@@ -93,7 +93,10 @@ pub(crate) fn replay(name: &str) -> (Replay, Vec<Value>, String) {
                 // itself (`withCodexReplayChildMetadata`) with no model.
                 Out::ChildMetadata(_)
                 | Out::InterruptChild { .. }
-                | Out::InterruptAbandoned { .. } => {}
+                | Out::InterruptAbandoned { .. }
+                | Out::GoalHeld { .. }
+                | Out::PauseGoal { .. }
+                | Out::StopOrphanGoalTurn { .. } => {}
             }
         }
     };

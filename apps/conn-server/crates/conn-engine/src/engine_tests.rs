@@ -389,6 +389,32 @@ async fn a_failed_turn_shows_its_error() {
     );
 }
 
+/// `activeProviderGoalForShell`: the shell shows the goal of the thread's active provider
+/// thread, as the GPUI thread list and the desktop goal banner read it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_shell_shows_the_active_provider_threads_goal() {
+    let db = TempDb::new("goal");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    assert_eq!(
+        engine.shell_snapshot().await.unwrap()["threads"][0]["goal"],
+        Value::Null
+    );
+    dispatch(&engine, message("t1", "c2", "goal")).await;
+    until_run_ends(&mut thread).await;
+    let shell = engine.shell_snapshot().await.unwrap();
+    assert_eq!(
+        shell["threads"][0]["goal"],
+        json!({"objective": "Ship the feature", "status": "active", "tokensUsed": 12,
+            "tokenBudget": null, "timeUsedSeconds": 3})
+    );
+}
+
 /// Starts a `hang` turn on t1 and drops the engine while it runs, as a killed process would.
 async fn die_during_a_turn(db: &TempDb, command: &str) {
     let (engine, _) = open(db);
@@ -1010,6 +1036,67 @@ async fn a_steer_reaches_the_running_turn() {
         ]
     );
     assert_eq!(p["messages"][1]["runId"], "run:t1:1");
+}
+
+/// `dispatchMessage` and `goalCommandStopsActiveRun`: a native `/goal` never joins a running
+/// turn. One that changes no running goal waits in the queue; one that starts goal work
+/// stops the run and goes first.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_command_never_steers_a_running_turn() {
+    let db = TempDb::new("goal-steer");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let steer = json!({"type": "steer_active", "targetRunId": "run:t1:1"});
+    dispatch(
+        &engine,
+        message_with("t1", "c3", "/goal clear", steer.clone(), None),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(
+        run_statuses(&p),
+        [
+            ("run:t1:1".to_owned(), "running".to_owned()),
+            ("run:t1:2".to_owned(), "queued".to_owned())
+        ]
+    );
+    assert!(
+        !local_item_texts(&p).iter().any(|t| t.contains("steer")),
+        "{:?}",
+        local_item_texts(&p)
+    );
+    dispatch(
+        &engine,
+        message_with("t1", "c4", "/goal Ship the feature", steer, None),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let goal_run = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["userMessageId"] == "message:c4")
+        .unwrap()
+        .clone();
+    assert_eq!(goal_run["queuePosition"], 1, "{goal_run}");
+    // The goal stops the run it replaces.
+    loop {
+        let item = next(&mut thread).await;
+        let run = &item["event"]["payload"];
+        if item["event"]["type"] == "run.updated" && run["id"] == "run:t1:1" {
+            if run["status"] == "interrupted" {
+                break;
+            }
+            assert_eq!(run["status"], "running", "{run}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

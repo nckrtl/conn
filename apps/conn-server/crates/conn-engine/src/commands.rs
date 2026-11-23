@@ -402,11 +402,20 @@ fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>
             }
         }
         "start_immediately" => match c.delivery_intent.as_deref() {
-            Some("steer" | "restart" | "auto") => Some(active),
+            Some("steer" | "restart" | "auto") => Some(active.clone()),
             _ => None,
         },
         _ => None,
     };
+    if let Some(goal) = conn_provider::goal::parse_command(&c.text, !c.attachments.is_empty()) {
+        let target = match c.dispatch_mode.kind.as_str() {
+            "queue_after_active" if c.delivery_intent.is_some() => Some(active),
+            _ => steer_target.clone(),
+        };
+        if let Some(delivery) = goal_delivery(tx, &c.thread_id, &goal, target)? {
+            return Ok(delivery);
+        }
+    }
     let restart =
         c.dispatch_mode.kind == "restart_active" || c.delivery_intent.as_deref() == Some("restart");
     Ok(match steer_target {
@@ -415,6 +424,52 @@ fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>
         Some(target) if turn_running(&target)? => (Delivery::Steer(target), None),
         _ => (Delivery::Queue { first: false }, None),
     })
+}
+
+/// `dispatchMessage` for a `/goal` to a provider that runs goals natively (`None` for any
+/// other provider, or with no run to join): it never joins a running turn. One that starts or ends the goal driving the run stops that run and goes
+/// first in the queue; the rest wait. A run that is only finishing is never stopped, nor one
+/// whose own message is a `/compact` or `/goal` (`isNativeMaintenanceCommand`).
+fn goal_delivery(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    goal: &conn_provider::goal::GoalCommand,
+    target: Option<Value>,
+) -> Result<Option<(Delivery, Option<Value>)>, CommandError> {
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let provider_thread = match target["providerThreadId"].as_str() {
+        Some(id) => tx.entity(thread_id, "providerThreads", id)?,
+        None => None,
+    };
+    let driver = provider_thread
+        .as_ref()
+        .and_then(|pt| pt["driver"].as_str())
+        .or_else(|| target["providerInstanceId"].as_str());
+    if !matches!(driver, Some("codex" | "claudeAgent")) {
+        return Ok(None);
+    }
+    let live = matches!(
+        target["status"].as_str(),
+        Some("preparing" | "starting" | "running")
+    );
+    let goal_status = provider_thread
+        .as_ref()
+        .and_then(|pt| pt["goal"]["status"].as_str());
+    let maintenance = match target["userMessageId"].as_str() {
+        Some(id) => tx
+            .entity(thread_id, "messages", id)?
+            .is_some_and(|m| crate::merge_back::defers_history(&m)),
+        None => false,
+    };
+    Ok(Some(
+        if live && goal.stops_active_run(goal_status) && !maintenance {
+            (Delivery::Queue { first: true }, Some(target))
+        } else {
+            (Delivery::Queue { first: false }, None)
+        },
+    ))
 }
 
 pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {

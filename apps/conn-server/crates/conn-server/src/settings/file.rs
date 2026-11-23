@@ -64,7 +64,11 @@ pub(super) fn decode(path: &Path) -> Decoded {
     // unrelated field does not decode.
     let legacy = legacy_providers(&doc);
     normalize_persisted(&mut doc);
-    match (check(&doc), legacy) {
+    let checked = check(&doc);
+    if checked.is_ok() {
+        fold_legacy_project_maps(&mut doc);
+    }
+    match (checked, legacy) {
         (Ok(()), Ok(None)) => Decoded {
             doc,
             migrated: false,
@@ -260,6 +264,43 @@ fn legacy_providers(doc: &Map<String, Value>) -> Result<Option<Map<String, Value
     Ok(doc.get("providers").and_then(Value::as_object).cloned())
 }
 
+/// `foldLegacyProjectSettings` for the settings file's legacy per-project maps: each value
+/// moves into its project's `projectSettingsOverrides` entry unless the entry sets that key,
+/// so a save that regenerates the maps keeps it. A `null` script override is a reset and
+/// moves nothing. `projectSettingsFolded` stays for T3, which also folds its project rows.
+fn fold_legacy_project_maps(doc: &mut Map<String, Value>) {
+    if doc.get("projectSettingsFolded") == Some(&json!(true)) {
+        return;
+    }
+    let mut entries = doc
+        .get("projectSettingsOverrides")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut changed = false;
+    for (map, key) in super::LEGACY_PROJECT_MAPS {
+        let Some(Value::Object(legacy)) = doc.get(*map) else {
+            continue;
+        };
+        for (project, value) in legacy {
+            if value.is_null() {
+                continue;
+            }
+            let Value::Object(entry) = entries.entry(project.clone()).or_insert_with(|| json!({}))
+            else {
+                continue;
+            };
+            if !entry.contains_key(*key) {
+                entry.insert((*key).to_owned(), value.clone());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        doc.insert("projectSettingsOverrides".into(), Value::Object(entries));
+    }
+}
+
 /// JSON has one number type: `30.0` is the whole number 30 to T3, but not to the generated
 /// `i64` decoder. Whole numbers T3 holds exactly (`Number.isSafeInteger`) become integers.
 pub(super) fn normalize_numbers(value: &mut Value) {
@@ -378,6 +419,12 @@ fn check_nulls(value: &Value, rule: &Value, path: &str) -> Result<(), String> {
 /// safe integer or `"unlimited"` (`UsageHistoryRetentionDays`,
 /// `packages/contracts/src/settings.ts`).
 pub(super) fn check_refinements(settings: &Map<String, Value>) -> Result<(), String> {
+    check_auto_settle_days(settings)?;
+    if let Some(Value::Object(projects)) = settings.get("projectSettingsOverrides") {
+        for entry in projects.values().filter_map(Value::as_object) {
+            check_auto_settle_days(entry)?;
+        }
+    }
     match settings.get("usageHistoryRetentionDays") {
         None => Ok(()),
         Some(Value::String(days)) if days == "unlimited" => Ok(()),
@@ -390,6 +437,19 @@ pub(super) fn check_refinements(settings: &Map<String, Value>) -> Result<(), Str
         }
         Some(other) => Err(format!(
             "usageHistoryRetentionDays must be a positive whole number or \"unlimited\", not {other}"
+        )),
+    }
+}
+
+/// `SidebarAutoSettleAfterDays`: 1 to 90 days, or `null` for off.
+fn check_auto_settle_days(settings: &Map<String, Value>) -> Result<(), String> {
+    match settings.get("sidebarAutoSettleAfterDays") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Number(days)) if days.as_f64().is_some_and(|d| (1.0..=90.0).contains(&d)) => {
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "sidebarAutoSettleAfterDays must be between 1 and 90, not {other}"
         )),
     }
 }
@@ -551,6 +611,28 @@ mod tests {
         let mut value = json!({"a": 30.0, "b": [1.5, 2.0], "c": 1e300, "d": -4.0});
         normalize_numbers(&mut value);
         assert_eq!(value, json!({"a": 30, "b": [1.5, 2], "c": 1e300, "d": -4}));
+    }
+
+    /// `SidebarAutoSettleAfterDays`: 1 to 90, or `null` for off, at the top level and in a
+    /// project's overrides; T3's `ServerConfig` decoder refuses anything else.
+    #[test]
+    fn sidebar_auto_settle_days_stay_within_t3s_range() {
+        let check = |value: Value| {
+            let top = Map::from_iter([("sidebarAutoSettleAfterDays".to_owned(), value.clone())]);
+            let project = json!({ "projectSettingsOverrides": { "p": { "sidebarAutoSettleAfterDays": value } } });
+            let Value::Object(project) = project else {
+                unreachable!()
+            };
+            let (top, project) = (check(&top).is_ok(), check(&project).is_ok());
+            assert_eq!(top, project);
+            top
+        };
+        for good in [json!(1), json!(90), json!(1.5), json!(null)] {
+            assert!(check(good.clone()), "{good}");
+        }
+        for bad in [json!(0), json!(91), json!(-1)] {
+            assert!(!check(bad.clone()), "{bad}");
+        }
     }
 
     #[test]

@@ -334,8 +334,7 @@ impl SettingsStore {
         let changes = secrets::persist(&current, &mut next);
         let undo = secrets::apply(&self.secrets_dir, &changes)
             .map_err(|(operation, error)| self.error(operation, error.to_string()))?;
-        let mut served = next.clone();
-        retain_supported_hosts(&mut served);
+        let served = served(&next);
         let materialized = match secrets::materialize(&self.secrets_dir, &served) {
             Ok(materialized) => materialized,
             Err((_, error)) => {
@@ -393,18 +392,23 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>, bool) {
             secrets_dir.display()
         );
     }
-    if (secrets::move_inline(secrets_dir, &mut doc) || migrated)
-        && let Err(error) = write_settings(path, &doc)
-    {
-        // The store holds the values now and the file still holds them inline; the next
-        // load moves them again.
-        eprintln!(
-            "conn-server: failed to write {} after migrating it: {error}",
-            path.display()
-        );
+    let retired_secrets = secrets::move_legacy_hosts(secrets_dir, &mut doc);
+    if secrets::move_inline(secrets_dir, &mut doc) || migrated || retired_secrets.is_some() {
+        match write_settings(path, &doc) {
+            Ok(()) => {
+                for name in retired_secrets.unwrap_or_default() {
+                    let _ = conn_support::secret_store::remove(secrets_dir, &name);
+                }
+            }
+            // The store holds the values now and the file still holds them inline; the next
+            // load moves them again.
+            Err(error) => eprintln!(
+                "conn-server: failed to write {} after migrating it: {error}",
+                path.display()
+            ),
+        }
     }
-    let mut served = doc.clone();
-    retain_supported_hosts(&mut served);
+    let served = served(&doc);
     let materialized = match secrets::materialize(secrets_dir, &served) {
         Ok(materialized) => materialized,
         Err((name, error)) => {
@@ -413,6 +417,16 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>, bool) {
         }
     };
     (Loaded { doc, materialized }, None, false)
+}
+
+/// The settings this server serves: only the hosts it supports, and no retired legacy key.
+fn served(doc: &Map<String, Value>) -> Map<String, Value> {
+    let mut served = doc.clone();
+    retain_supported_hosts(&mut served);
+    for key in secrets::RETIRED_HOST_KEYS {
+        served.remove(key);
+    }
+    served
 }
 
 /// Reloads `environment`'s settings on a blocking thread when their last load failed in a way
@@ -1502,6 +1516,83 @@ mod tests {
         assert_eq!(stored(&dir, "voice-cloud-openai").as_deref(), Some("old"));
         assert_eq!(stored(&dir, "voice-cloud-xai"), None);
         assert_eq!(store.raw()["cloudSpeechCredentials"]["openai"], "old");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `migrateLegacySourceControlSettings`: the retired `github` and `bitbucket` objects move
+    /// to `sourceControlHosts` with their stored secrets, and no client sees them again.
+    #[test]
+    fn legacy_source_control_settings_move_with_their_secrets() {
+        let dir = temp_state();
+        let ghe = conn_support::base64::url_encode(b"ghe.example.com");
+        let secrets = dir.join("secrets");
+        conn_support::secret_store::ensure_dir(&secrets).unwrap();
+        conn_support::secret_store::write(&secrets, &format!("github-token-{ghe}"), b"old")
+            .unwrap();
+        conn_support::secret_store::write(&secrets, "bitbucket-access-token", b"bb").unwrap();
+        let file = json!({
+            "github": { "tokens": { "github.com": "ghp", "ghe.example.com": SECRET_REDACTED } },
+            "bitbucket": { "accessToken": SECRET_REDACTED },
+        });
+        fs::write(dir.join("settings.json"), file.to_string()).unwrap();
+        let store = SettingsStore::open(dir.join("settings.json"));
+        let client = store.for_client();
+        assert!(client.get("github").is_none(), "{client}");
+        assert!(client.get("bitbucket").is_none(), "{client}");
+        assert!(!client.to_string().contains("ghp"), "{client}");
+        assert_eq!(
+            client["sourceControlHosts"]["github"]["tokens"],
+            json!({ "github.com": SECRET_REDACTED, "ghe.example.com": SECRET_REDACTED })
+        );
+        assert_eq!(
+            store.raw()["sourceControlHosts"]["github"]["tokens"],
+            json!({ "github.com": "ghp", "ghe.example.com": "old" })
+        );
+        let disk = on_disk(&dir);
+        assert!(
+            disk.get("github").is_none() && disk.get("bitbucket").is_none(),
+            "{disk}"
+        );
+        assert_eq!(
+            disk["sourceControlHosts"]["bitbucket"]["accessToken"],
+            SECRET_REDACTED
+        );
+        assert_eq!(
+            stored(&dir, &format!("source-control-Z2l0aHVi-dG9rZW5z-{ghe}")).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            stored(&dir, "source-control-Yml0YnVja2V0-YWNjZXNzVG9rZW4").as_deref(),
+            Some("bb")
+        );
+        assert_eq!(stored(&dir, &format!("github-token-{ghe}")), None);
+        assert_eq!(stored(&dir, "bitbucket-access-token"), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `foldLegacyProjectSettings`: a legacy per-project map moves into
+    /// `projectSettingsOverrides` on load, so an unrelated save keeps it.
+    #[test]
+    fn an_unrelated_save_keeps_legacy_project_overrides() {
+        let dir = temp_state();
+        let file = json!({
+            "projectAutoPullOverrides": { "p1": true, "p2": true },
+            "projectSettingsOverrides": { "p2": { "defaultAutoPull": false } },
+        });
+        fs::write(dir.join("settings.json"), file.to_string()).unwrap();
+        let store = SettingsStore::open(dir.join("settings.json"));
+        store
+            .update(json!({ "linkedEnvironmentsEnabled": true }), None)
+            .unwrap();
+        let disk = on_disk(&dir);
+        assert_eq!(
+            disk["projectSettingsOverrides"],
+            json!({ "p1": { "defaultAutoPull": true }, "p2": { "defaultAutoPull": false } })
+        );
+        assert_eq!(
+            disk["projectAutoPullOverrides"],
+            json!({ "p1": true, "p2": false })
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

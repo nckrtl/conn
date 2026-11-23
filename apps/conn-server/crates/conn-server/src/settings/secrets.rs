@@ -550,6 +550,86 @@ impl Undo {
     }
 }
 
+/// Retired top-level source control objects (`LegacyProviderSettingsJson`); no client sees them.
+pub(super) const RETIRED_HOST_KEYS: [&str; 2] = ["github", "bitbucket"];
+
+/// `migrateLegacySourceControlSettings`: the retired `github` and `bitbucket` objects become
+/// `sourceControlHosts` entries (unless one is set) and their saved secrets move to the new
+/// names. Only when every copy succeeds; then the retired keys go. Returns the old secret
+/// names to remove once the file is written, or `None` when the file has to stay as it is.
+pub(super) fn move_legacy_hosts(
+    dir: &Path,
+    settings: &mut Map<String, Value>,
+) -> Option<Vec<String>> {
+    let mut hosts: Vec<(&str, Value)> = Vec::new();
+    let mut moves: Vec<(String, String)> = Vec::new();
+    for kind in RETIRED_HOST_KEYS {
+        let Some(legacy) = settings.get(kind).filter(|v| v.is_object()) else {
+            continue;
+        };
+        if settings
+            .get("sourceControlHosts")
+            .and_then(|h| h.get(kind))
+            .is_some()
+        {
+            continue;
+        }
+        let saved = |value: &Value| value.as_str() == Some(SECRET_REDACTED);
+        let new_name = |field: &str, host: Option<&str>| {
+            let host = host.map(|h| h.trim().to_lowercase());
+            format!(
+                "source-control-{}-{}{}",
+                encode(kind),
+                encode(field),
+                host_suffix(host.as_deref())
+            )
+        };
+        if kind == "bitbucket" {
+            for (field, from) in [
+                ("accessToken", "bitbucket-access-token"),
+                ("apiToken", "bitbucket-api-token"),
+            ] {
+                if legacy.get(field).is_some_and(saved) {
+                    moves.push((from.to_owned(), new_name(field, None)));
+                }
+            }
+        } else if let Some(Value::Object(tokens)) = legacy.get("tokens") {
+            for (host, value) in tokens {
+                if saved(value) {
+                    let from = format!("github-token-{}", encode(&host.trim().to_lowercase()));
+                    moves.push((from, new_name("tokens", Some(host))));
+                }
+            }
+        }
+        hosts.push((kind, legacy.clone()));
+    }
+    if !RETIRED_HOST_KEYS
+        .iter()
+        .any(|key| settings.contains_key(*key))
+    {
+        return None;
+    }
+    for (from, to) in &moves {
+        let copied = match secret_store::read(dir, from) {
+            Ok(Some(value)) => secret_store::write(dir, to, &value),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        if copied.is_err() {
+            eprintln!("conn-server: failed to copy a source control secret to its new name ({to})");
+            return None;
+        }
+    }
+    let target = super::ensure_object(settings.entry("sourceControlHosts").or_insert(Value::Null));
+    for (kind, legacy) in hosts {
+        target.insert(kind.to_owned(), legacy);
+    }
+    for kind in RETIRED_HOST_KEYS {
+        settings.remove(kind);
+    }
+    Some(moves.into_iter().map(|(from, _)| from).collect())
+}
+
 /// `moveInlineSettingsSecrets`, at start: each field secret held in the file moves to the
 /// store and the slot holds the marker. A value that cannot be stored stays inline. Returns
 /// whether any moved.

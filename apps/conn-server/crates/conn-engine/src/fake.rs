@@ -20,6 +20,7 @@
 //!   does, then the turn completes. `/goal <objective>`: the same goal, and the turn waits
 //!   for an interrupt, as a running goal turn. `/goal pause` and `/goal clear` pause or
 //!   clear it and complete, with a row only when the turn's provider thread showed another.
+//! - `goal-continued`: a run of two provider turns, as a goal run Codex continued.
 //! - anything else: streams `echo: <text>` in three chunks and completes.
 //!
 //! A steer into a running turn reports `steer.updated` pending then completed, answers
@@ -215,6 +216,8 @@ struct Turn {
     root: String,
     provider_thread_id: String,
     ordinal: u32,
+    /// The provider turn's ordinal on its provider thread.
+    turn_ordinal: u32,
 }
 
 struct FakeSession {
@@ -396,12 +399,21 @@ fn assistant(turn: &Turn, id: &str, text: &str, streaming: bool) -> [ProviderEve
 }
 
 fn provider_turn(turn: &Turn, status: &str) -> ProviderEvent {
+    provider_turn_row(
+        turn,
+        status,
+        &format!("turn:{}", turn.run_id),
+        turn.turn_ordinal,
+    )
+}
+
+fn provider_turn_row(turn: &Turn, status: &str, id: &str, ordinal: u32) -> ProviderEvent {
     let now = now_iso();
     event(
         json!({"type": "provider_turn.updated", "threadId": turn.thread_id, "providerTurn": {
-            "id": format!("turn:{}", turn.run_id), "providerThreadId": turn.provider_thread_id,
+            "id": id, "providerThreadId": turn.provider_thread_id,
             "nodeId": turn.root, "runAttemptId": format!("{}:attempt:1", turn.run_id),
-            "nativeTurnRef": null, "ordinal": turn.ordinal, "status": status,
+            "nativeTurnRef": null, "ordinal": ordinal, "status": status,
             "startedAt": now, "completedAt": if status == "running" { Value::Null } else { json!(now) },
         }}),
     )
@@ -458,6 +470,7 @@ impl FakeSession {
                 root: input.root_node_id.0.clone(),
                 provider_thread_id,
                 ordinal: input.run_ordinal,
+                turn_ordinal: input.provider_turn_ordinal,
             };
             self.background.store(false, Ordering::SeqCst);
             let mut events = vec![provider_turn(&turn, "running")];
@@ -556,6 +569,7 @@ impl Session for FakeSession {
                 root: input.root_node_id.0.clone(),
                 provider_thread_id,
                 ordinal: input.run_ordinal,
+                turn_ordinal: input.provider_turn_ordinal,
             };
             crate::lock(&self.calls).push(format!("start {}", turn.run_id));
             crate::lock(&self.turn_heads).push(
@@ -776,6 +790,17 @@ impl Session for FakeSession {
                         started.push(provider_turn(&turn, "completed"));
                         started.push(terminal(&turn, TurnStatus::Completed, None));
                     }
+                }
+                // A goal run Codex continued: a second provider turn in the same run.
+                "goal-continued" => {
+                    started.push(provider_turn(&turn, "completed"));
+                    started.push(provider_turn_row(
+                        &turn,
+                        "completed",
+                        &format!("turn:{}:2", turn.run_id),
+                        turn.turn_ordinal + 1,
+                    ));
+                    started.push(terminal(&turn, TurnStatus::Completed, None));
                 }
                 "background-hold" => {
                     self.background.store(true, Ordering::SeqCst);

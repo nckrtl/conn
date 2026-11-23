@@ -872,6 +872,17 @@ impl Inner {
                         .node(Some(&root_id))
                 };
                 let mut stored_row = None;
+                // `providerTurnOrdinal`: after every turn already on the provider thread, as a
+                // goal run Codex continued holds more turns than runs.
+                let turn_ordinal = match provider_thread_json["id"].as_str() {
+                    Some(id) => tx
+                        .entities_where(&tid, "providerTurns", "providerThreadId", id)?
+                        .iter()
+                        .filter_map(|turn| turn["ordinal"].as_u64())
+                        .max()
+                        .unwrap_or(0),
+                    None => 0,
+                } + 1;
                 if let Some(id) = provider_thread_json["id"].as_str() {
                     let mut running = provider_thread_json.clone();
                     running["updatedAt"] = json!(now);
@@ -934,10 +945,10 @@ impl Inner {
                     node["providerThreadId"] = pt_id;
                     tx.append(draft("node.updated", node))?;
                 }
-                Ok(Some((scope, stored_row)))
+                Ok(Some((scope, stored_row, turn_ordinal)))
             })
             .await?;
-        let Some((scope, stored_row)) = started else {
+        let Some((scope, stored_row, turn_ordinal)) = started else {
             live.take_active();
             return Err(StartError::Abandoned);
         };
@@ -1007,7 +1018,7 @@ impl Inner {
             thread_id: thread_id.into(),
             run_id: run_id.into(),
             run_ordinal: context.run["ordinal"].as_u64().unwrap_or(1) as u32,
-            provider_turn_ordinal: context.run["ordinal"].as_u64().unwrap_or(1) as u32,
+            provider_turn_ordinal: u32::try_from(turn_ordinal).unwrap_or(u32::MAX),
             attempt_id: attempt_id.as_str().into(),
             root_node_id: root.as_str().into(),
             provider_thread,

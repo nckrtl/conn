@@ -1224,6 +1224,41 @@ async fn promoting_a_queued_goal_stops_the_running_turn() {
     assert_eq!(p["runs"][1]["status"], "queued", "{}", p["runs"][1]);
 }
 
+/// `providerTurnOrdinal`: a run's first provider turn follows the highest ordinal on its
+/// provider thread. A goal run Codex continued has two turns, so the next run's turn is the
+/// third, and a rollback to the goal's checkpoint counts it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_run_after_a_continued_goal_run_gets_the_next_turn_ordinal() {
+    let db = TempDb::new("goal-ordinals");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "goal-continued")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "hello")).await;
+    until_run_ends(&mut thread).await;
+    let p = projection(&engine, "t1").await;
+    let mut ordinals: Vec<(String, Value)> = p["providerTurns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["id"].as_str().unwrap().to_owned(), t["ordinal"].clone()))
+        .collect();
+    ordinals.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        ordinals,
+        [
+            ("turn:run:t1:1".to_owned(), json!(1)),
+            ("turn:run:t1:1:2".to_owned(), json!(2)),
+            ("turn:run:t1:2".to_owned(), json!(3)),
+        ]
+    );
+}
+
 /// `runningProviderThread`: the turn gets the provider thread row the engine stores, goal and
 /// all. Codex shows a goal change only against that row, so a Clear after a Pause clears it.
 #[tokio::test(flavor = "current_thread")]

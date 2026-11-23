@@ -458,57 +458,64 @@ impl McpService {
         let mut defects = 0;
         let mut backoff = FIRST_BACKOFF;
         loop {
-            let failure = match self.follow_once(parent, task).await {
+            let defect = match self.follow_once(parent, task).await {
                 Ok(true) => return,
                 Ok(false) => {
                     defects = 0;
                     backoff = FIRST_BACKOFF;
                     continue;
                 }
-                Err(step) => step,
-            };
-            match failure {
-                Step::Peer(failure) => {
+                Err(Step::Peer(failure)) => {
                     defects = 0;
-                    let environment = match self.read_remote_task(parent, task).await {
-                        Ok(Some((_, row))) => row["remoteChild"]["environmentId"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
-                        Ok(None) => return,
-                        Err(_) => String::new(),
-                    };
-                    if let Some(reason) = self.final_reason(&environment, &failure).await {
-                        let count = match self.read_remote_task(parent, task).await {
-                            Ok(Some((_, row))) => row["remoteChild"]["stopCount"].as_u64(),
-                            _ => None,
-                        };
-                        let _ = self
-                            .complete_remote(
-                                parent,
-                                task,
-                                "failed",
-                                &reason,
-                                Some("stopped"),
-                                count,
-                                None,
-                            )
-                            .await;
-                        return;
+                    match self.fail_finally(parent, task, &failure).await {
+                        Ok(true) => return,
+                        Ok(false) => None,
+                        // Not recorded here: the next pass meets the same refusal again.
+                        Err(step) => Some(step),
                     }
                 }
-                Step::Defect(message) => {
-                    defects += 1;
-                    eprintln!("conn-mcp: following remote task {task} failed: {message}");
-                    if defects >= MAX_DEFECTS {
-                        self.give_up(parent, task).await;
-                        return;
-                    }
+                Err(step) => Some(step),
+            };
+            if let Some(Step::Defect(message)) = defect {
+                defects += 1;
+                eprintln!("conn-mcp: following remote task {task} failed: {message}");
+                if defects >= MAX_DEFECTS {
+                    self.give_up(parent, task).await;
+                    return;
                 }
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
+    }
+
+    /// Fails the task with nothing left to stop when `failure` is final. True once that is
+    /// recorded here, or the task is gone; false when the failure may pass.
+    async fn fail_finally(
+        &self,
+        parent: &str,
+        task: &str,
+        failure: &PeerFailure,
+    ) -> StepResult<bool> {
+        let Some((_, row)) = self.read_remote_task(parent, task).await? else {
+            return Ok(true);
+        };
+        let remote = &row["remoteChild"];
+        let environment = remote["environmentId"].as_str().unwrap_or_default();
+        let Some(reason) = self.final_reason(environment, failure).await else {
+            return Ok(false);
+        };
+        self.complete_remote(
+            parent,
+            task,
+            "failed",
+            &reason,
+            Some("stopped"),
+            remote["stopCount"].as_u64(),
+            None,
+        )
+        .await?;
+        Ok(true)
     }
 
     /// `followGaveUp`: a task with its result keeps it; one without fails, naming the thread.
@@ -616,11 +623,14 @@ impl McpService {
             return Ok(false);
         }
         // A later run's answer there may be another open follow-up's: then this task's answer
-        // is its own run's.
+        // is its own run's. The records are read again: that follow-up may have been recorded
+        // here during the wait.
         let result_run = &waited["resultRun"];
-        let shared = result_run.is_object()
-            && result_run["runId"] != run_id
-            && projection["subagents"].as_array().is_some_and(|rows| {
+        let shared = result_run.is_object() && result_run["runId"] != run_id && {
+            let Some((projection, row)) = self.read_remote_task(parent, task).await? else {
+                return Ok(true);
+            };
+            projection["subagents"].as_array().is_some_and(|rows| {
                 let recorded = row["startedAt"].as_str();
                 rows.iter().any(|other| {
                     other["id"] != task
@@ -630,7 +640,8 @@ impl McpService {
                             || other["completedAt"].is_null()
                             || other["completedAt"].as_str() > recorded)
                 })
-            });
+            })
+        };
         let (answer_run, answer_status) = if result_run.is_object() && !shared {
             (
                 result_run["runId"].as_str().map(str::to_owned),
@@ -1420,5 +1431,13 @@ pub(crate) async fn wait_for_result(
     match tokio::time::timeout_at(deadline, ended_here(&mut stream, task)).await {
         Ok(()) => Ok(false),
         Err(_) => Ok(true),
+    }
+}
+
+#[cfg(test)]
+impl McpService {
+    /// The whole follower that [`Self::follow_remote_task`] spawns, awaited.
+    pub(crate) async fn follow_for_test(self: &Arc<Self>, parent: &str, task: &str) {
+        self.follow(parent, task).await
     }
 }

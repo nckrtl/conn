@@ -245,8 +245,7 @@ private struct WorkspacePhoneSwitcher: View {
             item(.tasks, icon: "checklist", label: "Tasks")
             item(.pullRequests, icon: "arrow.triangle.pull", label: "Pull requests")
             Button(action: onSearch) {
-                ConnIcon("magnifyingglass")
-                    .font(.system(size: 22))
+                toolbarIcon("magnifyingglass")
                     .foregroundStyle(theme.mutedForeground)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Capsule())
@@ -260,13 +259,20 @@ private struct WorkspacePhoneSwitcher: View {
         .fixedSize()
     }
 
+    /// 22pt icons. A bar item lays out from UIImage sizes, so the asset is framed explicitly.
+    private func toolbarIcon(_ name: String) -> some View {
+        connImage(name)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 22, height: 22)
+    }
+
     private func item(_ tab: WorkspaceTab, icon: String, label: String) -> some View {
         let selected = selectedTab == tab
         return Button {
             selectedTab = tab
         } label: {
-            ConnIcon(icon)
-                .font(.system(size: 22))
+            toolbarIcon(icon)
                 .foregroundStyle(selected ? theme.accentForeground : theme.mutedForeground)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {

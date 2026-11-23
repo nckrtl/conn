@@ -252,9 +252,9 @@ struct ThreadView: View {
 
                         if snapshot.working {
                             HStack(spacing: Kit.Space.m) {
-                                KitStatusIcon(.working, size: 14, label: "Working")
+                                // Mobile's `RunFoldWorking` is plain text, never a spinner.
                                 Text("Working…")
-                                    .font(.kitDetail)
+                                    .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(theme.mutedForeground)
                             }
                             .padding(.top, Kit.Space.xs)

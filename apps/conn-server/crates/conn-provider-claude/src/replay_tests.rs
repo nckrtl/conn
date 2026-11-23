@@ -192,9 +192,7 @@ fn replay(name: &str, runtime_mode: &str) -> Replay {
                 }
                 Out::Write(line) => replay.writes.push(serde_json::from_str(&line).unwrap()),
                 Out::Skipped(kind) => replay.skipped.push(kind),
-                Out::TailOutput { .. }
-                | Out::StopTail { .. }
-                | Out::StopTask { .. } => {}
+                Out::TailOutput { .. } | Out::StopTail { .. } | Out::StopTask { .. } => {}
             }
         }
     }
@@ -910,4 +908,88 @@ fn a_retired_process_cannot_stop_or_settle_a_replacements_workflow() {
     );
     assert!(mapper.workflow_stop(&thread, "new", true));
     assert!(mapper.turn_active());
+}
+
+/// `ClaudeAdapterV2.test.ts` "stops the run's live workflow after root result api_error,
+/// continuation=true, pending Stop=…": Claude reports the live workflow's `task_started`
+/// again for a wake; the continuation then owns it, so its failed root stops it. Both frame
+/// orders: the restart while the root is idle (T3's case), and inside the open continuation.
+#[test]
+fn a_failed_continuation_stops_the_workflow_it_took_over() {
+    let started = json!({"type":"system", "subtype":"task_started", "task_id":"wf1",
+        "tool_use_id":"run1", "task_type":"local_workflow", "workflow_name":"Review",
+        "description":"Review", "prompt":"workflow()"});
+    let result = |is_error: bool, text: &str| {
+        json!({"type":"result", "subtype":"success", "is_error":is_error,
+            "terminal_reason": if is_error { "api_error" } else { "completed" },
+            "result":text, "duration_ms":1, "duration_api_ms":1, "num_turns":1, "usage":{},
+            "modelUsage":{}, "total_cost_usd":0})
+    };
+    let wake_start = json!({"type":"assistant", "parent_tool_use_id":null, "uuid":"wake-1",
+        "message":{"id":"m-wake", "content":[{"type":"text","text":"Checking the workflow."}]}});
+    for (restart_inside, pending_stop) in [(false, false), (false, true), (true, false)] {
+        let case = format!("restart_inside={restart_inside} pending_stop={pending_stop}");
+        let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+        let thread = provider_thread("continuation-workflow");
+        mapper.begin_turn(
+            &turn_input(1, &thread, "workflow", "full-access"),
+            "default",
+        );
+        mapper.handle(Inbound::from_value(started.clone()));
+        mapper.handle(Inbound::from_value(result(false, "Launched.")));
+        assert!(mapper.has_pending_background_work(), "{case}");
+        let thread_json = serde_json::to_value(&thread).unwrap();
+        if pending_stop {
+            assert!(mapper.workflow_stop(&thread_json, "wf1", true), "{case}");
+        }
+        let mut frames = vec![started.clone(), result(true, "Root turn ended.")];
+        if restart_inside {
+            frames.insert(0, wake_start.clone());
+        }
+        let mut outs = Vec::new();
+        for frame in frames {
+            let step = mapper.handle(Inbound::from_value(frame));
+            let wake = step
+                .iter()
+                .any(|o| matches!(o, Out::Event(ProviderEvent::ContinuationRequested(_))));
+            outs.extend(step);
+            if wake {
+                outs.extend(
+                    mapper
+                        .begin_continuation(&turn_input(2, &thread, "", "full-access"), "default"),
+                );
+            }
+        }
+        let stops: Vec<&str> = outs
+            .iter()
+            .filter_map(|o| match o {
+                Out::StopTask { task_id } => Some(task_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops, ["wf1"], "{case}");
+        let events: Vec<Value> = outs
+            .iter()
+            .filter_map(|o| match o {
+                Out::Event(event) => Some(serde_json::to_value(event).unwrap()),
+                _ => None,
+            })
+            .collect();
+        let turn = events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "provider_turn.updated")
+            .unwrap();
+        assert_eq!(turn["providerTurn"]["status"], "failed", "{case}");
+        assert_eq!(turn["providerTurn"]["runAttemptId"], "attempt-2", "{case}");
+        let workflow = events
+            .iter()
+            .rev()
+            .find(|e| e["subagent"]["nativeTaskRef"]["nativeId"] == "wf1")
+            .unwrap();
+        assert_eq!(workflow["subagent"]["status"], "failed", "{case}");
+        assert_eq!(workflow["subagent"]["runId"], "run-attempt-2", "{case}");
+        assert!(!mapper.has_pending_background_work(), "{case}");
+        assert!(!mapper.workflow_stop(&thread_json, "wf1", true), "{case}");
+    }
 }

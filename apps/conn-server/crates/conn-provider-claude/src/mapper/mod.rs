@@ -618,7 +618,8 @@ impl<E: Env> Mapper<E> {
         self.track_scheduled_wakeup(&message);
         // Before routing: an idle Monitor reports its task before its call replays.
         self.roster.track_monitor_calls(&message);
-        if self.turn.is_none() && is_wake_frame(&message) {
+        if self.turn.is_none() && (is_wake_frame(&message) || self.restarts_running_task(&message))
+        {
             self.hold_wake(message, &mut out);
             return out;
         }
@@ -2942,7 +2943,10 @@ impl<E: Env> Mapper<E> {
     /// Holds a frame for a continuation turn and asks the engine for one, once.
     fn hold_wake(&mut self, message: Inbound, out: &mut Vec<Out>) {
         let starts_work = matches!(message, Inbound::Assistant(_) | Inbound::StreamEvent(_));
-        if !starts_work && self.wake.is_empty() {
+        // A running task's restart is wake evidence: the continuation takes the task over.
+        let restart = matches!(message, Inbound::System(_));
+        let is_result = matches!(message, Inbound::Result(_));
+        if !starts_work && !restart && self.wake.is_empty() {
             // Output that belongs to no work we saw start, such as the one `result` of an
             // unknown `--resume` id.
             if matches!(message, Inbound::Result(_)) {
@@ -2959,10 +2963,21 @@ impl<E: Env> Mapper<E> {
             self.wake.pop_front();
         }
         self.wake.push_back(message);
-        if !starts_work {
-            return;
+        if starts_work || is_result {
+            self.request_continuation(out);
         }
-        self.request_continuation(out);
+    }
+
+    /// `isKnownSubagentTaskStarted` for a task still running: Claude reports it again when a
+    /// wake picks it up.
+    fn restarts_running_task(&self, message: &Inbound) -> bool {
+        let Inbound::System(m) = message else {
+            return false;
+        };
+        m.subtype == "task_started"
+            && m.task_id
+                .as_deref()
+                .is_some_and(|id| self.subagents.is_running(id))
     }
 
     /// `trackClaudeScheduledWakeup`, in arrival order.

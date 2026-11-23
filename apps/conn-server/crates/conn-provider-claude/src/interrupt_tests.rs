@@ -863,9 +863,10 @@ fn workflow_status(seen: &[serde_json::Value], task_id: &str) -> serde_json::Val
         .unwrap_or_default()
 }
 
-/// The spawned `stopTask` reaches the host a moment after the terminal event.
+/// The spawned `stopTask` reaches the host a moment after the terminal event; under a loaded
+/// test run that moment can pass a second.
 async fn logged_stops(log: &Path) -> Vec<String> {
-    for _ in 0..100 {
+    for _ in 0..1000 {
         let text = std::fs::read_to_string(log).unwrap_or_default();
         if text.contains("call stopTask") {
             break;
@@ -1018,4 +1019,3 @@ async fn an_interrupted_root_cancels_its_workflow_without_stop_task() {
     session.close().await;
     helper.stop_if_idle().await;
 }
-

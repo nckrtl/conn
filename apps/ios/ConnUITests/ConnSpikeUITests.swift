@@ -461,24 +461,34 @@ final class ConnSpikeUITests: XCTestCase {
             app.terminate()
             app.launch()
             settle(4)
-            // Expo's own form (`ConnectionsNewRouteScreen.tsx`): Address and Code, then the
-            // header's checkmark, "Add environment". A production build ignores pairing links.
-            let parts = pairingURL.components(separatedBy: "/pair#token=")
-            XCTAssertEqual(parts.count, 2, "pairing URL should be <origin>/pair#token=<code>")
-            let addEnvironment = first(app, ["Add environment"], timeout: 45)
-            XCTAssertNotNil(addEnvironment, "Expo should offer Add environment")
-            addEnvironment?.tap()
-            settle(2)
-            let address = app.textFields.matching(
-                NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
-            XCTAssertTrue(address.waitForExistence(timeout: 30), "the pairing form should open")
-            pasteInto(app, address, parts[0].replacingOccurrences(of: "http://", with: ""))
-            let code = app.textFields.matching(
-                NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
-            pasteInto(app, code, parts.count > 1 ? parts[1] : "")
-            let submit = app.navigationBars.buttons["Add environment"].firstMatch
-            if submit.waitForExistence(timeout: 5) { submit.tap() } else { code.typeText("\n") }
-            settle(4)
+            // Already paired from an earlier run: the inbox lists the seeded thread.
+            let seeded = row(app, "Plan a greeting in main.rs")
+            if !(seeded.waitForExistence(timeout: 20) && seeded.isHittable) {
+                // Expo's own form (`ConnectionsNewRouteScreen.tsx`): Address and Code, then the
+                // header's checkmark, "Add environment". A production build ignores pairing links.
+                let parts = pairingURL.components(separatedBy: "/pair#token=")
+                XCTAssertEqual(parts.count, 2, "pairing URL should be <origin>/pair#token=<code>")
+                let addEnvironment = first(app, ["Add environment"], timeout: 45)
+                XCTAssertNotNil(addEnvironment, "Expo should offer Add environment")
+                addEnvironment?.tap()
+                settle(2)
+                let address = app.textFields.matching(
+                    NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
+                XCTAssertTrue(address.waitForExistence(timeout: 30), "the pairing form should open")
+                pasteInto(app, address, parts[0].replacingOccurrences(of: "http://", with: ""))
+                let code = app.textFields.matching(
+                    NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
+                pasteInto(app, code, parts.count > 1 ? parts[1] : "")
+                let submit = app.navigationBars.buttons["Add environment"].firstMatch
+                if submit.waitForExistence(timeout: 5) { submit.tap() } else { code.typeText("\n") }
+                settle(4)
+                // Pairing ends on Settings › Environments; close the sheet to reach the inbox.
+                for _ in 0..<3 {
+                    guard let close = first(app, ["Close", "close"], timeout: 8) else { break }
+                    close.tap()
+                    settle(1.5)
+                }
+            }
         } else {
             app = XCUIApplication()
             app.launchArguments = ["--reset-session"]

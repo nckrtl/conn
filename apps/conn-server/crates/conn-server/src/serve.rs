@@ -273,6 +273,7 @@ pub async fn serve_with_instances(
         environment: environment.clone(),
         scheduled_tasks: OnceLock::new(),
         devices: OnceLock::new(),
+        previews: OnceLock::new(),
     });
 
     // A state folder the T3 server used: its threads and projects, once (`t3_import.rs`).
@@ -379,6 +380,7 @@ pub async fn serve_with_instances(
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
     let preview = conn_preview::tabs::Preview::new(state_dir.clone());
+    let _ = host.previews.set(preview.clone());
     let mut deps = Deps {
         preview: Some(preview.clone()),
         panels: Some(conn_features::panels::PanelBroker::default()),

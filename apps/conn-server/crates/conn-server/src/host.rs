@@ -34,6 +34,8 @@ pub struct Host {
     pub scheduled_tasks: OnceLock<conn_features::scheduled::ScheduledTasks>,
     /// Device sessions a closed thread held (`ResourceCleanupService.cleanupDevices`).
     pub devices: OnceLock<conn_devices::Devices>,
+    /// Preview tabs a deleted thread held (`ResourceCleanupService.cleanupPreviews`).
+    pub previews: OnceLock<conn_preview::tabs::Preview>,
 }
 
 impl std::fmt::Debug for Host {
@@ -281,6 +283,17 @@ impl EngineHost for Host {
                 }
             }
         }
+        // `ThreadDeletion`'s `preview.cleanup`: a deleted thread's tabs free their slots.
+        if reason == ThreadClose::Deleted
+            && let Some(previews) = self.previews.get().cloned()
+        {
+            let thread_id = thread_id.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = previews.close(&thread_id, None).await {
+                    eprintln!("preview cleanup: {error}");
+                }
+            });
+        }
         // `ResourceCleanupService`: a deleted thread takes the tasks bound to it.
         if reason == ThreadClose::Deleted
             && let Some(tasks) = self.scheduled_tasks.get().cloned()
@@ -354,6 +367,7 @@ mod tests {
             environment,
             scheduled_tasks: OnceLock::new(),
             devices: OnceLock::new(),
+            previews: OnceLock::new(),
         }
     }
 
@@ -467,6 +481,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// T3's deletion effect (`preview.cleanup`) frees the deleted thread's desktop tabs: the
+    /// other thread's tabs stay, a full registry takes a new tab, and a replay is harmless.
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_closes_the_threads_desktop_previews() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-delete-previews-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = cleanup_host(&dir);
+        let previews = conn_preview::tabs::Preview::new(dir.clone());
+        host.previews.set(previews.clone()).unwrap();
+        let kept = previews.open_desktop("kept", &json!({})).unwrap();
+        while previews.open_desktop("deleted", &json!({})).is_ok() {}
+        previews
+            .open_desktop("newcomer", &json!({}))
+            .expect_err("the registry is full");
+
+        let sessions = |thread: &str| {
+            previews.list(thread)["sessions"]
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+        for _ in 0..2 {
+            host.thread_closed("deleted", ThreadClose::Deleted);
+            for _ in 0..100 {
+                if sessions("deleted") == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(sessions("deleted"), 0);
+        assert_eq!(previews.list("kept")["sessions"][0]["tabId"], kept["tabId"]);
+        previews.open_desktop("newcomer", &json!({})).unwrap();
+        host.terminals.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn browser_access_is_scoped_to_project_and_captured_at_session_start() {
         let dir =
@@ -493,6 +544,7 @@ mod tests {
             environment: environment.clone(),
             scheduled_tasks: OnceLock::new(),
             devices: OnceLock::new(),
+            previews: OnceLock::new(),
         };
         host.mcp.set(service.clone()).unwrap();
         let issue = |project: Option<&str>| {

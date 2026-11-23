@@ -326,17 +326,6 @@ pub fn signal_group(pgid: u32, signal: rustix::process::Signal) {
     let _ = rustix::process::kill_process_group(pgid, signal);
 }
 
-/// How [`wait_exit_unreaped`] ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Exit {
-    /// The child has exited and is still unreaped: its pid and the process group named after
-    /// it are still its own, so signals by them reach no other process.
-    Exited,
-    /// `ECHILD`: no unreaped child of ours has this pid, because another waiter reaped it. The
-    /// pid may already name another process, so send nothing to it or its group.
-    Lost,
-}
-
 /// How often [`wait_exit_unreaped`] looks again without a SIGCHLD, which a masked signal or
 /// another thread's handler can keep from it.
 #[cfg(unix)]
@@ -344,14 +333,26 @@ const EXIT_POLL: Duration = Duration::from_millis(50);
 
 /// Waits until the child `pid` exits, without reaping it, so its owner can still signal the
 /// pid and its group before the reap. Wakes on SIGCHLD and on a 50 ms timer.
+///
+/// Only the child's owner reaps it, so while the owner has not, its pid and group id stay its
+/// own. `ECHILD` (not our child) comes back as an error.
 #[cfg(unix)]
-pub async fn wait_exit_unreaped(pid: u32) -> io::Result<Exit> {
+pub async fn wait_exit_unreaped(pid: u32) -> io::Result<()> {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
     use tokio::signal::unix::{SignalKind, signal};
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
     // Registered before the first look, so no exit goes unnoticed.
     let mut sigchld = signal(SignalKind::child()).ok();
     loop {
-        if let Some(exit) = exit_unreaped(pid)? {
-            return Ok(exit);
+        match waitid(WaitId::Pid(pid), options) {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) | Err(Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
         }
         let tick = tokio::time::sleep(EXIT_POLL);
         let Some(stream) = sigchld.as_mut() else {
@@ -365,27 +366,6 @@ pub async fn wait_exit_unreaped(pid: u32) -> io::Result<Exit> {
         if !open {
             sigchld = None;
         }
-    }
-}
-
-/// One look at the child `pid`, without reaping it or waiting: `None` while it runs.
-#[cfg(unix)]
-pub(crate) fn exit_unreaped(pid: u32) -> io::Result<Option<Exit>> {
-    use rustix::io::Errno;
-    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
-    let pid = i32::try_from(pid)
-        .ok()
-        .and_then(Pid::from_raw)
-        .ok_or(io::ErrorKind::InvalidInput)?;
-    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
-    loop {
-        return match waitid(WaitId::Pid(pid), options) {
-            Ok(Some(_)) => Ok(Some(Exit::Exited)),
-            Ok(None) => Ok(None),
-            Err(Errno::INTR) => continue,
-            Err(Errno::CHILD) => Ok(Some(Exit::Lost)),
-            Err(error) => Err(error.into()),
-        };
     }
 }
 

@@ -20,7 +20,6 @@
 //! server on the same cases (`settings-cases.json`) and fails when they differ.
 
 use std::{
-    fs, io,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -34,6 +33,8 @@ use conn_support::fs::write_private;
 
 /// What `redactServerSettingsForClient` shows instead of a saved secret.
 pub const SECRET_REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+mod file;
 
 mod generated;
 
@@ -268,8 +269,11 @@ impl SettingsStore {
             apply_provider_instance_mutation(&mut next, mutation)
                 .map_err(|detail| self.error("normalize", detail))?;
         }
-        if let Err(error) = conn_contract::from_json::<ServerSettings>(Value::Object(next.clone()))
-        {
+        if let Err(error) = file::check_refinements(&next).and_then(|()| {
+            conn_contract::from_json::<ServerSettings>(Value::Object(next.clone()))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }) {
             return Err(self.error(
                 "normalize",
                 format!("the settings would not decode: {error}"),
@@ -312,30 +316,24 @@ impl SettingsStore {
     }
 }
 
-/// `loadSettingsFromDisk`. A missing file is no settings. A file that cannot be read, parsed or
-/// decoded as `ServerSettings` gives T3's conservative defaults and the reason; it stays on disk
-/// as it is for the user to repair. Otherwise T3's legacy `providers` map moves to provider
-/// instances, a secret the file holds inline moves to the store (`moveInlineSettingsSecrets`),
-/// and the file is rewritten when either changed it.
+/// `loadSettingsFromDisk` ([`file::decode`]). A file that cannot be read, parsed or decoded
+/// gives T3's conservative defaults and the reason; it stays on disk byte for byte for the
+/// user to repair. Otherwise a secret the file holds inline moves to the store
+/// (`moveInlineSettingsSecrets`), and the file is rewritten when that or the legacy provider
+/// migration changed it. Both apply to the whole file; only the server's own view drops the
+/// source control hosts it does not serve.
 fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
-    let (mut sparse, failure) = match read(path) {
-        Ok(mut sparse) => {
-            retain_supported_hosts(&mut sparse);
-            match conn_contract::from_json::<ServerSettings>(Value::Object(sparse.clone())) {
-                Ok(_) => (sparse, None),
-                Err(error) => (Map::new(), Some(error.to_string())),
-            }
-        }
-        Err(error) => (Map::new(), Some(error.to_string())),
-    };
+    let file::Decoded {
+        mut doc,
+        migrated,
+        failure,
+    } = file::decode(path);
     if failure.is_some() {
-        // The file may hold an opt-out this server cannot read; never resume threads on a guess.
-        sparse.insert("continueThreadsAfterServerUpdate".into(), json!(false));
-        sparse.insert("usageHistoryRetentionDays".into(), json!("unlimited"));
-        let materialized = sparse.clone();
+        retain_supported_hosts(&mut doc);
+        let materialized = doc.clone();
         return (
             Loaded {
-                sparse,
+                sparse: doc,
                 materialized,
             },
             failure,
@@ -347,9 +345,8 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
             secrets_dir.display()
         );
     }
-    let migrated = migrate_legacy_providers(&mut sparse);
-    if (secrets::move_inline(secrets_dir, &mut sparse) || migrated)
-        && let Err(error) = write_settings(path, &sparse)
+    if (secrets::move_inline(secrets_dir, &mut doc) || migrated)
+        && let Err(error) = write_settings(path, &doc)
     {
         // The store holds the values now and the file still holds them inline; the next
         // load moves them again.
@@ -358,6 +355,8 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
             path.display()
         );
     }
+    let mut sparse = doc;
+    retain_supported_hosts(&mut sparse);
     let materialized = match secrets::materialize(secrets_dir, &sparse) {
         Ok(materialized) => materialized,
         Err((name, error)) => {
@@ -374,56 +373,12 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
     )
 }
 
-/// `migrateLegacyProviderSettings`: each entry of T3's old `providers` map whose key is a driver
-/// becomes that driver's default instance, unless the file names that instance already. An
-/// entry that only restates the driver's default is dropped. Returns whether the map was there.
-/// T3 also turns on cursor, grok and opencode when its own database shows they ran; this server
-/// has no such history.
-fn migrate_legacy_providers(settings: &mut Map<String, Value>) -> bool {
-    let Some(legacy) = settings.remove("providers") else {
-        return false;
-    };
-    let Value::Object(legacy) = legacy else {
-        return true;
-    };
-    let named = settings.contains_key("providerInstances");
-    let instances = ensure_object(
-        settings
-            .entry("providerInstances")
-            .or_insert_with(|| json!({})),
-    );
-    for (driver, blob) in legacy {
-        let Value::Object(mut config) = blob else {
-            continue;
-        };
-        if !is_slug(&driver) || instances.contains_key(&driver) {
-            continue;
-        }
-        let enabled = config.remove("enabled").and_then(|e| e.as_bool());
-        let driver_default = !DEFAULT_DISABLED_DRIVERS.contains(&driver.as_str());
-        if config.is_empty() && enabled.is_none_or(|e| e == driver_default) {
-            continue;
-        }
-        let mut instance = Map::new();
-        instance.insert("driver".into(), json!(driver));
-        if let Some(enabled) = enabled {
-            instance.insert("enabled".into(), json!(enabled));
-        }
-        instance.insert("config".into(), Value::Object(config));
-        instances.insert(driver, Value::Object(instance));
-    }
-    if !named && instances.is_empty() {
-        settings.remove("providerInstances");
-    }
-    true
-}
-
-/// `ProviderDriverKind`: a trimmed slug of at most 64 characters.
-fn is_slug(value: &str) -> bool {
-    let mut chars = value.chars();
-    value.len() <= 64
-        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+/// The settings as the store would load them, without writing anything: for a reader that
+/// runs before the store opens (Grok's start settings). Blocking.
+pub(crate) fn effective(path: &Path) -> Map<String, Value> {
+    let mut doc = file::decode(path).doc;
+    retain_supported_hosts(&mut doc);
+    doc
 }
 
 /// Writes the file form, as `writeSettingsAtomically` (0600, a temp file and a rename). A
@@ -433,18 +388,6 @@ fn write_settings(path: &Path, settings: &Map<String, Value>) -> Result<(), Stri
     bytes.push(b'\n');
     let target = conn_support::fs::resolve_symlink_target(path).map_err(|e| e.to_string())?;
     write_private(&target, &bytes).map_err(|e| e.to_string())
-}
-
-pub(crate) fn read(path: &Path) -> io::Result<Map<String, Value>> {
-    match fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(Value::Object(map)) => Ok(map),
-            Ok(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "not an object")),
-            Err(error) => Err(io::Error::new(io::ErrorKind::InvalidData, error)),
-        },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
-        Err(error) => Err(error),
-    }
 }
 
 /// `slot` as an object, replacing whatever else a hand-edited file left there.
@@ -966,6 +909,8 @@ pub fn provider_instance_enabled(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn patched(stored: Value, patch: Value) -> Value {
@@ -1590,6 +1535,9 @@ mod tests {
         for broken in [
             "{\"defaultAutoPull\": tru",
             "{\"responseStreamingMode\":\"typo\"}",
+            "{\"usageHistoryRetentionDays\": 0}",
+            // T3 decodes the legacy fields apart; a wrong shape there is a broken file too.
+            "{\"providers\":false}",
         ] {
             let dir = temp_state();
             let path = dir.join("settings.json");
@@ -1604,6 +1552,9 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.operation, "read-file", "{broken}");
             assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+            // Opening it again writes nothing either.
+            drop(SettingsStore::open(path.clone()));
+            assert_eq!(fs::read_to_string(&path).unwrap(), broken, "{broken}");
             // Repaired by hand, the next save reads the user's value and keeps it.
             fs::write(&path, "{\"responseStreamingMode\":\"turn\"}").unwrap();
             let view = store
@@ -1683,6 +1634,108 @@ mod tests {
             );
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    /// Opening a legacy file rewrites it whole: the source control hosts this server does not
+    /// serve stay on disk, though the server's own view leaves them out.
+    #[test]
+    fn the_legacy_migration_keeps_hosts_this_server_does_not_serve() {
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        let bitbucket = json!({"email": "me@example.com", "workspace": "team"});
+        fs::write(
+            &path,
+            json!({ "providers": {}, "sourceControlHosts": { "bitbucket": bitbucket } })
+                .to_string(),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let store = SettingsStore::open(path.clone());
+            assert!(
+                store
+                    .raw()
+                    .get("sourceControlHosts")
+                    .and_then(|h| h.get("bitbucket"))
+                    .is_none()
+            );
+            let file = on_disk(&dir);
+            assert!(file.get("providers").is_none(), "migrated");
+            assert_eq!(file["sourceControlHosts"]["bitbucket"], bitbucket);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `serverSettings.test.ts`, "migrates saved token delivery to paragraph buffering without
+    /// resetting settings", with T3's lenient JSON (`fromLenientJson`): a T3 file with comments,
+    /// trailing commas and the retired `token` mode loads, keeps its other preferences, and
+    /// takes an unrelated save.
+    #[test]
+    fn a_t3_file_with_comments_and_the_retired_token_mode_loads_and_saves() {
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            "{\n  // written by T3\n  \"responseStreamingMode\": \"token\",\n  \"defaultAutoPull\": true, /* kept */\n  \"projectSettingsOverrides\": { \"p\": { \"responseStreamingMode\": \"token\", }, },\n}\n",
+        )
+        .unwrap();
+        let store = SettingsStore::open(path.clone());
+        let view = store.for_client();
+        assert_eq!(view["responseStreamingMode"], "paragraph");
+        assert_eq!(
+            view["projectSettingsOverrides"]["p"]["responseStreamingMode"],
+            "paragraph"
+        );
+        assert_eq!(view["defaultAutoPull"], true);
+        store
+            .update(json!({ "enableAgentBrowserAccess": false }), None)
+            .unwrap();
+        let reopened = Value::Object(SettingsStore::open(path).raw());
+        assert_eq!(reopened["defaultAutoPull"], true);
+        assert_eq!(reopened["enableAgentBrowserAccess"], false);
+        assert_eq!(reopened["responseStreamingMode"], "paragraph");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `serverSettings.test.ts`, "enables previously used optional providers while migrating
+    /// legacy settings": T3's history in `statev2.sqlite` turns on a driver that ran, unless
+    /// the legacy map turns it off.
+    #[test]
+    fn the_legacy_migration_turns_on_providers_t3_ran() {
+        let history = |dir: &Path| {
+            let db = rusqlite::Connection::open(dir.join("statev2.sqlite")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE projection_thread_sessions (provider_name TEXT, provider_instance_id TEXT);
+                 CREATE TABLE provider_session_runtime (provider_name TEXT, provider_instance_id TEXT);
+                 INSERT INTO projection_thread_sessions VALUES ('grok', NULL);
+                 INSERT INTO provider_session_runtime VALUES ('opencode', 'opencode');",
+            )
+            .unwrap();
+        };
+        let dir = temp_state();
+        history(&dir);
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            json!({ "providers": { "opencode": { "enabled": false } } }).to_string(),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let raw = SettingsStore::open(path.clone()).raw();
+            assert!(provider_instance_enabled(&raw, None, "grok"));
+            assert!(
+                !provider_instance_enabled(&raw, None, "opencode"),
+                "explicitly off"
+            );
+            assert!(
+                !provider_instance_enabled(&raw, None, "cursor"),
+                "never ran"
+            );
+            assert_eq!(
+                on_disk(&dir)["providerInstances"]["grok"],
+                json!({ "driver": "grok", "enabled": true, "config": {} })
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// `serverSettings.test.ts`, "moves customized legacy provider settings": T3's

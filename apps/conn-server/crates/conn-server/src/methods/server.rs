@@ -523,6 +523,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `serverSettings.test.ts`, the legacy provider opt-out beside an invalid field: T3 reads
+    /// the legacy map apart, so Claude stays off in the advertised config and at launch, and
+    /// the file is never rewritten.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_legacy_claude_opt_out_holds_beside_an_invalid_field() {
+        struct Admission(Arc<Environment>);
+        impl conn_engine::EngineHost for Admission {
+            fn provider_instance_enabled(&self, project: Option<&str>, instance: &str) -> bool {
+                crate::settings::provider_instance_enabled(
+                    &self.0.settings.raw(),
+                    project,
+                    instance,
+                )
+            }
+        }
+        let dir =
+            std::env::temp_dir().join(format!("conn-server-cfg-{}", crate::auth::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let broken =
+            r#"{"providers":{"claudeAgent":{"enabled":false}},"responseStreamingMode":"typo"}"#;
+        std::fs::write(&path, broken).unwrap();
+        let env = Arc::new(
+            Environment::load(&dir, Some("Test".into()), dir.clone(), Default::default()).unwrap(),
+        );
+        let config = server_config(&env, Vec::new()).unwrap();
+        assert_eq!(
+            config["settings"]["providerInstances"]["claudeAgent"]["enabled"],
+            false
+        );
+
+        let root = dir.join("project").display().to_string();
+        let provider = Arc::new(conn_engine::fake::FakeProvider::new("claudeAgent"));
+        let mut engine = conn_engine::EngineConfig::new(dir.join("engine.sqlite"));
+        engine.projects = vec![conn_engine::ProjectConfig {
+            title: "Project".into(),
+            workspace_root: root.clone(),
+        }];
+        engine.providers = vec![provider.clone()];
+        engine.host = Some(Arc::new(Admission(env.clone())));
+        let engine = conn_engine::SqliteEngine::open(engine).unwrap();
+        let model = json!({"instanceId": "claudeAgent", "model": "claude-haiku-4-5"});
+        let create = json!({
+            "type": "thread.create", "commandId": "create", "threadId": "t1",
+            "projectId": conn_engine::SqliteEngine::project_id_for(&root), "title": "Claude",
+            "modelSelection": model, "runtimeMode": "full-access", "interactionMode": "default",
+            "branch": null, "worktreePath": null, "createdBy": "user", "creationSource": "web",
+        });
+        let send = json!({
+            "type": "message.dispatch", "commandId": "send", "threadId": "t1",
+            "messageId": "message:send", "text": "hello", "attachments": [],
+            "dispatchMode": {"type": "start_immediately"}, "createdBy": "user",
+            "creationSource": "web",
+        });
+        let mut refused = false;
+        for command in [create, send] {
+            refused |=
+                conn_engine::Engine::dispatch(&engine, conn_contract::from_json(command).unwrap())
+                    .await
+                    .is_err();
+        }
+        assert!(refused, "the Claude launch is refused");
+        assert_eq!(
+            provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no Claude session started"
+        );
+
+        let save = env
+            .settings
+            .update(json!({ "defaultAutoPull": true }), None);
+        assert_eq!(save.unwrap_err().operation, "read-file");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        drop(crate::settings::SettingsStore::open(path.clone()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn the_config_stream_follows_settings_keybindings_and_providers() {
         let (env, dir) = environment();

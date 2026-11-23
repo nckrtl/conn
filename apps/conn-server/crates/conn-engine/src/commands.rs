@@ -2,6 +2,7 @@
 //! effects to run after the commit. To support a new command, add one function and one line
 //! in [`handler`].
 
+use conn_support::ids::join_id;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -1483,10 +1484,9 @@ pub(crate) fn mark_stop_unresponsive(
     Ok(())
 }
 
-/// `makeInterruptResultTurnItem`: the Stop result of a run that ended interrupted. Its message
-/// is `reason`, else the Stop request's, else "Stopped by the provider". Written once.
 /// `PROVIDER_STOP_REASON_SIGNAL`: Codex reports a turn a hook stopped as completed; the run
-/// keeps the hook's reason as a warning (`RunExecutionService`).
+/// keeps the hook's reason as a warning (`RunExecutionService`). Its id is T3's
+/// `runSignalTurnItem`, which `subagentProjection.ts` looks up.
 pub(crate) fn write_provider_stop_reason(
     tx: &mut Tx<'_>,
     thread_id: &str,
@@ -1505,7 +1505,7 @@ pub(crate) fn write_provider_stop_reason(
         .unwrap_or(Value::Null);
     let now = tx.now().to_owned();
     let item = json!({
-        "id": interrupt_item_id(run_id, "provider-stop-reason"),
+        "id": join_id("turn-item", &["run", run_id, "signal", "provider-stop-reason"]),
         "threadId": thread_id,
         "runId": run_id,
         "nodeId": root,
@@ -1531,11 +1531,15 @@ pub(crate) fn write_provider_stop_reason(
     Ok(())
 }
 
+/// `makeInterruptResultTurnItem`: the Stop result of a run that ended interrupted. Its message
+/// is `reason` (Force stop), else the Stop request's, else the provider's `fallback`, else
+/// "Stopped by the provider" (`RunExecutionService`). Written once.
 pub(crate) fn write_interrupt_result(
     tx: &mut Tx<'_>,
     thread_id: &str,
     run: &Value,
     reason: Option<&str>,
+    fallback: Option<&str>,
 ) -> StoreResult<()> {
     let (Some(run_id), Some(root)) = (run["id"].as_str(), run["rootNodeId"].as_str()) else {
         return Ok(());
@@ -1552,6 +1556,7 @@ pub(crate) fn write_interrupt_result(
                 .as_ref()
                 .and_then(|r| r["message"].as_str().map(str::to_owned))
         })
+        .or_else(|| fallback.map(str::to_owned))
         .unwrap_or_else(|| "Stopped by the provider".to_owned());
     let provider_turn = tx
         .entity(thread_id, "nodes", root)?
@@ -2077,6 +2082,7 @@ pub(crate) fn finish_run(
         status,
         status,
         failure,
+        None,
         IdleWrite::WhileActive,
     )
     .map(drop)
@@ -2095,8 +2101,13 @@ pub(crate) enum IdleWrite {
 
 /// Ends a run's items with `status`, and the run and its root node with `persisted`: a
 /// completed provider turn whose checkpoint is still to be taken persists `waiting`, with no
-/// `completedAt` (`RunExecutionService.ts`). Returns whether it ended the run: `false` when
-/// the run is gone or already ended.
+/// `completedAt` (`RunExecutionService.ts`). An interrupted run's Stop result falls back to the
+/// provider's `stop_reason`. Returns whether it ended the run: `false` when the run is gone or
+/// already ended.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "T3's turn terminal (status, failure, reason) plus how the run persists"
+)]
 pub(crate) fn finish_run_as(
     tx: &mut Tx<'_>,
     thread_id: &str,
@@ -2104,6 +2115,7 @@ pub(crate) fn finish_run_as(
     status: &str,
     persisted: &str,
     failure: Option<Value>,
+    stop_reason: Option<&str>,
     idle: IdleWrite,
 ) -> StoreResult<bool> {
     let Some(mut run) = tx.entity(thread_id, "runs", run_id)? else {
@@ -2114,7 +2126,7 @@ pub(crate) fn finish_run_as(
     }
     crate::secret_requests::cancel_pending(tx, thread_id, run_id)?;
     if status == "interrupted" {
-        write_interrupt_result(tx, thread_id, &run, None)?;
+        write_interrupt_result(tx, thread_id, &run, None, stop_reason)?;
     }
     let now = tx.now().to_owned();
     let root = run["rootNodeId"].as_str().map(str::to_owned);

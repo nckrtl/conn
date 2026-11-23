@@ -441,6 +441,48 @@ async fn a_provider_stop_reason_stays_on_the_completed_run() {
             ("run:t1:2".to_owned(), "completed".to_owned())
         ]
     );
+    // `subagentProjection.ts` finds the notice by `runSignalTurnItem`'s id.
+    let id = conn_support::ids::join_id(
+        "turn-item",
+        &["run", "run:t1:1", "signal", "provider-stop-reason"],
+    );
+    assert_eq!(item_of(&p, &id)["message"], crate::fake::HOOK_STOP_REASON);
+}
+
+/// `RunExecutionService`'s interrupted terminal: the Stop result takes the stored Stop
+/// request's reason, else the provider's stop reason, and never shows a stop-reason warning.
+#[tokio::test(flavor = "current_thread")]
+async fn a_provider_stop_reason_backs_the_stop_result() {
+    let db = TempDb::new("stop-reason-interrupt");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hook-interrupt")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "hook-hang")).await;
+    until_provider_turn(&mut thread).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    dispatch(&engine, stop("t1", "c4")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(
+        item_of(&p, "turn-item:run:t1:1:interrupt-result")["message"],
+        crate::fake::HOOK_STOP_REASON
+    );
+    assert_eq!(
+        item_of(&p, "turn-item:run:t1:2:interrupt-result")["message"],
+        "Stopped by user"
+    );
+    let notices = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "system_notice")
+        .count();
+    assert_eq!(notices, 0, "an interrupted run shows no warning");
 }
 
 /// Starts a `hang` turn on t1 and drops the engine while it runs, as a killed process would.

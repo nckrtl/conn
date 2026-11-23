@@ -1642,7 +1642,7 @@ impl<E: Env> Mapper<E> {
             .into_iter()
             .flatten()
             .filter(|entry| entry["kind"] == "stop")
-            .filter_map(|entry| entry["text"].as_str().map(str::trim))
+            .filter_map(|entry| entry["text"].as_str().map(conn_support::text::js_trim))
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
@@ -1801,7 +1801,10 @@ impl<E: Env> Mapper<E> {
                 "failure": failure,
                 "threadDisposition": "reusable",
             });
-            if let Some(reason) = &turn.hook_stop_reason {
+            // T3's failed terminal carries no reason.
+            if terminal_status != "failed"
+                && let Some(reason) = &turn.hook_stop_reason
+            {
                 terminal["reason"] = json!(reason);
             }
             push_event(out, terminal);

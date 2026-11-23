@@ -369,6 +369,7 @@ impl Inner {
                     status,
                     persisted,
                     failure,
+                    stop_reason.as_deref(),
                     crate::commands::IdleWrite::TurnEnd,
                 )?;
                 if ended
@@ -1973,6 +1974,7 @@ impl Inner {
                         &tid,
                         &run,
                         Some(crate::commands::FORCE_STOP_REASON),
+                        None,
                     )
                 })
                 .await
@@ -2271,7 +2273,6 @@ enum Translated {
     Ignore,
     Event(Draft),
     ProviderTurn(ProviderTurnId, Draft),
-    /// The status, the failure, and whether the native thread is broken.
     /// Status, failure, whether the native thread broke, and the provider's stop reason.
     Terminal(&'static str, Option<Value>, bool, Option<String>),
     /// A provider-made thread (a subagent's child): created once, never overwritten.

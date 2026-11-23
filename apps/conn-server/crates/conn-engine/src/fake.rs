@@ -6,7 +6,8 @@
 //! - `question`: the turn asks the user a question (`user_input`) and waits for the answer.
 //! - `fail`: the turn fails.
 //! - `hook-stop`: the turn completes with a stop reason, as Codex reports a turn a hook
-//!   stopped.
+//!   stopped. `hook-interrupt`: the turn ends interrupted with that reason. `hook-hang`: the
+//!   turn waits for an interrupt, which ends it with that reason.
 //! - `push`: a finished `git push` command row, then the turn completes.
 //! - `subagent`: a subagent's child thread with one message, then the turn completes.
 //! - `background`: the turn completes with background work left, then asks for a
@@ -230,6 +231,8 @@ struct FakeSession {
     roster: Arc<Mutex<Vec<(String, bool)>>>,
     /// The running turn ignores Stop.
     stuck: Arc<AtomicBool>,
+    /// The running turn is `hook-hang`: its interrupt carries [`HOOK_STOP_REASON`].
+    hook_hang: Arc<AtomicBool>,
     mcp_servers: Arc<Mutex<Vec<McpServer>>>,
     closed: Arc<AtomicUsize>,
     applied_selections: Arc<Mutex<Vec<Value>>>,
@@ -342,6 +345,7 @@ impl Provider for FakeProvider {
                     background_wait: self.background_wait,
                     roster: Arc::default(),
                     stuck: Arc::new(AtomicBool::new(false)),
+                    hook_hang: Arc::new(AtomicBool::new(false)),
                     mcp_servers: self.mcp_servers.clone(),
                     closed: self.closed.clone(),
                     applied_selections: self.applied_selections.clone(),
@@ -398,6 +402,14 @@ fn provider_turn(turn: &Turn, status: &str) -> ProviderEvent {
             "startedAt": now, "completedAt": if status == "running" { Value::Null } else { json!(now) },
         }}),
     )
+}
+
+/// A terminal that carries [`HOOK_STOP_REASON`], as Codex reports a turn a hook stopped.
+fn hook_stopped(mut event: ProviderEvent) -> ProviderEvent {
+    if let ProviderEvent::TurnTerminal(ended) = &mut event {
+        ended.reason = Some(HOOK_STOP_REASON.into());
+    }
+    event
 }
 
 fn terminal(turn: &Turn, status: TurnStatus, failure: Option<Value>) -> ProviderEvent {
@@ -629,6 +641,7 @@ impl Session for FakeSession {
             let tx = self.events.clone();
             let mut started = vec![provider_turn(&turn, "running")];
             self.stuck.store(text == "stuck", Ordering::SeqCst);
+            self.hook_hang.store(text == "hook-hang", Ordering::SeqCst);
             match text.as_str() {
                 "mcp-app" => {
                     let item = from_json(json!({"id":"app:item","threadId":turn.thread_id,"runId":turn.run_id,"providerThreadId":turn.provider_thread_id,"providerTurnId":null,"nodeId":null,"parentItemId":null,"ordinal":1,"status":"completed","startedAt":null,"completedAt":null,"updatedAt":now_iso(),"nativeItemRef":null,"title":null,"type":"dynamic_tool","toolName":"stub.show","input":{},"output":{"content":[{"type":"text","text":"Weather"}]}})).map_err(|e|ProviderError::Protocol {detail:e.to_string()})?;
@@ -636,7 +649,7 @@ impl Session for FakeSession {
                     started.push(provider_turn(&turn,"completed"));
                     started.push(terminal(&turn,TurnStatus::Completed,None));
                 }
-                "hang" | "stuck" => {}
+                "hang" | "stuck" | "hook-hang" => {}
                 t if t.starts_with("latestart") => {}
                 "ask" => started.push(event(json!({"type": "runtime_request.updated",
                     "threadId": turn.thread_id, "runtimeRequest": {
@@ -814,11 +827,11 @@ impl Session for FakeSession {
                 }
                 "hook-stop" => {
                     started.push(provider_turn(&turn, "completed"));
-                    let mut ended = terminal(&turn, TurnStatus::Completed, None);
-                    if let ProviderEvent::TurnTerminal(ended) = &mut ended {
-                        ended.reason = Some(HOOK_STOP_REASON.into());
-                    }
-                    started.push(ended);
+                    started.push(hook_stopped(terminal(&turn, TurnStatus::Completed, None)));
+                }
+                "hook-interrupt" => {
+                    started.push(provider_turn(&turn, "interrupted"));
+                    started.push(hook_stopped(terminal(&turn, TurnStatus::Interrupted, None)));
                 }
                 "fail" => started.push(terminal(
                     &turn,
@@ -894,12 +907,15 @@ impl Session for FakeSession {
             let (run, event) = {
                 let turn = crate::lock(&self.turn);
                 let turn = turn.as_ref().ok_or(ProviderError::SessionStopped)?;
+                let ended = terminal(turn, TurnStatus::Interrupted, None);
+                let ended = if self.hook_hang.load(Ordering::SeqCst) {
+                    hook_stopped(ended)
+                } else {
+                    ended
+                };
                 (
                     turn.run_id.clone(),
-                    vec![
-                        provider_turn(turn, "interrupted"),
-                        terminal(turn, TurnStatus::Interrupted, None),
-                    ],
+                    vec![provider_turn(turn, "interrupted"), ended],
                 )
             };
             crate::lock(&self.calls).push(format!("interrupt {run}"));

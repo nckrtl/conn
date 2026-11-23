@@ -1319,9 +1319,11 @@ impl ThreadState {
             DomainEvent::ProviderTurnUpdated(ev) => self.record_provider_turn(&ev.payload),
             DomainEvent::SubagentUpdated(ev) => {
                 let model = SubagentModel::from_subagent(&ev.payload);
-                self.subagent_models
-                    .insert(ev.payload.id.clone(), model.clone())
-                    != Some(model)
+                let changed = self.subagent_models.get(&ev.payload.id) != Some(&model);
+                if changed {
+                    self.subagent_models.insert(ev.payload.id, model);
+                }
+                changed
             }
             // Projection metadata events that do not directly add or alter timeline entries.
             DomainEvent::ThreadCreated(_)

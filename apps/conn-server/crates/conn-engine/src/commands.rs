@@ -2,6 +2,7 @@
 //! effects to run after the commit. To support a new command, add one function and one line
 //! in [`handler`].
 
+use conn_provider::goal::GoalCommand;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -372,6 +373,7 @@ enum Delivery {
 fn delivery(
     tx: &Tx<'_>,
     c: &mut MessageDispatch,
+    goal: Option<&GoalCommand>,
 ) -> Result<(Delivery, Option<Value>), CommandError> {
     let active = active_run(tx, &c.thread_id)?;
     let Some(active) = active else {
@@ -410,14 +412,13 @@ fn delivery(
         },
         _ => None,
     };
-    if let Some(goal) = conn_provider::goal::parse_command(&c.text, !c.attachments.is_empty()) {
+    if let Some(goal) = goal {
         let target = match c.dispatch_mode.kind.as_str() {
             "queue_after_active" if c.delivery_intent.is_some() => Some(active),
             _ => steer_target.clone(),
         };
-        if let Some(target) = target
-            && let Some(stops) = goal_stops_run(tx, &c.thread_id, &goal, &target)?
-        {
+        if let Some(target) = target {
+            let stops = goal_stops_run(tx, &c.thread_id, goal, &target)?;
             // A goal stays its own run: never a steer, now or once the turn runs.
             c.dispatch_mode = DispatchMode {
                 kind: "queue_after_active".into(),
@@ -448,27 +449,40 @@ fn is_native_maintenance(message: &Value) -> bool {
         && matches!(text.as_str(), "/compact" | "/logout")
 }
 
-/// The goal rule of `dispatchMessage` and `promoteQueuedMessageToSteer`, for a `/goal` aimed at
-/// `target`: `None` when its provider runs no native goals, else whether the goal stops the
-/// run (`goalCommandStopsActiveRun`). A run that is only finishing is never stopped, nor a
-/// compaction or sign-out.
+/// `goalDriverFor` and `ensureGoalCommandSupported`: the `/goal` in a message sent to
+/// `instance`, when that provider runs native goals. A control it cannot run is refused.
+fn native_goal(
+    tx: &Tx<'_>,
+    text: &str,
+    has_attachments: bool,
+    instance: &str,
+) -> Result<Option<GoalCommand>, CommandError> {
+    let Some(goal) = conn_provider::goal::parse_command(text, has_attachments) else {
+        return Ok(None);
+    };
+    match tx.driver(instance).as_deref() {
+        Some("claudeAgent") if matches!(goal, GoalCommand::Pause | GoalCommand::Resume) => {
+            reject("Claude goals cannot be paused or resumed. Send /goal clear to remove the goal.")
+        }
+        Some("codex" | "claudeAgent") => Ok(Some(goal)),
+        _ => Ok(None),
+    }
+}
+
+/// The goal rule of `dispatchMessage` and `promoteQueuedMessageToSteer` for a native `/goal`
+/// aimed at `target`: whether it stops the run (`goalCommandStopsActiveRun`), from the goal on
+/// the run's provider thread. A run that is only finishing is never stopped, nor a compaction
+/// or sign-out.
 fn goal_stops_run(
     tx: &Tx<'_>,
     thread_id: &str,
-    goal: &conn_provider::goal::GoalCommand,
+    goal: &GoalCommand,
     target: &Value,
-) -> Result<Option<bool>, CommandError> {
+) -> Result<bool, CommandError> {
     let provider_thread = match target["providerThreadId"].as_str() {
         Some(id) => tx.entity(thread_id, "providerThreads", id)?,
         None => None,
     };
-    let driver = provider_thread
-        .as_ref()
-        .and_then(|pt| pt["driver"].as_str())
-        .or_else(|| target["providerInstanceId"].as_str());
-    if !matches!(driver, Some("codex" | "claudeAgent")) {
-        return Ok(None);
-    }
     let live = matches!(
         target["status"].as_str(),
         Some("preparing" | "starting" | "running")
@@ -482,9 +496,7 @@ fn goal_stops_run(
             .is_some_and(|m| is_native_maintenance(&m)),
         None => false,
     };
-    Ok(Some(
-        live && goal.stops_active_run(goal_status) && !maintenance,
-    ))
+    Ok(live && goal.stops_active_run(goal_status) && !maintenance)
 }
 
 pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
@@ -524,7 +536,16 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             c.dispatch_mode.kind
         ));
     }
-    let (delivery, interrupt) = delivery(tx, &mut c)?;
+    let instance = normalize_model_selection(
+        c.model_selection
+            .as_ref()
+            .unwrap_or(&thread["modelSelection"]),
+    )["instanceId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let goal = native_goal(tx, &c.text, !c.attachments.is_empty(), &instance)?;
+    let (delivery, interrupt) = delivery(tx, &mut c, goal.as_ref())?;
     if let Delivery::Steer(target) = delivery {
         return steer_into(tx, &c, &target);
     }
@@ -1230,14 +1251,21 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let has_attachments = message["attachments"]
         .as_array()
         .is_some_and(|a| !a.is_empty());
-    if let Some(goal) = conn_provider::goal::parse_command(
+    // A queued message goes to the provider its run selected (`queuedRunModelSelection`).
+    let instance = normalize_model_selection(&queued["modelSelection"])["instanceId"]
+        .as_str()
+        .or_else(|| queued["providerInstanceId"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(goal) = native_goal(
+        tx,
         message["text"].as_str().unwrap_or_default(),
         has_attachments,
-    ) && let Some(stops) = goal_stops_run(tx, &c.thread_id, &goal, &target)?
-    {
+        &instance,
+    )? {
         // A goal keeps its own run, first in the queue, and stops the turn it ends or replaces.
         queue_first(tx, &c.thread_id, &queued)?;
-        return Ok(if stops {
+        return Ok(if goal_stops_run(tx, &c.thread_id, &goal, &target)? {
             stop_run(tx, &c.thread_id, &target, None, false)?
         } else {
             vec![]

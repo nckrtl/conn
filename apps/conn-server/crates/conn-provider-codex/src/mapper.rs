@@ -776,12 +776,14 @@ impl<E: Env> Mapper<E> {
             .unwrap_or_default()
     }
 
-    /// Background terminals that completed root turns among `roots` (provider turn ids) left
-    /// running (`settledTurns` in a Stop's lineage), as (native thread, process id).
+    /// Background terminals that completed turns in the lineage of `roots` (provider turn ids)
+    /// left running (`settledTurns` in a Stop's lineage), as (native thread, process id).
     pub fn settled_processes(&self, roots: &[String]) -> Vec<(String, String)> {
         self.settled
             .iter()
-            .filter(|s| roots.contains(&s.turn.provider_turn_id))
+            .filter(|s| {
+                roots.contains(&s.turn.provider_turn_id) || self.descends_from(&s.turn, roots)
+            })
             .flat_map(|s| {
                 s.turn.running_commands.iter().filter_map(|c| {
                     let process = c.process_id.clone()?;

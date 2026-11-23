@@ -879,6 +879,37 @@ fn a_subagent_wakes_its_parent_only_after_a_completed_root_turn() {
     }
 }
 
+/// `interruptTurn` stops what settled turns in a Stop's lineage left running, a subagent's
+/// included (`settledTurnContexts.filter(inLineage)`).
+#[test]
+fn a_stops_lineage_reaches_a_settled_subagents_terminal() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let ts: Value = serde_json::from_str(&read(format!("{dir}/testdata/ts/simple.json"))).unwrap();
+    mapper.begin_turn("th", &turn_input(&ts["startTurn"][0]));
+    let _ = mapper.turn_start_result("th", &json!({"turn": {"id": "tu", "startedAt": null}}));
+    let _ = feed(
+        &mut mapper,
+        &[
+            json!({"method": "item/started", "params": {"threadId": "th", "turnId": "tu",
+                "item": {"type": "subAgentActivity", "id": "a1", "kind": "started",
+                    "agentThreadId": "child", "agentPath": "/root/helper"}}}),
+            json!({"method": "turn/started", "params": {"threadId": "child",
+                "turn": {"id": "ct", "status": "inProgress", "startedAt": 1}}}),
+            json!({"method": "item/started", "params": {"threadId": "child", "turnId": "ct",
+                "item": {"type": "commandExecution", "id": "c7", "command": "npm run dev",
+                    "processId": "7", "status": "inProgress"}}}),
+            json!({"method": "turn/completed", "params": {"threadId": "child",
+                "turn": {"id": "ct", "status": "completed", "completedAt": 4}}}),
+        ],
+    );
+    let roots = mapper.lineage_roots("tu");
+    assert_eq!(
+        mapper.settled_processes(&roots),
+        [("child".to_owned(), "7".to_owned())]
+    );
+}
+
 #[test]
 fn deferred_mcp_app_uses_t3s_failed_cli_result() {
     let recording: Value = serde_json::from_str(include_str!("../testdata/mcp-app.json")).unwrap();

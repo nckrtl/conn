@@ -1224,6 +1224,131 @@ async fn promoting_a_queued_goal_stops_the_running_turn() {
     assert_eq!(p["runs"][1]["status"], "queued", "{}", p["runs"][1]);
 }
 
+/// `runningProviderThread`: the turn gets the provider thread row the engine stores, goal and
+/// all. Codex shows a goal change only against that row, so a Clear after a Pause clears it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_clear_after_a_pause_clears_the_goal_row() {
+    let db = TempDb::new("goal-pause-clear");
+    let (engine, _) = open_with(&db, FakeProvider::new("codex").with_driver("codex"));
+    let mut create = create("t1", "c1");
+    create["modelSelection"] = json!({"instanceId": "codex", "model": "gpt-5"});
+    dispatch(&engine, create).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "goal")).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(shell_goal_status(&engine).await, "active");
+    dispatch(&engine, message("t1", "c3", "/goal pause")).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(shell_goal_status(&engine).await, "paused");
+    dispatch(&engine, message("t1", "c4", "/goal clear")).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(shell_goal_status(&engine).await, Value::Null);
+}
+
+async fn shell_goal_status(engine: &SqliteEngine) -> Value {
+    engine.shell_snapshot().await.unwrap()["threads"][0]["goal"]["status"].clone()
+}
+
+/// An engine with a running `hang` turn on t1, on the instance `instance`.
+async fn hanging_turn(
+    db: &TempDb,
+    providers: Vec<FakeProvider>,
+    instance: &str,
+) -> (
+    SqliteEngine,
+    Subscription<conn_contract::ThreadStreamItem, conn_contract::GetThreadProjectionError>,
+) {
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = providers
+        .into_iter()
+        .map(|p| Arc::new(p) as Arc<dyn conn_provider::Provider>)
+        .collect();
+    let engine = SqliteEngine::open(config).unwrap();
+    let mut create = create("t1", "c1");
+    create["modelSelection"] = json!({"instanceId": instance, "model": "m"});
+    dispatch(&engine, create).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    (engine, thread)
+}
+
+/// `goalDriverFor(command, modelSelection.instanceId)`: the message's own provider decides
+/// whether `/goal` is a goal. A Codex goal sent into another provider's turn stops it and goes
+/// first; it never steers in as chat.
+#[tokio::test(flavor = "current_thread")]
+async fn a_codex_goal_into_another_providers_turn_stops_it() {
+    let db = TempDb::new("goal-other-provider");
+    let (engine, mut thread) = hanging_turn(
+        &db,
+        vec![
+            FakeProvider::new("grok").with_driver("grok"),
+            FakeProvider::new("codex").with_driver("codex"),
+        ],
+        "grok",
+    )
+    .await;
+    let mut goal = message_with(
+        "t1",
+        "c3",
+        "/goal Ship the feature",
+        json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+        None,
+    );
+    goal["modelSelection"] = json!({"instanceId": "codex", "model": "gpt-5"});
+    dispatch(&engine, goal).await;
+    let p = projection(&engine, "t1").await;
+    assert!(
+        !local_item_texts(&p).iter().any(|t| t.contains("steer")),
+        "{:?}",
+        local_item_texts(&p)
+    );
+    assert_eq!(p["runs"][1]["queuePosition"], 1, "{}", p["runs"]);
+    assert_eq!(
+        until_run_status(&mut thread, "run:t1:1").await,
+        "interrupted"
+    );
+}
+
+/// `ensureGoalCommandSupported`: Claude goals cannot be paused or resumed. The send is refused
+/// before it can stop the running turn.
+#[tokio::test(flavor = "current_thread")]
+async fn a_claude_goal_resume_is_refused_before_it_stops_work() {
+    let db = TempDb::new("goal-claude-resume");
+    let (engine, _thread) =
+        hanging_turn(&db, vec![FakeProvider::new("claudeAgent")], "claudeAgent").await;
+    for (command, text) in [("c3", "/goal resume"), ("c4", "/goal pause")] {
+        let message = message_with(
+            "t1",
+            command,
+            text,
+            json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+            None,
+        );
+        assert_eq!(
+            refused(&engine, message).await,
+            "Claude goals cannot be paused or resumed. Send /goal clear to remove the goal."
+        );
+    }
+    let p = projection(&engine, "t1").await;
+    assert_eq!(
+        run_statuses(&p),
+        [("run:t1:1".to_owned(), "running".to_owned())]
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_declined_steer_waits_first_in_the_queue() {
     let db = TempDb::new("steer-declined");

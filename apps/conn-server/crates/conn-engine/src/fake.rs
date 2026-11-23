@@ -18,7 +18,8 @@
 //!   `background_work.updated` (pending), and a running background command row.
 //! - `goal`: the provider thread gets an active goal, as Codex's `thread/goal/updated`
 //!   does, then the turn completes. `/goal <objective>`: the same goal, and the turn waits
-//!   for an interrupt, as a running goal turn.
+//!   for an interrupt, as a running goal turn. `/goal pause` and `/goal clear` pause or
+//!   clear it and complete, with a row only when the turn's provider thread showed another.
 //! - anything else: streams `echo: <text>` in three chunks and completes.
 //!
 //! A steer into a running turn reports `steer.updated` pending then completed, answers
@@ -46,6 +47,8 @@ use conn_support::time::now_iso;
 
 pub struct FakeProvider {
     id: ProviderInstanceId,
+    /// [`Provider::driver`]: `claudeAgent` unless [`Self::with_driver`] changes it.
+    driver: &'static str,
     /// Sessions opened so far.
     pub sessions: Arc<AtomicUsize>,
     /// The MCP servers the newest session was given (at open or later).
@@ -107,6 +110,7 @@ impl FakeProvider {
     pub fn new(instance_id: &str) -> Self {
         Self {
             id: instance_id.into(),
+            driver: "claudeAgent",
             sessions: Arc::new(AtomicUsize::new(0)),
             mcp_servers: Arc::new(Mutex::new(vec![])),
             closed: Arc::new(AtomicUsize::new(0)),
@@ -185,6 +189,12 @@ impl FakeProvider {
     }
 
     /// A provider whose sessions decline every steer, as one without live steering does.
+    /// A provider of another driver, such as `codex`.
+    pub fn with_driver(mut self, driver: &'static str) -> Self {
+        self.driver = driver;
+        self
+    }
+
     pub fn without_steering(mut self) -> Self {
         self.steering = false;
         self
@@ -266,7 +276,7 @@ impl Provider for FakeProvider {
         &self.id
     }
     fn driver(&self) -> &str {
-        "claudeAgent"
+        self.driver
     }
     fn plan_selection_transition(
         &self,
@@ -734,6 +744,25 @@ impl Session for FakeSession {
                         started.push(provider_turn(&turn, "completed"));
                         started.push(terminal(&turn, TurnStatus::Completed, None));
                     }
+                }
+                // As Codex's `emitGoalUpdate`: a row only when the goal differs from the one on
+                // the turn's provider thread.
+                "/goal pause" | "/goal clear" => {
+                    let mut provider_thread = conn_contract::to_json(&input.provider_thread);
+                    let goal = if text == "/goal pause" {
+                        json!({"objective": "Ship the feature", "status": "paused",
+                            "tokensUsed": 12, "tokenBudget": null, "timeUsedSeconds": 3})
+                    } else {
+                        Value::Null
+                    };
+                    if provider_thread["goal"] != goal {
+                        provider_thread["goal"] = goal;
+                        provider_thread["updatedAt"] = json!(now_iso());
+                        started.push(event(json!({"type": "provider_thread.updated",
+                            "providerThread": provider_thread})));
+                    }
+                    started.push(provider_turn(&turn, "completed"));
+                    started.push(terminal(&turn, TurnStatus::Completed, None));
                 }
                 t if t == "goal" || t.starts_with("/goal ") => {
                     let mut provider_thread = conn_contract::to_json(&input.provider_thread);

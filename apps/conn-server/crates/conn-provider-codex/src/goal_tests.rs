@@ -493,7 +493,32 @@ async fn stop_between_goal_turns_settles_the_held_run() {
 /// during the turn Codex continued with also stops what the first turn left running.
 #[tokio::test(flavor = "current_thread")]
 async fn stop_during_a_continued_goal_turn_stops_the_earlier_turns_work() {
-    let script = script(
+    stop_continued_goal_turn("stop-continued", "", "interrupted").await;
+}
+
+/// `resolveGoalStopTarget` takes the lineage before it awaits the pause: a continued turn that
+/// ends while Stop waits for the pause answer still has the first turn's work stopped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_that_ends_during_the_stops_pause_keeps_its_lineage() {
+    let paused = goal("paused", 12);
+    let cases = format!(
+        r#"    *'"method":"thread/goal/set"'*'"objective"'*) emit "{{\"id\":$id,\"result\":{{\"goal\":$(printf '%s' '{paused}')}}}}" ;;
+    *'"method":"thread/goal/set"'*'"status":"paused"'*)
+      emit '{update}'
+      emit '{completed}'
+      emit "{{\"id\":$id,\"result\":{{\"goal\":$(printf '%s' '{paused}')}}}}" ;;
+"#,
+        update = updated("paused", 12, "\"g2\""),
+        completed = turn_frame("turn/completed", "g2", "completed"),
+    );
+    // Codex completed `g2` itself, so Stop has no turn left to interrupt.
+    stop_continued_goal_turn("stop-during-pause", &cases, "completed").await;
+}
+
+/// Stops the goal run's continued turn `g2` while the goal is active; `g1` left process 9.
+/// `g2` ends as `ended`.
+async fn stop_continued_goal_turn(name: &str, cases: &str, ended: &str) {
+    let script = script_with(
         "null",
         &[
             updated("active", 10, "\"g1\""),
@@ -501,8 +526,9 @@ async fn stop_during_a_continued_goal_turn_stops_the_earlier_turns_work() {
             turn_frame("turn/completed", "g1", "completed"),
             turn_frame("turn/started", "g2", "inProgress"),
         ],
+        cases,
     );
-    let mut fixture = Fixture::open("stop-continued", &script, Duration::from_secs(30)).await;
+    let mut fixture = Fixture::open(name, &script, Duration::from_secs(30)).await;
     fixture
         .session
         .start_turn(turn(&fixture.thread, 1, &format!("/goal {OBJECTIVE}")))
@@ -527,9 +553,12 @@ async fn stop_during_a_continued_goal_turn_stops_the_earlier_turns_work() {
         .unwrap();
     seen.extend(fixture.until_terminal().await);
     let requests = fixture.requests();
-    assert!(methods(&requests).contains(&"turn/interrupt"));
+    assert_eq!(
+        methods(&requests).contains(&"turn/interrupt"),
+        ended == "interrupted"
+    );
     assert_eq!(terminated(&requests), [json!("9")]);
-    assert_eq!(terminals(&seen), [(g2, "interrupted".to_owned())]);
+    assert_eq!(terminals(&seen), [(g2, ended.to_owned())]);
     fixture.finish().await;
 }
 

@@ -440,6 +440,23 @@ impl<E: Env> Mapper<E> {
         }
     }
 
+    /// The lineage roots a Stop of `provider_turn_id` has now (`turnsBefore`): the running turn
+    /// that answers for it with the turns it continued, and the turns of a held goal run.
+    pub fn stop_roots(&self, native: &str, provider_turn_id: &str) -> Vec<String> {
+        let mut roots = self
+            .native_turn(provider_turn_id)
+            .map(|turn| self.lineage_roots(&turn))
+            .unwrap_or_default();
+        if let Some(hold) = self.goals.holds.get(native).filter(|h| {
+            h.provider_turn_id == provider_turn_id
+                || h.continues.iter().any(|c| c == provider_turn_id)
+        }) {
+            roots.extend(hold.continues.iter().cloned());
+            roots.push(hold.provider_turn_id.clone());
+        }
+        roots
+    }
+
     /// Stop named a held run's turn: it ends interrupted, with no `turn/interrupt`. Returns
     /// its events and the run's provider turns, whose work the Stop also ends.
     pub fn stop_held_goal(

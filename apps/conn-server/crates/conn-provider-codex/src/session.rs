@@ -287,16 +287,27 @@ impl CodexSession {
     }
 
     /// `turn/interrupt` for the turn and its lineage, then the wait for Codex to end it.
-    async fn interrupt_native(&self, input: InterruptInput) -> ProviderResult<()> {
+    /// Stops the requested turn's lineage, and that of `earlier` (roots a goal Stop took
+    /// before its pause, whose turns may have ended meanwhile).
+    async fn interrupt_native(
+        &self,
+        input: InterruptInput,
+        earlier: Vec<String>,
+    ) -> ProviderResult<()> {
         let (native_turn, roots) = {
             let state = self.inner.lock();
-            let Some(turn) = state.mapper.native_turn(input.provider_turn_id.as_str()) else {
-                return Ok(());
-            };
-            let roots = state.mapper.lineage_roots(&turn);
+            let turn = state.mapper.native_turn(input.provider_turn_id.as_str());
+            let mut roots = turn
+                .as_deref()
+                .map(|turn| state.mapper.lineage_roots(turn))
+                .unwrap_or_default();
+            roots.extend(earlier);
             (turn, roots)
         };
-        self.interrupt_lineage(Some(&native_turn), &roots).await
+        if roots.is_empty() {
+            return Ok(());
+        }
+        self.interrupt_lineage(native_turn.as_deref(), &roots).await
     }
 
     /// Stops the lineage of `roots` (provider turn ids): `turn/interrupt` for each running turn,
@@ -569,7 +580,6 @@ impl CodexSession {
                 Arc::clone(&inner.server),
                 native.to_owned(),
                 turn,
-                "a goal turn Stop abandoned",
             ));
         }
         // The goal row shows before the run can settle.
@@ -743,20 +753,10 @@ impl Inner {
                     });
                 }
                 Out::InterruptChild { thread, turn } => {
-                    tokio::spawn(interrupt(
-                        Arc::clone(&self.server),
-                        thread,
-                        turn,
-                        "a late subagent turn",
-                    ));
+                    tokio::spawn(interrupt(Arc::clone(&self.server), thread, turn));
                 }
                 Out::InterruptAbandoned { thread, turn } => {
-                    tokio::spawn(interrupt(
-                        Arc::clone(&self.server),
-                        thread,
-                        turn,
-                        "a turn Stop abandoned",
-                    ));
+                    tokio::spawn(interrupt(Arc::clone(&self.server), thread, turn));
                 }
                 Out::GoalHeld { thread, seq } => {
                     let inbox = self.inbox.clone();
@@ -794,7 +794,7 @@ impl Inner {
                                 json!({"threadId": thread, "status": "paused"}),
                             )
                             .await;
-                        interrupt(server, thread, turn, "a goal turn with no run").await;
+                        interrupt(server, thread, turn).await;
                     });
                 }
                 Out::Skipped(kind) => {
@@ -968,15 +968,14 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
 }
 
 /// `turn/interrupt` for a turn no run owns, at most [`CHILD_INTERRUPT_TIMEOUT`]. Starts no
-/// process: once the last session is gone the request fails at once.
-async fn interrupt(server: Arc<AppServer>, thread: String, turn: String, what: &str) {
+/// process: once the last session is gone the request fails at once. A turn it does not stop
+/// ends on its own.
+async fn interrupt(server: Arc<AppServer>, thread: String, turn: String) {
     let request = server.request(
         "turn/interrupt",
         json!({"threadId": thread, "turnId": turn}),
     );
-    if let Ok(Err(e)) = tokio::time::timeout(CHILD_INTERRUPT_TIMEOUT, request).await {
-        eprintln!("conn-provider-codex: {what} did not stop: {e}");
-    }
+    let _ = tokio::time::timeout(CHILD_INTERRUPT_TIMEOUT, request).await;
 }
 
 /// The answer to a `turn/start` that Stop abandoned after it was written, at most `bound`.
@@ -1011,7 +1010,7 @@ async fn watch_abandoned_start(
         }
         None => {
             if let Some(turn) = turn {
-                interrupt(server, native, turn, "a turn Stop abandoned").await;
+                interrupt(server, native, turn).await;
             }
         }
     }
@@ -1528,9 +1527,16 @@ impl Session for CodexSession {
         Box::pin(async move {
             let inner = &self.inner;
             let Some(goal_thread) = native_thread_id(&input.provider_thread) else {
-                return self.interrupt_native(input).await;
+                return self.interrupt_native(input, Vec::new()).await;
             };
-            inner.lock().mapper.goal_stop_begin(&goal_thread);
+            // `turnsBefore`: the pause can let the run settle, which drops its turns.
+            let earlier = {
+                let mut state = inner.lock();
+                state.mapper.goal_stop_begin(&goal_thread);
+                state
+                    .mapper
+                    .stop_roots(&goal_thread, input.provider_turn_id.as_str())
+            };
             let result = async {
                 if inner.lock().mapper.goal_status(&goal_thread).as_deref() == Some("active") {
                     let version = inner.lock().mapper.goal_version();
@@ -1551,11 +1557,12 @@ impl Session for CodexSession {
                     .lock()
                     .mapper
                     .stop_held_goal(&goal_thread, input.provider_turn_id.as_str());
-                if let Some((outs, roots)) = held {
+                if let Some((outs, mut roots)) = held {
                     inner.deliver(outs).await;
+                    roots.extend(earlier);
                     return self.interrupt_lineage(None, &roots).await;
                 }
-                self.interrupt_native(input).await
+                self.interrupt_native(input, earlier).await
             }
             .await;
             inner.lock().mapper.goal_stop_end(&goal_thread);

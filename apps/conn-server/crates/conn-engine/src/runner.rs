@@ -871,6 +871,7 @@ impl Inner {
                         .run(Some(&rid))
                         .node(Some(&root_id))
                 };
+                let mut stored_row = None;
                 if let Some(id) = provider_thread_json["id"].as_str() {
                     let mut running = provider_thread_json.clone();
                     running["updatedAt"] = json!(now);
@@ -881,7 +882,8 @@ impl Inner {
                     {
                         running["goal"] = goal;
                     }
-                    tx.append(Draft::new(&tid, "provider-thread.updated", running))?;
+                    tx.append(Draft::new(&tid, "provider-thread.updated", running.clone()))?;
+                    stored_row = Some(running);
                 }
                 if let Some(transfer) = &fork_transfer {
                     tx.append(
@@ -932,12 +934,22 @@ impl Inner {
                     node["providerThreadId"] = pt_id;
                     tx.append(draft("node.updated", node))?;
                 }
-                Ok(Some(scope))
+                Ok(Some((scope, stored_row)))
             })
             .await?;
-        let Some(scope) = started else {
+        let Some((scope, stored_row)) = started else {
             live.take_active();
             return Err(StartError::Abandoned);
+        };
+        // The turn, the live cache and the handoffs get the row just stored, goal included: a
+        // provider shows a goal change only against the row its turn started with.
+        let (provider_thread, running_json) = match stored_row {
+            Some(row) => {
+                let provider_thread = from_json(row.clone()).unwrap_or(provider_thread);
+                lock(&live.state).provider_thread = Some(provider_thread.clone());
+                (provider_thread, row)
+            }
+            None => (provider_thread, running_json),
         };
         // The baseline holds no change of this turn: the provider has not had the message.
         if let Some((scope_id, cwd)) = scope {

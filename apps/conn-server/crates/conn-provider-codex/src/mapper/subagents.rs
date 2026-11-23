@@ -1243,40 +1243,39 @@ impl<E: Env> Mapper<E> {
     /// The running turns in the lineage of `roots` (provider turn ids): each running root and
     /// every running descendant (`isDescendantCodexTurn`), the roots first.
     pub fn lineage(&self, roots: &[String]) -> Vec<(String, String)> {
-        let is_root = |id: &str| roots.iter().any(|r| r == id);
+        let ids = |turn: &Turn| (turn.native_thread_id.clone(), turn.native_turn_id.clone());
         let mut out: Vec<(String, String)> = self
             .turns
             .values()
-            .filter(|turn| is_root(&turn.provider_turn_id))
-            .map(|turn| (turn.native_thread_id.clone(), turn.native_turn_id.clone()))
+            .filter(|turn| roots.contains(&turn.provider_turn_id))
+            .map(ids)
             .collect();
-        for turn in self.turns.values() {
-            if is_root(&turn.provider_turn_id) {
-                continue;
-            }
-            let mut hops = 0;
-            let mut parent = turn
-                .subagent
-                .as_ref()
-                .and_then(|k| self.subagents.get(k))
-                .map(|s| s.parent.clone());
-            while let Some(scope) = parent {
-                if is_root(&scope.provider_turn_id) {
-                    out.push((turn.native_thread_id.clone(), turn.native_turn_id.clone()));
-                    break;
-                }
-                hops += 1;
-                if hops > MAX_SUBAGENTS {
-                    break;
-                }
-                parent = scope
-                    .subagent
-                    .as_ref()
-                    .and_then(|k| self.subagents.get(k))
-                    .map(|s| s.parent.clone());
-            }
-        }
+        out.extend(
+            self.turns
+                .values()
+                .filter(|turn| {
+                    !roots.contains(&turn.provider_turn_id) && self.descends_from(turn, roots)
+                })
+                .map(ids),
+        );
         out
+    }
+
+    /// Whether `turn` is a subagent turn below one of `roots` (`isDescendantCodexTurn`).
+    pub(super) fn descends_from(&self, turn: &Turn, roots: &[String]) -> bool {
+        let parent_of =
+            |key: Option<&String>| key.and_then(|k| self.subagents.get(k)).map(|s| &s.parent);
+        let mut parent = parent_of(turn.subagent.as_ref());
+        for _ in 0..=MAX_SUBAGENTS {
+            let Some(scope) = parent else {
+                return false;
+            };
+            if roots.contains(&scope.provider_turn_id) {
+                return true;
+            }
+            parent = parent_of(scope.subagent.as_ref());
+        }
+        false
     }
 
     /// Ends a running turn as interrupted without Codex's word, as T3's

@@ -594,3 +594,52 @@ async fn a_final_refusal_is_recorded_after_a_failed_local_write() {
     assert_eq!(results, 1, "one result was recorded");
     assert_eq!(wakes, 1);
 }
+
+/// `RemoteDelegation.ts` `followGaveUp`: after repeated failures here the follower still
+/// fails the task, retrying that last write with back-off until the store takes it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_follower_past_its_defect_limit_still_records_the_task_once() {
+    let peer = Arc::new(StandIn {
+        enabled: true,
+        gone: true,
+        ..Default::default()
+    });
+    let f = fixture_full(
+        "give-up-write",
+        None,
+        FakeProvider::new("claudeAgent"),
+        Some(peer.clone()),
+    );
+    let mut client = Client::open(&f.service, client(true)).await;
+    let parent = launch_as_swamp(&mut client, "Parent", "hang", "full-access", "default").await;
+    until_provider_turn(&f, &parent).await;
+    let task = remote_task(&f, &parent, "first").await;
+    // Every read and write of the parent's rows fails until the table comes back.
+    let db = rusqlite::Connection::open(f.dir.join("engine.sqlite")).unwrap();
+    db.execute_batch("ALTER TABLE entities RENAME TO entities_away")
+        .unwrap();
+    tokio::time::pause();
+    let mut follow = std::pin::pin!(f.service.follow_for_test(&parent, &task));
+    let ended_while_broken = tokio::select! {
+        () = &mut follow => true,
+        () = tokio::time::sleep(std::time::Duration::from_secs(3600)) => false,
+    };
+    db.execute_batch("ALTER TABLE entities_away RENAME TO entities")
+        .unwrap();
+    if !ended_while_broken {
+        follow.await;
+    }
+    let engine = &f.service.config.engine;
+    assert!(engine.open_remote_tasks(10).await.unwrap().is_empty());
+    let (row, results, wakes) = stored_task(&f, &parent, &task);
+    assert_eq!(row["status"], "failed");
+    assert!(
+        row["result"]
+            .as_str()
+            .unwrap()
+            .contains("failed repeatedly"),
+        "{row}"
+    );
+    assert_eq!(results, 1);
+    assert_eq!(wakes, 1);
+}

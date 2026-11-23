@@ -519,22 +519,41 @@ impl McpService {
     }
 
     /// `followGaveUp`: a task with its result keeps it; one without fails, naming the thread.
+    /// A failed read or write here is retried with back-off until the task is settled, so
+    /// the follower never ends with the task open (`Effect.retry(followRetry)` in T3).
     async fn give_up(&self, parent: &str, task: &str) {
-        let Ok(Some((_, row))) = self.read_remote_task(parent, task).await else {
-            return;
+        let mut backoff = FIRST_BACKOFF;
+        loop {
+            match self.try_give_up(parent, task).await {
+                Ok(()) => return,
+                Err(step) => eprintln!(
+                    "conn-mcp: failing remote task {task} after repeated errors failed: {}",
+                    match step {
+                        Step::Defect(message) => message,
+                        Step::Peer(failure) => failure.message,
+                    }
+                ),
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+    }
+
+    async fn try_give_up(&self, parent: &str, task: &str) -> StepResult<()> {
+        let Some((_, row)) = self.read_remote_task(parent, task).await? else {
+            return Ok(());
         };
         let remote = &row["remoteChild"];
         if !remote.is_object() || !row["result"].is_null() {
-            return;
+            return Ok(());
         }
         let result = format!(
             "Following the thread {} in {} failed repeatedly, so it may still run there (task_cancel stops it).",
             remote["threadId"].as_str().unwrap_or_default(),
             remote["label"].as_str().unwrap_or_default()
         );
-        let _ = self
-            .complete_remote(parent, task, "failed", &result, None, None, None)
-            .await;
+        self.complete_remote(parent, task, "failed", &result, None, None, None)
+            .await
     }
 
     /// `followOnce`: one wait on the task's thread there; true once the task here is done. A

@@ -660,6 +660,16 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func closeThread(threadId: String) 
     
     /**
+     * Declines a pending approval and passes `feedback` to the agent, for an approval whose
+     * [`crate::FfiPendingApproval::supports_feedback`] is set (mobile's `sendApprovalFeedback`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func declineApprovalWithFeedback(threadId: String, requestId: String, feedback: String) async throws 
+    
+    /**
      * Permanently deletes `thread_id` (`thread.delete`).
      *
      * # Errors
@@ -921,6 +931,30 @@ open func closeThread(threadId: String)  {try! rustCall() {
         FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Declines a pending approval and passes `feedback` to the agent, for an approval whose
+     * [`crate::FfiPendingApproval::supports_feedback`] is set (mobile's `sendApprovalFeedback`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func declineApprovalWithFeedback(threadId: String, requestId: String, feedback: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_decline_approval_with_feedback(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId),FfiConverterString.lower(feedback)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
 }
     
     /**
@@ -4840,6 +4874,16 @@ public struct FfiPendingApproval: Equatable, Hashable {
      * card says the provider process is gone.
      */
     public var answerable: Bool
+    /**
+     * Composer text declines this approval and reaches the agent as feedback
+     * ([`crate::ConnCore::decline_approval_with_feedback`]). Without it, a send declines every
+     * pending approval and then sends the text as a normal message (mobile's redirect).
+     */
+    public var supportsFeedback: Bool
+    /**
+     * The composer's placeholder while this approval is the first pending one.
+     */
+    public var composerPlaceholder: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -4866,7 +4910,15 @@ public struct FfiPendingApproval: Equatable, Hashable {
         /**
          * The provider still waits for this answer. When it does not, the buttons are off and the
          * card says the provider process is gone.
-         */answerable: Bool) {
+         */answerable: Bool, 
+        /**
+         * Composer text declines this approval and reaches the agent as feedback
+         * ([`crate::ConnCore::decline_approval_with_feedback`]). Without it, a send declines every
+         * pending approval and then sends the text as a normal message (mobile's redirect).
+         */supportsFeedback: Bool, 
+        /**
+         * The composer's placeholder while this approval is the first pending one.
+         */composerPlaceholder: String) {
         self.entryId = entryId
         self.requestId = requestId
         self.title = title
@@ -4876,6 +4928,8 @@ public struct FfiPendingApproval: Equatable, Hashable {
         self.warning = warning
         self.options = options
         self.answerable = answerable
+        self.supportsFeedback = supportsFeedback
+        self.composerPlaceholder = composerPlaceholder
     }
 
     
@@ -4902,7 +4956,9 @@ public struct FfiConverterTypeFfiPendingApproval: FfiConverterRustBuffer {
                 fullAccessExplanation: FfiConverterOptionString.read(from: &buf), 
                 warning: FfiConverterOptionString.read(from: &buf), 
                 options: FfiConverterSequenceTypeFfiApprovalOption.read(from: &buf), 
-                answerable: FfiConverterBool.read(from: &buf)
+                answerable: FfiConverterBool.read(from: &buf), 
+                supportsFeedback: FfiConverterBool.read(from: &buf), 
+                composerPlaceholder: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -4916,6 +4972,8 @@ public struct FfiConverterTypeFfiPendingApproval: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.warning, into: &buf)
         FfiConverterSequenceTypeFfiApprovalOption.write(value.options, into: &buf)
         FfiConverterBool.write(value.answerable, into: &buf)
+        FfiConverterBool.write(value.supportsFeedback, into: &buf)
+        FfiConverterString.write(value.composerPlaceholder, into: &buf)
     }
 }
 
@@ -13648,6 +13706,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 13465) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_decline_approval_with_feedback() != 41266) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_delete_thread() != 14454) {

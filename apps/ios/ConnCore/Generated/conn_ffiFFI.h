@@ -372,6 +372,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_answer_secret_request(uint64_t ptr, 
 void uniffi_conn_ffi_fn_method_conncore_close_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DECLINE_APPROVAL_WITH_FEEDBACK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DECLINE_APPROVAL_WITH_FEEDBACK
+uint64_t uniffi_conn_ffi_fn_method_conncore_decline_approval_with_feedback(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id, RustBuffer feedback
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DELETE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DELETE_THREAD
 uint64_t uniffi_conn_ffi_fn_method_conncore_delete_thread(uint64_t ptr, RustBuffer thread_id
@@ -1079,6 +1084,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_answer_secret_request(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CLOSE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CLOSE_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_close_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DECLINE_APPROVAL_WITH_FEEDBACK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DECLINE_APPROVAL_WITH_FEEDBACK
+uint16_t uniffi_conn_ffi_checksum_method_conncore_decline_approval_with_feedback(void
     
 );
 #endif

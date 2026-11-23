@@ -437,6 +437,57 @@ async fn worktrees_are_created_listed_and_removed() {
         .unwrap();
 }
 
+/// T3 "removes a worktree whose .git file git-annex replaced with a symlink, keeping the symlink
+/// when refused". The layout is built with git and a link; git-annex itself does not run.
+#[tokio::test]
+async fn removes_a_git_annex_worktree_and_keeps_the_link_when_refused() {
+    for removal in [Removal::Safe, Removal::Force] {
+        let fx = Fixture::new("annex");
+        let path = fx.root.path().join("annexed");
+        git(
+            &fx.work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/annexed",
+                path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let admin = git(&path, &["rev-parse", "--absolute-git-dir"])
+            .trim()
+            .to_owned();
+        let dot_git = path.join(".git");
+        std::fs::remove_file(&dot_git).unwrap();
+        std::os::unix::fs::symlink(&admin, &dot_git).unwrap();
+        write(&path, "notes.txt", "draft\n");
+
+        assert!(
+            worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("notes.txt")).unwrap(),
+            "draft\n"
+        );
+        assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_symlink());
+        assert_eq!(std::fs::read_link(&dot_git).unwrap(), PathBuf::from(&admin));
+        std::fs::remove_file(path.join("notes.txt")).unwrap();
+
+        worktree::remove_worktree(&fx.work, &path, removal)
+            .await
+            .unwrap();
+
+        assert!(!path.exists(), "{removal:?}");
+        assert!(!PathBuf::from(&admin).exists(), "{removal:?}");
+        let listed = git(&fx.work, &["worktree", "list", "--porcelain"]);
+        assert!(!listed.contains("annexed"), "{listed}");
+    }
+}
+
 #[tokio::test]
 async fn diff_preview_shows_working_tree_branch_range_and_commit() {
     let fx = Fixture::new("review");

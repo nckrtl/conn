@@ -297,11 +297,19 @@ pub async fn remove_worktree(cwd: &Path, path: &Path, removal: Removal) -> VcsRe
     }
     args.push("--".into());
     args.push(target.to_string_lossy().into_owned());
-    match git("GitVcsDriver.removeWorktree", cwd, args)
+    let annexed = blocking(cwd, {
+        let target = target.clone();
+        move || AnnexLink::replace(&target)
+    })
+    .await??;
+    let removed = git("GitVcsDriver.removeWorktree", cwd, args)
         .timeout(REMOVE_TIMEOUT)
         .run()
-        .await
-    {
+        .await;
+    if let Some(link) = annexed {
+        blocking(cwd, move || link.restore_if_kept()).await?;
+    }
+    match removed {
         Ok(_) => Ok(()),
         Err(ProcessError::Exit { stderr, .. })
             if !path_exists(&target).await? && {
@@ -321,9 +329,79 @@ pub async fn remove_worktree(cwd: &Path, path: &Path, removal: Removal) -> VcsRe
 
 async fn path_exists(path: &Path) -> VcsResult<bool> {
     let target = path.to_owned();
-    tokio::task::spawn_blocking(move || target.exists())
+    blocking(path, move || target.exists()).await
+}
+
+async fn blocking<T: Send + 'static>(
+    cwd: &Path,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> VcsResult<T> {
+    tokio::task::spawn_blocking(work)
         .await
-        .map_err(|e| invalid(path, e.to_string()))
+        .map_err(|e| invalid(cwd, e.to_string()))
+}
+
+/// git-annex replaces a linked worktree's `.git` file with a symlink to its admin folder, so its
+/// links into `.git/annex` resolve. Git refuses to remove such a worktree, so the removal puts
+/// the standard `gitdir:` file back for git and restores the link if the checkout survives.
+struct AnnexLink {
+    dot_git: PathBuf,
+    /// The link's own text, restored as it was.
+    link: PathBuf,
+    admin: PathBuf,
+}
+
+impl AnnexLink {
+    /// Swaps the link for a `gitdir:` file when `.git` links to an admin folder whose `gitdir`
+    /// points back to `worktree`. `None` for any other layout.
+    fn replace(worktree: &Path) -> VcsResult<Option<Self>> {
+        let Some(link) = Self::find(worktree) else {
+            return Ok(None);
+        };
+        let failed = |e: std::io::Error| {
+            VcsError::invalid(
+                "GitVcsDriver.removeWorktree",
+                &worktree.to_string_lossy(),
+                format!("fatal: failed to replace '{}': {e}", link.dot_git.display()),
+            )
+        };
+        std::fs::remove_file(&link.dot_git).map_err(failed)?;
+        link.write_gitdir_file().map_err(failed)?;
+        Ok(Some(link))
+    }
+
+    fn find(worktree: &Path) -> Option<Self> {
+        let dot_git = worktree.join(".git");
+        let link = std::fs::read_link(&dot_git).ok()?;
+        let admin = std::fs::canonicalize(worktree.join(&link)).ok()?;
+        let gitdir = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+        let points_back = admin.join(gitdir.trim());
+        let points_back = std::fs::canonicalize(points_back.parent()?).ok()?;
+        (points_back == std::fs::canonicalize(worktree).ok()?).then_some(Self {
+            dot_git,
+            link,
+            admin,
+        })
+    }
+
+    fn write_gitdir_file(&self) -> std::io::Result<()> {
+        std::fs::write(&self.dot_git, format!("gitdir: {}\n", self.admin.display()))
+    }
+
+    /// Best effort: a kept checkout gets its link back, or the `gitdir:` file when the link
+    /// cannot be made.
+    fn restore_if_kept(self) {
+        let Some(worktree) = self.dot_git.parent() else {
+            return;
+        };
+        if !worktree.exists() {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.dot_git);
+        if std::os::unix::fs::symlink(&self.link, &self.dot_git).is_err() {
+            let _ = self.write_gitdir_file();
+        }
+    }
 }
 
 /// Deletes a local branch (`git branch -d`, or `-D` with `force`).

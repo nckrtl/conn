@@ -281,6 +281,8 @@ struct ThreadView: View {
             }
             .background(theme.background.ignoresSafeArea())
             .scrollDismissesKeyboard(.interactively)
+            // Mobile's feed opens at its end (`ThreadFeed`'s initial scroll), not at the first message.
+            .defaultScrollAnchor(.bottom)
             .onScrollGeometryChange(for: Bool.self) { geo in
                 let maxOffset = max(0, geo.contentSize.height - geo.containerSize.height)
                 return geo.contentOffset.y >= maxOffset - 80

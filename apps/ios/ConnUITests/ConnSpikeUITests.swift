@@ -495,8 +495,7 @@ final class ConnSpikeUITests: XCTestCase {
             app.launch()
             let urlField = app.textFields["pairing.urlField"]
             XCTAssertTrue(urlField.waitForExistence(timeout: 10), "Pairing URL field should appear")
-            urlField.tap()
-            urlField.typeText(pairingURL)
+            pasteInto(app, urlField, pairingURL)
             app.buttons["pairing.connectButton"].tap()
         }
 
@@ -533,10 +532,12 @@ final class ConnSpikeUITests: XCTestCase {
                 settle(2)
                 capture(name)
                 back(app)
+            } else {
+                capture("missing-\(name)")
             }
         }
 
-        if tap(app, ["workspace.tab.tasks", "Tasks"]) { settle(3); capture("tasks") }
+        if tap(app, ["workspace.tab.tasks", "Tasks"]) { settle(3); capture("tasks") } else { capture("missing-tasks") }
         if tap(app, ["workspace.tab.pullRequests", "Pull requests"]) { settle(3); capture("prs") }
         if tap(app, ["workspace.tab.threads", "Threads"]) { settle(1) }
         if tap(app, ["workspace.searchButton", "Search"]) {

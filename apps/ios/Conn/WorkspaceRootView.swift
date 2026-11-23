@@ -213,7 +213,9 @@ private struct WorkspacePhoneBar: ToolbarContent {
             ToolbarItem(placement: .bottomBar) {
                 WorkspacePhoneSwitcher(
                     selectedTab: $selectedTab,
-                    width: min(64 * 4, windowWidth - 160),
+                    // Mobile's `min(64 × items, W − 160)` assumes UIKit's own item padding; a SwiftUI
+                    // item adds 8pt a side, which would push the group into the overflow menu.
+                    width: min(64 * 4, windowWidth - 176),
                     onSearch: { isSearching = true }
                 )
             }

@@ -331,9 +331,9 @@ struct TaskRowView: View {
 
     private func pullRequestColor(_ state: FfiPullRequestState?) -> Color {
         switch state {
-        case .merged: AdaptiveColor.violet600400.color(colorScheme)
-        case .closed: theme.destructive
-        default: AdaptiveColor.emerald700300.color(colorScheme)
+        case .merged?: AdaptiveColor.violet600400.color(colorScheme)
+        case .closed?: theme.destructive
+        case .open?, nil: AdaptiveColor.emerald700300.color(colorScheme)
         }
     }
 }

@@ -186,6 +186,7 @@ impl DraftBook {
         &self,
         open: Option<&DraftThreadState>,
         contents: &HashMap<String, DraftContent>,
+        thread_contents: Vec<(String, DraftContent)>,
     ) -> SavedDrafts {
         let mut drafts: Vec<SavedDraft> = self
             .parked
@@ -212,10 +213,16 @@ impl DraftBook {
             .filter(|(_, draft_id)| kept.contains(draft_id))
             .map(|(project, draft_id)| (project.to_owned(), draft_id.to_owned()))
             .collect();
+        let mut threads: Vec<(String, DraftContent)> = thread_contents
+            .into_iter()
+            .filter(|(_, content)| content.has_content())
+            .collect();
+        threads.sort_by(|a, b| a.0.cmp(&b.0));
         SavedDrafts {
             version: DRAFT_FILE_VERSION,
             drafts,
             slots,
+            threads,
         }
     }
 }
@@ -255,9 +262,17 @@ pub(crate) struct SavedDrafts {
     version: u32,
     drafts: Vec<SavedDraft>,
     slots: Vec<(String, String)>,
+    /// Unsent input of started threads, by thread id (Conn keeps these in the same store).
+    #[serde(default)]
+    threads: Vec<(String, DraftContent)>,
 }
 
 impl SavedDrafts {
+    /// Takes the started threads' unsent input out of the file.
+    pub(crate) fn take_threads(&mut self) -> Vec<(String, DraftContent)> {
+        std::mem::take(&mut self.threads)
+    }
+
     pub(crate) fn to_json(&self) -> Option<String> {
         serde_json::to_string(self).ok()
     }
@@ -397,7 +412,7 @@ mod tests {
             ("launching".to_owned(), content("sending")),
             ("open".to_owned(), content("typing")),
         ]);
-        let saved = book.capture(Some(&open), &contents);
+        let saved = book.capture(Some(&open), &contents, Vec::new());
         let ids: Vec<&str> = saved
             .drafts
             .iter()
@@ -414,10 +429,24 @@ mod tests {
         book.map("env:a", "d1");
         book.park(draft("d2", "a"));
         let contents = HashMap::from([("d2".to_owned(), content("unsent idea"))]);
-        let json = book.capture(None, &contents).to_json().expect("serializes");
+        let json = book
+            .capture(
+                None,
+                &contents,
+                vec![
+                    ("thread-a".to_owned(), content("half a reply")),
+                    ("thread-b".to_owned(), content("  ")),
+                ],
+            )
+            .to_json()
+            .expect("serializes");
 
         let mut restored = DraftBook::default();
-        let loaded = SavedDrafts::from_json(&json).expect("parses");
+        let mut loaded = SavedDrafts::from_json(&json).expect("parses");
+        let threads = loaded.take_threads();
+        assert_eq!(threads.len(), 1, "empty thread input is not kept");
+        assert_eq!(threads[0].0, "thread-a");
+        assert_eq!(threads[0].1.text, "half a reply");
         let mut restored_contents = restored.restore(loaded);
         restored_contents.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(restored_contents[1].1.text, "unsent idea");
@@ -432,6 +461,7 @@ mod tests {
     fn a_broken_or_foreign_version_file_loads_as_none() {
         assert!(SavedDrafts::from_json("not json").is_none());
         assert!(SavedDrafts::from_json(r#"{"version":99,"drafts":[],"slots":[]}"#).is_none());
+        // A file from before thread input was kept has no `threads`.
         assert!(SavedDrafts::from_json(r#"{"version":1,"drafts":[],"slots":[]}"#).is_some());
     }
 

@@ -1,5 +1,9 @@
 //! Sidebar rows for unsent new-thread drafts (Conn `SidebarDraftBlock`): which drafts get a
-//! row, their order, and their label. Plain data in and out, so the iPhone app can share it.
+//! row, their order, and their label; which started threads show an unsent-input mark
+//! (`useThreadHasUnsentDraft`); and what a key does on a draft row. Plain data in and out, so
+//! the iPhone app can share it.
+
+use std::collections::HashSet;
 
 /// Status the row's accessibility label carries (`gt("Unsent draft")`).
 pub const DRAFT_STATUS_LABEL: &str = "Unsent draft";
@@ -102,6 +106,50 @@ pub fn draft_row_label(preview: &str, project_title: Option<&str>) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Ids of the started threads whose composer holds unsent text or attachments, so their rows
+/// carry the pen mark (`useThreadHasUnsentDraft`). `drafts` is `(thread id, prompt, attachment
+/// count)`. The open thread is left out: its composer is on screen (`!isRouteThread`).
+#[must_use]
+pub fn threads_with_unsent_input<'a>(
+    drafts: impl IntoIterator<Item = (&'a str, &'a str, usize)>,
+    open_thread_id: Option<&str>,
+) -> HashSet<String> {
+    drafts
+        .into_iter()
+        .filter(|(thread_id, prompt, count)| {
+            Some(*thread_id) != open_thread_id && draft_has_content(prompt, *count)
+        })
+        .map(|(thread_id, _, _)| thread_id.to_owned())
+        .collect()
+}
+
+/// What a key press does on a focused draft row (`SidebarDraftRow` `handleKeyDown`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftRowKey {
+    /// Reopen the draft.
+    Open,
+    /// Open the row's menu below the row.
+    Menu,
+}
+
+/// `Enter` and `Space` activate a row or button (`is_activation_key`).
+#[must_use]
+pub fn is_activation_key(key: &str) -> bool {
+    matches!(key, "enter" | "space")
+}
+
+/// The action of `key` on a focused draft row: `Enter` / `Space` open it, `ContextMenu` and
+/// `Shift+F10` open its menu.
+#[must_use]
+pub fn draft_row_key(key: &str, shift: bool) -> Option<DraftRowKey> {
+    match key {
+        k if is_activation_key(k) => Some(DraftRowKey::Open),
+        "menu" => Some(DraftRowKey::Menu),
+        "f10" if shift => Some(DraftRowKey::Menu),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +257,33 @@ mod tests {
             "fix it, Unsent draft, conn"
         );
         assert_eq!(draft_row_label("fix it", None), "fix it, Unsent draft");
+    }
+
+    #[test]
+    fn unsent_threads_are_those_with_content_other_than_the_open_one() {
+        let unsent = threads_with_unsent_input(
+            [
+                ("a", "half a prompt", 0),
+                ("b", "   ", 0),
+                ("c", "", 2),
+                ("open", "typing", 0),
+            ],
+            Some("open"),
+        );
+        let mut ids: Vec<&str> = unsent.iter().map(String::as_str).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "c"]);
+        assert!(threads_with_unsent_input([("a", "x", 0)], None).contains("a"));
+    }
+
+    #[test]
+    fn draft_rows_answer_enter_space_and_the_menu_keys() {
+        assert_eq!(draft_row_key("enter", false), Some(DraftRowKey::Open));
+        assert_eq!(draft_row_key("space", false), Some(DraftRowKey::Open));
+        assert_eq!(draft_row_key("menu", false), Some(DraftRowKey::Menu));
+        assert_eq!(draft_row_key("f10", true), Some(DraftRowKey::Menu));
+        assert_eq!(draft_row_key("f10", false), None);
+        assert_eq!(draft_row_key("a", false), None);
+        assert!(is_activation_key("enter") && !is_activation_key("tab"));
     }
 }

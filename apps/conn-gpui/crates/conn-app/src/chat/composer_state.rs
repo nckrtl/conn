@@ -72,6 +72,12 @@ pub(crate) fn thread_draft_key(thread_id: &str) -> String {
     format!("thread:{thread_id}")
 }
 
+/// The thread id behind a [`thread_draft_key`].
+#[must_use]
+pub(crate) fn thread_id_from_key(key: &str) -> Option<&str> {
+    key.strip_prefix("thread:")
+}
+
 /// Store key for a new-thread draft. The key follows the draft's id, not its project, so a
 /// draft keeps its content when the picker moves it to another project (Conn's
 /// `draftsByThreadKey` is keyed by draft id too).
@@ -787,7 +793,7 @@ mod tests {
         composer_placeholder, draft_id_from_key, local_branch_name_from_remote_ref,
         new_thread_draft_key, previous_worktree, project_picker_rows, prompt_history_entries,
         prompt_length_message, recallable_prompt, ref_badge, sanitize_new_ref_name,
-        step_prompt_history, thread_draft_key,
+        step_prompt_history, thread_draft_key, thread_id_from_key,
     };
 
     fn item<'a>(
@@ -909,6 +915,8 @@ mod tests {
         );
         assert_eq!(draft_id_from_key(&a), Some("a"));
         assert_eq!(draft_id_from_key(&thread_draft_key("a")), None);
+        assert_eq!(thread_id_from_key(&thread_draft_key("t")), Some("t"));
+        assert_eq!(thread_id_from_key(&a), None);
     }
 
     #[test]

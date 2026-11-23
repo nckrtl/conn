@@ -51,11 +51,19 @@ enum SeamDrag {
 }
 
 /// A discarded draft, kept for `Undo`.
-struct DiscardedDraft {
-    session: DraftThreadState,
-    content: Option<DraftContent>,
-    /// The project key that opened it, to take its slot back when that is still free.
-    project_key: Option<String>,
+enum DiscardedDraft {
+    /// A new-thread draft.
+    New {
+        session: DraftThreadState,
+        content: Option<DraftContent>,
+        /// The project key that opened it, to take its slot back when that is still free.
+        project_key: Option<String>,
+    },
+    /// A started thread's unsent input.
+    Thread {
+        thread_id: String,
+        content: DraftContent,
+    },
 }
 
 /// How long `Undo` stays on offer after a draft is discarded.
@@ -1464,7 +1472,7 @@ impl ConnApp {
             .chat
             .update(cx, |chat, cx| chat.discard_draft(draft_id, cx));
         self.offer_draft_undo(
-            DiscardedDraft {
+            DiscardedDraft::New {
                 session,
                 content,
                 project_key,
@@ -1485,6 +1493,28 @@ impl ConnApp {
             }
         }
         self.sync_chat(cx);
+        self.settle_drafts(cx);
+        cx.notify();
+    }
+
+    /// The `X` on a started thread's row: clears the unsent input in its composer and offers
+    /// `Undo` (`discardComposerDraft` on a thread target).
+    pub(crate) fn discard_thread_draft_row(&mut self, thread_id: &str, cx: &mut Context<'_, Self>) {
+        if self.layout.selected_thread_id.as_deref() == Some(thread_id) && self.draft.is_none() {
+            return;
+        }
+        let content = self
+            .chat
+            .update(cx, |chat, cx| chat.discard_thread_draft(thread_id, cx));
+        if let Some(content) = content {
+            self.offer_draft_undo(
+                DiscardedDraft::Thread {
+                    thread_id: thread_id.to_owned(),
+                    content,
+                },
+                cx,
+            );
+        }
         self.settle_drafts(cx);
         cx.notify();
     }
@@ -1512,13 +1542,21 @@ impl ConnApp {
     /// `Undo` on the discard notice: the draft, its text and its project slot come back as a
     /// parked draft. A project that opened another draft meanwhile keeps that one.
     pub(crate) fn undo_discard_draft(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(DiscardedDraft {
-            session,
-            content,
-            project_key,
-        }) = self.discarded_draft.take()
-        else {
-            return;
+        let (session, content, project_key) = match self.discarded_draft.take() {
+            Some(DiscardedDraft::New {
+                session,
+                content,
+                project_key,
+            }) => (session, content, project_key),
+            Some(DiscardedDraft::Thread { thread_id, content }) => {
+                self.chat.update(cx, |chat, cx| {
+                    chat.restore_thread_draft(&thread_id, content, cx)
+                });
+                self.settle_drafts(cx);
+                cx.notify();
+                return;
+            }
+            None => return,
         };
         if let Some(content) = content {
             self.chat.update(cx, |chat, cx| {
@@ -1745,15 +1783,40 @@ impl ConnApp {
         })
     }
 
+    /// Started threads whose composer holds unsent input: their rows carry the pen mark. The
+    /// open thread is left out, its composer is on screen.
+    fn sidebar_unsent_threads(&self, cx: &App) -> HashSet<String> {
+        let open_thread = self
+            .layout
+            .selected_thread_id
+            .as_deref()
+            .filter(|_| self.draft.is_none());
+        let mut unsent = HashSet::new();
+        self.chat
+            .read(cx)
+            .visit_thread_drafts(cx, |thread_id, text, count| {
+                unsent.extend(conn_state::threads_with_unsent_input(
+                    [(thread_id, text, count)],
+                    open_thread,
+                ));
+            });
+        unsent
+    }
+
     /// Parks the drafts saved by the last run, with their text and attachments.
     fn restore_saved_drafts(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(saved) = self
+        let Some(mut saved) = self
             .drafts_path
             .as_deref()
             .and_then(crate::drafts::load_saved_drafts)
         else {
             return;
         };
+        for (thread_id, content) in saved.take_threads() {
+            self.chat.update(cx, |chat, cx| {
+                chat.restore_thread_draft(&thread_id, content, cx)
+            });
+        }
         for (draft_id, content) in self.drafts.restore(saved) {
             self.chat
                 .update(cx, |chat, cx| chat.restore_draft(&draft_id, content, cx));
@@ -1777,7 +1840,11 @@ impl ConnApp {
         };
         let Some(json) = self
             .drafts
-            .capture(self.draft.as_ref(), &contents)
+            .capture(
+                self.draft.as_ref(),
+                &contents,
+                self.chat.read(cx).saved_thread_drafts(cx),
+            )
             .to_json()
         else {
             return;
@@ -3364,6 +3431,11 @@ impl ConnApp {
     pub(crate) fn restore_saved_drafts_for_test(&mut self, cx: &mut Context<'_, Self>) {
         self.restore_saved_drafts(cx);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dismiss_shell_popovers_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        self.dismiss_shell_popovers(cx);
     }
 
     /// The open new-thread draft's id and project.
@@ -6139,6 +6211,7 @@ impl Render for ConnApp {
                 })
                 .collect(),
             undo_available: self.discarded_draft.is_some(),
+            unsent_threads: self.sidebar_unsent_threads(cx),
         };
         if self.layout.sidebar_open {
             root = root

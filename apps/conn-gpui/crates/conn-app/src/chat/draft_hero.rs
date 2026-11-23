@@ -14,7 +14,7 @@ use gpui_kit::{
 use super::color::hsla;
 use super::composer_state::{
     ProjectPickerItem, ProjectPickerRow, draft_id_from_key, new_thread_draft_key,
-    project_picker_rows,
+    project_picker_rows, thread_draft_key, thread_id_from_key,
 };
 use super::{
     CHAT_CONTENT_MAX_WIDTH_PX, CHAT_LANE_PADDING_X_PX, ChatEvent, ChatView, DraftViewInfo, icons,
@@ -101,6 +101,55 @@ impl ChatView {
                 visit(draft_id, text, count);
             }
         });
+    }
+
+    /// Calls `visit(thread id, text, attachment count)` for every started thread's composer
+    /// that the store holds, the shown one included.
+    pub(crate) fn visit_thread_drafts(
+        &self,
+        cx: &gpui_kit::App,
+        mut visit: impl FnMut(&str, &str, usize),
+    ) {
+        self.composer.read(cx).visit_drafts(cx, |key, text, count| {
+            if let Some(thread_id) = thread_id_from_key(key) {
+                visit(thread_id, text, count);
+            }
+        });
+    }
+
+    /// What each started thread's composer holds that outlives a restart, by thread id.
+    pub(crate) fn saved_thread_drafts(&self, cx: &gpui_kit::App) -> Vec<(String, DraftContent)> {
+        self.composer
+            .read(cx)
+            .saved_drafts(cx)
+            .into_iter()
+            .filter_map(|(key, content)| Some((thread_id_from_key(&key)?.to_owned(), content)))
+            .collect()
+    }
+
+    /// Puts a started thread's unsent text and attachments back (read from disk, or an undone
+    /// discard).
+    pub(crate) fn restore_thread_draft(
+        &mut self,
+        thread_id: &str,
+        content: DraftContent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let key = thread_draft_key(thread_id);
+        self.composer
+            .update(cx, |c, _| c.restore_draft(&key, content));
+    }
+
+    /// Clears a started thread's unsent input (`discardComposerDraft` on a thread target) and
+    /// returns what it held, for an undo.
+    pub(crate) fn discard_thread_draft(
+        &mut self,
+        thread_id: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<DraftContent> {
+        let key = thread_draft_key(thread_id);
+        self.composer
+            .update(cx, |c, cx| c.discard_draft_key(&key, cx))
     }
 
     /// What each new-thread draft holds that outlives a restart, by draft id.

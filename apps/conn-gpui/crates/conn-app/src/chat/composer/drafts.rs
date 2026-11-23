@@ -38,7 +38,7 @@ impl Composer {
             visit(key, &draft.text, draft.attachments.len());
         }
         if let Some(key) = self.drafts.active_key() {
-            let text = self.textarea.read(cx).value().to_string();
+            let text = self.textarea.read(cx).value();
             visit(key, &text, self.attachments.len());
         }
     }

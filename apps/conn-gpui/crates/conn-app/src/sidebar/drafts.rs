@@ -5,12 +5,18 @@
 //! Click reopens the draft, `x` discards it, right-click opens its menu. A hairline closes the
 //! block.
 
-use conn_state::{ProjectShell, SidebarDraftRow, draft_row_label};
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use conn_state::{
+    DraftRowKey, ProjectShell, SidebarDraftRow, draft_row_key, draft_row_label, is_activation_key,
+};
 use conn_theme::{Appearance, Tokens};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, canvas, div, point, px,
 };
 
 use crate::a11y::ConnA11yExt as _;
@@ -38,6 +44,8 @@ pub(crate) struct DraftSidebar<'a> {
     pub(crate) rows: Vec<DraftRowView<'a>>,
     /// A discarded draft can still be brought back.
     pub(crate) undo_available: bool,
+    /// Started threads whose composer holds unsent input (their rows carry the pen mark).
+    pub(crate) unsent_threads: HashSet<String>,
 }
 
 /// One draft row with the project it targets.
@@ -89,6 +97,7 @@ fn render_draft_row(
     let group = SharedString::from(format!("sidebar-draft-group-{}", row.draft_id));
 
     let discard_id = row.draft_id.clone();
+    let discard_key_id = row.draft_id.clone();
     let discard = div()
         .id(SharedString::from(format!(
             "sidebar-draft-discard-{}",
@@ -106,10 +115,21 @@ fn render_draft_row(
         .flex_shrink_0()
         .rounded(px(5.0))
         .cursor_pointer()
-        .invisible()
-        .group_hover(group.clone(), |s| s.visible())
+        // Not `invisible()`: a hidden element cannot take keyboard focus, and the button shows
+        // on row hover or keyboard focus (`has-[:focus-visible]`).
+        .opacity(0.0)
+        .group_hover(group.clone(), |s| s.opacity(1.0))
+        .focus_visible(|s| s.opacity(1.0))
+        .tab_index(0)
         .hover(move |s| s.bg(button_hover))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_key_down(cx.listener(move |app, event: &gpui_kit::KeyDownEvent, _, cx| {
+            // Keys on the button belong to the button, not to the row around it.
+            if is_activation_key(&event.keystroke.key) {
+                cx.stop_propagation();
+                app.discard_draft_row(&discard_key_id, cx);
+            }
+        }))
         .on_click(cx.listener(move |app, _, _, cx| {
             cx.stop_propagation();
             app.discard_draft_row(&discard_id, cx);
@@ -118,7 +138,18 @@ fn render_draft_row(
         .child(icons::concept("superhero/close.svg", 12.0, muted));
 
     let open_id = row.draft_id.clone();
+    let key_id = row.draft_id.clone();
     let menu_id = row.draft_id.clone();
+    // Where the row was last painted, for a menu opened from the keyboard.
+    let below_row: Rc<Cell<Option<gpui_kit::Point<gpui_kit::Pixels>>>> = Rc::default();
+    let measured = Rc::clone(&below_row);
+    let ring = gpui_kit::BoxShadow {
+        color: hsla(tokens.ring),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(2.0),
+        inset: true,
+    };
     let mut card = div()
         .id(SharedString::from(format!(
             "sidebar-draft-row-{}",
@@ -131,6 +162,26 @@ fn render_draft_row(
         )
         .aria_selected(row.active)
         .group(group)
+        .relative()
+        // `role="button" tabIndex={0}` with `focus-visible:ring-2 ring-inset`.
+        .tab_index(0)
+        .focus_visible(move |s| s.shadow(vec![ring]))
+        .on_key_down(cx.listener(move |app, event: &gpui_kit::KeyDownEvent, window, cx| {
+            let keystroke = &event.keystroke;
+            match draft_row_key(&keystroke.key, keystroke.modifiers.shift) {
+                Some(DraftRowKey::Open) => {
+                    cx.stop_propagation();
+                    app.open_draft(&key_id, Some(window), cx);
+                }
+                Some(DraftRowKey::Menu) => {
+                    cx.stop_propagation();
+                    if let Some(position) = below_row.get() {
+                        app.open_draft_menu(key_id.clone(), position, cx);
+                    }
+                }
+                None => {}
+            }
+        }))
         .flex()
         .flex_col()
         .w_full()
@@ -200,10 +251,21 @@ fn render_draft_row(
         .text_color(fg.opacity(0.9))
         .child(row.preview.clone());
 
-    div()
-        .w_full()
-        .py(px(2.0))
-        .child(card.child(top).child(preview).test_support())
+    div().w_full().py(px(2.0)).child(
+        card.child(top)
+            .child(preview)
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        measured.set(Some(point(bounds.left(), bounds.bottom())));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .test_support(),
+    )
 }
 
 /// `Discarded 1 draft` with its `Undo` button (`showThreadUndoNotice`), at the foot of the

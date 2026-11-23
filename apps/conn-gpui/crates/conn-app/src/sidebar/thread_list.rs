@@ -305,6 +305,7 @@ pub(crate) fn render_thread_sidebar(
             project: shell.project(&thread.project_id),
             selected,
             is_renaming,
+            unsent_draft: drafts.unsent_threads.contains(&thread.id),
             rename_input,
             now_secs,
             sidebar_width: layout.sidebar_width,
@@ -335,6 +336,7 @@ pub(crate) fn render_thread_sidebar(
             project: shell.project(&thread.project_id),
             selected,
             is_renaming,
+            unsent_draft: drafts.unsent_threads.contains(&thread.id),
             rename_input,
             now_secs,
             sidebar_width: layout.sidebar_width,
@@ -449,6 +451,7 @@ pub(crate) fn render_thread_sidebar(
                 project: shell.project(&thread.project_id),
                 selected,
                 is_renaming,
+                unsent_draft: drafts.unsent_threads.contains(&thread.id),
                 rename_input,
                 now_secs,
                 sidebar_width: layout.sidebar_width,
@@ -831,6 +834,8 @@ struct RowCtx<'a> {
     project: Option<&'a ProjectShell>,
     selected: bool,
     is_renaming: bool,
+    /// The thread's composer holds unsent input (`useThreadHasUnsentDraft`).
+    unsent_draft: bool,
     rename_input: &'a Entity<InputState>,
     now_secs: i64,
     sidebar_width: f32,
@@ -990,6 +995,7 @@ fn render_thread_card(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
         .as_ref()
         .is_some_and(Option::is_some);
     let group = SharedString::from(format!("sidebar-row-{}", row.row_key));
+    let tokens_warning = tokens.warning;
 
     // Line 1 (`flex h-5 min-w-0 items-center gap-1.5`):
     // StatusDotBadge(ProjectFavicon) + title + pinIndicator + hover-only settle icon button.
@@ -1069,11 +1075,18 @@ fn render_thread_card(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
     };
     line1 = line1.child(title_el);
 
+    if row.unsent_draft {
+        line1 = line1.child(render_unsent_indicator(row));
+    }
+
     if is_pinned {
         line1 = line1.child(render_pin_indicator(row, cx));
     }
 
     // Hover-only icon-only settle control (`CircleCheckIcon`, `size-3.5`).
+    if row.unsent_draft {
+        line1 = line1.child(render_discard_thread_draft_button(row, &group, cx));
+    }
     let settle_id = thread.id.clone();
     let settle_btn = div()
         .id(("thread-settle-btn", row.row_key))
@@ -1220,6 +1233,17 @@ fn render_thread_card(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
             .border_color(gpui_kit::transparent_black())
             .opacity(0.7)
             .hover(move |s| s.bg(hover_bg).opacity(1.0));
+        if row.unsent_draft {
+            card = card
+                .bg(unsent_surface(tokens))
+                .hover(move |s| s.bg(unsent_surface_hover(tokens_warning)).opacity(1.0));
+        }
+    } else if row.unsent_draft {
+        // `draftSurfaceClassName`: `bg-warning/4 hover:bg-warning/8`.
+        card = card
+            .border_color(gpui_kit::transparent_black())
+            .bg(unsent_surface(tokens))
+            .hover(move |s| s.bg(unsent_surface_hover(tokens_warning)));
     } else {
         card = card
             .border_color(gpui_kit::transparent_black())
@@ -1279,6 +1303,9 @@ fn render_settled_row(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
             .into_any_element()
     };
 
+    let unsent_discard = row
+        .unsent_draft
+        .then(|| render_discard_thread_draft_button(row, &group, cx));
     let unsettle_id = thread.id.clone();
     let time_slot = div()
         .relative()
@@ -1348,7 +1375,9 @@ fn render_settled_row(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
         .border_t_1()
         .cursor_pointer()
         .child(favicon_slot)
+        .children(row.unsent_draft.then(|| render_unsent_indicator(row)))
         .child(title_el)
+        .children(unsent_discard)
         .child(time_slot);
     slim = attach_row_interactions(slim, row, cx);
     if row.selected {
@@ -1361,12 +1390,97 @@ fn render_settled_row(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
                 .border_1()
                 .border_color(hsla_alpha(tokens.sidebar_border, 0.70));
         }
+    } else if row.unsent_draft {
+        let warning = tokens.warning;
+        slim = slim
+            .border_color(gpui_kit::transparent_black())
+            .bg(unsent_surface(tokens))
+            .hover(move |s| s.bg(unsent_surface_hover(warning)));
     } else {
         slim = slim
             .border_color(gpui_kit::transparent_black())
             .hover(move |s| s.bg(hover_bg));
     }
     div().w_full().child(slim)
+}
+
+/// `draftSurfaceClassName` rest colour: `bg-warning/4`.
+fn unsent_surface(tokens: &Tokens) -> gpui_kit::Hsla {
+    hsla_alpha(tokens.warning, 0.04)
+}
+
+/// `draftSurfaceClassName` hover colour: `hover:bg-warning/8`.
+fn unsent_surface_hover(warning: conn_theme::Rgba) -> gpui_kit::Hsla {
+    hsla_alpha(warning, 0.08)
+}
+
+/// `draftIndicator`: the `SquarePen` mark (`text-warning-foreground`) on a thread with unsent
+/// input, with the `Unsent draft` label.
+fn render_unsent_indicator(row: &RowCtx<'_>) -> gpui_kit::AnyElement {
+    div()
+        .id(("thread-unsent-draft", row.row_key))
+        .test_support()
+        .a11y(
+            gpui_kit::Role::Image,
+            SharedString::from(format!("sidebar.thread.{}.unsent-draft", row.thread.id)),
+            "Unsent draft",
+        )
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .child(icons::concept(
+            "superhero/edit.svg",
+            12.0,
+            hsla(row.tokens.warning_foreground),
+        ))
+        .into_any_element()
+}
+
+/// The `X` that clears a thread's unsent input: shown on row hover or keyboard focus, and
+/// pressed with `Enter` / `Space` (`handleDiscardDraftClick`).
+fn render_discard_thread_draft_button(
+    row: &RowCtx<'_>,
+    group: &SharedString,
+    cx: &mut Context<'_, ConnApp>,
+) -> gpui_kit::AnyElement {
+    let tokens = row.tokens;
+    let muted = hsla(tokens.muted_foreground);
+    let thread_id = row.thread.id.clone();
+    let key_thread_id = row.thread.id.clone();
+    div()
+        .id(("thread-discard-draft-btn", row.row_key))
+        .test_support()
+        .a11y_button(
+            SharedString::from(format!("sidebar.thread.{}.discard-draft", row.thread.id)),
+            "Discard draft",
+        )
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(TITLE_LINE_HEIGHT_PX))
+        .px(px(6.0))
+        .rounded(px(CARD_RADIUS_PX))
+        .flex_shrink_0()
+        .cursor_pointer()
+        // Not `invisible()`: a hidden element cannot take keyboard focus.
+        .opacity(0.0)
+        .group_hover(group.clone(), |s| s.opacity(1.0))
+        .focus_visible(|s| s.opacity(1.0))
+        .tab_index(0)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_key_down(cx.listener(move |app, event: &gpui_kit::KeyDownEvent, _, cx| {
+            if conn_state::is_activation_key(&event.keystroke.key) {
+                cx.stop_propagation();
+                app.discard_thread_draft_row(&key_thread_id, cx);
+            }
+        }))
+        .on_click(cx.listener(move |app, _, _, cx| {
+            cx.stop_propagation();
+            app.discard_thread_draft_row(&thread_id, cx);
+        }))
+        .conn_tooltip("Discard draft", tokens)
+        .child(icons::concept("superhero/close.svg", 12.0, muted))
+        .into_any_element()
 }
 
 /// `threadTimeTimestamp`: last user message, else last update.

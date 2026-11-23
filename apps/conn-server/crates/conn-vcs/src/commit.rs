@@ -73,6 +73,122 @@ async fn operation_in_progress(cwd: &Path) -> VcsResult<Option<&'static str>> {
     Ok(None)
 }
 
+/// Git's `conflict-marker-size` for each root-relative path, in order: 7 unless the attribute
+/// holds a positive number, as `ll_merge_marker_size` reads it.
+async fn marker_sizes(
+    cwd: &Path,
+    files: &[String],
+    index: Option<(&Path, &str)>,
+) -> VcsResult<Vec<usize>> {
+    const DEFAULT: usize = 7;
+    let top = command(cwd, ["rev-parse", "--show-cdup"]).text().await?;
+    let top = cwd.join(top.trim_end_matches('\n'));
+    let mut check = command(
+        &top,
+        ["check-attr", "-z", "--stdin", "conflict-marker-size"],
+    );
+    if let Some((index, alternates)) = index {
+        check = indexed(check, index, alternates);
+    }
+    let mut input = Vec::new();
+    for file in files {
+        input.extend_from_slice(file.as_bytes());
+        input.push(0);
+    }
+    let output = check.stdin(input).text().await?;
+    // `-z` prints `<path> NUL <attribute> NUL <value> NUL` per path.
+    let mut values = output.split('\0').skip(2).step_by(3);
+    Ok(files
+        .iter()
+        .map(|_| {
+            values
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|&size| size > 0)
+                .unwrap_or(DEFAULT)
+        })
+        .collect())
+}
+
+/// Reads a file's diff from the empty tree one chunk at a time and notes whether it holds an
+/// opening and a closing conflict marker. A marker is `size` copies of `<` or `>` followed by
+/// whitespace or the line end, as Git's `is_conflict_marker` reads it. Every conflict style
+/// opens and closes this way. A lone `=======` is valid content, such as a Markdown heading
+/// underline, so it does not count.
+struct Markers {
+    size: usize,
+    in_hunk: bool,
+    /// Bytes of the current diff line read so far, counting Git's one-byte line prefix.
+    column: usize,
+    first: u8,
+    /// The marker character this added line may still be, while every byte matches it.
+    marker: Option<u8>,
+    opening: bool,
+    closing: bool,
+}
+
+impl Markers {
+    fn new(size: usize) -> Self {
+        Self {
+            size,
+            in_hunk: false,
+            column: 0,
+            first: 0,
+            marker: None,
+            opening: false,
+            closing: false,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        for &byte in chunk {
+            if byte == b'\n' {
+                self.end_marker();
+                self.column = 0;
+                continue;
+            }
+            match self.column {
+                0 => {
+                    self.first = byte;
+                    self.marker = None;
+                }
+                // The file's lines start after the first hunk header.
+                1 if !self.in_hunk => self.in_hunk = self.first == b'@' && byte == b'@',
+                _ if !self.in_hunk || self.first != b'+' => {}
+                1 => self.marker = matches!(byte, b'<' | b'>').then_some(byte),
+                column if column <= self.size => {
+                    if self.marker != Some(byte) {
+                        self.marker = None;
+                    }
+                }
+                column if column == self.size.saturating_add(1) => {
+                    if matches!(byte, b' ' | b'\t' | b'\r') {
+                        self.end_marker();
+                    }
+                    self.marker = None;
+                }
+                _ => {}
+            }
+            self.column = self.column.saturating_add(1);
+        }
+    }
+
+    /// Records the line's marker when exactly `size` marker characters came before this byte.
+    fn end_marker(&mut self) {
+        if self.column == self.size.saturating_add(1) {
+            match self.marker.take() {
+                Some(b'<') => self.opening = true,
+                Some(b'>') => self.closing = true,
+                _ => {}
+            }
+        }
+    }
+
+    fn unresolved(&self) -> bool {
+        self.opening && self.closing
+    }
+}
+
 async fn stage(
     cwd: &Path,
     selected: Option<&[String]>,
@@ -130,9 +246,6 @@ async fn stage(
             .map(str::to_owned)
             .collect::<Vec<_>>();
         if !unmerged.is_empty() {
-            let mut check = diff(["--check", "--no-color", "--"]);
-            check.extend(paths(&unmerged));
-            let checked = run(check).allow_exit(&[2]).text().await?;
             let empty = run(vec![
                 "hash-object".into(),
                 "-t".into(),
@@ -142,20 +255,10 @@ async fn stage(
             .stdin(Vec::new())
             .text()
             .await?;
+            let sizes = marker_sizes(cwd, &unmerged, index).await?;
             let mut conflicted = Vec::new();
-            for file in &unmerged {
-                let prefix = format!("{file}:");
-                let lines = checked
-                    .lines()
-                    .filter_map(|line| {
-                        line.strip_prefix(&prefix)
-                            .and_then(|line| line.strip_suffix(": leftover conflict marker"))
-                            .and_then(|number| number.parse::<usize>().ok())
-                    })
-                    .collect::<Vec<_>>();
-                if lines.is_empty() {
-                    continue;
-                }
+            for (file, size) in unmerged.iter().zip(sizes) {
+                // Git's cleaned text of the file, even where a diff driver calls it binary.
                 let mut args = diff([
                     "--no-color",
                     "--no-ext-diff",
@@ -165,18 +268,11 @@ async fn stage(
                     "--",
                 ]);
                 args.push(format!(":(top,literal){file}"));
-                let patch = run(args).text().await?;
-                let added = patch
-                    .lines()
-                    .skip_while(|line| !line.starts_with("@@"))
-                    .filter_map(|line| line.strip_prefix('+'))
-                    .collect::<Vec<_>>();
-                let reported = |marker| {
-                    added.iter().enumerate().any(|(index, line)| {
-                        lines.contains(&(index + 1)) && line.starts_with(marker)
-                    })
-                };
-                if reported('<') && reported('>') {
+                let mut markers = Markers::new(size);
+                run(args)
+                    .scan(&mut |chunk: &[u8]| markers.feed(chunk))
+                    .await?;
+                if markers.unresolved() {
                     conflicted.push(file.as_str());
                 }
             }
@@ -372,4 +468,57 @@ pub async fn create(
         .await?
         .trim()
         .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Markers;
+
+    const PATCH: &[u8] = b"diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ b/f\n\
+@@ -0,0 +1,6 @@\n+Heading\n+=======\n+<<<<<<< HEAD\n+ours\n+>>>>>>>\n+tail\n";
+
+    fn scan(size: usize, chunks: &[&[u8]]) -> (bool, bool) {
+        let mut markers = Markers::new(size);
+        for chunk in chunks {
+            markers.feed(chunk);
+        }
+        (markers.opening, markers.closing)
+    }
+
+    #[test]
+    fn markers_survive_every_chunk_boundary() {
+        for split in 0..=PATCH.len() {
+            let (head, tail) = PATCH.split_at(split);
+            assert_eq!(scan(7, &[head, tail]), (true, true), "{split}");
+            // Markers of another width are content.
+            assert_eq!(scan(6, &[head, tail]), (false, false), "{split}");
+            assert_eq!(scan(8, &[head, tail]), (false, false), "{split}");
+        }
+        let bytes = PATCH.iter().map(std::slice::from_ref).collect::<Vec<_>>();
+        assert_eq!(scan(7, &bytes), (true, true));
+    }
+
+    #[test]
+    fn only_a_full_marker_line_counts() {
+        let patch = |line: &str| format!("@@ -0,0 +1 @@\n+{line}\n");
+        for (line, found) in [
+            ("<<<<<<< HEAD", (true, false)),
+            ("<<<<<<<\tHEAD", (true, false)),
+            ("<<<<<<<\r", (true, false)),
+            (">>>>>>>", (false, true)),
+            ("<<<<<<<<", (false, false)),
+            ("<<<<<<x", (false, false)),
+            ("<<<<<<>", (false, false)),
+            (" <<<<<<<", (false, false)),
+            ("=======", (false, false)),
+        ] {
+            assert_eq!(scan(7, &[patch(line).as_bytes()]), found, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn header_lines_before_the_first_hunk_are_not_content() {
+        let patch = b"+<<<<<<< a\n+++ >>>>>>> b\n@@ -0,0 +1 @@\n+tail\n";
+        assert_eq!(scan(7, &[patch]), (false, false));
+    }
 }

@@ -993,15 +993,22 @@ fn configure(work: &std::path::Path, settings: &[(&str, &str)]) {
 
 /// `notes.txt` at the root conflicts in a merge from `feature`; `sub/` is the project folder.
 fn merge_conflict(label: &str) -> Fixture {
+    conflict_in(label, "notes.txt", |_| {})
+}
+
+/// `file` at the root conflicts in a merge from `feature`. `prepare` runs on the work tree
+/// before the base commit, so it can add `.gitattributes` or Git settings.
+fn conflict_in(label: &str, file: &str, prepare: impl FnOnce(&std::path::Path)) -> Fixture {
     let fx = Fixture::new(label);
-    write(&fx.work, "notes.txt", "base\n");
+    prepare(&fx.work);
+    write(&fx.work, file, "base\n");
     write(&fx.work, "sub/chosen.txt", "one\n");
     commit_all(&fx.work, "base");
     git(&fx.work, &["checkout", "-q", "-b", "feature"]);
-    write(&fx.work, "notes.txt", "feature\n");
+    write(&fx.work, file, "feature\n");
     commit_all(&fx.work, "feature");
     git(&fx.work, &["checkout", "-q", "main"]);
-    write(&fx.work, "notes.txt", "main\n");
+    write(&fx.work, file, "main\n");
     commit_all(&fx.work, "main");
     let merge = std::process::Command::new("git")
         .args(["merge", "feature"])
@@ -1135,4 +1142,118 @@ async fn commit_all_from_a_subdirectory_refuses_a_conflict_anywhere() {
         );
         assert!(!fx.work.join(".git/MERGE_HEAD").exists());
     }
+}
+
+/// Commit All from `sub/` refuses `file`, and leaves HEAD, the merge, the stages and the file.
+async fn assert_commit_all_refused(fx: &Fixture, file: &str) {
+    let head = git(&fx.work, &["rev-parse", "HEAD"]);
+    let stages = git(&fx.work, &["ls-files", "-s"]);
+    let content = std::fs::read(fx.work.join(file)).unwrap();
+    let sub = fx.work.join("sub");
+    let expected = format!("Cannot commit with unresolved merge conflicts in {file}.");
+
+    let prepared = commit::prepare_context(&sub, None, true).await.unwrap_err();
+    assert!(prepared.to_string().contains(&expected), "{prepared}");
+    let created = commit::create(&sub, "All", "", None).await.unwrap_err();
+    assert!(created.to_string().contains(&expected), "{created}");
+
+    assert_eq!(git(&fx.work, &["rev-parse", "HEAD"]), head, "HEAD moved");
+    assert!(fx.work.join(".git/MERGE_HEAD").exists(), "the merge ended");
+    assert_eq!(git(&fx.work, &["ls-files", "-s"]), stages, "stages changed");
+    assert_eq!(
+        std::fs::read(fx.work.join(file)).unwrap(),
+        content,
+        "the file changed"
+    );
+}
+
+/// Commit All from `sub/` finishes the merge with both parents and `file` as `resolution`.
+async fn assert_commit_all_merges(fx: &Fixture, file: &str, resolution: &str) {
+    write(&fx.work, file, resolution);
+    commit::create(&fx.work.join("sub"), "Merge", "", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        git(&fx.work, &["rev-list", "--parents", "-n1", "HEAD"])
+            .split_whitespace()
+            .count(),
+        3,
+        "a merge commit has two parents"
+    );
+    assert_eq!(
+        git(&fx.work, &["show", &format!("HEAD:{file}")]),
+        resolution,
+        "the committed resolution"
+    );
+    assert!(
+        git(&fx.work, &["ls-files", "--unmerged"]).is_empty(),
+        "stages remain"
+    );
+    assert!(
+        !fx.work.join(".git/MERGE_HEAD").exists(),
+        "the merge is still pending"
+    );
+}
+
+#[tokio::test]
+async fn commit_all_refuses_markers_that_a_binary_diff_driver_hides() {
+    let fx = conflict_in("commit-binary-driver", "notes.txt", |work| {
+        write(work, ".gitattributes", "*.txt diff=doc\n");
+    });
+    // `git diff --check` skips a file whose diff driver calls it binary.
+    configure(&fx.work, &[("diff.doc.binary", "true")]);
+
+    assert_commit_all_refused(&fx, "notes.txt").await;
+    assert_commit_all_merges(&fx, "notes.txt", "resolved\n").await;
+}
+
+#[tokio::test]
+async fn commit_all_refuses_a_conflict_in_a_file_named_with_a_newline() {
+    let file = "odd\nname.txt";
+    let fx = conflict_in("commit-newline-name", file, |_| {});
+
+    assert_commit_all_refused(&fx, file).await;
+    assert_commit_all_merges(&fx, file, "resolved\n").await;
+}
+
+#[tokio::test]
+async fn commit_all_commits_a_resolution_with_a_lone_divider_line() {
+    let fx = merge_conflict("commit-lone-divider");
+    assert_commit_all_merges(
+        &fx,
+        "notes.txt",
+        "Heading\n=======\n<<<<<<< only an opening\nresolved\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn commit_all_reads_markers_at_the_configured_width() {
+    let fx = conflict_in("commit-marker-size", "notes.txt", |work| {
+        // Anchored, so the lookup has to run from the repository root, not `sub/`.
+        write(
+            work,
+            ".gitattributes",
+            "/notes.txt conflict-marker-size=12 diff=doc\n",
+        );
+        configure(
+            work,
+            &[
+                ("merge.conflictStyle", "diff3"),
+                ("diff.doc.binary", "true"),
+            ],
+        );
+    });
+    let notes = std::fs::read_to_string(fx.work.join("notes.txt")).unwrap();
+    assert!(notes.starts_with("<<<<<<<<<<<< HEAD\n"), "{notes}");
+    assert!(notes.contains("\n|||||||||||| "), "{notes}");
+
+    assert_commit_all_refused(&fx, "notes.txt").await;
+    // Seven-wide markers are content in a file whose markers are twelve wide.
+    assert_commit_all_merges(
+        &fx,
+        "notes.txt",
+        "<<<<<<< ours\nexample\n=======\nexample\n>>>>>>> theirs\n",
+    )
+    .await;
 }

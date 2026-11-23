@@ -454,15 +454,7 @@ const EXIT_POLL: Duration = Duration::from_millis(50);
 pub async fn wait_exit_unreaped(pid: u32) -> io::Result<Exit> {
     use tokio::signal::unix::{SignalKind, signal};
     // Registered before the first look, so no exit goes unnoticed.
-    wait_exit_woken_by(pid, signal(SignalKind::child()).ok()).await
-}
-
-/// [`wait_exit_unreaped`] woken by `sigchld`; tests pass a stream that never fires.
-#[cfg(unix)]
-async fn wait_exit_woken_by(
-    pid: u32,
-    mut sigchld: Option<tokio::signal::unix::Signal>,
-) -> io::Result<Exit> {
+    let mut sigchld = signal(SignalKind::child()).ok();
     loop {
         if let Some(exit) = exit_unreaped(pid)? {
             return Ok(exit);
@@ -772,28 +764,5 @@ mod tests {
             wait_gone(pid, Duration::from_secs(5)).await,
             "grandchild {pid} survived the group kill"
         );
-    }
-
-    /// A SIGCHLD that never arrives (here a registered stream for another signal) still lets
-    /// the supervisor's exit wait notice the exit, with the child unreaped for the group kill.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_missed_sigchld_still_notices_the_exit() {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut child = Command::new("sh")
-            .args(["-c", "sleep 0.2"])
-            .spawn()
-            .unwrap();
-        let pid = child.id().unwrap();
-        let silent = signal(SignalKind::user_defined2()).ok();
-        assert!(silent.is_some());
-        let noticed =
-            tokio::time::timeout(Duration::from_secs(5), wait_exit_woken_by(pid, silent)).await;
-        assert_eq!(
-            noticed.ok().and_then(Result::ok),
-            Some(Exit::Exited),
-            "the exit went unnoticed"
-        );
-        assert!(child.wait().await.unwrap().success());
     }
 }

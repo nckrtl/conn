@@ -22,7 +22,7 @@ use super::{
     ThreadShell, UpsertInput,
     schedule::{format_iso, parse_iso},
 };
-use crate::clock::TestClock;
+use crate::{clock::TestClock, secrets::SecretRequests};
 
 type Launch =
     Box<dyn Fn(LaunchRequest) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
@@ -113,12 +113,22 @@ impl Env {
     }
 
     pub(super) async fn start(&self, fake: Fake, zone: &str, timer: bool) -> ScheduledTasks {
+        self.start_with_secrets(fake, zone, timer, None).await
+    }
+
+    pub(super) async fn start_with_secrets(
+        &self,
+        fake: Fake,
+        zone: &str,
+        timer: bool,
+        secret_requests: Option<SecretRequests>,
+    ) -> ScheduledTasks {
         ScheduledTasks::start(Config {
             state_dir: self.dir.clone(),
             clock: Arc::new(self.clock.clone()),
             zone: TimeZone::get(zone).expect("zone"),
             runner: Arc::new(fake),
-            secret_requests: None,
+            secret_requests,
             start_timer: timer,
         })
         .await
@@ -1090,8 +1100,23 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         }),
         ..Fake::default()
     };
-    let service = env.start(fake, "UTC", false).await;
+    let (secrets, reference) =
+        crate::secrets::tests::answered_reference(&env.dir, "project:test", "s3cret").await;
+    let service = env
+        .start_with_secrets(fake, "UTC", false, Some(secrets.clone()))
+        .await;
     let save = |thread: &str| json!({"id": "task:destination", "projectId": "project:test", "threadId": thread});
+    let signed = |thread: &str, id: &str| {
+        json!({"id": id, "projectId": "project:test", "threadId": thread,
+               "schedule": {"type": "webhook", "signature": {"header": "x-signature", "encoding": "hex", "prefix": "", "secretRef": reference}}})
+    };
+    let unspent = async || {
+        secrets
+            .saved_ref("thread", "item")
+            .await
+            .expect("read")
+            .is_some()
+    };
     for (thread, message) in [
         ("thread:missing", "That thread no longer exists."),
         ("thread:deleted", "That thread no longer exists."),
@@ -1105,8 +1130,24 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         ),
     ] {
         assert_eq!(failure(&service, save(thread)).await, message, "{thread}");
+        // A rejected save must not burn a one-shot secret.
+        assert_eq!(
+            failure(&service, signed(thread, "task:destination")).await,
+            message,
+            "{thread} with a secretRef"
+        );
+        assert!(unspent().await, "{thread} left the reference usable");
     }
     assert!(tasks(&service).await.is_empty());
+    // The retry with a valid destination spends it once.
+    let retried = upsert(&service, signed("thread:destination", "task:signed")).await;
+    assert_eq!(retried.thread_id.as_deref(), Some("thread:destination"));
+    assert!(retried.webhook.as_ref().is_some_and(|w| w.has_secret));
+    assert!(!unspent().await, "spent by the save");
+    assert_eq!(
+        failure(&service, signed("thread:destination", "task:third-use")).await,
+        "That secretRef was already used or does not exist. Ask the user again with request_secret."
+    );
     upsert(&service, save("thread:destination")).await;
     *archived.lock().expect("lock") = true;
     assert_eq!(
@@ -1117,6 +1158,15 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         Some("thread:destination"),
         "a thread archived later stays editable"
     );
+    // So does the signed task bound to it, which keeps its stored secret.
+    let mut edited = save("thread:destination");
+    edited["id"] = json!("task:signed");
+    edited["schedule"] = json!({"type": "webhook", "signature": {"header": "x-signature", "encoding": "hex", "prefix": ""}});
+    let edited = upsert(&service, edited).await;
+    assert_eq!(edited.thread_id.as_deref(), Some("thread:destination"));
+    assert!(edited.webhook.as_ref().is_some_and(|w| w.has_secret));
+    let ids: Vec<String> = tasks(&service).await.into_iter().map(|t| t.id).collect();
+    assert_eq!(ids, ["task:destination", "task:signed"]);
 }
 
 /// `a run interrupted right after it reserves the task does not block the next run`, and

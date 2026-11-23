@@ -504,12 +504,12 @@ fn sweep(dir: &Path, now: i64) -> Result<(), SecretError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
 
     struct TestEngine {
-        records: Value,
+        records: std::sync::Mutex<Value>,
         fail_record_in: Option<PathBuf>,
     }
     impl Engine for TestEngine {
@@ -562,11 +562,12 @@ mod tests {
             '_,
             Result<Value, conn_engine::EngineError<conn_contract::GetThreadProjectionError>>,
         > {
-            Box::pin(std::future::ready(Ok(self.records.clone())))
+            let records = self.records.lock().expect("lock").clone();
+            Box::pin(std::future::ready(Ok(records)))
         }
         fn record_secret_request(
             &self,
-            _: Value,
+            command: Value,
         ) -> conn_engine::BoxFuture<'_, Result<(), String>> {
             Box::pin(async move {
                 if let Some(dir) = &self.fail_record_in {
@@ -583,13 +584,48 @@ mod tests {
                     .unwrap();
                     Err("record failed".into())
                 } else {
+                    let mut records = self.records.lock().expect("lock");
+                    records["turnItems"][0]["secretStatus"] = command["secretStatus"].clone();
                     Ok(())
                 }
             })
         }
     }
-    fn pending_records() -> Value {
-        json!({"thread":{"projectId":"p"},"runs":[{"id":"run","status":"running"}],"turnItems":[{"id":"item","type":"secret_request","threadId":"thread","runId":"run","nodeId":"node","secretStatus":"pending","label":"Key","reason":"Fixture"}]})
+    fn pending_records() -> std::sync::Mutex<Value> {
+        pending_in("p")
+    }
+    fn pending_in(project: &str) -> std::sync::Mutex<Value> {
+        std::sync::Mutex::new(
+            json!({"thread":{"projectId":project},"runs":[{"id":"run","status":"running"}],"turnItems":[{"id":"item","type":"secret_request","threadId":"thread","runId":"run","nodeId":"node","secretStatus":"pending","label":"Key","reason":"Fixture"}]}),
+        )
+    }
+
+    /// A store under `state_dir` where the user saved `value` for a card in `project`, and
+    /// the one-use reference the agent got for it.
+    pub(crate) async fn answered_reference(
+        state_dir: &Path,
+        project: &str,
+        value: &str,
+    ) -> (SecretRequests, String) {
+        let service = SecretRequests::new(
+            state_dir,
+            Arc::new(TestEngine {
+                records: pending_in(project),
+                fail_record_in: None,
+            }),
+            Arc::new(crate::clock::SystemClock),
+        );
+        let answer = json!({"threadId":"thread","turnItemId":"item","answer":{"type":"save","secret":value}});
+        service
+            .answer(conn_contract::from_json(answer).expect("answer"))
+            .await
+            .expect("saved");
+        let reference = service
+            .saved_ref("thread", "item")
+            .await
+            .expect("read")
+            .expect("reference");
+        (service, reference)
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -604,6 +604,28 @@ impl ScheduledTasks {
             )
             .into());
         }
+        let thread_mode = resolve_thread_mode(&input, existing.as_ref());
+        let kept_thread = input
+            .thread_id
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|t| t.thread_id.clone()));
+        // A bound thread belongs to its project, so moving the task leaves it for a new one.
+        let moved_off_thread = existing
+            .as_ref()
+            .is_some_and(|e| e.project_id != input.project_id && kept_thread == e.thread_id);
+        let thread_id = if thread_mode == ScheduledTaskThreadMode::NewThread || moved_off_thread {
+            None
+        } else {
+            kept_thread
+        };
+        // An unchanged destination is not checked again, so a task on an archived thread
+        // stays editable. Checked before the webhook part spends a one-use secretRef.
+        if let Some(thread) = &thread_id
+            && Some(thread) != existing.as_ref().and_then(|e| e.thread_id.as_ref())
+        {
+            self.require_destination(thread, &input.project_id, &id)
+                .await?;
+        }
         // A webhook schedule keeps the stored token, and the stored secret unless a new one
         // comes (`upsert`, the `webhook` part).
         let (schedule, credentials) = match decoded {
@@ -626,28 +648,6 @@ impl ScheduledTasks {
                 (save.schedule, Some(save.credentials))
             }
         };
-        let thread_mode = resolve_thread_mode(&input, existing.as_ref());
-        let kept_thread = input
-            .thread_id
-            .clone()
-            .or_else(|| existing.as_ref().and_then(|t| t.thread_id.clone()));
-        // A bound thread belongs to its project, so moving the task leaves it for a new one.
-        let moved_off_thread = existing
-            .as_ref()
-            .is_some_and(|e| e.project_id != input.project_id && kept_thread == e.thread_id);
-        let thread_id = if thread_mode == ScheduledTaskThreadMode::NewThread || moved_off_thread {
-            None
-        } else {
-            kept_thread
-        };
-        // An unchanged destination is not checked again, so a task on an archived thread
-        // stays editable.
-        if let Some(thread) = &thread_id
-            && Some(thread) != existing.as_ref().and_then(|e| e.thread_id.as_ref())
-        {
-            self.require_destination(thread, &input.project_id, &id)
-                .await?;
-        }
         let schedule_unchanged = existing.as_ref().is_some_and(|e| {
             e.enabled == input.enabled && is_same_schedule(&e.schedule, &schedule)
         });

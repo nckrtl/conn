@@ -23,7 +23,7 @@ use nucleo_matcher::{
 
 use crate::{
     entries::{FileLinks, WalkEnd, walk_files},
-    mime,
+    git, mime,
     paths::InternalPaths,
 };
 
@@ -53,13 +53,40 @@ fn normalize_query(query: &str) -> String {
 struct Scorer {
     matcher: nucleo_matcher::Matcher,
     pattern: Option<Pattern>,
-    glob: Option<String>,
+    glob: Option<Glob>,
     buffer: Vec<char>,
+}
+
+/// A name query fff reads as a glob over the whole path.
+enum Glob {
+    Valid(globset::GlobMatcher),
+    /// A brace left open or closed twice: fff finds nothing for it.
+    Invalid,
+}
+
+impl Glob {
+    /// `*` and `?` cross `/`, `{a,b}` picks one, without escapes or case. `[` never gets
+    /// here: [`normalize_query`] drops it.
+    fn new(query: &str) -> Option<Self> {
+        if !query.contains(['*', '?', '{']) {
+            return None;
+        }
+        let glob = globset::GlobBuilder::new(query)
+            .case_insensitive(true)
+            .literal_separator(false)
+            .backslash_escape(false)
+            .build();
+        Some(glob.map_or(Self::Invalid, |g| Self::Valid(g.compile_matcher())))
+    }
+
+    fn is_match(&self, path: &str) -> bool {
+        matches!(self, Self::Valid(m) if m.is_match(path))
+    }
 }
 
 impl Scorer {
     fn new(query: &str) -> Self {
-        let glob = query.contains(['*', '?']).then(|| query.to_owned());
+        let glob = Glob::new(query);
         let pattern = (!query.is_empty() && glob.is_none()).then(|| {
             Pattern::new(
                 query,
@@ -79,8 +106,7 @@ impl Scorer {
     fn score(&mut self, path: &str) -> Option<i64> {
         let length_penalty = path.len() as i64 + path.matches('/').count() as i64 * 4;
         if let Some(glob) = &self.glob {
-            let lower = path.to_lowercase();
-            return glob_match(glob.as_bytes(), lower.as_bytes()).then_some(-length_penalty);
+            return glob.is_match(path).then_some(-length_penalty);
         }
         let Some(pattern) = &self.pattern else {
             return Some(-length_penalty);
@@ -89,29 +115,6 @@ impl Scorer {
         let score = i64::from(pattern.score(haystack, &mut self.matcher)?);
         Some(score * 64 - length_penalty)
     }
-}
-
-/// `*` and `?` over the whole path.
-fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    let (mut p, mut t) = (0, 0);
-    let (mut star, mut mark) = (None, 0);
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
-            star = Some(p);
-            mark = t;
-            p += 1;
-        } else if let Some(s) = star {
-            p = s + 1;
-            mark += 1;
-            t = mark;
-        } else {
-            return false;
-        }
-    }
-    pattern[p..].iter().all(|&c| c == b'*')
 }
 
 /// Keeps the best `limit` scored entries seen so far.
@@ -190,10 +193,55 @@ pub fn search_entries(
         query = query.replace('{', "");
         (top, end) = run(&query);
     }
-    ProjectSearchEntriesResult {
-        truncated: top.matched > limit || end == WalkEnd::Bounded,
-        entries: top.items.into_iter().map(|(_, e)| e).collect(),
+    let mut truncated = top.matched > limit || end == WalkEnd::Bounded;
+    let mut entries: Vec<ProjectEntry> = top.items.into_iter().map(|(_, e)| e).collect();
+    if want_files && !image_only {
+        let mut nested = nested_worktree_files(root, &input.query, &entries, internal);
+        if !nested.is_empty() {
+            nested.append(&mut entries);
+            truncated |= nested.len() > limit;
+            nested.truncate(limit);
+            entries = nested;
+        }
     }
+    ProjectSearchEntriesResult { truncated, entries }
+}
+
+/// `findNestedWorktreeFiles`: the walk skips ignored folders, where agents often keep
+/// worktrees (`.worktrees/x`). A relative path names a file in such a checkout only exactly,
+/// and only when the walk found no file by that path.
+fn nested_worktree_files(
+    root: &Path,
+    query: &str,
+    found: &[ProjectEntry],
+    internal: &InternalPaths,
+) -> Vec<ProjectEntry> {
+    let relative = query.trim().replace('\\', "/");
+    let windows_absolute = relative.as_bytes().get(1) == Some(&b':');
+    if !relative.contains('/')
+        || relative.ends_with('/')
+        || relative.starts_with('/')
+        || windows_absolute
+        || relative.split('/').any(|s| s == "..")
+        || found.iter().any(|e| {
+            e.kind == ProjectEntryKind::File
+                && (e.path == relative || e.path.ends_with(&format!("/{relative}")))
+        })
+    {
+        return Vec::new();
+    }
+    let root = InternalPaths::real(root);
+    git::worktrees(&root)
+        .iter()
+        .filter_map(|worktree| {
+            let worktree = std::fs::canonicalize(worktree).ok()?;
+            let nested = worktree.strip_prefix(&root).ok()?.to_str()?;
+            let candidate = format!("{nested}/{relative}");
+            let full = root.join(&candidate);
+            (!nested.is_empty() && full.is_file() && !internal.contains(&full))
+                .then(|| entry(&candidate, ProjectEntryKind::File))
+        })
+        .collect()
 }
 
 fn entry(path: &str, kind: ProjectEntryKind) -> ProjectEntry {

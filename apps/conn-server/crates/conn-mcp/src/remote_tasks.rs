@@ -627,19 +627,23 @@ impl McpService {
         // here during the wait.
         let result_run = &waited["resultRun"];
         let shared = result_run.is_object() && result_run["runId"] != run_id && {
-            let Some((projection, row)) = self.read_remote_task(parent, task).await? else {
+            let rows = self
+                .config
+                .engine
+                .subagent_rows(parent)
+                .await
+                .map_err(Step::Defect)?;
+            let Some(row) = rows.iter().find(|row| row["id"] == task) else {
                 return Ok(true);
             };
-            projection["subagents"].as_array().is_some_and(|rows| {
-                let recorded = row["startedAt"].as_str();
-                rows.iter().any(|other| {
-                    other["id"] != task
-                        && other["remoteChild"]["environmentId"] == remote["environmentId"]
-                        && other["remoteChild"]["threadId"] == remote["threadId"]
-                        && (recorded.is_none()
-                            || other["completedAt"].is_null()
-                            || other["completedAt"].as_str() > recorded)
-                })
+            let recorded = row["startedAt"].as_str();
+            rows.iter().any(|other| {
+                other["id"] != task
+                    && other["remoteChild"]["environmentId"] == remote["environmentId"]
+                    && other["remoteChild"]["threadId"] == remote["threadId"]
+                    && (recorded.is_none()
+                        || other["completedAt"].is_null()
+                        || other["completedAt"].as_str() > recorded)
             })
         };
         let (answer_run, answer_status) = if result_run.is_object() && !shared {

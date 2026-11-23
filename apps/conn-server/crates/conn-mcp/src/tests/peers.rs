@@ -73,12 +73,20 @@ impl Peers for StandIn {
         if self.overlap {
             return Box::pin(async move {
                 match call.tool.as_str() {
-                    "conn_thread_wait" => {
-                        assert_eq!(call.arguments["runId"], "first");
+                    // The wait on `first` holds at the barrier and names the newer `second`
+                    // as the thread's answer; the wait on `second` ends with it.
+                    "conn_thread_wait" if call.arguments["runId"] == "first" => {
                         self.waiting.notify_one();
                         self.release.notified().await;
                         Ok(
                             json!({"threadId":"shared","runId":"first","status":"completed",
+                            "timedOut":false,"resultRun":{"runId":"second","status":"completed"}}),
+                        )
+                    }
+                    "conn_thread_wait" => {
+                        assert_eq!(call.arguments["runId"], "second");
+                        Ok(
+                            json!({"threadId":"shared","runId":"second","status":"completed",
                             "timedOut":false,"resultRun":{"runId":"second","status":"completed"}}),
                         )
                     }
@@ -449,32 +457,36 @@ async fn remote_task(f: &Fixture, parent: &str, run: &str) -> String {
     format!("node:delegated-task:{run}")
 }
 
-/// What the parent store holds for `task`, read on a fresh connection: the results recorded for
-/// it, and the wake messages that name it.
-fn stored_outcome(f: &Fixture, parent: &str, task: &str) -> (Vec<String>, usize) {
+/// What the parent store holds for `task`, read on a fresh connection: the task as last
+/// recorded, how often it went from no result to a result, and the wake messages naming it.
+fn stored_task(f: &Fixture, parent: &str, task: &str) -> (Value, usize, usize) {
     let db = rusqlite::Connection::open(f.dir.join("engine.sqlite")).unwrap();
-    let mut results = db
+    let mut rows = db
         .prepare(
-            "SELECT DISTINCT json_extract(event, '$.payload.result') FROM events
+            "SELECT json_extract(event, '$.payload') FROM events
              WHERE thread_id = ?1 AND type = 'subagent.updated'
-               AND json_extract(event, '$.payload.id') = ?2
-               AND json_extract(event, '$.payload.result') IS NOT NULL",
+               AND json_extract(event, '$.payload.id') = ?2 ORDER BY seq",
         )
         .unwrap();
-    let results = results
+    let rows: Vec<Value> = rows
         .query_map([parent, task], |row| row.get::<_, String>(0))
         .unwrap()
-        .map(Result::unwrap)
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
         .collect();
+    let results = rows
+        .windows(2)
+        .filter(|pair| pair[0]["result"].is_null() && pair[1]["result"].is_string())
+        .count();
     let wakes: usize = db
         .query_row(
-            "SELECT count(DISTINCT json_extract(event, '$.payload.id')) FROM events WHERE thread_id = ?1 AND type = 'message.updated'
+            "SELECT count(DISTINCT json_extract(event, '$.payload.id')) FROM events
+             WHERE thread_id = ?1 AND type = 'message.updated'
                AND instr(json_extract(event, '$.payload.text'), ?2) > 0",
             [parent, &format!("Delegated task {task} ")],
             |row| row.get(0),
         )
         .unwrap();
-    (results, wakes)
+    (rows.last().cloned().unwrap_or(Value::Null), results, wakes)
 }
 
 /// `RemoteDelegation.test.ts`, "a follow-up there ends with its own reply, not one queued
@@ -504,6 +516,7 @@ async fn a_follow_up_recorded_during_the_wait_keeps_its_reply() {
             "stoppedThere":"ran-out"
         })).await.unwrap();
         let first = remote_task(&f, &parent, "first").await;
+        let second = "node:delegated-task:second".to_owned();
         if !during {
             remote_task(&f, &parent, "second").await;
         }
@@ -516,25 +529,17 @@ async fn a_follow_up_recorded_during_the_wait_keeps_its_reply() {
             peer.release.notify_one();
         };
         tokio::join!(follow, record);
-        let projection = f
-            .service
-            .config
-            .engine
-            .get_thread_projection(parent.as_str().into())
-            .await
-            .unwrap();
-        let row = projection["subagents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["id"] == first)
-            .unwrap();
-        assert_eq!(row["remoteChild"]["runId"], "first");
-        assert_eq!(row["result"], "First report", "during: {during}");
-        let (results, _) = stored_outcome(&f, &parent, &first);
-        assert_eq!(results, ["First report"]);
-        let (results, _) = stored_outcome(&f, &parent, "node:delegated-task:second");
-        assert!(results.is_empty(), "the follow-up is still open");
+        // The follow-up's own follower ends with its own run.
+        f.service.follow_for_test(&parent, &second).await;
+        for (task, run, report) in [
+            (&first, "first", "First report"),
+            (&second, "second", "Second report"),
+        ] {
+            let (row, results, _) = stored_task(&f, &parent, task);
+            assert_eq!(row["remoteChild"]["runId"], run, "during: {during}");
+            assert_eq!(row["result"], report, "{task}, during: {during}");
+            assert_eq!(results, 1, "{task}, during: {during}");
+        }
     }
 }
 
@@ -580,8 +585,12 @@ async fn a_final_refusal_is_recorded_after_a_failed_local_write() {
     }
     let engine = &f.service.config.engine;
     assert!(engine.open_remote_tasks(10).await.unwrap().is_empty());
-    let (results, wakes) = stored_outcome(&f, &parent, &task);
-    assert_eq!(results.len(), 1, "{results:?}");
-    assert!(results[0].contains("Thread gone"), "{results:?}");
+    let (row, results, wakes) = stored_task(&f, &parent, &task);
+    assert_eq!(row["status"], "failed");
+    assert!(
+        row["result"].as_str().unwrap().contains("Thread gone"),
+        "{row}"
+    );
+    assert_eq!(results, 1, "one result was recorded");
     assert_eq!(wakes, 1);
 }

@@ -13,12 +13,14 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
 };
 
-use conn_contract::{AnnotationCapture, AnnotationRecord, AnnotationRemoveInputScope, to_json};
+use conn_contract::{AnnotationCapture, AnnotationRemoveInputScope, to_json};
 use conn_engine::BoxFuture;
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::clock::Clock;
+
+mod record;
 
 /// The most annotations one project keeps. The T3 server has no limit; a bound keeps each
 /// call's folder read and each list on the wire small.
@@ -126,6 +128,9 @@ struct ProjectData {
     /// The removed ids in the file's order, oldest first.
     deleted_order: Vec<String>,
     records: Vec<Map<String, Value>>,
+    /// Ids whose file is kept but skipped: unreadable, naming another id, or refused by the
+    /// schema. A new note never takes one, so its file is never overwritten.
+    skipped: BTreeSet<String>,
 }
 
 fn number(record: &Map<String, Value>, key: &str) -> u64 {
@@ -169,6 +174,7 @@ impl ProjectData {
             deleted,
             deleted_order,
             records: Vec::new(),
+            skipped: BTreeSet::new(),
             dir,
         };
         for entry in std::fs::read_dir(&data.dir)? {
@@ -189,20 +195,22 @@ impl ProjectData {
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok());
             let Some(Value::Object(record)) = record else {
                 eprintln!("annotations: skipped an unreadable annotation file {name}");
+                data.skipped.insert(id.to_owned());
                 continue;
             };
             if text(&record, "id") != id {
+                data.skipped.insert(id.to_owned());
                 continue;
             }
-            // T3 decodes each record (`AnnotationRecord`); one the contract refuses would make
-            // the client refuse the whole list.
-            let record_value = Value::Object(record);
-            if conn_contract::from_json::<AnnotationRecord>(record_value.clone()).is_err() {
-                eprintln!("annotations: skipped an invalid annotation file {name}");
-                continue;
-            }
-            let Value::Object(record) = record_value else {
-                continue;
+            // T3 decodes each record (`AnnotationRecord`); one it refuses would make the client
+            // refuse the whole list.
+            let record = match record::decode(record) {
+                Ok(record) => record,
+                Err(error) => {
+                    eprintln!("annotations: skipped an invalid annotation file {name}: {error}");
+                    data.skipped.insert(id.to_owned());
+                    continue;
+                }
             };
             data.last_number = data.last_number.max(number(&record, "number"));
             data.revision = data.revision.max(number(&record, "revision"));
@@ -537,6 +545,12 @@ impl Annotations {
         self.with_project(project_id, move |data| {
             if data.deleted.contains(&id) {
                 return Err(AnnotationError::Removed { id });
+            }
+            // Unlike T3, which overwrites it: the skipped file is someone's note.
+            if data.skipped.contains(&id) {
+                return Err(AnnotationError::invalid(&format!(
+                    "Annotation {id} has a file this server cannot read. Use another id."
+                )));
             }
             let existing = data.find(&id).cloned();
             if existing.is_none() && data.records.len() >= MAX_PER_PROJECT {

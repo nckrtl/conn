@@ -546,6 +546,34 @@ impl<E: Env> Mapper<E> {
         out
     }
 
+    /// A root that did not complete stops its own run's running workflows and settles their
+    /// rows; another run's workflows keep running.
+    pub(super) fn end_run_workflows(&mut self, run_id: &str, status: &str, out: &mut Vec<Out>) {
+        let mut owned: Vec<(String, String)> = self
+            .subagents
+            .by_task
+            .iter()
+            .filter(|(_, s)| s.running() && s.task["workflow"].is_object())
+            .filter(|(_, s)| s.parent.run_id == run_id)
+            .map(|(id, s)| (id.clone(), s.tool_use_id.clone()))
+            .collect();
+        owned.sort();
+        for (task_id, tool_use_id) in owned {
+            out.push(Out::StopTask {
+                task_id: task_id.clone(),
+            });
+            self.update_subagent(
+                Update {
+                    task_id: &task_id,
+                    tool_use_id: &tool_use_id,
+                    status,
+                    ..Update::default()
+                },
+                out,
+            );
+        }
+    }
+
     /// The session ended: every running subagent ends with it.
     pub(super) fn end_running_subagents(&mut self, status: &str, out: &mut Vec<Out>) {
         let running: Vec<(String, String)> = self

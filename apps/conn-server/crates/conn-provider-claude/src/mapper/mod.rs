@@ -60,6 +60,11 @@ pub enum Out {
     StopTail {
         tool_use_id: String,
     },
+    /// A root that did not complete takes its run's live workflow with it: ask the SDK to
+    /// stop it, without waiting for the answer.
+    StopTask {
+        task_id: String,
+    },
 }
 
 const DEFAULT_CONTEXT_TOKENS: u64 = 200_000;
@@ -1370,6 +1375,14 @@ impl<E: Env> Mapper<E> {
             item["completedAt"] = json!(now);
             item["updatedAt"] = json!(now);
             out.push(turn_item(item));
+        }
+        if !completed {
+            let node_status = if status == TurnStatus::Failed {
+                "failed"
+            } else {
+                "cancelled"
+            };
+            self.end_run_workflows(&turn.run_id, node_status, out);
         }
         let mut provider_turn = provider_turn(&turn, status_text, Some(&now), true);
         // A steer's cut-off segment counts towards the turn.

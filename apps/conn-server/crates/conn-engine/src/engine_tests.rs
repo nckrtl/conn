@@ -626,6 +626,35 @@ async fn a_restart_sends_an_undelivered_message_again() {
     assert_eq!(p["messages"][1]["text"], "echo: late");
 }
 
+/// A restart during workspace preparation cancels the run, as T3's recovery does
+/// (`ProviderRuntimeRecoveryService.test.ts`, "preparing"): its setup died with the process, so
+/// the provider never starts in a half-built checkout.
+#[tokio::test(flavor = "current_thread")]
+async fn a_restart_cancels_an_interrupted_preparation() {
+    let db = TempDb::new("restart-preparing");
+    {
+        let (engine, _) = open(&db);
+        dispatch(&engine, create("t1", "c1")).await;
+        let mut send = message("t1", "c2", "work");
+        send["dispatchMode"] = json!({"type": "defer_start",
+            "workspaceStrategy": {"type": "worktree", "baseRef": "HEAD", "startFromOrigin": false}});
+        dispatch(&engine, send).await;
+    }
+    let (engine, _) = open(&db);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][0]["status"], "cancelled");
+    assert!(p["providerThreads"].as_array().unwrap().is_empty());
+    let items = p["turnItems"].as_array().unwrap();
+    assert!(items.iter().any(|i| i["title"] == "Server restarted"));
+    assert!(
+        items
+            .iter()
+            .filter(|i| i["type"] == "command_execution")
+            .all(|i| i["status"] == "cancelled")
+    );
+}
+
 /// An inert rehearsal copy (`recover_runs` off) leaves a run it found active as it was: no
 /// provider turn starts, so the copy never repeats the original's work.
 #[tokio::test(flavor = "current_thread")]

@@ -321,27 +321,51 @@ async fn prepare_child(
     let path = projection["thread"]["worktreePath"]
         .as_str()
         .unwrap_or_default();
-    let started = match cx.config().worktrees.as_ref() {
+    let config = cx.config().worktrees.as_ref();
+    let started = match config {
         Some(config) if !path.is_empty() => {
-            super::worktree::start_setup(config, child, project, path, true)
-                .await
-                .map(|started| started.completion)
+            super::worktree::start_setup(config, child, project, path, true).await
         }
-        _ => Ok(None),
+        _ => Ok(super::worktree::SetupStarted {
+            status: Value::Null,
+            completion: None,
+        }),
     };
+    let terminals = config.and_then(|config| config.terminals.clone());
     let service = cx.service.clone();
     let (command_id, child) = (command_id.to_owned(), child.to_owned());
     let settle = async move {
         let outcome = match started {
             Err(error) => Err(error),
-            Ok(None) => Ok(()),
-            Ok(Some(completion)) => match completion.await.ok().flatten() {
-                Some(0) => Ok(()),
-                code => Err(format!(
-                    "Setup script exited with {}.",
-                    code.map_or("no exit code".to_owned(), |c| c.to_string())
-                )),
-            },
+            Ok(super::worktree::SetupStarted {
+                completion: None, ..
+            }) => Ok(()),
+            Ok(super::worktree::SetupStarted {
+                status,
+                completion: Some(completion),
+            }) => {
+                let engine = service.config.engine.as_ref();
+                tokio::select! {
+                    code = completion => match code.ok().flatten() {
+                        Some(0) => Ok(()),
+                        code => Err(format!(
+                            "Setup script exited with {}.",
+                            code.map_or("no exit code".to_owned(), |c| c.to_string())
+                        )),
+                    },
+                    () = left_preparing(engine, &child, &run_id) => {
+                        // A cancel stops the script too (T3 closes the setup terminal).
+                        if let (Some(terminals), Some(terminal)) =
+                            (&terminals, status["terminalId"].as_str())
+                            && let Ok(input) = conn_contract::from_json(json!({
+                                "threadId": child, "terminalId": terminal, "deleteHistory": true}))
+                        {
+                            terminals.close(input);
+                        }
+                        return;
+                    }
+                }
+            }
         };
         let command = match outcome {
             Ok(()) => {
@@ -363,6 +387,36 @@ async fn prepare_child(
     // T3 schedules the preparation: the call returns while the child waits in `preparing`.
     tokio::spawn(settle);
     Ok(())
+}
+
+/// Resolves once `run_id` is no longer `preparing`: a cancel or stop ended it before its
+/// setup did. Never resolves when the thread cannot be watched.
+async fn left_preparing(engine: &dyn conn_engine::Engine, thread: &str, run_id: &str) {
+    let preparing = || async {
+        engine
+            .get_thread_projection(thread.into())
+            .await
+            .ok()
+            .and_then(|p| {
+                p["runs"]
+                    .as_array()?
+                    .iter()
+                    .find(|run| run["id"] == run_id)
+                    .map(|run| run["status"] == "preparing")
+            })
+            .unwrap_or(false)
+    };
+    let Ok(input) = conn_contract::from_json(json!({"threadId": thread})) else {
+        return std::future::pending().await;
+    };
+    let Ok(mut stream) = engine.subscribe_thread(input).await else {
+        return std::future::pending().await;
+    };
+    while preparing().await {
+        if stream.recv().await.is_none() {
+            return std::future::pending().await;
+        }
+    }
 }
 
 pub(super) async fn status(cx: &Cx<'_>, args: &Args) -> ToolResult {

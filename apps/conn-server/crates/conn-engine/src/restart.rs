@@ -4,8 +4,10 @@
 //! - A run the provider had (`running`) ends `cancelled` with a "Server restarted" notice, and a
 //!   continuation message asks the agent to go on in the same provider thread, so it keeps its
 //!   context. At most 3 continuations chain within 5 minutes; a fourth restart only cancels.
-//! - A run the provider never took (`preparing`, `starting`) starts again: its message was not
-//!   delivered, so sending it is not a repeat.
+//! - A run the provider never took (`starting`) starts again: its message was not delivered,
+//!   so sending it is not a repeat.
+//! - A run still `preparing` its workspace ends `cancelled`: its setup died with the process,
+//!   and the checkout may be half built.
 //! - A run waiting on an approval or a question ends `cancelled` with no continuation: the
 //!   prompt died with the process and only the user can answer it again.
 //! - A run left `waiting` (its provider turn ended, its checkpoint was not taken) is captured
@@ -85,7 +87,7 @@ pub(crate) fn recover(tx: &mut Tx<'_>, thread_id: &str, run: &Value) -> StoreRes
     if run["status"] == "waiting" {
         return Ok(vec![crate::checkpoint::resume_capture(thread_id, run)]);
     }
-    if matches!(run["status"].as_str(), Some("preparing" | "starting")) {
+    if run["status"] == "starting" {
         let mut again = run.clone();
         again["status"] = json!("starting");
         tx.append(Draft::new(thread_id, "run.updated", again).run(Some(&run_id)))?;
@@ -121,9 +123,14 @@ pub(crate) fn recover(tx: &mut Tx<'_>, thread_id: &str, run: &Value) -> StoreRes
         }
     }
     if !continues {
-        return Ok(commands::start_next_queued(tx, thread_id, None)?
+        let mut effects: Vec<Effect> = commands::start_next_queued(tx, thread_id, None)?
             .into_iter()
-            .collect());
+            .collect();
+        // A delegated child's parent hears of a cancelled preparation, as of a failed one.
+        if run["status"] == "preparing" {
+            effects.extend(crate::families::on_run_end(tx, thread_id, &run_id)?);
+        }
+        return Ok(effects);
     }
     let dispatch = commands::handler("message.dispatch").expect("message.dispatch");
     let outcome = dispatch(

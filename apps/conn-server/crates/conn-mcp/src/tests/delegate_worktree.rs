@@ -432,6 +432,86 @@ async fn a_worktree_child_waits_for_its_synchronous_setup() {
     }
 }
 
+/// T3's `prepareRun` on interrupt: `task_cancel` during a synchronous setup stops the child,
+/// and its setup terminal closes, so the script stops changing the checkout.
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_a_child_during_setup_closes_its_setup_terminal() {
+    let host = GitHost::new("setup-cancel");
+    let provider = conn_engine::fake::FakeProvider::new("claudeAgent");
+    let calls = provider.calls.clone();
+    let mut f = fixture_with(
+        "delegate-worktree-setup-cancel",
+        Some(host.clone()),
+        provider,
+    );
+    let shell = f.dir.join("shell");
+    conn_support::test_util::executable(
+        &shell,
+        "#!/bin/sh\nexport HISTFILE=/dev/null\nexec /bin/sh \"$@\"\n",
+    )
+    .unwrap();
+    let terminals = conn_terminal::TerminalManager::new(conn_terminal::TerminalConfig {
+        shells: vec![shell.to_string_lossy().into_owned()],
+        ..Default::default()
+    });
+    Arc::get_mut(&mut f.service)
+        .unwrap()
+        .config
+        .worktrees
+        .as_mut()
+        .unwrap()
+        .terminals = Some(terminals.clone());
+    let _root = git_project(&f).await;
+    let script = "while [ ! -f \"$T3CODE_PROJECT_ROOT/.gate\" ]; do sleep 0.05; done";
+    f.service
+        .config
+        .engine
+        .call(
+            "projects.mutate",
+            json!({"type": "project.update", "commandId": "setup-cancel",
+                "projectId": project_id(), "scripts": [{"id": "setup", "name": "Install",
+                "icon": "play", "command": script, "runOnWorktreeCreate": true, "async": false}]}),
+        )
+        .await
+        .unwrap();
+    let (_, caller) = running_parent(&f).await;
+    let mut agent = Client::open(&f.service, caller).await;
+    let task = agent
+        .ok(
+            "delegate_task",
+            json!({"task": "child work", "isolation": "worktree", "clientRequestId": "cancel"}),
+        )
+        .await;
+    let child = task["childThreadId"].as_str().unwrap().to_owned();
+    let open = |terminals: &conn_terminal::TerminalManager| {
+        terminals.list().iter().any(|t| t.thread_id == child)
+    };
+    assert!(open(&terminals), "the setup terminal runs");
+    let mut metadata = terminals.subscribe_metadata();
+    agent
+        .ok("task_cancel", json!({"taskId": task["taskId"]}))
+        .await;
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while open(&terminals) {
+            metadata.next().await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the setup terminal closes with the cancel");
+    let status = agent
+        .ok("task_status", json!({"taskId": task["taskId"]}))
+        .await;
+    assert_eq!(status["status"], "interrupted", "{status}");
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("start ") && c.contains(&child)),
+        "the provider never starts"
+    );
+}
+
 async fn child_thread_projection(f: &Fixture, child: &str) -> Value {
     f.service
         .config

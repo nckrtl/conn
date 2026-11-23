@@ -42,6 +42,7 @@ macro_rules! search_sql {
                                 'message', json(e.body))
              FROM hits h
              CROSS JOIN message_keys k ON k.id = h.rowid
+             CROSS JOIN message_search folded ON folded.rowid = h.rowid
              CROSS JOIN threads t ON t.id = k.thread_id
              CROSS JOIN entities e
                ON e.thread_id = k.thread_id AND e.kind = 'messages' AND e.id = k.message_id
@@ -54,7 +55,7 @@ macro_rules! search_sql {
                AND k.thread_id NOT IN (SELECT value FROM json_each(?7))
                AND NOT EXISTS (
                  SELECT 1 FROM json_each(?2) AS token
-                 WHERE instr(lower(COALESCE(json_extract(e.body, '$.text'), '')), token.value) = 0
+                 WHERE instr(folded.text, token.value) = 0
                )
              ORDER BY h.rowid DESC
              LIMIT ?5"
@@ -76,7 +77,7 @@ const SEARCH_SCAN_SQL: &str =
 struct MessageSearch {
     /// Quoted long words for FTS5 `MATCH`, or `None` when the index cannot serve them.
     fts_match: Option<String>,
-    /// Lowercase words each hit must contain as a substring.
+    /// Folded words each hit's folded text must contain as a substring.
     substrings: Vec<String>,
     /// The word the snippet centres on.
     needle: String,
@@ -91,8 +92,8 @@ impl MessageSearch {
         let query = query
             .trim()
             .trim_matches(quotes)
-            .replace(['\u{2018}', '\u{2019}'], "'")
-            .to_lowercase();
+            .replace(['\u{2018}', '\u{2019}'], "'");
+        let query = crate::fold::fold(&query);
         let (long, short): (Vec<&str>, Vec<&str>) = query
             .split_whitespace()
             .partition(|token| searchable(token));
@@ -553,16 +554,16 @@ fn count_occurrences(text: &str, needle: &str) -> u64 {
     text.to_lowercase().matches(needle).count() as u64
 }
 
-/// Up to 240 characters around the first match.
+/// Up to 240 characters of the original text around the first match of a folded `needle`.
 ///
-/// Lowercasing can make a character longer (`İ` becomes two characters), so the match is found
-/// in a lowercase copy that records, for each of its bytes, the original character it came from.
+/// Folding can change a character's length (`ﬁ` stays, a lone mark goes), so the match is found
+/// in a folded copy that records, for each of its bytes, the original character it came from.
 fn snippet(text: &str, needle: &str) -> String {
     let mut lower = String::with_capacity(text.len());
     let mut origin: Vec<usize> = Vec::with_capacity(text.len());
     for (index, c) in text.chars().enumerate() {
         let before = lower.len();
-        lower.extend(c.to_lowercase());
+        crate::fold::push_folded(c, &mut lower);
         origin.resize(origin.len() + (lower.len() - before), index);
     }
     let at = lower

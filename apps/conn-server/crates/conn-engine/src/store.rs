@@ -68,8 +68,9 @@ CREATE TABLE IF NOT EXISTS shell_changes (
   seq  INTEGER PRIMARY KEY,
   item TEXT NOT NULL
 );
--- Final message texts for `searchThreads`. Trigram tokens make LIKE '%q%' an index lookup
--- for queries of three or more characters. `message_keys` gives each message a stable rowid.
+-- Final message texts for `searchThreads`, case and accents folded (`fold.rs`). Trigram tokens
+-- make LIKE '%q%' an index lookup for queries of three or more characters. `message_keys`
+-- gives each message a stable rowid.
 CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(text, tokenize = 'trigram');
 CREATE TABLE IF NOT EXISTS message_keys (
   id         INTEGER PRIMARY KEY,
@@ -1927,6 +1928,26 @@ fn migrate(conn: &Connection) -> StoreResult<()> {
         )
         .map_err(err)?;
     }
+    // The index holds folded text, so a search without accents finds an accented message
+    // written before the upgrade (T3 indexes with `remove_diacritics`). A `meta` mark, not a
+    // schema version, so this step composes with versioned steps in any order.
+    let folded: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'message_search_folded')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(err)?;
+    if !folded {
+        let tx = conn.unchecked_transaction().map_err(err)?;
+        fold_message_search(&tx)?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('message_search_folded', 1)",
+            [],
+        )
+        .map_err(err)?;
+        tx.commit().map_err(err)?;
+    }
     Ok(())
 }
 
@@ -1953,10 +1974,45 @@ fn index_message(
         .map_err(err)?;
     conn.execute(
         "INSERT INTO message_search (rowid, text) VALUES (?1, ?2)",
-        params![id, text],
+        params![id, crate::fold::fold(text)],
     )
     .map_err(err)?;
     Ok(())
+}
+
+/// Folds every `message_search` text that is not folded yet, a batch of rows at a time, so a
+/// large store never holds all its texts in memory. Folding is idempotent.
+pub(crate) fn fold_message_search(conn: &Connection) -> StoreResult<()> {
+    const BATCH: i64 = 500;
+    let mut after = i64::MIN;
+    loop {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT rowid, text FROM message_search WHERE rowid > ?1
+                     ORDER BY rowid LIMIT ?2",
+                )
+                .map_err(err)?;
+            stmt.query_map(params![after, BATCH], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(err)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(err)?
+        };
+        let Some(&(last, _)) = rows.last() else {
+            return Ok(());
+        };
+        for (rowid, text) in rows {
+            let folded = crate::fold::fold(&text);
+            if folded != text {
+                conn.execute(
+                    "UPDATE message_search SET text = ?2 WHERE rowid = ?1",
+                    params![rowid, folded],
+                )
+                .map_err(err)?;
+            }
+        }
+        after = last;
+    }
 }
 
 /// Bounds the tables that only serve resumes and retries. Events and projections stay: they

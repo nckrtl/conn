@@ -44,6 +44,7 @@ mod engine_tests;
 #[cfg(any(test, feature = "fake-provider"))]
 pub mod fake;
 mod families;
+mod fold;
 mod fork;
 mod fresh;
 mod html_cleanup;

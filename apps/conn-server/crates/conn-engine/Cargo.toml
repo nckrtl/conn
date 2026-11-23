@@ -20,6 +20,8 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 # Bundled SQLite with JSON1 (built in since 3.38). No statement cache, no extra features.
 rusqlite.workspace = true
+# Message search folds case and accents (`src/fold.rs`), as `foldCharacter` in T3.
+unicode-normalization.workspace = true
 
 [features]
 # A scripted provider for the client check (`examples/export_turn.rs`).

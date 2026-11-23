@@ -175,8 +175,10 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   question's answer as `questionAnswer`, as T3's `Orchestrator` does.
 - **Search.** `searchThreads` reads a trigram FTS5 index of final message texts
   (`message_search`) with `MATCH` and quoted words, as `ThreadSearch.ts`; SQLite's bundled
-  build already has FTS5. Every word of three characters or more must match; shorter words
-  only narrow, and a query without a long word searches no messages (two CJK characters count
+  build already has FTS5. The index holds text with case and accents folded (`src/fold.rs`,
+  T3's `foldCharacter`), and queries fold the same way, so "ecole" finds "École"; the snippet
+  shows the original text. A `meta` mark (`message_search_folded`) folds an older index once.
+  Every word of three characters or more must match; shorter words only narrow, and a query without a long word searches no messages (two CJK characters count
   as long). Hidden threads drop out in SQL before the limit. Titles are the client's to match.
 - **Background work.** A run that completes leaves its open command, dynamic tool and
   subagent rows running, as T3 does. The shell row's `pendingBackgroundTasks` is

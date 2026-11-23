@@ -3602,6 +3602,113 @@ async fn search(engine: &SqliteEngine, query: &str) -> Vec<String> {
         .collect()
 }
 
+/// T3 "ThreadSearch short words outside ASCII: finds them in any case or accent", plus the
+/// ordinary message of audit 9.5: a query without accents finds an accented message, on a
+/// store indexed before folding (after the migration) and for a message sent after it.
+#[tokio::test(flavor = "current_thread")]
+async fn search_folds_case_and_accents_before_and_after_the_upgrade() {
+    let db = TempDb::new("search-accents");
+    let (engine, _) = open(&db);
+    for (thread, texts) in [
+        ("russian", &["В логах ошибка"][..]),
+        (
+            "french",
+            &[
+                "École fermée à Lyon. Scope ordinary beacon.",
+                "Météo école",
+                "Școala închisă",
+                "Hồ Chí Minh",
+            ][..],
+        ),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c0"))).await;
+        for (n, text) in texts.iter().enumerate() {
+            let n = n + 1;
+            dispatch(&engine, message(thread, &format!("{thread}:c{n}"), text)).await;
+            run_to_end(&engine, thread, &format!("run:{thread}:{n}")).await;
+        }
+    }
+    engine.shutdown().await;
+    drop(engine);
+    // The index as a store written before folding had it: original text, no fold mark.
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "UPDATE message_search SET text = (
+           SELECT COALESCE(json_extract(e.body, '$.text'), '') FROM message_keys k
+           JOIN entities e ON e.thread_id = k.thread_id AND e.kind = 'messages'
+             AND e.id = k.message_id
+           WHERE k.id = message_search.rowid);
+         DELETE FROM meta WHERE key = 'message_search_folded';",
+    )
+    .unwrap();
+    let stored: String = conn
+        .query_row(
+            "SELECT text FROM message_search WHERE text LIKE '%Lyon%' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.starts_with("École"), "{stored}");
+    drop(conn);
+
+    let (engine, _) = open(&db);
+    let hits = |query: &'static str| {
+        let engine = &engine;
+        async move {
+            call(
+                engine,
+                "orchestration.searchThreads",
+                json!({"query": query}),
+            )
+            .await
+            .unwrap()["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| (m["threadId"].as_str().unwrap().to_owned(), m.clone()))
+                .collect::<Vec<_>>()
+        }
+    };
+    let ids = |found: &[(String, Value)]| found.iter().map(|f| f.0.clone()).collect::<Vec<_>>();
+    let french = hits("École fermée").await;
+    assert_eq!(ids(&french), ["french"]);
+    let message_id = french[0].1["messageId"].clone();
+    for query in ["ecole fermee", "ecole fermée", "fermée éc", "ECOLE FERMEE"] {
+        let found = hits(query).await;
+        assert_eq!(ids(&found), ["french"], "{query}");
+        assert_eq!(found[0].1["messageId"], message_id, "{query}");
+        assert!(
+            found[0].1["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("École fermée à Lyon"),
+            "the snippet keeps the original text: {query}"
+        );
+    }
+    assert_eq!(ids(&hits("ошибка в").await), ["russian"]);
+    assert_eq!(ids(&hits("école me").await), ["french"]);
+    assert_eq!(ids(&hits("închisă sc").await), ["french"]);
+    assert_eq!(ids(&hits("chí ho").await), ["french"]);
+    // Short words still narrow, and an absent word finds nothing.
+    assert_eq!(ids(&hits("ошибка я").await), Vec::<String>::new());
+    assert_eq!(ids(&hits("fermée ce").await), Vec::<String>::new());
+    assert_eq!(ids(&hits("totallyabsent").await), Vec::<String>::new());
+
+    // A message sent after the upgrade is indexed folded too.
+    dispatch(&engine, create("later", "later:c1")).await;
+    dispatch(&engine, message("later", "later:c2", "Crème brûlée recipe")).await;
+    run_to_end(&engine, "later", "run:later:1").await;
+    let later = hits("creme brulee").await;
+    assert_eq!(ids(&later), ["later"]);
+    assert!(
+        later[0].1["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("Crème brûlée")
+    );
+    engine.shutdown().await;
+}
+
 /// Search follows `ThreadSearch.ts`: every long word must match, `%` and `_` are plain
 /// characters, short words narrow, two CJK characters count as a word, and deleted or
 /// archived threads drop out in SQL.

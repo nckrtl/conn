@@ -212,6 +212,7 @@ impl Inner {
                 &run_id,
                 "failed",
                 Some(failure("provider_error", &message, None)),
+                None,
             )
             .await;
         }
@@ -334,6 +335,7 @@ impl Inner {
         run_id: &str,
         status: &'static str,
         failure: Option<Value>,
+        stop_reason: Option<String>,
     ) {
         let (thread, run) = (thread_id.to_owned(), run_id.to_owned());
         let (thread_id, run_id) = (thread_id.to_owned(), run_id.to_owned());
@@ -369,6 +371,12 @@ impl Inner {
                     failure,
                     crate::commands::IdleWrite::TurnEnd,
                 )?;
+                if ended
+                    && status == "completed"
+                    && let Some(reason) = &stop_reason
+                {
+                    crate::commands::write_provider_stop_reason(tx, &thread_id, &run_id, reason)?;
+                }
                 // A failure holds the queue, so queued messages do not hit the same wall. A
                 // late end of a run that already ended (a start failing after Force stop)
                 // holds nothing.
@@ -1409,13 +1417,14 @@ impl Inner {
                     self.request_continuation(&thread_id, detail, notification, delivery)
                         .await;
                 }
-                Translated::Terminal(status, failure, broken) => {
+                Translated::Terminal(status, failure, broken, reason) => {
                     // The root run's messages are closed; none of its text is flushed later.
                     streaming.forget_thread(&thread_id);
                     reserved.retain(|(tid, _)| *tid != thread_id);
                     if let Some(run_id) = run_id {
                         live.take_active();
-                        self.end_run(&thread_id, &run_id, status, failure).await;
+                        self.end_run(&thread_id, &run_id, status, failure, reason)
+                            .await;
                         if broken {
                             self.mark_thread_broken(&thread_id, &run_id).await;
                         }
@@ -1443,6 +1452,7 @@ impl Inner {
                     "The provider session ended during the turn.",
                     None,
                 )),
+                None,
             )
             .await;
         }
@@ -1674,7 +1684,8 @@ impl Inner {
             live.take_active();
             self.close_session(&thread_id).await;
         }
-        self.end_run(&thread_id, &run_id, "interrupted", None).await;
+        self.end_run(&thread_id, &run_id, "interrupted", None, None)
+            .await;
     }
 
     /// Stop with no active run (`ProviderTurnControlService.interrupt` on a settled turn):
@@ -1968,7 +1979,8 @@ impl Inner {
             {
                 eprintln!("conn-engine: could not record the Force stop: {e}");
             }
-            self.end_run(&thread_id, &run_id, "interrupted", None).await;
+            self.end_run(&thread_id, &run_id, "interrupted", None, None)
+                .await;
         }
         Ok(json!({"outcome": "killed", "sharedWithThreadIds": []}))
     }
@@ -2260,7 +2272,8 @@ enum Translated {
     Event(Draft),
     ProviderTurn(ProviderTurnId, Draft),
     /// The status, the failure, and whether the native thread is broken.
-    Terminal(&'static str, Option<Value>, bool),
+    /// Status, failure, whether the native thread broke, and the provider's stop reason.
+    Terminal(&'static str, Option<Value>, bool, Option<String>),
     /// A provider-made thread (a subagent's child): created once, never overwritten.
     CreateThread(Value),
     /// A steer was taken or dropped: the user message's turn item follows.
@@ -2431,6 +2444,7 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
                 status,
                 failure,
                 terminal.thread_disposition == ThreadDisposition::Broken,
+                terminal.reason,
             )
         }
         ProviderEvent::AppThreadCreated { app_thread, .. } => {

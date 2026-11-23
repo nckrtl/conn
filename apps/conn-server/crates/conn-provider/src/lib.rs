@@ -865,6 +865,10 @@ pub struct TurnTerminal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ProviderRetry>,
     pub thread_disposition: ThreadDisposition,
+    /// Why the provider stopped a turn it reports as completed (a Codex hook that stopped
+    /// it); the engine keeps it as a warning on the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1136,6 +1140,7 @@ mod tests {
                     failure: None,
                     retry: None,
                     thread_disposition: ThreadDisposition::Reusable,
+                    reason: None,
                 }))
                 .await
                 .map_err(|_| ProviderError::SessionStopped)

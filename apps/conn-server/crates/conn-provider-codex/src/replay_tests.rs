@@ -917,3 +917,63 @@ fn deferred_mcp_app_uses_t3s_failed_cli_result() {
         recording["result"]["structuredContent"]
     );
 }
+
+/// T3's `hook/completed` cases: a stopped hook's reason rides the matching turn's terminal.
+/// A hook that completed, a stop naming another turn or thread, and the next ordinary turn
+/// carry none.
+#[test]
+fn a_hook_that_stops_a_turn_gives_its_terminal_the_reason() {
+    let hook = |turn: &str, thread: &str, status: &str| {
+        json!({"method": "hook/completed", "params": {"threadId": thread, "turnId": turn, "run": {
+        "id": "checkpoint-hook", "eventName": "preCompact", "source": "project",
+        "sourcePath": "/fixture/.codex/hooks.json", "scope": "turn", "executionMode": "sync",
+        "handlerType": "command", "displayOrder": 1, "startedAt": 1_782_622_440,
+        "status": status, "entries": [
+            {"kind": "feedback", "text": "ignored"},
+            {"kind": "stop", "text": " Save a current task checkpoint before compaction. "},
+        ]}}})
+    };
+    let completed = |turn: &str| {
+        json!({"method": "turn/completed", "params": {"threadId": "th",
+            "turn": {"id": turn, "status": "completed", "completedAt": 3}}})
+    };
+    let terminal = |outs: &[Out]| {
+        outs.iter()
+            .filter_map(|o| match o {
+                Out::Event(e) => Some(serde_json::to_value(e).unwrap()),
+                _ => None,
+            })
+            .find(|e| e["type"] == "turn.terminal")
+            .expect("a terminal")
+    };
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let ts: Value = serde_json::from_str(&read(format!("{dir}/testdata/ts/simple.json"))).unwrap();
+    let input = turn_input(&ts["startTurn"][0]);
+    let run = |mapper: &mut Mapper<FixedEnv>, turn: &str, frames: &[Value]| {
+        mapper.begin_turn("th", &input);
+        let _ = mapper.turn_start_result("th", &json!({"turn": {"id": turn, "startedAt": null}}));
+        let mut frames = frames.to_vec();
+        frames.push(completed(turn));
+        terminal(&feed(mapper, &frames))
+    };
+
+    let mut mapper = Mapper::new(FixedEnv::default());
+    let stopped = run(&mut mapper, "tu1", &[hook("tu1", "th", "stopped")]);
+    assert_eq!(stopped["status"], "completed");
+    assert_eq!(
+        stopped["reason"],
+        "preCompact hook (project): Save a current task checkpoint before compaction."
+    );
+    let next = run(&mut mapper, "tu-next", &[]);
+    assert!(next.get("reason").is_none(), "the next turn: {next}");
+    for frames in [
+        vec![hook("tu2", "th", "completed")],
+        vec![hook("other-turn", "th", "stopped")],
+        vec![hook("tu2", "other-thread", "stopped")],
+    ] {
+        // A fresh mapper per case: an ended turn id is remembered and never reused.
+        mapper = Mapper::new(FixedEnv::default());
+        let ended = run(&mut mapper, "tu2", &frames);
+        assert!(ended.get("reason").is_none(), "{frames:?}: {ended}");
+    }
+}

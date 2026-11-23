@@ -389,6 +389,60 @@ async fn a_failed_turn_shows_its_error() {
     );
 }
 
+/// `RunExecutionService`'s provider stop reason: a turn a hook stopped ends completed, with
+/// the hook's reason kept as a "Stopped by the provider" warning on its run. The work log
+/// shows it after a reload; an ordinary completed turn gets none.
+#[tokio::test(flavor = "current_thread")]
+async fn a_provider_stop_reason_stays_on_the_completed_run() {
+    let db = TempDb::new("stop-reason");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hook-stop")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "plain")).await;
+    until_run_ends(&mut thread).await;
+    drop(thread);
+    drop(engine);
+
+    let (engine, _) = open(&db);
+    let p = projection(&engine, "t1").await;
+    let warnings: Vec<(Value, Value, Value, Value)> = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "system_notice")
+        .map(|item| {
+            (
+                item["runId"].clone(),
+                item["title"].clone(),
+                item["level"].clone(),
+                item["message"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        warnings,
+        [(
+            json!("run:t1:1"),
+            json!("Stopped by the provider"),
+            json!("warning"),
+            json!(crate::fake::HOOK_STOP_REASON)
+        )]
+    );
+    assert_eq!(
+        run_statuses(&p),
+        [
+            ("run:t1:1".to_owned(), "completed".to_owned()),
+            ("run:t1:2".to_owned(), "completed".to_owned())
+        ]
+    );
+}
+
 /// Starts a `hang` turn on t1 and drops the engine while it runs, as a killed process would.
 async fn die_during_a_turn(db: &TempDb, command: &str) {
     let (engine, _) = open(db);

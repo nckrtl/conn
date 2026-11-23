@@ -5,6 +5,8 @@
 //! - `ask`: the turn asks for a command approval, then answers once approved.
 //! - `question`: the turn asks the user a question (`user_input`) and waits for the answer.
 //! - `fail`: the turn fails.
+//! - `hook-stop`: the turn completes with a stop reason, as Codex reports a turn a hook
+//!   stopped.
 //! - `push`: a finished `git push` command row, then the turn completes.
 //! - `subagent`: a subagent's child thread with one message, then the turn completes.
 //! - `background`: the turn completes with background work left, then asks for a
@@ -40,6 +42,10 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use conn_support::time::now_iso;
+
+/// The reason the `hook-stop` script's terminal carries.
+pub const HOOK_STOP_REASON: &str =
+    "preCompact hook (project): Save a current task checkpoint before compaction.";
 
 pub struct FakeProvider {
     id: ProviderInstanceId,
@@ -403,6 +409,7 @@ fn terminal(turn: &Turn, status: TurnStatus, failure: Option<Value>) -> Provider
         failure: failure.map(|f| from_json(f).expect("failure")),
         retry: None,
         thread_disposition: ThreadDisposition::Reusable,
+        reason: None,
     })
 }
 
@@ -804,6 +811,14 @@ impl Session for FakeSession {
                     });
                     *crate::lock(&self.turn) = Some(turn);
                     return Ok(());
+                }
+                "hook-stop" => {
+                    started.push(provider_turn(&turn, "completed"));
+                    let mut ended = terminal(&turn, TurnStatus::Completed, None);
+                    if let ProviderEvent::TurnTerminal(ended) = &mut ended {
+                        ended.reason = Some(HOOK_STOP_REASON.into());
+                    }
+                    started.push(ended);
                 }
                 "fail" => started.push(terminal(
                     &turn,

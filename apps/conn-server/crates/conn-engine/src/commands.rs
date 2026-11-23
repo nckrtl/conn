@@ -1485,6 +1485,52 @@ pub(crate) fn mark_stop_unresponsive(
 
 /// `makeInterruptResultTurnItem`: the Stop result of a run that ended interrupted. Its message
 /// is `reason`, else the Stop request's, else "Stopped by the provider". Written once.
+/// `PROVIDER_STOP_REASON_SIGNAL`: Codex reports a turn a hook stopped as completed; the run
+/// keeps the hook's reason as a warning (`RunExecutionService`).
+pub(crate) fn write_provider_stop_reason(
+    tx: &mut Tx<'_>,
+    thread_id: &str,
+    run_id: &str,
+    reason: &str,
+) -> StoreResult<()> {
+    let Some(run) = tx.entity(thread_id, "runs", run_id)? else {
+        return Ok(());
+    };
+    let Some(root) = run["rootNodeId"].as_str() else {
+        return Ok(());
+    };
+    let provider_turn = tx
+        .entity(thread_id, "nodes", root)?
+        .map(|node| node["providerTurnId"].clone())
+        .unwrap_or(Value::Null);
+    let now = tx.now().to_owned();
+    let item = json!({
+        "id": interrupt_item_id(run_id, "provider-stop-reason"),
+        "threadId": thread_id,
+        "runId": run_id,
+        "nodeId": root,
+        "providerThreadId": run["providerThreadId"],
+        "providerTurnId": provider_turn,
+        "nativeItemRef": null,
+        "parentItemId": null,
+        "ordinal": run["ordinal"].as_u64().unwrap_or(0) * 100 + 98,
+        "status": "completed",
+        "title": "Stopped by the provider",
+        "startedAt": now,
+        "completedAt": now,
+        "updatedAt": now,
+        "type": "system_notice",
+        "level": "warning",
+        "message": reason,
+    });
+    tx.append(
+        Draft::new(thread_id, "turn-item.updated", item)
+            .run(Some(run_id))
+            .node(Some(root)),
+    )?;
+    Ok(())
+}
+
 pub(crate) fn write_interrupt_result(
     tx: &mut Tx<'_>,
     thread_id: &str,

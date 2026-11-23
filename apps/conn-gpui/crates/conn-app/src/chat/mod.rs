@@ -236,6 +236,13 @@ pub(crate) struct ChatView {
     pending_approval: Option<composer_state::PendingApprovalPrompt>,
     /// The first pending question request, which a composer send answers.
     pending_question_id: Option<String>,
+    /// Pending approvals and the first pending question (entry id, request id), before the
+    /// typing guard hides any of them.
+    incoming_approvals: Vec<conn_state::PendingApproval>,
+    incoming_question: Option<(String, String)>,
+    /// Holds requests that arrive while the user types (`useComposerTypingGuard`).
+    typing_guard: composer_state::TypingGuard,
+    _typing_guard_idle: Option<gpui_kit::Task<()>>,
     user_input_cards: HashMap<String, cards::UserInputCardState>,
     /// The pending question's banner: lead-in, scroll, and what keeps the digit shortcuts live.
     question_panel: question_panel::QuestionPanelState,
@@ -321,6 +328,12 @@ impl ChatView {
                 }
                 ComposerEvent::AnswerQuestion { text } => {
                     this.answer_pending_question(text, cx);
+                }
+                ComposerEvent::TypingGuard(input) => {
+                    if this.typing_guard.update(*input, std::time::Instant::now()) {
+                        this.apply_typing_guard(cx);
+                    }
+                    this.schedule_typing_guard_idle(cx);
                 }
                 ComposerEvent::Resume => cx.emit(ChatEvent::Resume),
                 ComposerEvent::ImplementPlanInNewThread { text } => {
@@ -413,6 +426,10 @@ impl ChatView {
             pending_card_ids: Vec::new(),
             pending_approval: None,
             pending_question_id: None,
+            incoming_approvals: Vec::new(),
+            incoming_question: None,
+            typing_guard: composer_state::TypingGuard::default(),
+            _typing_guard_idle: None,
             user_input_cards: HashMap::new(),
             question_panel: question_panel::QuestionPanelState::new(cx),
             secret_forms: HashMap::new(),
@@ -696,17 +713,33 @@ impl ChatView {
                 _ => None,
             })
             .collect();
-        self.pending_approval = thread.pending_approvals().first().map(|approval| {
-            composer_state::PendingApprovalPrompt {
-                supports_feedback: approval.supports_feedback,
-            }
-        });
-        self.pending_question_id = thread.entries.iter().find_map(|entry| match entry {
+        self.incoming_approvals = thread.pending_approvals();
+        self.incoming_question = thread.entries.iter().find_map(|entry| match entry {
             TimelineEntry::UserInputRequest {
-                id, pending: true, ..
-            } => Some(id.clone()),
+                id,
+                request_id,
+                pending: true,
+                ..
+            } => Some((id.clone(), request_id.clone())),
             _ => None,
         });
+        let request_ids: Vec<String> = self
+            .incoming_approvals
+            .iter()
+            .map(|approval| approval.request_id.clone())
+            .chain(thread.entries.iter().filter_map(|entry| match entry {
+                TimelineEntry::UserInputRequest {
+                    request_id,
+                    pending: true,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            }))
+            .collect();
+        self.typing_guard
+            .requests(&request_ids, std::time::Instant::now());
+        self.apply_typing_guard(cx);
+        self.schedule_typing_guard_idle(cx);
         self.sync_question_panel(thread);
         self.sync_working_timer(cx);
         let sync_start = std::time::Instant::now();
@@ -866,6 +899,52 @@ impl ChatView {
         });
     }
 
+    /// Shows the pending approval and question the typing guard does not hold. A held first
+    /// question hides the question banner, as in Conn.
+    fn apply_typing_guard(&mut self, cx: &mut Context<'_, Self>) {
+        let (approval, question) = composer_state::guarded_pending_requests(
+            &self.incoming_approvals,
+            self.incoming_question.as_ref(),
+            self.typing_guard.held(),
+        );
+        self.pending_approval = approval;
+        self.pending_question_id = question;
+        cx.notify();
+    }
+
+    /// Releases held requests once typing pauses (`useComposerTypingGuard` idle timer).
+    fn schedule_typing_guard_idle(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(deadline) = self.typing_guard.idle_deadline() else {
+            self._typing_guard_idle = None;
+            return;
+        };
+        let wait = deadline.saturating_duration_since(std::time::Instant::now());
+        self._typing_guard_idle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |view, cx| {
+                view._typing_guard_idle = None;
+                if view.typing_guard.update(
+                    composer_state::TypingGuardInput::Idle,
+                    std::time::Instant::now(),
+                ) {
+                    view.apply_typing_guard(cx);
+                }
+            });
+        }));
+    }
+
+    /// Request ids the typing guard holds back, so a send leaves those approvals pending.
+    pub(crate) fn held_request_ids(&self) -> &HashSet<String> {
+        self.typing_guard.held()
+    }
+
+    /// True while the typing guard holds the approval card `entry_id`.
+    fn approval_held(&self, entry_id: &str) -> bool {
+        self.incoming_approvals.iter().any(|approval| {
+            approval.entry_id == entry_id && self.typing_guard.held().contains(&approval.request_id)
+        })
+    }
+
     /// Drops per-thread card, copy, and fetched-detail state.
     fn reset_card_state(&mut self) {
         self.interrupted_run_id = None;
@@ -874,6 +953,10 @@ impl ChatView {
         self.pending_card_ids.clear();
         self.pending_approval = None;
         self.pending_question_id = None;
+        self.incoming_approvals.clear();
+        self.incoming_question = None;
+        self.typing_guard.reset_scope();
+        self._typing_guard_idle = None;
         self.user_input_cards.clear();
         self.secret_forms.clear();
         self.changed_files_expanded.clear();

@@ -2499,11 +2499,20 @@ impl ConnApp {
             self.send_prompt_with_attachments(text, attachments, dispatch, Some(window), cx);
             return;
         };
-        let approvals = self
+        let pending = self
             .threads
             .get(&thread_id)
             .map(conn_state::ThreadState::pending_approvals)
             .unwrap_or_default();
+        // Approvals the typing guard holds stay unseen and pending (`shownPendingApprovalIds`).
+        let pending_before: Vec<String> = pending.iter().map(|a| a.request_id.clone()).collect();
+        let approvals: Vec<_> = {
+            let held = self.chat.read(cx).held_request_ids();
+            pending
+                .into_iter()
+                .filter(|approval| !held.contains(&approval.request_id))
+                .collect()
+        };
         let plan = crate::chat::plan_approval_send(&approvals, &text, !attachments.is_empty());
         let feedback_send = matches!(plan, crate::chat::ApprovalSendPlan::Feedback { .. });
         let (shown, declines) = match plan {
@@ -2617,7 +2626,7 @@ impl ConnApp {
                     return;
                 }
                 let arrived = crate::chat::approval_arrived(
-                    &shown,
+                    &pending_before,
                     &app.threads
                         .get(&thread_id)
                         .map(conn_state::ThreadState::pending_approvals)

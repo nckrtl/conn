@@ -62,8 +62,8 @@ use self::stash::{PromptStash, render_stash_badge, render_stash_menu};
 use super::color::{hsla, hsla_alpha};
 use super::composer_state::{
     ComposerDraft, ComposerDraftStore, ComposerPendingRequest, ComposerSendAction, HeldDraft,
-    PromptHistoryEntry, PromptHistoryPosition, composer_placeholder, composer_send_action,
-    prompt_length_message, step_prompt_history,
+    PromptHistoryEntry, PromptHistoryPosition, TypingGuardInput, composer_placeholder,
+    composer_send_action, prompt_length_message, step_prompt_history,
 };
 use super::icons;
 use crate::a11y::ConnA11yExt as _;
@@ -164,6 +164,8 @@ pub(crate) enum ComposerEvent {
     AnswerQuestion {
         text: String,
     },
+    /// An editor event for the typing guard (`useComposerTypingGuard`).
+    TypingGuard(TypingGuardInput),
     /// `Resume thread`: continue an interrupted thread (`useComposerResume`).
     Resume,
     /// `Implement in a new thread` from the plan follow-up split button.
@@ -341,9 +343,15 @@ impl Composer {
                     }
                 }
                 InputEvent::Change => {
+                    // Typing a question's answer is not prompt typing (`onPromptChange`).
+                    if this.pending_request.question.is_none() {
+                        cx.emit(ComposerEvent::TypingGuard(TypingGuardInput::Typed));
+                    }
                     this.on_draft_changed(cx);
                 }
-                _ => {}
+                InputEvent::Focus => cx.emit(ComposerEvent::TypingGuard(TypingGuardInput::Focus)),
+                InputEvent::Blur => cx.emit(ComposerEvent::TypingGuard(TypingGuardInput::Blur)),
+                InputEvent::PressEnter { .. } => {}
             },
         );
 
@@ -1443,6 +1451,7 @@ impl Composer {
                 self.active_trigger = None;
                 self.dismissed_trigger_text = None;
                 cx.emit(ComposerEvent::AnswerQuestion { text: raw });
+                cx.emit(ComposerEvent::TypingGuard(TypingGuardInput::Send));
                 cx.notify();
                 return;
             }
@@ -1539,6 +1548,7 @@ impl Composer {
             dispatch,
             held_draft,
         });
+        cx.emit(ComposerEvent::TypingGuard(TypingGuardInput::Send));
         cx.notify();
     }
 

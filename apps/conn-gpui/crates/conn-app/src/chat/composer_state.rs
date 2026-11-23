@@ -615,6 +615,122 @@ pub(crate) fn approval_redirect_notice(
 /// Second line of every redirect notice (`description`).
 pub(crate) const APPROVAL_REDIRECT_RETRY: &str = "Send again when it's ready.";
 
+/// The pending approval and question the composer shows: the first approval unless it is held
+/// (`activePendingApproval`), and the first question's entry id unless it is held, which hides
+/// every question until the hold lifts (`holdingUserInput`).
+#[must_use]
+pub(crate) fn guarded_pending_requests(
+    approvals: &[conn_state::PendingApproval],
+    question: Option<&(String, String)>,
+    held: &std::collections::HashSet<String>,
+) -> (Option<PendingApprovalPrompt>, Option<String>) {
+    let approval = approvals
+        .first()
+        .filter(|approval| !held.contains(&approval.request_id))
+        .map(|approval| PendingApprovalPrompt {
+            supports_feedback: approval.supports_feedback,
+        });
+    let question = question
+        .filter(|(_, request_id)| !held.contains(request_id))
+        .map(|(entry_id, _)| entry_id.clone());
+    (approval, question)
+}
+
+/// How long typing must pause before held requests show (`COMPOSER_TYPING_IDLE_MS`).
+pub(crate) const COMPOSER_TYPING_IDLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Holds approvals and questions that arrive while the user types in the composer, so Enter or
+/// the next keystroke never answers or redirects a prompt they have not seen
+/// (`composerTypingGuard.ts`). Holds lift on blur, on send, and after
+/// [`COMPOSER_TYPING_IDLE`] without typing.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TypingGuard {
+    seen: std::collections::HashSet<String>,
+    held: std::collections::HashSet<String>,
+    focused: bool,
+    last_typed_at: Option<std::time::Instant>,
+}
+
+/// An input to [`TypingGuard::update`] (`TypingGuardEvent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TypingGuardInput {
+    /// The user edited the prompt (not a question's answer).
+    Typed,
+    Focus,
+    Blur,
+    Send,
+    Idle,
+}
+
+impl TypingGuard {
+    /// Request ids held back from the composer and the timeline.
+    pub(crate) fn held(&self) -> &std::collections::HashSet<String> {
+        &self.held
+    }
+
+    /// Takes the current pending request ids. A request seen for the first time while the
+    /// focused composer was typed in within [`COMPOSER_TYPING_IDLE`] is held; a held request
+    /// that is no longer pending is dropped. Returns whether the held set changed.
+    pub(crate) fn requests(&mut self, request_ids: &[String], now: std::time::Instant) -> bool {
+        let before = self.held.len();
+        self.held.retain(|id| request_ids.contains(id));
+        let mut changed = self.held.len() != before;
+        let typing = self.focused
+            && self
+                .last_typed_at
+                .is_some_and(|at| now.saturating_duration_since(at) < COMPOSER_TYPING_IDLE);
+        for id in request_ids {
+            if self.seen.insert(id.clone()) && typing {
+                changed |= self.held.insert(id.clone());
+            }
+        }
+        changed
+    }
+
+    /// Applies one editor event. Returns whether the held set changed.
+    pub(crate) fn update(&mut self, input: TypingGuardInput, now: std::time::Instant) -> bool {
+        match input {
+            TypingGuardInput::Typed => {
+                self.last_typed_at = Some(now);
+                false
+            }
+            TypingGuardInput::Focus => {
+                self.focused = true;
+                false
+            }
+            TypingGuardInput::Blur | TypingGuardInput::Send | TypingGuardInput::Idle => {
+                if input == TypingGuardInput::Blur {
+                    self.focused = false;
+                }
+                self.last_typed_at = None;
+                let changed = !self.held.is_empty();
+                self.held.clear();
+                changed
+            }
+        }
+    }
+
+    /// Starts over for another thread or draft, keeping the editor's focus
+    /// (`useComposerTypingGuard` scope change).
+    pub(crate) fn reset_scope(&mut self) {
+        *self = Self {
+            focused: self.focused,
+            ..Self::default()
+        };
+    }
+
+    /// When the idle release is due while requests are held.
+    pub(crate) fn idle_deadline(&self) -> Option<std::time::Instant> {
+        if self.held.is_empty() {
+            return None;
+        }
+        Some(
+            self.last_typed_at
+                .map_or_else(std::time::Instant::now, |at| at + COMPOSER_TYPING_IDLE),
+        )
+    }
+}
+
 /// Store key for the composer's answer to the question request `entry_id`, kept apart from the
 /// thread's draft like Conn's `activePendingProgress.customAnswer`.
 #[must_use]
@@ -1438,5 +1554,106 @@ mod pending_request_tests {
         // A failed decline reports its own error; an arrival only matters after a decline.
         assert_eq!(approval_redirect_notice(false, false, false, true), None);
         assert_eq!(approval_redirect_notice(false, true, false, false), None);
+    }
+
+    #[test]
+    fn typing_guard_holds_requests_that_arrive_while_typing() {
+        use super::{COMPOSER_TYPING_IDLE, TypingGuard, TypingGuardInput};
+        use std::time::{Duration, Instant};
+
+        let t0 = Instant::now();
+        let ids = |list: &[&str]| list.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        let mut guard = TypingGuard::default();
+
+        // Requests already pending when the composer opens are never held.
+        assert!(!guard.requests(&ids(&["a"]), t0));
+        // Typing without focus holds nothing.
+        guard.update(TypingGuardInput::Typed, t0);
+        assert!(!guard.requests(&ids(&["a", "b"]), t0));
+        assert!(guard.held().is_empty());
+
+        guard.update(TypingGuardInput::Focus, t0);
+        guard.update(TypingGuardInput::Typed, t0);
+        assert!(guard.requests(&ids(&["a", "b", "c"]), t0 + Duration::from_millis(100)));
+        assert_eq!(guard.held().len(), 1);
+        assert!(guard.held().contains("c"));
+        assert_eq!(guard.idle_deadline(), Some(t0 + COMPOSER_TYPING_IDLE));
+        // A request seen once is not held again; one that resolves stops being held.
+        assert!(guard.requests(&ids(&["a", "b"]), t0));
+        assert!(guard.held().is_empty());
+        assert!(!guard.requests(&ids(&["a", "b", "c"]), t0));
+
+        // After the idle window a new request shows at once.
+        let late = t0 + COMPOSER_TYPING_IDLE;
+        assert!(!guard.requests(&ids(&["d"]), late));
+        assert!(guard.held().is_empty());
+
+        // Blur, send and idle each release every hold.
+        for release in [
+            TypingGuardInput::Blur,
+            TypingGuardInput::Send,
+            TypingGuardInput::Idle,
+        ] {
+            guard.update(TypingGuardInput::Focus, late);
+            guard.update(TypingGuardInput::Typed, late);
+            let fresh = format!("{release:?}");
+            assert!(guard.requests(std::slice::from_ref(&fresh), late));
+            assert!(guard.update(release, late));
+            assert!(guard.held().is_empty());
+            assert_eq!(guard.idle_deadline(), None);
+            // Holds released, the request stays seen.
+            assert!(!guard.requests(&[fresh], late));
+        }
+        // Blur leaves the editor unfocused, so typing holds nothing until it is focused again.
+        guard.update(TypingGuardInput::Blur, late);
+        guard.update(TypingGuardInput::Typed, late);
+        assert!(!guard.requests(&ids(&["e"]), late));
+    }
+
+    #[test]
+    fn typing_guard_scope_change_forgets_requests_but_keeps_focus() {
+        use super::{TypingGuard, TypingGuardInput};
+        use std::time::Instant;
+
+        let now = Instant::now();
+        let mut guard = TypingGuard::default();
+        guard.update(TypingGuardInput::Focus, now);
+        guard.update(TypingGuardInput::Typed, now);
+        assert!(guard.requests(&["a".to_owned()], now));
+        guard.reset_scope();
+        assert!(guard.held().is_empty());
+        // Still focused, but the typing clock restarted: the other thread's pending requests show.
+        assert!(!guard.requests(&["b".to_owned()], now));
+        guard.update(TypingGuardInput::Typed, now);
+        assert!(guard.requests(&["b".to_owned(), "c".to_owned()], now));
+        assert!(guard.held().contains("c"));
+    }
+
+    #[test]
+    fn held_requests_leave_the_composer() {
+        use super::guarded_pending_requests;
+        use std::collections::HashSet;
+
+        let approvals = [approval("a", true, true), approval("b", true, false)];
+        let question = ("item-q".to_owned(), "q".to_owned());
+        let held = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| (*id).to_owned())
+                .collect::<HashSet<_>>()
+        };
+
+        assert_eq!(
+            guarded_pending_requests(&approvals, Some(&question), &held(&[])),
+            (FEEDBACK, Some("item-q".to_owned()))
+        );
+        // Holding the first approval clears the approval state, even with a later one shown.
+        assert_eq!(
+            guarded_pending_requests(&approvals, Some(&question), &held(&["a", "q"])),
+            (None, None)
+        );
+        assert_eq!(
+            guarded_pending_requests(&approvals, None, &held(&["b"])),
+            (FEEDBACK, None)
+        );
     }
 }

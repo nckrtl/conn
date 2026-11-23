@@ -475,6 +475,23 @@ impl SqliteEngine {
             .await
     }
 
+    /// A live thread's stored record, without its history.
+    pub async fn thread_record(&self, thread_id: String) -> Result<Option<Value>, String> {
+        self.inner
+            .db(move |store| store.thread_record(&thread_id))
+            .await
+    }
+
+    /// Only the records idle compaction decides on, shaped as a thread projection.
+    pub async fn idle_compaction_records(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<Value>, String> {
+        self.inner
+            .db(move |store| store.idle_compaction_records(&thread_id))
+            .await
+    }
+
     /// A live thread's shell row, as the shell stream last sent it.
     pub async fn thread_shell(&self, thread_id: String) -> Result<Option<Value>, String> {
         self.inner

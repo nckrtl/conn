@@ -467,3 +467,82 @@ async fn a_compaction_into_a_busy_thread_is_a_no_op() {
         .len();
     assert_eq!(after, before, "no compaction message while a turn runs");
 }
+
+/// Cancellation on the controlled clock, still before the deadline: a cancelled timer, and
+/// every timer at shutdown, sends nothing; after shutdown no timer starts.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_cancelled_timer_and_shutdown_send_nothing() {
+    let h = harness("cancel");
+    let run = h
+        .send("thread", &format!("large-context:{}", expires_at(10)))
+        .await;
+    let service = IdleCompaction::new(h.engine.clone(), h.environment.clone());
+    service.run_completed("thread", &run);
+    h.advance(Duration::from_secs(60)).await;
+    assert!(service.waiting("thread"));
+    service.cancel("thread");
+    assert!(!service.waiting("thread"));
+
+    service.run_completed("thread", &run);
+    h.advance(Duration::from_secs(60)).await;
+    assert!(service.waiting("thread"));
+    service.shutdown().await;
+    assert!(!service.waiting("thread"));
+    service.run_completed("thread", &run);
+    assert!(!service.waiting("thread"), "no timer starts after shutdown");
+
+    h.advance(Duration::from_secs(10 * 60)).await;
+    let p = h.projection("thread").await;
+    assert_eq!(p["runs"].as_array().unwrap().len(), 1, "no compaction run");
+}
+
+/// `getThreadRecords` with only what the window reads (`IdleCompactionService.ts:56`): the
+/// latest run that ran and its message, the active provider thread and its latest usage.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_window_reads_only_its_records() {
+    let h = harness("records");
+    h.send("thread", "baseline").await;
+    let run = h
+        .send("thread", &format!("large-context:{}", expires_at(10)))
+        .await;
+    let records = h
+        .engine
+        .idle_compaction_records("thread".into())
+        .await
+        .unwrap()
+        .unwrap();
+    let ids = |kind: &str| -> Vec<Value> {
+        records[kind]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect()
+    };
+    assert_eq!(ids("runs"), [json!(run)]);
+    let p = h.projection("thread").await;
+    let run_row = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == run.as_str())
+        .unwrap();
+    assert_eq!(ids("messages"), [run_row["userMessageId"].clone()]);
+    assert_eq!(
+        ids("providerThreads"),
+        [p["thread"]["activeProviderThreadId"].clone()]
+    );
+    assert_eq!(records["providerTurns"].as_array().unwrap().len(), 1);
+    assert_eq!(records["thread"]["id"], "thread");
+    // The same window as from the whole projection.
+    let now = i64::try_from(h.engine.now_millis()).unwrap();
+    assert_eq!(window(&records, &[], now), window(&p, &[], now));
+    assert!(window(&records, &[], now).is_some());
+    assert!(
+        h.engine
+            .idle_compaction_records("missing".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

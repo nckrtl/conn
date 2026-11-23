@@ -291,47 +291,57 @@ pub fn resolve_auto_settlement_at(
     (inactive_since < now - days * DAY_MS).then_some(inactive_since)
 }
 
-/// The commands a sweep sends: one `thread.auto-settle` per candidate that settles now. A
-/// delegate settles with its parent (the engine offers it only once the parent is done).
-pub fn decide(
-    candidates: &[Value],
-    settings: impl Fn() -> Map<String, Value>,
-    now: i64,
-) -> Vec<Value> {
-    let configured = auto_settlement_configured(&settings());
-    candidates
-        .iter()
-        .filter(|thread| {
-            (configured || thread["lineage"]["relationshipToParent"] == "subagent")
-                && is_auto_settlement_candidate(thread, now)
-        })
-        .filter_map(|thread| {
-            let id = thread["id"].as_str()?;
-            let mut command = json!({
-                "type": "thread.auto-settle",
-                "commandId": format!("server:auto-settle:{id}:{}", conn_support::uuid_v4()),
-                "threadId": id,
-                "snapshotAt": thread["updatedAt"],
-            });
-            if thread["lineage"]["relationshipToParent"] != "subagent" {
-                // `thread.auto-settle` does not read the settings, so each decision does.
-                let project = thread["projectId"].as_str().unwrap_or_default();
-                let at = resolve_auto_settlement_at(
-                    thread,
-                    None,
-                    now,
-                    AutoSettle::for_project(&settings(), project),
-                )?;
-                command["settledAt"] = json!(conn_support::time::iso_from_millis(at));
-            }
-            Some(command)
-        })
-        .collect()
+/// The `thread.auto-settle` for one candidate under `settings` at `now`, or `None` when it
+/// does not settle now. A delegate settles with its parent (the engine offers it only once the
+/// parent is done). `snapshotAt` is the thread's `updatedAt` as read, which the engine checks.
+pub fn decide(thread: &Value, settings: &Map<String, Value>, now: i64) -> Option<Value> {
+    let id = thread["id"].as_str()?;
+    let mut command = json!({
+        "type": "thread.auto-settle",
+        "commandId": format!("server:auto-settle:{id}:{}", conn_support::uuid_v4()),
+        "threadId": id,
+        "snapshotAt": thread["updatedAt"],
+    });
+    if thread["lineage"]["relationshipToParent"] != "subagent" {
+        let project = thread["projectId"].as_str().unwrap_or_default();
+        let at = resolve_auto_settlement_at(
+            thread,
+            None,
+            now,
+            AutoSettle::for_project(settings, project),
+        )?;
+        command["settledAt"] = json!(conn_support::time::iso_from_millis(at));
+    }
+    Some(command)
 }
 
-/// One sweep at `now`: the candidates, the decisions, the commands. A refused command (the
-/// thread changed since it was read) is not an error.
-pub async fn sweep(engine: &SqliteEngine, environment: &Environment, now: i64) {
+/// One sweep over `candidates`: the sweep's own read skips the threads that do not settle,
+/// and each one that does is decided again on the settings and time read right before its
+/// command, as T3's `settleThread` does, since `thread.auto-settle` does not read settings.
+pub(crate) async fn sweep_with<F: std::future::Future<Output = ()>>(
+    candidates: &[Value],
+    settings: impl Fn() -> Map<String, Value>,
+    now: impl Fn() -> i64,
+    mut dispatch: impl FnMut(Value) -> F,
+) {
+    let (read, read_at) = (settings(), now());
+    let configured = auto_settlement_configured(&read);
+    for thread in candidates {
+        if !(configured || thread["lineage"]["relationshipToParent"] == "subagent")
+            || !is_auto_settlement_candidate(thread, read_at)
+            || decide(thread, &read, read_at).is_none()
+        {
+            continue;
+        }
+        if let Some(command) = decide(thread, &settings(), now()) {
+            dispatch(command).await;
+        }
+    }
+}
+
+/// One sweep on the engine's clock. A refused command (the thread changed since it was read)
+/// is not an error.
+pub async fn sweep(engine: &SqliteEngine, environment: &Environment) {
     let candidates = match engine.settlement_candidates(None).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -339,14 +349,21 @@ pub async fn sweep(engine: &SqliteEngine, environment: &Environment, now: i64) {
             return;
         }
     };
-    for command in decide(&candidates, || environment.settings.raw(), now) {
-        let Ok(command) = conn_contract::from_json(command) else {
-            continue;
-        };
-        if let Err(conn_engine::EngineError::Internal(error)) = engine.dispatch(command).await {
-            eprintln!("automatic thread settlement: {error}");
-        }
-    }
+    let now = || i64::try_from(engine.now_millis()).unwrap_or(i64::MAX);
+    sweep_with(
+        &candidates,
+        || environment.settings.raw(),
+        now,
+        |command| async move {
+            let Ok(command) = conn_contract::from_json(command) else {
+                return;
+            };
+            if let Err(conn_engine::EngineError::Internal(error)) = engine.dispatch(command).await {
+                eprintln!("automatic thread settlement: {error}");
+            }
+        },
+    )
+    .await;
 }
 
 /// Sweeps at start, every minute, after a settings change and when `wake` is notified (a
@@ -359,8 +376,7 @@ pub fn start(
     tokio::spawn(async move {
         let mut changes = environment.settings.subscribe();
         loop {
-            let now = i64::try_from(engine.now_millis()).unwrap_or(i64::MAX);
-            sweep(&engine, &environment, now).await;
+            sweep(&engine, &environment).await;
             tokio::select! {
                 () = tokio::time::sleep(SWEEP_EVERY) => {}
                 changed = changes.changed() => {

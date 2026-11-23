@@ -380,20 +380,6 @@ pub async fn serve_with_instances(
         })
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
-    // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.
-    if !inert {
-        let _ = host
-            .idle_compaction
-            .set(crate::idle_compaction::IdleCompaction::new(
-                sqlite_engine.clone(),
-                environment.clone(),
-            ));
-        crate::settlement::start(
-            sqlite_engine.clone(),
-            environment.clone(),
-            host.settlement_wake.clone(),
-        );
-    }
     let preview = conn_preview::tabs::Preview::new(state_dir.clone());
     let mut deps = Deps {
         preview: Some(preview.clone()),
@@ -429,6 +415,21 @@ pub async fn serve_with_instances(
     if let Some(mcp) = &deps.mcp {
         let _ = host.mcp.set(mcp.clone());
     }
+    // After the MCP service, which settled threads' cleanup uses: the first sweep may settle.
+    // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.
+    let settlement = (!inert).then(|| {
+        let _ = host
+            .idle_compaction
+            .set(crate::idle_compaction::IdleCompaction::new(
+                sqlite_engine.clone(),
+                environment.clone(),
+            ));
+        crate::settlement::start(
+            sqlite_engine.clone(),
+            environment.clone(),
+            host.settlement_wake.clone(),
+        )
+    });
     let state = AppState {
         table: Arc::new(method_table(&deps)),
         auth: auth.clone(),
@@ -534,6 +535,14 @@ pub async fn serve_with_instances(
     }
     if let Some(managed) = managed_server {
         managed.abort();
+    }
+    // Settlement and compaction stop before the engine does, so neither dispatches into it.
+    if let Some(settlement) = settlement {
+        settlement.abort();
+        let _ = settlement.await;
+    }
+    if let Some(idle) = host.idle_compaction.get() {
+        idle.shutdown().await;
     }
     // Shells and provider processes end with their whole process groups, so nothing they
     // started outlives the server.

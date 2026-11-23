@@ -289,6 +289,12 @@ pub(crate) fn on_run_end(
     Ok(effects)
 }
 
+/// A finished task whose result still waits for its wake message (`delegatedCompletion`
+/// `delivery` planned, its message not yet in the thread).
+pub(crate) fn completion_undelivered(task: &Value) -> bool {
+    task["origin"] == "app_owned" && task["completionDelivery"]["state"] == "pending"
+}
+
 /// Wakes `thread_id` with one message naming every finished task still `pending`. A task
 /// with `settled_only` waits while the thread has an active run, unless `settled` says the
 /// run just ended.
@@ -297,9 +303,7 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
     let due: Vec<Value> = tx
         .entities(thread_id, "subagents")?
         .into_iter()
-        .filter(|row| {
-            row["origin"] == "app_owned" && row["completionDelivery"]["state"] == "pending"
-        })
+        .filter(completion_undelivered)
         .filter(|row| !busy || row["completionWake"] == "always")
         .collect();
     if due.is_empty()

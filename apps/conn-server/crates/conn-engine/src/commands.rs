@@ -456,13 +456,18 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             c.dispatch_mode.kind
         ));
     }
-    // The service checked idleness before this command; a run that landed since makes the
-    // thread busy, and that turn refreshes the cache anyway (`Orchestrator.ts:7027`).
+    // The service checked idleness before this command; a run or a delegated result that
+    // landed since makes the thread busy, and that turn refreshes the cache anyway
+    // (`Orchestrator.ts:7027`). A result is undelivered while its wake message is pending.
     if c.idle_compaction.as_deref() == Some("beforeCacheExpires")
-        && tx
+        && (tx
             .entities(&c.thread_id, "runs")?
             .iter()
             .any(|run| run["status"] == "queued" || is_active(run))
+            || tx
+                .entities(&c.thread_id, "subagents")?
+                .iter()
+                .any(crate::families::completion_undelivered))
     {
         return Ok(vec![]);
     }
@@ -2260,6 +2265,30 @@ fn is_null(thread: &Value, field: &str) -> bool {
 
 fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    // T3's `thread.auto-settle` rechecks the live thread against the sweep's snapshot: a user's
+    // own choice or any change since wins. Then it is a settle. The snapshot is the shell's
+    // `updatedAt`, the row's activity time (#260 keeps the stored `updatedAt` equal to it).
+    if command["type"] == "thread.auto-settle" {
+        let thread = live_thread(tx, &thread_id)?;
+        let changed_at: String = tx
+            .conn()
+            .query_row(
+                "SELECT activity_at FROM threads WHERE id = ?1",
+                [&thread_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("store: {e}"))?;
+        let changed_at = conn_support::time::millis_from_iso(&changed_at);
+        let snapshot = command["snapshotAt"]
+            .as_str()
+            .and_then(conn_support::time::millis_from_iso);
+        let unchanged = matches!((changed_at, snapshot), (Some(at), Some(seen)) if at <= seen);
+        if !is_null(&thread, "settledOverride") || !unchanged {
+            return reject(format!(
+                "Thread {thread_id} changed before automatic settlement."
+            ));
+        }
+    }
     if let Some(expected) = command["expectedLatestRunId"].as_str() {
         let latest = tx
             .entities(&thread_id, "runs")?
@@ -2274,30 +2303,6 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
         let thread = live_thread(tx, &thread_id)?;
         if !is_null(&thread, "autoSettleDisabledAt") || !is_null(&thread, "pinnedAt") {
             return Ok(vec![]);
-        }
-        // `Orchestrator.ts:15119`: changes and explicit overrides since the sweep read the
-        // thread win over its snapshot. The thread's `updatedAt` is its activity time.
-        let activity_at: String = tx
-            .conn()
-            .query_row(
-                "SELECT activity_at FROM threads WHERE id = ?1",
-                [&thread_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("store: {e}"))?;
-        let changed = match (
-            conn_support::time::millis_from_iso(&activity_at),
-            command["snapshotAt"]
-                .as_str()
-                .and_then(conn_support::time::millis_from_iso),
-        ) {
-            (Some(updated), Some(snapshot)) => updated > snapshot,
-            _ => true,
-        };
-        if !is_null(&thread, "settledOverride") || changed {
-            return reject(format!(
-                "Thread {thread_id} changed before automatic settlement."
-            ));
         }
     }
     if active_run(tx, &thread_id)?.is_some() {

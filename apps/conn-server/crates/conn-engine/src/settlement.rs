@@ -59,6 +59,18 @@ pub(crate) fn candidates(conn: &Connection, thread_id: Option<&str>) -> StoreRes
     Ok(out)
 }
 
+/// `pendingGuestMessageCount`: a guest's messages the thread has not taken up yet.
+fn pending_guest_messages(thread: &Value) -> usize {
+    thread["guestShare"]["messages"]
+        .as_array()
+        .map_or(0, |messages| {
+            messages
+                .iter()
+                .filter(|message| message["status"] == "pending")
+                .count()
+        })
+}
+
 fn candidate(
     conn: &Connection,
     id: &str,
@@ -171,7 +183,10 @@ fn candidate(
         ("activityRunStatus", Value::Null),
         ("activityRunStartedAt", Value::Null),
         ("pendingRuntimeRequest", Value::Null),
-        ("pendingGuestMessageCount", json!(0)),
+        (
+            "pendingGuestMessageCount",
+            json!(pending_guest_messages(thread)),
+        ),
     ] {
         shell[field] = value;
     }

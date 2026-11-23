@@ -270,12 +270,12 @@ impl EngineHost for Host {
 
     fn thread_closed(&self, thread_id: &str, reason: ThreadClose) {
         match reason {
-            ThreadClose::Settled => {
-                self.terminals.close_on_settle(thread_id);
-                // T3 sweeps again on `thread.settled`: a delegate may settle with its parent.
-                self.settlement_wake.notify_one();
-            }
+            ThreadClose::Settled => self.clean_up_settled(thread_id),
             ThreadClose::Archived | ThreadClose::Deleted => {
+                // A closed thread compacts nothing: its waiting timer ends now.
+                if let Some(idle) = self.idle_compaction.get() {
+                    idle.cancel(thread_id);
+                }
                 self.terminals.close(TerminalCloseInput {
                     thread_id: thread_id.to_owned(),
                     terminal_id: None,
@@ -299,6 +299,15 @@ impl EngineHost for Host {
                 }
             });
         }
+    }
+}
+
+impl Host {
+    /// `thread.settled` (`ThreadSettlementService.ts:752`): the settled thread's cleanup
+    /// (`closeOnSettle`), then the sweep, as a settlement can free a parent's delegates.
+    fn clean_up_settled(&self, thread_id: &str) {
+        self.terminals.close_on_settle(thread_id);
+        self.settlement_wake.notify_one();
     }
 }
 
@@ -432,6 +441,53 @@ mod tests {
         clock.advance(step);
         tokio::time::advance(step).await;
         run_of(format!("idle-compact:thread:{run}")).await;
+
+        // An archived or deleted thread's waiting timer ends at once, long before its deadline.
+        let idle = host.idle_compaction.get().unwrap().clone();
+        let expires = conn_support::time::iso_from_millis(
+            i64::try_from(t0 + step.as_millis() as u64 + 10 * 60_000).unwrap(),
+        );
+        for (thread, close) in [("archived", "thread.archive"), ("deleted", "thread.delete")] {
+            for command in [
+                json!({"type":"thread.create","commandId":format!("create-{thread}"),"threadId":thread,
+                    "projectId":conn_engine::SqliteEngine::project_id_for(&root),"title":thread,
+                    "modelSelection":{"instanceId":"claudeAgent","model":"claude-haiku-5-5"},
+                    "runtimeMode":"auto","interactionMode":"default","branch":null,
+                    "worktreePath":null,"createdBy":"user","creationSource":"web"}),
+                json!({"type":"message.dispatch","commandId":format!("send-{thread}"),
+                    "threadId":thread,"messageId":format!("message-{thread}"),
+                    "text":format!("large-context:{expires}"),"attachments":[],
+                    "dispatchMode":{"type":"start_immediately"},"createdBy":"user",
+                    "creationSource":"web"}),
+            ] {
+                engine
+                    .dispatch(conn_contract::from_json(command).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let mut waited = 0;
+            while !idle.waiting(thread) {
+                assert!(waited < 500, "{thread}: no timer");
+                waited += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            engine
+                .dispatch(
+                    conn_contract::from_json(
+                        json!({"type":close,"commandId":format!("close-{thread}"),"threadId":thread}),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            for _ in 0..500 {
+                if !idle.waiting(thread) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!idle.waiting(thread), "{close} cancels the waiting timer");
+        }
         engine.shutdown().await;
         drop(host);
         let _ = std::fs::remove_dir_all(dir);

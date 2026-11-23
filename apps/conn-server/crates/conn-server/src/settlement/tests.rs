@@ -277,6 +277,37 @@ fn a_project_inherits_or_disables_the_threshold() {
 
 // ---- The sweep on a real engine and controlled time ----
 
+/// `settleThread` (`ThreadSettlementService.ts:384`) reads the settings right before each
+/// command: turned off while a sweep settles, they keep the threads it has not reached.
+#[tokio::test(flavor = "current_thread")]
+async fn each_settlement_reads_the_settings_right_before_its_command() {
+    let candidates = [
+        shell(json!({"id": "first", "latestUserMessageAt": at(-4 * DAY_MS)})),
+        shell(json!({"id": "second", "latestUserMessageAt": at(-4 * DAY_MS)})),
+    ];
+    let on = std::cell::Cell::new(true);
+    let settings = || {
+        let days = if on.get() { json!(1) } else { Value::Null };
+        json!({"sidebarAutoSettleAfterDays": days, "sidebarAutoSettleOnMerge": false})
+            .as_object()
+            .unwrap()
+            .clone()
+    };
+    let mut sent = Vec::new();
+    sweep_with(
+        &candidates,
+        settings,
+        || NOW_MS,
+        |command| {
+            sent.push(command["threadId"].clone());
+            on.set(false);
+            async {}
+        },
+    )
+    .await;
+    assert_eq!(sent, [json!("first")]);
+}
+
 const T0: u64 = 1_800_000_000_000;
 
 struct Harness {
@@ -403,12 +434,12 @@ async fn a_sweep_settles_threads_idle_past_the_threshold_and_nothing_else() {
     // Under a day: nothing yet.
     h.clock
         .advance(std::time::Duration::from_secs(12 * 60 * 60));
-    sweep(&h.engine, &h.environment, h.now()).await;
+    sweep(&h.engine, &h.environment).await;
     assert!(h.thread("idle").await["settledOverride"].is_null());
 
     h.clock
         .advance(std::time::Duration::from_secs(24 * 60 * 60));
-    sweep(&h.engine, &h.environment, h.now()).await;
+    sweep(&h.engine, &h.environment).await;
     let idle = h.thread("idle").await;
     assert_eq!(idle["settledOverride"], "settled", "{idle}");
     assert!(
@@ -429,8 +460,54 @@ async fn a_sweep_settles_threads_idle_past_the_threshold_and_nothing_else() {
     h.launch("later", "baseline").await;
     h.clock
         .advance(std::time::Duration::from_secs(10 * 24 * 60 * 60));
-    sweep(&h.engine, &h.environment, h.now()).await;
+    sweep(&h.engine, &h.environment).await;
     assert!(h.thread("later").await["settledOverride"].is_null());
+}
+
+/// `pendingGuestMessageCount` (`ProjectionStore.ts:8717`): a guest's message still waiting keeps
+/// an otherwise idle thread, which settles once nothing waits.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_guest_message_keeps_an_idle_thread() {
+    let h = harness("guest");
+    h.environment
+        .settings
+        .update(json!({"sidebarAutoSettleAfterDays": 1}), None)
+        .unwrap();
+    h.launch("guest", "baseline").await;
+    h.launch("alone", "baseline").await;
+    let share = |status: &str| {
+        json!({"id": "share", "host": "tunnel.example", "createdAt": at(0), "expiresAt": at(DAY_MS),
+            "guestName": "Guest", "messages": [
+                {"id": "seen", "status": "dismissed"},
+                {"id": "waiting", "status": status}]})
+    };
+    let set_share = |share: Value| {
+        let db = h.dir.join("engine.sqlite");
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .execute(
+                "UPDATE threads SET thread = json_set(thread, '$.guestShare', json(?1))
+                 WHERE id = 'guest'",
+                [share.to_string()],
+            )
+            .unwrap();
+    };
+    set_share(share("pending"));
+    h.clock
+        .advance(std::time::Duration::from_secs(2 * 24 * 60 * 60));
+    let candidates = h
+        .engine
+        .settlement_candidates(Some("guest".into()))
+        .await
+        .unwrap();
+    assert_eq!(candidates[0]["pendingGuestMessageCount"], 1);
+    sweep(&h.engine, &h.environment).await;
+    assert!(h.thread("guest").await["settledOverride"].is_null());
+    assert_eq!(h.thread("alone").await["settledOverride"], "settled");
+
+    set_share(share("delivered"));
+    sweep(&h.engine, &h.environment).await;
+    assert_eq!(h.thread("guest").await["settledOverride"], "settled");
 }
 
 /// The final eligibility check: user activity between the sweep's read and its command keeps
@@ -446,7 +523,11 @@ async fn activity_between_the_sweeps_read_and_its_command_keeps_the_thread() {
     h.clock
         .advance(std::time::Duration::from_secs(2 * 24 * 60 * 60));
     let candidates = h.engine.settlement_candidates(None).await.unwrap();
-    let commands = decide(&candidates, || h.environment.settings.raw(), h.now());
+    let settings = h.environment.settings.raw();
+    let commands: Vec<_> = candidates
+        .iter()
+        .filter_map(|thread| decide(thread, &settings, h.now()))
+        .collect();
     assert_eq!(commands.len(), 1, "the thread was eligible when read");
     // The user comes back before the command lands.
     h.clock.advance(std::time::Duration::from_secs(1));

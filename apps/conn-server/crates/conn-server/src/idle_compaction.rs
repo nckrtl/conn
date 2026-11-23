@@ -159,11 +159,19 @@ pub fn window(projection: &Value, pending_background: &[Value], now: i64) -> Opt
 }
 
 /// The timers, one per thread: a newer completed run replaces the waiting one (`FiberMap`).
+/// Archiving or deleting the thread cancels its timer; after [`IdleCompaction::shutdown`] no
+/// timer starts.
 pub struct IdleCompaction {
     engine: Arc<SqliteEngine>,
     environment: Arc<Environment>,
-    timers: Mutex<HashMap<String, (u64, tokio::task::AbortHandle)>>,
-    next: std::sync::atomic::AtomicU64,
+    timers: Mutex<Timers>,
+}
+
+#[derive(Default)]
+struct Timers {
+    waiting: HashMap<String, (u64, tokio::task::JoinHandle<()>)>,
+    next: u64,
+    closed: bool,
 }
 
 impl std::fmt::Debug for IdleCompaction {
@@ -177,54 +185,95 @@ impl IdleCompaction {
         Arc::new(Self {
             engine,
             environment,
-            timers: Mutex::new(HashMap::new()),
-            next: std::sync::atomic::AtomicU64::new(0),
+            timers: Mutex::default(),
         })
+    }
+
+    fn timers(&self) -> std::sync::MutexGuard<'_, Timers> {
+        self.timers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A run completed: its thread's timer starts over from it.
     pub fn run_completed(self: &Arc<Self>, thread_id: &str, run_id: &str) {
-        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (service, thread, run) = (self.clone(), thread_id.to_owned(), run_id.to_owned());
+        // The task removes its own entry under this lock, so it is registered before it can.
+        let mut timers = self.timers();
+        if timers.closed {
+            return;
+        }
+        let id = timers.next;
+        timers.next += 1;
         let task = tokio::spawn(async move {
             service.compact_when_due(&thread, run).await;
-            // The map holds only waiting timers.
-            if let Ok(mut timers) = service.timers.lock()
-                && timers.get(&thread).is_some_and(|(own, _)| *own == id)
+            let mut timers = service.timers();
+            if timers
+                .waiting
+                .get(&thread)
+                .is_some_and(|(own, _)| *own == id)
             {
-                timers.remove(&thread);
+                timers.waiting.remove(&thread);
             }
         });
-        if let Ok(mut timers) = self.timers.lock()
-            && let Some((_, previous)) =
-                timers.insert(thread_id.to_owned(), (id, task.abort_handle()))
-        {
+        if let Some((_, previous)) = timers.waiting.insert(thread_id.to_owned(), (id, task)) {
             previous.abort();
+        }
+    }
+
+    /// The thread was archived or deleted: its waiting timer ends.
+    pub fn cancel(&self, thread_id: &str) {
+        if let Some((_, task)) = self.timers().waiting.remove(thread_id) {
+            task.abort();
+        }
+    }
+
+    /// Ends every waiting timer and starts no new one; returns once they have stopped.
+    pub async fn shutdown(&self) {
+        let tasks: Vec<_> = {
+            let mut timers = self.timers();
+            timers.closed = true;
+            timers.waiting.drain().map(|(_, (_, task))| task).collect()
+        };
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
         }
     }
 
     /// Whether `thread_id` has a timer waiting.
     pub fn waiting(&self, thread_id: &str) -> bool {
-        self.timers
-            .lock()
-            .is_ok_and(|timers| timers.contains_key(thread_id))
+        self.timers().waiting.contains_key(thread_id)
     }
 
-    /// `compactWhenDue`: loops after each wait, as the thread may have moved on.
+    /// `compactWhenDue`: loops after each wait, as the thread may have moved on. The thread's
+    /// own record decides eligibility first; only then are the few records the window reads.
     async fn compact_when_due(&self, thread_id: &str, mut run_id: String) {
         loop {
             let settings = self.environment.settings.raw();
-            let Ok(projection) = self.engine.get_thread_projection(thread_id.into()).await else {
+            let eligible_now = |thread: &Value| {
+                eligible(
+                    &settings,
+                    thread["providerInstanceId"].as_str().unwrap_or_default(),
+                    thread["projectId"].as_str(),
+                )
+            };
+            match self.engine.thread_record(thread_id.to_owned()).await {
+                Ok(Some(thread)) if eligible_now(&thread) => {}
+                _ => return,
+            }
+            let Ok(Some(records)) = self
+                .engine
+                .idle_compaction_records(thread_id.to_owned())
+                .await
+            else {
                 return;
             };
-            let thread = &projection["thread"];
-            let instance = thread["providerInstanceId"].as_str().unwrap_or_default();
-            let project = thread["projectId"].as_str();
-            if !eligible(&settings, instance, project) {
+            if !eligible_now(&records["thread"]) {
                 return;
             }
             // A late end of an earlier run replaced the latest run's timer: it takes over.
-            if let Some(latest) = latest_run(&projection)
+            if let Some(latest) = latest_run(&records)
                 && latest["status"] == "completed"
                 && latest["id"] != run_id.as_str()
             {
@@ -239,7 +288,7 @@ impl IdleCompaction {
                 _ => return,
             };
             let now = i64::try_from(self.engine.now_millis()).unwrap_or(i64::MAX);
-            let Some(window) = window(&projection, &pending, now) else {
+            let Some(window) = window(&records, &pending, now) else {
                 return;
             };
             if window.run_id != run_id {

@@ -537,23 +537,31 @@ final class ConnSpikeUITests: XCTestCase {
             }
         }
 
-        if tap(app, ["workspace.tab.tasks", "Tasks"]) { settle(3); capture("tasks") } else { capture("missing-tasks") }
-        if tap(app, ["workspace.tab.pullRequests", "Pull requests"]) { settle(3); capture("prs") }
-        if tap(app, ["workspace.tab.threads", "Threads"]) { settle(1) }
-        if tap(app, ["workspace.searchButton", "Search"]) {
-            settle(1)
+        // SwiftUI hosts the switcher inside one UIToolbar item, where XCUITest cannot hit its
+        // buttons; the Swift app falls back to their place on the bar (402pt-wide phone).
+        func barTap(_ keys: [String], swiftX: CGFloat) -> Bool {
+            if tap(app, keys) { return true }
+            guard !expo else { return false }
+            app.coordinate(withNormalizedOffset: CGVector(dx: swiftX, dy: 0.936)).tap()
+            return true
+        }
+        if barTap(["workspace.tab.tasks", "Tasks"], swiftX: 0.43) { settle(3); capture("tasks") }
+        if barTap(["workspace.tab.pullRequests", "Pull requests"], swiftX: 0.57) { settle(3); capture("prs") }
+        if barTap(["workspace.tab.threads", "Threads"], swiftX: 0.29) { settle(1) }
+        if barTap(["workspace.searchButton", "Search"], swiftX: 0.71) {
+            settle(1.5)
             if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
             capture("search")
-            _ = tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"])
-            settle(1)
-        }
-        if tap(app, ["workspace.settingsButton", "Open settings"]) {
+            if !tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"]) { app.swipeDown() }
             settle(1.5)
+        }
+        if barTap(["workspace.settingsButton", "Open settings"], swiftX: 0.115) {
+            settle(2)
             capture("settings")
             if !tap(app, ["settings.closeButton", "Close", "Done"]) { app.swipeDown() }
-            settle(1)
+            settle(1.5)
         }
-        if tap(app, ["inbox.newThreadButton", "New chat"]) { settle(1.5); capture("new-chat") }
+        if barTap(["inbox.newThreadButton", "New chat"], swiftX: 0.885) { settle(2); capture("new-chat") }
     }
 
     /// Writes the running app's accessibility tree to `CONN_DUMP_PATH` (layout debugging).

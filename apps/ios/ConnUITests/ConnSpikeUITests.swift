@@ -474,6 +474,13 @@ final class ConnSpikeUITests: XCTestCase {
         content.tap()
         settle(2)
         capture("thread")
+        // Part-way up the feed: content runs under the floating composer and the top edge blur.
+        let feed = app.scrollViews.firstMatch.exists ? app.scrollViews.firstMatch : app.collectionViews.firstMatch
+        if feed.exists {
+            feed.swipeDown(velocity: .slow)
+            settle(1.5)
+            capture("thread-scrolled")
+        }
         let composer = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
         if composer.waitForExistence(timeout: 5) {
             composer.tap()

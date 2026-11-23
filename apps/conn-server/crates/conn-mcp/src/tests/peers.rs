@@ -643,3 +643,48 @@ async fn a_follower_past_its_defect_limit_still_records_the_task_once() {
     assert_eq!(results, 1);
     assert_eq!(wakes, 1);
 }
+
+/// `RemoteDelegation.ts`: followers run in a scope the server closes at shutdown. A follower
+/// waiting out its back-off stops with the server and writes nothing afterwards, even once the
+/// store works again; the task stays open for the next start.
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_stops_a_follower_in_its_back_off() {
+    let peer = Arc::new(StandIn {
+        enabled: true,
+        gone: true,
+        ..Default::default()
+    });
+    let f = fixture_full(
+        "follower-shutdown",
+        None,
+        FakeProvider::new("claudeAgent"),
+        Some(peer.clone()),
+    );
+    let mut client = Client::open(&f.service, client(true)).await;
+    let parent = launch_as_swamp(&mut client, "Parent", "hang", "full-access", "default").await;
+    until_provider_turn(&f, &parent).await;
+    let task = remote_task(&f, &parent, "first").await;
+    let db = rusqlite::Connection::open(f.dir.join("engine.sqlite")).unwrap();
+    db.execute_batch("ALTER TABLE entities RENAME TO entities_away")
+        .unwrap();
+    tokio::time::pause();
+    f.service.follow_remote_task(&parent, &task);
+    // Past the defect limit, the follower waits out its back-off.
+    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    f.service.stop_remote_tasks().await;
+    db.execute_batch("ALTER TABLE entities_away RENAME TO entities")
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    let (row, results, wakes) = stored_task(&f, &parent, &task);
+    assert!(row["result"].is_null(), "{row}");
+    assert_eq!((results, wakes), (0, 0));
+    let engine = &f.service.config.engine;
+    assert_eq!(
+        engine.open_remote_tasks(10).await.unwrap(),
+        vec![(parent.clone(), task.clone())]
+    );
+    // A follower asked for after the stop never starts.
+    f.service.follow_remote_task(&parent, &task);
+    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    assert_eq!(stored_task(&f, &parent, &task).1, 0);
+}

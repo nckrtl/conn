@@ -490,6 +490,7 @@ pub async fn serve_with_instances(
     }
 
     let devices = state.deps.devices.clone();
+    let mcp = state.deps.mcp.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let listener = axum::serve::ListenerExt::tap_io(listener, |stream| {
@@ -522,6 +523,11 @@ pub async fn serve_with_instances(
     // Shells and provider processes end with their whole process groups, so nothing they
     // started outlives the server.
     terminals.shutdown().await;
+    // Remote task followers stop before the engine closes, so none settles a task or wakes a
+    // parent during shutdown; bounded, as a follower stops at its next await.
+    if let Some(mcp) = &mcp {
+        let _ = tokio::time::timeout(Duration::from_secs(5), mcp.stop_remote_tasks()).await;
+    }
     engine.shutdown().await;
     preview.shutdown().await;
     // Device hubs and agent daemons stop, here and on SSH hosts, as T3's finalizers do;

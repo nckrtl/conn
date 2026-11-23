@@ -51,11 +51,26 @@ const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 const NO_REPLY: &str = "(The thread in the linked environment ended without a reply.)";
 
 /// Which tasks have a follower, and whether one was asked to look again.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Followers {
     running: std::sync::Mutex<HashMap<String, bool>>,
     /// A task was left out because [`MAX_FOLLOWERS`] ran: scan again when one ends.
     rescan: AtomicBool,
+    /// Set at shutdown: followers stop where they are, and no new one starts.
+    stop: tokio::sync::watch::Sender<bool>,
+    /// Signalled as each follower ends.
+    ended: tokio::sync::Notify,
+}
+
+impl Default for Followers {
+    fn default() -> Self {
+        Self {
+            running: std::sync::Mutex::default(),
+            rescan: AtomicBool::default(),
+            stop: tokio::sync::watch::Sender::new(false),
+            ended: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 /// Why one look at a task did not finish it.
@@ -133,6 +148,22 @@ impl McpService {
         tokio::spawn(async move { service.scan_remote_tasks().await });
     }
 
+    /// Stops every follower where it is, a back-off included, and waits until none runs, so
+    /// nothing writes a result or wakes a parent while the engine closes. T3 closes the
+    /// followers' scope the same way. Open tasks stay open for the next start.
+    pub async fn stop_remote_tasks(&self) {
+        self.remote.stop.send_replace(true);
+        loop {
+            let ended = self.remote.ended.notified();
+            let mut ended = std::pin::pin!(ended);
+            ended.as_mut().enable();
+            if crate::lock(&self.remote.running).is_empty() {
+                return;
+            }
+            ended.await;
+        }
+    }
+
     async fn scan_remote_tasks(self: &Arc<Self>) {
         match self.config.engine.open_remote_tasks(SCAN_LIMIT).await {
             Ok(open) => {
@@ -153,6 +184,9 @@ impl McpService {
     pub fn follow_remote_task(self: &Arc<Self>, parent: &str, task: &str) {
         {
             let mut running = crate::lock(&self.remote.running);
+            if *self.remote.stop.borrow() {
+                return;
+            }
             if let Some(again) = running.get_mut(task) {
                 *again = true;
                 return;
@@ -165,19 +199,31 @@ impl McpService {
         }
         let (service, parent, task) = (self.clone(), parent.to_owned(), task.to_owned());
         tokio::spawn(async move {
-            loop {
-                service.follow(&parent, &task).await;
-                // Checked and released under one lock, so a request between them is not lost.
-                let mut running = crate::lock(&service.remote.running);
-                match running.get_mut(&task) {
-                    Some(again) if *again => *again = false,
-                    _ => {
-                        running.remove(&task);
-                        break;
+            let mut stop = service.remote.stop.subscribe();
+            let followed = async {
+                loop {
+                    service.follow(&parent, &task).await;
+                    // Checked and released under one lock, so a request between them is not
+                    // lost.
+                    let mut running = crate::lock(&service.remote.running);
+                    match running.get_mut(&task) {
+                        Some(again) if *again => *again = false,
+                        _ => {
+                            running.remove(&task);
+                            break;
+                        }
                     }
                 }
+            };
+            let stopped = tokio::select! {
+                () = followed => false,
+                _ = stop.wait_for(|stop| *stop) => true,
+            };
+            if stopped {
+                crate::lock(&service.remote.running).remove(&task);
             }
-            if service.remote.rescan.swap(false, Ordering::Relaxed) {
+            service.remote.ended.notify_waiters();
+            if !stopped && service.remote.rescan.swap(false, Ordering::Relaxed) {
                 service.scan_remote_tasks().await;
             }
         });

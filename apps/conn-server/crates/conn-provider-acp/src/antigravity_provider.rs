@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::antigravity::{self, AntigravitySettings, Directories, Observed};
-use crate::session::{self, AcpSession, OpenControl, OpenError, SpawnError};
+use crate::session::{self, AcpSession, OpenControl, OpenError, SessionNew, SpawnError};
 use crate::{ANTIGRAVITY, MAX_LINE_BYTES, lock, stop_process};
 
 /// The limit for `agy --version` in a health check.
@@ -52,6 +52,9 @@ pub struct AntigravityProvider {
     /// Tests start a scripted agent here instead of `agy`.
     #[cfg(test)]
     test_spawner: Option<session::Spawner>,
+    /// Tests count the scans for a throwaway session's files here.
+    #[cfg(test)]
+    scans: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for AntigravityProvider {
@@ -80,6 +83,8 @@ impl AntigravityProvider {
             observed: Arc::default(),
             #[cfg(test)]
             test_spawner: None,
+            #[cfg(test)]
+            scans: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -248,9 +253,11 @@ impl AntigravityProvider {
         provider_session_id: String,
         mcp_servers: Vec<conn_provider::McpServer>,
         purpose: Purpose,
-        control: OpenControl,
     ) -> Result<(AcpSession, mpsc::Receiver<conn_provider::ProviderEvent>), OpenError> {
-        let workspace = purpose == Purpose::Thread;
+        let (workspace, control) = match purpose {
+            Purpose::Thread => (true, OpenControl::default()),
+            Purpose::Throwaway(control) => (false, control),
+        };
         if let Some(issue) = self.settings.config_issue() {
             return Err(OpenError::Other(ProviderError::Failed {
                 operation: "configure",
@@ -321,9 +328,11 @@ impl AntigravityProvider {
     /// this returns.
     async fn throwaway_session(
         &self,
-        control: OpenControl,
+        mut control: OpenControl,
         publish_by: Option<tokio::time::Instant>,
     ) -> Result<(), OpenError> {
+        let session_new = Arc::new(std::sync::Mutex::new(SessionNew::NotSent));
+        control.session_new = Some(session_new.clone());
         let parent = self.dirs.runtime_temp.join("setup");
         let Ok(Ok(cwd)) = tokio::task::spawn_blocking(move || make_run_temp(&parent)).await else {
             return Err(OpenError::Other(ProviderError::Failed {
@@ -341,8 +350,7 @@ impl AntigravityProvider {
                 String::new(),
                 format!("antigravity-models-{}", conn_support::uuid_v4()),
                 Vec::new(),
-                Purpose::ModelRefresh,
-                control,
+                Purpose::Throwaway(control),
             )
             .await;
         let result = match started {
@@ -355,28 +363,29 @@ impl AntigravityProvider {
                     }
                     None => Ok(()),
                 };
-                let (_, setup) = session.handshake().await;
                 session.close().await;
-                // T3's finalizer (`AntigravityDriver.ts` `makeDisposableRuntime`): the agent has
-                // closed, so its files for this workspace can go.
-                if let Some(session_id) = setup["sessionId"].as_str().map(str::to_owned) {
-                    let (profile, workspace) = (self.dirs.profile.clone(), workspace.clone());
-                    let _ = tokio::task::spawn_blocking(move || {
-                        antigravity::remove_session_files(&profile, &session_id, &workspace);
-                    })
-                    .await;
-                }
                 published
             }
             Err(error) => Err(error),
         };
-        // A failed or cancelled check has no session id, but the agent may have stored the
-        // session already: its `.meta` names this scratch folder. The agent has stopped.
+        // T3's finalizer (`AntigravityDriver.ts` `makeDisposableRuntime`): the agent has
+        // stopped, so its files for this workspace can go, found by the id it returned. Beyond
+        // T3: when the open ended with `session/new` unanswered, the agent may have stored the
+        // session already; its `.meta` names this scratch folder.
+        let session_new = std::mem::take(&mut *lock(&session_new));
+        #[cfg(test)]
+        if session_new == SessionNew::Sent {
+            self.scans
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let profile = self.dirs.profile.clone();
-        let failed = result.is_err();
         let _ = tokio::task::spawn_blocking(move || {
-            if failed {
-                antigravity::remove_sessions_in(&profile, &workspace);
+            match session_new {
+                SessionNew::Created(id) => {
+                    antigravity::remove_session_files(&profile, &id, &workspace)
+                }
+                SessionNew::Sent => antigravity::remove_sessions_in(&profile, &workspace),
+                SessionNew::NotSent => {}
             }
             std::fs::remove_dir_all(&cwd)
         })
@@ -390,7 +399,7 @@ impl AntigravityProvider {
         let deadline = tokio::time::Instant::now() + MODEL_LOAD_TIMEOUT;
         let control = OpenControl {
             abort: Some(Box::pin(tokio::time::sleep_until(deadline))),
-            on_step: None,
+            ..OpenControl::default()
         };
         self.throwaway_session(control, Some(deadline))
             .await
@@ -415,6 +424,7 @@ impl AntigravityProvider {
         let control = OpenControl {
             abort: Some(check.abort),
             on_step: Some(check.on_step),
+            ..OpenControl::default()
         };
         self.throwaway_session(control, None)
             .await
@@ -425,12 +435,12 @@ impl AntigravityProvider {
     }
 }
 
-/// Why a session starts: a thread's workspace gets a snapshot; a model refresh runs in a
-/// scratch folder that is no workspace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Why a session starts: a thread's workspace gets a snapshot; a throwaway session (a model
+/// refresh or a credential check) runs in a scratch folder that is no workspace, with its own
+/// abort and steps.
 enum Purpose {
     Thread,
-    ModelRefresh,
+    Throwaway(OpenControl),
 }
 
 /// T3's `safeAuthFailure` without a browser: a setup failure's own text, fixed texts for the
@@ -707,7 +717,6 @@ impl Provider for AntigravityProvider {
                     input.provider_session_id.as_str().to_owned(),
                     input.mcp_servers.clone(),
                     Purpose::Thread,
-                    OpenControl::default(),
                 )
                 .await?;
             let now = SystemEnv.now();
@@ -889,6 +898,63 @@ mod tests {
             script.cursor,
             script.failure
         );
+    }
+
+    /// No session can exist when the agent never started, so nothing is scanned for one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_setup_failure_does_no_scan() {
+        let (provider, _, dir) = provider(Vec::new());
+        assert!(provider.load_models().await.is_err());
+        assert_eq!(provider.scans.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A check that ends while `session/new` is outstanding knows no session id: the files
+    /// the agent stored for its scratch folder are found by their `.meta` and go.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_abort_during_session_new_removes_that_sessions_files() {
+        const ID: &str = "4b6f0f2e-9c1d-4a7b-8e3f-2d5c6b7a8f90";
+        let mut script = handshake(json!([]));
+        script.pop(); // `session/new` gets no reply.
+        let (provider, scripts, dir) = provider(vec![script]);
+        let script = scripts[0].clone();
+        let setup = provider.dirs.runtime_temp.join("setup");
+        let conversations = provider
+            .dirs
+            .profile
+            .join("antigravity-acp")
+            .join("conversations");
+        let stored = conversations.clone();
+        let abort = Box::pin(async move {
+            while !lock(&script)
+                .written
+                .iter()
+                .any(|frame| frame["method"] == "session/new")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            // The agent stores the session for its scratch folder, as `agy` does.
+            let run = std::fs::read_dir(&setup)
+                .unwrap()
+                .flatten()
+                .next()
+                .unwrap()
+                .path();
+            std::fs::create_dir_all(&stored).unwrap();
+            let meta = json!({"cwd": run.display().to_string()}).to_string();
+            std::fs::write(stored.join(format!("{ID}.meta")), meta).unwrap();
+            std::fs::write(stored.join(format!("{ID}.db")), "history").unwrap();
+        });
+        let control = OpenControl {
+            abort: Some(abort),
+            ..OpenControl::default()
+        };
+        let result = provider.throwaway_session(control, None).await;
+        assert!(matches!(result, Err(OpenError::Aborted)), "{result:?}");
+        assert_eq!(provider.scans.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(!conversations.join(format!("{ID}.meta")).exists());
+        assert!(!conversations.join(format!("{ID}.db")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// T3's `publishCatalog`: each model is selected, then the original again, and the

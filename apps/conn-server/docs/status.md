@@ -109,9 +109,10 @@ through its process supervisor before the reap, so a reused PID is never signall
 starts (folders, spawn, cleanup of a failed spawn) on a blocking thread, and a check cancelled
 meanwhile still stops what it started; after a check the agent's session files for the
 check's workspace go (`removeAntigravitySessionFiles`: an absent file counts as removed, other
-errors stop it, `.meta` goes last); beyond T3, a failed or cancelled check also removes a
-session stored before `session/new` answered (found by its `.meta`), a symlinked `.meta` or a
-`conversations` folder outside the profile is never followed; a custom executable may have
+errors stop it, `.meta` goes last); beyond T3, a check that ended with `session/new` sent and
+unanswered also removes the session stored meanwhile (found by its `.meta`; no scan when no
+session could exist), and a symlinked `.meta`, an `antigravity-acp` symlink, or a
+`conversations` or `brain` folder outside the profile is never followed; a custom executable may have
 any name (`resolveCommandPath`); the server's own setup errors (a missing executable, an
 unusable scratch folder) keep T3's texts, while a profile it cannot prepare shows the check's
 and the refresh's fixed texts, as T3's transport error does; known ACP errors

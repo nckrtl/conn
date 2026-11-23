@@ -210,9 +210,10 @@ const EXECUTABLE_MISSING: &str =
 /// opened in `cwd`. The unique temporary `cwd` in the session's `.meta` proves the session is
 /// ours; any other session stays. Blocking: call it off the runtime thread.
 ///
-/// Beyond T3: the `conversations` and `brain` folders are resolved once and must lie inside the
-/// profile, a `.meta` that is a symlink proves nothing, and the files go only while the checked
-/// `.meta` is still the same file in the same folder. Removal stops at the first error, as in
+/// Beyond T3: `antigravity-acp` must be a real folder inside the profile, not a symlink; the
+/// `conversations` and `brain` folders are resolved once, before anything is removed, and must
+/// lie inside it; a `.meta` that is a symlink proves nothing; and the files go only while the
+/// checked `.meta` is still the same file in the same folder. Removal stops at the first error, as in
 /// T3, and `.meta` goes last, so an incomplete cleanup keeps its ownership marker.
 pub(crate) fn remove_session_files(profile: &Path, session_id: &str, cwd: &str) {
     if !is_native_session_id(session_id) {
@@ -229,20 +230,33 @@ fn remove_owned_session(profile: &Path, session_id: &str, cwd: &str) -> std::io:
         Err(error) if error.kind() == NotFound => Ok(()),
         other => other,
     };
-    let acp = match std::fs::canonicalize(profile.join("antigravity-acp")) {
+    let acp = profile.join("antigravity-acp");
+    match std::fs::symlink_metadata(&acp) {
+        Ok(meta) if meta.is_dir() => {}
+        // A symlink (or anything but a folder) could lead out of the profile.
+        Ok(_) => return Ok(()),
         Err(error) if error.kind() == NotFound => return Ok(()),
-        acp => acp?,
-    };
-    let inside = |name: &str| -> std::io::Result<Option<PathBuf>> {
+        Err(error) => return Err(error),
+    }
+    let acp = std::fs::canonicalize(acp)?;
+    if !acp.starts_with(std::fs::canonicalize(profile)?) {
+        return Ok(());
+    }
+    let folder = |name: &str| -> std::io::Result<Folder> {
         match std::fs::canonicalize(acp.join(name)) {
-            Ok(dir) => Ok(dir.starts_with(&acp).then_some(dir)),
-            Err(error) if error.kind() == NotFound => Ok(None),
+            Ok(dir) if dir.starts_with(&acp) => Ok(Folder::Inside(dir)),
+            Ok(_) => Ok(Folder::Outside),
+            Err(error) if error.kind() == NotFound => Ok(Folder::Absent),
             Err(error) => Err(error),
         }
     };
-    let Some(conversations) = inside("conversations")? else {
+    let (Folder::Inside(conversations), brain) = (folder("conversations")?, folder("brain")?)
+    else {
         return Ok(());
     };
+    if brain == Folder::Outside {
+        return Ok(());
+    }
     let file = |suffix: &str| conversations.join(format!("{session_id}{suffix}"));
     let meta_path = file(".meta");
     let checked = match std::fs::symlink_metadata(&meta_path) {
@@ -267,17 +281,27 @@ fn remove_owned_session(profile: &Path, session_id: &str, cwd: &str) -> std::io:
     // The checked `.meta` must still be there, in the folder resolved above.
     let unchanged = std::fs::symlink_metadata(&meta_path)
         .is_ok_and(|now| same_file(&now, &checked))
-        && std::fs::canonicalize(acp.join("conversations")).is_ok_and(|dir| dir == conversations);
+        && folder("conversations")? == Folder::Inside(conversations.clone())
+        && folder("brain")? == brain;
     if !unchanged {
         return Ok(());
     }
     for suffix in [".db", ".db-wal", ".db-shm", ".db-journal"] {
         absent_is_done(std::fs::remove_file(file(suffix)))?;
     }
-    if let Some(brain) = inside("brain")? {
+    if let Folder::Inside(brain) = brain {
         absent_is_done(std::fs::remove_dir_all(brain.join(session_id)))?;
     }
     absent_is_done(std::fs::remove_file(meta_path))
+}
+
+/// Where a folder of `antigravity-acp` resolves.
+#[derive(Debug, PartialEq, Eq)]
+enum Folder {
+    Inside(PathBuf),
+    Absent,
+    /// It leads out of `antigravity-acp`.
+    Outside,
 }
 
 /// The same file on disk: device and inode on Unix.
@@ -293,8 +317,9 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     }
 }
 
-/// The sessions whose `.meta` names `cwd`: what a check left behind when it ended before the
-/// agent's `session/new` reply named its session. Beyond T3, which keeps those files.
+/// The sessions whose `.meta` names `cwd`: what a check left behind when it ended with its
+/// `session/new` sent and unanswered, so no id names the session. Beyond T3, which keeps those
+/// files. Each `.meta` is read, so call it only then.
 pub(crate) fn remove_sessions_in(profile: &Path, cwd: &str) {
     let conversations = profile.join("antigravity-acp").join("conversations");
     let Ok(entries) = std::fs::read_dir(&conversations) else {
@@ -1766,6 +1791,33 @@ mod tests {
             let kept = outside.join(format!("{SESSION_ID}.db")).exists();
             let _ = std::fs::remove_dir_all(&outside);
             assert!(kept, "a file outside the profile was removed");
+        }
+
+        /// An `antigravity-acp` that links out of the profile is refused, so nothing there
+        /// is removed, even with a matching `.meta`.
+        #[cfg(unix)]
+        #[test]
+        fn an_acp_link_out_of_the_profile_is_refused() {
+            let profile = Profile::new("acp-link");
+            profile.meta("/tmp/t3-antigravity-setup-6");
+            let acp = profile.root.join("antigravity-acp");
+            let outside = profile.root.with_extension("acp-outside");
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::rename(&acp, &outside).unwrap();
+            std::os::unix::fs::symlink(&outside, &acp).unwrap();
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-6");
+            let kept: Vec<bool> = [".db", ".db-wal", ".meta"]
+                .iter()
+                .map(|suffix| {
+                    outside
+                        .join("conversations")
+                        .join(format!("{SESSION_ID}{suffix}"))
+                        .exists()
+                })
+                .chain([outside.join("brain").join(SESSION_ID).exists()])
+                .collect();
+            let _ = std::fs::remove_dir_all(&outside);
+            assert_eq!(kept, [true; 4], "a file outside the profile was removed");
         }
 
         /// A check that ended before `session/new` answered knows no session id: the sessions

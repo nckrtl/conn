@@ -283,6 +283,40 @@ pub(crate) fn prepare_profile(
     std::fs::write(acp.join("settings.json"), profile_settings(settings))
 }
 
+/// `removeAntigravitySessionFiles`, after the agent closed: a native session's database,
+/// metadata and brain folder go when its id is a v4 UUID and its metadata names `cwd`, the
+/// unique scratch folder that proves the session is ours. Anything else leaves them.
+pub(crate) fn remove_session_files(profile: &Path, session_id: &str, cwd: &str) {
+    if !is_uuid_v4(session_id) {
+        return;
+    }
+    let acp = profile.join("antigravity-acp");
+    let conversations = acp.join("conversations");
+    let Ok(text) = std::fs::read_to_string(conversations.join(format!("{session_id}.meta"))) else {
+        return;
+    };
+    let named = serde_json::from_str::<Value>(&text).is_ok_and(|meta| meta["cwd"] == cwd);
+    if !named {
+        return;
+    }
+    for suffix in [".db", ".db-wal", ".db-shm", ".db-journal", ".meta"] {
+        let _ = std::fs::remove_file(conversations.join(format!("{session_id}{suffix}")));
+    }
+    let _ = std::fs::remove_dir_all(acp.join("brain").join(session_id));
+}
+
+/// Effect's `isUUID(4)`: `xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx`, any case.
+fn is_uuid_v4(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            14 => *byte == b'4',
+            19 => matches!(byte.to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b'),
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
 /// `antigravityProfileSettings`: `{"auth":{"type":…},"gcp":{…}}` and a newline.
 fn profile_settings(settings: &AntigravitySettings) -> String {
     let mut gcp = serde_json::Map::new();
@@ -1094,6 +1128,19 @@ pub(crate) fn thinking_config(options: &Value) -> Option<&Value> {
         .iter()
         .find(|o| o["category"] == "thought_level")
         .filter(|o| o["type"] == "select")
+}
+
+/// The thinking level a selection chose, when the session offers it and has another one
+/// (T3's selection loop over the live config options): `(config id, value)` to write.
+pub(crate) fn thinking_write(options: &Value, selections: &[Value]) -> Option<(String, String)> {
+    let config = thinking_config(options)?;
+    let id = config["id"].as_str()?;
+    let chosen = selections.iter().find(|s| s["id"] == id)?["value"].as_str()?;
+    let value = if chosen == "_t3/empty" { "" } else { chosen };
+    let offered = flatten_choices(&config["options"])
+        .iter()
+        .any(|choice| choice["value"] == value);
+    (offered && config["currentValue"] != value).then(|| (id.to_owned(), value.to_owned()))
 }
 
 /// `antigravityModelOptions`: the values of the `model` option.

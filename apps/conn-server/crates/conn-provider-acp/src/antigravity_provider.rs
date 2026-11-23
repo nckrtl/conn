@@ -331,6 +331,7 @@ impl AntigravityProvider {
         let workspace = cwd.display().to_string();
         let policy =
             json!({"runtimeMode": "full-access", "interactionMode": "default", "cwd": workspace});
+        let scratch = workspace.clone();
         // T3's scoped refresh: the limit interrupts the work, then the scope stops the agent
         // before the refresh answers.
         let deadline = tokio::time::Instant::now() + MODEL_LOAD_TIMEOUT;
@@ -349,8 +350,18 @@ impl AntigravityProvider {
                     control,
                 )
                 .await?;
+            let session_id = session.handshake().await.1["sessionId"]
+                .as_str()
+                .map(str::to_owned);
             let published = tokio::time::timeout_at(deadline, self.publish_catalog(&session)).await;
             session.close().await;
+            if let Some(session_id) = session_id {
+                let profile = self.dirs.profile.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    antigravity::remove_session_files(&profile, &session_id, &scratch);
+                })
+                .await;
+            }
             Ok::<bool, ProviderError>(published.is_ok())
         }
         .await;
@@ -1296,6 +1307,66 @@ mod tests {
         );
         assert_eq!(lock(&scripts[0]).cursor, 3, "no request after the URL");
         assert_eq!(lock(&stops).len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A model refresh opens a throwaway native session in its scratch folder. After the
+    /// close its files leave the profile (`removeAntigravitySessionFiles`): only a v4 UUID
+    /// whose metadata names that folder; another session's files stay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_model_refresh_removes_its_native_session_files() {
+        let ours = "00000000-0000-4000-8000-00000000a6f1";
+        let theirs = "00000000-0000-4000-8000-0000000000b2";
+        let mut script = handshake(json!([{"id": "model", "name": "Model", "category": "model",
+            "type": "select", "currentValue": "gemini-a",
+            "options": [{"value": "gemini-a", "name": "Gemini A"}]}]));
+        let last = script.len() - 1;
+        script[last]["frame"]["result"]["sessionId"] = json!(ours);
+        let (mut provider, _, dir, _) = provider_with(Vec::new(), Default::default());
+        let queue = Arc::new(Mutex::new(Some(Script::new(script, "/w"))));
+        let acp = provider.dirs.profile.join("antigravity-acp");
+        let setup = provider.dirs.runtime_temp.join("setup");
+        let (conversations, brain) = (acp.join("conversations"), acp.join("brain"));
+        let planted = (conversations.clone(), brain.clone());
+        provider.test_spawner = Some(Arc::new(move || {
+            // The scratch folder exists now: the agent records its session there.
+            let scratch = std::fs::read_dir(&setup)?.next().unwrap()?.path();
+            let (conversations, brain) = &planted;
+            std::fs::create_dir_all(conversations)?;
+            for (id, cwd) in [
+                (ours, scratch.display().to_string()),
+                (theirs, "/elsewhere".into()),
+            ] {
+                std::fs::write(
+                    conversations.join(format!("{id}.meta")),
+                    json!({"cwd": cwd}).to_string(),
+                )?;
+                std::fs::write(conversations.join(format!("{id}.db")), "")?;
+                std::fs::create_dir_all(brain.join(id))?;
+            }
+            let script = lock(&queue)
+                .take()
+                .ok_or_else(|| std::io::Error::other("no script"))?;
+            let (writer, events) = replay_agent::spawn(script);
+            Ok(session::Spawned {
+                writer,
+                events,
+                stop: Box::new(|_| Box::pin(async {})),
+            })
+        }));
+        provider.refresh_models().unwrap().await.unwrap();
+        for suffix in [".meta", ".db"] {
+            assert!(
+                !conversations.join(format!("{ours}{suffix}")).exists(),
+                "{suffix}"
+            );
+            assert!(
+                conversations.join(format!("{theirs}{suffix}")).exists(),
+                "{suffix}"
+            );
+        }
+        assert!(!brain.join(ours).exists());
+        assert!(brain.join(theirs).exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

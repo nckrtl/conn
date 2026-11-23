@@ -408,9 +408,11 @@ impl AcpSession {
             .as_ref()
             .map(|r| r.connection.clone());
         if let Some(connection) = live {
-            let effort = crate::grok::selection_effort(&to_json(&input.model_selection));
+            let selection = to_json(&input.model_selection);
+            let effort = crate::grok::selection_effort(&selection);
+            let options = selection["options"].as_array().cloned().unwrap_or_default();
             inner
-                .configure(&connection, &model, effort.as_deref())
+                .configure(&connection, &model, effort.as_deref(), &options)
                 .await?;
         }
         inner.check_abandoned(run_id)?;
@@ -762,7 +764,7 @@ impl Inner {
         }
         let model = self.config.model.clone();
         let effort = self.config.effort.clone();
-        self.configure(connection, &model, effort.as_deref())
+        self.configure(connection, &model, effort.as_deref(), &[])
             .await?;
         // T3's start commits only when no termination was recorded (Antigravity's sign-in
         // URL right behind the last reply).
@@ -847,16 +849,19 @@ impl Inner {
 
     /// `configureSession`'s model part: switch the session's model (and Grok's reasoning
     /// effort) when the flavor says so. A rejected effort is dropped and the switch sent
-    /// again without it, as T3 does.
+    /// again without it, as T3 does. A config-option flavor then applies the chosen
+    /// thinking level from `options` (the selection's).
     async fn configure(
         &self,
         connection: &Connection,
         model: &str,
         effort: Option<&str>,
+        options: &[Value],
     ) -> ProviderResult<()> {
         let key = format!("{model}\u{0}{}", effort.unwrap_or(""));
         if self.config.flavor.model_switch == ModelSwitch::ConfigOption {
-            return self.configure_option(connection, model, key).await;
+            self.configure_option(connection, model, key).await?;
+            return self.configure_thinking(connection, options).await;
         }
         let (session_id, switch, current) = {
             let state = self.state.lock().await;
@@ -960,6 +965,39 @@ impl Inner {
         }
         self.state.lock().await.active_model = Some(key);
         Ok(())
+    }
+
+    /// The chosen thinking level, after the model: T3 writes each chosen option the live
+    /// session offers, and skips a value the agent rejects as invalid (`-32602`).
+    async fn configure_thinking(
+        &self,
+        connection: &Connection,
+        options: &[Value],
+    ) -> ProviderResult<()> {
+        let (session_id, write, before) = {
+            let state = self.state.lock().await;
+            (
+                state.session_id.clone().unwrap_or_default(),
+                crate::antigravity::thinking_write(&state.setup["configOptions"], options),
+                state.config_updates,
+            )
+        };
+        let Some((config_id, value)) = write else {
+            return Ok(());
+        };
+        let params = obj()
+            .with("sessionId", session_id)
+            .with("configId", config_id.clone())
+            .with("value", value.clone());
+        match connection.call("session/set_config_option", params).await {
+            Ok(reply) => {
+                let mut state = self.state.lock().await;
+                self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
+                Ok(())
+            }
+            Err(CallError::Rpc(error)) if error.code == -32602 => Ok(()),
+            Err(e) => Err(failed(self.config.flavor, "session/set_config_option", &e)),
+        }
     }
 
     /// A `session/set_config_option` reply: its options, or the value written, unless the

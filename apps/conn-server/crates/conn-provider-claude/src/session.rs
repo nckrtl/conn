@@ -1270,6 +1270,8 @@ impl ClaudeSession {
         // the client shows it running as T3's does; what the CLI receives does not change.
         // With a live query the host is up, and frames of that query must not reach the new
         // turn before `prepare` decided to keep or close it, so the turn opens after it.
+        let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
+        let models = catalog::current_provider_models(&self.inner.config.model_manifest, now);
         let early = {
             let mut state = self.inner.lock();
             if state.mapper.turn_active() {
@@ -1278,6 +1280,7 @@ impl ClaudeSession {
                     "the previous turn is still running",
                 ));
             }
+            state.mapper.set_catalog(models);
             if state.live.is_none() && !state.closed {
                 let mode = plain_policy(&input.runtime_policy).permission_mode;
                 Some(state.mapper.begin_turn(&input, &mode))

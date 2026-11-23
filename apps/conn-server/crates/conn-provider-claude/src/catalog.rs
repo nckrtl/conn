@@ -674,6 +674,27 @@ pub fn resolve_slug(value: &str) -> String {
         .map_or_else(|| value.to_string(), |(slug, _)| slug.clone())
 }
 
+/// [`resolve_slug`] over `models` (the turn's resolved catalog, as the picker lists it).
+pub fn resolve_slug_in(models: &[Value], value: &str) -> String {
+    let trimmed = value.trim();
+    models
+        .iter()
+        .find(|m| m["slug"] == trimmed)
+        .or_else(|| {
+            models.iter().find(|m| {
+                m["aliases"].as_array().is_some_and(|aliases| {
+                    aliases
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|a| a.eq_ignore_ascii_case(trimmed))
+                })
+            })
+        })
+        .and_then(|m| m["slug"].as_str())
+        .filter(|_| !trimmed.is_empty())
+        .map_or_else(|| value.to_string(), str::to_owned)
+}
+
 /// `applyClaudePromptEffortPrefix`: trims the text, and prefixes `Ultrathink:` for the
 /// `ultrathink` effort unless the text is a slash command or already has it.
 pub fn prompt_text(text: &str, prompt_effort: Option<&str>) -> String {

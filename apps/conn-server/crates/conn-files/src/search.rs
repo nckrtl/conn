@@ -87,11 +87,15 @@ impl Glob {
 
     fn is_match(&self, path: &str) -> bool {
         match self {
-            Self::Extension(suffix) => path
-                .len()
-                .checked_sub(suffix.len())
-                .and_then(|start| path.get(start..))
-                .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix)),
+            // fff wants a name longer than the suffix: `*.env` skips a bare `.env`.
+            Self::Extension(suffix) => {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                name.len()
+                    .checked_sub(suffix.len())
+                    .filter(|&start| start > 0)
+                    .and_then(|start| name.get(start..))
+                    .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+            }
             Self::Valid(m) => m.is_match(path),
             Self::Invalid => false,
         }
@@ -249,9 +253,19 @@ fn nested_worktree_files(
         .filter_map(|worktree| {
             let worktree = std::fs::canonicalize(worktree).ok()?;
             let nested = worktree.strip_prefix(&root).ok()?.to_str()?;
+            if nested.is_empty() {
+                return None; // the main checkout; the walk already covered it
+            }
             let candidate = format!("{nested}/{relative}");
-            let kind = symlink_kind(&root.join(&candidate), &root, &[], internal);
-            (!nested.is_empty() && kind == Some(ProjectEntryKind::File))
+            // The walk skips `.git` and internal folders before it looks at a link; so does this.
+            let mut listed = root.clone();
+            for segment in candidate.split('/') {
+                listed.push(segment);
+                if segment == ".git" || internal.contains(&listed) {
+                    return None;
+                }
+            }
+            (symlink_kind(&listed, &root, &[], internal) == Some(ProjectEntryKind::File))
                 .then(|| entry(&candidate, ProjectEntryKind::File))
         })
         .collect()

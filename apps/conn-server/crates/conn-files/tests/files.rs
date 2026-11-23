@@ -675,6 +675,15 @@ fn finds_a_path_inside_a_gitignored_nested_worktree_only_by_its_exact_path() {
     for query in ["src/leak.py", "src/head.py"] {
         assert!(names(&f, query, 25).is_empty(), "{query}");
     }
+    // As in the walk, a name under a `.git` folder stays out; a link inside the checkout counts.
+    d.write(".worktrees/x/sub/.git/plain.py", "print(6)");
+    assert!(names(&f, "sub/.git/plain.py", 25).is_empty());
+    symlink(
+        f.project.join(".worktrees/x/src/foo.py"),
+        f.project.join(".worktrees/x/src/alias.py"),
+    )
+    .unwrap();
+    assert_eq!(names(&f, "src/alias.py", 25), [".worktrees/x/src/alias.py"]);
     // A gone checkout's folder is no longer one of them.
     fs::remove_dir_all(f.project.join(".worktrees/x")).unwrap();
     d.write(".worktrees/x/src/foo.py", "print(4)");
@@ -696,6 +705,8 @@ fn name_globs_take_brace_alternatives_and_keep_literal_braces() {
         "src/notes.md",
         "src/UPPER.TS",
         "src/clip.ts}",
+        "config/.env",
+        "config/app.ENV",
     ] {
         d.write(path, "");
     }
@@ -718,6 +729,8 @@ fn name_globs_take_brace_alternatives_and_keep_literal_braces() {
         ["src/UPPER.TS", "src/foo{bar}.ts", "src/main.ts"]
     );
     assert_eq!(names(&f, "*.ts}", 10), ["src/clip.ts}"]);
+    // fff wants a name longer than the extension: a bare `.env` is not an `*.env` file.
+    assert_eq!(names(&f, "*.env", 10), ["config/app.ENV"]);
     assert_eq!(names(&f, "src/{main}.ts", 10), ["src/main.ts"]);
     assert_eq!(names(&f, "src/{foo{bar},notes}.md", 10), ["src/notes.md"]);
     assert_eq!(names(&f, "*.{TS}", 10), ["src/foo{bar}.ts", "src/main.ts"]);

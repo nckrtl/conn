@@ -977,3 +977,162 @@ async fn commit_preparation_truncates_large_diffs_and_does_not_run_textconv() {
     assert!(context.patch.ends_with("\n\n[truncated]"));
     assert!(context.patch.contains("+a line of text"));
 }
+
+/// The Git settings a project can carry that change what a plain `git diff` reports.
+const DIFF_SETTINGS: [&[(&str, &str)]; 3] = [
+    &[],
+    &[("diff.relative", "true")],
+    &[("diff.relative", "true"), ("color.ui", "always")],
+];
+
+fn configure(work: &std::path::Path, settings: &[(&str, &str)]) {
+    for (key, value) in settings {
+        git(work, &["config", key, value]);
+    }
+}
+
+/// `notes.txt` at the root conflicts in a merge from `feature`; `sub/` is the project folder.
+fn merge_conflict(label: &str) -> Fixture {
+    let fx = Fixture::new(label);
+    write(&fx.work, "notes.txt", "base\n");
+    write(&fx.work, "sub/chosen.txt", "one\n");
+    commit_all(&fx.work, "base");
+    git(&fx.work, &["checkout", "-q", "-b", "feature"]);
+    write(&fx.work, "notes.txt", "feature\n");
+    commit_all(&fx.work, "feature");
+    git(&fx.work, &["checkout", "-q", "main"]);
+    write(&fx.work, "notes.txt", "main\n");
+    commit_all(&fx.work, "main");
+    let merge = std::process::Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(&fx.work)
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge should conflict");
+    fx
+}
+
+// T3: "keeps other files conflicted through a selected-file commit", run from a nested project
+// folder under each diff setting.
+#[tokio::test]
+async fn keeps_other_files_conflicted_through_a_selected_file_commit() {
+    for settings in DIFF_SETTINGS {
+        let fx = Fixture::new("commit-stash-pop");
+        write(&fx.work, "notes.txt", "base\n");
+        write(&fx.work, "sub/chosen.txt", "one\n");
+        commit_all(&fx.work, "base");
+        // git stash pop leaves notes.txt conflicted with no merge in progress.
+        write(&fx.work, "notes.txt", "stashed version\n");
+        git(&fx.work, &["stash", "-q"]);
+        write(&fx.work, "notes.txt", "committed version\n");
+        commit_all(&fx.work, "change notes");
+        let pop = std::process::Command::new("git")
+            .args(["stash", "pop"])
+            .current_dir(&fx.work)
+            .output()
+            .unwrap();
+        assert!(!pop.status.success(), "the stash pop should conflict");
+        configure(&fx.work, settings);
+        write(&fx.work, "sub/chosen.txt", "one\ntwo\n");
+        // A formatting hook stages its edit into the temporary index that --only commits from.
+        write(
+            &fx.work,
+            ".git/hooks/pre-commit",
+            "#!/bin/sh\necho formatted >> sub/chosen.txt\ngit add sub/chosen.txt\n",
+        );
+        let hook = fx.work.join(".git/hooks/pre-commit");
+        let mut mode = std::fs::metadata(&hook).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        std::fs::set_permissions(&hook, mode).unwrap();
+        let head = git(&fx.work, &["rev-parse", "HEAD"]);
+        let unmerged = git(&fx.work, &["ls-files", "--unmerged"]);
+        assert_eq!(unmerged.lines().count(), 3, "{settings:?}");
+        let sub = fx.work.join("sub");
+        let selected = vec!["sub/chosen.txt".to_owned()];
+
+        let context = commit::prepare_context(&sub, Some(&selected), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.summary, "M\tsub/chosen.txt", "{settings:?}");
+        commit::create(&sub, "Add chosen", "", Some(&selected))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git(&fx.work, &["rev-parse", "HEAD~1"]),
+            head,
+            "{settings:?}"
+        );
+        assert_eq!(
+            git(&fx.work, &["show", "--pretty=", "--name-only", "HEAD"]),
+            "sub/chosen.txt\n"
+        );
+        assert_eq!(
+            git(&fx.work, &["show", "HEAD:sub/chosen.txt"]),
+            "one\ntwo\nformatted\n"
+        );
+        assert_eq!(
+            git(&fx.work, &["show", ":sub/chosen.txt"]),
+            "one\ntwo\nformatted\n"
+        );
+        assert_eq!(git(&fx.work, &["ls-files", "--unmerged"]), unmerged);
+        let all = commit::prepare_context(&sub, None, true).await.unwrap_err();
+        assert!(
+            all.to_string().contains(
+                "Cannot commit with unresolved merge conflicts in notes.txt. Resolve them, then commit."
+            ),
+            "{settings:?}: {all}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn commit_all_from_a_subdirectory_refuses_a_conflict_anywhere() {
+    for settings in DIFF_SETTINGS {
+        let fx = merge_conflict("commit-all-conflict");
+        configure(&fx.work, settings);
+        write(&fx.work, "sub/chosen.txt", "one\ntwo\n");
+        let head = git(&fx.work, &["rev-parse", "HEAD"]);
+        let stages = git(&fx.work, &["ls-files", "-s"]);
+        let notes = std::fs::read(fx.work.join("notes.txt")).unwrap();
+        assert!(String::from_utf8_lossy(&notes).starts_with("<<<<<<< HEAD\n"));
+        let sub = fx.work.join("sub");
+
+        let prepared = commit::prepare_context(&sub, None, true).await.unwrap_err();
+        assert!(
+            prepared
+                .to_string()
+                .contains("unresolved merge conflicts in notes.txt"),
+            "{settings:?}: {prepared}"
+        );
+        let created = commit::create(&sub, "All", "", None).await.unwrap_err();
+        assert!(
+            created
+                .to_string()
+                .contains("unresolved merge conflicts in notes.txt"),
+            "{settings:?}: {created}"
+        );
+        assert_eq!(git(&fx.work, &["rev-parse", "HEAD"]), head, "{settings:?}");
+        assert!(fx.work.join(".git/MERGE_HEAD").exists(), "{settings:?}");
+        assert_eq!(git(&fx.work, &["ls-files", "-s"]), stages, "{settings:?}");
+        assert_eq!(std::fs::read(fx.work.join("notes.txt")).unwrap(), notes);
+
+        // Once resolved, Commit All finishes the merge with both parents.
+        write(&fx.work, "notes.txt", "resolved\n");
+        commit::create(&sub, "Merge", "", None).await.unwrap();
+        assert_eq!(
+            git(&fx.work, &["rev-list", "--parents", "-n1", "HEAD"])
+                .split_whitespace()
+                .count(),
+            3,
+            "{settings:?}"
+        );
+        assert_eq!(git(&fx.work, &["show", "HEAD:notes.txt"]), "resolved\n");
+        assert_eq!(
+            git(&fx.work, &["show", "HEAD:sub/chosen.txt"]),
+            "one\ntwo\n"
+        );
+        assert!(!fx.work.join(".git/MERGE_HEAD").exists());
+    }
+}

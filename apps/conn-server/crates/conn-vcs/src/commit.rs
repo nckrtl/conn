@@ -41,6 +41,15 @@ fn paths(paths: &[String]) -> Vec<String> {
     paths.iter().map(|p| format!(":(top,literal){p}")).collect()
 }
 
+/// `git diff` over the whole repository: a project's `diff.relative` would limit it to the cwd.
+fn diff<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    ["-c", "diff.relative=false", "diff"]
+        .into_iter()
+        .chain(args)
+        .map(Into::into)
+        .collect()
+}
+
 async fn operation_in_progress(cwd: &Path) -> VcsResult<Option<&'static str>> {
     for (name, operation) in [
         ("MERGE_HEAD", "merge"),
@@ -98,37 +107,32 @@ async fn stage(
             ])
             .run()
             .await?;
-        }
-        let unmerged = run(vec![
-            "diff".into(),
-            "--cached".into(),
-            "--name-only".into(),
-            "--diff-filter=U".into(),
-            "-z".into(),
-        ])
-        .text()
-        .await?;
-        if index.is_none()
-            && !unmerged
-                .split('\0')
-                .any(|p| !p.is_empty() && !selected.iter().any(|s| s == p))
-        {
-            run(vec!["reset".into(), "--quiet".into()]).run().await?;
-        }
-    } else {
-        let unmerged = run(vec![
-            "diff".into(),
-            "--name-only".into(),
-            "--diff-filter=U".into(),
-            "-z".into(),
-        ])
-        .text()
-        .await?;
-        if !unmerged.is_empty() {
-            let checked = run(vec!["diff".into(), "--check".into()])
-                .allow_exit(&[2])
+        } else {
+            let unmerged = run(diff(["--cached", "--name-only", "--diff-filter=U", "-z"]))
                 .text()
                 .await?;
+            // Reset drops every conflict stage, so keep the index while an unselected file is
+            // conflicted.
+            if !unmerged
+                .split('\0')
+                .any(|p| !p.is_empty() && !selected.iter().any(|s| s == p))
+            {
+                run(vec!["reset".into(), "--quiet".into()]).run().await?;
+            }
+        }
+    } else {
+        let unmerged = run(diff(["--name-only", "--diff-filter=U", "-z"]))
+            .text()
+            .await?;
+        let unmerged = unmerged
+            .split('\0')
+            .filter(|file| !file.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !unmerged.is_empty() {
+            let mut check = diff(["--check", "--no-color", "--"]);
+            check.extend(paths(&unmerged));
+            let checked = run(check).allow_exit(&[2]).text().await?;
             let empty = run(vec![
                 "hash-object".into(),
                 "-t".into(),
@@ -139,7 +143,7 @@ async fn stage(
             .text()
             .await?;
             let mut conflicted = Vec::new();
-            for file in unmerged.split('\0').filter(|file| !file.is_empty()) {
+            for file in &unmerged {
                 let prefix = format!("{file}:");
                 let lines = checked
                     .lines()
@@ -152,18 +156,16 @@ async fn stage(
                 if lines.is_empty() {
                     continue;
                 }
-                let patch = run(vec![
-                    "diff".into(),
-                    "--no-color".into(),
-                    "--no-ext-diff".into(),
-                    "--no-textconv".into(),
-                    "--text".into(),
-                    empty.trim().into(),
-                    "--".into(),
-                    format!(":(top,literal){file}"),
-                ])
-                .text()
-                .await?;
+                let mut args = diff([
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--text",
+                    empty.trim(),
+                    "--",
+                ]);
+                args.push(format!(":(top,literal){file}"));
+                let patch = run(args).text().await?;
                 let added = patch
                     .lines()
                     .skip_while(|line| !line.starts_with("@@"))
@@ -175,7 +177,7 @@ async fn stage(
                     })
                 };
                 if reported('<') && reported('>') {
-                    conflicted.push(file);
+                    conflicted.push(file.as_str());
                 }
             }
             if !conflicted.is_empty() {
@@ -350,7 +352,7 @@ pub async fn create(
     // T3 uses --only only when unselected conflict stages have to survive.
     let unmerged = command(
         cwd,
-        ["diff", "--cached", "--name-only", "--diff-filter=U", "-z"],
+        diff(["--cached", "--name-only", "--diff-filter=U", "-z"]),
     )
     .text()
     .await?;

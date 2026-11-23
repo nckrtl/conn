@@ -130,9 +130,11 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
         .await
         .map_err(super::internal)?
         .is_some();
-    // T3 `resolveTarget`, shared with `create_threads`: driver and instance resolution, project
-    // enablement, the health check, the model and its options.
-    let selection = super::create_threads::resolve_target(cx, parent_thread, &target, retried)?;
+    // T3 `resolveTargetRechecking`, shared with `create_threads`: driver and instance
+    // resolution, project enablement, the health check, the model and its options.
+    let selection =
+        super::create_threads::resolve_target_rechecking(cx, parent_thread, &target, retried)
+            .await?;
     let runtime_mode = threads::resolve_runtime_mode(
         parent_thread["runtimeMode"]
             .as_str()

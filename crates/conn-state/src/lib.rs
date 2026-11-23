@@ -12,6 +12,7 @@
 //! - [`LayoutState`]: sidebar, right panel, and tab layout.
 
 mod annotations;
+mod discard_undo;
 mod drafts;
 mod layout;
 pub mod provider_auth;
@@ -20,6 +21,7 @@ mod question;
 mod scheduled;
 mod shell;
 mod sidebar;
+mod sidebar_nav;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 mod thread;
@@ -51,6 +53,11 @@ pub use crate::scheduled::{
     schedule_label, webhook_delivery_label,
 };
 
+pub use crate::discard_undo::{
+    DISCARD_UNDO_SECS, DiscardNotice, DiscardUndo, UNDO_FAILED_NEW_CONTENT, UNDO_SHORTCUT_LABEL,
+    UndoShortcutScene, discard_short_summary, discard_summary, is_modifier_key, is_undo_key,
+    undo_label, undo_shortcut_applies, undone_summary,
+};
 pub use crate::drafts::{
     ProjectDraftSlots, Retarget, keeps_displaced_draft, persists_across_restart, project_draft_key,
     retarget_draft,
@@ -68,6 +75,11 @@ pub use crate::sidebar::{
     DRAFT_STATUS_LABEL, DraftRowKey, SidebarDraft, SidebarDraftRow, draft_has_content,
     draft_preview, draft_row_key, draft_row_label, freeze_active_draft_row, is_activation_key,
     sidebar_draft_row, sidebar_draft_rows, threads_with_unsent_input,
+};
+pub use crate::sidebar_nav::{
+    FocusedRow, KeyMods, MenuKey, MenuNavItem, MenuStep, RowKey, RowKind, SETTLED_SHELF_ROW,
+    TreeKey, TreeRow, TreeStep, draft_tree_key, first_enabled, focused_row, is_menu_key, menu_key,
+    menu_step, restore_target, row_key, row_kind, tree_key, tree_step,
 };
 pub use crate::thread::{
     ApprovalDetails, EntryTiming, ItemStatus, PendingApproval, PendingRequest, RunStatus,

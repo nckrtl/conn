@@ -1101,8 +1101,9 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         }),
         ..Fake::default()
     };
-    let (secrets, reference) =
+    let answered =
         crate::secrets::tests::answered_reference(&env.dir, "project:test", "s3cret").await;
+    let (secrets, reference) = (answered.service.clone(), answered.reference.clone());
     let service = env
         .start_with_secrets(fake, "UTC", false, Some(secrets.clone()))
         .await;
@@ -1153,6 +1154,16 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         unspent().await,
         "a malformed save left the reference usable"
     );
+    // A blank secretRef is refused as input too (T3's `SecretRef` is trimmed and non-blank).
+    let mut blank = signed("thread:missing", "task:destination");
+    blank["schedule"]["signature"]["secretRef"] = json!(" ");
+    assert!(
+        matches!(
+            service.upsert(input(blank)).await,
+            Err(Failure::Invalid(message)) if message.starts_with("Invalid schedule")
+        ),
+        "a blank secretRef is invalid input"
+    );
     // A task write that fails puts the spent reference back.
     std::fs::set_permissions(&env.dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
     let unwritten = failure(&service, signed("thread:destination", "task:signed")).await;
@@ -1188,6 +1199,203 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
     assert!(edited.webhook.as_ref().is_some_and(|w| w.has_secret));
     let ids: Vec<String> = tasks(&service).await.into_iter().map(|t| t.id).collect();
     assert_eq!(ids, ["task:destination", "task:signed"]);
+}
+
+/// Holds a store write until the test releases it.
+pub(super) struct WriteGate {
+    reached: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+impl WriteGate {
+    pub(super) async fn hold(self) {
+        let _ = self.reached.send(());
+        let _ = self.release.await;
+    }
+}
+
+/// Pauses the service's next store write: the first receiver fires when the write is
+/// reached, and the sender lets it go on.
+fn pause_next_write(service: &ScheduledTasks) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached, at_write) = oneshot::channel();
+    let (go, release) = oneshot::channel();
+    *service.inner.write_gate.lock().expect("lock") = Some(WriteGate { reached, release });
+    (at_write, go)
+}
+
+fn set_mode(dir: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// A service whose store can resolve `thread:destination`, and a one-use reference to
+/// `s3cret` in `project:test`.
+async fn signed_service(name: &str) -> (Env, ScheduledTasks, crate::secrets::tests::Answered) {
+    let env = Env::new(name, "2026-07-01T09:00:00.000Z");
+    let fake = Fake {
+        shell: Box::new(|thread| {
+            (thread == "thread:destination").then(|| ThreadShell {
+                project_id: "project:test".into(),
+                deleted: false,
+                archived: false,
+            })
+        }),
+        ..Fake::default()
+    };
+    let answered =
+        crate::secrets::tests::answered_reference(&env.dir, "project:test", "s3cret").await;
+    let service = env
+        .start_with_secrets(fake, "UTC", false, Some(answered.service.clone()))
+        .await;
+    (env, service, answered)
+}
+
+fn signed_save(reference: &str, id: &str) -> UpsertInput {
+    input(
+        json!({"id": id, "projectId": "project:test", "threadId": "thread:destination",
+        "schedule": {"type": "webhook", "signature": {"header": "x-signature", "encoding": "hex", "prefix": "", "secretRef": reference}}}),
+    )
+}
+
+/// The reference is usable until a save's task write lands: the retry binds the secret and
+/// spends the reference, once.
+async fn retry_spends_it_once(
+    service: &ScheduledTasks,
+    answered: &crate::secrets::tests::Answered,
+) {
+    let unspent = async || {
+        answered
+            .service
+            .saved_ref("thread", "item")
+            .await
+            .expect("read")
+            .is_some()
+    };
+    assert!(unspent().await, "the reference stays usable");
+    let task = service
+        .upsert(signed_save(&answered.reference, "task:signed"))
+        .await
+        .expect("the retry saves");
+    assert!(task.webhook.as_ref().is_some_and(|w| w.has_secret));
+    assert!(
+        std::fs::read_to_string(service.inner.path.clone())
+            .expect("store")
+            .contains("s3cret"),
+        "the retry bound the saved value"
+    );
+    assert!(!unspent().await, "spent by the retry");
+    assert_eq!(
+        service
+            .upsert(signed_save(&answered.reference, "task:third-use"))
+            .await
+            .map_err(|e| e.to_string()),
+        Err(
+            "That secretRef was already used or does not exist. Ask the user again with request_secret."
+                .to_owned()
+        )
+    );
+}
+
+/// A second answer and a consume of the same reference wait while a save holds it. The
+/// save's write fails, so the reference still holds the value the save read: the racing
+/// consume gets it once, and it never comes back.
+#[tokio::test(start_paused = true)]
+async fn a_second_answer_and_a_consume_wait_for_a_save_of_the_same_reference() {
+    let (env, service, answered) = signed_service("claim-race").await;
+    let answered = Arc::new(answered);
+    let reference = answered.reference.clone();
+    let (at_write, go) = pause_next_write(&service);
+    let saving = tokio::spawn({
+        let service = service.clone();
+        let save = signed_save(&reference, "task:signed");
+        async move { service.upsert(save).await }
+    });
+    at_write.await.expect("the save reached its write");
+    set_mode(&env.dir, 0o555);
+    let mut again = tokio::spawn({
+        let answered = answered.clone();
+        async move { answered.answer_again("second").await }
+    });
+    let mut consumer = tokio::spawn({
+        let (secrets, reference) = (answered.service.clone(), reference.clone());
+        async move { secrets.consume(&reference, "project:test").await }
+    });
+    let waits = Duration::from_secs(60);
+    assert!(
+        tokio::time::timeout(waits, &mut again).await.is_err(),
+        "a second answer waits for the save"
+    );
+    assert!(
+        tokio::time::timeout(waits, &mut consumer).await.is_err(),
+        "a consume waits for the save"
+    );
+    go.send(()).expect("release");
+    let saved = saving.await.expect("join");
+    set_mode(&env.dir, 0o755);
+    assert_eq!(
+        saved.map_err(|e| e.to_string()),
+        Err("Could not save schedule task.".to_owned())
+    );
+    again.await.expect("join").expect("answered");
+    assert_eq!(
+        consumer.await.expect("join").map_err(|e| e.0),
+        Ok("s3cret".to_owned()),
+        "the consume got the value the failed save left"
+    );
+    let drained = answered
+        .service
+        .consume(&reference, "project:test")
+        .await
+        .map_err(|e| e.0);
+    assert_ne!(
+        drained,
+        Ok("s3cret".to_owned()),
+        "a spent value never comes back"
+    );
+}
+
+/// A caller that drops the save while its task write is pending (a WebSocket disconnect)
+/// leaves the reference usable.
+#[tokio::test(start_paused = true)]
+async fn a_save_dropped_during_its_write_leaves_the_reference_usable() {
+    let (_env, service, answered) = signed_service("claim-dropped").await;
+    let (at_write, _go) = pause_next_write(&service);
+    let saving = tokio::spawn({
+        let service = service.clone();
+        let save = signed_save(&answered.reference, "task:signed");
+        async move { service.upsert(save).await }
+    });
+    at_write.await.expect("the save reached its write");
+    saving.abort();
+    assert!(saving.await.is_err_and(|e| e.is_cancelled()));
+    assert!(tasks(&service).await.is_empty());
+    retry_spends_it_once(&service, &answered).await;
+}
+
+/// A task write that fails while the secret store cannot be written either (a full disk)
+/// leaves the reference usable, and the retry spends it once.
+#[tokio::test(start_paused = true)]
+async fn a_failed_write_with_a_read_only_store_leaves_the_reference_usable() {
+    let (env, service, answered) = signed_service("claim-read-only").await;
+    let (at_write, go) = pause_next_write(&service);
+    let saving = tokio::spawn({
+        let service = service.clone();
+        let save = signed_save(&answered.reference, "task:signed");
+        async move { service.upsert(save).await }
+    });
+    at_write.await.expect("the save reached its write");
+    // Read-only without search: nothing below the state folder can be written, the secret
+    // store included.
+    set_mode(&env.dir, 0o444);
+    go.send(()).expect("release");
+    let saved = saving.await.expect("join");
+    set_mode(&env.dir, 0o755);
+    assert_eq!(
+        saved.map_err(|e| e.to_string()),
+        Err("Could not save schedule task.".to_owned())
+    );
+    assert!(tasks(&service).await.is_empty());
+    retry_spends_it_once(&service, &answered).await;
 }
 
 /// `a run interrupted right after it reserves the task does not block the next run`, and

@@ -301,6 +301,9 @@ struct Inner {
     wake: Notify,
     #[cfg(test)]
     timer_pass: watch::Sender<u64>,
+    /// Holds the next store write until the test lets it go.
+    #[cfg(test)]
+    write_gate: StdMutex<Option<tests::WriteGate>>,
     /// Webhook tokens and secrets, rate windows, queue counts and run permits.
     hooks: webhook::State,
     hooks_db: PathBuf,
@@ -443,6 +446,8 @@ impl ScheduledTasks {
                 wake: Notify::new(),
                 #[cfg(test)]
                 timer_pass: watch::channel(0).0,
+                #[cfg(test)]
+                write_gate: StdMutex::new(None),
                 hooks,
                 hooks_db: config.state_dir.join(HOOKS_FILE_NAME),
             }),
@@ -508,6 +513,18 @@ impl ScheduledTasks {
         let body = json!({"version": 1, "tasks": tasks, "webhooks": hooks}).to_string();
         let path = self.inner.path.clone();
         let log = log.map(str::to_owned);
+        #[cfg(test)]
+        {
+            let gate = self
+                .inner
+                .write_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                gate.hold().await;
+            }
+        }
         tokio::task::spawn_blocking(move || {
             conn_support::fs::write_private(&path, body.as_bytes()).map_err(|error| {
                 if let Some(message) = log {
@@ -647,7 +664,7 @@ impl ScheduledTasks {
         }
         // A webhook schedule keeps the stored token, and the stored secret unless a new one
         // comes (`upsert`, the `webhook` part).
-        let (schedule, credentials, spent) = match decoded {
+        let (schedule, credentials, claim) = match decoded {
             Requested::Schedule(schedule) => (schedule, None, None),
             Requested::Webhook(webhook_input) => {
                 let stored = self
@@ -665,7 +682,7 @@ impl ScheduledTasks {
                     self.inner.secret_requests.as_ref(),
                 )
                 .await?;
-                (save.schedule, Some(save.credentials), save.spent)
+                (save.schedule, Some(save.credentials), save.claim)
             }
         };
         let schedule_unchanged = existing.as_ref().is_some_and(|e| {
@@ -732,14 +749,15 @@ impl ScheduledTasks {
             .await
         {
             self.set_credentials(&id, previous);
-            // A crash between the spend and this write still loses the reference, as in T3.
-            if let (Some(spent), Some(secrets)) = (spent, &self.inner.secret_requests) {
-                secrets.restore(spent).await;
-            }
             return Err(error.into());
         }
         *tasks = next_tasks;
         drop(tasks);
+        // Spent only once the task holds the secret. A failed delete is logged and leaves the
+        // reference usable.
+        if let Some(claim) = claim {
+            let _ = claim.spend().await;
+        }
         self.notify_changed();
         Ok(task)
     }
@@ -1395,8 +1413,14 @@ impl ScheduledTasks {
         let mut log = TimerLog::default();
         loop {
             let pass = self.run_due().await;
-            for line in log.report(&pass) {
-                eprintln!("scheduled tasks: {line}");
+            let lines = log.report(&pass);
+            if !lines.is_empty() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    for line in lines {
+                        eprintln!("scheduled tasks: {line}");
+                    }
+                })
+                .await;
             }
             let wait = self.next_due().await.map(|at| {
                 let wait = Duration::from_millis(u64::try_from(at - self.now()).unwrap_or(0))

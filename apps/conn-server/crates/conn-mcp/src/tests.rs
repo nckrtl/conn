@@ -3800,3 +3800,53 @@ async fn fill_credential_answers_with_a_status_only() {
     assert_eq!(result["status"], "tab_unavailable");
     assert!(!result.to_string().contains("fixture-only"));
 }
+
+/// T3 `resolveTarget` (`OrchestratorMcpService.ts:1576`): an explicit `driverKind` with no
+/// instance of that driver fails before any work starts; it never falls back to the parent's.
+#[tokio::test(flavor = "current_thread")]
+async fn delegate_task_with_an_absent_driver_fails_before_it_runs() {
+    let f = fixture("delegate-driver");
+    let mut operator = Client::open(&f.service, client(true)).await;
+    let parent = launch_as_swamp(&mut operator, "Parent", "hang", "auto", "default").await;
+    until_provider_turn(&f, &parent).await;
+    let mut agent = Client::open(&f.service, agent_of(&f, &parent)).await;
+    let (code, message) = agent
+        .failure(
+            "delegate_task",
+            json!({"task":"driver probe","target":{"driverKind":"codex"},"mode":"wait"}),
+        )
+        .await;
+    assert_eq!(code, "provider_unavailable");
+    assert_eq!(
+        message,
+        "No V2 provider adapter is registered for driver codex."
+    );
+    let (code, message) = agent
+        .failure(
+            "delegate_task",
+            json!({"task":"driver probe","target":{"providerInstanceId":"claudeAgent","driverKind":"codex"}}),
+        )
+        .await;
+    assert_eq!(code, "invalid_request");
+    assert_eq!(
+        message,
+        "Provider instance claudeAgent uses driver claudeAgent, not codex."
+    );
+    let projection = f
+        .service
+        .config
+        .engine
+        .get_thread_projection(parent.as_str().into())
+        .await
+        .unwrap();
+    assert_eq!(projection["subagents"], json!([]));
+    // The parent's own driver still resolves to its instance.
+    let task = agent
+        .ok(
+            "delegate_task",
+            json!({"task":"same driver","target":{"driverKind":"claudeAgent"},"mode":"wait"}),
+        )
+        .await;
+    assert_eq!(task["providerInstanceId"], "claudeAgent");
+    assert_eq!(task["summary"], "echo: same driver");
+}

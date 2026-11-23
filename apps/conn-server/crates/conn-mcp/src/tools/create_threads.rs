@@ -417,7 +417,7 @@ fn resolve_target(cx: &Cx<'_>, parent: &Value, target: &Value, accepted: bool) -
     Ok(selection)
 }
 
-fn constraints(provider: &Value) -> Vec<&str> {
+pub(super) fn constraints(provider: &Value) -> Vec<&str> {
     if provider["enabled"] == false {
         return vec!["Provider instance is disabled."];
     }

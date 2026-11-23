@@ -133,24 +133,32 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
         ));
     }
     let inherited = &parent_thread["modelSelection"];
-    let instance = target["providerInstanceId"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| {
-            let driver = target["driverKind"].as_str()?;
-            (cx.config().providers)()
-                .into_iter()
-                .find(|p| p["driver"] == driver)
-                .and_then(|p| p["instanceId"].as_str().map(str::to_owned))
-        })
-        .or_else(|| inherited["instanceId"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    let requested_driver = target["driverKind"].as_str();
+    let instance = match (target["providerInstanceId"].as_str(), requested_driver) {
+        (Some(instance), _) => instance.to_owned(),
+        (None, Some(driver)) => driver_instance(cx, driver, &inherited["instanceId"])?,
+        (None, None) => inherited["instanceId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    };
     let provider = projects::provider(cx, &instance).ok_or_else(|| {
         fail(
             "provider_unavailable",
             format!("Provider {instance} is not available here. orchestrator_capabilities lists providers."),
         )
     })?;
+    if let Some(driver) = requested_driver
+        && provider["driver"] != driver
+    {
+        return Err(fail(
+            "invalid_request",
+            format!(
+                "Provider instance {instance} uses driver {}, not {driver}.",
+                provider["driver"].as_str().unwrap_or_default()
+            ),
+        ));
+    }
     let model = target["model"]
         .as_str()
         .map(str::to_owned)
@@ -257,6 +265,38 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
         return read_task(cx, &caller.thread_id, &task_id, timed_out).await;
     }
     read_task(cx, &caller.thread_id, &task_id, false).await
+}
+
+/// T3 `resolveTarget` for `target.driverKind` without an instance
+/// (`OrchestratorMcpService.ts:1576`): a healthy instance of that driver, the parent's own
+/// first. No instance of the driver fails; it never falls back to another driver.
+fn driver_instance(cx: &Cx<'_>, driver: &str, inherited: &Value) -> Result<String, ToolError> {
+    let candidates: Vec<Value> = (cx.config().providers)()
+        .into_iter()
+        .filter(|p| p["driver"] == driver)
+        .collect();
+    if candidates.is_empty() {
+        return Err(fail(
+            "provider_unavailable",
+            format!("No V2 provider adapter is registered for driver {driver}."),
+        ));
+    }
+    let healthy: Vec<&Value> = candidates
+        .iter()
+        .filter(|p| super::create_threads::constraints(p).is_empty())
+        .collect();
+    healthy
+        .iter()
+        .find(|p| p["instanceId"] == *inherited)
+        .or_else(|| healthy.first())
+        .and_then(|p| p["instanceId"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            fail(
+                "provider_unavailable",
+                format!("No available V2 provider instance for driver {driver}."),
+            )
+        })
 }
 
 /// The project and the commit a `worktree` child starts from: the parent checkout's `HEAD`,

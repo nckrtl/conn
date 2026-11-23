@@ -139,6 +139,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         child_env: vec![("PATH", path), ("HOME", dir.0.clone().into_os_string())],
         credentials: Mutex::new(VecDeque::new()),
         next_scope: AtomicU64::new(1),
+        revisions: Mutex::new(VecDeque::new()),
         refreshes: watch::channel(0).0,
         linked: watch::channel(0).0,
         monitor: OnceCell::new(),
@@ -679,6 +680,7 @@ async fn cancelling_a_write_discards_reads_started_while_it_was_in_flight() {
         repo: "a/b".into(),
         number: Some(7),
         input: reference().to_string(),
+        revision: None,
     };
     panel
         .cache
@@ -1136,6 +1138,318 @@ async fn viewed_mutations_only_evict_the_references_viewed_files() {
         count.load(Ordering::Relaxed),
         before + 1,
         "only the changed PR is fetched"
+    );
+    task.abort();
+}
+
+/// Holds one host response: the handler signals its arrival, then waits for the test.
+#[derive(Default)]
+struct Gate {
+    armed: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+impl Gate {
+    async fn pass(&self) {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.arrived.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
+/// A GitHub host whose PR #7 moves through revisions 0, 1, 2 and keeps a viewed mark on `a.ts`.
+#[derive(Default)]
+struct ReviewHost {
+    revision: AtomicU64,
+    a_viewed: std::sync::atomic::AtomicBool,
+    viewed_reads: AtomicU64,
+    diff_reads: AtomicU64,
+    other_diff_reads: AtomicU64,
+    pinned_reads: AtomicU64,
+    detail_gate: Gate,
+    diff_gate: Gate,
+    mutation_gate: Gate,
+}
+fn revision_head(revision: u64) -> String {
+    (revision + 1).to_string().repeat(40)
+}
+fn revision_patch(revision: u64) -> String {
+    format!(
+        "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-base\n+revision {revision}\n"
+    )
+}
+async fn review_api(host: Arc<ReviewHost>) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{get, post},
+    };
+    let (graphql, diffs, pinned) = (host.clone(), host.clone(), host);
+    let router = Router::new()
+        .route("/graphql", post(move |Json(body): Json<Value>| {
+            let host = graphql.clone();
+            async move {
+                let query = text(&body, "query");
+                let data = if query.contains("PullRequestFilesViewed") {
+                    host.viewed_reads.fetch_add(1, Ordering::SeqCst);
+                    let a = if host.a_viewed.load(Ordering::SeqCst) { "VIEWED" } else { "UNVIEWED" };
+                    json!({"repository":{"pullRequest":{"files":{"nodes":[{"path":"a.ts","viewerViewedState":a},{"path":"b.ts","viewerViewedState":"UNVIEWED"}],"pageInfo":{"hasNextPage":false}}}}})
+                } else if query.contains("SetFileViewed") {
+                    match body.pointer("/variables/path").and_then(Value::as_str) {
+                        Some("b.ts") => {
+                            return Json(json!({"errors":[{"message":"Second mutation refused"}]}));
+                        }
+                        Some("c.ts") => host.mutation_gate.pass().await,
+                        _ => host.a_viewed.store(
+                            body.pointer("/variables/viewed") == Some(&json!(true)),
+                            Ordering::SeqCst,
+                        ),
+                    }
+                    json!({"markFileAsViewed":{"clientMutationId":null}})
+                } else if query.contains("PullRequestNodeId") {
+                    json!({"repository":{"pullRequest":{"id":"PR7"}}})
+                } else {
+                    let revision = host.revision.load(Ordering::SeqCst);
+                    host.detail_gate.pass().await;
+                    let mut pr: Value = serde_json::from_str(include_str!(
+                        "../../../../conn-source-control/src/pull_requests/sample.json"
+                    ))
+                    .expect("sample");
+                    pr["headRefOid"] = json!(revision_head(revision));
+                    pr["updatedAt"] = json!(format!("2026-11-2{revision}T15:00:00Z"));
+                    json!({"viewer":{"login":"reader"},"repository":{"pullRequest":pr,"viewerPermission":"WRITE"}})
+                };
+                Json(json!({"data":data}))
+            }
+        }))
+        .route("/user", get(|| async { Json(json!({"id":12,"login":"reader"})) }))
+        .route(
+            "/repos/a/b/pulls/{number}",
+            get(move |Path(number): Path<u32>| {
+                let host = diffs.clone();
+                async move {
+                    if number != 7 {
+                        host.other_diff_reads.fetch_add(1, Ordering::SeqCst);
+                        return revision_patch(80);
+                    }
+                    host.diff_reads.fetch_add(1, Ordering::SeqCst);
+                    let revision = host.revision.load(Ordering::SeqCst);
+                    host.diff_gate.pass().await;
+                    revision_patch(revision)
+                }
+            }),
+        )
+        .route(
+            "/repos/a/b/commits/{sha}",
+            get(move || {
+                pinned.pinned_reads.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Json(json!({"files":[{"filename":"a.ts","status":"modified","patch":"@@ -1 +1 @@\n-base\n+pinned\n"}]}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("stub API");
+    });
+    (base, task)
+}
+fn patch_of(read: Result<Value, Failure>) -> String {
+    text(&read.expect("diff"), "patch").to_owned()
+}
+
+/// Pass 11.1: T3 keys an unpinned diff on the newest `updatedAt` its summary and detail
+/// reads have seen (`readDiff`), so a new head is never answered with the old patch.
+#[tokio::test]
+async fn an_unpinned_diff_follows_the_newest_observed_revision() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut strict = reference();
+    strict["allowStale"] = json!(false);
+    let mut fresh_detail = reference();
+    fresh_detail["method"] = json!("detail");
+    let mut pinned = reference();
+    pinned["commit"] = json!("c".repeat(40));
+    let mut other = reference();
+    other["number"] = json!(8);
+
+    let detail = panel.call("detail", reference()).await.expect("detail A");
+    assert_eq!(detail["headSha"], revision_head(0));
+    for input in [pinned.clone(), other.clone()] {
+        panel.call("diff", input).await.expect("warm diff");
+    }
+    // A diff read and a detail read both reach the host at revision A and are held there.
+    host.diff_gate.armed.store(true, Ordering::SeqCst);
+    let mut late_diff = Box::pin(panel.call("diff", reference()));
+    tokio::select! {
+        () = host.diff_gate.arrived.notified() => {},
+        read = &mut late_diff => panic!("diff ended before the gate: {read:?}"),
+    }
+    host.detail_gate.armed.store(true, Ordering::SeqCst);
+    let mut late_detail = Box::pin(panel.mcp_call("fresh", fresh_detail));
+    tokio::select! {
+        () = host.detail_gate.arrived.notified() => {},
+        read = &mut late_detail => panic!("detail ended before the gate: {read:?}"),
+    }
+
+    host.revision.store(1, Ordering::SeqCst);
+    let detail = panel.call("detail", strict).await.expect("detail B");
+    assert_eq!(detail["headSha"], revision_head(1));
+    host.diff_gate.release.notify_one();
+    assert_eq!(
+        patch_of(late_diff.await),
+        revision_patch(0),
+        "a read that began before B still answers its own caller"
+    );
+    host.detail_gate.release.notify_one();
+    assert_eq!(
+        late_detail.await.expect("late detail")["headSha"],
+        revision_head(0),
+        "the older observation arrives last"
+    );
+
+    let after = patch_of(panel.call("diff", reference()).await);
+    let again = patch_of(panel.call("diff", reference()).await);
+    println!(
+        "pass11.1 after detail B: patch {after:?}, host diff reads {}",
+        host.diff_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        (after, again, host.diff_reads.load(Ordering::SeqCst)),
+        (revision_patch(1), revision_patch(1), 2),
+        "B's patch without invalidation; the late A read and A observation reinstate nothing; \
+         a repeat at B stays warm"
+    );
+    for input in [pinned, other] {
+        panel.call("diff", input).await.expect("warm diff");
+    }
+    assert_eq!(
+        (
+            host.pinned_reads.load(Ordering::SeqCst),
+            host.other_diff_reads.load(Ordering::SeqCst)
+        ),
+        (1, 1),
+        "a pinned commit and another PR keep their diffs"
+    );
+
+    host.revision.store(2, Ordering::SeqCst);
+    let summary = panel.call("summary", reference()).await.expect("summary C");
+    assert_eq!(summary["updatedAt"], "2026-11-22T15:00:00Z");
+    let after = patch_of(panel.call("diff", reference()).await);
+    println!("pass11.1 after summary C: patch {after:?}");
+    assert_eq!(
+        (after, host.diff_reads.load(Ordering::SeqCst)),
+        (revision_patch(2), 3),
+        "a fresh summary moves the diff on too"
+    );
+    task.abort();
+}
+
+/// Pass 11.2: T3 bumps the viewed-files epoch when a write ends, on failure too, so a
+/// partly applied batch shows what the host accepted. Other reads stay cached.
+#[tokio::test]
+async fn a_partly_applied_viewed_batch_shows_the_marks_the_host_accepted() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut other = reference();
+    other["number"] = json!(8);
+    let marks = |read: Result<Value, Failure>| {
+        let read = read.expect("viewed files");
+        (
+            text(&read["files"][0], "state").to_owned(),
+            text(&read["files"][1], "state").to_owned(),
+        )
+    };
+    let unviewed = ("unviewed".to_owned(), "unviewed".to_owned());
+    let a_viewed = ("viewed".to_owned(), "unviewed".to_owned());
+
+    assert_eq!(
+        marks(panel.call("filesViewed", reference()).await),
+        unviewed
+    );
+    panel
+        .call("filesViewed", other.clone())
+        .await
+        .expect("warm");
+    panel.call("diff", reference()).await.expect("warm diff");
+
+    let mut batch = reference();
+    batch["files"] = json!([{"path":"a.ts","viewed":true},{"path":"b.ts","viewed":true}]);
+    let error = panel
+        .call("setFilesViewed", batch)
+        .await
+        .expect_err("the host refuses b.ts");
+    let message = failure_message(&error);
+    assert!(message.contains("Second mutation refused"), "{message}");
+    assert!(
+        host.a_viewed.load(Ordering::SeqCst),
+        "the host accepted a.ts"
+    );
+    let after = marks(panel.call("filesViewed", reference()).await);
+    println!(
+        "pass11.2 after partial write: {after:?}, error {message:?}, host reads {}",
+        host.viewed_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        (after, host.viewed_reads.load(Ordering::SeqCst)),
+        (a_viewed.clone(), 3),
+        "one new host read shows a.ts viewed and b.ts not"
+    );
+    panel.call("filesViewed", other).await.expect("warm");
+    panel.call("diff", reference()).await.expect("warm diff");
+    assert_eq!(
+        (
+            host.viewed_reads.load(Ordering::SeqCst),
+            host.diff_reads.load(Ordering::SeqCst)
+        ),
+        (3, 1),
+        "another PR's marks and the diff stay cached"
+    );
+
+    // Cancel a batch after the host applied its first file.
+    host.mutation_gate.armed.store(true, Ordering::SeqCst);
+    let mut batch = reference();
+    batch["files"] = json!([{"path":"a.ts","viewed":false},{"path":"c.ts","viewed":true}]);
+    let mut write = Box::pin(panel.call("setFilesViewed", batch));
+    tokio::select! {
+        () = host.mutation_gate.arrived.notified() => {},
+        result = &mut write => panic!("write ended before the gate: {result:?}"),
+    }
+    assert!(!host.a_viewed.load(Ordering::SeqCst), "a.ts was unticked");
+    assert_eq!(
+        marks(panel.call("filesViewed", reference()).await),
+        a_viewed,
+        "cached while the write runs"
+    );
+    drop(write);
+    let after = marks(panel.call("filesViewed", reference()).await);
+    println!("pass11.2 after cancellation: {after:?}");
+    assert_eq!(
+        (after, host.viewed_reads.load(Ordering::SeqCst)),
+        (unviewed, 4),
+        "cancellation invalidates the marks too"
+    );
+
+    let mut tick = reference();
+    tick["files"] = json!([{"path":"a.ts","viewed":true}]);
+    panel.call("setFilesViewed", tick).await.expect("tick");
+    assert_eq!(
+        marks(panel.call("filesViewed", reference()).await),
+        a_viewed,
+        "a successful write shows at once"
+    );
+    assert_eq!(
+        host.diff_reads.load(Ordering::SeqCst),
+        1,
+        "viewed writes never evict the diff"
     );
     task.abort();
 }

@@ -82,7 +82,12 @@ struct ReadKey {
     repo: String,
     number: Option<u32>,
     input: String,
+    /// An unpinned diff's newest observed `updatedAt`, so each PR revision has its own key.
+    revision: Option<String>,
 }
+
+/// How many PRs' newest revisions the panel remembers.
+const REVISION_CAPACITY: usize = 256;
 
 fn cache_ttl(result: &Result<Value, Failure>, seconds: u64) -> Duration {
     match result {
@@ -101,6 +106,9 @@ struct Panel {
     child_env: Vec<(&'static str, std::ffi::OsString)>,
     credentials: Mutex<VecDeque<(Client, u64)>>,
     next_scope: AtomicU64,
+    /// The newest `updatedAt` each credential's summary and detail reads saw per PR (T3's
+    /// `lastGoodSummary`), oldest first.
+    revisions: Mutex<VecDeque<(ReadKey, String)>>,
     refreshes: watch::Sender<u64>,
     linked: watch::Sender<u64>,
     monitor: OnceCell<tokio::task::JoinHandle<()>>,
@@ -170,13 +178,16 @@ fn failure_message(failure: &Failure) -> String {
             .unwrap_or_else(|| text(error, "detail").to_owned()),
     }
 }
+/// Invalidates a PR's cached reads when a write ends: on success, error or cancellation.
 struct MutationReads<'a> {
     panel: &'a Panel,
     reference: ReadKey,
+    files_viewed_only: bool,
 }
 impl Drop for MutationReads<'_> {
     fn drop(&mut self) {
-        self.panel.invalidate_cached(Some(&self.reference), false);
+        self.panel
+            .invalidate_cached(Some(&self.reference), self.files_viewed_only);
     }
 }
 impl Drop for Panel {
@@ -539,6 +550,7 @@ impl Panel {
                     number: Some(lookup.number),
                     ..ReadKey::default()
                 },
+                files_viewed_only: false,
             };
             self.invalidate_cached(Some(&reads.reference), false);
             reads
@@ -1018,23 +1030,90 @@ impl Panel {
         Ok((project, client, lookup))
     }
     async fn set_files_viewed(&self, input: &Value) -> Result<Value, Failure> {
-        let (_, client, lookup) = self.reference_client("setFilesViewed", input).await?;
+        let (project, client, lookup) = self.reference_client("setFilesViewed", input).await?;
+        // The host applies files one by one, so a failed or cancelled batch may be partly applied.
+        let _reads = MutationReads {
+            panel: self,
+            reference: ReadKey {
+                host: project.host,
+                repo: project.repository.to_lowercase(),
+                number: Some(lookup.number),
+                ..ReadKey::default()
+            },
+            files_viewed_only: true,
+        };
         client
             .set_files_viewed(&lookup, array(input.get("files")))
             .await
             .map_err(|e| host_error(&e, "setFilesViewed"))?;
-        self.invalidate(Some(input), true).await;
         Ok(Value::Null)
     }
-    async fn cached_read(&self, method: &str, input: &Value) -> Result<Value, Failure> {
-        let (project, client, lookup) = self.reference_client(method, input).await?;
-        let key = ReadKey {
-            scope: self.credential_scope(&client),
-            method: method.into(),
+    /// The key that identifies one PR for one credential.
+    fn pull_request_key(&self, client: &Client, project: &Project, lookup: &Lookup) -> ReadKey {
+        ReadKey {
+            scope: self.credential_scope(client),
             host: project.host.clone(),
             repo: project.repository.to_lowercase(),
             number: Some(lookup.number),
+            ..ReadKey::default()
+        }
+    }
+    /// Keeps the newest `updatedAt` a summary or detail read returned. An older response that
+    /// arrives late never replaces a newer one.
+    fn observe_revision(&self, pull_request: ReadKey, value: &Value) {
+        let Some(updated) = value.get("updatedAt").and_then(Value::as_str) else {
+            return;
+        };
+        let evicted = {
+            let mut held = self
+                .revisions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, newest)) = held.iter_mut().find(|(key, _)| *key == pull_request) {
+                if updated > newest.as_str() {
+                    updated.clone_into(newest);
+                }
+                return;
+            }
+            let evicted = if held.len() >= REVISION_CAPACITY {
+                held.pop_front()
+            } else {
+                None
+            };
+            held.push_back((pull_request, updated.to_owned()));
+            evicted
+        };
+        // Without its revision, that PR's next diff key would match diffs read before it.
+        if let Some((forgotten, _)) = evicted {
+            self.cache.invalidate_where(|key| {
+                key.method == "diff"
+                    && key.scope == forgotten.scope
+                    && key.host == forgotten.host
+                    && key.repo == forgotten.repo
+                    && key.number == forgotten.number
+            });
+        }
+    }
+    fn newest_revision(&self, pull_request: &ReadKey) -> Option<String> {
+        self.revisions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(key, _)| key == pull_request)
+            .map(|(_, updated)| updated.clone())
+    }
+    async fn cached_read(&self, method: &str, input: &Value) -> Result<Value, Failure> {
+        let (project, client, lookup) = self.reference_client(method, input).await?;
+        let pull_request = self.pull_request_key(&client, &project, &lookup);
+        // A pinned commit's diff never changes; the branch diff changes with each push.
+        let unpinned = method == "diff" && input.get("commit").is_none_or(Value::is_null);
+        let key = ReadKey {
+            method: method.into(),
             input: input.to_string(),
+            revision: unpinned
+                .then(|| self.newest_revision(&pull_request))
+                .flatten(),
+            ..pull_request
         };
         self.cache
             .get_with(
@@ -1088,6 +1167,9 @@ impl Panel {
             return Ok(
                 json!({"state":value.get("state"),"checks":value.get("checks"),"observedAt":observed}),
             );
+        }
+        if matches!(method, "summary" | "detail") {
+            self.observe_revision(self.pull_request_key(client, project, lookup), &value);
         }
         if matches!(method, "summary" | "preview" | "detail") {
             value["projectId"] = json!(project.id);
@@ -1741,6 +1823,7 @@ impl Shared {
                         child_env: Vec::new(),
                         credentials: Mutex::new(VecDeque::new()),
                         next_scope: AtomicU64::new(1),
+                        revisions: Mutex::new(VecDeque::new()),
                         refreshes: watch::channel(0).0,
                         linked: watch::channel(0).0,
                         monitor: OnceCell::new(),

@@ -3721,6 +3721,7 @@ async fn search_folds_latin_accents_only_and_normalizes_the_query() {
         ("hangul", "한글 문서 작성"),
         ("french", "Le garçon était déjà prêt"),
         ("letters", "Straße ørsted ﬁle"),
+        ("georgian", "თბილისი"),
     ] {
         dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
         dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
@@ -3745,6 +3746,8 @@ async fn search_folds_latin_accents_only_and_normalizes_the_query() {
     for query in ["strasse", "orsted", "file"] {
         assert_eq!(search(&engine, query).await, none, "{query}");
     }
+    // The query is lowercased before the index fold, which leaves Mtavruli capitals alone.
+    assert_eq!(search(&engine, "ᲗᲑᲘᲚᲘᲡᲘ").await, ["georgian"]);
     engine.shutdown().await;
     drop(engine);
 
@@ -3764,19 +3767,27 @@ async fn search_folds_latin_accents_only_and_normalizes_the_query() {
 }
 
 /// `messageMatcher` in `paletteSearch.ts`: a word shorter than four characters must start a
-/// word in the message, so "me" does not find "fermé" and "fts" does not find "drafts".
+/// word in the message, so "me" does not find "fermé" and "fts" does not find "drafts". A
+/// symbol starts a word only where a letter would (`startsWordAt`): "☀ab" is inside "x☀ab". T3
+/// reads an emoji above U+FFFF as two UTF-16 units, so "🚀cd" brings its own boundary.
 #[tokio::test(flavor = "current_thread")]
 async fn search_short_words_must_start_a_word() {
     let db = TempDb::new("search-word-starts");
     let (engine, _) = open(&db);
-    for (thread, text) in [("closed", "marker fermé"), ("drafts", "marker drafts")] {
+    for (thread, text) in [
+        ("closed", "marker fermé"),
+        ("drafts", "marker drafts"),
+        ("sun", "marker x☀ab y🚀cd"),
+    ] {
         dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
         dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
         run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
     }
     let none = Vec::<String>::new();
-    assert_eq!(search(&engine, "marker").await.len(), 2);
+    assert_eq!(search(&engine, "marker").await.len(), 3);
     assert_eq!(search(&engine, "marker me").await, none);
+    assert_eq!(search(&engine, "marker ☀ab").await, none);
+    assert_eq!(search(&engine, "marker 🚀cd").await, ["sun"]);
     assert_eq!(search(&engine, "marker ke").await, none);
     assert_eq!(search(&engine, "marker fe").await, ["closed"]);
     assert_eq!(search(&engine, "fts").await, none);

@@ -1258,6 +1258,16 @@ mod tests {
         ] {
             assert!(!hit(query), "{query}");
         }
+        // A symbol starts a word only where a letter would (`isWordStart`): "⚙" sits inside
+        // "fix⚙", and only punctuation brings its own boundary.
+        let gear = json!({"id": "t2", "title": "Spring cleanup",
+            "pullRequests": [{"number": 12, "repository": "example/fixture",
+                "url": "https://github.com/example/fixture/pull/12", "source": "manual",
+                "snapshot": {"title": "fix⚙ settings"}}]});
+        let hit =
+            |query: &str| thread_hit(&conn_engine::fold_search_query(query), &gear, "Lakebed");
+        assert!(hit("lakebed settings"));
+        assert!(!hit("lakebed ⚙"));
     }
 
     #[test]

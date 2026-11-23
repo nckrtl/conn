@@ -8,7 +8,8 @@
 //! - Titles, branches and pull requests ([`fold_search_query`], [`fold_field`]): `foldInPlace`
 //!   in `paletteSearch.ts`, which drops every mark a compatibility decomposition leaves.
 //!
-//! Both read words as `isWordStart` does ([`is_word_start`]).
+//! Both read words as `isWordStart` does ([`is_word_start`]), by the Unicode general categories
+//! its patterns test. Messages read text in UTF-16 units, as JavaScript strings index it.
 
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{decompose_compatible, is_combining_mark};
@@ -83,6 +84,20 @@ pub fn fold_search_query(query: &str) -> String {
         .join(" ")
 }
 
+/// Maps a curly apostrophe to a straight one, as T3 does to queries and to the text a phrase is
+/// looked for in (`CURLY_APOSTROPHES`).
+pub(crate) fn straight(c: char) -> char {
+    match c {
+        '\u{2018}' | '\u{2019}' => '\'',
+        _ => c,
+    }
+}
+
+/// JavaScript's `\s`: Rust's whitespace without U+0085, plus U+FEFF.
+pub(crate) fn is_js_space(c: char) -> bool {
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
+}
+
 /// `foldInPlace` in `paletteSearch.ts`: each character as [`push_field`] folds it.
 pub fn fold_field(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -96,7 +111,7 @@ pub fn fold_field(text: &str) -> String {
 /// `foldCharacter` folds it (NFKD, marks dropped, lower case, final sigma and curly apostrophes
 /// made plain) when that leaves one UTF-16 unit, else only lower case: "ß", "ﬁ" and a lone mark
 /// stay.
-fn push_field(c: char, out: &mut String) {
+pub(crate) fn push_field(c: char, out: &mut String) {
     if c.is_ascii() {
         out.push(c.to_ascii_lowercase());
         return;
@@ -179,30 +194,86 @@ fn is_hex_id(run: &[char]) -> bool {
         && run.iter().any(char::is_ascii_digit)
 }
 
+/// How a [`Folded`] text reads words: by code point, as `foldSearchField` reads a title, or by
+/// UTF-16 unit, as `findMessageToken` reads a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Units {
+    CodePoints,
+    Utf16,
+}
+
+/// What a character outside the Basic Multilingual Plane reads as in a message: a lone
+/// surrogate in JavaScript, which is no letter, digit, symbol or apostrophe. U+FFFF is a
+/// noncharacter in no such category either.
+const SURROGATE: char = '\u{ffff}';
+
 /// A text folded one character at a time, which still reads the original's word starts.
 #[derive(Debug)]
 pub(crate) struct Folded {
     pub(crate) text: String,
     /// For each byte of `text`, the index of the original character it came from.
     origin: Vec<usize>,
+    /// The original characters as the word rules read them.
     chars: Vec<char>,
+    /// For each original character, and one past the end, its offset in UTF-16 units.
+    utf16: Vec<usize>,
 }
 
 impl Folded {
     pub(crate) fn new(text: &str, fold: fn(char, &mut String)) -> Self {
+        Self::build(text, Units::CodePoints, |_, c, out| fold(c, out))
+    }
+
+    /// A message folded by `fold`, read in UTF-16 units.
+    pub(crate) fn message(text: &str, fold: fn(char, &mut String)) -> Self {
+        Self::build(text, Units::Utf16, |_, c, out| fold(c, out))
+    }
+
+    /// A message lowercased as a whole, as `toLowerCase` lowercases it (a final sigma stays
+    /// final), or `None` when that changes its length ("İ"): `messageMatcher` then folds it.
+    pub(crate) fn message_lowercase(text: &str) -> Option<Self> {
+        let lower = text.to_lowercase();
+        let units = |text: &str| text.chars().map(char::len_utf16).sum::<usize>();
+        if lower.chars().count() != text.chars().count() || units(&lower) != units(text) {
+            return None;
+        }
+        let lower: Vec<char> = lower.chars().collect();
+        Some(Self::build(text, Units::Utf16, |index, _, out| {
+            out.extend(lower.get(index));
+        }))
+    }
+
+    fn build(text: &str, units: Units, mut fold: impl FnMut(usize, char, &mut String)) -> Self {
         let mut folded = String::with_capacity(text.len());
         let mut origin = Vec::with_capacity(text.len());
-        let chars: Vec<char> = text.chars().collect();
-        for (index, &c) in chars.iter().enumerate() {
+        let mut chars = Vec::with_capacity(text.len());
+        let mut utf16 = Vec::with_capacity(text.len() + 1);
+        let mut offset = 0;
+        for (index, c) in text.chars().enumerate() {
             let before = folded.len();
-            fold(c, &mut folded);
+            fold(index, c, &mut folded);
             origin.resize(origin.len() + (folded.len() - before), index);
+            let wide = c.len_utf16() == 2;
+            chars.push(if wide && units == Units::Utf16 {
+                SURROGATE
+            } else {
+                c
+            });
+            utf16.push(offset);
+            offset += c.len_utf16();
         }
+        utf16.push(offset);
         Self {
             text: folded,
             origin,
             chars,
+            utf16,
         }
+    }
+
+    /// Where the original character at `index` starts, in UTF-16 units.
+    pub(crate) fn utf16_offset(&self, index: usize) -> usize {
+        self.utf16.get(index).copied().unwrap_or(0)
     }
 
     /// The original character where `needle` first occurs.
@@ -231,10 +302,15 @@ impl Folded {
         })
     }
 
-    /// Whether `token` occurs where a word starts. A token that opens with punctuation (".ts")
-    /// brings its own boundary, so it counts anywhere.
+    /// Whether `token` occurs where a word starts (`matchToken`). A token that opens with
+    /// punctuation (".ts") brings its own boundary, so it counts anywhere; one that opens with a
+    /// symbol does not. T3 reads that first character as a UTF-16 unit, so a token that opens
+    /// with an emoji above U+FFFF brings its own boundary too.
     pub(crate) fn has_at_word_start(&self, token: &str) -> bool {
-        let own_boundary = token.chars().next().is_some_and(|c| !is_alphanumeric(c));
+        let own_boundary = token
+            .chars()
+            .next()
+            .is_some_and(|c| c.len_utf16() == 2 || (!is_alphanumeric(c) && !is_symbol(c)));
         self.occurrences(token)
             .any(|at| own_boundary || self.origin.get(at).is_some_and(|&i| self.starts_word(i)))
     }
@@ -302,11 +378,32 @@ impl Folded {
         best
     }
 
-    /// `startsWordAt`: punctuation brings its own boundary.
+    /// `startsWordAt`: punctuation brings its own boundary; a symbol starts a word where a
+    /// letter would.
     fn starts_word_at(&self, index: usize) -> bool {
         self.chars
             .get(index)
-            .is_some_and(|&c| !is_alphanumeric(c) || self.starts_word(index))
+            .is_some_and(|&c| (!is_alphanumeric(c) && !is_symbol(c)) || self.starts_word(index))
+    }
+
+    /// `messagePhrase`: the first original character where `words` (lowercased, apostrophes
+    /// straight) sit side by side in `text`, with whitespace between them and no letter or digit
+    /// right before or after. Curly apostrophes in `text` read as straight ones.
+    pub(crate) fn find_phrase(&self, words: &[String]) -> Option<usize> {
+        let mut previous = None;
+        for (at, c) in self.text.char_indices() {
+            let boundary = previous.is_none_or(|p| !is_alphanumeric(p));
+            previous = Some(c);
+            if boundary
+                && self
+                    .text
+                    .get(at..)
+                    .is_some_and(|rest| phrase_at(rest, words))
+            {
+                return self.origin.get(at).copied();
+            }
+        }
+        None
     }
 
     /// `endsWordAt`: whether a word ends right before `end`.
@@ -329,11 +426,32 @@ impl Folded {
     }
 }
 
+/// Whether `words` open `text` side by side, with whitespace between them and no letter or digit
+/// right after the last one.
+fn phrase_at(text: &str, words: &[String]) -> bool {
+    let mut rest = text.chars().peekable();
+    for (index, word) in words.iter().enumerate() {
+        if index > 0 {
+            let mut spaces = 0;
+            while rest.next_if(|&c| is_js_space(c)).is_some() {
+                spaces += 1;
+            }
+            if spaces == 0 {
+                return false;
+            }
+        }
+        if !word.chars().all(|w| rest.next().map(straight) == Some(w)) {
+            return false;
+        }
+    }
+    rest.peek().is_none_or(|&c| !is_alphanumeric(c))
+}
+
 /// `isWordStart` in `paletteSearch.ts`: whether `c` starts a word after `previous` and
-/// `before_previous` (`None` at the start of the text). A word starts after a character that is
-/// no letter or digit, at a camelCase or digit boundary, at the last capital of an acronym
-/// ("JSONSchema"), and at every Chinese or Japanese character, but not after an apostrophe
-/// inside a word ("Julius’s"). Emoji do not start words here; T3 lets them.
+/// `before_previous` (`None` at the start of the text). A letter, digit or symbol starts a word
+/// after a character that is no letter or digit, at a camelCase or digit boundary, at the last
+/// capital of an acronym ("JSONSchema"), and at every Chinese or Japanese character, but not
+/// after an apostrophe inside a word ("Julius’s").
 fn is_word_start(
     before_previous: Option<char>,
     previous: Option<char>,
@@ -342,22 +460,89 @@ fn is_word_start(
 ) -> bool {
     let after_apostrophe =
         matches!(previous, Some('\'' | '\u{2019}')) && before_previous.is_some_and(is_alphanumeric);
-    if !is_alphanumeric(c) || after_apostrophe {
+    if !(is_alphanumeric(c) || is_symbol(c)) || after_apostrophe {
         return false;
     }
     let Some(previous) = previous else {
         return true;
     };
     !is_alphanumeric(previous)
-        || (previous.is_lowercase() && c.is_uppercase())
-        || (previous.is_uppercase() && c.is_uppercase() && next.is_some_and(char::is_lowercase))
+        || (is_lowercase(previous) && is_uppercase(c))
+        || (is_uppercase(previous) && is_uppercase(c) && next.is_some_and(is_lowercase))
         || previous.is_numeric() != c.is_numeric()
         || is_cjk(c)
 }
 
-/// `ALPHANUMERIC` in `paletteSearch.ts`: a letter or a digit (`\p{L}`, `\p{N}`), not a mark.
+/// A Unicode general category as sorted, disjoint ranges, from `regex-syntax`'s tables.
+struct Category(Vec<(char, char)>);
+
+impl Category {
+    fn parse(class: &str) -> Self {
+        let ranges = regex_syntax::parse(class)
+            .ok()
+            .and_then(|hir| match hir.kind() {
+                regex_syntax::hir::HirKind::Class(regex_syntax::hir::Class::Unicode(class)) => {
+                    Some(
+                        class
+                            .ranges()
+                            .iter()
+                            .map(|range| (range.start(), range.end()))
+                            .collect(),
+                    )
+                }
+                _ => None,
+            });
+        Self(ranges.unwrap_or_default())
+    }
+
+    fn contains(&self, c: char) -> bool {
+        self.0
+            .binary_search_by(|&(start, end)| {
+                if end < c {
+                    std::cmp::Ordering::Less
+                } else if start > c {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+}
+
+type CategoryCell = std::sync::OnceLock<Category>;
+
+fn in_category(cell: &'static CategoryCell, class: &str, c: char) -> bool {
+    cell.get_or_init(|| Category::parse(class)).contains(c)
+}
+
+/// `LETTER`: `\p{L}`.
+fn is_letter(c: char) -> bool {
+    static CELL: CategoryCell = CategoryCell::new();
+    c.is_ascii_alphabetic() || (!c.is_ascii() && in_category(&CELL, r"\p{L}", c))
+}
+
+/// `LOWERCASE`: `\p{Ll}`.
+fn is_lowercase(c: char) -> bool {
+    static CELL: CategoryCell = CategoryCell::new();
+    c.is_ascii_lowercase() || (!c.is_ascii() && in_category(&CELL, r"\p{Ll}", c))
+}
+
+/// `UPPERCASE`: `\p{Lu}`.
+fn is_uppercase(c: char) -> bool {
+    static CELL: CategoryCell = CategoryCell::new();
+    c.is_ascii_uppercase() || (!c.is_ascii() && in_category(&CELL, r"\p{Lu}", c))
+}
+
+/// `SYMBOL`: emoji and other symbols, `\p{So}`. ASCII has none.
+fn is_symbol(c: char) -> bool {
+    static CELL: CategoryCell = CategoryCell::new();
+    !c.is_ascii() && in_category(&CELL, r"\p{So}", c)
+}
+
+/// `ALPHANUMERIC` in `paletteSearch.ts`: a letter or a digit (`\p{L}`, `\p{N}`).
 fn is_alphanumeric(c: char) -> bool {
-    (c.is_alphabetic() && !is_combining_mark(c)) || c.is_numeric()
+    is_letter(c) || c.is_numeric()
 }
 
 /// `isCjk`: kana and CJK ideographs, which start a word each.
@@ -545,6 +730,11 @@ mod tests {
         assert_eq!(starts("JSONSchema t3code"), [0, 4, 11, 12, 13]);
         assert_eq!(starts("Julius’s drafts"), [0, 9]);
         assert_eq!(starts("東京"), [0, 1]);
+        // A symbol starts a word where a letter would, and is no letter after it.
+        assert_eq!(starts("fix⚙ ⚙x 😀"), [0, 5, 6, 8]);
+        // By general category: "ª" is no lowercase letter (`Lo`), "Ⓐ" no letter at all (`So`).
+        assert_eq!(starts("ªB Ⓐb"), [0, 3, 4]);
+        assert_eq!(starts("écoleÉté"), [0, 5]);
     }
 
     #[test]
@@ -564,6 +754,9 @@ mod tests {
             assert!(!field_holds_words(title, query), "{query}");
         }
         assert!(field_holds_words("fix parser.ts", ".ts"), "own boundary");
+        // A symbol is no punctuation: it starts a word only where a letter would.
+        assert!(field_holds_words("fix ⚙ settings", "⚙"));
+        assert!(!field_holds_words("fix⚙ settings", "⚙"));
         assert!(field_holds_words("parseJSONSchema", "schema"));
     }
 }

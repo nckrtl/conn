@@ -85,41 +85,52 @@ struct MessageSearch {
     substrings: Vec<String>,
     /// Every word, long ones first.
     tokens: Vec<MatchToken>,
+    /// Two or more words, as typed and lowercased, that a hit may hold side by side.
+    phrase: Option<Vec<String>>,
+    /// The same words with accents folded.
+    folded_phrase: Option<Vec<String>>,
+    /// Whether the query, as typed, has a character outside ASCII (`NON_ASCII`).
+    non_ascii: bool,
 }
 
 /// One query word as the matcher reads it.
 struct MatchToken {
-    /// The word as the index folds it.
+    /// The word lowercased, as `messageSearchTokens` gives it.
+    word: String,
+    /// The word folded as `foldInPlace` folds it, marks dropped, for the accent-blind pass.
     folded: String,
-    /// Shorter than `MESSAGE_WORD_START_LENGTH` once lowercased: it must start a word, so "fts"
-    /// does not find "drafts".
+    non_ascii: bool,
+    /// Shorter than `MESSAGE_WORD_START_LENGTH`: it must start a word, so "fts" does not find
+    /// "drafts".
     must_start_word: bool,
 }
 
 impl MessageSearch {
     /// `None` when the query has no word long enough to search (`messageSearchTokens`).
     fn new(query: &str) -> Option<Self> {
-        let query: String = query
+        let lowered = query
             .trim()
             .trim_matches(crate::fold::WRAPPING_QUOTES)
+            .chars()
+            .map(crate::fold::straight)
             .nfc()
-            .collect();
-        // `messageSearchTokens` counts a word's length lowercased, before the index folds it:
-        // "İce" is four characters, though the index reads "ice".
-        let words: Vec<(usize, String)> = query
-            .split_whitespace()
-            .map(|word| (word.to_lowercase().chars().count(), crate::fold::fold(word)))
+            .collect::<String>()
+            .to_lowercase();
+        // Each word with its index fold. A word the index folds away is not searched.
+        let words: Vec<(&str, String)> = lowered
+            .split(crate::fold::is_js_space)
+            .map(|word| (word, crate::fold::fold(word)))
             .filter(|(_, folded)| !folded.is_empty())
             .collect();
         let (long, short): (Vec<_>, Vec<_>) = words
-            .into_iter()
-            .partition(|(length, folded)| searchable(*length, folded));
+            .iter()
+            .partition(|(word, _)| searchable(word.chars().count(), word));
         if long.is_empty() {
             return None;
         }
         let indexed = long
             .iter()
-            .all(|(length, _)| *length >= MESSAGE_TOKEN_MIN_LENGTH);
+            .all(|(word, _)| word.chars().count() >= MESSAGE_TOKEN_MIN_LENGTH);
         let fts_match = indexed.then(|| {
             long.iter()
                 .map(|(_, token)| format!("\"{}\"", token.replace('"', "\"\"")))
@@ -132,41 +143,84 @@ impl MessageSearch {
             long.iter().map(|(_, token)| token.clone()).collect()
         };
         substrings.extend(short.iter().map(|(_, token)| token.clone()));
+        let without_marks = |word: &str| -> String {
+            crate::fold::fold_field(word)
+                .chars()
+                .filter(|&c| !unicode_normalization::char::is_combining_mark(c))
+                .collect()
+        };
         let tokens = long
-            .into_iter()
-            .chain(short)
-            .map(|(length, folded)| MatchToken {
-                folded,
-                must_start_word: length < MESSAGE_WORD_START_LENGTH,
+            .iter()
+            .chain(&short)
+            .map(|(word, _)| MatchToken {
+                word: (*word).to_owned(),
+                folded: without_marks(word),
+                non_ascii: !word.is_ascii(),
+                must_start_word: word.chars().count() < MESSAGE_WORD_START_LENGTH,
             })
             .collect();
+        let phrase = |words: Vec<String>| (words.len() > 1).then_some(words);
         Some(Self {
             fts_match,
             substrings,
             tokens,
+            phrase: phrase(words.iter().map(|(word, _)| (*word).to_owned()).collect()),
+            folded_phrase: phrase(
+                words
+                    .iter()
+                    .map(|(word, _)| without_marks(word))
+                    .filter(|word| !word.is_empty())
+                    .collect(),
+            ),
+            non_ascii: !query.is_ascii(),
         })
     }
 
-    /// `messageMatcher`: where the snippet of a hit starts, as an index into its characters, or
-    /// `None` when a word sits only inside a hex id, or a short word only inside words. The
-    /// snippet starts at the shortest stretch that holds one best place of every word.
+    /// `messageMatcher`: where the snippet of a hit starts, in UTF-16 units, or `None` when a
+    /// word sits only inside a hex id, or a short word only inside words. Each word is looked
+    /// for lowercased, then with accents folded when that finds no whole word. The snippet
+    /// starts where the words sit side by side as typed, else at the shortest stretch that
+    /// holds one best place of every word.
     fn accept(&self, text: &str) -> Option<usize> {
-        let folded = crate::fold::Folded::new(text, crate::fold::push_indexed);
+        use crate::fold::{Folded, Placement, push_field};
+        let text_non_ascii = !text.is_ascii();
+        let plain =
+            Folded::message_lowercase(text).unwrap_or_else(|| Folded::message(text, push_field));
+        let mut folded: Option<Folded> = None;
         let first_only = self.tokens.len() == 1;
-        let mut places = Vec::with_capacity(self.tokens.len());
+        let mut places: Vec<Vec<usize>> = Vec::with_capacity(self.tokens.len());
         for token in &self.tokens {
-            let (placement, at) = folded.find_token(&token.folded, first_only)?;
-            if placement == crate::fold::Placement::Inside && token.must_start_word {
+            let mut found = plain.find_token(&token.word, first_only);
+            let whole = matches!(found, Some((Placement::Whole, _)));
+            if !whole && !token.folded.is_empty() && (token.non_ascii || text_non_ascii) {
+                found = folded
+                    .get_or_insert_with(|| Folded::message(text, push_field))
+                    .find_token(&token.folded, first_only);
+            }
+            let (placement, at) = found?;
+            if placement == Placement::Inside && token.must_start_word {
                 return None;
             }
-            places.push(at);
+            places.push(at.into_iter().map(|i| plain.utf16_offset(i)).collect());
         }
-        Some(shortest_span(&places))
+        let mut together = self
+            .phrase
+            .as_ref()
+            .and_then(|words| plain.find_phrase(words));
+        if together.is_none()
+            && (self.non_ascii || text_non_ascii)
+            && let Some(words) = &self.folded_phrase
+        {
+            together = folded
+                .get_or_insert_with(|| Folded::message(text, push_field))
+                .find_phrase(words);
+        }
+        Some(together.map_or_else(|| shortest_span(&places), |at| plain.utf16_offset(at)))
     }
 }
 
 /// `shortestSpan` in `paletteSearch.ts`: where the shortest stretch of text starts that holds
-/// one place of each word, from each word's places in order.
+/// one place of each word, from each word's places in order, in UTF-16 units.
 fn shortest_span(places: &[Vec<usize>]) -> usize {
     let mut hits: Vec<(usize, usize)> = places
         .iter()
@@ -639,8 +693,17 @@ fn count_occurrences(text: &str, needle: &str) -> u64 {
     text.to_lowercase().matches(needle).count() as u64
 }
 
-/// Up to 240 characters of the original text around the match that starts at character `at`.
+/// Up to 240 characters of the original text around the match that starts `at` UTF-16 units in.
 fn snippet(text: &str, at: usize) -> String {
+    let mut units = 0;
+    let at = text
+        .chars()
+        .take_while(|c| {
+            let before = units < at;
+            units += c.len_utf16();
+            before
+        })
+        .count();
     let start = at.saturating_sub(SNIPPET_CHARS / 3);
     text.chars()
         .skip(start)
@@ -747,6 +810,41 @@ mod tests {
         assert_eq!(s.substrings, ["東京", "say\"x"]);
         let s = MessageSearch::new("a\"bc").unwrap();
         assert_eq!(s.fts_match.as_deref(), Some("\"a\"\"bc\""));
+    }
+
+    fn accept(query: &str, text: &str) -> Option<usize> {
+        MessageSearch::new(query).and_then(|search| search.accept(text))
+    }
+
+    /// `messageMatcher` gives the snippet's offset in UTF-16 units, as T3 does: an emoji is two.
+    /// Words written together as typed come before the shortest stretch that holds them.
+    #[test]
+    fn the_snippet_offset_counts_utf16_units_and_prefers_the_phrase() {
+        // By characters the emoji stretch is shorter (47 against 67); by UTF-16 units it is
+        // longer (87), so T3 shows the later pair.
+        let emoji = format!(
+            "alpha {} beta {} alpha {} beta",
+            "😀".repeat(40),
+            "z".repeat(225),
+            "x".repeat(60)
+        );
+        assert_eq!(accept("alpha beta", &emoji), Some(318));
+        let phrase = format!("bar foo {} foo bar", "y".repeat(100));
+        assert_eq!(accept("foo bar", &phrase), Some(109));
+        // The snippet reads the offset back in UTF-16 units.
+        let text = format!("{}needle tail", "😀".repeat(200));
+        let got = snippet(&text, 400);
+        assert_eq!(got.chars().position(|c| c == 'n'), Some(SNIPPET_CHARS / 3));
+    }
+
+    /// `messageMatcher` looks for the word as typed, lowercased, first, and folds accents only
+    /// when that finds no whole word: "cafe" shows the later "cafe", not "Café".
+    #[test]
+    fn the_exact_spelling_comes_before_the_folded_one() {
+        let text = format!("Café {} cafe", "z".repeat(300));
+        assert_eq!(accept("cafe", &text), Some(306));
+        assert_eq!(accept("café", &text), Some(0));
+        assert_eq!(accept("cafe", "Café ouvert"), Some(0));
     }
 
     #[test]

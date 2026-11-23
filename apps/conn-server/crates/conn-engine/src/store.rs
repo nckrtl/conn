@@ -1972,8 +1972,8 @@ fn index_message(
 const MESSAGE_SEARCH_FOLD: i64 = 3;
 /// Messages between two progress lines of a refold.
 const REFOLD_REPORT_EVERY: u64 = 10_000;
-/// The text a refold batch reads before it writes: a batch ends at the row that reaches it, or
-/// at `REFOLD_BATCH_ROWS` rows.
+/// The most text a refold batch holds before it writes, with `REFOLD_BATCH_ROWS` rows at most.
+/// A row larger than this is folded alone.
 const REFOLD_BATCH_BYTES: usize = 4 << 20;
 const REFOLD_BATCH_ROWS: usize = 500;
 
@@ -2062,9 +2062,9 @@ const REFOLD_ROWS_SQL: &str = "SELECT k.id, s.text, COALESCE(json_extract(e.body
      WHERE k.id > ?1 ORDER BY k.id";
 
 /// Folds every `message_search` text again from its message's text, so an older fold is
-/// rebuilt. It reads rows in id order until their texts reach [`REFOLD_BATCH_BYTES`] or the row
-/// cap, so a store of large messages never holds many of them at once. `progress` hears the messages read so far
-/// after each batch. A row whose message is gone keeps its text.
+/// rebuilt. It reads rows in id order while their texts fit [`REFOLD_BATCH_BYTES`] and the row
+/// cap, so a store of large messages never holds more than the budget at once. `progress` hears
+/// the messages read so far after each batch. A row whose message is gone keeps its text.
 pub(crate) fn refold_message_search(
     conn: &Connection,
     progress: &mut dyn FnMut(u64),
@@ -2077,8 +2077,7 @@ pub(crate) fn refold_message_search(
         let mut bytes = 0;
         {
             let mut rows = stmt.query([after]).map_err(err)?;
-            while bytes < REFOLD_BATCH_BYTES
-                && batch.len() < REFOLD_BATCH_ROWS
+            while batch.len() < REFOLD_BATCH_ROWS
                 && let Some(row) = rows.next().map_err(err)?
             {
                 let row: (i64, String, String) = (
@@ -2086,8 +2085,16 @@ pub(crate) fn refold_message_search(
                     row.get(1).map_err(err)?,
                     row.get(2).map_err(err)?,
                 );
-                bytes += row.1.len() + row.2.len();
+                let size = row.1.len() + row.2.len();
+                // A row that would pass the budget is read again as the next batch's first.
+                if !batch.is_empty() && bytes + size > REFOLD_BATCH_BYTES {
+                    break;
+                }
+                bytes += size;
                 batch.push(row);
+                if bytes >= REFOLD_BATCH_BYTES {
+                    break;
+                }
             }
         }
         let Some(&(last, ..)) = batch.last() else {
@@ -2623,64 +2630,71 @@ mod tests {
     }
 
     /// A refold reads its rows a byte budget at a time, so a store of large messages never
-    /// holds a whole batch of them: a batch ends at the row that reaches the budget.
+    /// holds more than the budget: a row that would pass it starts the next batch, and a row
+    /// larger than the budget is folded alone.
     #[test]
     fn a_refold_batch_stays_within_its_byte_budget() {
-        const ROWS: u64 = 20;
-        // 1 MiB of message text and the one-byte stale fold.
-        const ROW_BYTES: usize = (1 << 20) + 1;
+        const MIB: usize = 1 << 20;
+        // Message text in MiB per row; each index row adds its one-byte stale fold.
+        const SIZES: [usize; 8] = [3, 2, 5, 1, 1, 1, 1, 1];
         let dir =
             std::env::temp_dir().join(format!("conn-engine-{}-refold-budget", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        for (i, mib) in SIZES.iter().enumerate() {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
+                     VALUES ('t1', 'messages', ?1, ?2, ?2, NULL, json_object('id', ?1,
+                       'text', replace(printf('%.*c', ?3, 'x'), 'x', 'É')))",
+                    params![format!("m{i}"), i as i64 + 1, (mib * MIB / 2) as i64],
+                )
+                .unwrap();
+        }
         store
             .conn
-            .execute_batch(&format!(
-                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ROWS})
-                 INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
-                   SELECT 't1', 'messages', 'm' || i, i, i, NULL,
-                          json_object('id', 'm' || i, 'text', replace(printf('%.*c', 524288, 'x'), 'x', 'É'))
-                   FROM n;
-                 INSERT INTO message_keys (thread_id, message_id)
-                   SELECT thread_id, id FROM entities WHERE kind = 'messages';
-                 INSERT INTO message_search (rowid, text) SELECT id, 'x' FROM message_keys;"
-            ))
-            .unwrap();
-        let text_bytes: usize = store
-            .conn
-            .query_row(
-                "SELECT length(CAST(json_extract(body, '$.text') AS BLOB)) FROM entities LIMIT 1",
-                [],
-                |row| row.get(0),
+            .execute_batch(
+                "INSERT INTO message_keys (thread_id, message_id)
+                   SELECT thread_id, id FROM entities WHERE kind = 'messages' ORDER BY seq;
+                 INSERT INTO message_search (rowid, text) SELECT id, 'x' FROM message_keys;",
             )
             .unwrap();
-        assert_eq!(text_bytes + 1, ROW_BYTES);
-        let mut batches = vec![];
+        let mut batches: Vec<usize> = vec![];
         let mut read = 0;
         refold_message_search(&store.conn, &mut |done| {
-            batches.push(done - read);
+            let rows = SIZES.get(read as usize..done as usize).unwrap_or_default();
+            batches.push(rows.iter().map(|mib| mib * MIB + 1).sum());
             read = done;
         })
         .unwrap();
-        assert_eq!(read, ROWS);
+        assert_eq!(read, SIZES.len() as u64);
+        assert_eq!(
+            batches,
+            [
+                3 * MIB + 1,
+                2 * MIB + 1,
+                5 * MIB + 1,
+                3 * MIB + 3,
+                2 * MIB + 2
+            ],
+            "bytes per batch, budget {REFOLD_BATCH_BYTES}"
+        );
         let plan = store.query_plan(REFOLD_ROWS_SQL, [0]);
         assert!(
             !plan.iter().any(|step| step.contains("TEMP B-TREE")),
             "{plan:?}"
         );
-        let most = REFOLD_BATCH_BYTES.div_ceil(ROW_BYTES) as u64;
-        assert!(
-            batches.iter().all(|&rows| rows <= most),
-            "rows per batch {batches:?}, budget {most}"
-        );
         let folded: String = store
             .conn
-            .query_row("SELECT text FROM message_search LIMIT 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT text FROM message_search ORDER BY rowid LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(folded, "e".repeat(text_bytes / 2));
+        assert_eq!(folded, "e".repeat(SIZES[0] * MIB / 2));
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -466,7 +466,7 @@ async fn worktrees_are_created_listed_and_removed() {
 
 /// A linked worktree at `<root>/annexed` whose `.git` file git-annex replaced with a symlink to
 /// its admin folder. The layout is built with git and a link; git-annex itself does not run.
-fn annexed_worktree(fx: &Fixture) -> (PathBuf, String) {
+fn annexed_worktree(fx: &Fixture) -> (PathBuf, PathBuf) {
     let path = fx.root.path().join("annexed");
     git(
         &fx.work,
@@ -480,9 +480,7 @@ fn annexed_worktree(fx: &Fixture) -> (PathBuf, String) {
             "main",
         ],
     );
-    let admin = git(&path, &["rev-parse", "--absolute-git-dir"])
-        .trim()
-        .to_owned();
+    let admin = PathBuf::from(git(&path, &["rev-parse", "--absolute-git-dir"]).trim());
     let dot_git = path.join(".git");
     std::fs::remove_file(&dot_git).unwrap();
     std::os::unix::fs::symlink(&admin, &dot_git).unwrap();
@@ -495,133 +493,115 @@ fn dot_git_inode(path: &std::path::Path) -> u64 {
     std::fs::symlink_metadata(path.join(".git")).unwrap().ino()
 }
 
-/// T3 "removes a worktree whose .git file git-annex replaced with a symlink, keeping the symlink
-/// when refused".
+/// The checkout and its registration are both gone.
+fn assert_removed(fx: &Fixture, path: &std::path::Path, admin: &std::path::Path) {
+    assert!(std::fs::symlink_metadata(path).is_err(), "checkout kept");
+    assert!(!admin.exists(), "admin folder kept");
+    let listed = git(&fx.work, &["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("annexed"), "{listed}");
+}
+
+/// T3 "removes a worktree whose .git file git-annex replaced with a symlink". A link inside the
+/// checkout is unlinked, never followed.
 #[tokio::test]
-async fn removes_a_git_annex_worktree_and_keeps_the_link_when_refused() {
+async fn removes_a_clean_git_annex_worktree() {
     for removal in [Removal::Safe, Removal::Force] {
         let fx = Fixture::new("annex");
         let (path, admin) = annexed_worktree(&fx);
-        let dot_git = path.join(".git");
-        write(&path, "notes.txt", "draft\n");
-
-        assert!(
-            worktree::remove_worktree(&fx.work, &path, Removal::Safe)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            std::fs::read_to_string(path.join("notes.txt")).unwrap(),
-            "draft\n"
-        );
-        assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_symlink());
-        assert_eq!(std::fs::read_link(&dot_git).unwrap(), PathBuf::from(&admin));
-        std::fs::remove_file(path.join("notes.txt")).unwrap();
+        let outside = fx.root.path().join("outside");
+        write(&outside, "keep.txt", "keep\n");
+        if removal == Removal::Force {
+            std::os::unix::fs::symlink(&outside, path.join("escape")).unwrap();
+        }
 
         worktree::remove_worktree(&fx.work, &path, removal)
             .await
             .unwrap();
 
-        assert!(!path.exists(), "{removal:?}");
-        assert!(!PathBuf::from(&admin).exists(), "{removal:?}");
-        let listed = git(&fx.work, &["worktree", "list", "--porcelain"]);
-        assert!(!listed.contains("annexed"), "{listed}");
+        assert_removed(&fx, &path, &admin);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+            "keep\n"
+        );
     }
 }
 
-/// An interrupted removal leaves `.git` as a gitfile; the next attempt restores the link.
+/// Safe removal refuses an annexed checkout with untracked, modified or staged files, or with
+/// submodules, as `git worktree remove` does, and keeps every file; force removes it.
 #[tokio::test]
-async fn an_interrupted_annex_removal_is_restored_by_the_next_attempt() {
-    let fx = Fixture::new("annex-crash");
-    let (path, admin) = annexed_worktree(&fx);
-    let dot_git = path.join(".git");
-    // What a removal leaves when it stops after the swap: the link recorded in the admin
-    // folder, and the gitfile in its place.
-    std::fs::write(
-        PathBuf::from(&admin).join("conn-annex-link"),
-        format!(".git.conn-swap-crash\0{admin}"),
-    )
-    .unwrap();
-    std::fs::remove_file(&dot_git).unwrap();
-    std::fs::write(&dot_git, format!("gitdir: {admin}\n")).unwrap();
-    std::os::unix::fs::symlink(&admin, path.join(".git.conn-swap-crash")).unwrap();
-    write(&path, "notes.txt", "draft\n");
-
-    assert!(
-        worktree::remove_worktree(&fx.work, &path, Removal::Safe)
-            .await
-            .is_err()
-    );
-
-    assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_symlink());
-    assert_eq!(std::fs::read_link(&dot_git).unwrap(), PathBuf::from(&admin));
-    assert!(!PathBuf::from(&admin).join("conn-annex-link").exists());
-    assert!(
-        std::fs::symlink_metadata(path.join(".git.conn-swap-crash")).is_err(),
-        "the swap entry the record names is cleared"
-    );
-    assert_eq!(
-        std::fs::read_to_string(path.join("notes.txt")).unwrap(),
-        "draft\n"
-    );
-}
-
-/// A user's own `.git.conn-swap` is an untracked file like any other: removal keeps it and
-/// refuses the dirty checkout.
-#[tokio::test]
-async fn annex_removal_keeps_a_user_file_named_like_the_swap() {
-    let fx = Fixture::new("annex-user-swap");
-    let (path, admin) = annexed_worktree(&fx);
-    write(&path, ".git.conn-swap", "mine\n");
-
-    assert!(
-        worktree::remove_worktree(&fx.work, &path, Removal::Safe)
-            .await
-            .is_err(),
-        "a checkout with an untracked file is refused"
-    );
-    assert_eq!(
-        std::fs::read_to_string(path.join(".git.conn-swap")).unwrap(),
-        "mine\n"
-    );
-    assert_eq!(
-        std::fs::read_link(path.join(".git")).unwrap(),
-        PathBuf::from(&admin)
-    );
-}
-
-/// The recovery record is written as a fresh file, never through a link already at its path.
-#[tokio::test]
-async fn annex_removal_does_not_write_through_a_linked_record() {
-    for hard in [false, true] {
-        let fx = Fixture::new("annex-linked-record");
+async fn safe_annex_removal_refuses_a_dirty_checkout() {
+    for case in ["untracked", "modified", "staged", "submodules"] {
+        let fx = Fixture::new("annex-dirty");
         let (path, admin) = annexed_worktree(&fx);
-        write(&path, "notes.txt", "draft\n");
-        let victim = fx.root.path().join("victim.txt");
-        std::fs::write(&victim, "keep\n").unwrap();
-        let record = PathBuf::from(&admin).join("conn-annex-link");
-        if hard {
-            std::fs::hard_link(&victim, &record).unwrap();
-        } else {
-            std::os::unix::fs::symlink(&victim, &record).unwrap();
+        match case {
+            "untracked" => write(&path, "notes.txt", "draft\n"),
+            "modified" => write(&path, "README.md", "draft\n"),
+            "staged" => {
+                write(&path, "notes.txt", "draft\n");
+                git(&path, &["add", "notes.txt"]);
+            }
+            _ => std::fs::create_dir_all(admin.join("modules/sub")).unwrap(),
         }
+        let before = git(&path, &["status", "--porcelain", "--untracked-files=all"]);
+        let inode = dot_git_inode(&path);
 
-        assert!(
-            worktree::remove_worktree(&fx.work, &path, Removal::Safe)
-                .await
-                .is_err(),
-            "a checkout with an untracked file is refused"
-        );
+        let refused = worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        let expected = if case == "submodules" {
+            "working trees containing submodules cannot be moved or removed".to_owned()
+        } else {
+            format!(
+                "'{}' contains modified or untracked files, use --force to delete it",
+                path.display()
+            )
+        };
+        assert!(refused.contains(&expected), "{case}: {refused}");
+        assert_eq!(dot_git_inode(&path), inode, "{case}");
         assert_eq!(
-            std::fs::read_to_string(&victim).unwrap(),
-            "keep\n",
-            "hard link: {hard}"
+            git(&path, &["status", "--porcelain", "--untracked-files=all"]),
+            before,
+            "{case}"
         );
-        assert_eq!(
-            std::fs::read_link(path.join(".git")).unwrap(),
-            PathBuf::from(&admin)
-        );
+        assert!(admin.exists(), "{case}");
+
+        worktree::remove_worktree(&fx.work, &path, Removal::Force)
+            .await
+            .unwrap();
+        assert_removed(&fx, &path, &admin);
     }
+}
+
+/// A locked annexed worktree is refused, forced or not, as `git worktree remove --force` does.
+#[tokio::test]
+async fn annex_removal_refuses_a_locked_worktree() {
+    let fx = Fixture::new("annex-locked");
+    let (path, admin) = annexed_worktree(&fx);
+    git(
+        &fx.work,
+        &["worktree", "lock", "--reason", "on a stick", "annexed"],
+    );
+
+    for removal in [Removal::Safe, Removal::Force] {
+        let refused = worktree::remove_worktree(&fx.work, &path, removal)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("cannot remove a locked working tree, lock reason: on a stick"),
+            "{refused}"
+        );
+        assert!(path.join("README.md").exists(), "{removal:?}");
+        assert!(admin.join("locked").exists(), "{removal:?}");
+    }
+
+    git(&fx.work, &["worktree", "unlock", "annexed"]);
+    worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+        .await
+        .unwrap();
+    assert_removed(&fx, &path, &admin);
 }
 
 /// Removal reads an annexed checkout's metadata only from this repository's own
@@ -637,7 +617,7 @@ async fn annex_removal_refuses_a_link_outside_the_repository() {
         &["init", "-q", "--bare", outside.to_str().unwrap()],
     );
     for file in ["gitdir", "HEAD"] {
-        std::fs::copy(PathBuf::from(&admin).join(file), outside.join(file)).unwrap();
+        std::fs::copy(admin.join(file), outside.join(file)).unwrap();
     }
     let dot_git = path.join(".git");
     std::fs::remove_file(&dot_git).unwrap();
@@ -653,8 +633,18 @@ async fn annex_removal_refuses_a_link_outside_the_repository() {
         assert_eq!(dot_git_inode(&path), inode, "{removal:?}");
         assert_eq!(std::fs::read_link(&dot_git).unwrap(), outside);
         assert!(path.join("README.md").exists());
+        assert!(outside.join("HEAD").exists());
+        assert!(admin.exists());
     }
     assert!(git(&fx.work, &["worktree", "list"]).contains("annexed"));
+
+    // With the link pointing home again, the same checkout is removed.
+    std::fs::remove_file(&dot_git).unwrap();
+    std::os::unix::fs::symlink(&admin, &dot_git).unwrap();
+    worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+        .await
+        .unwrap();
+    assert_removed(&fx, &path, &admin);
 }
 
 /// The admin folder's `gitdir` must name this checkout's `.git`, not another file in it.
@@ -662,8 +652,9 @@ async fn annex_removal_refuses_a_link_outside_the_repository() {
 async fn annex_removal_refuses_a_backlink_to_another_file() {
     let fx = Fixture::new("annex-backlink");
     let (path, admin) = annexed_worktree(&fx);
+    let gitdir = std::fs::read_to_string(admin.join("gitdir")).unwrap();
     std::fs::write(
-        PathBuf::from(&admin).join("gitdir"),
+        admin.join("gitdir"),
         format!("{}\n", path.join("README.md").display()),
     )
     .unwrap();
@@ -676,12 +667,41 @@ async fn annex_removal_refuses_a_backlink_to_another_file() {
                 .is_err()
         );
         assert_eq!(dot_git_inode(&path), inode, "{removal:?}");
-        assert_eq!(
-            std::fs::read_link(path.join(".git")).unwrap(),
-            PathBuf::from(&admin)
-        );
+        assert_eq!(std::fs::read_link(path.join(".git")).unwrap(), admin);
         assert!(path.join("README.md").exists());
+        assert!(admin.exists());
     }
+
+    std::fs::write(admin.join("gitdir"), gitdir).unwrap();
+    worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+        .await
+        .unwrap();
+    assert_removed(&fx, &path, &admin);
+}
+
+/// A user's own `.git.conn-swap*` is an untracked file like any other: safe removal refuses the
+/// checkout and keeps it, and only force deletes it.
+#[tokio::test]
+async fn annex_removal_treats_a_swap_named_file_as_untracked() {
+    let fx = Fixture::new("annex-user-swap");
+    let (path, admin) = annexed_worktree(&fx);
+    write(&path, ".git.conn-swap-mine", "mine\n");
+
+    assert!(
+        worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join(".git.conn-swap-mine")).unwrap(),
+        "mine\n"
+    );
+    assert_eq!(std::fs::read_link(path.join(".git")).unwrap(), admin);
+
+    worktree::remove_worktree(&fx.work, &path, Removal::Force)
+        .await
+        .unwrap();
+    assert_removed(&fx, &path, &admin);
 }
 
 #[tokio::test]

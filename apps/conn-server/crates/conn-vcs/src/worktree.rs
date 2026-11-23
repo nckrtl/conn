@@ -5,13 +5,6 @@
 //! where the hash is `sha256(<git common dir> NUL <branch>)`.
 
 use std::{
-    ffi::{OsStr, OsString},
-    fs::{File, Metadata, OpenOptions, TryLockError},
-    io::{self, Read, Write},
-    os::unix::{
-        ffi::{OsStrExt, OsStringExt},
-        fs::MetadataExt,
-    },
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -293,6 +286,9 @@ pub async fn remove_worktree(cwd: &Path, path: &Path, removal: Removal) -> VcsRe
     } else {
         cwd.join(path)
     };
+    if let Some(annexed) = Annexed::find(cwd, &target).await? {
+        return annexed.remove(cwd, &target, removal).await;
+    }
     let mut args = vec![
         "-c".to_owned(),
         "status.showUntrackedFiles=normal".into(),
@@ -304,18 +300,11 @@ pub async fn remove_worktree(cwd: &Path, path: &Path, removal: Removal) -> VcsRe
     }
     args.push("--".into());
     args.push(target.to_string_lossy().into_owned());
-    let common = common_dir(cwd).await?;
-    let prepared = blocking(cwd, {
-        let target = target.clone();
-        move || Prepared::new(&target, &common)
-    })
-    .await??;
-    let removed = git("GitVcsDriver.removeWorktree", cwd, args)
+    match git("GitVcsDriver.removeWorktree", cwd, args)
         .timeout(REMOVE_TIMEOUT)
         .run()
-        .await;
-    blocking(cwd, move || prepared.finish()).await?;
-    match removed {
+        .await
+    {
         Ok(_) => Ok(()),
         Err(ProcessError::Exit { stderr, .. })
             if !path_exists(&target).await? && {
@@ -347,16 +336,8 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| invalid(cwd, e.to_string()))
 }
 
-/// The swap entry's name, a NUL and the original `.git` link, kept in the admin folder while
-/// `.git` is a gitfile, so the next removal attempt can restore the link after an interruption.
-const ANNEX_LINK_RECORD: &str = "conn-annex-link";
-/// Held from before the swap until after the restore, so removals of one worktree never
-/// overlap.
-const REMOVAL_LOCK: &str = "conn-remove.lock";
-/// `.git`'s replacement is created exclusively as `<prefix><random>`, then renamed over it.
-const DOT_GIT_SWAP_PREFIX: &str = ".git.conn-swap-";
-
-fn refuse(worktree: &Path, detail: String) -> VcsError {
+/// A refusal worded as `git worktree remove` words it.
+fn refuse(worktree: &Path, detail: impl std::fmt::Display) -> VcsError {
     VcsError::invalid(
         "GitVcsDriver.removeWorktree",
         &worktree.to_string_lossy(),
@@ -364,262 +345,129 @@ fn refuse(worktree: &Path, detail: String) -> VcsError {
     )
 }
 
-/// A removal's hold on a linked worktree: its admin folder's lock and, for git-annex, the
-/// swapped `.git` link.
-struct Prepared {
-    _lock: Option<File>,
-    annexed: Option<AnnexLink>,
-}
-
-impl Prepared {
-    /// Locks the worktree's admin folder, then swaps a git-annex link for a `gitdir:` file or
-    /// picks up a swap an interrupted removal left. Waits while another removal holds the lock.
-    fn new(worktree: &Path, common: &Path) -> VcsResult<Self> {
-        // A removal that finished while this one waited deleted the admin folder and its lock;
-        // look again.
-        for _ in 0..3 {
-            let Some((admin, _)) = locate(worktree, common)? else {
-                return Ok(Self {
-                    _lock: None,
-                    annexed: None,
-                });
-            };
-            let lock = lock_admin(&admin).map_err(|e| {
-                refuse(
-                    worktree,
-                    format!("failed to lock '{}': {e}", admin.display()),
-                )
-            })?;
-            let Some(lock) = lock else { continue };
-            let annexed = match locate(worktree, common)? {
-                Some((now, _)) if now != admin => continue,
-                Some((_, DotGit::Link(link))) => Some(AnnexLink::swap(worktree, link, admin)?),
-                Some((_, DotGit::File)) => AnnexLink::interrupted(worktree, admin),
-                None => None,
-            };
-            return Ok(Self {
-                _lock: Some(lock),
-                annexed,
-            });
-        }
-        Err(refuse(
-            worktree,
-            format!("'{}' changed during removal", worktree.display()),
-        ))
-    }
-
-    /// Restores a kept checkout's link, then releases the lock.
-    fn finish(self) {
-        if let Some(link) = self.annexed {
-            link.restore_if_kept();
-        }
-    }
-}
-
-/// What a linked worktree's `.git` is.
-enum DotGit {
-    /// git-annex's symlink to the admin folder, with the link's own text.
-    Link(PathBuf),
-    /// git's own `gitdir:` file.
-    File,
-}
-
-/// The registered admin folder `worktree`'s `.git` names, if any. A symlink to anything else is
-/// refused before the checkout changes; any other layout is git's to handle.
-fn locate(worktree: &Path, common: &Path) -> VcsResult<Option<(PathBuf, DotGit)>> {
-    let dot_git = worktree.join(".git");
-    if std::fs::symlink_metadata(&dot_git).is_ok_and(|m| m.is_symlink()) {
-        let not_a_worktree = || {
-            refuse(
-                worktree,
-                format!("'{}' is not a working tree", worktree.display()),
-            )
-        };
-        let link = std::fs::read_link(&dot_git).map_err(|_| not_a_worktree())?;
-        let admin =
-            registered_admin(worktree, &worktree.join(&link), common).ok_or_else(not_a_worktree)?;
-        return Ok(Some((admin, DotGit::Link(link))));
-    }
-    let Ok(gitfile) = std::fs::read(&dot_git) else {
-        return Ok(None);
-    };
-    Ok(gitfile
-        .strip_prefix(b"gitdir: ")
-        .map(<[u8]>::trim_ascii_end)
-        .and_then(|target| {
-            registered_admin(worktree, &worktree.join(OsStr::from_bytes(target)), common)
-        })
-        .map(|admin| (admin, DotGit::File)))
-}
-
-/// Locks `admin`'s removal lock, waiting for another holder. `None` when the lock file went
-/// away while this one waited, as it does when git deletes the admin folder.
-fn lock_admin(admin: &Path) -> io::Result<Option<File>> {
-    let path = admin.join(REMOVAL_LOCK);
-    let file = match open_single(
-        &path,
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false),
-    ) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        file => file?,
-    };
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            #[cfg(test)]
-            tests::contended(&path);
-            file.lock()?;
-        }
-        Err(TryLockError::Error(e)) => return Err(e),
-    }
-    let held = file.metadata()?;
-    match std::fs::symlink_metadata(&path) {
-        Ok(entry) => Ok(same_entry(&held, &entry).then_some(file)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-/// Opens `path` only when it is a regular file with one link, so a symlink or hard link
-/// planted in the admin folder is never followed.
-fn open_single(path: &Path, options: &OpenOptions) -> io::Result<File> {
-    let file = options.open(path)?;
-    let opened = file.metadata()?;
-    let entry = std::fs::symlink_metadata(path)?;
-    if !entry.is_file() || !same_entry(&opened, &entry) || opened.nlink() != 1 {
-        return Err(io::Error::other(format!(
-            "'{}' is not a plain file",
-            path.display()
-        )));
-    }
-    Ok(file)
-}
-
-fn same_entry(a: &Metadata, b: &Metadata) -> bool {
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-
-/// git-annex replaces a linked worktree's `.git` file with a symlink to its admin folder, so its
-/// links into `.git/annex` resolve. Git refuses to remove such a worktree, so the removal puts
-/// the standard `gitdir:` file back for git and restores the link if the checkout survives.
-struct AnnexLink {
-    dot_git: PathBuf,
-    /// The link's own text, restored as it was.
-    link: PathBuf,
+/// A linked worktree whose `.git` file git-annex replaced with a symlink to its admin folder.
+/// `git worktree remove` refuses that layout, so this removes it the way git removes a
+/// worktree: the same checks, then the checkout, then the admin folder. `.git` is never
+/// rewritten.
+struct Annexed {
+    /// The checkout, resolved.
+    checkout: PathBuf,
+    /// `<common dir>/worktrees/<name>`, resolved.
     admin: PathBuf,
-    /// Where `.git`'s replacement is created; named in the record.
-    swap: PathBuf,
 }
 
-impl AnnexLink {
-    /// Records the link and the swap entry's name, then swaps the link for a `gitdir:` file.
-    fn swap(worktree: &Path, link: PathBuf, admin: PathBuf) -> VcsResult<Self> {
-        let name = OsString::from(format!("{DOT_GIT_SWAP_PREFIX}{}", conn_support::uuid_v4()));
-        let this = Self {
-            dot_git: worktree.join(".git"),
-            swap: worktree.join(&name),
-            link,
-            admin,
-        };
-        write_record(&this.admin, &name, &this.link)
-            .and_then(|()| {
-                replace_dot_git(&this.dot_git, &this.swap, |temp| {
-                    write_gitfile(temp, &this.admin)
-                })
-            })
-            .map_err(|e| {
-                let _ = std::fs::remove_file(this.admin.join(ANNEX_LINK_RECORD));
-                refuse(
-                    worktree,
-                    format!("failed to replace '{}': {e}", this.dot_git.display()),
-                )
-            })?;
-        Ok(this)
-    }
-
-    /// The gitfile a removal interrupted after the swap left, with the link it replaced. Clears
-    /// the swap entry the record names, left when a swap or restore stopped before its rename.
-    fn interrupted(worktree: &Path, admin: PathBuf) -> Option<Self> {
-        let (name, link) = read_record(&admin)?;
-        if std::fs::canonicalize(worktree.join(&link)).ok()? != admin {
-            return None;
-        }
-        let swap = worktree.join(name);
-        let _ = std::fs::remove_file(&swap);
-        Some(Self {
-            dot_git: worktree.join(".git"),
-            link,
-            admin,
-            swap,
+impl Annexed {
+    /// `None` when `.git` is not a symlink: that layout is git's to handle. A symlink that does
+    /// not resolve to this repository's admin folder for this checkout is refused here, before
+    /// anything changes.
+    async fn find(cwd: &Path, worktree: &Path) -> VcsResult<Option<Self>> {
+        let dot_git = worktree.join(".git");
+        let linked = blocking(cwd, {
+            let dot_git = dot_git.clone();
+            move || std::fs::symlink_metadata(dot_git).is_ok_and(|m| m.is_symlink())
         })
-    }
-
-    /// A kept checkout gets its link back. If that fails, the gitfile stays usable and the
-    /// record stays for the next attempt.
-    fn restore_if_kept(self) {
-        let kept = self.dot_git.parent().is_some_and(Path::exists);
-        if kept
-            && replace_dot_git(&self.dot_git, &self.swap, |temp| {
-                std::os::unix::fs::symlink(&self.link, temp)
-            })
-            .is_err()
-        {
-            return;
+        .await?;
+        if !linked {
+            return Ok(None);
         }
-        let _ = std::fs::remove_file(self.admin.join(ANNEX_LINK_RECORD));
+        let common = common_dir(cwd).await?;
+        let worktree = worktree.to_owned();
+        blocking(cwd, move || {
+            registered_admin(&worktree, &dot_git, &common)
+                .zip(std::fs::canonicalize(&worktree).ok())
+                .map(|(admin, checkout)| Some(Self { checkout, admin }))
+                .ok_or_else(|| {
+                    refuse(
+                        &worktree,
+                        format_args!("'{}' is not a working tree", worktree.display()),
+                    )
+                })
+        })
+        .await?
     }
-}
 
-/// Writes the record to a fresh file in `admin`, then renames it over the old one, so a link
-/// at the record's path is replaced, never written through.
-fn write_record(admin: &Path, swap: &OsStr, link: &Path) -> io::Result<()> {
-    let temp = admin.join(format!(
-        "{ANNEX_LINK_RECORD}.tmp-{}",
-        conn_support::uuid_v4()
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let mut bytes = swap.as_bytes().to_vec();
-    bytes.push(0);
-    bytes.extend_from_slice(link.as_os_str().as_bytes());
-    let written = file
-        .write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temp, admin.join(ANNEX_LINK_RECORD)));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
+    /// `git worktree remove`: a locked worktree is refused; without force, so is one with
+    /// submodules or with modified or untracked files.
+    async fn remove(self, cwd: &Path, worktree: &Path, removal: Removal) -> VcsResult<()> {
+        let admin = self.admin.clone();
+        let (locked, submodules) = blocking(cwd, move || {
+            let locked = admin.join("locked");
+            let locked = locked.exists().then(|| {
+                std::fs::read_to_string(locked)
+                    .map(|reason| reason.trim().to_owned())
+                    .unwrap_or_default()
+            });
+            (locked, admin.join("modules").is_dir())
+        })
+        .await?;
+        match locked.as_deref() {
+            Some("") => {
+                return Err(refuse(
+                    worktree,
+                    "cannot remove a locked working tree;\nuse 'remove -f -f' to override or unlock first",
+                ));
+            }
+            Some(reason) => {
+                return Err(refuse(
+                    worktree,
+                    format_args!(
+                        "cannot remove a locked working tree, lock reason: {reason}\nuse 'remove -f -f' to override or unlock first"
+                    ),
+                ));
+            }
+            None => {}
+        }
+        if removal == Removal::Safe {
+            if submodules {
+                return Err(refuse(
+                    worktree,
+                    "working trees containing submodules cannot be moved or removed",
+                ));
+            }
+            // One byte answers the question.
+            let status = git(
+                "GitVcsDriver.removeWorktree",
+                &self.checkout,
+                [
+                    "status",
+                    "--porcelain",
+                    "--ignore-submodules=none",
+                    "--untracked-files=all",
+                ],
+            )
+            .timeout(REMOVE_TIMEOUT)
+            .max_stdout(1, OnLimit::Truncate)
+            .run()
+            .await?;
+            if !status.stdout.is_empty() {
+                return Err(refuse(
+                    worktree,
+                    format_args!(
+                        "'{}' contains modified or untracked files, use --force to delete it",
+                        worktree.display()
+                    ),
+                ));
+            }
+        }
+        let worktree_for_error = worktree.to_owned();
+        blocking(cwd, move || self.delete())
+            .await?
+            .map_err(|e| refuse(&worktree_for_error, e))
     }
-    written
-}
 
-/// The swap entry's name and the link from `admin`'s record, when the record is a plain file
-/// and the name is one a swap makes.
-fn read_record(admin: &Path) -> Option<(OsString, PathBuf)> {
-    let mut bytes = Vec::new();
-    open_single(
-        &admin.join(ANNEX_LINK_RECORD),
-        OpenOptions::new().read(true),
-    )
-    .ok()?
-    .read_to_end(&mut bytes)
-    .ok()?;
-    let mut parts = bytes.splitn(2, |b| *b == 0);
-    let name = parts.next()?;
-    let link = parts.next()?;
-    let suffix = name.strip_prefix(DOT_GIT_SWAP_PREFIX.as_bytes())?;
-    if suffix.is_empty() || suffix.contains(&b'/') || link.is_empty() {
-        return None;
+    /// Deletes the checkout, then the admin folder even if that failed, as git does, then
+    /// `<common dir>/worktrees` once empty. `remove_dir_all` unlinks symlinks, including `.git`,
+    /// and never follows them.
+    fn delete(self) -> Result<(), String> {
+        let checkout = std::fs::remove_dir_all(&self.checkout)
+            .map_err(|e| format!("failed to delete '{}': {e}", self.checkout.display()));
+        let admin = std::fs::remove_dir_all(&self.admin)
+            .map_err(|e| format!("failed to delete '{}': {e}", self.admin.display()));
+        if let Some(worktrees) = self.admin.parent() {
+            let _ = std::fs::remove_dir(worktrees);
+        }
+        checkout.and(admin)
     }
-    Some((
-        OsString::from_vec(name.to_vec()),
-        PathBuf::from(OsString::from_vec(link.to_vec())),
-    ))
 }
 
 /// The admin folder `target` resolves to, when it is the repository's
@@ -635,31 +483,6 @@ fn registered_admin(worktree: &Path, target: &Path, common: &Path) -> Option<Pat
         && std::fs::canonicalize(backlink.parent()?).ok()?
             == std::fs::canonicalize(worktree).ok()?;
     names_dot_git.then_some(admin)
-}
-
-/// A `gitdir:` file at `temp`, which must not exist yet.
-fn write_gitfile(temp: &Path, admin: &Path) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(temp)?;
-    let mut bytes = b"gitdir: ".to_vec();
-    bytes.extend_from_slice(admin.as_os_str().as_bytes());
-    bytes.push(b'\n');
-    file.write_all(&bytes).inspect_err(|_| {
-        let _ = std::fs::remove_file(temp);
-    })
-}
-
-/// Has `create` make `.git`'s replacement at `temp`, exclusively, then renames it over `.git`,
-/// so an interruption leaves either the old or the new one. An entry already at `temp` fails
-/// the creation and stays.
-fn replace_dot_git(
-    dot_git: &Path,
-    temp: &Path,
-    create: impl FnOnce(&Path) -> io::Result<()>,
-) -> io::Result<()> {
-    create(temp)?;
-    std::fs::rename(temp, dot_git).inspect_err(|_| {
-        let _ = std::fs::remove_file(temp);
-    })
 }
 
 /// Deletes a local branch (`git branch -d`, or `-D` with `force`).
@@ -712,144 +535,6 @@ pub async fn list_worktrees(cwd: &Path) -> VcsResult<Vec<Worktree>> {
 mod tests {
     use super::*;
 
-    type Waiter = (PathBuf, tokio::sync::oneshot::Sender<()>);
-    /// Removals a test waits on, by lock path: told when they find the lock held.
-    static CONTENDED: std::sync::Mutex<Vec<Waiter>> = std::sync::Mutex::new(Vec::new());
-
-    pub(super) fn contended(lock: &Path) {
-        let mut waiters = CONTENDED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(i) = waiters.iter().position(|(path, _)| path == lock) {
-            let (_, waiter) = waiters.swap_remove(i);
-            let _ = waiter.send(());
-        }
-    }
-
-    /// While one removal is inside `git worktree remove`, a second removal of the same worktree
-    /// waits on the lock; the swapped `.git` and its record stay until the first one restores
-    /// them.
-    #[tokio::test]
-    async fn a_second_removal_waits_for_the_first() {
-        let root =
-            std::env::temp_dir().join(format!("conn-vcs-annex-overlap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
-        let (repo, checkout) = (root.join("repo"), root.join("checkout"));
-        let git = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-                .args(["-c", "commit.gpgsign=false"])
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
-        };
-        git(&root, &["init", "-q", "-b", "main", "repo"]);
-        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
-        git(
-            &repo,
-            &["worktree", "add", "-q", "-b", "annexed", "../checkout"],
-        );
-        let admin = PathBuf::from(git(&checkout, &["rev-parse", "--absolute-git-dir"]));
-        let dot_git = checkout.join(".git");
-        std::fs::remove_file(&dot_git).unwrap();
-        std::os::unix::fs::symlink(&admin, &dot_git).unwrap();
-        std::fs::write(checkout.join("notes.txt"), "draft\n").unwrap();
-        let (record, lock) = (
-            admin.join("conn-annex-link"),
-            admin.join("conn-remove.lock"),
-        );
-
-        // git's dirty check runs the fsmonitor hook. Its first call says it started through one
-        // FIFO and waits for a line on another, which holds the first removal inside git.
-        let (started, release) = (root.join("started"), root.join("release"));
-        for fifo in [&started, &release] {
-            let made = std::process::Command::new("mkfifo")
-                .arg(fifo)
-                .status()
-                .unwrap();
-            assert!(made.success(), "mkfifo");
-        }
-        let hook = root.join("fsmonitor.sh");
-        std::fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\nif /bin/mkdir '{}' 2>/dev/null; then\n  printf x > '{}'\n  read line < '{}'\nfi\nexit 1\n",
-                root.join("held").display(),
-                started.display(),
-                release.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-        git(&repo, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
-
-        let remove = || {
-            let (repo, checkout) = (repo.clone(), checkout.clone());
-            tokio::spawn(async move { remove_worktree(&repo, &checkout, Removal::Safe).await })
-        };
-        let first = remove();
-        tokio::task::spawn_blocking(move || std::fs::read(started))
-            .await
-            .unwrap()
-            .unwrap();
-
-        let (waiting, contention) = tokio::sync::oneshot::channel();
-        CONTENDED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((lock.clone(), waiting));
-        let mut second = remove();
-        // Either the second removal finds the lock held, or it returns without waiting.
-        let returned = tokio::select! {
-            found = contention => {
-                found.unwrap();
-                None
-            }
-            done = &mut second => Some(done.unwrap()),
-        };
-        let held = std::fs::File::open(&lock)
-            .is_ok_and(|probe| matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
-        let swapped = std::fs::symlink_metadata(&dot_git).unwrap().is_file();
-        let recorded = record.exists();
-        tokio::task::spawn_blocking(move || std::fs::write(release, "go\n"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            first.await.unwrap().is_err(),
-            "the dirty checkout is refused"
-        );
-        let waited = returned.is_none();
-        let second = match returned {
-            Some(done) => done,
-            None => second.await.unwrap(),
-        };
-        assert!(second.is_err(), "the dirty checkout is refused");
-
-        assert!(
-            waited,
-            "the second removal returned while the first held the worktree"
-        );
-        assert!(held, "the first removal holds the lock");
-        assert!(
-            swapped && recorded,
-            "the first removal's swap and record survived"
-        );
-        assert_eq!(std::fs::read_link(&dot_git).unwrap(), admin);
-        assert!(!record.exists(), "the record goes with the restore");
-        assert_eq!(
-            std::fs::read_to_string(checkout.join("notes.txt")).unwrap(),
-            "draft\n"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     #[test]
     fn folder_name_truncates_by_bytes_and_hashes() {
         let name = worktree_folder_name("/repo/.git", "feature/a-very-long-branch-name");
@@ -863,107 +548,5 @@ mod tests {
         );
         let multi = worktree_folder_name("/r", "ééééééééééééé");
         assert!(multi.split('-').next().unwrap().len() <= PREFIX_MAX_BYTES);
-    }
-
-    /// `.git` stays usable when a swap stops before or after its rename, and when a removal
-    /// stops after the swap. Only the swap entry the record names is ever cleared.
-    #[test]
-    fn dot_git_stays_usable_through_an_interrupted_swap() {
-        let root = std::env::temp_dir().join(format!("conn-vcs-annex-swap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
-        let (repo, checkout) = (root.join("repo"), root.join("checkout"));
-        let git = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-                .args(["-c", "commit.gpgsign=false"])
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
-        };
-        git(&root, &["init", "-q", "-b", "main", "repo"]);
-        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
-        git(
-            &repo,
-            &["worktree", "add", "-q", "-b", "annexed", "../checkout"],
-        );
-        let admin = PathBuf::from(git(&checkout, &["rev-parse", "--absolute-git-dir"]));
-        let dot_git = checkout.join(".git");
-        std::fs::remove_file(&dot_git).unwrap();
-        std::os::unix::fs::symlink(&admin, &dot_git).unwrap();
-        // Ignored, so the checkout stays clean for `usable`.
-        std::fs::write(repo.join(".git/info/exclude"), ".git.conn-swap*\n").unwrap();
-        let user_file = checkout.join(".git.conn-swap");
-        std::fs::write(&user_file, "mine\n").unwrap();
-        let usable = || assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
-        let mine = || assert_eq!(std::fs::read_to_string(&user_file).unwrap(), "mine\n");
-
-        // An entry already at the swap path fails the swap and stays.
-        replace_dot_git(&dot_git, &user_file, |temp| write_gitfile(temp, &admin)).unwrap_err();
-        assert_eq!(std::fs::read_link(&dot_git).unwrap(), admin);
-        mine();
-        usable();
-
-        // A removal that stops after the swap leaves a working gitfile and the record.
-        let common = std::fs::canonicalize(repo.join(".git")).unwrap();
-        drop(Prepared::new(&checkout, &common).unwrap());
-        assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_file());
-        let (name, link) = read_record(&admin).unwrap();
-        assert_eq!(link, admin);
-        usable();
-
-        // A restore that stops after creating its replacement keeps the gitfile, and the next
-        // attempt clears that entry and restores the link.
-        let swap = checkout.join(&name);
-        std::os::unix::fs::symlink(&admin, &swap).unwrap();
-        assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_file());
-        usable();
-        Prepared::new(&checkout, &common).unwrap().finish();
-        assert_eq!(std::fs::read_link(&dot_git).unwrap(), admin);
-        assert!(!admin.join(ANNEX_LINK_RECORD).exists(), "record cleared");
-        assert!(
-            std::fs::symlink_metadata(&swap).is_err(),
-            "swap entry cleared"
-        );
-        mine();
-        usable();
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A record that is a symlink or a hard link is not read.
-    #[test]
-    fn a_linked_record_is_not_read() {
-        let root =
-            std::env::temp_dir().join(format!("conn-vcs-annex-record-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let elsewhere = root.join("elsewhere");
-        std::fs::write(&elsewhere, b".git.conn-swap-x\0/admin").unwrap();
-        let record = root.join(ANNEX_LINK_RECORD);
-
-        std::fs::copy(&elsewhere, &record).unwrap();
-        assert!(read_record(&root).is_some(), "a plain record is read");
-        std::fs::remove_file(&record).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, &record).unwrap();
-        assert!(read_record(&root).is_none(), "symlink");
-        std::fs::remove_file(&record).unwrap();
-        std::fs::hard_link(&elsewhere, &record).unwrap();
-        assert!(read_record(&root).is_none(), "hard link");
-
-        write_record(&root, OsStr::new(".git.conn-swap-y"), Path::new("/a")).unwrap();
-        assert_eq!(
-            std::fs::read(&elsewhere).unwrap(),
-            b".git.conn-swap-x\0/admin",
-            "the link's target is untouched"
-        );
-        assert!(
-            read_record(&root).is_some(),
-            "the new record is a plain file"
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

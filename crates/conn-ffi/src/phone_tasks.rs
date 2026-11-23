@@ -7,7 +7,6 @@
 //! time and machine.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use conn_orbit::OrbitTasksClient;
 use conn_orbit::insights::parse_date_ms;
@@ -431,6 +430,8 @@ fn working_duration_label(elapsed_ms: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use conn_orbit::fixtures::{FixtureScenario, FixtureTransport};
 
     use super::*;

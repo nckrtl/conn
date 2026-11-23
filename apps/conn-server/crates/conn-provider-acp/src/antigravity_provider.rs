@@ -285,7 +285,11 @@ impl AntigravityProvider {
             // The `agy` CLI on `PATH` has no version known before `initialize`.
             runtime_version: None,
             self_command,
-            default_model: antigravity::catalog(&self.config.model_manifest)
+            // A thread applies the configured default; a model refresh starts, as T3's does,
+            // from the model the agent has selected.
+            default_model: workspace
+                .then(|| antigravity::catalog(&self.config.model_manifest))
+                .flatten()
                 .and_then(|catalog| catalog.default_model),
             observer: Some(self.observer(workspace.then(|| cwd.clone()))),
         };
@@ -1258,7 +1262,10 @@ mod tests {
         };
         let commands = names(&entry["slashCommands"], "name");
         assert!(commands.contains(&"root-cmd".to_owned()), "{commands:?}");
-        assert!(!commands.iter().any(|c| c.starts_with("child")), "{commands:?}");
+        assert!(
+            !commands.iter().any(|c| c.starts_with("child")),
+            "{commands:?}"
+        );
         let models = names(&entry["models"], "slug");
         assert!(models.contains(&"gemini-a".to_owned()), "{models:?}");
         assert!(!models.contains(&"gemini-z".to_owned()), "{models:?}");

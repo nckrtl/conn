@@ -33,7 +33,11 @@ pub(crate) enum Incoming {
         id: i64,
         result: Result<Value, CallError>,
     },
-    Closed(Option<ExitInfo>),
+    /// The agent's exit, and the failure that ended the connection ([`Signal`]), if any.
+    Closed {
+        exit: Option<ExitInfo>,
+        failure: Option<conn_provider::ProviderError>,
+    },
     /// [`Connection::barrier`]: everything forwarded before it has been handled.
     Barrier(oneshot::Sender<()>),
 }
@@ -71,6 +75,17 @@ struct Pending {
     /// Requests whose reply goes to the incoming channel.
     ordered: std::collections::HashSet<i64>,
     closed: bool,
+    /// What ended the connection ([`Signal`]); calls after the close fail with it.
+    failure: Option<conn_provider::ProviderError>,
+}
+
+impl Pending {
+    /// Why a call on the closed connection gets no result.
+    fn closed_error(&self) -> CallError {
+        self.failure
+            .clone()
+            .map_or(CallError::Closed, CallError::Provider)
+    }
 }
 
 /// The writing half; cheap to clone.
@@ -193,14 +208,17 @@ impl Connection {
             let waiting = {
                 let mut pending = crate::lock(&routed);
                 pending.closed = true;
+                pending.failure = failure.clone();
                 pending.ordered.clear();
                 std::mem::take(&mut pending.waiting)
             };
-            let error = failure.map_or(CallError::Closed, CallError::Provider);
+            let error = failure
+                .clone()
+                .map_or(CallError::Closed, CallError::Provider);
             for (_, reply) in waiting {
                 let _ = reply.send(Err(error.clone()));
             }
-            let _ = incoming_tx.send(Incoming::Closed(exit)).await;
+            let _ = incoming_tx.send(Incoming::Closed { exit, failure }).await;
         });
         (
             Self {
@@ -218,7 +236,7 @@ impl Connection {
         let id = {
             let mut pending = crate::lock(&self.pending);
             if pending.closed {
-                return Err(CallError::Closed);
+                return Err(pending.closed_error());
             }
             let id = pending.next_id;
             pending.next_id += 1;
@@ -236,9 +254,12 @@ impl Connection {
             .await
             .is_err()
         {
-            return Err(CallError::Closed);
+            return Err(crate::lock(&self.pending).closed_error());
         }
-        rx.await.unwrap_or(Err(CallError::Closed))
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => Err(crate::lock(&self.pending).closed_error()),
+        }
     }
 
     /// Sends a request whose reply arrives as [`Incoming::Reply`]. `None` when closed.
@@ -386,9 +407,7 @@ mod waiting_tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(
-            connection
-                .call("authenticate", J::V(Value::Null))
-                .await,
+            connection.call("authenticate", J::V(Value::Null)).await,
             Err(CallError::Provider(sign_in("SIGN IN").unwrap()))
         );
     }

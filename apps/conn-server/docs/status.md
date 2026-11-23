@@ -27,7 +27,10 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
   before close, and the sign-in signals (error replies, stdout and stderr URLs) that sign the
   entry out and notify the config streams (`conn_provider::StatusNotifier`).
 - With `instanceId` and `cwd` the instance's per-workspace scan runs (Codex: `skills/list`),
-  kept 5 minutes unless `fresh`; the reply follows `omitProviders`,
+  kept 5 minutes unless `fresh`. As in T3, a plain refresh joins the scan in flight, a `fresh`
+  one claims the folder anew and an older scan that ends later is dropped, and a missing
+  managed worktree is scanned at its project's root (`workspaceScanDirectory`). The reply
+  follows `omitProviders`,
   `workspaceSnapshotsOnDemand`, `providerCatalogsOnDemand`, `machineCatalog` and
   `usageLimitsCommand`, with the pending snapshot and the catalog digest.
 
@@ -36,10 +39,10 @@ Proof: tests in `methods::server`, `catalog` and `lib` (Claude), `antigravity`,
 `AntigravityProvider.test.ts` and `AntigravityDriver.test.ts` cases; each fails with its fix
 reverted. `check-copies.mjs` holds the T3 texts. Not ported: advertising
 `providerWorkspaceSnapshotsOnDemand` (the config stream does not yet strip snapshots per
-client or track catalogs per cwd, so clients do not send the on-demand fields); T3's scan
-claims, rescans and `scanCwd`; Claude's and Antigravity's per-workspace scans; Claude's and
-the latest-version caches (this server keeps neither); compiling a model only the accepted
-manifest lists from its profile (it compiles with its slug).
+client or track catalogs per cwd); T3's rescans; Claude's and Antigravity's per-workspace
+scans; Claude's capability-probe and latest-version caches (this server keeps neither).
+Claude selections compile against the catalog the picker shows (`compileClaudeModelSelection`
+over the accepted manifest, proven equal to T3's output on the bundled one).
 
 **Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left

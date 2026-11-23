@@ -139,6 +139,20 @@ struct State<E: Env> {
     ordered_calls: Vec<(i64, OrderedReply)>,
     /// `config_option_update`s seen: a write's reply older than one of them stays out.
     config_updates: u64,
+    /// T3's `startupMetadata`: metadata updates that arrived before the root session was
+    /// known, the latest per session and kind; the root's are applied once it is.
+    startup_updates: Vec<Value>,
+}
+
+/// `maxStartupMetadataUpdates`.
+const MAX_STARTUP_UPDATES: usize = 32;
+
+/// `isStartupMetadataUpdate`.
+fn is_startup_metadata(params: &Value) -> bool {
+    matches!(
+        params["update"]["sessionUpdate"].as_str(),
+        Some("current_mode_update" | "config_option_update" | "available_commands_update")
+    )
 }
 
 type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
@@ -285,7 +299,13 @@ impl AcpSession {
         if inner.state.lock().await.restart_required {
             // A new agent loads the session (T3 `restartRuntimeAfterTeardownIfRequired`).
             let connection = inner.start_runtime().await?;
-            let initialize = inner.initialize(&connection).await?;
+            let initialize = match inner.initialize(&connection).await {
+                Ok(initialize) => initialize,
+                Err(error) => {
+                    inner.stop_runtime().await;
+                    return Err(error);
+                }
+            };
             let session_id = inner
                 .state
                 .lock()
@@ -301,13 +321,19 @@ impl AcpSession {
             } else {
                 "session/load"
             };
-            let setup = connection
+            let setup = match connection
                 .call(
                     method,
                     inner.session_setup_params(&initialize, Some(&session_id)),
                 )
                 .await
-                .map_err(|e| failed(inner.config.flavor, method, &e))?;
+            {
+                Ok(setup) => setup,
+                Err(error) => {
+                    inner.stop_runtime().await;
+                    return Err(failed(inner.config.flavor, method, &error));
+                }
+            };
             let mut state = inner.state.lock().await;
             state.initialize = initialize;
             state.setup = setup;
@@ -514,33 +540,19 @@ impl AcpSession {
                 active_model: None,
                 ordered_calls: Vec::new(),
                 config_updates: 0,
+                startup_updates: Vec::new(),
             }),
             config,
             abandoned_run: std::sync::Mutex::new(None),
         });
         let connection = inner.start_runtime().await?;
-        let initialize = inner.initialize(&connection).await?;
-        let setup = connection
-            .call("session/new", inner.session_setup_params(&initialize, None))
-            .await
-            .map_err(|e| failed(inner.config.flavor, "session/new", &e))?;
-        let session_id = setup["sessionId"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| protocol_error("session/new returned no session id"))?
-            .to_owned();
-        {
-            let mut state = inner.state.lock().await;
-            state.session_id = Some(session_id.clone());
-            state.mapper.set_root_session(&session_id);
-            state.initialize = initialize;
-            state.setup = setup;
-        }
-        let model = inner.config.model.clone();
-        let effort = inner.config.effort.clone();
-        inner
-            .configure(&connection, &model, effort.as_deref())
-            .await?;
+        let session_id = match inner.start_session(&connection).await {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                inner.stop_runtime().await;
+                return Err(error);
+            }
+        };
         let session = Self {
             id: inner.config.provider_session_id.as_str().into(),
             inner,
@@ -652,6 +664,81 @@ impl Inner {
         };
         tokio::spawn(drive(Arc::downgrade(self), incoming, generation));
         Ok(connection)
+    }
+
+    /// `initialize`, `session/new` and the model (T3's `start`): returns the root session id.
+    /// Startup metadata the agent sent for that session before its reply is applied then.
+    async fn start_session(self: &Arc<Self>, connection: &Connection) -> ProviderResult<String> {
+        let initialize = self.initialize(connection).await?;
+        let setup = connection
+            .call("session/new", self.session_setup_params(&initialize, None))
+            .await
+            .map_err(|e| failed(self.config.flavor, "session/new", &e))?;
+        let session_id = setup["sessionId"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| protocol_error("session/new returned no session id"))?
+            .to_owned();
+        {
+            let mut state = self.state.lock().await;
+            state.session_id = Some(session_id.clone());
+            state.mapper.set_root_session(&session_id);
+            state.initialize = initialize;
+            state.setup = setup;
+            let buffered = std::mem::take(&mut state.startup_updates);
+            for params in buffered
+                .iter()
+                .filter(|p| p["sessionId"] == session_id.as_str())
+            {
+                self.root_update(&mut state, params).await;
+            }
+        }
+        let model = self.config.model.clone();
+        let effort = self.config.effort.clone();
+        self.configure(connection, &model, effort.as_deref())
+            .await?;
+        Ok(session_id)
+    }
+
+    /// Ends the current runtime as a close does: a failed start leaves no agent, no `run-*`
+    /// folder and (on Linux) no process tree behind. The driver ignores its exit.
+    async fn stop_runtime(&self) {
+        let stop = {
+            let mut state = self.state.lock().await;
+            state.generation += 1;
+            state
+                .runtime
+                .take()
+                .and_then(|mut runtime| runtime.stop.take())
+        };
+        if let Some(stop) = stop {
+            stop(StopKind::Kill).await;
+        }
+    }
+
+    /// One `session/update` of the root session: its config options and commands, then the
+    /// mapper.
+    async fn root_update(self: &Arc<Self>, state: &mut State<DynEnv>, params: &Value) {
+        // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
+        // the agent, and the observer hears both.
+        let update = &params["update"];
+        if update["sessionUpdate"] == "config_option_update"
+            && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
+        {
+            state.setup["configOptions"] = options.clone();
+            state.config_updates += 1;
+            if let Some(observer) = &self.config.observer {
+                observer(CatalogUpdate::ConfigOptions(options));
+            }
+        }
+        if update["sessionUpdate"] == "available_commands_update"
+            && let Some(observer) = &self.config.observer
+            && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
+        {
+            observer(CatalogUpdate::AvailableCommands(commands));
+        }
+        let outs = state.mapper.session_update(params);
+        self.deliver(state, outs).await;
     }
 
     /// `initialize`, as `AcpSessionRuntime.initializeOnce` and effect-acp's negotiating
@@ -1103,21 +1190,30 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 };
                 inner.settle(generation, None, outcome).await;
             }
-            Incoming::Closed(exit) => {
-                let mut state = inner.state.lock().await;
-                if state.generation != generation {
-                    return;
+            Incoming::Closed { exit, failure } => {
+                let stop = {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        return;
+                    }
+                    let stop = state.runtime.take().and_then(|mut r| r.stop.take());
+                    state.active_prompt = None;
+                    state.ordered_calls.clear();
+                    state.restart_required = true;
+                    let detail = match (failure, exit) {
+                        (Some(ProviderError::Failed { detail, .. }), _) => detail,
+                        (Some(failure), _) => failure.to_string(),
+                        (None, Some(exit)) => format!("the agent exited ({})", exit.describe()),
+                        (None, None) => "the agent closed its output".to_owned(),
+                    };
+                    let outs = state.mapper.agent_exited(&detail);
+                    inner.deliver(&mut state, outs).await;
+                    stop
+                };
+                // As a close ends it: the process tree and the agent's own folder go too.
+                if let Some(stop) = stop {
+                    stop(StopKind::Kill).await;
                 }
-                state.runtime = None;
-                state.active_prompt = None;
-                state.ordered_calls.clear();
-                state.restart_required = true;
-                let detail = exit.map_or_else(
-                    || "the agent closed its output".to_owned(),
-                    |exit| format!("the agent exited ({})", exit.describe()),
-                );
-                let outs = state.mapper.agent_exited(&detail);
-                inner.deliver(&mut state, outs).await;
                 return;
             }
         }
@@ -1217,26 +1313,30 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
         if state.generation != generation {
             return;
         }
-        // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
-        // the agent, and the observer hears both.
-        let update = &params["update"];
-        if update["sessionUpdate"] == "config_option_update"
-            && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
-        {
-            state.setup["configOptions"] = options.clone();
-            state.config_updates += 1;
-            if let Some(observer) = &inner.config.observer {
-                observer(CatalogUpdate::ConfigOptions(options));
+        let Some(root) = state.session_id.clone() else {
+            // Starting: keep the latest metadata per session and kind until the root is known.
+            if is_startup_metadata(params) {
+                let kind = &params["update"]["sessionUpdate"];
+                state.startup_updates.retain(|p| {
+                    p["sessionId"] != params["sessionId"] || p["update"]["sessionUpdate"] != *kind
+                });
+                state.startup_updates.push(params.clone());
+                if state.startup_updates.len() > MAX_STARTUP_UPDATES {
+                    state.startup_updates.remove(0);
+                }
             }
+            return;
+        };
+        if params["sessionId"] != root.as_str() {
+            // One runtime projects one root session. Only a flavor with subagents routes a
+            // child session's updates, through its mapper, never into the root's metadata.
+            if inner.config.flavor.background.is_some() {
+                let outs = state.mapper.session_update(params);
+                inner.deliver(&mut state, outs).await;
+            }
+            return;
         }
-        if update["sessionUpdate"] == "available_commands_update"
-            && let Some(observer) = &inner.config.observer
-            && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
-        {
-            observer(CatalogUpdate::AvailableCommands(commands));
-        }
-        let outs = state.mapper.session_update(params);
-        inner.deliver(&mut state, outs).await;
+        inner.root_update(&mut state, params).await;
         return;
     }
     if let Some(hooks) = inner.config.flavor.background

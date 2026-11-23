@@ -1441,8 +1441,8 @@ done
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A provider that scans workspaces: each scan records its folder and lists one skill
-    /// named by the scan's number. The first scan waits for `release` when `gate_first`.
+    /// A provider that scans workspaces: each scan that runs records its folder and lists one
+    /// skill named by the scan's number. The first waits for `release` when `gate_first`.
     struct Scans {
         id: conn_contract::ProviderInstanceId,
         scanned: std::sync::Mutex<Vec<String>>,
@@ -1494,19 +1494,22 @@ done
             })
         }
         fn server_provider_entry(&self, _checked_at: &str) -> Option<Value> {
-            Some(json!({"instanceId": "scans", "driver": "codex", "enabled": true,
-                "installed": true, "status": "ready", "skills": [], "slashCommands": []}))
+            Some(
+                json!({"instanceId": "scans", "driver": "codex", "enabled": true,
+                "installed": true, "status": "ready", "skills": [], "slashCommands": []}),
+            )
         }
         fn snapshot_for_cwd(
             &self,
             cwd: &str,
         ) -> Option<conn_provider::BoxFuture<'_, conn_provider::ProviderResult<Value>>> {
-            let number = {
-                let mut scanned = self.scanned.lock().unwrap();
-                scanned.push(cwd.to_owned());
-                scanned.len()
-            };
+            let cwd = cwd.to_owned();
             Some(Box::pin(async move {
+                let number = {
+                    let mut scanned = self.scanned.lock().unwrap();
+                    scanned.push(cwd);
+                    scanned.len()
+                };
                 if number == 1 && self.gate_first {
                     self.started.notify_one();
                     let _ = self.release.acquire().await;
@@ -1556,7 +1559,10 @@ done
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        assert!(!joined.is_finished(), "the second refresh waits for the scan");
+        assert!(
+            !joined.is_finished(),
+            "the second refresh waits for the scan"
+        );
         assert_eq!(scans.scanned.lock().unwrap().len(), 1, "one shared scan");
         scoped(true).await.unwrap();
         assert_eq!(workspace_skills(&deps, cwd), [json!({"name": "scan-2"})]);
@@ -1646,9 +1652,9 @@ done
                 json!({"threads": [{"id": "t1", "projectId": "p1", "branch": "feature",
                     "worktreePath": self.worktree}]})
             });
-            Box::pin(std::future::ready(
-                reply.ok_or_else(|| conn_engine::EngineError::Internal("unused".into())),
-            ))
+            Box::pin(std::future::ready(reply.ok_or_else(|| {
+                conn_engine::EngineError::Internal("unused".into())
+            })))
         }
     }
 
@@ -1695,7 +1701,10 @@ done
         .await
         .unwrap();
         assert_eq!(*scans.scanned.lock().unwrap(), [project, elsewhere]);
-        assert_eq!(workspace_skills(&deps, &worktree), [json!({"name": "scan-1"})]);
+        assert_eq!(
+            workspace_skills(&deps, &worktree),
+            [json!({"name": "scan-1"})]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -283,9 +283,13 @@ more per `providerInstances` entry with that driver (`supportsMultipleInstances`
   installs and updates the CLI (Nick, 2026-11-20); T3 says `true` for its managed runtime.
 - **Model refresh** (`server.refreshProviders` with `refreshModels`, T3's `refreshModels`
   and `publishCatalog`): the throwaway session selects each model, then the original again,
-  and drains the agent's events before it closes; each model lists the thinking levels it
-  reported. A selection's reply is dropped when the agent pushed `config_option_update`
-  while it was in flight (T3's `configOptionUpdates` rule).
+  and drains the agent's events before it closes; it starts from the agent's own model, not
+  the catalog's default. Each model lists the thinking levels it reported; levels of a model
+  the agent no longer lists go (T3 keeps them until sign-out). A selection's reply is
+  dropped when the agent pushed `config_option_update` while it was in flight (T3's
+  `configOptionUpdates` rule). Only the root session's updates reach the entry; metadata
+  sent before `session/new` answered is kept per session and applied for the root (T3's
+  `startupMetadata`).
 - **Catalog:** the entry applies the accepted model manifest's legacy marks and default
   (`applyModelCatalog`; bundled: `src/antigravity_catalog.json`, generated), and a selection
   that asks for the default takes the catalog's default when the agent lists it.

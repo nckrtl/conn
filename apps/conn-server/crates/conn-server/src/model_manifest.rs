@@ -372,7 +372,10 @@ fn provider_catalog_is_valid(catalog: &Value) -> bool {
     let Some(profiles) = catalog.get("profiles").and_then(Value::as_object) else {
         return false;
     };
-    if !profiles.values().all(Value::is_object) {
+    let profiles_ok = profiles.values().all(|profile| {
+        profile.is_object() && optional(profile, "capabilities", capabilities_are_valid)
+    });
+    if !profiles_ok {
         return false;
     }
     let Some(models) = catalog.get("models").and_then(Value::as_array) else {
@@ -414,6 +417,37 @@ fn provider_catalog_is_valid(catalog: &Value) -> bool {
                 })
         }
     }
+}
+
+/// `ModelCapabilities`: the config's wire type (`ServerProvider.models[].capabilities`), with
+/// T3's non-blank names. A profile that fails this would break `server.getConfig`.
+fn capabilities_are_valid(capabilities: &Value) -> bool {
+    type Capabilities = conn_contract::ServerProvidersItemItemModelsItemCapabilities;
+    if conn_contract::from_json::<Capabilities>(capabilities.clone()).is_err() {
+        return false;
+    }
+    let names = |item: &Value| {
+        non_blank(&item["id"])
+            && non_blank(&item["label"])
+            && optional(item, "description", non_blank)
+    };
+    capabilities
+        .get("optionDescriptors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .all(|descriptor| {
+            names(descriptor)
+                && descriptor["options"]
+                    .as_array()
+                    .is_none_or(|options| options.iter().all(names))
+                && optional(descriptor, "currentValue", |v| {
+                    v.is_boolean() || non_blank(v)
+                })
+                && optional(descriptor, "promptInjectedValues", |values| {
+                    values.as_array().is_some_and(|v| v.iter().all(non_blank))
+                })
+        })
 }
 
 /// `Date.parse` for the forms a manifest uses: an RFC 3339 time or a plain date (UTC).

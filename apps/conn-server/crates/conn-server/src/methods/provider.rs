@@ -153,6 +153,17 @@ pub struct ProviderStatus {
     /// Per-workspace snapshots (T3's `workspaceSnapshots`), by instance id; at most
     /// [`MAX_WORKSPACE_SNAPSHOTS`] per instance, the oldest dropped first.
     workspaces: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<Value>>>>,
+    /// Workspace scans in flight (T3's `workspaceRefreshesRef`), by instance and folder: the
+    /// claim's token and a channel that turns `true` when the scan ends. Removed by the scan
+    /// that holds the claim, so one entry per running scan.
+    scans: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), ScanClaim>>>,
+    next_scan: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[derive(Clone, Debug)]
+struct ScanClaim {
+    token: u64,
+    done: watch::Receiver<bool>,
 }
 
 /// `MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER`.
@@ -206,6 +217,14 @@ impl ProviderStatus {
         &self,
     ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<Value>>> {
         self.workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn scans(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<(String, String), ScanClaim>> {
+        self.scans
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -521,8 +540,8 @@ pub async fn refresh_workspace(
     let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
     let checked_at = conn_support::time::iso_from_ms(conn_support::time::now_ms());
     let entry = provider.server_provider_entry(&checked_at);
-    let scans = provider.snapshot_for_cwd(cwd);
-    let scanning = scans.is_some();
+    // The future is only built here, to learn whether the instance scans; the scan runs below.
+    let scanning = provider.snapshot_for_cwd(cwd).is_some();
     if entry.as_ref().is_none_or(|entry| entry["enabled"] != true) {
         return scanning;
     }
@@ -541,27 +560,135 @@ pub async fn refresh_workspace(
     if kept && !fresh {
         return scanning;
     }
-    if fresh {
+    if !scanning {
         provider
             .refresh_status(instance_settings(deps, instance_id))
             .await;
-    }
-    let Some(scan) = scans else {
-        if !fresh {
-            provider
-                .refresh_status(instance_settings(deps, instance_id))
-                .await;
-        }
         deps.provider_status.bump();
         return false;
-    };
-    // The scan's start counts for the TTL, not the machine check's time.
-    if let Ok(scoped) = scan.await {
-        deps.provider_status
-            .upsert_workspace(instance_id, cwd, &checked_at, &scoped);
     }
-    deps.provider_status.bump();
+    let scan_dir = workspace_scan_dir(deps, cwd).await;
+    // An ordinary refresh joins the scan in flight; a fresh one claims the folder anew, so
+    // the older scan's result is dropped when it ends.
+    let key = (instance_id.to_owned(), cwd.to_owned());
+    let claim = {
+        let mut scans = deps.provider_status.scans();
+        match scans.get(&key) {
+            Some(running) if !fresh => Err(running.done.clone()),
+            _ => {
+                let token = deps
+                    .provider_status
+                    .next_scan
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (finished, done) = watch::channel(false);
+                scans.insert(key.clone(), ScanClaim { token, done });
+                Ok((token, finished))
+            }
+        }
+    };
+    let (token, finished) = match claim {
+        Ok(claim) => claim,
+        Err(mut running) => {
+            let _ = running.wait_for(|done| *done).await;
+            return true;
+        }
+    };
+    // On its own task, so a caller that goes away does not cancel what others wait for.
+    let deps = deps.clone();
+    let scan = tokio::spawn(async move {
+        let (instance_id, cwd) = (&key.0, &key.1);
+        if fresh {
+            provider
+                .refresh_status(instance_settings(&deps, instance_id))
+                .await;
+        }
+        let scanned = match provider.snapshot_for_cwd(&scan_dir) {
+            Some(scan) => scan.await.ok(),
+            None => None,
+        };
+        let status = &deps.provider_status;
+        {
+            let mut scans = status.scans();
+            let claimed = scans.get(&key).is_some_and(|claim| claim.token == token);
+            let same_instance = deps
+                .providers
+                .snapshot()
+                .iter()
+                .any(|current| Arc::ptr_eq(current, &provider));
+            // The scan's start counts for the TTL, not the machine check's time.
+            if claimed
+                && same_instance
+                && let Some(scoped) = scanned
+            {
+                status.upsert_workspace(instance_id, cwd, &checked_at, &scoped);
+            }
+            if claimed {
+                scans.remove(&key);
+            }
+        }
+        status.bump();
+        let _ = finished.send(true);
+    });
+    let _ = scan.await;
     true
+}
+
+/// T3's `workspaceScanDirectory`: the folder while it exists. A missing managed worktree is
+/// scanned at its project's root, found through a thread on it with a branch (archived ones
+/// too); any other folder as asked. The snapshot keeps the asked folder as its key.
+async fn workspace_scan_dir(deps: &Deps, cwd: &str) -> String {
+    let path = std::path::PathBuf::from(cwd);
+    let exists = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || path.try_exists().unwrap_or(true))
+            .await
+            .unwrap_or(true)
+    };
+    let (Some(engine), Some(environment)) = (&deps.engine, &deps.environment) else {
+        return cwd.to_owned();
+    };
+    if exists || !is_managed_worktree(environment, &path) {
+        return cwd.to_owned();
+    }
+    let shell = engine.shell_snapshot().await.unwrap_or(Value::Null);
+    let archived = engine
+        .call("orchestration.getArchivedShellSnapshot", json!({}))
+        .await
+        .unwrap_or(Value::Null);
+    let project_id = [&shell["threads"], &archived["threads"]]
+        .into_iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .find(|thread| thread["worktreePath"] == cwd && !thread["branch"].is_null())
+        .and_then(|thread| thread["projectId"].as_str());
+    shell["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|project| project_id.is_some_and(|id| project["id"] == id))
+        .and_then(|project| project["workspaceRoot"].as_str())
+        .map_or_else(|| cwd.to_owned(), str::to_owned)
+}
+
+/// `isManagedWorktreePath`, lexically: an absolute, normalized path inside the worktrees
+/// folder the settings name or the default one.
+fn is_managed_worktree(
+    environment: &crate::environment::Environment,
+    path: &std::path::Path,
+) -> bool {
+    use std::path::Component;
+    let normalized = path.is_absolute()
+        && path
+            .components()
+            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
+    let roots = [
+        crate::host::worktrees_dir(environment),
+        environment.state_dir.join("worktrees"),
+    ];
+    normalized
+        && roots
+            .iter()
+            .any(|root| path.starts_with(root) && path != root)
 }
 
 /// T3's `refreshModelCatalog`, for an opened model picker: refetch a manifest older than

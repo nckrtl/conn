@@ -1056,7 +1056,9 @@ pub(crate) fn auth_required(settings: &AntigravitySettings, previous: &Observed)
     }
 }
 
-/// `observeThinkingLevels`: the thinking option the selected model reports.
+/// `observeThinkingLevels`: the thinking option the selected model reports. The model option
+/// lists every model the account has, so levels of models it no longer lists go (T3 keeps
+/// them until sign-out).
 fn observe_thinking_levels(
     levels: &mut std::collections::BTreeMap<String, Option<Value>>,
     options: &Value,
@@ -1066,11 +1068,18 @@ fn observe_thinking_levels(
             .iter()
             .find(|o| o["id"] == "model" || o["category"] == "model")
     });
-    if let Some(model) = model
-        && model["type"] == "select"
-        && let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty())
-    {
+    let Some(model) = model.filter(|m| m["type"] == "select") else {
+        return;
+    };
+    if let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty()) {
         levels.insert(current.to_owned(), thinking_config(options).cloned());
+    }
+    let listed: Vec<&str> = flatten_choices(&model["options"])
+        .into_iter()
+        .filter_map(|choice| choice["value"].as_str())
+        .collect();
+    if !listed.is_empty() {
+        levels.retain(|model, _| listed.contains(&model.as_str()));
     }
 }
 

@@ -22,6 +22,9 @@ use tokio::{
 use crate::lines::{Line, read_lines, read_lines_keeping_last};
 
 const STDERR_TAIL_BYTES: usize = 4096;
+/// The longest stderr line an observer reads whole: Antigravity's sign-in URL may be 16,384
+/// characters (T3's `maxAuthorizationUrlLength`) behind its marker. The tail keeps its 4 KiB.
+const OBSERVED_STDERR_LINE_BYTES: usize = 16_384 + 1024;
 /// How long a closed stdin may take to end the CLI before it is killed.
 pub const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
@@ -390,9 +393,10 @@ pub async fn wait_gone(pid: u32, timeout: Duration) -> bool {
     }
 }
 
-/// Keeps the last [`STDERR_TAIL_BYTES`] of stderr. Lines are framed with a cap and decoded
-/// lossily, so a long line or invalid UTF-8 cannot grow memory or end the reader (which would
-/// close the pipe and fail the child's next stderr write).
+/// Keeps the last [`STDERR_TAIL_BYTES`] of stderr. Lines are framed with a cap (larger for an
+/// observer, [`OBSERVED_STDERR_LINE_BYTES`]) and decoded lossily, so a long line or invalid
+/// UTF-8 cannot grow memory or end the reader (which would close the pipe and fail the
+/// child's next stderr write).
 fn spawn_stderr_tail(
     stderr: impl AsyncRead + Unpin + Send + 'static,
     tail: Arc<Mutex<String>>,
@@ -400,7 +404,12 @@ fn spawn_stderr_tail(
 ) -> oneshot::Receiver<()> {
     let (done_tx, done) = oneshot::channel();
     tokio::spawn(async move {
-        read_lines_keeping_last(stderr, STDERR_TAIL_BYTES, |line| {
+        let line_bytes = if observer.is_some() {
+            OBSERVED_STDERR_LINE_BYTES
+        } else {
+            STDERR_TAIL_BYTES
+        };
+        read_lines_keeping_last(stderr, line_bytes, |line| {
             let text = match line {
                 Line::Text(text) => text,
                 Line::Oversized(bytes) => format!("[{bytes}-byte line dropped]"),
@@ -476,7 +485,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn an_observed_stderr_line_may_carry_a_16k_url() {
         let (tx, mut rx) = mpsc::channel(8);
-        let script = "printf 'url: %16384s\\n' x | tr ' ' a >&2";
+        let script = "printf 'url: %s\\n' \"$(printf '%16384s' x | tr ' ' a)\" >&2";
         let observer: StderrObserver =
             Box::new(|line| line.starts_with("url: ").then(|| line.len().to_string()));
         let _process =

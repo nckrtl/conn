@@ -244,10 +244,16 @@ fn lock(state: &Mutex<ClientState>) -> std::sync::MutexGuard<'_, ClientState> {
 }
 
 impl Client {
-    fn spawn(spec: &LaunchSpec) -> Result<Self, ProbeError> {
+    /// Starts the CLI off the runtime thread: `fork` and `exec` block.
+    async fn spawn(spec: &LaunchSpec) -> Result<Self, ProbeError> {
         let (tx, mut rx) = mpsc::channel(64);
-        let process = Process::spawn(spec, crate::client::MAX_LINE_BYTES, tx)
-            .map_err(|_| ProbeError::Spawn)?;
+        let spec = spec.clone();
+        let process = tokio::task::spawn_blocking(move || {
+            Process::spawn(&spec, crate::client::MAX_LINE_BYTES, tx)
+        })
+        .await
+        .map_err(|_| ProbeError::Spawn)?
+        .map_err(|_| ProbeError::Spawn)?;
         let writer = process.writer();
         let state = Arc::new(Mutex::new(ClientState::default()));
         let reader = Arc::clone(&state);
@@ -1958,29 +1964,37 @@ fn account_status(
     ("ready", auth, None)
 }
 
-/// `makeCodexSkillsProbe`: the skills Codex sees in `workspace`. An `app-server` in the
-/// server's working folder answers `initialize` and `skills/list` with `forceReload`, then
-/// ends; a failure is tried once more. T3 keeps that helper alive for reuse; this server starts
-/// one per scan, so no process waits idle.
-pub async fn skills_for_cwd(input: &ProbeInput<'_>, workspace: &str) -> Result<Vec<Value>, String> {
+/// The probes' launch: the session's argv (`codexAppServerArgs`) and environment, plus
+/// `MISE_OFFLINE=1` and the instance's home, in the server's working folder.
+fn probe_spec(input: &ProbeInput<'_>) -> LaunchSpec {
     let config = input.config;
-    let resolved = resolved_environment(config, &input.host_env);
-    let timeout = probe_timeout(PROBE_TIMEOUT, &resolved);
     let mut spec = launch::launch_spec(
         config,
         config.launch_args_env().as_deref(),
         get(&input.host_env, launch::ORIGINATOR_ENV).is_some(),
     );
     spec.cwd = Some(input.cwd.to_string_lossy().into_owned());
+    spec.env_set.push(("MISE_OFFLINE".into(), "1".into()));
     if let Some(home) = &config.home_path {
         spec.env_set.retain(|(k, _)| k != "CODEX_HOME");
         spec.env_set
             .push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
     }
+    spec
+}
+
+/// `makeCodexSkillsProbe`: the skills Codex sees in `workspace`. An `app-server` in the
+/// server's working folder answers `initialize` and `skills/list` with `forceReload`, then
+/// ends; a failure is tried once more. T3 keeps that helper alive for reuse; this server starts
+/// one per scan, so no process waits idle.
+pub async fn skills_for_cwd(input: &ProbeInput<'_>, workspace: &str) -> Result<Vec<Value>, String> {
+    let resolved = resolved_environment(input.config, &input.host_env);
+    let timeout = probe_timeout(PROBE_TIMEOUT, &resolved);
+    let spec = probe_spec(input);
     let failed = || format!("Failed to probe Codex skills for '{workspace}'");
     let mut last = Err(failed());
     for _ in 0..2 {
-        let Ok(client) = Client::spawn(&spec) else {
+        let Ok(client) = Client::spawn(&spec).await else {
             continue;
         };
         let skills = tokio::time::timeout(timeout, async {
@@ -2032,23 +2046,10 @@ pub async fn check(input: ProbeInput<'_>) -> Value {
     let resolved = resolved_environment(config, &input.host_env);
     let timeout = probe_timeout(PROBE_TIMEOUT, &resolved);
     let binary = config.binary.to_string_lossy().into_owned();
-    // The launch: the session's argv (`codexAppServerArgs`) and environment, plus
-    // `MISE_OFFLINE=1`, in the server's working folder.
-    let mut spec = launch::launch_spec(
-        config,
-        config.launch_args_env().as_deref(),
-        get(&input.host_env, launch::ORIGINATOR_ENV).is_some(),
-    );
-    spec.cwd = Some(input.cwd.to_string_lossy().into_owned());
-    spec.env_set.push(("MISE_OFFLINE".into(), "1".into()));
-    if let Some(home) = &config.home_path {
-        spec.env_set.retain(|(k, _)| k != "CODEX_HOME");
-        spec.env_set
-            .push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
-    }
+    let spec = probe_spec(&input);
     let started = tokio::time::Instant::now();
     let spawned_ms = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
-    let outcome = match Client::spawn(&spec) {
+    let outcome = match Client::spawn(&spec).await {
         Err(error) => Some(Err(error)),
         Ok(client) => {
             let result = tokio::time::timeout(

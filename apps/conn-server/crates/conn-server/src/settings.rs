@@ -27,7 +27,7 @@ use std::{
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
-use conn_contract::{ClientServerSettingsPatch, ProviderInstanceMutation, ServerSettings};
+use conn_contract::{ClientServerSettingsPatch, ProviderInstanceMutation};
 
 use conn_support::fs::write_private;
 
@@ -122,16 +122,21 @@ pub struct SettingsStore {
     path: PathBuf,
     /// `<state>/secrets`, the T3 server's secret store.
     secrets_dir: PathBuf,
+    /// What readers see. Held only to read or publish, never across file or SQLite work:
+    /// readers run on the runtime thread.
     state: Mutex<Loaded>,
+    /// Serializes saves, which reload, write and publish.
+    writer: Mutex<()>,
     /// Bumped after each write; `subscribeServerConfig` sends `settingsUpdated` on it.
     revision: watch::Sender<u64>,
 }
 
 /// The settings in both forms.
 struct Loaded {
-    /// As the file holds them: `••••••` where a secret is saved.
-    sparse: Map<String, Value>,
-    /// With each saved secret read from the store, for the server's own use.
+    /// The whole document as the file holds it, `••••••` where a secret is saved, hosts this
+    /// server does not serve included. Saves start from it.
+    doc: Map<String, Value>,
+    /// The served settings, each saved secret read from the store, for the server's own use.
     materialized: Map<String, Value>,
 }
 
@@ -162,6 +167,7 @@ impl SettingsStore {
             path,
             secrets_dir,
             state: Mutex::new(loaded),
+            writer: Mutex::new(()),
             revision: watch::Sender::new(0),
         }
     }
@@ -242,16 +248,24 @@ impl SettingsStore {
             return Err(self.error("normalize", "the patch is not an object"));
         };
         keep_client_patch_keys(&mut patch);
+        // A client cannot set the hosts this server does not serve; the file keeps its own.
+        retain_supported_hosts(&mut patch);
         patch.extend(theme);
-        let mut state = self.lock();
+        let mut patch = Value::Object(patch);
+        file::normalize_numbers(&mut patch);
+        let Value::Object(patch) = patch else {
+            return Err(self.error("normalize", "the patch is not an object"));
+        };
+        let _writer = crate::lock(&self.writer);
         // T3's `updateAndPersistSettings` reloads first, so an edit made outside the server
         // survives an unrelated save, and a file the user broke is never replaced.
         let (reloaded, failure) = load(&self.path, &self.secrets_dir);
-        *state = reloaded;
+        let current = reloaded.doc.clone();
+        *self.lock() = reloaded;
         if let Some(detail) = failure {
             return Err(self.error("read-file", detail));
         }
-        let mut next = state.sparse.clone();
+        let mut next = current.clone();
         if let Some(mutation) = &mutation
             && mutation["operation"] == "create"
             && let Some(id) = mutation["instanceId"].as_str()
@@ -269,20 +283,18 @@ impl SettingsStore {
             apply_provider_instance_mutation(&mut next, mutation)
                 .map_err(|detail| self.error("normalize", detail))?;
         }
-        if let Err(error) = file::check_refinements(&next).and_then(|()| {
-            conn_contract::from_json::<ServerSettings>(Value::Object(next.clone()))
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        }) {
+        if let Err(error) = file::check(&next) {
             return Err(self.error(
                 "normalize",
                 format!("the settings would not decode: {error}"),
             ));
         }
-        let changes = secrets::persist(&state.sparse, &mut next);
+        let changes = secrets::persist(&current, &mut next);
         let undo = secrets::apply(&self.secrets_dir, &changes)
             .map_err(|(operation, error)| self.error(operation, error.to_string()))?;
-        let materialized = match secrets::materialize(&self.secrets_dir, &next) {
+        let mut served = next.clone();
+        retain_supported_hosts(&mut served);
+        let materialized = match secrets::materialize(&self.secrets_dir, &served) {
             Ok(materialized) => materialized,
             Err((_, error)) => {
                 undo.run(&self.secrets_dir);
@@ -293,11 +305,10 @@ impl SettingsStore {
             undo.run(&self.secrets_dir);
             return Err(self.error("write-file", error));
         }
-        *state = Loaded {
-            sparse: next,
+        *self.lock() = Loaded {
+            doc: next,
             materialized,
         };
-        drop(state);
         self.revision.send_modify(|r| *r += 1);
         Ok(self.for_client())
     }
@@ -329,15 +340,9 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
         failure,
     } = file::decode(path);
     if failure.is_some() {
-        retain_supported_hosts(&mut doc);
-        let materialized = doc.clone();
-        return (
-            Loaded {
-                sparse: doc,
-                materialized,
-            },
-            failure,
-        );
+        let mut materialized = doc.clone();
+        retain_supported_hosts(&mut materialized);
+        return (Loaded { doc, materialized }, failure);
     }
     if let Err(error) = conn_support::secret_store::ensure_dir(secrets_dir) {
         eprintln!(
@@ -355,22 +360,16 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
             path.display()
         );
     }
-    let mut sparse = doc;
-    retain_supported_hosts(&mut sparse);
-    let materialized = match secrets::materialize(secrets_dir, &sparse) {
+    let mut served = doc.clone();
+    retain_supported_hosts(&mut served);
+    let materialized = match secrets::materialize(secrets_dir, &served) {
         Ok(materialized) => materialized,
         Err((name, error)) => {
             eprintln!("conn-server: failed to read settings secret {name}: {error}");
-            sparse.clone()
+            served
         }
     };
-    (
-        Loaded {
-            sparse,
-            materialized,
-        },
-        None,
-    )
+    (Loaded { doc, materialized }, None)
 }
 
 /// The settings as the store would load them, without writing anything: for a reader that
@@ -464,9 +463,9 @@ fn merge_entries(current: &mut Map<String, Value>, key: &str, patch: Value) {
     }
 }
 
-/// `applyServerSettingsPatch`, for the fields clients send.
+/// `applyServerSettingsPatch`, for the fields clients send. A client cannot set a source
+/// control host this server does not serve; the settings keep the ones they hold.
 pub fn apply_patch(settings: &mut Map<String, Value>, mut patch: Map<String, Value>) {
-    retain_supported_hosts(settings);
     retain_supported_hosts(&mut patch);
     translate_legacy_project_overrides(settings, &mut patch);
     let idle_compaction = patched_idle_compaction(settings, &patch);
@@ -911,6 +910,8 @@ pub fn provider_instance_enabled(
 mod tests {
     use std::fs;
 
+    use conn_contract::ServerSettings;
+
     use super::*;
 
     fn patched(stored: Value, patch: Value) -> Value {
@@ -1088,18 +1089,28 @@ mod tests {
             answer["offeredSourceControlProviders"],
             json!({"github": false})
         );
+        // The file keeps the hosts this server does not serve, as the file had them.
         assert_eq!(
             on_disk(&dir)["offeredSourceControlProviders"],
-            json!({"github": false})
+            json!({"github": false, "gitlab": true, "bitbucket": true,
+                   "forgejo": true, "gitcafe": true, "azure-devops": true, "cursor-origin": true})
         );
         assert_eq!(
             answer["sourceControlHosts"],
             json!({"github": {"tokens": {"github.com": SECRET_REDACTED}}})
         );
-        assert_eq!(
-            on_disk(&dir)["sourceControlHosts"],
-            answer["sourceControlHosts"]
-        );
+        let hosts = on_disk(&dir)["sourceControlHosts"].clone();
+        assert_eq!(hosts["github"], answer["sourceControlHosts"]["github"]);
+        for kind in [
+            "gitlab",
+            "bitbucket",
+            "gitcafe",
+            "forgejo",
+            "azure-devops",
+            "cursor-origin",
+        ] {
+            assert!(hosts.get(kind).is_some(), "{kind} stays on disk");
+        }
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -1538,11 +1549,18 @@ mod tests {
             "{\"usageHistoryRetentionDays\": 0}",
             // T3 decodes the legacy fields apart; a wrong shape there is a broken file too.
             "{\"providers\":false}",
+            // An optional key holds no explicit null, and the migration must not run.
+            "{\"providers\":{},\"responseStreamingMode\":null}",
         ] {
             let dir = temp_state();
             let path = dir.join("settings.json");
             fs::write(&path, broken).unwrap();
             let store = SettingsStore::open(path.clone());
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                broken,
+                "opened: {broken}"
+            );
             let view = store.for_client();
             conn_contract::from_json::<ServerSettings>(view.clone()).unwrap();
             assert_eq!(view["continueThreadsAfterServerUpdate"], false, "{broken}");
@@ -1662,6 +1680,15 @@ mod tests {
             assert!(file.get("providers").is_none(), "migrated");
             assert_eq!(file["sourceControlHosts"]["bitbucket"], bitbucket);
         }
+        // An unrelated save keeps it too, across a reopen.
+        let store = SettingsStore::open(path.clone());
+        store
+            .update(json!({ "worktreesDirectory": "/managed" }), None)
+            .unwrap();
+        drop(SettingsStore::open(path));
+        let file = on_disk(&dir);
+        assert_eq!(file["sourceControlHosts"]["bitbucket"], bitbucket);
+        assert_eq!(file["worktreesDirectory"], "/managed");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1675,7 +1702,7 @@ mod tests {
         let path = dir.join("settings.json");
         fs::write(
             &path,
-            "{\n  // written by T3\n  \"responseStreamingMode\": \"token\",\n  \"defaultAutoPull\": true, /* kept */\n  \"projectSettingsOverrides\": { \"p\": { \"responseStreamingMode\": \"token\", }, },\n}\n",
+            "{\n  // written by T3\n  \"responseStreamingMode\": \"token\",\n  \"defaultAutoPull\": true, /* kept */\n  \"worktreeCleanup\": null,\n  \"projectSettingsOverrides\": { \"p\": { \"responseStreamingMode\": \"token\", }, },\n}\n",
         )
         .unwrap();
         let store = SettingsStore::open(path.clone());
@@ -1802,6 +1829,85 @@ mod tests {
         assert_eq!(response_streaming_mode(&turn, None), Turn);
         assert_eq!(response_streaming_mode(&turn, Some("p")), Turn);
         assert_eq!(response_streaming_mode(&turn, Some("q")), Paragraph);
+    }
+
+    /// `serverSettings.ts` (`read-provider-history`): a history that cannot be read fails
+    /// the load instead of migrating without it. The opt-out still holds and the file stays
+    /// for the next load, which migrates once the history reads.
+    #[test]
+    fn an_unreadable_provider_history_keeps_the_legacy_file() {
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        let legacy = json!({ "providers": { "claudeAgent": { "enabled": false } } }).to_string();
+        fs::write(&path, &legacy).unwrap();
+        // A T3 database whose history tables cannot be read.
+        rusqlite::Connection::open(dir.join("statev2.sqlite"))
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x)")
+            .unwrap();
+        let store = SettingsStore::open(path.clone());
+        assert!(!provider_instance_enabled(
+            &store.raw(),
+            None,
+            "claudeAgent"
+        ));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            legacy,
+            "kept for a retry"
+        );
+        rusqlite::Connection::open(dir.join("statev2.sqlite"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE projection_thread_sessions (provider_name TEXT, provider_instance_id TEXT);
+                 CREATE TABLE provider_session_runtime (provider_name TEXT, provider_instance_id TEXT);",
+            )
+            .unwrap();
+        let store = SettingsStore::open(path);
+        assert!(!provider_instance_enabled(
+            &store.raw(),
+            None,
+            "claudeAgent"
+        ));
+        assert!(on_disk(&dir).get("providers").is_none(), "migrated");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A save in progress never holds up a reader: the writer works outside the lock that
+    /// readers on the runtime thread take, and publishes the result at the end.
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_is_not_held_up_by_a_save_in_progress() {
+        use std::sync::{Arc, mpsc};
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        let store = Arc::new(SettingsStore::open(path.clone()));
+        // The save's reload blocks on a FIFO until the test writes to it.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let writer = {
+            let store = store.clone();
+            std::thread::spawn(move || store.update(json!({ "defaultAutoPull": true }), None))
+        };
+        let (sent, read) = mpsc::channel();
+        let reader = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                // Give the writer time to reach the reload first.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let _ = sent.send(store.raw());
+            })
+        };
+        let answered = read.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+        fs::write(&path, "{}").unwrap();
+        reader.join().unwrap();
+        writer.join().unwrap().unwrap();
+        assert!(answered, "the reader waited for the save");
+        assert_eq!(store.raw()["defaultAutoPull"], true);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

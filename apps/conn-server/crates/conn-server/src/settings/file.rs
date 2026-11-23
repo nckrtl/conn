@@ -8,8 +8,8 @@ use serde_json::{Map, Value, json};
 
 use conn_contract::ServerSettings;
 
-use super::generated::DEFAULT_DISABLED_DRIVERS;
-use super::{ensure_object, retain_supported_hosts};
+use super::generated::{CLIENT_PATCH_KEYS, DEFAULT_DISABLED_DRIVERS, PROJECT_OVERRIDE_KEYS};
+use super::{THEME_DEFAULT_KEYS, ensure_object};
 
 /// T3's database beside the settings file; the provider history lives there.
 const T3_STATE_FILE: &str = "statev2.sqlite";
@@ -52,18 +52,28 @@ pub(super) fn decode(path: &Path) -> Decoded {
     let legacy = legacy_providers(&doc);
     normalize_persisted(&mut doc);
     match (check(&doc), legacy) {
-        (Ok(()), Ok(providers)) => {
-            let migrated = providers.is_some();
-            if let Some(providers) = providers {
+        (Ok(()), Ok(None)) => Decoded {
+            doc,
+            migrated: false,
+            failure: None,
+        },
+        (Ok(()), Ok(Some(providers))) => match provider_history(path) {
+            Ok(history) => {
                 doc.remove("providers");
-                migrate_legacy_providers(&mut doc, providers, &provider_history(path));
+                migrate_legacy_providers(&mut doc, providers, &history);
+                Decoded {
+                    doc,
+                    migrated: true,
+                    failure: None,
+                }
             }
-            Decoded {
-                doc,
-                migrated,
-                failure: None,
-            }
-        }
+            // T3's load fails on `read-provider-history`; the file stays for the next load.
+            Err(error) => untrusted(
+                path,
+                format!("read-provider-history: {error}"),
+                Some(providers),
+            ),
+        },
         (Err(error), legacy) => untrusted(path, error, legacy.ok().flatten()),
         (Ok(()), Err(error)) => untrusted(path, error, None),
     }
@@ -77,7 +87,8 @@ fn untrusted(path: &Path, failure: String, legacy: Option<Map<String, Value>>) -
     doc.insert("continueThreadsAfterServerUpdate".into(), json!(false));
     doc.insert("usageHistoryRetentionDays".into(), json!("unlimited"));
     if let Some(providers) = legacy {
-        migrate_legacy_providers(&mut doc, providers, &provider_history(path));
+        let history = provider_history(path).unwrap_or_default();
+        migrate_legacy_providers(&mut doc, providers, &history);
     }
     Decoded {
         doc,
@@ -190,9 +201,35 @@ fn legacy_providers(doc: &Map<String, Value>) -> Result<Option<Map<String, Value
     Ok(doc.get("providers").and_then(Value::as_object).cloned())
 }
 
+/// JSON has one number type: `30.0` is the whole number 30 to T3, but not to the generated
+/// `i64` decoder. Whole numbers T3 holds exactly (`Number.isSafeInteger`) become integers.
+pub(super) fn normalize_numbers(value: &mut Value) {
+    const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            if let Some(whole) = number
+                .as_f64()
+                .filter(|n| n.fract() == 0.0 && n.abs() <= MAX_SAFE)
+            {
+                // Exact: a whole number within the safe range converts without loss.
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "checked whole and in range"
+                )]
+                let whole = whole as i64;
+                *value = json!(whole);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_numbers),
+        Value::Object(fields) => fields.values_mut().for_each(normalize_numbers),
+        _ => {}
+    }
+}
+
 /// `PersistedServerSettings`: the retired `token` streaming mode reads as `paragraph`, for
-/// the machine and for each project.
+/// the machine and for each project, and whole numbers are integers.
 fn normalize_persisted(doc: &mut Map<String, Value>) {
+    doc.values_mut().for_each(normalize_numbers);
     fn retire_token(settings: &mut Map<String, Value>) {
         if settings.get("responseStreamingMode") == Some(&json!("token")) {
             settings.insert("responseStreamingMode".into(), json!("paragraph"));
@@ -208,15 +245,48 @@ fn normalize_persisted(doc: &mut Map<String, Value>) {
     }
 }
 
-/// Whether the settings decode as `ServerSettings`, with the refinements the generated
-/// decoder does not hold.
-fn check(doc: &Map<String, Value>) -> Result<(), String> {
-    let mut view = doc.clone();
-    retain_supported_hosts(&mut view);
-    check_refinements(&view)?;
-    conn_contract::from_json::<ServerSettings>(Value::Object(view))
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+/// Whether the whole document decodes as `ServerSettings`, hosts this server does not serve
+/// included, with the checks the generated decoder does not make.
+pub(super) fn check(doc: &Map<String, Value>) -> Result<(), String> {
+    check_refinements(doc)?;
+    let decoded = conn_contract::from_json::<ServerSettings>(Value::Object(doc.clone()))
+        .map_err(|error| error.to_string())?;
+    check_explicit_nulls(doc, &conn_contract::to_json(&decoded))
+}
+
+/// `Schema.optionalKey` takes a missing key, never an explicit `null`; serde reads both as
+/// absent. A known key whose `null` does not survive the decode is refused, at the top level
+/// and in each project's overrides.
+fn check_explicit_nulls(doc: &Map<String, Value>, decoded: &Value) -> Result<(), String> {
+    let refused = |fields: &Map<String, Value>, decoded: &Value, known: &dyn Fn(&str) -> bool| {
+        fields
+            .iter()
+            .find(|(key, value)| {
+                value.is_null() && known(key) && decoded.get(key.as_str()) != Some(&Value::Null)
+            })
+            .map(|(key, _)| key.clone())
+    };
+    let top = |key: &str| CLIENT_PATCH_KEYS.contains(&key) || THEME_DEFAULT_KEYS.contains(&key);
+    if let Some(key) = refused(doc, decoded, &top) {
+        return Err(format!("`{key}` may not be null"));
+    }
+    let project_key = |key: &str| PROJECT_OVERRIDE_KEYS.contains(&key);
+    if let Some(Value::Object(projects)) = doc.get("projectSettingsOverrides") {
+        for (project, overrides) in projects {
+            if let Value::Object(overrides) = overrides
+                && let Some(key) = refused(
+                    overrides,
+                    &decoded["projectSettingsOverrides"][project.as_str()],
+                    &project_key,
+                )
+            {
+                return Err(format!(
+                    "`projectSettingsOverrides.{project}.{key}` may not be null"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Checks the generated decoder does not make: `usageHistoryRetentionDays` is a positive
@@ -239,13 +309,14 @@ pub(super) fn check_refinements(settings: &Map<String, Value>) -> Result<(), Str
 }
 
 /// `(providerName, providerInstanceId)` of the cursor, grok and opencode sessions T3 recorded
-/// in `statev2.sqlite` beside the settings file. Empty when there is none; read-only.
-fn provider_history(settings_path: &Path) -> Vec<(String, Option<String>)> {
+/// in `statev2.sqlite` beside the settings file, read-only. Empty when there is no such file;
+/// an error when it is there and cannot be read.
+fn provider_history(settings_path: &Path) -> Result<Vec<(String, Option<String>)>, String> {
     let Some(db) = settings_path.parent().map(|dir| dir.join(T3_STATE_FILE)) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if !db.is_file() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let read = || -> rusqlite::Result<Vec<(String, Option<String>)>> {
         let conn = rusqlite::Connection::open_with_flags(
@@ -264,13 +335,7 @@ fn provider_history(settings_path: &Path) -> Vec<(String, Option<String>)> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     };
-    read().unwrap_or_else(|error| {
-        eprintln!(
-            "conn-server: failed to read provider history from {}: {error}",
-            db.display()
-        );
-        Vec::new()
-    })
+    read().map_err(|error| format!("{}: {error}", db.display()))
 }
 
 /// `migrateLegacyProviderSettings`. An instance of a driver T3 turns on from history that
@@ -365,6 +430,13 @@ mod tests {
             json!({"url": "http://x//y", "list": [1, 2], "text": "a,}"})
         );
         assert!(parse_lenient("{\"a\": 1 /* open").is_err());
+    }
+
+    #[test]
+    fn whole_floats_become_integers_within_the_safe_range() {
+        let mut value = json!({"a": 30.0, "b": [1.5, 2.0], "c": 1e300, "d": -4.0});
+        normalize_numbers(&mut value);
+        assert_eq!(value, json!({"a": 30, "b": [1.5, 2], "c": 1e300, "d": -4}));
     }
 
     #[test]

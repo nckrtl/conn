@@ -225,6 +225,10 @@ pub(crate) struct ChatView {
     _copy_reset: Option<gpui_kit::Task<()>>,
     /// Ids of pending question and secret cards that need input fields.
     pending_card_ids: Vec<String>,
+    /// The thread shows a pending approval; a composer send declines it to redirect the agent.
+    pending_approval: bool,
+    /// The first pending question request, which a composer send answers.
+    pending_question_id: Option<String>,
     user_input_cards: HashMap<String, cards::UserInputCardState>,
     secret_forms: HashMap<String, cards::SecretFormState>,
     /// Runs whose changed-files tree has every folder expanded.
@@ -303,6 +307,9 @@ impl ChatView {
                         dispatch: *dispatch,
                     });
                     cx.notify();
+                }
+                ComposerEvent::AnswerQuestion { text } => {
+                    this.answer_pending_question(text, cx);
                 }
                 ComposerEvent::Resume => cx.emit(ChatEvent::Resume),
                 ComposerEvent::ImplementPlanInNewThread { text } => {
@@ -393,6 +400,8 @@ impl ChatView {
             copied_message_key: None,
             _copy_reset: None,
             pending_card_ids: Vec::new(),
+            pending_approval: false,
+            pending_question_id: None,
             user_input_cards: HashMap::new(),
             secret_forms: HashMap::new(),
             changed_files_expanded: HashSet::new(),
@@ -654,6 +663,16 @@ impl ChatView {
                 _ => None,
             })
             .collect();
+        self.pending_approval = thread
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, TimelineEntry::Approval { .. }));
+        self.pending_question_id = thread.entries.iter().find_map(|entry| match entry {
+            TimelineEntry::UserInputRequest {
+                id, pending: true, ..
+            } => Some(id.clone()),
+            _ => None,
+        });
         self.sync_working_timer(cx);
         let sync_start = std::time::Instant::now();
         let stats = self.cache.sync(
@@ -818,6 +837,8 @@ impl ChatView {
         self.copied_message_key = None;
         self._copy_reset = None;
         self.pending_card_ids.clear();
+        self.pending_approval = false;
+        self.pending_question_id = None;
         self.user_input_cards.clear();
         self.secret_forms.clear();
         self.changed_files_expanded.clear();
@@ -2888,7 +2909,16 @@ impl Render for ChatView {
                 .as_deref()
                 .map(composer_state::thread_draft_key)
         };
+        // A question's answer lives apart from the thread's draft, as in Conn.
+        let draft_key = self
+            .pending_question_id
+            .as_deref()
+            .filter(|_| self.draft.is_none())
+            .map(composer_state::question_answer_draft_key)
+            .or(draft_key);
+        let pending_request = self.composer_pending_request();
         self.composer.update(cx, |c, cx| {
+            c.set_pending_request(pending_request, cx);
             c.sync_draft_key(draft_key.as_deref(), window, cx)
         });
 

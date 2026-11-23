@@ -1898,6 +1898,31 @@ impl ConnApp {
             return;
         };
         let thread = self.threads.get(&thread_id);
+        // A message sent over pending approvals declines them first to redirect the agent
+        // (`declinePendingApprovals`).
+        let approvals: Vec<String> = thread
+            .map(|t| {
+                t.entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        conn_state::TimelineEntry::Approval { id, .. } => {
+                            t.approval_requests.get(id).cloned()
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut declines = Vec::with_capacity(approvals.len());
+        for request_id in &approvals {
+            match crate::commands::respond_approval(&thread_id, request_id, "decline") {
+                Ok(command) => declines.push(command),
+                Err(e) => {
+                    eprintln!("send: could not build runtime-request.respond: {e}");
+                    return;
+                }
+            }
+        }
         let working = thread.is_some_and(|t| t.working);
         // Steer the running turn when asked (`steer_active`); otherwise queue after it.
         let steer_target = if working && dispatch == crate::chat::SendDispatch::Steer {
@@ -1926,15 +1951,32 @@ impl ConnApp {
         let send_window = window.map(|w| w.window_handle());
         let fallback_text = text;
         cx.spawn(async move |this, cx| {
-            if let Err(err) = connection.dispatch_command(command).await {
-                let msg = crate::commands::format_client_error(&err);
+            let mut result = Ok(());
+            for decline in declines {
+                if let Err(err) = connection.dispatch_command(decline).await {
+                    result = Err(format!(
+                        "Could not decline the approval: {}",
+                        crate::commands::format_client_error(&err)
+                    ));
+                    break;
+                }
+            }
+            if result.is_ok()
+                && let Err(err) = connection.dispatch_command(command).await
+            {
+                result = Err(format!(
+                    "Send failed: {}",
+                    crate::commands::format_client_error(&err)
+                ));
+            }
+            if let Err(msg) = result {
                 eprintln!("send: dispatchCommand failed: {msg}");
                 let _ = this.update(cx, |app, cx| {
                     if app.connection_gen != generation {
                         return;
                     }
                     app.chat.update(cx, |chat, cx| {
-                        chat.set_error(Some(format!("Send failed: {msg}")), cx);
+                        chat.set_error(Some(msg), cx);
                     });
                     if let Some(win) = send_window {
                         let chat = app.chat.clone();

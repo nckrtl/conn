@@ -370,11 +370,81 @@ pub(crate) fn prompt_length_message(prompt: &str) -> Option<String> {
 /// Default editor placeholder (`DEFAULT_COMPOSER_PLACEHOLDER`).
 pub(crate) const DEFAULT_COMPOSER_PLACEHOLDER: &str = "Ask anything. @ files, $ skills, / commands";
 
-/// Editor placeholder for the composer's state (`ChatComposer.tsx` `placeholder`). The approval
-/// and question placeholders wait until the composer answers those requests itself.
+/// The pending requests a composer send answers instead of starting a turn
+/// (`activePendingApproval`, `activePendingProgress`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ComposerPendingRequest {
+    /// The thread shows a pending approval (`isComposerApprovalState`).
+    pub(crate) approval: bool,
+    /// The active question of the first pending question request.
+    pub(crate) question: Option<PendingQuestion>,
+}
+
+/// The active question of a pending question request (`activePendingProgress.activeQuestion`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingQuestion {
+    /// `false` when the provider set `allowCustomAnswer: false` (`isChoiceOnlyPendingQuestion`).
+    pub(crate) allow_custom_answer: bool,
+    pub(crate) has_options: bool,
+    /// The question card already holds an answer, so a blank send submits it.
+    pub(crate) answered: bool,
+}
+
+/// What a composer send does (`useComposerSend` `onSend`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposerSendAction {
+    /// Start a turn, or steer or queue the running one.
+    Message,
+    /// Decline the pending approvals, then steer the turn with the message
+    /// (`declinePendingApprovals`, `followUpBehavior: "steer"`).
+    RedirectApprovals,
+    /// Answer the active question with the typed text, or with its selection when blank
+    /// (`onAdvanceActivePendingUserInput`).
+    AnswerQuestion,
+    /// Nothing to send: a choice-only question, or a blank answer with nothing selected.
+    Blocked,
+}
+
+/// A question outranks an approval, as in Conn's send handler (`answeringQuestion` first).
 #[must_use]
-pub(crate) fn composer_placeholder(provider_unavailable: bool) -> &'static str {
-    if provider_unavailable {
+pub(crate) fn composer_send_action(
+    pending: &ComposerPendingRequest,
+    text_is_blank: bool,
+) -> ComposerSendAction {
+    match pending.question {
+        Some(q) if !q.allow_custom_answer => ComposerSendAction::Blocked,
+        Some(q) if text_is_blank && !q.answered => ComposerSendAction::Blocked,
+        Some(_) => ComposerSendAction::AnswerQuestion,
+        None if pending.approval => ComposerSendAction::RedirectApprovals,
+        None => ComposerSendAction::Message,
+    }
+}
+
+/// Store key for the composer's answer to the question request `entry_id`, kept apart from the
+/// thread's draft like Conn's `activePendingProgress.customAnswer`.
+#[must_use]
+pub(crate) fn question_answer_draft_key(entry_id: &str) -> String {
+    format!("question:{entry_id}")
+}
+
+/// Editor placeholder for the composer's state (`ChatComposer.tsx` `placeholder`). This client
+/// does not see `supportsFeedback`, so an approval always shows the redirect placeholder.
+#[must_use]
+pub(crate) fn composer_placeholder(
+    pending: &ComposerPendingRequest,
+    provider_unavailable: bool,
+) -> &'static str {
+    if pending.approval {
+        "Send a message to decline and redirect the agent"
+    } else if let Some(q) = pending.question {
+        if !q.allow_custom_answer {
+            "Choose an option above"
+        } else if !q.has_options {
+            "Type your answer"
+        } else {
+            "Type your own answer, or leave this blank to use the selected option"
+        }
+    } else if provider_unavailable {
         "Enable a provider in Settings to send a message"
     } else {
         DEFAULT_COMPOSER_PLACEHOLDER
@@ -779,7 +849,7 @@ mod tests {
             )
         );
         assert_eq!(
-            composer_placeholder(true),
+            composer_placeholder(&Default::default(), true),
             "Enable a provider in Settings to send a message"
         );
     }
@@ -847,6 +917,110 @@ mod tests {
         assert_eq!(
             step_prompt_history(true, &entries, down.position.as_ref(), "second!"),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod pending_request_tests {
+    use super::{
+        ComposerPendingRequest, ComposerSendAction, DEFAULT_COMPOSER_PLACEHOLDER, PendingQuestion,
+        composer_placeholder, composer_send_action,
+    };
+
+    const fn question(
+        allow_custom_answer: bool,
+        has_options: bool,
+        answered: bool,
+    ) -> PendingQuestion {
+        PendingQuestion {
+            allow_custom_answer,
+            has_options,
+            answered,
+        }
+    }
+
+    #[test]
+    fn placeholder_follows_the_pending_request() {
+        let none = ComposerPendingRequest::default();
+        let approval = ComposerPendingRequest {
+            approval: true,
+            question: None,
+        };
+        let ask = |q| ComposerPendingRequest {
+            approval: false,
+            question: Some(q),
+        };
+        assert_eq!(
+            composer_placeholder(&none, false),
+            DEFAULT_COMPOSER_PLACEHOLDER
+        );
+        assert_eq!(
+            composer_placeholder(&approval, true),
+            "Send a message to decline and redirect the agent"
+        );
+        assert_eq!(
+            composer_placeholder(&ask(question(false, true, false)), false),
+            "Choose an option above"
+        );
+        assert_eq!(
+            composer_placeholder(&ask(question(true, false, false)), false),
+            "Type your answer"
+        );
+        assert_eq!(
+            composer_placeholder(&ask(question(true, true, true)), true),
+            "Type your own answer, or leave this blank to use the selected option"
+        );
+        // An approval outranks a question in the placeholder.
+        assert_eq!(
+            composer_placeholder(
+                &ComposerPendingRequest {
+                    approval: true,
+                    question: Some(question(false, true, false)),
+                },
+                false
+            ),
+            "Send a message to decline and redirect the agent"
+        );
+    }
+
+    #[test]
+    fn send_answers_questions_before_redirecting_approvals() {
+        let ask = |approval, q| ComposerPendingRequest {
+            approval,
+            question: Some(q),
+        };
+        assert_eq!(
+            composer_send_action(&ComposerPendingRequest::default(), false),
+            ComposerSendAction::Message
+        );
+        assert_eq!(
+            composer_send_action(
+                &ComposerPendingRequest {
+                    approval: true,
+                    question: None,
+                },
+                false
+            ),
+            ComposerSendAction::RedirectApprovals
+        );
+        assert_eq!(
+            composer_send_action(&ask(true, question(true, true, false)), false),
+            ComposerSendAction::AnswerQuestion
+        );
+        // A blank send uses the selected option, and needs one.
+        assert_eq!(
+            composer_send_action(&ask(false, question(true, true, true)), true),
+            ComposerSendAction::AnswerQuestion
+        );
+        assert_eq!(
+            composer_send_action(&ask(false, question(true, true, false)), true),
+            ComposerSendAction::Blocked
+        );
+        // A choice-only question is answered in its card, never from the composer.
+        assert_eq!(
+            composer_send_action(&ask(false, question(false, true, true)), false),
+            ComposerSendAction::Blocked
         );
     }
 }

@@ -472,20 +472,27 @@ impl Annexed {
             .run()
             .await?
             .stdout;
-        let checkout = self.checkout.clone();
-        blocking(cwd, move || {
+        let dot_gits: Vec<PathBuf> = {
             use std::os::unix::ffi::OsStrExt as _;
             index
                 .split(|b| *b == 0)
                 .filter_map(|entry| {
                     let tab = entry.iter().position(|b| *b == b'\t')?;
                     let (meta, name) = (entry.get(..tab)?, entry.get(tab + 1..)?);
-                    meta.starts_with(b"160000 ")
-                        .then(|| checkout.join(std::ffi::OsStr::from_bytes(name)))
+                    meta.starts_with(b"160000 ").then(|| {
+                        self.checkout
+                            .join(std::ffi::OsStr::from_bytes(name))
+                            .join(".git")
+                    })
                 })
-                .any(|submodule| resolves_to_git_dir(&submodule.join(".git")))
-        })
-        .await
+                .collect()
+        };
+        for dot_git in dot_gits {
+            if resolves_to_git_dir(cwd, &dot_git).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Deletes the checkout, then the admin folder even if that failed, as git does, then
@@ -503,23 +510,23 @@ impl Annexed {
     }
 }
 
-/// `resolve_gitdir_gently`: `.git` is a git directory, or a `gitdir:` file that names one.
-fn resolves_to_git_dir(dot_git: &Path) -> bool {
-    let dir = if dot_git.is_dir() {
-        dot_git.to_owned()
-    } else {
-        let Some(target) = std::fs::read_to_string(dot_git).ok().and_then(|text| {
-            text.strip_prefix("gitdir:")
-                .map(|target| PathBuf::from(target.trim()))
-        }) else {
-            return false;
-        };
-        match dot_git.parent() {
-            Some(base) => base.join(target),
-            None => target,
-        }
+/// `resolve_gitdir_gently`, asked of git itself: `.git` is a git directory, or a `gitdir:`
+/// file that names one. Git's own resolver handles a symlinked or packed `HEAD` and paths
+/// with trailing spaces; a path git cannot be given counts as populated, so removal refuses.
+async fn resolves_to_git_dir(cwd: &Path, dot_git: &Path) -> VcsResult<bool> {
+    let Some(path) = dot_git.to_str() else {
+        return Ok(true);
     };
-    dir.join("HEAD").is_file()
+    let output = git(
+        "GitVcsDriver.removeWorktree",
+        cwd,
+        ["rev-parse", "--resolve-git-dir", path],
+    )
+    .allow_exit(&[128])
+    .timeout(REMOVE_TIMEOUT)
+    .run()
+    .await?;
+    Ok(output.code == 0)
 }
 
 /// The admin folder `target` resolves to, when it is the repository's

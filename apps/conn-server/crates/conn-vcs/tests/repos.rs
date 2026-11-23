@@ -574,11 +574,29 @@ async fn safe_annex_removal_refuses_a_dirty_checkout() {
     }
 }
 
-/// A populated submodule (its checkout has its own `.git`) is refused like `<admin>/modules`,
-/// as git reads the worktree's index; an unpopulated one is not.
+/// How a submodule's checkout is populated, if at all.
+#[derive(Clone, Copy, Debug)]
+enum Submodule {
+    /// Its own `.git` directory.
+    Cloned,
+    /// A `gitdir:` file naming a git directory whose path ends in a space.
+    GitFileTrailingSpace,
+    /// `HEAD` is a symlink (`core.preferSymlinkRefs`) to a branch `pack-refs` has packed.
+    SymlinkedPackedHead,
+    Unpopulated,
+}
+
+/// A populated submodule (its checkout has a `.git` git itself resolves) is refused like
+/// `<admin>/modules`, as git reads the worktree's index; an unpopulated one is not.
 #[tokio::test]
 async fn safe_annex_removal_refuses_a_populated_submodule() {
-    for populated in [true, false] {
+    for layout in [
+        Submodule::Cloned,
+        Submodule::GitFileTrailingSpace,
+        Submodule::SymlinkedPackedHead,
+        Submodule::Unpopulated,
+    ] {
+        let populated = !matches!(layout, Submodule::Unpopulated);
         let fx = Fixture::new("annex-submodule");
         let (path, admin) = annexed_worktree(&fx);
         let sub = fx.root.path().join("sub");
@@ -586,10 +604,44 @@ async fn safe_annex_removal_refuses_a_populated_submodule() {
         git(&sub, &["init", "-q", "-b", "main"]);
         write(&sub, "lib.txt", "lib\n");
         let sha = commit_all(&sub, "lib");
-        if populated {
-            git(&path, &["clone", "-q", sub.to_str().unwrap(), "lib"]);
-        } else {
-            std::fs::create_dir_all(path.join("lib")).unwrap();
+        match layout {
+            Submodule::Cloned => {
+                git(&path, &["clone", "-q", sub.to_str().unwrap(), "lib"]);
+            }
+            Submodule::GitFileTrailingSpace => {
+                let separate = fx.root.path().join("lib-git ");
+                git(
+                    &path,
+                    &[
+                        "clone",
+                        "-q",
+                        "--separate-git-dir",
+                        separate.to_str().unwrap(),
+                        sub.to_str().unwrap(),
+                        "lib",
+                    ],
+                );
+            }
+            Submodule::SymlinkedPackedHead => {
+                git(&path, &["clone", "-q", sub.to_str().unwrap(), "lib"]);
+                let lib = path.join("lib");
+                git(
+                    &lib,
+                    &[
+                        "-c",
+                        "core.preferSymlinkRefs=true",
+                        "symbolic-ref",
+                        "HEAD",
+                        "refs/heads/main",
+                    ],
+                );
+                git(&lib, &["pack-refs", "--all"]);
+                let head = lib.join(".git/HEAD");
+                assert!(head.is_symlink() && !head.is_file(), "{layout:?}");
+            }
+            Submodule::Unpopulated => {
+                std::fs::create_dir_all(path.join("lib")).unwrap();
+            }
         }
         git(
             &path,
@@ -601,7 +653,7 @@ async fn safe_annex_removal_refuses_a_populated_submodule() {
             ],
         );
         git(&path, &["commit", "-q", "-m", "submodule"]);
-        assert_eq!(git(&path, &["status", "--porcelain"]), "", "{populated}");
+        assert_eq!(git(&path, &["status", "--porcelain"]), "", "{layout:?}");
 
         let result = worktree::remove_worktree(&fx.work, &path, Removal::Safe).await;
 
@@ -615,9 +667,9 @@ async fn safe_annex_removal_refuses_a_populated_submodule() {
             refused.contains("working trees containing submodules cannot be moved or removed"),
             "{refused}"
         );
-        assert!(path.join("lib/lib.txt").exists());
-        assert!(path.join("lib/.git").is_dir());
-        assert!(admin.exists());
+        assert!(path.join("lib/lib.txt").exists(), "{layout:?}");
+        assert!(path.join("lib/.git").exists(), "{layout:?}");
+        assert!(admin.exists(), "{layout:?}");
 
         worktree::remove_worktree(&fx.work, &path, Removal::Force)
             .await

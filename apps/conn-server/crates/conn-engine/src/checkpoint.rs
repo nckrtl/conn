@@ -66,11 +66,13 @@ pub(crate) fn ensure_scope(
     cwd: &str,
 ) -> StoreResult<(String, String)> {
     let id = scope_id(thread_id);
+    // An imported scope has no event yet: record its folder before this run captures.
     let current = tx
         .entity(thread_id, "checkpointScopes", &id)?
         .is_some_and(|scope| {
             scope["providerThreadId"] == *provider_thread_id && scope["cwd"] == cwd
-        });
+        })
+        && tx.has_scope_event(thread_id)?;
     if !current {
         let scope = json!({
             "id": id, "threadId": thread_id, "runId": run["id"], "nodeId": run["rootNodeId"],

@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use crate::commands::{CommandError, Effect, Outcome, live_thread, reject};
 use crate::engine::Inner;
-use crate::store::{Draft, PendingRollback, StoreResult, Tx};
+use crate::store::{CaptureFolder, Draft, PendingRollback, StoreResult, Tx};
 
 /// `ROLLBACK_FAILED_MESSAGE`.
 pub(crate) const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
@@ -35,9 +35,9 @@ pub(crate) const SHARED_WORKSPACE_RESTORE_MESSAGE: &str = "File restore requires
 /// Not in T3, which restores a checkpoint into the scope's folder whichever checkout took it.
 pub(crate) const OTHER_CHECKOUT_RESTORE_MESSAGE: &str = "File restore needs the checkout this checkpoint was taken in, and the thread has moved to another checkout since. Rewind the conversation without restoring files instead.";
 
-/// Whether another checkout than the scope's folder now took `checkpoint`. Worktrees of one
-/// repository share its refs, so restoring it here would put that checkout's files into this
-/// one and remove what only this one has.
+/// Whether another checkout than the scope's folder now took `checkpoint`, or one the log
+/// cannot tell. Worktrees of one repository share its refs, so restoring it here would put
+/// that checkout's files into this one and remove what only this one has.
 fn captured_elsewhere(
     tx: &Tx<'_>,
     thread_id: &str,
@@ -45,11 +45,12 @@ fn captured_elsewhere(
     scope: &Value,
 ) -> StoreResult<bool> {
     let id = checkpoint["id"].as_str().unwrap_or_default();
-    let Some(captured) = tx.checkpoint_capture_cwd(thread_id, id)? else {
-        return Ok(false);
-    };
     let now = scope["cwd"].as_str().unwrap_or_default();
-    Ok(captured != now && resolve(&captured) != resolve(now))
+    Ok(match tx.checkpoint_capture_folder(thread_id, id)? {
+        CaptureFolder::Imported => false,
+        CaptureFolder::Unknown => true,
+        CaptureFolder::Known(captured) => captured != now && resolve(&captured) != resolve(now),
+    })
 }
 
 /// `latestProviderTurnForAttempt`, else the attempt's own turn id.

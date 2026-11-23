@@ -1338,3 +1338,68 @@ async fn a_file_rewind_across_a_checkout_move_is_refused() {
     );
     assert_eq!(work.read("new-only.txt").as_deref(), Some("two\n"));
 }
+
+/// A scope imported from the T3 server has no `checkpoint-scope.created` in this log. A run
+/// that resumes it records its folder before it captures, and a checkpoint captured here whose
+/// folder the log cannot tell is not restored after a move.
+#[tokio::test(flavor = "current_thread")]
+async fn an_imported_scope_still_refuses_a_file_rewind_across_a_move() {
+    let db = TempDb::new("imported-rewind");
+    let repo = Repo::new("imported-rewind");
+    let work = Repo::plain("imported-rewind-new");
+    repo.git(&["worktree", "add", "-b", "probe", &work.root(), "HEAD"]);
+    let (engine, _) = open_repo(&db, &repo);
+    dispatch(&engine, create_worktree_thread(&repo)).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    turn(&engine, &mut stream, "run-one", "write first.txt one").await;
+    // As if the scope had come from the T3 server: its row is here, its event is not.
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute(
+            "DELETE FROM events WHERE type = 'checkpoint-scope.created'",
+            [],
+        )
+        .unwrap();
+    turn(&engine, &mut stream, "run-two", "write second.txt two").await;
+    dispatch(
+        &engine,
+        json!({
+            "type":"thread.metadata.update", "threadId":"t1", "commandId":"move",
+            "worktreePath":work.root(), "branch":"probe", "expectedWorktreePath":repo.root()
+        }),
+    )
+    .await;
+    work.write("b-only.txt", "only in the new checkout\n");
+    turn(&engine, &mut stream, "run-three", "write third.txt three").await;
+    let p = projection(&engine, "t1").await;
+    for ordinal in [2, 1] {
+        let message = refused_message(
+            engine
+                .dispatch(
+                    from_json(rollback(
+                        &format!("rb-{ordinal}"),
+                        &checkpoint_at(&p, ordinal),
+                        None,
+                    ))
+                    .unwrap(),
+                )
+                .await,
+        );
+        assert!(message.contains("another checkout"), "{ordinal}: {message}");
+    }
+    assert_eq!(
+        work.read("b-only.txt").as_deref(),
+        Some("only in the new checkout\n")
+    );
+    dispatch(
+        &engine,
+        rollback("rb-talk", &checkpoint_at(&p, 2), Some(false)),
+    )
+    .await;
+    let p = until(&engine, |p| p["runs"][2]["status"] == "rolled_back").await;
+    assert!(p["thread"]["rollbackFailure"].is_null(), "{}", p["thread"]);
+}

@@ -250,6 +250,15 @@ fn keyed_rows(
     .collect()
 }
 
+/// [`Tx::checkpoint_capture_folder`].
+pub(crate) enum CaptureFolder {
+    /// No capture event: the checkpoint came from the T3 server's import.
+    Imported,
+    /// Captured here, before any event recorded the scope's folder.
+    Unknown,
+    Known(String),
+}
+
 /// [`Store::thread_replay_stats`].
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ReplayStats {
@@ -1380,28 +1389,52 @@ impl Tx<'_> {
         thread(&self.tx, thread_id)
     }
 
-    /// The scope's folder when the checkpoint was captured: the `cwd` of the last
+    /// Where the checkpoint was captured, by the log: the `cwd` of the last
     /// `checkpoint-scope.created` before its last capture that did not mark it `stale`.
-    /// `None` when the log does not hold both (rows imported from the T3 server).
-    pub(crate) fn checkpoint_capture_cwd(
+    pub(crate) fn checkpoint_capture_folder(
         &self,
         thread_id: &str,
         checkpoint_id: &str,
-    ) -> StoreResult<Option<String>> {
-        self.tx
+    ) -> StoreResult<CaptureFolder> {
+        let captured: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT MAX(seq) FROM events
+                 WHERE thread_id = ?1 AND type = 'checkpoint.captured'
+                   AND json_extract(event, '$.payload.id') = ?2
+                   AND json_extract(event, '$.payload.status') <> 'stale'",
+                [thread_id, checkpoint_id],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        let Some(captured) = captured else {
+            return Ok(CaptureFolder::Imported);
+        };
+        let cwd: Option<String> = self
+            .tx
             .query_row(
                 "SELECT json_extract(event, '$.payload.cwd') FROM events
-                 WHERE thread_id = ?1 AND type = 'checkpoint-scope.created' AND seq < (
-                   SELECT MAX(seq) FROM events
-                   WHERE thread_id = ?1 AND type = 'checkpoint.captured'
-                     AND json_extract(event, '$.payload.id') = ?2
-                     AND json_extract(event, '$.payload.status') <> 'stale')
+                 WHERE thread_id = ?1 AND type = 'checkpoint-scope.created' AND seq < ?2
                  ORDER BY seq DESC LIMIT 1",
-                [thread_id, checkpoint_id],
-                |row| row.get::<_, Option<String>>(0),
+                params![thread_id, captured],
+                |row| row.get(0),
             )
             .optional()
-            .map(Option::flatten)
+            .map_err(err)?
+            .flatten();
+        Ok(cwd.map_or(CaptureFolder::Unknown, CaptureFolder::Known))
+    }
+
+    /// Whether the thread's log holds a `checkpoint-scope.created`. A scope imported from the
+    /// T3 server has its row but none.
+    pub(crate) fn has_scope_event(&self, thread_id: &str) -> StoreResult<bool> {
+        self.tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events
+                 WHERE thread_id = ?1 AND type = 'checkpoint-scope.created')",
+                [thread_id],
+                |row| row.get(0),
+            )
             .map_err(err)
     }
 

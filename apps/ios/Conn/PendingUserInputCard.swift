@@ -249,8 +249,8 @@ private struct AgentContext: View {
                     }
                 }
             } else if let clamped {
-                (Text(clamped + "… ").foregroundStyle(theme.mutedForeground)
-                    + Text("Show more").fontWeight(.medium).foregroundStyle(theme.foreground))
+                let more = Text("Show more").fontWeight(.medium).foregroundStyle(theme.foreground)
+                Text("\(Text(clamped + "… ").foregroundStyle(theme.mutedForeground))\(more)")
                     .font(.system(size: Self.fontSize))
                     .lineSpacing(Self.lineSpacing)
                     .onTapGesture(perform: onToggle)

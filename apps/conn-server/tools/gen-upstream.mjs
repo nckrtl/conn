@@ -41,7 +41,7 @@ import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
 import * as NodeURL from "node:url";
 
-import { schemaRule } from "./schema-rules.mjs";
+import { nullRule, schemaRule } from "./schema-rules.mjs";
 import { importSource, inMonorepo, packageImporter, repoRoot } from "./monorepo.mjs";
 
 const check = process.argv.includes("--check");
@@ -336,6 +336,11 @@ const secretsRs = rustfmt(
     "",
     "/// Default instances that run before settings name them (`DEFAULT_ENABLED_DEFAULT_INSTANCES`).",
     `pub(super) const DEFAULT_ENABLED_INSTANCES: &[&str] = ${strs(defaultEnabledInstances)};`,
+    "",
+    "/// Where `ServerSettings` (packages/contracts/src/settings.ts) takes an explicit `null`, by",
+    "/// T3's own decoder (`nullRule` in tools/schema-rules.mjs): `n` marks a node that may be null,",
+    "/// `f` an object's known fields, `v` a record's values, `i` array items.",
+    `pub(super) const NULL_RULES: &str = ${JSON.stringify(JSON.stringify(nullRule(contracts.ServerSettings.ast)))};`,
     "",
   ].join("\n"),
 );

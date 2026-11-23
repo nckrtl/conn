@@ -127,6 +127,9 @@ pub struct SettingsStore {
     state: Mutex<Loaded>,
     /// Serializes saves, which reload, write and publish.
     writer: Mutex<()>,
+    /// The last load failed in a way that may pass (a read, the provider history): the next
+    /// admission reloads first ([`Self::reload_if_failed`]).
+    retry: std::sync::atomic::AtomicBool,
     /// Bumped after each write; `subscribeServerConfig` sends `settingsUpdated` on it.
     revision: watch::Sender<u64>,
 }
@@ -156,7 +159,7 @@ impl SettingsStore {
         let secrets_dir = path
             .parent()
             .map_or_else(|| PathBuf::from("secrets"), |dir| dir.join("secrets"));
-        let (loaded, failure) = load(&path, &secrets_dir);
+        let (loaded, failure, retry) = load(&path, &secrets_dir);
         if let Some(error) = failure {
             eprintln!(
                 "conn-server: failed to parse {}, using defaults: {error}",
@@ -168,6 +171,7 @@ impl SettingsStore {
             secrets_dir,
             state: Mutex::new(loaded),
             writer: Mutex::new(()),
+            retry: std::sync::atomic::AtomicBool::new(retry),
             revision: watch::Sender::new(0),
         }
     }
@@ -191,6 +195,27 @@ impl SettingsStore {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
+    }
+
+    /// Whether the last load failed in a way that may since have passed.
+    pub fn needs_reload(&self) -> bool {
+        self.retry.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Loads again after a failure that may have passed, as T3 keeps a failed load for no
+    /// time. Blocking: call it from a blocking thread.
+    pub fn reload_if_failed(&self) {
+        if !self.needs_reload() {
+            return;
+        }
+        let _writer = crate::lock(&self.writer);
+        let (reloaded, failure, retry) = load(&self.path, &self.secrets_dir);
+        *self.lock() = reloaded;
+        self.retry
+            .store(retry, std::sync::atomic::Ordering::Relaxed);
+        if failure.is_none() {
+            self.revision.send_modify(|r| *r += 1);
+        }
     }
 
     /// Applies a `server.updateSettings` patch, saves, and returns the client view.
@@ -218,6 +243,9 @@ impl SettingsStore {
         theme_defaults: bool,
     ) -> Result<Value, SettingsError> {
         let mut theme = Map::new();
+        // `30.0` is a whole number to T3: read it as one before the patch decodes.
+        let mut patch = patch;
+        file::normalize_numbers(&mut patch);
         let patch = match patch {
             Value::Object(mut map) if theme_defaults => {
                 for key in THEME_DEFAULT_KEYS {
@@ -251,17 +279,14 @@ impl SettingsStore {
         // A client cannot set the hosts this server does not serve; the file keeps its own.
         retain_supported_hosts(&mut patch);
         patch.extend(theme);
-        let mut patch = Value::Object(patch);
-        file::normalize_numbers(&mut patch);
-        let Value::Object(patch) = patch else {
-            return Err(self.error("normalize", "the patch is not an object"));
-        };
         let _writer = crate::lock(&self.writer);
         // T3's `updateAndPersistSettings` reloads first, so an edit made outside the server
         // survives an unrelated save, and a file the user broke is never replaced.
-        let (reloaded, failure) = load(&self.path, &self.secrets_dir);
+        let (reloaded, failure, retry) = load(&self.path, &self.secrets_dir);
         let current = reloaded.doc.clone();
         *self.lock() = reloaded;
+        self.retry
+            .store(retry, std::sync::atomic::Ordering::Relaxed);
         if let Some(detail) = failure {
             return Err(self.error("read-file", detail));
         }
@@ -333,16 +358,17 @@ impl SettingsStore {
 /// (`moveInlineSettingsSecrets`), and the file is rewritten when that or the legacy provider
 /// migration changed it. Both apply to the whole file; only the server's own view drops the
 /// source control hosts it does not serve.
-fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
+fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>, bool) {
     let file::Decoded {
         mut doc,
         migrated,
         failure,
+        retryable,
     } = file::decode(path);
     if failure.is_some() {
         let mut materialized = doc.clone();
         retain_supported_hosts(&mut materialized);
-        return (Loaded { doc, materialized }, failure);
+        return (Loaded { doc, materialized }, failure, retryable);
     }
     if let Err(error) = conn_support::secret_store::ensure_dir(secrets_dir) {
         eprintln!(
@@ -369,7 +395,7 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>) {
             served
         }
     };
-    (Loaded { doc, materialized }, None)
+    (Loaded { doc, materialized }, None, false)
 }
 
 /// The settings as the store would load them, without writing anything: for a reader that
@@ -1551,6 +1577,11 @@ mod tests {
             "{\"providers\":false}",
             // An optional key holds no explicit null, and the migration must not run.
             "{\"providers\":{},\"responseStreamingMode\":null}",
+            // T3's persisted schema takes no null here either, though no client sends them.
+            "{\"projectSettingsFolded\":null}",
+            "{\"providerInstances\":{\"claudeAgent\":{\"driver\":\"claudeAgent\",\"enabled\":null}}}",
+            // Past `Number.MAX_SAFE_INTEGER`.
+            "{\"usageHistoryRetentionDays\":9007199254740992}",
         ] {
             let dir = temp_state();
             let path = dir.join("settings.json");
@@ -1870,6 +1901,62 @@ mod tests {
             "claudeAgent"
         ));
         assert!(on_disk(&dir).get("providers").is_none(), "migrated");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Only a missing T3 database means no history: one that cannot even be opened (here a
+    /// folder in its place) fails the load like an unreadable one, and the file stays.
+    #[test]
+    fn an_inaccessible_provider_history_keeps_the_legacy_file() {
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        let legacy = json!({ "providers": { "claudeAgent": { "enabled": false } } }).to_string();
+        fs::write(&path, &legacy).unwrap();
+        fs::create_dir(dir.join("statev2.sqlite")).unwrap();
+        let store = SettingsStore::open(path.clone());
+        assert!(!provider_instance_enabled(
+            &store.raw(),
+            None,
+            "claudeAgent"
+        ));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            legacy,
+            "kept for a retry"
+        );
+        assert!(store.needs_reload());
+        fs::remove_dir(dir.join("statev2.sqlite")).unwrap();
+        store.reload_if_failed();
+        assert!(!store.needs_reload());
+        assert!(!provider_instance_enabled(
+            &store.raw(),
+            None,
+            "claudeAgent"
+        ));
+        assert!(on_disk(&dir).get("providers").is_none(), "migrated");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A saved whole number written as a float is one to T3; one past the safe range is
+    /// refused and the file stays as it was.
+    #[test]
+    fn saved_numbers_follow_t3() {
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::open(path.clone());
+        store
+            .update(json!({ "usageHistoryRetentionDays": 30.0 }), None)
+            .unwrap();
+        assert_eq!(on_disk(&dir)["usageHistoryRetentionDays"], 30);
+        let before = fs::read_to_string(&path).unwrap();
+        let error = store
+            .update(
+                json!({ "usageHistoryRetentionDays": 9_007_199_254_740_992_u64 }),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.operation, "normalize");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
         fs::remove_dir_all(dir).unwrap();
     }
 

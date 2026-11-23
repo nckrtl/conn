@@ -80,6 +80,18 @@ impl Host {
 }
 
 impl EngineHost for Host {
+    fn refresh_settings(&self) -> BoxFuture<'_, ()> {
+        let environment = self.environment.clone();
+        Box::pin(async move {
+            if environment.settings.needs_reload() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    environment.settings.reload_if_failed();
+                })
+                .await;
+            }
+        })
+    }
+
     fn provider_instance_enabled(&self, project_id: Option<&str>, instance_id: &str) -> bool {
         crate::settings::provider_instance_enabled(
             &self.environment.settings.raw(),

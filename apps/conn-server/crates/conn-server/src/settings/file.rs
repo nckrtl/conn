@@ -8,8 +8,8 @@ use serde_json::{Map, Value, json};
 
 use conn_contract::ServerSettings;
 
-use super::generated::{CLIENT_PATCH_KEYS, DEFAULT_DISABLED_DRIVERS, PROJECT_OVERRIDE_KEYS};
-use super::{THEME_DEFAULT_KEYS, ensure_object};
+use super::ensure_object;
+use super::generated::{DEFAULT_DISABLED_DRIVERS, NULL_RULES};
 
 /// T3's database beside the settings file; the provider history lives there.
 const T3_STATE_FILE: &str = "statev2.sqlite";
@@ -21,13 +21,19 @@ const HISTORY_RESTORED_DRIVERS: [&str; 3] = ["cursor", "grok", "opencode"];
 pub(super) struct Decoded {
     /// The document to keep: the file's own keys, all source control hosts included, with the
     /// persisted-only values decoded and the legacy provider map moved. For an untrusted file,
-    /// T3's conservative defaults (with a readable legacy opt-out) instead.
+    /// T3's conservative defaults (with the provider choices that could still be read) instead.
     pub doc: Map<String, Value>,
     /// The legacy provider map was moved: write `doc` back.
     pub migrated: bool,
     /// Why the file cannot be trusted. Then nothing may write it until the user repairs it.
     pub failure: Option<String>,
+    /// The failure may pass by itself (a read or the provider history failed), so the next
+    /// load tries again: T3 keeps a failed load for no time.
+    pub retryable: bool,
 }
+
+/// Whole numbers T3 holds exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 /// Reads and decodes `path`. Only reads: the caller decides what to write. Blocking.
 pub(super) fn decode(path: &Path) -> Decoded {
@@ -38,14 +44,15 @@ pub(super) fn decode(path: &Path) -> Decoded {
                 doc: Map::new(),
                 migrated: false,
                 failure: None,
+                retryable: false,
             };
         }
-        Err(error) => return untrusted(path, error.to_string(), None),
+        Err(error) => return untrusted(path, error.to_string(), None, None).retry(),
     };
     let mut doc = match parse_lenient(&raw) {
         Ok(Value::Object(doc)) => doc,
-        Ok(_) => return untrusted(path, "the settings are not an object".into(), None),
-        Err(error) => return untrusted(path, error, None),
+        Ok(_) => return untrusted(path, "the settings are not an object".into(), None, None),
+        Err(error) => return untrusted(path, error, None, None),
     };
     // `LegacyProviderSettingsJson`: decoded apart, so a readable opt-out holds even when an
     // unrelated field does not decode.
@@ -56,6 +63,7 @@ pub(super) fn decode(path: &Path) -> Decoded {
             doc,
             migrated: false,
             failure: None,
+            retryable: false,
         },
         (Ok(()), Ok(Some(providers))) => match provider_history(path) {
             Ok(history) => {
@@ -65,27 +73,45 @@ pub(super) fn decode(path: &Path) -> Decoded {
                     doc,
                     migrated: true,
                     failure: None,
+                    retryable: false,
                 }
             }
             // T3's load fails on `read-provider-history`; the file stays for the next load.
-            Err(error) => untrusted(
-                path,
-                format!("read-provider-history: {error}"),
-                Some(providers),
-            ),
+            // The instance map decoded, so its explicit choices hold meanwhile.
+            Err(error) => {
+                let instances = doc.get("providerInstances").cloned();
+                let failure = format!("read-provider-history: {error}");
+                untrusted(path, failure, Some(providers), instances).retry()
+            }
         },
-        (Err(error), legacy) => untrusted(path, error, legacy.ok().flatten()),
-        (Ok(()), Err(error)) => untrusted(path, error, None),
+        (Err(error), legacy) => untrusted(path, error, legacy.ok().flatten(), None),
+        (Ok(()), Err(error)) => untrusted(path, error, None, None),
+    }
+}
+
+impl Decoded {
+    fn retry(mut self) -> Self {
+        self.retryable = true;
+        self
     }
 }
 
 /// T3's fallback for a file it cannot trust: the defaults, with restart continuation off and
-/// usage history kept, and a legacy provider map it could still read.
-fn untrusted(path: &Path, failure: String, legacy: Option<Map<String, Value>>) -> Decoded {
+/// usage history kept, a provider instance map that decoded, and a legacy provider map it
+/// could still read.
+fn untrusted(
+    path: &Path,
+    failure: String,
+    legacy: Option<Map<String, Value>>,
+    instances: Option<Value>,
+) -> Decoded {
     let mut doc = Map::new();
     // The file may hold an opt-out this server cannot read; never resume threads on a guess.
     doc.insert("continueThreadsAfterServerUpdate".into(), json!(false));
     doc.insert("usageHistoryRetentionDays".into(), json!("unlimited"));
+    if let Some(instances) = instances {
+        doc.insert("providerInstances".into(), instances);
+    }
     if let Some(providers) = legacy {
         let history = provider_history(path).unwrap_or_default();
         migrate_legacy_providers(&mut doc, providers, &history);
@@ -94,6 +120,7 @@ fn untrusted(path: &Path, failure: String, legacy: Option<Map<String, Value>>) -
         doc,
         migrated: false,
         failure: Some(failure),
+        retryable: false,
     }
 }
 
@@ -204,12 +231,11 @@ fn legacy_providers(doc: &Map<String, Value>) -> Result<Option<Map<String, Value
 /// JSON has one number type: `30.0` is the whole number 30 to T3, but not to the generated
 /// `i64` decoder. Whole numbers T3 holds exactly (`Number.isSafeInteger`) become integers.
 pub(super) fn normalize_numbers(value: &mut Value) {
-    const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
     match value {
         Value::Number(number) if number.is_f64() => {
             if let Some(whole) = number
                 .as_f64()
-                .filter(|n| n.fract() == 0.0 && n.abs() <= MAX_SAFE)
+                .filter(|n| n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER)
             {
                 // Exact: a whole number within the safe range converts without loss.
                 #[expect(
@@ -249,56 +275,73 @@ fn normalize_persisted(doc: &mut Map<String, Value>) {
 /// included, with the checks the generated decoder does not make.
 pub(super) fn check(doc: &Map<String, Value>) -> Result<(), String> {
     check_refinements(doc)?;
-    let decoded = conn_contract::from_json::<ServerSettings>(Value::Object(doc.clone()))
-        .map_err(|error| error.to_string())?;
-    check_explicit_nulls(doc, &conn_contract::to_json(&decoded))
+    let doc = Value::Object(doc.clone());
+    check_nulls(&doc, null_rules(), "")?;
+    conn_contract::from_json::<ServerSettings>(doc)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
-/// `Schema.optionalKey` takes a missing key, never an explicit `null`; serde reads both as
-/// absent. A known key whose `null` does not survive the decode is refused, at the top level
-/// and in each project's overrides.
-fn check_explicit_nulls(doc: &Map<String, Value>, decoded: &Value) -> Result<(), String> {
-    let refused = |fields: &Map<String, Value>, decoded: &Value, known: &dyn Fn(&str) -> bool| {
-        fields
-            .iter()
-            .find(|(key, value)| {
-                value.is_null() && known(key) && decoded.get(key.as_str()) != Some(&Value::Null)
-            })
-            .map(|(key, _)| key.clone())
+/// [`NULL_RULES`], parsed once.
+fn null_rules() -> &'static Value {
+    static RULES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    RULES.get_or_init(|| serde_json::from_str(NULL_RULES).unwrap_or(Value::Null))
+}
+
+/// Refuses an explicit `null` where T3's persisted schema takes none, at any depth
+/// ([`NULL_RULES`]); serde would read it as absent. A key the schema does not know is
+/// ignored, as T3 ignores excess keys.
+fn check_nulls(value: &Value, rule: &Value, path: &str) -> Result<(), String> {
+    let visit = |value: &Value, rule: &Value, at: String| -> Result<(), String> {
+        if value.is_null() {
+            return if rule.get("n").is_some() {
+                Ok(())
+            } else {
+                Err(format!("`{at}` may not be null"))
+            };
+        }
+        check_nulls(value, rule, &at)
     };
-    let top = |key: &str| CLIENT_PATCH_KEYS.contains(&key) || THEME_DEFAULT_KEYS.contains(&key);
-    if let Some(key) = refused(doc, decoded, &top) {
-        return Err(format!("`{key}` may not be null"));
-    }
-    let project_key = |key: &str| PROJECT_OVERRIDE_KEYS.contains(&key);
-    if let Some(Value::Object(projects)) = doc.get("projectSettingsOverrides") {
-        for (project, overrides) in projects {
-            if let Value::Object(overrides) = overrides
-                && let Some(key) = refused(
-                    overrides,
-                    &decoded["projectSettingsOverrides"][project.as_str()],
-                    &project_key,
-                )
-            {
-                return Err(format!(
-                    "`projectSettingsOverrides.{project}.{key}` may not be null"
-                ));
+    match value {
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                let known = rule
+                    .get("f")
+                    .and_then(|fields| fields.get(key))
+                    .or_else(|| rule.get("v"));
+                if let Some(known) = known {
+                    let at = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    visit(field, known, at)?;
+                }
             }
         }
+        Value::Array(items) => {
+            if let Some(known) = rule.get("i") {
+                for (index, item) in items.iter().enumerate() {
+                    visit(item, known, format!("{path}[{index}]"))?;
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
 
 /// Checks the generated decoder does not make: `usageHistoryRetentionDays` is a positive
-/// integer or `"unlimited"` (`UsageHistoryRetentionDays`, `packages/contracts/src/settings.ts`).
+/// safe integer or `"unlimited"` (`UsageHistoryRetentionDays`,
+/// `packages/contracts/src/settings.ts`).
 pub(super) fn check_refinements(settings: &Map<String, Value>) -> Result<(), String> {
     match settings.get("usageHistoryRetentionDays") {
         None => Ok(()),
         Some(Value::String(days)) if days == "unlimited" => Ok(()),
         Some(Value::Number(days))
-            if days
-                .as_f64()
-                .is_some_and(|days| days > 0.0 && days.fract() == 0.0) =>
+            if days.as_f64().is_some_and(|days| {
+                days > 0.0 && days.fract() == 0.0 && days <= MAX_SAFE_INTEGER
+            }) =>
         {
             Ok(())
         }
@@ -309,14 +352,17 @@ pub(super) fn check_refinements(settings: &Map<String, Value>) -> Result<(), Str
 }
 
 /// `(providerName, providerInstanceId)` of the cursor, grok and opencode sessions T3 recorded
-/// in `statev2.sqlite` beside the settings file, read-only. Empty when there is no such file;
-/// an error when it is there and cannot be read.
+/// in `statev2.sqlite` beside the settings file, read-only. Empty only when there is no such
+/// file; an error when anything there cannot be read.
 fn provider_history(settings_path: &Path) -> Result<Vec<(String, Option<String>)>, String> {
     let Some(db) = settings_path.parent().map(|dir| dir.join(T3_STATE_FILE)) else {
         return Ok(Vec::new());
     };
-    if !db.is_file() {
-        return Ok(Vec::new());
+    match fs::metadata(&db) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", db.display())),
+        Ok(meta) if !meta.is_file() => return Err(format!("{}: not a file", db.display())),
+        Ok(_) => {}
     }
     let read = || -> rusqlite::Result<Vec<(String, Option<String>)>> {
         let conn = rusqlite::Connection::open_with_flags(
@@ -448,7 +494,9 @@ mod tests {
         };
         assert!(check(json!(30)));
         assert!(check(json!("unlimited")));
+        assert!(check(json!(9_007_199_254_740_991_u64)));
         for bad in [
+            json!(9_007_199_254_740_992_u64),
             json!(0),
             json!(-1),
             json!(1.5),

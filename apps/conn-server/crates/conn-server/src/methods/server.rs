@@ -547,6 +547,11 @@ mod tests {
                 r#"{"usageHistoryRetentionDays":30.0,"providerInstances":{"claudeAgent":{"driver":"claudeAgent","enabled":false}}}"#,
                 false,
             ),
+            // T3's schema takes `null` here: the file is valid and its opt-out holds.
+            (
+                r#"{"defaultThreadEnvMode":null,"providerInstances":{"claudeAgent":{"driver":"claudeAgent","enabled":false}}}"#,
+                false,
+            ),
         ];
         for (file, untrusted) in cases {
             let dir = std::env::temp_dir()
@@ -614,6 +619,108 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// T3 fails a load whose provider history cannot be read and tries again on the next
+    /// read. Claude, disabled in the file's instance map, stays off meanwhile; once the history
+    /// reads, the next admission loads again and the legacy migration runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_history_failure_keeps_claude_off_and_is_retried() {
+        struct Admission(Arc<Environment>);
+        impl conn_engine::EngineHost for Admission {
+            fn refresh_settings(&self) -> conn_engine::BoxFuture<'_, ()> {
+                let environment = self.0.clone();
+                Box::pin(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        environment.settings.reload_if_failed();
+                    })
+                    .await;
+                })
+            }
+            fn provider_instance_enabled(&self, project: Option<&str>, instance: &str) -> bool {
+                crate::settings::provider_instance_enabled(
+                    &self.0.settings.raw(),
+                    project,
+                    instance,
+                )
+            }
+        }
+        let dir =
+            std::env::temp_dir().join(format!("conn-server-cfg-{}", crate::auth::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let file = r#"{"providers":{},"providerInstances":{"claudeAgent":{"driver":"claudeAgent","enabled":false}}}"#;
+        std::fs::write(&path, file).unwrap();
+        // A T3 database whose history cannot be read yet.
+        let history = rusqlite::Connection::open(dir.join("statev2.sqlite")).unwrap();
+        history.execute_batch("CREATE TABLE other (x)").unwrap();
+        let env = Arc::new(
+            Environment::load(&dir, Some("Test".into()), dir.clone(), Default::default()).unwrap(),
+        );
+        let config = server_config(&env, Vec::new()).unwrap();
+        assert_eq!(
+            config["settings"]["providerInstances"]["claudeAgent"]["enabled"],
+            false
+        );
+        let root = dir.join("project").display().to_string();
+        let provider = Arc::new(conn_engine::fake::FakeProvider::new("claudeAgent"));
+        let mut engine = conn_engine::EngineConfig::new(dir.join("engine.sqlite"));
+        engine.projects = vec![conn_engine::ProjectConfig {
+            title: "Project".into(),
+            workspace_root: root.clone(),
+        }];
+        engine.providers = vec![provider.clone()];
+        engine.host = Some(Arc::new(Admission(env.clone())));
+        let engine = conn_engine::SqliteEngine::open(engine).unwrap();
+        // A thread with a Claude message: the message is what admission checks.
+        let refused = |n: u32| {
+            let engine = &engine;
+            let thread = format!("t{n}");
+            let create = json!({
+                "type": "thread.create", "commandId": format!("create-{n}"), "threadId": thread,
+                "projectId": conn_engine::SqliteEngine::project_id_for(&root), "title": "Claude",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "branch": null, "worktreePath": null, "createdBy": "user", "creationSource": "web",
+            });
+            let send = json!({
+                "type": "message.dispatch", "commandId": format!("send-{n}"), "threadId": thread,
+                "messageId": format!("message:{n}"), "text": "hello", "attachments": [],
+                "dispatchMode": {"type": "start_immediately"}, "createdBy": "user",
+                "creationSource": "web",
+            });
+            async move {
+                let _ = conn_engine::Engine::dispatch(
+                    engine,
+                    conn_contract::from_json(create).unwrap(),
+                )
+                .await;
+                conn_engine::Engine::dispatch(engine, conn_contract::from_json(send).unwrap())
+                    .await
+                    .is_err()
+            }
+        };
+        assert!(refused(1).await);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            file,
+            "kept for a retry"
+        );
+        history
+            .execute_batch(
+                "CREATE TABLE projection_thread_sessions (provider_name TEXT, provider_instance_id TEXT);
+                 CREATE TABLE provider_session_runtime (provider_name TEXT, provider_instance_id TEXT);",
+            )
+            .unwrap();
+        assert!(refused(2).await);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get("providers").is_none(), "the repaired load ran");
+        assert_eq!(saved["providerInstances"]["claudeAgent"]["enabled"], false);
+        assert_eq!(
+            provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "current_thread")]

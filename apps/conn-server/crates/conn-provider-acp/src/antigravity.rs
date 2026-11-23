@@ -1056,9 +1056,8 @@ pub(crate) fn auth_required(settings: &AntigravitySettings, previous: &Observed)
     }
 }
 
-/// `observeThinkingLevels`: the thinking option the selected model reports. The model option
-/// lists every model the account has, so levels of models it no longer lists go (T3 keeps
-/// them until sign-out).
+/// `observeThinkingLevels`: the thinking option the selected model reports. Levels stay until
+/// sign-out, also for a model the agent no longer lists, as T3 keeps them.
 fn observe_thinking_levels(
     levels: &mut std::collections::BTreeMap<String, Option<Value>>,
     options: &Value,
@@ -1068,18 +1067,11 @@ fn observe_thinking_levels(
             .iter()
             .find(|o| o["id"] == "model" || o["category"] == "model")
     });
-    let Some(model) = model.filter(|m| m["type"] == "select") else {
-        return;
-    };
-    if let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty()) {
+    if let Some(model) = model
+        && model["type"] == "select"
+        && let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty())
+    {
         levels.insert(current.to_owned(), thinking_config(options).cloned());
-    }
-    let listed: Vec<&str> = flatten_choices(&model["options"])
-        .into_iter()
-        .filter_map(|choice| choice["value"].as_str())
-        .collect();
-    if !listed.is_empty() {
-        levels.retain(|model, _| listed.contains(&model.as_str()));
     }
 }
 
@@ -1794,10 +1786,10 @@ mod tests {
         assert!(!needs_session(&checked));
     }
 
-    /// A config update lists the account's models in full: thinking levels kept for a model
-    /// the agent no longer offers go, so the map stays one entry per listed model.
+    /// T3's `observeThinkingLevels` keeps what each model reported until sign-out, also for
+    /// a model a later full model list no longer offers.
     #[test]
-    fn a_complete_model_list_prunes_retired_thinking_levels() {
+    fn thinking_levels_stay_until_sign_out() {
         let mut previous = Observed {
             authenticated: true,
             ..Observed::default()
@@ -1805,15 +1797,15 @@ mod tests {
         previous
             .thinking_levels
             .insert("gemini-retired".into(), None);
-        previous
-            .thinking_levels
-            .insert("gemini-3.8-flash".into(), None);
         let options = &setup()["configOptions"];
         let next = config_options_updated(&previous, options);
-        let kept: Vec<&str> = next.thinking_levels.keys().map(String::as_str).collect();
-        assert_eq!(kept, ["gemini-3.1-pro", "gemini-3.8-flash"]);
+        assert!(next.thinking_levels.contains_key("gemini-retired"));
         let started = session_started(&previous, &json!({}), &setup(), None);
-        let kept: Vec<&str> = started.thinking_levels.keys().map(String::as_str).collect();
-        assert_eq!(kept, ["gemini-3.1-pro", "gemini-3.8-flash"]);
+        assert!(started.thinking_levels.contains_key("gemini-retired"));
+        let signed_out = auth_required(
+            &AntigravitySettings::from_instance(Some(&json!({"enabled": true}))),
+            &started,
+        );
+        assert!(signed_out.thinking_levels.is_empty());
     }
 }

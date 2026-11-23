@@ -34,7 +34,7 @@ use conn_contract::{
     ProviderUploadFeedbackInput, ProviderUploadFeedbackResult, lit,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::watch;
 
 use super::Deps;
@@ -150,26 +150,7 @@ pub struct ProviderStatus {
     leases: Arc<std::sync::Mutex<Vec<Lease>>>,
     /// The full probe pass in flight (T3's `refreshAllInFlightRef`): later callers wait for it.
     pass: Arc<std::sync::Mutex<Option<watch::Receiver<bool>>>>,
-    /// Per-workspace snapshots (T3's `workspaceSnapshots`), by instance id; at most
-    /// [`MAX_WORKSPACE_SNAPSHOTS`] per instance, the oldest dropped first.
-    workspaces: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<Value>>>>,
-    /// Workspace scans in flight (T3's `workspaceRefreshesRef`), by instance and folder: the
-    /// claim's token and a channel that turns `true` when the scan ends. Removed by the scan
-    /// that holds the claim, so one entry per running scan.
-    scans: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), ScanClaim>>>,
-    next_scan: Arc<std::sync::atomic::AtomicU64>,
 }
-
-#[derive(Clone, Debug)]
-struct ScanClaim {
-    token: u64,
-    done: watch::Receiver<bool>,
-}
-
-/// `MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER`.
-const MAX_WORKSPACE_SNAPSHOTS: usize = 16;
-/// `PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS`.
-const WORKSPACE_SNAPSHOT_TTL_MS: i64 = 5 * 60_000;
 
 /// One client's `ClientActivityLease`, as far as provider status needs it.
 #[derive(Clone, Debug)]
@@ -211,80 +192,6 @@ impl ProviderStatus {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
-    }
-
-    fn workspaces(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<Value>>> {
-        self.workspaces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn scans(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<(String, String), ScanClaim>> {
-        self.scans
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn workspace_snapshot(&self, instance_id: &str, cwd: &str) -> Option<Value> {
-        self.workspaces()
-            .get(instance_id)?
-            .iter()
-            .find(|snapshot| snapshot["cwd"] == cwd)
-            .cloned()
-    }
-
-    /// `upsertProviderWorkspaceSnapshot`: what a scan found for `cwd`, replacing the last.
-    /// Commands still pending keep the ones found before; an errored scan counts as pending.
-    fn upsert_workspace(&self, instance_id: &str, cwd: &str, checked_at: &str, scoped: &Value) {
-        let mut workspaces = self.workspaces();
-        let snapshots = workspaces.entry(instance_id.to_owned()).or_default();
-        let previous = snapshots.iter().find(|s| s["cwd"] == cwd).cloned();
-        let pending = scoped["slashCommandsPending"]
-            .as_bool()
-            .unwrap_or(scoped["status"] == "error");
-        let mut snapshot = serde_json::Map::new();
-        snapshot.insert("cwd".into(), json!(cwd));
-        snapshot.insert("checkedAt".into(), json!(checked_at));
-        let commands = match (&previous, pending) {
-            (Some(previous), true) => previous["slashCommands"].clone(),
-            _ => scoped["slashCommands"].clone(),
-        };
-        snapshot.insert(
-            "slashCommands".into(),
-            if commands.is_array() {
-                commands
-            } else {
-                json!([])
-            },
-        );
-        if pending {
-            snapshot.insert("slashCommandsPending".into(), json!(true));
-        }
-        let skills = &scoped["skills"];
-        snapshot.insert(
-            "skills".into(),
-            if skills.is_array() {
-                skills.clone()
-            } else {
-                json!([])
-            },
-        );
-        let descriptors = scoped
-            .get("optionDescriptors")
-            .or_else(|| previous.as_ref().and_then(|p| p.get("optionDescriptors")));
-        if let Some(descriptors) = descriptors {
-            snapshot.insert("optionDescriptors".into(), descriptors.clone());
-        }
-        snapshots.retain(|s| s["cwd"] != cwd);
-        snapshots.push(Value::Object(snapshot));
-        if snapshots.len() > MAX_WORKSPACE_SNAPSHOTS {
-            let extra = snapshots.len() - MAX_WORKSPACE_SNAPSHOTS;
-            snapshots.drain(..extra);
-        }
     }
 
     fn bump(&self) {
@@ -501,196 +408,6 @@ pub async fn refresh_all(deps: &Deps) {
     let _ = done.wait_for(|finished| *finished).await;
 }
 
-/// Whether a workspace refresh may answer from a kept snapshot (`fresh` in the request).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Freshness {
-    /// A snapshot younger than the TTL and not pending is kept.
-    KeepCurrent,
-    /// Scan again: the workspace's snapshots of other instances go, the instance is probed.
-    Fresh,
-}
-
-/// T3's `refreshWorkspaceSnapshot`: the instance's snapshot for one workspace, scanned by the
-/// provider (`snapshot_for_cwd`) unless a current one is kept. A failed scan keeps what was
-/// there. Without a per-workspace scan the instance is probed. Returns whether the instance
-/// scans workspaces (T3's `snapshotForCwd !== undefined`).
-pub async fn refresh_workspace(
-    deps: &Deps,
-    instance_id: &str,
-    cwd: &str,
-    freshness: Freshness,
-) -> bool {
-    let fresh = freshness == Freshness::Fresh;
-    let provider = deps
-        .providers
-        .snapshot()
-        .into_iter()
-        .find(|p| p.instance_id().as_str() == instance_id);
-    if fresh {
-        let mut workspaces = deps.provider_status.workspaces();
-        for (id, snapshots) in workspaces.iter_mut() {
-            if id != instance_id {
-                snapshots.retain(|snapshot| snapshot["cwd"] != cwd);
-            }
-        }
-    }
-    let Some(provider) = provider else {
-        return false;
-    };
-    let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
-    let checked_at = conn_support::time::iso_from_ms(conn_support::time::now_ms());
-    let entry = provider.server_provider_entry(&checked_at);
-    // The future is only built here, to learn whether the instance scans; the scan runs below.
-    let scanning = provider.snapshot_for_cwd(cwd).is_some();
-    if entry.as_ref().is_none_or(|entry| entry["enabled"] != true) {
-        return scanning;
-    }
-    let kept = deps
-        .provider_status
-        .workspace_snapshot(instance_id, cwd)
-        .is_some_and(|snapshot| {
-            let pending =
-                snapshot["slashCommandsPending"] == true || snapshot["modelsPending"] == true;
-            let checked = snapshot["checkedAt"]
-                .as_str()
-                .and_then(conn_support::time::millis_from_iso)
-                .unwrap_or(i64::MIN);
-            !pending && now.saturating_sub(checked) < WORKSPACE_SNAPSHOT_TTL_MS
-        });
-    if kept && !fresh {
-        return scanning;
-    }
-    if !scanning {
-        provider
-            .refresh_status(instance_settings(deps, instance_id))
-            .await;
-        deps.provider_status.bump();
-        return false;
-    }
-    let scan_dir = workspace_scan_dir(deps, cwd).await;
-    // An ordinary refresh joins the scan in flight; a fresh one claims the folder anew, so
-    // the older scan's result is dropped when it ends.
-    let key = (instance_id.to_owned(), cwd.to_owned());
-    let claim = {
-        let mut scans = deps.provider_status.scans();
-        match scans.get(&key) {
-            Some(running) if !fresh => Err(running.done.clone()),
-            _ => {
-                let token = deps
-                    .provider_status
-                    .next_scan
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let (finished, done) = watch::channel(false);
-                scans.insert(key.clone(), ScanClaim { token, done });
-                Ok((token, finished))
-            }
-        }
-    };
-    let (token, finished) = match claim {
-        Ok(claim) => claim,
-        Err(mut running) => {
-            let _ = running.wait_for(|done| *done).await;
-            return true;
-        }
-    };
-    // On its own task, so a caller that goes away does not cancel what others wait for.
-    let deps = deps.clone();
-    let scan = tokio::spawn(async move {
-        let (instance_id, cwd) = (&key.0, &key.1);
-        if fresh {
-            provider
-                .refresh_status(instance_settings(&deps, instance_id))
-                .await;
-        }
-        let scanned = match provider.snapshot_for_cwd(&scan_dir) {
-            Some(scan) => scan.await.ok(),
-            None => None,
-        };
-        let status = &deps.provider_status;
-        {
-            let mut scans = status.scans();
-            let claimed = scans.get(&key).is_some_and(|claim| claim.token == token);
-            let same_instance = deps
-                .providers
-                .snapshot()
-                .iter()
-                .any(|current| Arc::ptr_eq(current, &provider));
-            // The scan's start counts for the TTL, not the machine check's time.
-            if claimed
-                && same_instance
-                && let Some(scoped) = scanned
-            {
-                status.upsert_workspace(instance_id, cwd, &checked_at, &scoped);
-            }
-            if claimed {
-                scans.remove(&key);
-            }
-        }
-        status.bump();
-        let _ = finished.send(true);
-    });
-    let _ = scan.await;
-    true
-}
-
-/// T3's `workspaceScanDirectory`: the folder while it exists. A missing managed worktree is
-/// scanned at its project's root, found through a thread on it with a branch (archived ones
-/// too); any other folder as asked. The snapshot keeps the asked folder as its key.
-async fn workspace_scan_dir(deps: &Deps, cwd: &str) -> String {
-    let path = std::path::PathBuf::from(cwd);
-    let exists = {
-        let path = path.clone();
-        tokio::task::spawn_blocking(move || path.try_exists().unwrap_or(true))
-            .await
-            .unwrap_or(true)
-    };
-    let (Some(engine), Some(environment)) = (&deps.engine, &deps.environment) else {
-        return cwd.to_owned();
-    };
-    if exists || !is_managed_worktree(environment, &path) {
-        return cwd.to_owned();
-    }
-    let shell = engine.shell_snapshot().await.unwrap_or(Value::Null);
-    let archived = engine
-        .call("orchestration.getArchivedShellSnapshot", json!({}))
-        .await
-        .unwrap_or(Value::Null);
-    let project_id = [&shell["threads"], &archived["threads"]]
-        .into_iter()
-        .filter_map(Value::as_array)
-        .flatten()
-        .find(|thread| thread["worktreePath"] == cwd && !thread["branch"].is_null())
-        .and_then(|thread| thread["projectId"].as_str());
-    shell["projects"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|project| project_id.is_some_and(|id| project["id"] == id))
-        .and_then(|project| project["workspaceRoot"].as_str())
-        .map_or_else(|| cwd.to_owned(), str::to_owned)
-}
-
-/// `isManagedWorktreePath`, lexically: an absolute, normalized path inside the worktrees
-/// folder the settings name or the default one.
-fn is_managed_worktree(
-    environment: &crate::environment::Environment,
-    path: &std::path::Path,
-) -> bool {
-    use std::path::Component;
-    let normalized = path.is_absolute()
-        && path
-            .components()
-            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
-    let roots = [
-        crate::host::worktrees_dir(environment),
-        environment.state_dir.join("worktrees"),
-    ];
-    normalized
-        && roots
-            .iter()
-            .any(|root| path.starts_with(root) && path != root)
-}
-
 /// T3's `refreshModelCatalog`, for an opened model picker: refetch a manifest older than
 /// 5 minutes, and run full passes until the providers have been probed with the manifest now
 /// known. A pass that started before the fetch does not count, so a second one may follow.
@@ -872,22 +589,10 @@ pub fn start_status_refresh(deps: &Deps) {
 
 /// `ServerConfig.providers` entries for the configured providers. `checked_at` is ISO-8601.
 pub fn server_providers(deps: &Deps, checked_at: &str) -> Vec<Value> {
-    let providers = deps.providers.snapshot();
-    let mut workspaces = deps.provider_status.workspaces();
-    // Snapshots go with their instance: a removed instance's are dropped.
-    workspaces.retain(|id, _| providers.iter().any(|p| p.instance_id().as_str() == id));
-    providers
+    deps.providers
+        .snapshot()
         .iter()
-        .filter_map(|p| {
-            let mut entry = p.server_provider_entry(checked_at)?;
-            if let Some(snapshots) = workspaces.get(p.instance_id().as_str())
-                && !snapshots.is_empty()
-                && let Some(fields) = entry.as_object_mut()
-            {
-                fields.insert("workspaceSnapshots".into(), Value::Array(snapshots.clone()));
-            }
-            Some(entry)
-        })
+        .filter_map(|p| p.server_provider_entry(checked_at))
         .collect()
 }
 

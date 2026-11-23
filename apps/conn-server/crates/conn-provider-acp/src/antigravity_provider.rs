@@ -234,7 +234,11 @@ impl AntigravityProvider {
     }
 
     /// Starts `agy acp` and opens a session in `cwd` (T3's `openSession` start); the session
-    /// reports the account and models.
+    /// reports the account and models. `control` may end the open; the agent is stopped then.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one call per purpose; the fields are the session's own inputs"
+    )]
     async fn start(
         &self,
         cwd: String,
@@ -243,6 +247,7 @@ impl AntigravityProvider {
         provider_session_id: String,
         mcp_servers: Vec<conn_provider::McpServer>,
         purpose: Purpose,
+        control: session::OpenControl,
     ) -> ProviderResult<(AcpSession, mpsc::Receiver<conn_provider::ProviderEvent>)> {
         let workspace = purpose == Purpose::Thread;
         if let Some(issue) = self.settings.config_issue() {
@@ -294,15 +299,19 @@ impl AntigravityProvider {
             observer: Some(self.observer(workspace.then(|| cwd.clone()))),
         };
         let (tx, events) = mpsc::channel(session::EVENT_CAPACITY);
-        let (session, _) = AcpSession::open(config, spawner, session::system_env(), tx)
-            .await
-            .inspect_err(|error| {
-                if is_sign_in_required(error) {
-                    self.auth_required();
-                }
-            })?;
+        let (session, _) =
+            AcpSession::open_with(config, spawner, session::system_env(), tx, control)
+                .await
+                .inspect_err(|error| {
+                    if is_sign_in_required(error) {
+                        self.auth_required();
+                    }
+                })?;
         let (initialize, setup) = session.handshake().await;
         self.session_started(&initialize, &setup, workspace.then_some(cwd.as_str()));
+        // T3 publishes the session, then its event stream: the metadata the agent sent
+        // while it started (its commands) lands on the signed-in entry.
+        session.release_catalog_updates().await;
         Ok((session, events))
     }
 
@@ -322,7 +331,13 @@ impl AntigravityProvider {
         let workspace = cwd.display().to_string();
         let policy =
             json!({"runtimeMode": "full-access", "interactionMode": "default", "cwd": workspace});
-        let loaded = tokio::time::timeout(MODEL_LOAD_TIMEOUT, async {
+        // T3's scoped refresh: the limit interrupts the work, then the scope stops the agent
+        // before the refresh answers.
+        let deadline = tokio::time::Instant::now() + MODEL_LOAD_TIMEOUT;
+        let loaded = async {
+            let control = session::OpenControl {
+                abort: Some(Box::pin(tokio::time::sleep_until(deadline))),
+            };
             let (session, _events) = self
                 .start(
                     workspace,
@@ -331,17 +346,20 @@ impl AntigravityProvider {
                     format!("antigravity-models-{}", conn_support::uuid_v4()),
                     Vec::new(),
                     Purpose::ModelRefresh,
+                    control,
                 )
                 .await?;
-            self.publish_catalog(&session).await;
+            let published = tokio::time::timeout_at(deadline, self.publish_catalog(&session)).await;
             session.close().await;
-            Ok::<(), ProviderError>(())
-        })
+            Ok::<bool, ProviderError>(published.is_ok())
+        }
         .await;
+        let timed_out = tokio::time::Instant::now() >= deadline;
         let result = match loaded {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(failed(&refresh_failure_detail(&error))),
-            Err(_) => Err(failed(REFRESH_TIMED_OUT)),
+            Ok(true) => Ok(()),
+            Ok(false) => Err(failed(REFRESH_TIMED_OUT)),
+            Err(_) if timed_out => Err(failed(REFRESH_TIMED_OUT)),
+            Err(error) => Err(failed(&refresh_failure_detail(&error))),
         };
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cwd)).await;
         result
@@ -559,6 +577,7 @@ impl Provider for AntigravityProvider {
                     input.provider_session_id.as_str().to_owned(),
                     input.mcp_servers.clone(),
                     Purpose::Thread,
+                    session::OpenControl::default(),
                 )
                 .await?;
             let now = SystemEnv.now();
@@ -1096,13 +1115,17 @@ mod tests {
         assert_eq!(antigravity::stderr_sign_in("I1123 log line"), None);
     }
 
-    /// Replaces the provider's agents with `scripts`; returns how many stops ran (not only
-    /// dropped): a run stop is what removes the `run-*` folder and ends the process tree.
+    /// The stops a test spawner ran, in order.
+    type Stops = Arc<Mutex<Vec<session::StopKind>>>;
+
+    /// Replaces the provider's agents with `scripts`; returns the stops that ran (not only
+    /// dropped), in order: a run stop is what removes the `run-*` folder and ends the process
+    /// tree.
     fn count_stops(
         provider: &mut AntigravityProvider,
         scripts: Vec<Vec<Value>>,
-    ) -> (Vec<Arc<Mutex<Script>>>, Arc<std::sync::atomic::AtomicUsize>) {
-        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    ) -> (Vec<Arc<Mutex<Script>>>, Stops) {
+        let stops = Arc::new(Mutex::new(Vec::new()));
         let scripts: Vec<_> = scripts
             .into_iter()
             .map(|entries| Script::new(entries, "/w"))
@@ -1118,8 +1141,8 @@ mod tests {
             Ok(session::Spawned {
                 writer,
                 events,
-                stop: Box::new(move |_| {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                stop: Box::new(move |kind| {
+                    lock(&counter).push(kind);
                     Box::pin(async {})
                 }),
             })
@@ -1143,12 +1166,104 @@ mod tests {
         let (mut provider, _, dir, _) = provider_with(Vec::new(), Default::default());
         let (_scripts, stops) = count_stops(&mut provider, vec![refused, exits]);
         assert!(provider.refresh_models().unwrap().await.is_err());
-        assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(lock(&stops).len(), 1);
         assert!(provider.refresh_models().unwrap().await.is_err());
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(lock(&stops).len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent that exits on its own has been reaped by the time the session hears it: the
+    /// session removes its files but signals neither its PID nor its group, which the OS may
+    /// already have given to another process.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_agent_that_exited_is_cleaned_up_without_a_signal() {
+        let mut script = handshake(json!([]));
+        script.extend([
+            json!({"type": "runtime_exit", "status": "success"}),
+            expect("never", json!("<any>")),
+        ]);
+        let (mut provider, _, dir, _) = provider_with(Vec::new(), Default::default());
+        let (_scripts, stops) = count_stops(&mut provider, vec![script]);
+        let (session, _events) = provider
+            .start(
+                "/w".into(),
+                json!({"runtimeMode": "full-access", "cwd": "/w"}),
+                String::new(),
+                "exits".into(),
+                Vec::new(),
+                Purpose::ModelRefresh,
+                session::OpenControl::default(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..64 {
+            if !lock(&stops).is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*lock(&stops), [session::StopKind::Exited]);
+        drop(session);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3's refresh is scoped: its 90 s limit interrupts an agent that never answers
+    /// `initialize`, and the scope stops that agent before the refresh answers.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_refresh_that_times_out_in_initialize_stops_the_agent() {
+        let silent = vec![
+            expect("initialize", json!("<any>")),
+            expect("never", json!("<any>")),
+        ];
+        let (mut provider, _, dir, _) = provider_with(Vec::new(), Default::default());
+        let (_scripts, stops) = count_stops(&mut provider, vec![silent]);
+        let error = provider.refresh_models().unwrap().await.unwrap_err();
+        assert_eq!(
+            error,
+            ProviderError::Failed {
+                operation: "refresh-models",
+                detail: REFRESH_TIMED_OUT.into(),
+            }
+        );
+        assert_eq!(*lock(&stops), [session::StopKind::Kill]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// After a sign-in failure clears the account's metadata, the retry's commands, sent
+    /// while the agent starts, land on the signed-in entry: T3 publishes the session before
+    /// it delivers the session's events.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retry_after_a_sign_in_failure_keeps_the_agents_commands() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=fixture-state";
+        let login = vec![
+            expect("initialize", json!("<any>")),
+            json!({"type": "emit_raw", "line": format!("{}{url}", antigravity::AUTH_STDOUT_PREFIX)}),
+        ];
+        let mut retry = handshake(json!([{"id": "model", "name": "Model", "category": "model",
+            "type": "select", "currentValue": "gemini-a",
+            "options": [{"value": "gemini-a", "name": "Gemini A"}]}]));
+        let reply_at = retry.len() - 1;
+        retry.insert(
+            reply_at,
+            json!({"type": "emit_inbound", "frame": {"kind": "notification", "method": "session/update",
+                "params": {"sessionId": "s1", "update": {"sessionUpdate": "available_commands_update",
+                    "availableCommands": [{"name": "goal", "description": "Set a goal"}]}}}}),
+        );
+        let (provider, scripts, dir) = provider(vec![login, retry]);
+        assert!(provider.refresh_models().unwrap().await.is_err());
+        assert_eq!(
+            entry_of(&provider)["auth"],
+            json!({"status": "unauthenticated"})
+        );
+        provider.refresh_models().unwrap().await.unwrap();
+        complete(&scripts[1]);
+        assert_eq!(
+            entry_of(&provider)["slashCommands"],
+            json!([{"name": "goal", "description": "Set a goal"}])
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1180,7 +1295,7 @@ mod tests {
             json!({"status": "unauthenticated"})
         );
         assert_eq!(lock(&scripts[0]).cursor, 3, "no request after the URL");
-        assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(lock(&stops).len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

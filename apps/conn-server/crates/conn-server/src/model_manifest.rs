@@ -340,8 +340,13 @@ fn decode_manifest(manifest: &Value) -> Option<i64> {
     if fields.get("version").and_then(Value::as_f64) != Some(1.0) {
         return None;
     }
+    let policies_ok = |policies: &Value| {
+        policies
+            .as_array()
+            .is_some_and(|policies| policies.iter().all(compatibility_policy_is_valid))
+    };
     if !optional(manifest, "updatedAt", Value::is_string)
-        || !optional(manifest, "compatibility", Value::is_array)
+        || !optional(manifest, "compatibility", policies_ok)
     {
         return None;
     }
@@ -360,12 +365,126 @@ fn decode_manifest(manifest: &Value) -> Option<i64> {
             }
         }
     }
+    if !conn_provider_claude::catalog::manifest_adapters_are_valid(manifest) {
+        return None;
+    }
     Some(
         fields
             .get("updatedAt")
             .and_then(Value::as_str)
             .map_or(0, updated_at_ms),
     )
+}
+
+/// `ProviderCompatibilityPolicy`: a driver, version ranges T3 can read, known statuses, and a
+/// recommended version that lies in the recommended range and in a supported range.
+fn compatibility_policy_is_valid(policy: &Value) -> bool {
+    let range = |value: &Value| value.as_str().is_some_and(version_range_is_valid);
+    let stable = |value: &Value| {
+        value.as_str().map(str::trim).is_some_and(|v| {
+            let parts: Vec<&str> = v.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|p| is_digits(p))
+        })
+    };
+    let Some(ranges) = policy.get("ranges").and_then(Value::as_array) else {
+        return false;
+    };
+    let ranges_ok = ranges.iter().all(|entry| {
+        range(&entry["range"])
+            && matches!(
+                entry["status"].as_str(),
+                Some("unknown" | "supported" | "graceful" | "unsupported" | "broken")
+            )
+    });
+    let shape_ok = policy.is_object()
+        && non_blank(&policy["driver"])
+        && range(&policy["t3CodeRange"])
+        && optional(policy, "recommendedRange", range)
+        && optional(policy, "recommendedVersion", stable)
+        && ranges_ok;
+    if !shape_ok {
+        return false;
+    }
+    let Some(version) = policy["recommendedVersion"].as_str().map(str::trim) else {
+        return true;
+    };
+    let in_recommended = policy["recommendedRange"]
+        .as_str()
+        .is_none_or(|r| satisfies_range(version, r.trim()));
+    let first = ranges.iter().find(|entry| {
+        entry["range"]
+            .as_str()
+            .is_some_and(|r| satisfies_range(version, r.trim()))
+    });
+    in_recommended && first.is_some_and(|entry| entry["status"] == "supported")
+}
+
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A comparator token: an optional operator, an optional `v`, and one to three numbers.
+/// Returns the operator and the numbers as written.
+fn comparator(token: &str) -> Option<(&str, Vec<&str>)> {
+    let operator = ["^", ">=", "<=", ">", "<", "="]
+        .into_iter()
+        .find(|op| token.starts_with(op))
+        .unwrap_or("");
+    let rest = token.get(operator.len()..)?;
+    let rest = rest.strip_prefix('v').unwrap_or(rest);
+    let numbers: Vec<&str> = rest.split('.').collect();
+    (numbers.len() <= 3 && numbers.iter().all(|n| is_digits(n))).then_some((operator, numbers))
+}
+
+/// T3's `VersionRange` check: `||` groups of whitespace-separated comparators.
+fn version_range_is_valid(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.split("||").all(|group| {
+            let group = group.trim();
+            !group.is_empty() && group.split_whitespace().all(|t| comparator(t).is_some())
+        })
+}
+
+/// `satisfiesSemverRange` for a version T3 accepts as stable (`major.minor.patch`).
+fn satisfies_range(version: &str, range: &str) -> bool {
+    let parse = |numbers: &[&str]| -> Option<[u64; 3]> {
+        let mut parts = [0u64; 3];
+        for (slot, number) in parts.iter_mut().zip(numbers) {
+            *slot = number.parse().ok()?;
+        }
+        Some(parts)
+    };
+    let version_parts: Vec<&str> = version.trim_start_matches('v').split('.').collect();
+    let Some(version) = parse(&version_parts) else {
+        return false;
+    };
+    range.split("||").any(|group| {
+        let tokens: Vec<&str> = group.split_whitespace().collect();
+        !tokens.is_empty()
+            && tokens.iter().all(|token| {
+                let Some((operator, numbers)) = comparator(token) else {
+                    return false;
+                };
+                let Some(target) = parse(&numbers) else {
+                    return false;
+                };
+                let compared = version.cmp(&target);
+                match operator {
+                    "^" if compared.is_lt() => false,
+                    "^" if target[0] > 0 || numbers.len() < 2 => version[0] == target[0],
+                    "^" if target[1] > 0 || numbers.len() < 3 => {
+                        version[0] == 0 && version[1] == target[1]
+                    }
+                    "^" => version[0] == 0 && version[1] == 0 && version[2] == target[2],
+                    ">=" => compared.is_ge(),
+                    ">" => compared.is_gt(),
+                    "<=" => compared.is_le(),
+                    "<" => compared.is_lt(),
+                    _ => compared.is_eq(),
+                }
+            })
+    })
 }
 
 fn provider_catalog_is_valid(catalog: &Value) -> bool {
@@ -766,5 +885,120 @@ pub(crate) mod tests {
         assert!(!refresh(&mut fresh, &dir, &off, false, later).await);
         assert_eq!(fresh.live.provider_catalog("claudeAgent"), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Port of `providerCompatibility.test.ts` "rejects invalid ranges and recommendations
+    /// outside the first supported match", and of `semver.test.ts` "matches supported range
+    /// groups".
+    #[test]
+    fn compatibility_policies_follow_t3s_schema() {
+        let policy = serde_json::json!({
+            "driver": "codex", "t3CodeRange": ">=0.0.0",
+            "recommendedVersion": "2.0.0", "recommendedRange": ">=2.0.0 <3.0.0",
+            "ranges": [
+                {"range": "<1.0.0", "status": "broken"},
+                {"range": ">=1.0.0 <1.5.0", "status": "unsupported"},
+                {"range": ">=1.5.0 <2.0.0", "status": "graceful"},
+                {"range": ">=2.0.0 <3.0.0", "status": "supported"}]
+        });
+        assert!(compatibility_policy_is_valid(&policy));
+        let with = |key: &str, value: Value| {
+            let mut changed = policy.clone();
+            changed[key] = value;
+            changed
+        };
+        let prefixed = serde_json::json!({
+            "driver": "codex", "t3CodeRange": ">=v0.0.42 <v0.1",
+            "recommendedVersion": "2.0.0", "recommendedRange": "^v2",
+            "ranges": [{"range": ">=v2.0 <v3", "status": "supported"}]
+        });
+        assert!(compatibility_policy_is_valid(&prefixed));
+        let mut first_broken = policy.clone();
+        first_broken["ranges"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({"range": ">=0.0.0", "status": "broken"}),
+        );
+        for invalid in [
+            with("t3CodeRange", "*".into()),
+            with("recommendedVersion", "3.0.0".into()),
+            with(
+                "ranges",
+                serde_json::json!([{"range": ">=2.0.0 garbage", "status": "supported"}]),
+            ),
+            with("recommendedVersion", "2.0.0; echo unsafe".into()),
+            first_broken,
+            with(
+                "ranges",
+                serde_json::json!([{"range": ">=2.0.0", "status": "fine"}]),
+            ),
+        ] {
+            assert!(!compatibility_policy_is_valid(&invalid), "{invalid}");
+        }
+        let range = "^22.16 || ^23.11 || >=24.10";
+        for (version, expected) in [
+            ("22.16.0", true),
+            ("23.11.1", true),
+            ("24.10.0", true),
+            ("22.15.9", false),
+            ("23.10.9", false),
+            ("24.9.9", false),
+        ] {
+            assert_eq!(satisfies_range(version, range), expected, "{version}");
+        }
+        assert!(satisfies_range("0.2.5", "^0.2"));
+        assert!(!satisfies_range("0.3.0", "^0.2"));
+        assert!(satisfies_range("0.0.3", "^0.0.3"));
+        assert!(!satisfies_range("0.0.4", "^0.0.3"));
+    }
+
+    /// `ModelManifestSchema` checks the Claude adapters (`hasValidClaudeManifestAdapters`)
+    /// and the compatibility policies. A newer fetched manifest that fails either is refused:
+    /// the last valid one stays in memory and in the cache file.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_invalid_adapter_or_policy_keeps_the_last_valid_manifest() {
+        let mut bad_version = bundled_manifest("2999-06-01T00:00:00.000Z");
+        bad_version["providers"]["claudeAgent"]["models"][0]["adapter"] =
+            serde_json::json!({"claudeCode": {"minVersion": "not a version"}});
+        let mut inverted = bundled_manifest("2999-06-01T00:00:00.000Z");
+        inverted["providers"]["claudeAgent"]["models"][0]["adapter"] = serde_json::json!({"claudeCode": {"minVersion": "3.0.0", "maxVersionExclusive": "2.0.0"}});
+        let mut bad_profile = bundled_manifest("2999-06-01T00:00:00.000Z");
+        let profile = bad_profile["providers"]["claudeAgent"]["profiles"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        profile["adapter"] = serde_json::json!({"claudeCode": {"effortMap": {"high": 3}}});
+        let mut bad_policy = bundled_manifest("2999-06-01T00:00:00.000Z");
+        bad_policy["compatibility"][0]["recommendedVersion"] = "0.1.0".into();
+        let valid = bundled_manifest("2999-01-01T00:00:00.000Z");
+        assert!(decode_manifest(&valid).is_some());
+        for invalid in [bad_version, inverted, bad_profile, bad_policy] {
+            assert!(decode_manifest(&invalid).is_none(), "accepted");
+            let dir = temp_dir("invalid-adapter");
+            let mut state = State::default();
+            let (url, server) = serve_once(valid.to_string(), 1);
+            assert!(refresh(&mut state, &dir, &Source::Url(url), true, 1).await);
+            assert_eq!(server.join().unwrap(), 1);
+            let kept = state.live.provider_catalog("claudeAgent");
+            let cached = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+            let (url, server) = serve_once(invalid.to_string(), 1);
+            let later = 1 + MANIFEST_RETRY_MS;
+            let window = Window::Force;
+            assert!(!refresh_with(&mut state, &dir, &Source::Url(url), true, later, window).await);
+            assert_eq!(server.join().unwrap(), 1);
+            assert_eq!(state.live.provider_catalog("claudeAgent"), kept);
+            assert_eq!(
+                std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(),
+                cached
+            );
+            // A cache file holding it is not read either.
+            std::fs::write(dir.join(FILE_NAME), cache_text(later, &invalid.to_string())).unwrap();
+            let mut fresh = State::default();
+            let off = Source::Url("http://127.0.0.1:9/m.json".into());
+            assert!(!refresh(&mut fresh, &dir, &off, false, later).await);
+            assert_eq!(fresh.live.provider_catalog("claudeAgent"), None);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }

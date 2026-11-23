@@ -26,21 +26,19 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 - Antigravity: per-model thinking levels, T3's stale-reply rule, slash commands, the drain
   before close, and the sign-in signals (error replies, stdout and stderr URLs) that sign the
   entry out and notify the config streams (`conn_provider::StatusNotifier`).
-- With `instanceId` and `cwd` the instance's per-workspace scan runs (Codex: `skills/list`),
-  kept 5 minutes unless `fresh`. As in T3, a plain refresh joins the scan in flight, a `fresh`
-  one claims the folder anew and an older scan that ends later is dropped, and a missing
-  managed worktree is scanned at its project's root (`workspaceScanDirectory`). The reply
-  follows `omitProviders`,
-  `workspaceSnapshotsOnDemand`, `providerCatalogsOnDemand`, `machineCatalog` and
-  `usageLimitsCommand`, with the pending snapshot and the catalog digest.
+- A refresh with `instanceId` and `cwd` does not scan the workspace: it probes the instance
+  and answers every entry, as before. Without a `cwd` the reply follows `omitProviders`,
+  `workspaceSnapshotsOnDemand` and `usageLimitsCommand`.
+- The manifest is refused, fetched or cached, unless its Claude adapters and compatibility
+  policies decode as T3's schema requires; the last valid one stays.
 
 Proof: tests in `methods::server`, `catalog` and `lib` (Claude), `antigravity`,
 `antigravity_provider`, `connection` and `process`, including ports of T3's
 `AntigravityProvider.test.ts` and `AntigravityDriver.test.ts` cases; each fails with its fix
-reverted. `check-copies.mjs` holds the T3 texts. Not ported: advertising
-`providerWorkspaceSnapshotsOnDemand` (the config stream does not yet strip snapshots per
-client or track catalogs per cwd); T3's rescans; Claude's and Antigravity's per-workspace
-scans; Claude's capability-probe and latest-version caches (this server keeps neither).
+reverted. `check-copies.mjs` holds the T3 texts. Not ported: workspace-scoped refreshes
+(`snapshotForCwd`, the per-workspace snapshot cache, `workspaceScanDirectory`, the scoped
+reply with `providerCatalogsOnDemand` and `machineCatalog`) and advertising
+`providerWorkspaceSnapshotsOnDemand`; T3's rescans; Claude's capability-probe and latest-version caches (this server keeps neither).
 Claude selections compile against the catalog the picker shows (`compileClaudeModelSelection`
 over the accepted manifest, proven equal to T3's output on the bundled one).
 

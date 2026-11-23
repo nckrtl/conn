@@ -1983,46 +1983,6 @@ fn probe_spec(input: &ProbeInput<'_>) -> LaunchSpec {
     spec
 }
 
-/// `makeCodexSkillsProbe`: the skills Codex sees in `workspace`. An `app-server` in the
-/// server's working folder answers `initialize` and `skills/list` with `forceReload`, then
-/// ends; a failure is tried once more. T3 keeps that helper alive for reuse; this server starts
-/// one per scan, so no process waits idle.
-pub async fn skills_for_cwd(input: &ProbeInput<'_>, workspace: &str) -> Result<Vec<Value>, String> {
-    let resolved = resolved_environment(input.config, &input.host_env);
-    let timeout = probe_timeout(PROBE_TIMEOUT, &resolved);
-    let spec = probe_spec(input);
-    let failed = || format!("Failed to probe Codex skills for '{workspace}'");
-    let mut last = Err(failed());
-    for _ in 0..2 {
-        let Ok(client) = Client::spawn(&spec).await else {
-            continue;
-        };
-        let skills = tokio::time::timeout(timeout, async {
-            client
-                .request(
-                    "initialize",
-                    json!({"clientInfo": {"name": CLIENT_NAME, "title": CLIENT_NAME, "version": launch::CLIENT_VERSION},
-                        "capabilities": {"experimentalApi": true}}),
-                )
-                .await?;
-            client.notify("initialized");
-            client
-                .request(
-                    "skills/list",
-                    json!({"cwds": [workspace], "forceReload": true}),
-                )
-                .await
-        })
-        .await;
-        client.close().await;
-        if let Ok(Ok(response)) = skills {
-            last = Ok(parse_skills(&response, workspace));
-            break;
-        }
-    }
-    last
-}
-
 /// `checkCodexProviderStatus` for one instance, as `CodexDriver` runs it.
 pub async fn check(input: ProbeInput<'_>) -> Value {
     let config = input.config;
@@ -2359,49 +2319,5 @@ mod tests {
         let mut invalid = entry();
         apply_model_catalog(&mut invalid, &live, 0);
         assert_eq!(invalid["models"][0]["isDefault"], true);
-    }
-
-    /// A workspace scan starts `codex app-server` as the machine probe does, with
-    /// `MISE_OFFLINE=1`: the stub names its one skill after the variable it saw.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_workspace_scan_launches_as_the_machine_probe_does() {
-        let dir = std::env::temp_dir().join(format!("conn-codex-scan-{}", conn_support::uuid_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let stub = dir.join("codex-stub");
-        std::fs::write(
-            &stub,
-            r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-  case "$line" in
-    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"codex/0.166.0"}}\n' "$id" ;;
-    *'"method":"skills/list"'*)
-      printf '{"id":%s,"result":{"data":[{"cwd":"/w","skills":[{"name":"mise-%s","path":"/w/s","enabled":true}]}]}}\n' "$id" "${MISE_OFFLINE:-unset}" ;;
-  esac
-done
-"#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let config = CodexConfig {
-            binary: stub,
-            ..CodexConfig::default()
-        };
-        let settings = StatusSettings {
-            enabled: true,
-            ..StatusSettings::default()
-        };
-        let input = ProbeInput {
-            instance_id: "codex",
-            config: &config,
-            settings: &settings,
-            host_env: vec![("PATH".into(), "/usr/bin:/bin".into())],
-            cwd: dir.clone(),
-            checked_at: "2026-11-23T00:00:00.000Z".into(),
-        };
-        let skills = skills_for_cwd(&input, "/w").await.unwrap();
-        assert_eq!(skills[0]["name"], "mise-1");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

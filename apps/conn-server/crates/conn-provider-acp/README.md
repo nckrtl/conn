@@ -284,12 +284,14 @@ more per `providerInstances` entry with that driver (`supportsMultipleInstances`
 - **Model refresh** (`server.refreshProviders` with `refreshModels`, T3's `refreshModels`
   and `publishCatalog`): the throwaway session selects each model, then the original again,
   and drains the agent's events before it closes; it starts from the agent's own model, not
-  the catalog's default. Each model lists the thinking levels it reported; levels of a model
-  the agent no longer lists go (T3 keeps them until sign-out). A selection's reply is
+  the catalog's default. Each model lists the thinking levels it reported, kept until sign-out
+  as in T3. A selection's reply is
   dropped when the agent pushed `config_option_update` while it was in flight (T3's
   `configOptionUpdates` rule). Only the root session's updates reach the entry; metadata
   sent before `session/new` answered is kept per session and applied for the root (T3's
-  `startupMetadata`).
+  `startupMetadata`); the entry hears it after the session is published, so a retry after a
+  sign-in failure keeps its commands. The 90 s limit stops the agent before the refresh
+  answers, also during `initialize`. An agent that exited is cleaned up without a signal.
 - **Catalog:** the entry applies the accepted model manifest's legacy marks and default
   (`applyModelCatalog`; bundled: `src/antigravity_catalog.json`, generated), and a selection
   that asks for the default takes the catalog's default when the agent lists it.

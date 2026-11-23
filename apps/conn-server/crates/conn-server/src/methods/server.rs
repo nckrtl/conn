@@ -111,26 +111,14 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
             if refresh_models && let Some(manifest) = &deps.model_manifest {
                 manifest.refresh(Window::Force).await;
             }
-            let scans_workspaces = match (only, input["cwd"].as_str()) {
-                (Some(id), Some(cwd)) => {
-                    use super::provider::Freshness;
-                    let freshness = if input["fresh"] == true {
-                        Freshness::Fresh
-                    } else {
-                        Freshness::KeepCurrent
-                    };
-                    super::provider::refresh_workspace(&deps, id, cwd, freshness).await
-                }
-                _ => {
-                    super::provider::refresh(&deps, only).await;
-                    false
-                }
-            };
+            // A workspace (`cwd`, `fresh`) is not scanned: the instance is probed and the
+            // reply lists every entry, as before workspace snapshots.
+            super::provider::refresh(&deps, only).await;
             if refresh_models {
                 super::provider::refresh_models(&deps, only).await?;
             }
             let providers = current_providers(&deps);
-            Ok(json!({ "providers": refresh_reply(&input, providers, scans_workspaces) }))
+            Ok(json!({ "providers": refresh_reply(&input, providers) }))
         }
     });
 
@@ -501,17 +489,15 @@ fn open_stream(first: Vec<Value>) -> ItemStream {
     rx
 }
 
-/// The providers `server.refreshProviders` answers with (T3's `ws.ts`): none for
-/// `omitProviders` without a workspace. With `workspaceSnapshotsOnDemand`: every entry without
-/// its workspace snapshots, or, for an instance and a `cwd`, only that entry scoped to the
-/// workspace (the config stream carries its models). `usageLimitsCommand` adds `/usage-limits`;
-/// `providerCatalogsOnDemand` for an instance that scans workspaces answers a pending
-/// snapshot from the machine catalog when none is kept, and with `machineCatalog` the
-/// catalog's names and digest.
-fn refresh_reply(input: &Value, providers: Vec<Value>, scans_workspaces: bool) -> Vec<Value> {
-    let only = input["instanceId"].as_str();
-    let cwd = input["cwd"].as_str();
-    if input["omitProviders"] == true && (only.is_none() || cwd.is_none()) {
+/// The providers `server.refreshProviders` answers with (T3's `ws.ts`), for a refresh
+/// without a workspace: none for `omitProviders`; with `workspaceSnapshotsOnDemand`, every
+/// entry without its workspace snapshots, and `usageLimitsCommand` adds `/usage-limits`. A
+/// request with a `cwd` gets every entry as it is: this server does not scan workspaces.
+fn refresh_reply(input: &Value, providers: Vec<Value>) -> Vec<Value> {
+    if input["cwd"].is_string() {
+        return providers;
+    }
+    if input["omitProviders"] == true {
         return Vec::new();
     }
     if input["workspaceSnapshotsOnDemand"] != true {
@@ -522,103 +508,15 @@ fn refresh_reply(input: &Value, providers: Vec<Value>, scans_workspaces: bool) -
     } else {
         providers
     };
-    let (Some(only), Some(cwd)) = (only, cwd) else {
-        return providers
-            .into_iter()
-            .map(|mut provider| {
-                if let Some(entry) = provider.as_object_mut() {
-                    entry.remove("workspaceSnapshots");
-                }
-                provider
-            })
-            .collect();
-    };
-    let catalog_on_demand = input["providerCatalogsOnDemand"] == true && scans_workspaces;
-    let machine_catalog = catalog_on_demand && input["machineCatalog"] == true;
     providers
         .into_iter()
-        .filter(|provider| provider["instanceId"] == only)
-        .map(|provider| {
-            let snapshots = workspace_snapshot_or_catalog(&provider, cwd, catalog_on_demand);
-            let mut scoped = provider.clone();
-            if let Some(entry) = scoped.as_object_mut() {
-                entry.insert("models".into(), json!([]));
-                let (commands, skills) = if machine_catalog {
-                    machine_catalog_names(&provider)
-                } else {
-                    (json!([]), json!([]))
-                };
-                entry.insert("slashCommands".into(), commands);
-                entry.insert("skills".into(), skills);
-                if machine_catalog {
-                    entry.insert(
-                        "catalogDigest".into(),
-                        json!(machine_catalog_digest(&provider)),
-                    );
-                }
-                entry.insert("workspaceSnapshots".into(), Value::Array(snapshots));
+        .map(|mut provider| {
+            if let Some(entry) = provider.as_object_mut() {
+                entry.remove("workspaceSnapshots");
             }
-            scoped
+            provider
         })
         .collect()
-}
-
-/// `workspaceSnapshotOrCatalog`: the kept snapshot for `cwd`, else (catalogs on demand) a
-/// pending one from the machine catalog.
-fn workspace_snapshot_or_catalog(
-    provider: &Value,
-    cwd: &str,
-    catalog_on_demand: bool,
-) -> Vec<Value> {
-    let snapshots: Vec<Value> = provider["workspaceSnapshots"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|snapshot| snapshot["cwd"] == cwd)
-        .cloned()
-        .collect();
-    if !snapshots.is_empty() || !catalog_on_demand {
-        return snapshots;
-    }
-    vec![json!({
-        "cwd": cwd,
-        "checkedAt": provider["checkedAt"],
-        "slashCommands": provider["slashCommands"],
-        "slashCommandsPending": true,
-        "skills": provider["skills"],
-    })]
-}
-
-/// `machineCatalogNames`: command names, and skills without their descriptions.
-fn machine_catalog_names(provider: &Value) -> (Value, Value) {
-    let commands: Vec<Value> = provider["slashCommands"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|command| json!({"name": command["name"]}))
-        .collect();
-    let skills: Vec<Value> = provider["skills"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|skill| {
-            let mut skill = skill.clone();
-            if let Some(fields) = skill.as_object_mut() {
-                fields.remove("description");
-                fields.remove("shortDescription");
-            }
-            skill
-        })
-        .collect();
-    (Value::Array(commands), Value::Array(skills))
-}
-
-/// `machineCatalogDigest`: the first 16 hex digits of the SHA-256 of
-/// `[slashCommands, skills]`, so a client's cached lists stay current until they change.
-fn machine_catalog_digest(provider: &Value) -> String {
-    let text = json!([provider["slashCommands"], provider["skills"]]).to_string();
-    let digest = conn_support::hex::hex(&conn_support::hmac::sha256(text.as_bytes()));
-    digest.get(..16).unwrap_or(&digest).to_owned()
 }
 
 /// `USAGE_LIMITS_COMMAND`.
@@ -913,20 +811,17 @@ mod tests {
             call(json!({"instanceId": "good", "refreshModels": true, "omitProviders": true})).await;
         assert_eq!(reply, Ok(json!({"providers": []})));
         assert_eq!(good.refreshes.load(Relaxed), 3);
-        // A workspace on demand: that instance only, scoped to the `cwd`.
+        // A workspace is not scanned: the instance is probed, and the reply lists every
+        // entry as it is, as before workspace snapshots.
+        let probes = good.probes.load(Relaxed);
         let reply = call(
-            json!({"instanceId": "good", "cwd": "/w", "omitProviders": true,
+            json!({"instanceId": "good", "cwd": "/w", "fresh": true, "omitProviders": true,
             "workspaceSnapshotsOnDemand": true}),
         )
-        .await;
-        assert_eq!(
-            reply,
-            Ok(json!({"providers": [{
-                "instanceId": "good", "enabled": true, "installed": true,
-                "models": [], "slashCommands": [], "skills": [],
-                "workspaceSnapshots": [{"cwd": "/w", "slashCommands": []}],
-            }]}))
-        );
+        .await
+        .unwrap();
+        assert_eq!(good.probes.load(Relaxed), probes + 1);
+        assert_eq!(reply["providers"], json!(current_providers(&deps)));
         // On demand without a workspace: every entry, without its snapshots.
         let reply = call(json!({"workspaceSnapshotsOnDemand": true}))
             .await
@@ -1207,134 +1102,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A stand-in `codex app-server`: `initialize`, then `skills/list` lists the skill folders
-    /// under the first cwd's `.codex/skills`. A cwd named `broken` makes it exit.
-    fn codex_stub(dir: &std::path::Path) -> std::path::PathBuf {
-        let stub = dir.join("codex-stub");
-        std::fs::write(
-            &stub,
-            r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-  case "$line" in
-    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"codex/0.166.0"}}\n' "$id" ;;
-    *'"method":"skills/list"'*)
-      cwd=$(printf '%s' "$line" | sed -n 's/.*"cwds":\["\([^"]*\)".*/\1/p')
-      case "$cwd" in *broken*) exit 3 ;; esac
-      skills=""
-      for skill in "$cwd"/.codex/skills/*; do
-        [ -d "$skill" ] || continue
-        name=$(basename "$skill")
-        skills="$skills${skills:+,}{\"name\":\"$name\",\"path\":\"$skill/SKILL.md\",\"enabled\":true,\"scope\":\"repo\"}"
-      done
-      printf '{"id":%s,"result":{"data":[{"cwd":"%s","skills":[%s]}]}}\n' "$id" "$cwd" "$skills" ;;
-  esac
-done
-"#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        stub
-    }
-
-    /// T3's `refreshWorkspaceSnapshot` and reply rules (`ws.ts` 2509, 2553) with Codex's own
-    /// per-workspace scan: a project-only skill shows in that workspace's snapshot only; a
-    /// kept snapshot is reused until `fresh`; a failed scan answers the machine catalog as a
-    /// pending snapshot with its names and digest.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_workspace_refresh_scans_that_workspace_with_codex() {
-        use crate::table::{CallContext, Handler};
-        let (env, dir) = environment();
-        std::fs::create_dir_all(&dir).unwrap();
-        let project = dir.join("project");
-        std::fs::create_dir_all(project.join(".codex/skills/deploy")).unwrap();
-        let other = dir.join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        let broken = dir.join("broken");
-        std::fs::create_dir_all(&broken).unwrap();
-        let config = conn_provider_codex::CodexConfig {
-            status_probe: false,
-            status_cwd: Some(dir.clone()),
-            ..Default::default()
-        };
-        let instance = json!({"driver": "codex", "enabled": true,
-            "config": {"binaryPath": codex_stub(&dir).display().to_string()}});
-        let codex = Arc::new(conn_provider_codex::CodexProvider::for_instance(
-            "codex".into(),
-            config,
-            Some(&instance),
-        ));
-        let deps = Deps {
-            environment: Some(env.clone()),
-            providers: vec![codex as Arc<dyn conn_provider::Provider>].into(),
-            ..Deps::default()
-        };
-        let mut table = MethodTable::new();
-        register(&mut table, &deps);
-        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
-            panic!("server.refreshProviders is not registered");
-        };
-        let scoped = |cwd: &std::path::Path, extra: Value| {
-            let mut input = json!({"instanceId": "codex", "cwd": cwd.display().to_string(),
-                "workspaceSnapshotsOnDemand": true});
-            for (key, value) in extra.as_object().unwrap() {
-                input[key] = value.clone();
-            }
-            call(CallContext::default(), input)
-        };
-        let skills = |reply: &Value| -> Vec<String> {
-            reply["providers"][0]["workspaceSnapshots"][0]["skills"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|s| s["name"].as_str().unwrap().to_owned())
-                .collect()
-        };
-        let reply = scoped(&project, json!({})).await.unwrap();
-        let providers = reply["providers"].as_array().unwrap();
-        assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0]["models"], json!([]));
-        let snapshot = &providers[0]["workspaceSnapshots"][0];
-        assert_eq!(snapshot["cwd"], project.display().to_string());
-        assert_eq!(skills(&reply), ["deploy"]);
-        let reply = scoped(&other, json!({})).await.unwrap();
-        assert_eq!(
-            skills(&reply),
-            Vec::<String>::new(),
-            "the skill is project-only"
-        );
-
-        // A kept snapshot answers until `fresh` scans again.
-        std::fs::create_dir_all(project.join(".codex/skills/review")).unwrap();
-        let reply = scoped(&project, json!({})).await.unwrap();
-        assert_eq!(skills(&reply), ["deploy"]);
-        let reply = scoped(&project, json!({"fresh": true})).await.unwrap();
-        assert_eq!(skills(&reply), ["deploy", "review"]);
-
-        // Catalogs on demand: a failed scan keeps nothing, so the machine catalog answers as a
-        // pending snapshot, with its names and digest.
-        let reply = scoped(
-            &broken,
-            json!({"providerCatalogsOnDemand": true, "machineCatalog": true}),
-        )
-        .await
-        .unwrap();
-        let entry = &reply["providers"][0];
-        assert_eq!(entry["workspaceSnapshots"][0]["slashCommandsPending"], true);
-        assert_eq!(
-            entry["workspaceSnapshots"][0]["cwd"],
-            broken.display().to_string()
-        );
-        assert_eq!(entry["catalogDigest"].as_str().map(str::len), Some(16));
-        // The config stream carries the kept snapshots.
-        let all = current_providers(&deps);
-        assert_eq!(all[0]["workspaceSnapshots"].as_array().unwrap().len(), 2);
-        // T3's "stores workspace skills ... without changing machine metadata".
-        assert_eq!(all[0]["skills"], json!([]));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
     /// `withUsageLimitsCommands`: providers that report limits get `/usage-limits` last.
     #[test]
     fn the_usage_limits_command_follows_t3() {
@@ -1438,273 +1205,6 @@ done
         // That one completed: the manifest counts as probed.
         assert_eq!(picker().await, Ok(json!({"providers": []})));
         assert_eq!(crashes.probes.load(Relaxed), 2);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A provider that scans workspaces: each scan that runs records its folder and lists one
-    /// skill named by the scan's number. The first waits for `release` when `gate_first`.
-    struct Scans {
-        id: conn_contract::ProviderInstanceId,
-        scanned: std::sync::Mutex<Vec<String>>,
-        gate_first: bool,
-        started: tokio::sync::Notify,
-        release: tokio::sync::Semaphore,
-    }
-
-    impl Scans {
-        fn new(gate_first: bool) -> Arc<Self> {
-            Arc::new(Self {
-                id: "scans".into(),
-                scanned: std::sync::Mutex::new(Vec::new()),
-                gate_first,
-                started: tokio::sync::Notify::new(),
-                release: tokio::sync::Semaphore::new(0),
-            })
-        }
-    }
-
-    impl conn_provider::Provider for Scans {
-        fn instance_id(&self) -> &conn_contract::ProviderInstanceId {
-            &self.id
-        }
-        fn driver(&self) -> &str {
-            "codex"
-        }
-        fn capabilities(
-            &self,
-        ) -> conn_provider::BoxFuture<
-            '_,
-            conn_provider::ProviderResult<conn_contract::ProviderCapabilities>,
-        > {
-            Box::pin(async {
-                Err(conn_provider::ProviderError::Unsupported {
-                    operation: "capabilities",
-                })
-            })
-        }
-        fn open_session(
-            &self,
-            _input: conn_provider::OpenSessionInput,
-        ) -> conn_provider::BoxFuture<'_, conn_provider::ProviderResult<conn_provider::OpenedSession>>
-        {
-            Box::pin(async {
-                Err(conn_provider::ProviderError::Unsupported {
-                    operation: "open_session",
-                })
-            })
-        }
-        fn server_provider_entry(&self, _checked_at: &str) -> Option<Value> {
-            Some(
-                json!({"instanceId": "scans", "driver": "codex", "enabled": true,
-                "installed": true, "status": "ready", "skills": [], "slashCommands": []}),
-            )
-        }
-        fn snapshot_for_cwd(
-            &self,
-            cwd: &str,
-        ) -> Option<conn_provider::BoxFuture<'_, conn_provider::ProviderResult<Value>>> {
-            let cwd = cwd.to_owned();
-            Some(Box::pin(async move {
-                let number = {
-                    let mut scanned = self.scanned.lock().unwrap();
-                    scanned.push(cwd);
-                    scanned.len()
-                };
-                if number == 1 && self.gate_first {
-                    self.started.notify_one();
-                    let _ = self.release.acquire().await;
-                }
-                Ok(json!({"skills": [{"name": format!("scan-{number}")}], "slashCommands": []}))
-            }))
-        }
-    }
-
-    fn workspace_skills(deps: &Deps, cwd: &str) -> Vec<Value> {
-        current_providers(deps)[0]["workspaceSnapshots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["cwd"] == cwd)
-            .map(|s| s["skills"].as_array().unwrap().clone())
-            .unwrap_or_default()
-    }
-
-    /// T3's workspace refresh claims: a second ordinary refresh joins the scan in flight, a
-    /// `fresh` one scans again, and the older scan that ends last does not overwrite it.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_stale_workspace_scan_does_not_overwrite_a_fresh_one() {
-        use crate::table::{CallContext, Handler};
-        let (env, dir) = environment();
-        let scans = Scans::new(true);
-        let deps = Deps {
-            environment: Some(env.clone()),
-            providers: vec![scans.clone() as Arc<dyn conn_provider::Provider>].into(),
-            ..Deps::default()
-        };
-        let mut table = MethodTable::new();
-        register(&mut table, &deps);
-        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
-            panic!("server.refreshProviders is not registered");
-        };
-        let cwd = "/work/project";
-        let scoped = |fresh: bool| {
-            call(
-                CallContext::default(),
-                json!({"instanceId": "scans", "cwd": cwd, "fresh": fresh}),
-            )
-        };
-        let first = tokio::spawn(scoped(false));
-        scans.started.notified().await;
-        let joined = tokio::spawn(scoped(false));
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            !joined.is_finished(),
-            "the second refresh waits for the scan"
-        );
-        assert_eq!(scans.scanned.lock().unwrap().len(), 1, "one shared scan");
-        scoped(true).await.unwrap();
-        assert_eq!(workspace_skills(&deps, cwd), [json!({"name": "scan-2"})]);
-        scans.release.add_permits(1);
-        first.await.unwrap().unwrap();
-        joined.await.unwrap().unwrap();
-        assert_eq!(
-            workspace_skills(&deps, cwd),
-            [json!({"name": "scan-2"})],
-            "the stale scan is dropped"
-        );
-        assert_eq!(scans.scanned.lock().unwrap().len(), 2);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// An engine whose only thread is archived, on a managed worktree.
-    struct Archived {
-        project_root: String,
-        worktree: String,
-    }
-
-    impl conn_engine::Engine for Archived {
-        fn dispatch(
-            &self,
-            _command: conn_contract::Command,
-        ) -> conn_engine::BoxFuture<
-            '_,
-            Result<
-                conn_contract::DispatchCommandResult,
-                conn_engine::EngineError<conn_contract::DispatchCommandError>,
-            >,
-        > {
-            Box::pin(std::future::ready(Err(conn_engine::EngineError::Internal(
-                "unused".into(),
-            ))))
-        }
-        fn subscribe_shell(
-            &self,
-            _input: conn_contract::SubscribeShellInput,
-        ) -> conn_engine::BoxFuture<
-            '_,
-            Result<
-                conn_engine::Subscription<
-                    conn_contract::ShellStreamItem,
-                    conn_contract::GetShellSnapshotError,
-                >,
-                conn_engine::EngineError<conn_contract::GetShellSnapshotError>,
-            >,
-        > {
-            Box::pin(std::future::ready(Err(conn_engine::EngineError::Internal(
-                "unused".into(),
-            ))))
-        }
-        fn subscribe_thread(
-            &self,
-            _input: conn_contract::SubscribeThreadInput,
-        ) -> conn_engine::BoxFuture<
-            '_,
-            Result<
-                conn_engine::Subscription<
-                    conn_contract::ThreadStreamItem,
-                    conn_contract::GetThreadProjectionError,
-                >,
-                conn_engine::EngineError<conn_contract::GetThreadProjectionError>,
-            >,
-        > {
-            Box::pin(std::future::ready(Err(conn_engine::EngineError::Internal(
-                "unused".into(),
-            ))))
-        }
-        fn shell_snapshot(
-            &self,
-        ) -> conn_engine::BoxFuture<
-            '_,
-            Result<Value, conn_engine::EngineError<conn_contract::GetShellSnapshotError>>,
-        > {
-            let snapshot = json!({"threads": [], "archivedThreads": [],
-                "projects": [{"id": "p1", "workspaceRoot": self.project_root}]});
-            Box::pin(std::future::ready(Ok(snapshot)))
-        }
-        fn call(
-            &self,
-            method: &str,
-            _input: Value,
-        ) -> conn_engine::BoxFuture<'_, Result<Value, conn_engine::EngineError<Value>>> {
-            let reply = (method == "orchestration.getArchivedShellSnapshot").then(|| {
-                json!({"threads": [{"id": "t1", "projectId": "p1", "branch": "feature",
-                    "worktreePath": self.worktree}]})
-            });
-            Box::pin(std::future::ready(reply.ok_or_else(|| {
-                conn_engine::EngineError::Internal("unused".into())
-            })))
-        }
-    }
-
-    /// T3's `workspaceScanDirectory`: a managed worktree that no longer exists is scanned at
-    /// its project's root, and the snapshot stays under the folder the client asked for.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_missing_managed_worktree_scans_its_project_root() {
-        use crate::table::{CallContext, Handler};
-        let (env, dir) = environment();
-        let project = dir.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let worktree = dir.join("worktrees/project/feature");
-        let (project, worktree) = (
-            project.display().to_string(),
-            worktree.display().to_string(),
-        );
-        let scans = Scans::new(false);
-        let deps = Deps {
-            environment: Some(env.clone()),
-            engine: Some(Arc::new(Archived {
-                project_root: project.clone(),
-                worktree: worktree.clone(),
-            })),
-            providers: vec![scans.clone() as Arc<dyn conn_provider::Provider>].into(),
-            ..Deps::default()
-        };
-        let mut table = MethodTable::new();
-        register(&mut table, &deps);
-        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
-            panic!("server.refreshProviders is not registered");
-        };
-        call(
-            CallContext::default(),
-            json!({"instanceId": "scans", "cwd": worktree}),
-        )
-        .await
-        .unwrap();
-        // An unmanaged missing folder is scanned as asked.
-        let elsewhere = dir.join("elsewhere").display().to_string();
-        call(
-            CallContext::default(),
-            json!({"instanceId": "scans", "cwd": elsewhere}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(*scans.scanned.lock().unwrap(), [project, elsewhere]);
-        assert_eq!(
-            workspace_skills(&deps, &worktree),
-            [json!({"name": "scan-1"})]
-        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

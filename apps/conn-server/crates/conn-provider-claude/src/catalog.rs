@@ -132,6 +132,28 @@ fn resolve(section: &Value, now_ms: i64) -> Option<Value> {
     }))
 }
 
+/// `hasValidClaudeManifestAdapters`: every Claude profile and model adapter decodes (an
+/// absent or null adapter counts as `{}`). The server refuses a manifest that fails it.
+pub fn manifest_adapters_are_valid(manifest: &Value) -> bool {
+    let Some(catalog) = manifest.pointer("/providers/claudeAgent") else {
+        return true;
+    };
+    fn adapter(item: &Value) -> Option<&Value> {
+        item.get("adapter").filter(|a| !a.is_null())
+    }
+    let profiles_ok = catalog["profiles"].as_object().is_none_or(|profiles| {
+        profiles
+            .values()
+            .all(|p| profile_adapter_is_valid(adapter(p)))
+    });
+    let models_ok = catalog["models"].as_array().is_none_or(|models| {
+        models
+            .iter()
+            .all(|m| model_adapter_bounds(adapter(m)).is_some())
+    });
+    profiles_ok && models_ok
+}
+
 /// `ClaudeProfileAdapterSchema`: `claudeCode` with an effort map, model suffixes and context
 /// window sizes of the right types.
 fn profile_adapter_is_valid(adapter: Option<&Value>) -> bool {
@@ -276,8 +298,13 @@ pub fn compile(selection: &Value, manifest: &conn_provider::LiveManifest) -> Com
     }
 }
 
-/// Outside the catalog: a known effort level passes, no option descriptors apply.
-fn outside_catalog(model: &str, raw_effort: Option<&str>) -> Compiled {
+/// Outside the catalog: a known effort level passes, no option descriptors apply, and an
+/// explicit `thinking` choice still reaches `alwaysThinkingEnabled` (T3's `!inCatalog`).
+fn outside_catalog(model: &str, raw_effort: Option<&str>, selections: &[Value]) -> Compiled {
+    let mut settings = Map::new();
+    if let Some(thinking) = raw_option(selections, "thinking").and_then(Value::as_bool) {
+        settings.insert("alwaysThinkingEnabled".into(), Value::Bool(thinking));
+    }
     Compiled {
         api_model_id: model.to_string(),
         effort: raw_effort
@@ -285,7 +312,7 @@ fn outside_catalog(model: &str, raw_effort: Option<&str>) -> Compiled {
             .filter(|e| EFFORT_LEVELS.contains(e))
             .map(str::to_string),
         prompt_effort: None,
-        settings: Map::new(),
+        settings,
     }
 }
 
@@ -318,7 +345,7 @@ fn compile_resolved(resolved: &Value, selection: &Value) -> Compiled {
         at.and_then(|at| models.get(at)),
         at.and_then(|at| resolved["runtime"].get(at)),
     ) else {
-        return outside_catalog(model, raw_effort);
+        return outside_catalog(model, raw_effort, selections);
     };
     let caps = &entry["capabilities"];
     let descriptors = option_descriptors(caps, selections);
@@ -553,7 +580,7 @@ fn compile_bundled(selection: &Value) -> Compiled {
         })
     });
     let Some(entry) = entry else {
-        return outside_catalog(model, raw_effort);
+        return outside_catalog(model, raw_effort, &options);
     };
     let base = raw_effort
         .and_then(|e| entry["efforts"].get(e))
@@ -843,6 +870,36 @@ mod live_tests {
             legacy.settings,
             json!({"ultracode": true}).as_object().cloned().unwrap()
         );
+    }
+
+    /// T3's `compileClaudeModelSelection` passes an explicit `thinking` choice for a model
+    /// outside the catalog (`!inCatalog`), with the bundled and with a fetched manifest.
+    #[test]
+    fn an_out_of_catalog_model_keeps_an_explicit_thinking_choice() {
+        use serde_json::json;
+        let fetched = conn_provider::LiveManifest::default();
+        fetched.set(bundled_manifest());
+        for live in [conn_provider::LiveManifest::default(), fetched] {
+            for thinking in [false, true] {
+                let compiled = compile(
+                    &selection(
+                        "my-proxy-model",
+                        json!([{"id": "thinking", "value": thinking}]),
+                    ),
+                    &live,
+                );
+                assert_eq!(compiled.api_model_id, "my-proxy-model");
+                assert_eq!(
+                    compiled.settings,
+                    json!({"alwaysThinkingEnabled": thinking})
+                        .as_object()
+                        .cloned()
+                        .unwrap()
+                );
+            }
+            let unset = compile(&selection("my-proxy-model", json!([])), &live);
+            assert!(unset.settings.is_empty());
+        }
     }
 
     /// The port of `compileClaudeModelSelection` over a resolved manifest gives, for T3's

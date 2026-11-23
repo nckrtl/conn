@@ -189,7 +189,14 @@ impl Provider for ClaudeProvider {
                 .await
                 .unwrap_or(false);
             let program = self.config.binary.to_string_lossy().into_owned();
-            text_generation::generate(&program, &env, managed, request).await
+            text_generation::generate(
+                &program,
+                &env,
+                &self.config.model_manifest,
+                managed,
+                request,
+            )
+            .await
         })
     }
 

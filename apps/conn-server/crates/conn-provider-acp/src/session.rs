@@ -51,6 +51,16 @@ pub(crate) enum StopKind {
     Kill,
     /// `terminateProcessGroup`: SIGTERM to the group, 1 s grace, then SIGKILL.
     Terminate,
+    /// The agent exited and was reaped: only its files go. Its PID and group are no longer
+    /// ours to signal.
+    Exited,
+}
+
+/// What may end an open early ([`AcpSession::open_with`]).
+#[derive(Default)]
+pub(crate) struct OpenControl {
+    /// Ends the open; the agent is stopped before `open_with` returns.
+    pub abort: Option<BoxFuture<'static, ()>>,
 }
 
 /// Starts the agent for this session (the real process, or a replay agent in tests).
@@ -100,6 +110,13 @@ pub(crate) enum CatalogUpdate<'a> {
 /// Receives [`CatalogUpdate`]s, in the order the agent sent them.
 pub(crate) type Observer = Arc<dyn Fn(CatalogUpdate<'_>) + Send + Sync>;
 
+fn notify_observer(observer: &Observer, update: &HeldUpdate) {
+    observer(match update {
+        HeldUpdate::ConfigOptions(options) => CatalogUpdate::ConfigOptions(options),
+        HeldUpdate::AvailableCommands(commands) => CatalogUpdate::AvailableCommands(commands),
+    });
+}
+
 struct Runtime {
     connection: Connection,
     stop: Option<Box<dyn FnOnce(StopKind) -> BoxFuture<'static, ()> + Send>>,
@@ -142,6 +159,17 @@ struct State<E: Env> {
     /// T3's `startupMetadata`: metadata updates that arrived before the root session was
     /// known, the latest per session and kind; the root's are applied once it is.
     startup_updates: Vec<Value>,
+    /// Catalog updates for the observer, held until the driver publishes the session
+    /// ([`AcpSession::release_catalog_updates`]), the latest per kind in arrival order.
+    /// `None` once released.
+    held_updates: Option<Vec<HeldUpdate>>,
+}
+
+/// A [`CatalogUpdate`] kept for later.
+#[derive(Debug)]
+enum HeldUpdate {
+    ConfigOptions(Value),
+    AvailableCommands(Value),
 }
 
 /// `maxStartupMetadataUpdates`.
@@ -508,6 +536,18 @@ impl AcpSession {
         env: Box<dyn Env + Sync>,
         events: mpsc::Sender<ProviderEvent>,
     ) -> ProviderResult<(Self, Value)> {
+        Self::open_with(config, spawner, env, events, OpenControl::default()).await
+    }
+
+    /// [`Self::open`] that `control.abort` can end early. On any failure the agent is stopped
+    /// and its files are removed before this returns, as T3's scoped runtime does.
+    pub(crate) async fn open_with(
+        config: Config,
+        spawner: Spawner,
+        env: Box<dyn Env + Sync>,
+        events: mpsc::Sender<ProviderEvent>,
+        control: OpenControl,
+    ) -> ProviderResult<(Self, Value)> {
         let mapper = Mapper::new(
             DynEnv(env),
             config.flavor,
@@ -541,23 +581,38 @@ impl AcpSession {
                 ordered_calls: Vec::new(),
                 config_updates: 0,
                 startup_updates: Vec::new(),
+                held_updates: Some(Vec::new()),
             }),
             config,
             abandoned_run: std::sync::Mutex::new(None),
         });
-        let connection = inner.start_runtime().await?;
-        let session_id = match inner.start_session(&connection).await {
-            Ok(session_id) => session_id,
+        let steps = async {
+            let connection = inner.start_runtime().await?;
+            inner.start_session(&connection).await
+        };
+        let outcome = match control.abort {
+            Some(abort) => tokio::select! {
+                outcome = steps => outcome,
+                () = abort => Err(ProviderError::Failed {
+                    operation: "start",
+                    detail: "The agent start was stopped.".into(),
+                }),
+            },
+            None => steps.await,
+        };
+        match outcome {
+            Ok(session_id) => {
+                let session = Self {
+                    id: inner.config.provider_session_id.as_str().into(),
+                    inner,
+                };
+                Ok((session, json!({"sessionId": session_id})))
+            }
             Err(error) => {
                 inner.stop_runtime().await;
-                return Err(error);
+                Err(error)
             }
-        };
-        let session = Self {
-            id: inner.config.provider_session_id.as_str().into(),
-            inner,
-        };
-        Ok((session, json!({"sessionId": session_id})))
+        }
     }
 
     /// The agent's `initialize` result and the session setup result, as last seen.
@@ -600,6 +655,18 @@ impl AcpSession {
         self.inner
             .apply_config_reply(&mut state, before, config_id, value, &reply);
         Ok(state.setup["configOptions"].clone())
+    }
+
+    /// The driver published the session (T3's `onSessionStarted`): the catalog updates held
+    /// since the start reach the observer now, in order, and later ones as they come.
+    pub(crate) async fn release_catalog_updates(&self) {
+        let mut state = self.inner.state.lock().await;
+        let held = state.held_updates.take().unwrap_or_default();
+        if let Some(observer) = &self.inner.config.observer {
+            for update in &held {
+                notify_observer(observer, update);
+            }
+        }
     }
 
     /// `drainEvents`: waits until the driver has handled everything the agent sent so far.
@@ -727,15 +794,12 @@ impl Inner {
         {
             state.setup["configOptions"] = options.clone();
             state.config_updates += 1;
-            if let Some(observer) = &self.config.observer {
-                observer(CatalogUpdate::ConfigOptions(options));
-            }
+            self.observe(state, HeldUpdate::ConfigOptions(options.clone()));
         }
         if update["sessionUpdate"] == "available_commands_update"
-            && let Some(observer) = &self.config.observer
             && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
         {
-            observer(CatalogUpdate::AvailableCommands(commands));
+            self.observe(state, HeldUpdate::AvailableCommands(commands.clone()));
         }
         let outs = state.mapper.session_update(params);
         self.deliver(state, outs).await;
@@ -913,8 +977,21 @@ impl Inner {
             }
             _ => crate::antigravity::set_current(&mut state.setup, config_id, value),
         }
-        if let Some(observer) = &self.config.observer {
-            observer(CatalogUpdate::ConfigOptions(&state.setup["configOptions"]));
+        let options = state.setup["configOptions"].clone();
+        self.observe(state, HeldUpdate::ConfigOptions(options));
+    }
+
+    /// Tells the observer about `update`, or holds it until the session is published.
+    fn observe(&self, state: &mut State<DynEnv>, update: HeldUpdate) {
+        let Some(observer) = &self.config.observer else {
+            return;
+        };
+        match &mut state.held_updates {
+            Some(held) => {
+                held.retain(|h| std::mem::discriminant(h) != std::mem::discriminant(&update));
+                held.push(update);
+            }
+            None => notify_observer(observer, &update),
         }
     }
 
@@ -1191,6 +1268,11 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 inner.settle(generation, None, outcome).await;
             }
             Incoming::Closed { exit, failure } => {
+                let kind = if exit.is_some() {
+                    StopKind::Exited
+                } else {
+                    StopKind::Kill
+                };
                 let stop = {
                     let mut state = inner.state.lock().await;
                     if state.generation != generation {
@@ -1210,9 +1292,9 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     inner.deliver(&mut state, outs).await;
                     stop
                 };
-                // As a close ends it: the process tree and the agent's own folder go too.
+                // The agent's own folder goes; the process tree too while it still runs.
                 if let Some(stop) = stop {
-                    stop(StopKind::Kill).await;
+                    stop(kind).await;
                 }
                 return;
             }

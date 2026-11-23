@@ -83,6 +83,7 @@ async fn stop_process(mut process: Process, kind: session::StopKind) {
                 terminate_tree(process.pid, Duration::ZERO).await;
             }
             session::StopKind::Terminate => terminate_tree(process.pid, TERMINATE_GRACE).await,
+            session::StopKind::Exited => {}
         }
     }
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -103,11 +104,12 @@ async fn stop_process(mut process: Process, kind: session::StopKind) {
                     signal_group(pid, Signal::KILL);
                 }
             }
+            session::StopKind::Exited => {}
         }
     }
     #[cfg(not(unix))]
     let _ = kind;
-    // The child is gone or going; reap it.
+    // The child is gone or going; reap it. After `Exited` the supervisor already has.
     process.shutdown().await;
 }
 

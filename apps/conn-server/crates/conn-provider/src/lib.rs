@@ -100,16 +100,6 @@ pub trait Provider: Send + Sync {
         None
     }
 
-    /// T3's `ProviderInstance.snapshotForCwd`: the instance's entry as seen from one workspace
-    /// (its skills and commands there), for `server.refreshProviders` with `instanceId` and
-    /// `cwd`. `None`: this provider has no per-workspace scan.
-    fn snapshot_for_cwd(
-        &self,
-        _cwd: &str,
-    ) -> Option<BoxFuture<'_, ProviderResult<serde_json::Value>>> {
-        None
-    }
-
     /// The periodic probe (`ManagedServerProvider` `refreshOnInterval` with `deferFailure`):
     /// a disabled instance is not probed, and a failed check over a ready entry keeps that
     /// entry. `true` asks for a recheck after 30 s (`FAILED_CHECK_RECHECK_DELAY`); `defer`

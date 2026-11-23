@@ -18,7 +18,10 @@ const NEWEST_SETTLED_KEPT: usize = 25;
 /// `searchThreads` scans at most this many newest messages, so one search cannot hold the
 /// database thread for long.
 const SEARCH_SCAN_LIMIT: i64 = 20_000;
-const SNIPPET_CHARS: usize = 240;
+/// `SNIPPET_LENGTH` in `ThreadSearch.ts`: a snippet's UTF-16 units, its ellipses included.
+const SNIPPET_LENGTH: usize = 240;
+/// `SNIPPET_LEAD`: the units a snippet may show before the match. A result row shows one line.
+const SNIPPET_LEAD: usize = 24;
 /// `MESSAGE_CANDIDATE_LIMIT` in `ThreadSearch.ts`: the newest index hits the filters may pass
 /// over, so a common word does not read every hit.
 const SEARCH_CANDIDATE_LIMIT: i64 = 10_000;
@@ -693,25 +696,59 @@ fn count_occurrences(text: &str, needle: &str) -> u64 {
     text.to_lowercase().matches(needle).count() as u64
 }
 
-/// Up to 240 characters of the original text around the match that starts `at` UTF-16 units in.
+/// `buildSearchSnippet` in `ThreadSearch.ts`: up to 240 UTF-16 units of `text` from a few words
+/// before the match that starts `at` units in, emphasis and code marks dropped, whitespace
+/// collapsed, with ellipses where the text was cut. A lone surrogate, where T3 would leave one,
+/// reads as U+FFFD.
 fn snippet(text: &str, at: usize) -> String {
-    let mut units = 0;
-    let at = text
-        .chars()
-        .take_while(|c| {
-            let before = units < at;
-            units += c.len_utf16();
-            before
-        })
-        .count();
-    let start = at.saturating_sub(SNIPPET_CHARS / 3);
-    text.chars()
-        .skip(start)
-        .take(SNIPPET_CHARS)
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let is_space =
+        |unit: &u16| char::from_u32(u32::from(*unit)).is_some_and(crate::fold::is_js_space);
+    let is_low_surrogate = |unit: Option<&u16>| unit.is_some_and(|u| (0xdc00..=0xdfff).contains(u));
+    let at = at.min(units.len());
+    let mut start = at.saturating_sub(SNIPPET_LEAD);
+    if start > 0
+        && let Some(space) = units
+            .get(start..at)
+            .and_then(|lead| lead.iter().position(is_space))
+    {
+        start += space + 1;
+    }
+    if is_low_surrogate(units.get(start)) {
+        start += 1;
+    }
+    let raw_end = units.len().min(start + SNIPPET_LENGTH * 2);
+    let raw = units.get(start..raw_end).unwrap_or_default();
+    // `/\*\*|`+/g` goes first, so whitespace on both sides of a mark collapses into one space
+    // (`/\s+/g`), and `trim` drops it at the ends.
+    let mut shown: Vec<u16> = Vec::with_capacity(raw.len());
+    let mut rest = raw.iter().peekable();
+    while let Some(&unit) = rest.next() {
+        match unit {
+            0x2a if rest.next_if_eq(&&0x2a).is_some() => {}
+            0x60 => while rest.next_if_eq(&&0x60).is_some() {},
+            _ if is_space(&unit) => {
+                if shown.last().is_some_and(|&last| last != 0x20) {
+                    shown.push(0x20);
+                }
+            }
+            _ => shown.push(unit),
+        }
+    }
+    if shown.last() == Some(&0x20) {
+        shown.pop();
+    }
+    let mut end = shown.len().min(SNIPPET_LENGTH - 2);
+    if is_low_surrogate(shown.get(end)) {
+        end -= 1;
+    }
+    let cut = end < shown.len() || raw_end < units.len();
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        String::from_utf16_lossy(shown.get(..end).unwrap_or_default()),
+        if cut { "…" } else { "" }
+    )
 }
 
 #[cfg(test)]
@@ -723,16 +760,35 @@ mod tests {
         snippet(text, folded.find(needle).unwrap_or(0))
     }
 
-    /// `İ` (U+0130) lowercases to two characters, so a lowercase index is not an index into
-    /// the original text. Before the fix this panicked (`range start index 320 out of range`).
+    /// `buildSearchSnippet` in `ThreadSearch.ts`, each row's snippet from T3's own function: 24
+    /// UTF-16 units before the match, from the next word start, emphasis and code marks gone,
+    /// whitespace collapsed, ellipses where the text was cut. `İ` (U+0130) lowercases to two
+    /// characters, so a lowercase index is not an index into the original text: before the fix
+    /// that panicked (`range start index 320 out of range`).
     #[test]
     fn snippet_survives_lowercase_expansion() {
         let text = format!("{}abc tail", "İ".repeat(200));
-        let got = snip(&text, "abc");
-        assert!(got.contains("abc tail"), "{got}");
-        assert!(got.starts_with('İ'), "{got}");
-        // The match sits 80 characters into the snippet, as for plain text.
-        assert_eq!(got.chars().position(|c| c == 'a'), Some(SNIPPET_CHARS / 3));
+        assert_eq!(snip(&text, "abc"), format!("…{}abc tail", "İ".repeat(24)));
+        let long = format!("needle {}", "word ".repeat(100));
+        let emoji = format!("x{}yneedle", "😀".repeat(30));
+        for (text, at, expected) in [
+            (
+                "alpha bravo charlie delta echo foxtrot golf needle hotel",
+                44,
+                "…echo foxtrot golf needle hotel".to_owned(),
+            ),
+            (
+                "intro **bold** and `code`\n\n  needle",
+                0,
+                "intro bold and code needle".to_owned(),
+            ),
+            ("a ** b *`c` ***d", 0, "a b *c *d".to_owned()),
+            (&long, 0, format!("needle {}w…", "word ".repeat(46))),
+            // The lead starts on the second half of an emoji: the snippet starts after it.
+            (&emoji, 62, format!("…{}yneedle", "😀".repeat(11))),
+        ] {
+            assert_eq!(snippet(text, at), expected, "{text}");
+        }
     }
 
     fn plan(sql: &str, fts: Option<&str>) -> Vec<String> {
@@ -833,8 +889,10 @@ mod tests {
         assert_eq!(accept("foo bar", &phrase), Some(109));
         // The snippet reads the offset back in UTF-16 units.
         let text = format!("{}needle tail", "😀".repeat(200));
-        let got = snippet(&text, 400);
-        assert_eq!(got.chars().position(|c| c == 'n'), Some(SNIPPET_CHARS / 3));
+        assert_eq!(
+            snippet(&text, 400),
+            format!("…{}needle tail", "😀".repeat(12))
+        );
     }
 
     /// `messageMatcher` looks for the word as typed, lowercased, first, and folds accents only
@@ -852,7 +910,7 @@ mod tests {
         for before in 0..300 {
             let text = format!("{}needle{}", "İ".repeat(before), "İ".repeat(before));
             assert!(snip(&text, "needle").contains("needle"));
-            assert!(snip(&text, "absent").chars().count() <= SNIPPET_CHARS);
+            assert!(snip(&text, "absent").chars().count() <= SNIPPET_LENGTH);
             assert_eq!(count_occurrences(&text, "needle"), 1);
         }
     }

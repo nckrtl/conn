@@ -189,7 +189,9 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   then with accents folded when that finds no whole word. A word shorter than four characters
   must start a word in the message (a symbol starts one only where a letter would), and a hit
   inside a hex id does not count. The snippet shows the original text from where the words sit
-  side by side as typed, else from the shortest stretch that holds every word, in UTF-16 units.
+  side by side as typed, else from the shortest stretch that holds every word, in UTF-16 units,
+  and is cut as `buildSearchSnippet` cuts it: from a word start up to 24 units before, emphasis
+  and code marks dropped, whitespace collapsed, with ellipses.
   Hidden threads drop out in SQL before the limit. Titles are the client's to match.
 - **Background work.** A run that completes leaves its open command, dynamic tool and
   subagent rows running, as T3 does. The shell row's `pendingBackgroundTasks` is

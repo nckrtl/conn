@@ -404,6 +404,10 @@ pub async fn serve_with_instances(
         // An inert copy holds the original's peer links: it must not use them.
         peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
         devices: Some(crate::methods::devices::start(environment.clone())),
+        model_manifest: Some(crate::model_manifest::ModelManifest::new(
+            state_dir.clone(),
+            environment.clone(),
+        )),
         ..Deps::default()
     };
     if let Some(devices) = &deps.devices {
@@ -463,7 +467,9 @@ pub async fn serve_with_instances(
         crate::methods::pull_requests::start_watches(&state.deps);
     }
     // `model-manifest.json`, fetched and cached as the T3 server's provider checks do.
-    crate::model_manifest::start(state_dir.clone(), environment.clone());
+    if let Some(manifest) = &state.deps.model_manifest {
+        manifest.start();
+    }
     // `spawn` starts nothing when the engine has attention events off.
     let managed_server = match provision {
         Some(provision) => {

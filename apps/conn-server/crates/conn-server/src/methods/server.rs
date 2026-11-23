@@ -99,11 +99,27 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
     table.unary("server.refreshProviders", move |_, input: Value| {
         let deps = providers.clone();
         async move {
-            // T3 awaits the refresh before it answers. `modelCatalogOnly` answers no providers.
+            use crate::model_manifest::Window;
+            let only = input["instanceId"].as_str();
+            // T3 awaits the refresh before it answers. `modelCatalogOnly` (an opened model
+            // picker) ignores the other fields: a manifest older than 5 minutes is fetched, and
+            // when it changed every provider is probed. The config stream carries the result.
             if input["modelCatalogOnly"] == true {
+                if let Some(manifest) = &deps.model_manifest
+                    && manifest.refresh_on_demand().await
+                {
+                    super::provider::refresh(&deps, None).await;
+                }
                 return Ok(json!({ "providers": [] }));
             }
-            super::provider::refresh(&deps, input["instanceId"].as_str()).await;
+            let refresh_models = input["refreshModels"] == true;
+            if refresh_models && let Some(manifest) = &deps.model_manifest {
+                manifest.refresh(Window::Force).await;
+            }
+            super::provider::refresh(&deps, only).await;
+            if refresh_models {
+                super::provider::refresh_models(&deps, only).await?;
+            }
             Ok(json!({ "providers": current_providers(&deps) }))
         }
     });
@@ -552,6 +568,154 @@ mod tests {
         assert!(started.elapsed() >= std::time::Duration::from_millis(150));
         let more = tokio::time::timeout(std::time::Duration::from_millis(400), stream.recv()).await;
         assert!(more.is_err(), "one list per burst");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A provider that counts its probes and model refreshes; `fail` makes the refresh fail.
+    struct Models {
+        id: conn_contract::ProviderInstanceId,
+        probes: std::sync::atomic::AtomicUsize,
+        refreshes: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl conn_provider::Provider for Models {
+        fn instance_id(&self) -> &conn_contract::ProviderInstanceId {
+            &self.id
+        }
+        fn driver(&self) -> &str {
+            "antigravity"
+        }
+        fn capabilities(
+            &self,
+        ) -> conn_provider::BoxFuture<
+            '_,
+            conn_provider::ProviderResult<conn_contract::ProviderCapabilities>,
+        > {
+            Box::pin(async {
+                Err(conn_provider::ProviderError::Unsupported {
+                    operation: "capabilities",
+                })
+            })
+        }
+        fn open_session(
+            &self,
+            _input: conn_provider::OpenSessionInput,
+        ) -> conn_provider::BoxFuture<'_, conn_provider::ProviderResult<conn_provider::OpenedSession>>
+        {
+            Box::pin(async {
+                Err(conn_provider::ProviderError::Unsupported {
+                    operation: "open_session",
+                })
+            })
+        }
+        fn server_provider_entry(&self, _checked_at: &str) -> Option<Value> {
+            Some(json!({"instanceId": self.id.as_str(), "enabled": true, "installed": true}))
+        }
+        fn refresh_status(&self, _instance: Option<Value>) -> conn_provider::BoxFuture<'_, ()> {
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async {})
+        }
+        fn refresh_models(
+            &self,
+        ) -> Option<conn_provider::BoxFuture<'_, conn_provider::ProviderResult<()>>> {
+            self.refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let fail = self.fail;
+            Some(Box::pin(async move {
+                if fail {
+                    Err(conn_provider::ProviderError::Failed {
+                        operation: "refresh-models",
+                        detail: "no models".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }))
+        }
+    }
+
+    /// T3's `serverRefreshProviders`: `modelCatalogOnly` answers no providers and probes them
+    /// only when an on-demand manifest fetch changed the manifest; `refreshModels` runs each
+    /// targeted provider's model refresh after the probe, and a failure answers
+    /// `ProviderSetupError` with operation `refresh-models`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_providers_follows_model_catalog_only_and_refresh_models() {
+        use crate::model_manifest::{ModelManifest, Source, tests as manifest};
+        use crate::table::{CallContext, Handler};
+        use std::sync::atomic::Ordering::Relaxed;
+        let (env, dir) = environment();
+        let model = |id: &str, fail: bool| {
+            Arc::new(Models {
+                id: id.into(),
+                probes: Default::default(),
+                refreshes: Default::default(),
+                fail,
+            })
+        };
+        let (good, bad) = (model("good", false), model("bad", true));
+        let (url, server) = manifest::serve_once(manifest::manifest("2999-01-01T00:00:00.000Z"), 1);
+        let deps = Deps {
+            environment: Some(env.clone()),
+            providers: vec![
+                good.clone() as Arc<dyn conn_provider::Provider>,
+                bad.clone() as Arc<dyn conn_provider::Provider>,
+            ]
+            .into(),
+            model_manifest: Some(ModelManifest::with_source(
+                Source::Url(url),
+                dir.clone(),
+                env.clone(),
+            )),
+            ..Deps::default()
+        };
+        let mut table = MethodTable::new();
+        register(&mut table, &deps);
+        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
+            panic!("server.refreshProviders is not registered");
+        };
+        let call = |input: Value| call(CallContext::default(), input);
+
+        // A newer manifest: no providers in the reply, every provider probed once.
+        let reply = call(json!({"modelCatalogOnly": true, "refreshModels": true})).await;
+        assert_eq!(reply, Ok(json!({"providers": []})));
+        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(good.probes.load(Relaxed), 1);
+        assert_eq!(bad.probes.load(Relaxed), 1);
+        assert_eq!(
+            good.refreshes.load(Relaxed),
+            0,
+            "the other fields are ignored"
+        );
+        // Fetched within 5 minutes: nothing changes, nothing is probed.
+        call(json!({"modelCatalogOnly": true})).await.unwrap();
+        assert_eq!(good.probes.load(Relaxed), 1);
+
+        // Without `refreshModels` no model refresh runs.
+        let reply = call(json!({"instanceId": "good"})).await.unwrap();
+        assert_eq!(reply["providers"].as_array().unwrap().len(), 2);
+        assert_eq!(good.refreshes.load(Relaxed), 0);
+        assert_eq!(good.probes.load(Relaxed), 2);
+        // With it: the targeted instance only, probed again after its refresh.
+        call(json!({"instanceId": "good", "refreshModels": true}))
+            .await
+            .unwrap();
+        assert_eq!(good.refreshes.load(Relaxed), 1);
+        assert_eq!(good.probes.load(Relaxed), 4);
+        assert_eq!(bad.refreshes.load(Relaxed), 0);
+        let failure = call(json!({"instanceId": "bad", "refreshModels": true}))
+            .await
+            .err();
+        assert_eq!(
+            failure,
+            Some(Failure::Fail(json!({
+                "_tag": "ProviderSetupError",
+                "instanceId": "bad",
+                "operation": "refresh-models",
+                "detail": "no models",
+            })))
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -206,12 +206,17 @@ impl AntigravityProvider {
         Ok((session, events))
     }
 
-    /// `loadModels`: a throwaway session in a scratch folder, closed once it has answered.
-    /// A failure leaves the entry as the check made it; the next check tries again.
-    async fn load_models(&self) {
+    /// `refreshModels`: a throwaway session in a scratch folder, closed once it has answered.
+    /// A failure leaves the entry as the last check made it. The error carries the text T3
+    /// shows for a failed explicit refresh.
+    async fn load_models(&self) -> ProviderResult<()> {
+        let failed = |detail: &str| ProviderError::Failed {
+            operation: "refresh-models",
+            detail: detail.to_owned(),
+        };
         let parent = self.dirs.runtime_temp.join("setup");
         let Ok(Ok(cwd)) = tokio::task::spawn_blocking(move || make_run_temp(&parent)).await else {
-            return;
+            return Err(failed(REFRESH_FAILED));
         };
         let workspace = cwd.display().to_string();
         let policy =
@@ -227,15 +232,39 @@ impl AntigravityProvider {
             ),
         )
         .await;
-        if let Ok(Ok((session, _events))) = started {
-            session.close().await;
-        }
+        let result = match started {
+            Ok(Ok((session, _events))) => {
+                session.close().await;
+                Ok(())
+            }
+            Ok(Err(error)) => Err(failed(&refresh_failure_detail(&error))),
+            Err(_) => Err(failed(REFRESH_TIMED_OUT)),
+        };
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cwd)).await;
+        result
     }
 }
 
 /// T3's `refreshModels` limit for the throwaway session.
 const MODEL_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// `AntigravityDriver.ts` texts for a failed explicit refresh (`tools/check-copies.mjs`).
+const REFRESH_FAILED: &str =
+    "Could not refresh Antigravity models. The previous model list is unchanged.";
+const REFRESH_TIMED_OUT: &str =
+    "Antigravity model refresh timed out. Try again or check Google sign-in.";
+
+/// T3 shows a configuration or start failure's own text and a fixed text for the rest.
+/// Not ported: T3's sign-in and `python-socks` texts; this runtime does not tell those
+/// errors apart, so they get the fixed text.
+fn refresh_failure_detail(error: &ProviderError) -> String {
+    match error {
+        ProviderError::Failed {
+            operation: "configure" | "start",
+            detail,
+        } => detail.clone(),
+        _ => REFRESH_FAILED.to_owned(),
+    }
+}
 
 /// Starts `agy acp` with a fresh temp folder of its own (`run-<random>` under the runtime
 /// temp folder); the folder goes when the process has ended.
@@ -354,10 +383,15 @@ impl Provider for AntigravityProvider {
                 *observed = antigravity::check(&self.settings, &observed, executable, version);
                 antigravity::needs_session(&observed)
             };
+            // A failure here leaves the entry as the check made it; the next check tries again.
             if load {
-                self.load_models().await;
+                let _ = self.load_models().await;
             }
         })
+    }
+
+    fn refresh_models(&self) -> Option<BoxFuture<'_, ProviderResult<()>>> {
+        Some(Box::pin(self.load_models()))
     }
 
     fn open_session(

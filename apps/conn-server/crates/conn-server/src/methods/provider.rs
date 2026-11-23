@@ -352,6 +352,45 @@ pub async fn refresh(deps: &Deps, only: Option<&str>) {
     deps.provider_status.bump();
 }
 
+/// The model refresh of `server.refreshProviders` with `refreshModels`, after the probe: each
+/// provider (all, or the one named) that has one, and whose entry is enabled and installed,
+/// lists its models again and is probed once more. The first failure answers T3's
+/// `ProviderSetupError` with operation `refresh-models`.
+pub async fn refresh_models(deps: &Deps, only: Option<&str>) -> Result<(), Failure> {
+    let checked_at = conn_support::time::iso_from_ms(conn_support::time::now_ms());
+    for provider in deps.providers.snapshot() {
+        let id = provider.instance_id().as_str();
+        if only.is_some_and(|only| only != id) {
+            continue;
+        }
+        let ready = server_providers(deps, &checked_at).iter().any(|entry| {
+            entry["instanceId"] == id && entry["enabled"] == true && entry["installed"] == true
+        });
+        if !ready {
+            continue;
+        }
+        let Some(refresh) = provider.refresh_models() else {
+            continue;
+        };
+        if let Err(error) = refresh.await {
+            let detail = match error {
+                conn_provider::ProviderError::Failed { detail, .. } => detail,
+                other => other.to_string(),
+            };
+            return Err(Failure::fail(&ProviderSetupError {
+                tag: lit::ProviderSetupError,
+                instance_id: id.to_owned(),
+                operation: "refresh-models".to_owned(),
+                detail,
+                cause: None,
+            }));
+        }
+        provider.refresh_status(instance_settings(deps, id)).await;
+        deps.provider_status.bump();
+    }
+    Ok(())
+}
+
 /// `FAILED_CHECK_RECHECK_DELAY`.
 const FAILED_CHECK_RECHECK: Duration = Duration::from_secs(30);
 

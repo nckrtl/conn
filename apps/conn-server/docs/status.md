@@ -13,6 +13,19 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 `conn-support/src/input.rs` and the generator walk `tools/schema-rules.mjs`. Proof:
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
 
+**Model catalog refresh (2026-11-23):** `server.refreshProviders` follows T3's `ws.ts`.
+`modelCatalogOnly` answers no providers, refetches a manifest older than 5 minutes and probes
+every provider when the manifest changed; `modelCatalogRefresh` is advertised.
+`refreshModels` fetches the manifest at once, probes, then runs each targeted, enabled and
+installed provider's model refresh (Antigravity only, as in T3) and probes it again; a
+failure answers `ProviderSetupError` with operation `refresh-models`. Proof: the
+`refresh_providers_follows_model_catalog_only_and_refresh_models` and
+`on_demand_and_forced_refreshes_use_their_own_windows` tests, and `check-copies.mjs` for the
+Antigravity texts. Not ported: T3's other `invalidateModelCaches` work (Claude's capability
+probe cache and the latest-version cache), because this server keeps neither; Antigravity's
+sign-in and `python-socks` failure texts, because this runtime does not tell those errors
+apart.
+
 **Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left
 out, the child bound to it; a refused or replayed command removes it. Proof: four `conn-mcp`

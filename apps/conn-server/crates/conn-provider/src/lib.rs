@@ -91,6 +91,13 @@ pub trait Provider: Send + Sync {
         Box::pin(async {})
     }
 
+    /// T3's `ProviderInstance.refreshModels`, for `server.refreshProviders` with
+    /// `refreshModels`: list the models again even when the last check listed them. `None`:
+    /// this provider has no such refresh. An error's `Failed` detail is shown to the user.
+    fn refresh_models(&self) -> Option<BoxFuture<'_, ProviderResult<()>>> {
+        None
+    }
+
     /// The periodic probe (`ManagedServerProvider` `refreshOnInterval` with `deferFailure`):
     /// a disabled instance is not probed, and a failed check over a ready entry keeps that
     /// entry. `true` asks for a recheck after 30 s (`FAILED_CHECK_RECHECK_DELAY`); `defer`

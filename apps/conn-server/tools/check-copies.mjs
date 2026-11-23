@@ -154,6 +154,23 @@ same(
   );
 }
 
+// ---- Antigravity's texts for a failed explicit model refresh ----------------------------------
+{
+  const agyRs = rust("crates/conn-provider-acp/src/antigravity_provider.rs");
+  const agyTs = ts("apps/server/src/provider/Drivers/AntigravityDriver.ts");
+  const rustText = (name) => new RegExp(`const ${name}: &str =\\s*"([^"]*)";`).exec(agyRs)?.[1];
+  same(
+    "antigravity_provider.rs REFRESH_FAILED = AntigravityDriver's",
+    rustText("REFRESH_FAILED"),
+    /const REFRESH_FAILED =\s*"([^"]*)";/.exec(agyTs)?.[1],
+  );
+  same(
+    "antigravity_provider.rs REFRESH_TIMED_OUT = AntigravityDriver's timeout detail",
+    rustText("REFRESH_TIMED_OUT"),
+    /detail: "(Antigravity model refresh timed out[^"]*)"/.exec(agyTs)?.[1],
+  );
+}
+
 // ---- The Codex status probe's tables (apps/server/src/provider/CodexProvider.ts) ---------------
 {
   const statusRs = rust("crates/conn-provider-codex/src/status.rs");

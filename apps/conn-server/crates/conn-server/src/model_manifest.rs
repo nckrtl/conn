@@ -10,6 +10,10 @@
 //! `{"fetchedAtMs":<ms>,"manifest":<manifest>}`. The URL, the times and the bundled
 //! `updatedAt` are generated from the Conn monorepo (`tools/gen-upstream.mjs`).
 //!
+//! `server.refreshProviders` asks too, as in T3: `modelCatalogOnly` (an opened model picker)
+//! refetches a manifest older than 5 minutes and probes the providers when it changed;
+//! `refreshModels` fetches at once (no TTL, no retry wait; the setting still decides).
+//!
 //! The server reads no model from the manifest itself; it only keeps the file as T3 keeps it.
 //!
 //! **Test seam:** `CONN_MODEL_MANIFEST_URL`, read once at start. Unset: T3's URL. `off`, empty,
@@ -33,7 +37,10 @@ use crate::environment::Environment;
 mod generated;
 
 pub use generated::MODEL_MANIFEST_URL;
-use generated::{BUNDLED_UPDATED_AT, FETCH_TIMEOUT_MS, MANIFEST_RETRY_MS, MANIFEST_TTL_MS};
+use generated::{
+    BUNDLED_UPDATED_AT, FETCH_TIMEOUT_MS, MANIFEST_ON_DEMAND_TTL_MS, MANIFEST_RETRY_MS,
+    MANIFEST_TTL_MS,
+};
 
 pub const FILE_NAME: &str = "model-manifest.json";
 /// The test seam's variable (see the module text).
@@ -64,7 +71,7 @@ const TICK: Duration = Duration::from_secs(5 * 60);
 /// The manifest is about 30 KB; anything far larger is not one.
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
-/// What a refresh remembers between ticks: three numbers.
+/// What a refresh remembers between ticks.
 #[derive(Debug, Default)]
 pub struct State {
     disk_loaded: bool,
@@ -72,54 +79,128 @@ pub struct State {
     current_updated_at_ms: i64,
     fetched_at_ms: Option<i64>,
     last_attempt_ms: Option<i64>,
+    /// `updatedAt` of the manifest the providers were last probed with (T3's
+    /// `probedManifestUpdatedAt`): the one known at start, then the one each on-demand
+    /// refresh reported.
+    probed_updated_at_ms: i64,
 }
 
-/// Starts the refresh on the runtime (once now, then on every tick), from the source the
-/// process environment names.
-pub fn start(state_dir: PathBuf, environment: Arc<Environment>) {
-    start_from(
-        source(std::env::var_os(URL_VARIABLE).as_deref()),
-        state_dir,
-        environment,
-    );
+/// When a refresh fetches.
+#[derive(Clone, Copy, Debug)]
+pub enum Window {
+    /// When the last fetch is older than this and the last try older than the retry wait.
+    Ttl(i64),
+    /// Now (`forceRefresh`, before an explicit model refresh). The setting still decides.
+    Force,
 }
 
-/// [`start`] with the source given. With [`Source::Off`] nothing starts; returns whether a
-/// refresh task runs.
-pub fn start_from(source: Source, state_dir: PathBuf, environment: Arc<Environment>) -> bool {
-    if source == Source::Off {
-        return false;
+/// The manifest this server keeps. The tick and `server.refreshProviders` share it; its lock
+/// is T3's refresh semaphore, so one fetch runs at a time.
+#[derive(Debug)]
+pub struct ModelManifest {
+    source: Source,
+    state_dir: PathBuf,
+    environment: Arc<Environment>,
+    state: tokio::sync::Mutex<State>,
+}
+
+impl ModelManifest {
+    /// From the source the process environment names (see the module text).
+    pub fn new(state_dir: PathBuf, environment: Arc<Environment>) -> Arc<Self> {
+        Self::with_source(
+            source(std::env::var_os(URL_VARIABLE).as_deref()),
+            state_dir,
+            environment,
+        )
     }
-    tokio::spawn(async move {
-        let mut state = State::default();
-        loop {
-            let enabled = environment
-                .settings
-                .raw()
-                .get("enableProviderUpdateChecks")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            refresh(
-                &mut state,
-                &state_dir,
-                &source,
-                enabled,
-                i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX),
-            )
-            .await;
-            tokio::time::sleep(TICK).await;
+
+    pub fn with_source(
+        source: Source,
+        state_dir: PathBuf,
+        environment: Arc<Environment>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            source,
+            state_dir,
+            environment,
+            state: tokio::sync::Mutex::new(State::default()),
+        })
+    }
+
+    /// Starts the refresh on the runtime: once now, then on every tick. With [`Source::Off`]
+    /// nothing starts; returns whether a refresh task runs.
+    pub fn start(self: &Arc<Self>) -> bool {
+        if self.source == Source::Off {
+            return false;
         }
-    });
-    true
+        let manifest = self.clone();
+        tokio::spawn(async move {
+            loop {
+                manifest.refresh(Window::Ttl(MANIFEST_TTL_MS)).await;
+                tokio::time::sleep(TICK).await;
+            }
+        });
+        true
+    }
+
+    /// One refresh, with the setting `enableProviderUpdateChecks` (default on) and the clock.
+    /// Returns whether it wrote the file.
+    pub async fn refresh(&self, window: Window) -> bool {
+        let mut state = self.state.lock().await;
+        self.refresh_locked(&mut state, window).await
+    }
+
+    async fn refresh_locked(&self, state: &mut State, window: Window) -> bool {
+        let enabled = self
+            .environment
+            .settings
+            .raw()
+            .get("enableProviderUpdateChecks")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
+        refresh_with(state, &self.state_dir, &self.source, enabled, now, window).await
+    }
+
+    /// The first half of T3's `refreshModelCatalog`, for an opened model picker: refetch a
+    /// manifest older than `MANIFEST_ON_DEMAND_TTL_MS`. Returns whether the manifest now known
+    /// is not the one the providers were probed with, and marks it probed: the caller probes.
+    pub async fn refresh_on_demand(&self) -> bool {
+        let mut state = self.state.lock().await;
+        self.refresh_locked(&mut state, Window::Ttl(MANIFEST_ON_DEMAND_TTL_MS))
+            .await;
+        mark_probed(&mut state)
+    }
 }
 
-/// One refresh (`ModelManifest.refresh`). Returns whether it wrote the file.
+/// Whether the known manifest differs from the probed one; it counts as probed from now.
+fn mark_probed(state: &mut State) -> bool {
+    let changed = state.current_updated_at_ms != state.probed_updated_at_ms;
+    state.probed_updated_at_ms = state.current_updated_at_ms;
+    changed
+}
+
+/// One refresh on the hourly window (`ModelManifest.refresh`). Returns whether it wrote the
+/// file.
 pub async fn refresh(
     state: &mut State,
     state_dir: &Path,
     source: &Source,
     enabled: bool,
     now_ms: i64,
+) -> bool {
+    let window = Window::Ttl(MANIFEST_TTL_MS);
+    refresh_with(state, state_dir, source, enabled, now_ms, window).await
+}
+
+/// One refresh (`ModelManifest.refresh(force, ttlMs)`). Returns whether it wrote the file.
+pub async fn refresh_with(
+    state: &mut State,
+    state_dir: &Path,
+    source: &Source,
+    enabled: bool,
+    now_ms: i64,
+    window: Window,
 ) -> bool {
     let Source::Url(url) = source else {
         return false;
@@ -139,12 +220,13 @@ pub async fn refresh(
             state.current_updated_at_ms = updated;
             state.fetched_at_ms = Some(fetched_at);
         }
+        state.probed_updated_at_ms = state.current_updated_at_ms;
     }
     // Times from before a clock rollback count as expired.
     let within =
         |since: Option<i64>, window: i64| since.is_some_and(|s| now_ms >= s && now_ms - s < window);
-    if within(state.fetched_at_ms, MANIFEST_TTL_MS)
-        || within(state.last_attempt_ms, MANIFEST_RETRY_MS)
+    if let Window::Ttl(ttl) = window
+        && (within(state.fetched_at_ms, ttl) || within(state.last_attempt_ms, MANIFEST_RETRY_MS))
     {
         return false;
     }
@@ -340,11 +422,11 @@ pub fn compact_json(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    fn manifest(updated_at: &str) -> String {
+    pub(crate) fn manifest(updated_at: &str) -> String {
         format!(
             r#"{{
   "version": 1,
@@ -362,7 +444,10 @@ mod tests {
     }
 
     /// One HTTP answer from a local server, for `count` requests.
-    fn serve_once(body: String, count: usize) -> (String, std::thread::JoinHandle<usize>) {
+    pub(crate) fn serve_once(
+        body: String,
+        count: usize,
+    ) -> (String, std::thread::JoinHandle<usize>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
             "http://{}/model-manifest.json",
@@ -422,7 +507,10 @@ mod tests {
             crate::environment::Environment::load(&dir, None, dir.clone(), Default::default())
                 .unwrap(),
         );
-        assert!(!start_from(Source::Off, dir.clone(), environment));
+        let manifest = ModelManifest::with_source(Source::Off, dir.clone(), environment);
+        assert!(!manifest.start());
+        assert!(!manifest.refresh(Window::Force).await);
+        assert!(!manifest.refresh_on_demand().await);
         let mut state = State::default();
         for now in [0, 1, MANIFEST_TTL_MS * 10] {
             assert!(!refresh(&mut state, &dir, &Source::Off, true, now).await);
@@ -500,6 +588,42 @@ mod tests {
         let mut fresh = State::default();
         assert!(!refresh(&mut fresh, &dir, &Source::Url(url.clone()), true, 1_000_500).await);
         assert_eq!(fresh.fetched_at_ms, Some(1_000_000));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// T3's `refreshOnDemand` and `forceRefresh`: an opened model picker refetches a manifest
+    /// older than 5 minutes though the hour has not passed, and reports a change once; an
+    /// explicit model refresh fetches through both windows.
+    #[tokio::test(flavor = "current_thread")]
+    async fn on_demand_and_forced_refreshes_use_their_own_windows() {
+        let dir = temp_dir("on-demand");
+        let (url, server) = serve_once(manifest("2999-01-01T00:00:00.000Z"), 1);
+        let source = Source::Url(url);
+        let mut state = State::default();
+        let t0 = 1_000_000;
+        assert!(refresh(&mut state, &dir, &source, true, t0).await);
+        assert_eq!(server.join().unwrap(), 1);
+        // Fetched: the providers were probed with the start manifest, so one probe is due.
+        assert!(mark_probed(&mut state));
+        assert!(!mark_probed(&mut state));
+        let on_demand = Window::Ttl(MANIFEST_ON_DEMAND_TTL_MS);
+        // Within 5 minutes the picker fetches nothing (the server above is gone).
+        let soon = t0 + MANIFEST_ON_DEMAND_TTL_MS - 1;
+        assert!(!refresh_with(&mut state, &dir, &source, true, soon, on_demand).await);
+        // Past 5 minutes it fetches, though the hourly refresh would not.
+        let (url, server) = serve_once(manifest("2999-06-01T00:00:00.000Z"), 1);
+        let source = Source::Url(url);
+        let later = t0 + MANIFEST_ON_DEMAND_TTL_MS;
+        assert!(!refresh(&mut state, &dir, &source, true, later).await);
+        assert!(refresh_with(&mut state, &dir, &source, true, later, on_demand).await);
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(mark_probed(&mut state));
+        // Forced: inside both windows, but not when the setting is off.
+        let (url, server) = serve_once(manifest("2999-07-01T00:00:00.000Z"), 1);
+        let source = Source::Url(url);
+        assert!(!refresh_with(&mut state, &dir, &source, false, later + 1, Window::Force).await);
+        assert!(refresh_with(&mut state, &dir, &source, true, later + 1, Window::Force).await);
+        assert_eq!(server.join().unwrap(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

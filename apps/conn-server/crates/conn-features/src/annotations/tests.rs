@@ -406,6 +406,35 @@ async fn reads_the_t3_servers_files() {
     );
 }
 
+/// T3's disk decoder: a record that misses a field the contract needs (`status`) is skipped
+/// like unreadable JSON, so the healthy notes still decode as one `AnnotationList`. Its file
+/// stays, and it counts toward no number.
+#[tokio::test(flavor = "current_thread")]
+async fn an_incomplete_record_is_skipped_and_kept_on_disk() {
+    let (store, dir) = store("incomplete");
+    let folder = dir.0.join("annotations").join("project_annotations");
+    std::fs::create_dir_all(&folder).expect("dir");
+    let incomplete = json!({"id": "old", "comment": "Fixture missing status", "projectId": PROJECT,
+        "number": 7, "revision": 7, "hasScreenshot": false, "createdAt": "2026-01-02T10:00:00Z"});
+    std::fs::write(folder.join("old.json"), incomplete.to_string()).expect("incomplete");
+    std::fs::write(folder.join("syntax.json"), "{broken").expect("syntax");
+    let good = store.create(PROJECT, capture("good")).await.expect("good");
+    assert_eq!(good["number"], 1, "an invalid record takes no number");
+    for reopened in [false, true] {
+        let store = if reopened {
+            open(&dir.0)
+        } else {
+            store.clone()
+        };
+        let list = store.list(PROJECT).await.expect("list");
+        assert_eq!(ids(&list), ["good"], "reopened: {reopened}");
+        let decoded: conn_contract::AnnotationList = from_json(list).expect("the client's list");
+        assert_eq!(decoded.annotations.len(), 1);
+    }
+    assert!(folder.join("old.json").exists(), "the invalid file stays");
+    assert!(folder.join("syntax.json").exists());
+}
+
 #[derive(Debug)]
 struct Any;
 

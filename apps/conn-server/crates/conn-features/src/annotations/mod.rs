@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
 };
 
-use conn_contract::{AnnotationCapture, AnnotationRemoveInputScope, to_json};
+use conn_contract::{AnnotationCapture, AnnotationRecord, AnnotationRemoveInputScope, to_json};
 use conn_engine::BoxFuture;
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -194,6 +194,16 @@ impl ProjectData {
             if text(&record, "id") != id {
                 continue;
             }
+            // T3 decodes each record (`AnnotationRecord`); one the contract refuses would make
+            // the client refuse the whole list.
+            let record_value = Value::Object(record);
+            if conn_contract::from_json::<AnnotationRecord>(record_value.clone()).is_err() {
+                eprintln!("annotations: skipped an invalid annotation file {name}");
+                continue;
+            }
+            let Value::Object(record) = record_value else {
+                continue;
+            };
             data.last_number = data.last_number.max(number(&record, "number"));
             data.revision = data.revision.max(number(&record, "revision"));
             data.records.push(record);

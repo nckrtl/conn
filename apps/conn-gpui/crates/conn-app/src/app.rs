@@ -116,6 +116,8 @@ pub(crate) struct ConnApp {
     /// Each project's new-thread draft left behind, by project id; its text and attachments wait
     /// in the composer's draft store. The next new thread in that project restores it.
     parked_drafts: HashMap<String, DraftThreadState>,
+    /// Approval requests with a `runtime-request.respond` in flight (`respondingRequestIds`).
+    responding_approvals: HashSet<String>,
     /// Right panel tabs the user has open, in order (Conn's `RightPanelTabs`).
     right_panel_open_tabs: Vec<PanelSurface>,
     /// The open file while `layout.right_panel_tab` is [`RightPanelTab::File`].
@@ -239,12 +241,28 @@ impl ConnApp {
                     text,
                     attachments,
                     dispatch,
+                    held_draft: None,
                 } => {
                     app.send_prompt_with_attachments(
                         text.clone(),
                         attachments.clone(),
                         *dispatch,
                         Some(window),
+                        cx,
+                    );
+                }
+                crate::chat::ChatEvent::Send {
+                    text,
+                    attachments,
+                    dispatch,
+                    held_draft: Some(held),
+                } => {
+                    app.send_over_approvals(
+                        text.clone(),
+                        attachments.clone(),
+                        *dispatch,
+                        held.clone(),
+                        window,
                         cx,
                     );
                 }
@@ -425,6 +443,7 @@ impl ConnApp {
             scratch_workspace_root: None,
             scratch_project_id: None,
             parked_drafts: HashMap::new(),
+            responding_approvals: HashSet::new(),
             right_panel_open_tabs: vec![PanelSurface::Kind(RightPanelTab::Files)],
             right_panel_file: None,
             right_panel_add_menu_open: false,
@@ -1934,32 +1953,35 @@ impl ConnApp {
         ) else {
             return;
         };
+        let send_window = window.map(|w| w.window_handle());
+        self.dispatch_message(
+            connection,
+            thread_id,
+            text,
+            attachments,
+            dispatch,
+            send_window,
+            cx,
+        );
+    }
+
+    /// `message.dispatch` to `thread_id`: steers or queues behind a running turn. A failed send
+    /// puts `text` back in the composer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one send's parts, passed straight through"
+    )]
+    fn dispatch_message(
+        &mut self,
+        connection: Connection,
+        thread_id: String,
+        text: String,
+        attachments: Vec<conn_contract::ChatAttachment>,
+        dispatch: crate::chat::SendDispatch,
+        send_window: Option<gpui_kit::AnyWindowHandle>,
+        cx: &mut Context<'_, Self>,
+    ) {
         let thread = self.threads.get(&thread_id);
-        // A message sent over pending approvals declines them first to redirect the agent
-        // (`declinePendingApprovals`).
-        let approvals: Vec<String> = thread
-            .map(|t| {
-                t.entries
-                    .iter()
-                    .filter_map(|entry| match entry {
-                        conn_state::TimelineEntry::Approval { id, .. } => {
-                            t.approval_requests.get(id).cloned()
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut declines = Vec::with_capacity(approvals.len());
-        for request_id in &approvals {
-            match crate::commands::respond_approval(&thread_id, request_id, "decline") {
-                Ok(command) => declines.push(command),
-                Err(e) => {
-                    eprintln!("send: could not build runtime-request.respond: {e}");
-                    return;
-                }
-            }
-        }
         let working = thread.is_some_and(|t| t.working);
         // Steer the running turn when asked (`steer_active`); otherwise queue after it.
         let steer_target = if working && dispatch == crate::chat::SendDispatch::Steer {
@@ -1985,27 +2007,14 @@ impl ConnApp {
         };
         self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
         let generation = self.connection_gen;
-        let send_window = window.map(|w| w.window_handle());
         let fallback_text = text;
         cx.spawn(async move |this, cx| {
-            let mut result = Ok(());
-            for decline in declines {
-                if let Err(err) = connection.dispatch_command(decline).await {
-                    result = Err(format!(
-                        "Could not decline the approval: {}",
-                        crate::commands::format_client_error(&err)
-                    ));
-                    break;
-                }
-            }
-            if result.is_ok()
-                && let Err(err) = connection.dispatch_command(command).await
-            {
-                result = Err(format!(
+            let result = connection.dispatch_command(command).await.map_err(|err| {
+                format!(
                     "Send failed: {}",
                     crate::commands::format_client_error(&err)
-                ));
-            }
+                )
+            });
             if let Err(msg) = result {
                 eprintln!("send: dispatchCommand failed: {msg}");
                 let _ = this.update(cx, |app, cx| {
@@ -2027,6 +2036,214 @@ impl ConnApp {
             }
         })
         .detach();
+    }
+
+    /// A composer send over pending approvals (`useComposerSend`). With feedback support it
+    /// declines the first approval with the text as feedback. Otherwise it declines every
+    /// answerable approval, then steers with the message. The composer keeps `held` until
+    /// then, and the message stays unsent when the draft changed, an approval is already
+    /// being answered, a new approval arrived, or the thread changed.
+    pub(crate) fn send_over_approvals(
+        &mut self,
+        text: String,
+        attachments: Vec<conn_contract::ChatAttachment>,
+        dispatch: crate::chat::SendDispatch,
+        held: crate::chat::HeldDraft,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let send_window = Some(window.window_handle());
+        let (Some(connection), Some(thread_id), None) = (
+            self.connection.clone(),
+            self.layout.selected_thread_id.clone(),
+            self.draft.as_ref(),
+        ) else {
+            self.chat.update(cx, |chat, cx| {
+                chat.settle_held_draft(Some(&held), window, cx)
+            });
+            self.send_prompt_with_attachments(text, attachments, dispatch, Some(window), cx);
+            return;
+        };
+        let approvals = self
+            .threads
+            .get(&thread_id)
+            .map(conn_state::ThreadState::pending_approvals)
+            .unwrap_or_default();
+        let plan = crate::chat::plan_approval_send(&approvals, &text, !attachments.is_empty());
+        let feedback_send = matches!(plan, crate::chat::ApprovalSendPlan::Feedback { .. });
+        let (shown, declines) = match plan {
+            crate::chat::ApprovalSendPlan::Message => {
+                self.chat.update(cx, |chat, cx| {
+                    chat.settle_held_draft(Some(&held), window, cx)
+                });
+                self.dispatch_message(
+                    connection,
+                    thread_id,
+                    text,
+                    attachments,
+                    dispatch,
+                    send_window,
+                    cx,
+                );
+                return;
+            }
+            crate::chat::ApprovalSendPlan::FeedbackNeedsPlainText => {
+                self.chat
+                    .update(cx, |chat, cx| chat.settle_held_draft(None, window, cx));
+                self.chat.update(cx, |chat, cx| {
+                    chat.set_error(
+                        Some(crate::chat::APPROVAL_FEEDBACK_PLAIN_TEXT.to_owned()),
+                        cx,
+                    );
+                });
+                return;
+            }
+            crate::chat::ApprovalSendPlan::Feedback {
+                request_id,
+                feedback,
+            } => {
+                let command = crate::commands::decline_approval_with_feedback(
+                    &thread_id,
+                    &request_id,
+                    &feedback,
+                );
+                (vec![request_id], command.map(|c| vec![c]))
+            }
+            crate::chat::ApprovalSendPlan::Redirect { shown, decline } => {
+                let commands = decline
+                    .iter()
+                    .map(|id| crate::commands::respond_approval(&thread_id, id, "decline"))
+                    .collect::<Result<Vec<_>, _>>();
+                (shown, commands)
+            }
+        };
+        let declines = match declines {
+            Ok(declines) => declines,
+            Err(e) => {
+                eprintln!("send: could not build runtime-request.respond: {e}");
+                self.chat
+                    .update(cx, |chat, cx| chat.settle_held_draft(None, window, cx));
+                return;
+            }
+        };
+        if shown
+            .iter()
+            .any(|id| self.responding_approvals.contains(id))
+        {
+            self.chat
+                .update(cx, |chat, cx| chat.settle_held_draft(None, window, cx));
+            // Conn's feedback send stops silently here; a redirect explains why.
+            if !feedback_send
+                && let Some(notice) =
+                    crate::chat::approval_redirect_notice(false, false, true, false)
+            {
+                self.show_redirect_notice(notice, cx);
+            }
+            return;
+        }
+        self.responding_approvals.extend(shown.iter().cloned());
+        self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
+        let generation = self.connection_gen;
+        cx.spawn(async move |this, cx| {
+            let mut declined = Ok(());
+            for decline in declines {
+                if let Err(err) = connection.dispatch_command(decline).await {
+                    declined = Err(format!(
+                        "Could not decline the approval: {}",
+                        crate::commands::format_client_error(&err)
+                    ));
+                    break;
+                }
+            }
+            let _ = this.update(cx, |app, cx| {
+                for id in &shown {
+                    app.responding_approvals.remove(id);
+                }
+                if app.connection_gen != generation
+                    || app.layout.selected_thread_id.as_deref() != Some(thread_id.as_str())
+                {
+                    app.settle_held_draft(None, send_window, cx);
+                    return;
+                }
+                let draft_changed = app.chat.read(cx).held_draft(cx) != held;
+                if feedback_send {
+                    // Feedback is the whole answer: clear the draft unless it changed.
+                    match declined {
+                        Ok(()) => {
+                            app.settle_held_draft(Some(&held), send_window, cx);
+                        }
+                        Err(msg) => {
+                            app.settle_held_draft(None, send_window, cx);
+                            app.chat
+                                .update(cx, |chat, cx| chat.set_error(Some(msg), cx));
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
+                let arrived = crate::chat::approval_arrived(
+                    &shown,
+                    &app.threads
+                        .get(&thread_id)
+                        .map(conn_state::ThreadState::pending_approvals)
+                        .unwrap_or_default(),
+                );
+                if declined.is_err() || draft_changed || arrived {
+                    app.settle_held_draft(None, send_window, cx);
+                    let notice = crate::chat::approval_redirect_notice(
+                        draft_changed,
+                        declined.is_ok(),
+                        false,
+                        arrived,
+                    );
+                    match (notice, declined) {
+                        (Some(notice), _) => app.show_redirect_notice(notice, cx),
+                        (None, Err(msg)) => {
+                            app.chat
+                                .update(cx, |chat, cx| chat.set_error(Some(msg), cx));
+                        }
+                        (None, Ok(())) => {}
+                    }
+                    cx.notify();
+                    return;
+                }
+                app.settle_held_draft(Some(&held), send_window, cx);
+                app.dispatch_message(
+                    connection,
+                    thread_id,
+                    text,
+                    attachments,
+                    dispatch,
+                    send_window,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Ends an approval send in the composer; `clear` empties it when its draft is unchanged.
+    fn settle_held_draft(
+        &self,
+        clear: Option<&crate::chat::HeldDraft>,
+        window: Option<gpui_kit::AnyWindowHandle>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(window) = window else {
+            return;
+        };
+        let chat = self.chat.clone();
+        let _ = window.update(cx, |_, window, cx| {
+            chat.update(cx, |chat, cx| chat.settle_held_draft(clear, window, cx))
+        });
+    }
+
+    /// Shows why a redirect kept the draft. Conn uses an info toast; this client has no toasts,
+    /// so the composer's dismissible banner carries it.
+    fn show_redirect_notice(&self, notice: &str, cx: &mut Context<'_, Self>) {
+        let message = format!("{notice} {}", crate::chat::APPROVAL_REDIRECT_RETRY);
+        self.chat
+            .update(cx, |chat, cx| chat.set_error(Some(message), cx));
     }
 
     /// Answers the approval timeline entry `entry_id` of the selected thread.
@@ -2058,10 +2275,15 @@ impl ConnApp {
                 return;
             }
         };
-        cx.spawn(async move |_, _| {
+        // A composer send meanwhile must not decline this request too (`respondingRequestIds`).
+        if !self.responding_approvals.insert(request_id.clone()) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
             if let Err(e) = connection.dispatch_command(command).await {
                 eprintln!("approval: dispatchCommand failed: {e}");
             }
+            let _ = this.update(cx, |app, _| app.responding_approvals.remove(&request_id));
         })
         .detach();
     }

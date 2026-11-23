@@ -11,6 +11,9 @@ use conn_contract::{
     OrchestrationV2ProviderThreadContextUsage as ProviderThreadContextUsage,
     OrchestrationV2ProviderTurn as ProviderTurn,
     OrchestrationV2ProviderTurnTokenUsage as ProviderTurnTokenUsage, OrchestrationV2Run as Run,
+    OrchestrationV2RuntimeRequest as RuntimeRequest,
+    OrchestrationV2RuntimeRequestResponseCapability as ResponseCapability,
+    OrchestrationV2RuntimeRequestStatus as RuntimeRequestStatus,
     OrchestrationV2ThreadProjectionTurnItemsItem as ProjectionTurnItem,
     OrchestrationV2ThreadStreamItem as ThreadStreamItem, OrchestrationV2TurnItem as TurnItem,
     OrchestrationV2TurnItemApprovalRequest as ApprovalRequestItem,
@@ -296,6 +299,48 @@ struct TrackedMessage {
     is_automatic: bool,
 }
 
+/// How the provider can take the answer to one pending runtime request (its
+/// `responseCapability`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PendingRequest {
+    /// The provider session still waits for this answer (`responseCapability.type == "live"`).
+    /// A `not_resumable` request stays pending, but answering it reaches nobody.
+    pub answerable: bool,
+    /// A decline can carry the user's typed feedback (`responseCapability.supportsFeedback`).
+    pub supports_feedback: bool,
+}
+
+impl PendingRequest {
+    /// The request's response capability while it is `pending`; `None` once it is resolved,
+    /// expired or cancelled.
+    fn from_runtime_request(request: &RuntimeRequest) -> Option<Self> {
+        if request.status != RuntimeRequestStatus::Pending {
+            return None;
+        }
+        Some(match &request.response_capability {
+            ResponseCapability::Live(live) => Self {
+                answerable: true,
+                supports_feedback: live.supports_feedback == Some(true),
+            },
+            _ => Self::default(),
+        })
+    }
+}
+
+/// A pending approval shown in the timeline, joined with its runtime request
+/// (Conn's `ThreadPendingApproval`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingApproval {
+    /// The [`TimelineEntry::Approval`] id.
+    pub entry_id: String,
+    /// Server request id for `runtime-request.respond`.
+    pub request_id: String,
+    /// See [`PendingRequest::answerable`].
+    pub answerable: bool,
+    /// See [`PendingRequest::supports_feedback`].
+    pub supports_feedback: bool,
+}
+
 /// One thread's timeline from `orchestration.subscribeThread`.
 #[derive(Clone, Debug, Default)]
 pub struct ThreadState {
@@ -307,6 +352,8 @@ pub struct ThreadState {
     pub synchronized: bool,
     /// Server request id of each approval entry, by entry id, for `runtime-request.respond`.
     pub approval_requests: HashMap<String, String>,
+    /// Runtime requests that are still `pending`, by server request id.
+    pub pending_requests: HashMap<String, PendingRequest>,
     /// Per-entry run association and start/completion timestamps (Unix ms).
     pub entry_timings: HashMap<String, EntryTiming>,
     /// Per-run start/completion timestamps (Unix ms).
@@ -340,6 +387,29 @@ impl ThreadState {
             revision: next_revision(),
             ..Self::default()
         }
+    }
+
+    /// The timeline's approvals whose runtime request is still pending, in timeline order
+    /// (Conn's `derivePendingThreadRequests` approvals). An approval card whose request was
+    /// already answered, expired or cancelled is left out.
+    #[must_use]
+    pub fn pending_approvals(&self) -> Vec<PendingApproval> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let TimelineEntry::Approval { id, .. } = entry else {
+                    return None;
+                };
+                let request_id = self.approval_requests.get(id)?;
+                let pending = self.pending_requests.get(request_id)?;
+                Some(PendingApproval {
+                    entry_id: id.clone(),
+                    request_id: request_id.clone(),
+                    answerable: pending.answerable,
+                    supports_feedback: pending.supports_feedback,
+                })
+            })
+            .collect()
     }
 
     /// Computes the elapsed duration in milliseconds for a contiguous group of work entries.
@@ -612,6 +682,13 @@ impl ThreadState {
         }
 
         self.approval_requests.clear();
+        self.pending_requests = projection
+            .runtime_requests
+            .iter()
+            .filter_map(|request| {
+                PendingRequest::from_runtime_request(request).map(|p| (request.id.clone(), p))
+            })
+            .collect();
         self.entry_timings.clear();
 
         // Index canonical message & subagent bodies so snapshots compacted with
@@ -755,7 +832,8 @@ impl ThreadState {
 
     /// Applies one `subscribeThread` stream item.
     ///
-    /// Returns `true` when timeline entries or the `working` state changed.
+    /// Returns `true` when timeline entries, the `working` state or
+    /// [`Self::pending_requests`] changed.
     pub fn apply(&mut self, item: ThreadStreamItem) -> bool {
         self.revision = next_revision();
         match item {
@@ -993,6 +1071,15 @@ impl ThreadState {
                 let queue_changed = self.reconcile_queued_runs(false);
                 working_changed || queue_changed
             }
+            DomainEvent::RuntimeRequestUpdated(ev) => {
+                let request = ev.payload;
+                match PendingRequest::from_runtime_request(&request) {
+                    Some(pending) => {
+                        self.pending_requests.insert(request.id, pending) != Some(pending)
+                    }
+                    None => self.pending_requests.remove(&request.id).is_some(),
+                }
+            }
             DomainEvent::MessageUpdated(ev) => {
                 self.record_message(&ev.payload);
                 self.reconcile_queued_runs(false)
@@ -1067,7 +1154,6 @@ impl ThreadState {
             | DomainEvent::SubagentUpdated(_)
             | DomainEvent::ProviderSessionAttached(_)
             | DomainEvent::ProviderSessionDetached(_)
-            | DomainEvent::RuntimeRequestUpdated(_)
             | DomainEvent::PlanUpdated(_)
             | DomainEvent::CheckpointScopeCreated(_)
             | DomainEvent::CheckpointRollbackRequested(_)

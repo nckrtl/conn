@@ -9,8 +9,9 @@ mod color;
 mod composer;
 mod composer_state;
 pub(crate) use self::composer_state::{
-    RefEntry, ThreadWorkspace, branch_selection_target, local_branch_name_from_remote_ref,
-    previous_worktree,
+    APPROVAL_FEEDBACK_PLAIN_TEXT, APPROVAL_REDIRECT_RETRY, ApprovalSendPlan, HeldDraft, RefEntry,
+    ThreadWorkspace, approval_arrived, approval_redirect_notice, branch_selection_target,
+    local_branch_name_from_remote_ref, plan_approval_send, previous_worktree,
 };
 mod draft_hero;
 mod icons;
@@ -32,7 +33,7 @@ use conn_theme::Tokens;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, FollowMode, FontWeight,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FollowMode, FontWeight,
     InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, list, px,
     relative,
@@ -110,6 +111,8 @@ pub(crate) enum ChatEvent {
         attachments: Vec<conn_contract::ChatAttachment>,
         /// Steer or queue while a turn runs.
         dispatch: SendDispatch,
+        /// The draft an approval send left in the composer (see [`ChatView::settle_held_draft`]).
+        held_draft: Option<HeldDraft>,
     },
     /// Continue an interrupted thread (`Resume thread`).
     Resume,
@@ -228,8 +231,8 @@ pub(crate) struct ChatView {
     _copy_reset: Option<gpui_kit::Task<()>>,
     /// Ids of pending question and secret cards that need input fields.
     pending_card_ids: Vec<String>,
-    /// The thread shows a pending approval; a composer send declines it to redirect the agent.
-    pending_approval: bool,
+    /// The thread's first pending approval; a composer send declines it.
+    pending_approval: Option<composer_state::PendingApprovalPrompt>,
     /// The first pending question request, which a composer send answers.
     pending_question_id: Option<String>,
     user_input_cards: HashMap<String, cards::UserInputCardState>,
@@ -302,12 +305,14 @@ impl ChatView {
                     text,
                     attachments,
                     dispatch,
+                    held_draft,
                 } => {
                     this.scroll_to_latest(cx);
                     cx.emit(ChatEvent::Send {
                         text: text.clone(),
                         attachments: attachments.clone(),
                         dispatch: *dispatch,
+                        held_draft: held_draft.clone(),
                     });
                     cx.notify();
                 }
@@ -403,7 +408,7 @@ impl ChatView {
             copied_message_key: None,
             _copy_reset: None,
             pending_card_ids: Vec::new(),
-            pending_approval: false,
+            pending_approval: None,
             pending_question_id: None,
             user_input_cards: HashMap::new(),
             secret_forms: HashMap::new(),
@@ -467,6 +472,22 @@ impl ChatView {
     /// Moves keyboard focus into the composer input.
     pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.composer.update(cx, |c, cx| c.focus_input(window, cx));
+    }
+
+    /// The composer's live draft, to compare with an approval send's [`HeldDraft`].
+    pub(crate) fn held_draft(&self, cx: &App) -> HeldDraft {
+        self.composer.read(cx).held_draft(cx)
+    }
+
+    /// Ends an approval send; with `clear`, empties the composer if its draft is unchanged.
+    pub(crate) fn settle_held_draft(
+        &mut self,
+        clear: Option<&HeldDraft>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        self.composer
+            .update(cx, |c, cx| c.settle_held_draft(clear, window, cx))
     }
 
     /// Restores or sets the composer textarea text (for example if a launch fails).
@@ -666,10 +687,11 @@ impl ChatView {
                 _ => None,
             })
             .collect();
-        self.pending_approval = thread
-            .entries
-            .iter()
-            .any(|entry| matches!(entry, TimelineEntry::Approval { .. }));
+        self.pending_approval = thread.pending_approvals().first().map(|approval| {
+            composer_state::PendingApprovalPrompt {
+                supports_feedback: approval.supports_feedback,
+            }
+        });
         self.pending_question_id = thread.entries.iter().find_map(|entry| match entry {
             TimelineEntry::UserInputRequest {
                 id, pending: true, ..
@@ -840,7 +862,7 @@ impl ChatView {
         self.copied_message_key = None;
         self._copy_reset = None;
         self.pending_card_ids.clear();
-        self.pending_approval = false;
+        self.pending_approval = None;
         self.pending_question_id = None;
         self.user_input_cards.clear();
         self.secret_forms.clear();

@@ -40,7 +40,7 @@ use gpui_kit::component::input::{
 use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, ExternalPaths,
+    AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, ExternalPaths,
     FontWeight, ImageFormat, InteractiveElement as _, IntoElement, ParentElement as _,
     PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, deferred, div, px,
@@ -60,7 +60,7 @@ use self::model_picker::{ModelCatalog, ModelOption, ModelPickerView, render_mode
 use self::stash::{PromptStash, render_stash_badge, render_stash_menu};
 use super::color::{hsla, hsla_alpha};
 use super::composer_state::{
-    ComposerDraft, ComposerDraftStore, ComposerPendingRequest, ComposerSendAction,
+    ComposerDraft, ComposerDraftStore, ComposerPendingRequest, ComposerSendAction, HeldDraft,
     PromptHistoryEntry, PromptHistoryPosition, composer_placeholder, composer_send_action,
     prompt_length_message, step_prompt_history,
 };
@@ -155,6 +155,9 @@ pub(crate) enum ComposerEvent {
         attachments: Vec<ChatAttachment>,
         /// Steer or queue while a turn runs (`resolveComposerDispatchMode`).
         dispatch: SendDispatch,
+        /// Set when the send answers pending approvals: the draft stays in the composer until
+        /// the host settles it with [`Composer::settle_held_draft`].
+        held_draft: Option<HeldDraft>,
     },
     /// Answer the active pending question with `text`; blank uses its selected option.
     AnswerQuestion {
@@ -213,6 +216,9 @@ pub(crate) struct Composer {
     can_resume: bool,
     /// The pending approval or question a send answers instead of starting a turn.
     pending_request: ComposerPendingRequest,
+    /// An approval send is declining; the draft stays put and another send waits
+    /// (`sendInFlightRef`).
+    answering_approval: bool,
     send_disabled_reason: Option<String>,
     environment_unavailable: bool,
     preparing_worktree: bool,
@@ -357,6 +363,7 @@ impl Composer {
             plan_follow_up: None,
             can_resume: false,
             pending_request: ComposerPendingRequest::default(),
+            answering_approval: false,
             send_disabled_reason: None,
             environment_unavailable: false,
             preparing_worktree: false,
@@ -524,7 +531,7 @@ impl Composer {
 
     /// Conn steers over pending approvals, since a send declines them to redirect the agent.
     fn effective_follow_up(&self) -> FollowUpBehavior {
-        if self.pending_request.approval {
+        if self.pending_request.approval.is_some() {
             FollowUpBehavior::Steer
         } else {
             self.follow_up
@@ -1393,7 +1400,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.submitting {
+        if self.submitting || self.answering_approval {
             return;
         }
         let raw = self.textarea.read(cx).value().to_string();
@@ -1417,8 +1424,14 @@ impl Composer {
                 cx.notify();
                 return;
             }
-            ComposerSendAction::Message | ComposerSendAction::RedirectApprovals => {}
+            ComposerSendAction::Message
+            | ComposerSendAction::RedirectApprovals
+            | ComposerSendAction::DeclineWithFeedback => {}
         }
+        let holds_draft = matches!(
+            action,
+            ComposerSendAction::RedirectApprovals | ComposerSendAction::DeclineWithFeedback
+        );
         let still_uploading = self
             .attachments
             .iter()
@@ -1482,20 +1495,56 @@ impl Composer {
             true,
             alternate.unwrap_or(self.alternate_modifier),
         );
-        self.textarea.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-        });
-        self.attachments.clear();
         self.active_trigger = None;
         self.dismissed_trigger_text = None;
         self.model_picker_open = false;
         self.implement_menu_open = false;
+        // Approvals are declined before the message goes, so the draft stays until then: an
+        // edit meanwhile, or a refused decline, keeps it (`useComposerSend`).
+        let held_draft = if holds_draft {
+            self.answering_approval = true;
+            Some(self.held_draft(cx))
+        } else {
+            self.textarea.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+            self.attachments.clear();
+            None
+        };
         cx.emit(ComposerEvent::Send {
             text,
             attachments: ready_attachments,
             dispatch,
+            held_draft,
         });
         cx.notify();
+    }
+
+    /// The live draft, to compare with the one an approval send held.
+    pub(crate) fn held_draft(&self, cx: &App) -> HeldDraft {
+        HeldDraft {
+            text: self.textarea.read(cx).value().to_string(),
+            attachment_ids: self.attachments.iter().map(|a| a.local_id).collect(),
+        }
+    }
+
+    /// Ends an approval send. With `clear`, empties the composer when its draft still equals
+    /// `clear` and returns whether it did.
+    pub(crate) fn settle_held_draft(
+        &mut self,
+        clear: Option<&HeldDraft>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        self.answering_approval = false;
+        let cleared = clear.is_some_and(|held| *held == self.held_draft(cx));
+        if cleared {
+            self.textarea
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.attachments.clear();
+        }
+        cx.notify();
+        cleared
     }
 
     /// `Resume thread`: asks the host to continue the interrupted thread.
@@ -2335,7 +2384,7 @@ impl Render for Composer {
             alternate_modifier: self.alternate_modifier,
             show_plan_follow_up: self.plan_follow_up.is_some() && !is_editing_queued,
             prompt_has_text: has_non_empty_text,
-            is_send_busy: self.submitting,
+            is_send_busy: self.submitting || self.answering_approval,
             send_disabled_reason: self
                 .send_disabled_reason
                 .clone()

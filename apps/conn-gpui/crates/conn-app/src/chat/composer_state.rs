@@ -414,10 +414,17 @@ pub(crate) const DEFAULT_COMPOSER_PLACEHOLDER: &str = "Ask anything. @ files, $ 
 /// (`activePendingApproval`, `activePendingProgress`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ComposerPendingRequest {
-    /// The thread shows a pending approval (`isComposerApprovalState`).
-    pub(crate) approval: bool,
+    /// The thread's first pending approval (`activePendingApproval`, `isComposerApprovalState`).
+    pub(crate) approval: Option<PendingApprovalPrompt>,
     /// The active question of the first pending question request.
     pub(crate) question: Option<PendingQuestion>,
+}
+
+/// The pending approval the composer answers (`activePendingApproval`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PendingApprovalPrompt {
+    /// A send declines it with the typed text as feedback (`supportsFeedback`).
+    pub(crate) supports_feedback: bool,
 }
 
 /// The active question of a pending question request (`activePendingProgress.activeQuestion`).
@@ -438,6 +445,8 @@ pub(crate) enum ComposerSendAction {
     /// Decline the pending approvals, then steer the turn with the message
     /// (`declinePendingApprovals`, `followUpBehavior: "steer"`).
     RedirectApprovals,
+    /// Decline the first approval with the typed text as its feedback (`sendApprovalFeedback`).
+    DeclineWithFeedback,
     /// Answer the active question with the typed text, or with its selection when blank
     /// (`onAdvanceActivePendingUserInput`).
     AnswerQuestion,
@@ -455,10 +464,112 @@ pub(crate) fn composer_send_action(
         Some(q) if !q.allow_custom_answer => ComposerSendAction::Blocked,
         Some(q) if text_is_blank && !q.answered => ComposerSendAction::Blocked,
         Some(_) => ComposerSendAction::AnswerQuestion,
-        None if pending.approval => ComposerSendAction::RedirectApprovals,
-        None => ComposerSendAction::Message,
+        None => match pending.approval {
+            Some(approval) if approval.supports_feedback => ComposerSendAction::DeclineWithFeedback,
+            Some(_) => ComposerSendAction::RedirectApprovals,
+            None => ComposerSendAction::Message,
+        },
     }
 }
+
+/// What a send over pending approvals does, decided from the thread's live approvals when the
+/// send reaches the app (`useComposerSend` `approvalFeedbackTarget` / `approvalsToDecline`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovalSendPlan {
+    /// No approval is pending: send the message as usual.
+    Message,
+    /// Decline the first approval with `feedback` and send nothing else (`sendApprovalFeedback`).
+    Feedback {
+        request_id: String,
+        feedback: String,
+    },
+    /// Feedback is text only; the draft stays so the user can remove its attachments.
+    FeedbackNeedsPlainText,
+    /// Decline every answerable approval in `decline`, then send the message
+    /// (`declinePendingApprovals`). `shown` holds every pending one, answerable or not.
+    Redirect {
+        shown: Vec<String>,
+        decline: Vec<String>,
+    },
+}
+
+/// The draft an approval send leaves in the composer until the decline settles, so the app can
+/// tell whether the user changed it meanwhile (`draftChangedSinceSend`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeldDraft {
+    pub(crate) text: String,
+    pub(crate) attachment_ids: Vec<u64>,
+}
+
+/// Error shown when approval feedback carries attachments (`useComposerSend`).
+pub(crate) const APPROVAL_FEEDBACK_PLAIN_TEXT: &str =
+    "Send approval feedback without attachments or added context.";
+
+/// Conn gives feedback only to the first approval, and only when its provider takes feedback.
+#[must_use]
+pub(crate) fn plan_approval_send(
+    approvals: &[conn_state::PendingApproval],
+    text: &str,
+    has_attachments: bool,
+) -> ApprovalSendPlan {
+    let Some(first) = approvals.first() else {
+        return ApprovalSendPlan::Message;
+    };
+    if first.supports_feedback {
+        return if has_attachments {
+            ApprovalSendPlan::FeedbackNeedsPlainText
+        } else {
+            ApprovalSendPlan::Feedback {
+                request_id: first.request_id.clone(),
+                feedback: text.trim().to_owned(),
+            }
+        };
+    }
+    ApprovalSendPlan::Redirect {
+        shown: approvals.iter().map(|a| a.request_id.clone()).collect(),
+        // A request the provider can no longer answer has nothing to decline.
+        decline: approvals
+            .iter()
+            .filter(|a| a.answerable)
+            .map(|a| a.request_id.clone())
+            .collect(),
+    }
+}
+
+/// True when `now` holds an approval that was not pending before the decline; it would block
+/// the redirect, so the message waits for the next send to decline it too.
+#[must_use]
+pub(crate) fn approval_arrived(before: &[String], now: &[conn_state::PendingApproval]) -> bool {
+    now.iter().any(|a| !before.contains(&a.request_id))
+}
+
+/// Why a redirect kept the draft instead of sending it (`approvalRedirectNotice`); `None` when
+/// the decline failed on its own, which reports its own error.
+#[must_use]
+pub(crate) fn approval_redirect_notice(
+    draft_changed: bool,
+    declined: bool,
+    approval_responding: bool,
+    approval_arrived: bool,
+) -> Option<&'static str> {
+    if draft_changed {
+        return Some(if declined {
+            "Approval declined. Your message changed, so it wasn't sent."
+        } else {
+            "Your message changed, so it wasn't sent."
+        });
+    }
+    if approval_responding {
+        return Some("An approval is already being answered, so your message wasn't sent.");
+    }
+    if declined && approval_arrived {
+        return Some("Another approval arrived, so your message wasn't sent.");
+    }
+    None
+}
+
+/// Second line of every redirect notice (`description`).
+pub(crate) const APPROVAL_REDIRECT_RETRY: &str = "Send again when it's ready.";
 
 /// Store key for the composer's answer to the question request `entry_id`, kept apart from the
 /// thread's draft like Conn's `activePendingProgress.customAnswer`.
@@ -467,15 +578,18 @@ pub(crate) fn question_answer_draft_key(entry_id: &str) -> String {
     format!("question:{entry_id}")
 }
 
-/// Editor placeholder for the composer's state (`ChatComposer.tsx` `placeholder`). This client
-/// does not see `supportsFeedback`, so an approval always shows the redirect placeholder.
+/// Editor placeholder for the composer's state (`ChatComposer.tsx` `placeholder`).
 #[must_use]
 pub(crate) fn composer_placeholder(
     pending: &ComposerPendingRequest,
     provider_unavailable: bool,
 ) -> &'static str {
-    if pending.approval {
-        "Send a message to decline and redirect the agent"
+    if let Some(approval) = pending.approval {
+        if approval.supports_feedback {
+            "Send feedback to decline this request"
+        } else {
+            "Send a message to decline and redirect the agent"
+        }
     } else if let Some(q) = pending.question {
         if !q.allow_custom_answer {
             "Choose an option above"
@@ -1054,9 +1168,30 @@ mod tests {
 #[cfg(test)]
 mod pending_request_tests {
     use super::{
-        ComposerPendingRequest, ComposerSendAction, DEFAULT_COMPOSER_PLACEHOLDER, PendingQuestion,
-        composer_placeholder, composer_send_action,
+        ApprovalSendPlan, ComposerPendingRequest, ComposerSendAction, DEFAULT_COMPOSER_PLACEHOLDER,
+        PendingApprovalPrompt, PendingQuestion, approval_arrived, approval_redirect_notice,
+        composer_placeholder, composer_send_action, plan_approval_send,
     };
+
+    const REDIRECT: Option<PendingApprovalPrompt> = Some(PendingApprovalPrompt {
+        supports_feedback: false,
+    });
+    const FEEDBACK: Option<PendingApprovalPrompt> = Some(PendingApprovalPrompt {
+        supports_feedback: true,
+    });
+
+    fn approval(
+        id: &str,
+        answerable: bool,
+        supports_feedback: bool,
+    ) -> conn_state::PendingApproval {
+        conn_state::PendingApproval {
+            entry_id: format!("item-{id}"),
+            request_id: id.to_owned(),
+            answerable,
+            supports_feedback,
+        }
+    }
 
     const fn question(
         allow_custom_answer: bool,
@@ -1074,11 +1209,11 @@ mod pending_request_tests {
     fn placeholder_follows_the_pending_request() {
         let none = ComposerPendingRequest::default();
         let approval = ComposerPendingRequest {
-            approval: true,
+            approval: REDIRECT,
             question: None,
         };
         let ask = |q| ComposerPendingRequest {
-            approval: false,
+            approval: None,
             question: Some(q),
         };
         assert_eq!(
@@ -1088,6 +1223,16 @@ mod pending_request_tests {
         assert_eq!(
             composer_placeholder(&approval, true),
             "Send a message to decline and redirect the agent"
+        );
+        assert_eq!(
+            composer_placeholder(
+                &ComposerPendingRequest {
+                    approval: FEEDBACK,
+                    question: None,
+                },
+                false
+            ),
+            "Send feedback to decline this request"
         );
         assert_eq!(
             composer_placeholder(&ask(question(false, true, false)), false),
@@ -1105,7 +1250,7 @@ mod pending_request_tests {
         assert_eq!(
             composer_placeholder(
                 &ComposerPendingRequest {
-                    approval: true,
+                    approval: REDIRECT,
                     question: Some(question(false, true, false)),
                 },
                 false
@@ -1116,8 +1261,8 @@ mod pending_request_tests {
 
     #[test]
     fn send_answers_questions_before_redirecting_approvals() {
-        let ask = |approval, q| ComposerPendingRequest {
-            approval,
+        let ask = |approval: bool, q| ComposerPendingRequest {
+            approval: if approval { REDIRECT } else { None },
             question: Some(q),
         };
         assert_eq!(
@@ -1127,12 +1272,22 @@ mod pending_request_tests {
         assert_eq!(
             composer_send_action(
                 &ComposerPendingRequest {
-                    approval: true,
+                    approval: REDIRECT,
                     question: None,
                 },
                 false
             ),
             ComposerSendAction::RedirectApprovals
+        );
+        assert_eq!(
+            composer_send_action(
+                &ComposerPendingRequest {
+                    approval: FEEDBACK,
+                    question: None,
+                },
+                false
+            ),
+            ComposerSendAction::DeclineWithFeedback
         );
         assert_eq!(
             composer_send_action(&ask(true, question(true, true, false)), false),
@@ -1152,5 +1307,67 @@ mod pending_request_tests {
             composer_send_action(&ask(false, question(false, true, true)), false),
             ComposerSendAction::Blocked
         );
+    }
+
+    #[test]
+    fn approval_send_gives_feedback_to_the_first_approval_or_declines_answerable_ones() {
+        assert_eq!(
+            plan_approval_send(&[], "hi", false),
+            ApprovalSendPlan::Message
+        );
+        // Feedback goes to the first approval only, trimmed, and never with attachments.
+        let feedback = [approval("a", true, true), approval("b", true, false)];
+        assert_eq!(
+            plan_approval_send(&feedback, "  use staging  ", false),
+            ApprovalSendPlan::Feedback {
+                request_id: "a".to_owned(),
+                feedback: "use staging".to_owned(),
+            }
+        );
+        assert_eq!(
+            plan_approval_send(&feedback, "use staging", true),
+            ApprovalSendPlan::FeedbackNeedsPlainText
+        );
+        // A later approval's feedback support does not make this a feedback send.
+        let redirect = [
+            approval("a", true, false),
+            approval("gone", false, false),
+            approval("c", true, true),
+        ];
+        assert_eq!(
+            plan_approval_send(&redirect, "do X instead", true),
+            ApprovalSendPlan::Redirect {
+                shown: vec!["a".to_owned(), "gone".to_owned(), "c".to_owned()],
+                decline: vec!["a".to_owned(), "c".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn redirect_guards_name_why_the_message_stayed() {
+        let before = ["a".to_owned()];
+        assert!(!approval_arrived(&before, &[approval("a", true, false)]));
+        assert!(!approval_arrived(&before, &[]));
+        assert!(approval_arrived(&before, &[approval("b", true, false)]));
+
+        assert_eq!(
+            approval_redirect_notice(true, true, false, true),
+            Some("Approval declined. Your message changed, so it wasn't sent.")
+        );
+        assert_eq!(
+            approval_redirect_notice(true, false, true, false),
+            Some("Your message changed, so it wasn't sent.")
+        );
+        assert_eq!(
+            approval_redirect_notice(false, false, true, false),
+            Some("An approval is already being answered, so your message wasn't sent.")
+        );
+        assert_eq!(
+            approval_redirect_notice(false, true, false, true),
+            Some("Another approval arrived, so your message wasn't sent.")
+        );
+        // A failed decline reports its own error; an arrival only matters after a decline.
+        assert_eq!(approval_redirect_notice(false, false, false, true), None);
+        assert_eq!(approval_redirect_notice(false, true, false, false), None);
     }
 }

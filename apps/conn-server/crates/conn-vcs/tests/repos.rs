@@ -537,9 +537,14 @@ async fn an_interrupted_annex_removal_is_restored_by_the_next_attempt() {
     let dot_git = path.join(".git");
     // What a removal leaves when it stops after the swap: the link recorded in the admin
     // folder, and the gitfile in its place.
-    std::fs::write(PathBuf::from(&admin).join("conn-annex-link"), &admin).unwrap();
+    std::fs::write(
+        PathBuf::from(&admin).join("conn-annex-link"),
+        format!(".git.conn-swap-crash\0{admin}"),
+    )
+    .unwrap();
     std::fs::remove_file(&dot_git).unwrap();
     std::fs::write(&dot_git, format!("gitdir: {admin}\n")).unwrap();
+    std::os::unix::fs::symlink(&admin, path.join(".git.conn-swap-crash")).unwrap();
     write(&path, "notes.txt", "draft\n");
 
     assert!(
@@ -551,10 +556,72 @@ async fn an_interrupted_annex_removal_is_restored_by_the_next_attempt() {
     assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_symlink());
     assert_eq!(std::fs::read_link(&dot_git).unwrap(), PathBuf::from(&admin));
     assert!(!PathBuf::from(&admin).join("conn-annex-link").exists());
+    assert!(
+        std::fs::symlink_metadata(path.join(".git.conn-swap-crash")).is_err(),
+        "the swap entry the record names is cleared"
+    );
     assert_eq!(
         std::fs::read_to_string(path.join("notes.txt")).unwrap(),
         "draft\n"
     );
+}
+
+/// A user's own `.git.conn-swap` is an untracked file like any other: removal keeps it and
+/// refuses the dirty checkout.
+#[tokio::test]
+async fn annex_removal_keeps_a_user_file_named_like_the_swap() {
+    let fx = Fixture::new("annex-user-swap");
+    let (path, admin) = annexed_worktree(&fx);
+    write(&path, ".git.conn-swap", "mine\n");
+
+    assert!(
+        worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+            .await
+            .is_err(),
+        "a checkout with an untracked file is refused"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join(".git.conn-swap")).unwrap(),
+        "mine\n"
+    );
+    assert_eq!(
+        std::fs::read_link(path.join(".git")).unwrap(),
+        PathBuf::from(&admin)
+    );
+}
+
+/// The recovery record is written as a fresh file, never through a link already at its path.
+#[tokio::test]
+async fn annex_removal_does_not_write_through_a_linked_record() {
+    for hard in [false, true] {
+        let fx = Fixture::new("annex-linked-record");
+        let (path, admin) = annexed_worktree(&fx);
+        write(&path, "notes.txt", "draft\n");
+        let victim = fx.root.path().join("victim.txt");
+        std::fs::write(&victim, "keep\n").unwrap();
+        let record = PathBuf::from(&admin).join("conn-annex-link");
+        if hard {
+            std::fs::hard_link(&victim, &record).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&victim, &record).unwrap();
+        }
+
+        assert!(
+            worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+                .await
+                .is_err(),
+            "a checkout with an untracked file is refused"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "keep\n",
+            "hard link: {hard}"
+        );
+        assert_eq!(
+            std::fs::read_link(path.join(".git")).unwrap(),
+            PathBuf::from(&admin)
+        );
+    }
 }
 
 /// Removal reads an annexed checkout's metadata only from this repository's own

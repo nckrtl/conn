@@ -240,11 +240,8 @@ impl AntigravityProvider {
     }
 
     /// Starts `agy acp` and opens a session in `cwd` (T3's `openSession` start); the session
-    /// reports the account and models. `control` may end the open; the agent is stopped then.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one call per purpose; the fields are the session's own inputs"
-    )]
+    /// reports the account and models. A throwaway's `control` may end the open; the agent is
+    /// stopped then.
     async fn start(
         &self,
         cwd: String,
@@ -1390,8 +1387,7 @@ mod tests {
                 String::new(),
                 "exits".into(),
                 Vec::new(),
-                Purpose::ModelRefresh,
-                session::OpenControl::default(),
+                Purpose::Throwaway(OpenControl::default()),
             )
             .await
             .unwrap();

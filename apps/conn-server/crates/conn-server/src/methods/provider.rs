@@ -29,7 +29,7 @@ use conn_contract::{
     ProviderSetupError, ProviderUploadFeedbackError, ProviderUploadFeedbackInput,
     ProviderUploadFeedbackResult, lit,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::watch;
 
 use super::Deps;

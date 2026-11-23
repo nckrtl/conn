@@ -512,6 +512,17 @@ final class ConnSpikeUITests: XCTestCase {
         if tap(app, ["inbox.newThreadButton", "New chat"]) { settle(1.5); capture("new-chat") }
     }
 
+    /// Writes the running app's accessibility tree to `CONN_DUMP_PATH` (layout debugging).
+    func testDumpHierarchy() throws {
+        guard let path = ProcessInfo.processInfo.environment["CONN_DUMP_PATH"] else {
+            throw XCTSkip("Set CONN_DUMP_PATH")
+        }
+        let app = XCUIApplication()
+        app.activate()
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        try app.debugDescription.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
     private func saveScreenshot(named name: String, dir: String?) {
         guard let dir, !dir.isEmpty else { return }
         let directory = URL(fileURLWithPath: dir, isDirectory: true)

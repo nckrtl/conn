@@ -924,7 +924,7 @@ impl ChatView {
                     &self.tokens,
                     format!("question-dismiss-{id}"),
                     format!("chat.question.dismiss.{id}"),
-                    "Dismiss question without answering",
+                    "Skip question",
                     "Skip",
                     !disabled,
                     index == 0 && !primary.show,
@@ -957,9 +957,9 @@ impl ChatView {
         }
         if primary.show {
             let (ax_label, text) = if disabled {
-                ("Sending…", "Submitting...")
+                ("Submitting", "Submitting...")
             } else if is_last {
-                ("Submit", "Send")
+                ("Send answers", "Send")
             } else {
                 ("Next", "Next")
             };

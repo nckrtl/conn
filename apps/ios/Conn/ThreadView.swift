@@ -332,6 +332,7 @@ struct ThreadView: View {
 
                     KitComposer(
                         questionPanelModel?.composerPlaceholder
+                            ?? snapshot?.pendingApprovals.first?.composerPlaceholder
                             ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
                         text: $draft,
                         maxLines: 6,
@@ -462,8 +463,38 @@ struct ThreadView: View {
 
     private func sendDraft(scrollProxy: ScrollViewProxy) {
         let message = draft
+        // Mobile's ThreadDetailScreen: with no open question, a send answers the pending approvals.
+        let approvals = pendingQuestion == nil ? (snapshot?.pendingApprovals ?? []) : []
         stickToBottom = true
         Task {
+            if let target = approvals.first {
+                guard respondingApprovalId == nil else { return }
+                respondingApprovalId = target.requestId
+                defer {
+                    if respondingApprovalId == target.requestId { respondingApprovalId = nil }
+                }
+                if target.supportsFeedback {
+                    // The feedback is the answer; the text is not sent as a message too.
+                    if await store.declineApprovalWithFeedback(
+                        threadId: threadId, requestId: target.requestId, feedback: message
+                    ) {
+                        draft = ""
+                    }
+                    return
+                }
+                // A redirect: decline every approval the agent could still act on, then send.
+                for approval in approvals where approval.answerable {
+                    guard await store.respondApproval(
+                        threadId: threadId, requestId: approval.requestId, decision: .decline
+                    ) else { return }
+                }
+                // A draft edited during the decline isn't what the user sent, and an approval
+                // that arrived meanwhile would block the redirect; the next send declines it.
+                let declined = Set(approvals.map(\.requestId))
+                guard draft == message,
+                      !(snapshot?.pendingApprovals ?? []).contains(where: { !declined.contains($0.requestId) })
+                else { return }
+            }
             let sent = await store.sendMessage(threadId: threadId, text: message, mode: .auto)
             if sent {
                 draft = ""

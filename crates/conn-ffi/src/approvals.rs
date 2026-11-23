@@ -51,6 +51,12 @@ pub struct FfiPendingApproval {
     /// The provider still waits for this answer. When it does not, the buttons are off and the
     /// card says the provider process is gone.
     pub answerable: bool,
+    /// Composer text declines this approval and reaches the agent as feedback
+    /// ([`crate::ConnCore::decline_approval_with_feedback`]). Without it, a send declines every
+    /// pending approval and then sends the text as a normal message (mobile's redirect).
+    pub supports_feedback: bool,
+    /// The composer's placeholder while this approval is the first pending one.
+    pub composer_placeholder: String,
 }
 
 /// Every approval that still waits for an answer, in timeline order. The card shows the first.
@@ -82,9 +88,20 @@ pub(crate) fn pending_approvals(thread: &ThreadState) -> Vec<FfiPendingApproval>
                     .and_then(first_warning),
                 options,
                 answerable: pending.answerable,
+                supports_feedback: pending.supports_feedback,
+                composer_placeholder: composer_placeholder(pending.supports_feedback).to_owned(),
             }
         })
         .collect()
+}
+
+/// Mobile `ThreadDetailScreen`'s composer placeholder while an approval waits.
+fn composer_placeholder(supports_feedback: bool) -> &'static str {
+    if supports_feedback {
+        "Send feedback to decline this request"
+    } else {
+        "Send a message to decline and redirect the agent"
+    }
 }
 
 /// The approval entry's own title, for an approval whose item has not arrived.
@@ -211,6 +228,14 @@ mod tests {
             "prompt"
         );
         assert!(approval.answerable, "the provider waits");
+        assert!(
+            approval.supports_feedback,
+            "Claude's live request takes feedback"
+        );
+        assert_eq!(
+            approval.composer_placeholder, "Send feedback to decline this request",
+            "the composer sends feedback"
+        );
         let buttons: Vec<_> = approval
             .options
             .iter()
@@ -287,5 +312,13 @@ mod tests {
         let approvals = pending_approvals(&replay(&frames[..=index]));
         assert_eq!(approvals.len(), 1, "still pending");
         assert!(!approvals[0].answerable, "nobody waits for the answer");
+        assert!(
+            !approvals[0].supports_feedback,
+            "no feedback without a live request"
+        );
+        assert_eq!(
+            approvals[0].composer_placeholder, "Send a message to decline and redirect the agent",
+            "the composer redirects"
+        );
     }
 }

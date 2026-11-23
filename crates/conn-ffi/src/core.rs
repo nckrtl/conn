@@ -354,6 +354,27 @@ impl ConnCore {
         self.dispatch_command(command).await
     }
 
+    /// Declines a pending approval and passes `feedback` to the agent, for an approval whose
+    /// [`crate::FfiPendingApproval::supports_feedback`] is set (mobile's `sendApprovalFeedback`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn decline_approval_with_feedback(
+        &self,
+        thread_id: String,
+        request_id: String,
+        feedback: String,
+    ) -> Result<(), FfiError> {
+        let command = conn_client::commands::decline_approval_with_feedback(
+            &thread_id,
+            &request_id,
+            feedback.trim(),
+        )
+        .map_err(|err| map_build_error("runtime-request.respond", err))?;
+        self.dispatch_command(command).await
+    }
+
     /// Submits answers for a pending `user_input_request` (`runtime-request.respond`).
     ///
     /// # Errors

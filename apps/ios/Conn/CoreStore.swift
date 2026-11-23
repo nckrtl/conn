@@ -86,12 +86,27 @@ final class CoreStore {
         }
     }
 
-    func respondApproval(threadId: String, requestId: String, decision: FfiApprovalDecision) async {
-        guard let core else { return }
+    @discardableResult
+    func respondApproval(threadId: String, requestId: String, decision: FfiApprovalDecision) async -> Bool {
+        guard let core else { return false }
         do {
             try await core.respondApproval(threadId: threadId, requestId: requestId, decision: decision)
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    func declineApprovalWithFeedback(threadId: String, requestId: String, feedback: String) async -> Bool {
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let core else { return false }
+        do {
+            try await core.declineApprovalWithFeedback(threadId: threadId, requestId: requestId, feedback: trimmed)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
         }
     }
 

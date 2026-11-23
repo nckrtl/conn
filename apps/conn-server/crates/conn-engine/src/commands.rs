@@ -313,7 +313,11 @@ fn thread_create(tx: &mut Tx<'_>, command: Value) -> Outcome {
             thread["delegatedFrom"] = from;
         }
     }
-    tx.append(Draft::new(&c.thread_id, "thread.created", thread).command(Some(&c.command_id)))?;
+    tx.append(
+        Draft::new(&c.thread_id, "thread.created", thread)
+            .command(Some(&c.command_id))
+            .payload_instance(),
+    )?;
     if let Some(mut message) = initial_message {
         message["type"] = json!("message.dispatch");
         message["threadId"] = json!(c.thread_id);
@@ -585,7 +589,14 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
         run["restartContinuationOfRunId"] = json!(source);
     }
     if let Some(merge_back) = &merge_back {
-        crate::merge_back::append_records(tx, merge_back, &run_id, cid, &c.thread_id)?;
+        crate::merge_back::append_records(
+            tx,
+            merge_back,
+            &run_id,
+            cid,
+            &c.thread_id,
+            model["instanceId"].as_str(),
+        )?;
     }
     tx.append(draft("run.created", run))?;
     tx.append(draft(
@@ -693,7 +704,11 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
                 regenerate: false,
             });
         }
-        tx.append(Draft::new(&c.thread_id, "thread.metadata-updated", thread).command(cid))?;
+        tx.append(
+            Draft::new(&c.thread_id, "thread.metadata-updated", thread)
+                .command(cid)
+                .payload_instance(),
+        )?;
     }
     if let Some(target) = interrupt {
         // A run stopped before its provider started also abandons that start, and the
@@ -961,6 +976,13 @@ pub(crate) fn start_next_queued(
         }
         break run;
     };
+    // T3's `startNextQueuedRun`: a provider turned off for the project holds the queue for
+    // the user instead of starting the run.
+    let instance = run["providerInstanceId"].as_str().unwrap_or_default();
+    if !tx.provider_enabled(thread["projectId"].as_str(), instance) {
+        hold_queue(tx, thread_id)?;
+        return Ok(None);
+    }
     let run_id = run["id"].as_str().unwrap_or_default().to_owned();
     let root = run["rootNodeId"].as_str().unwrap_or_default().to_owned();
     let now = tx.now().to_owned();
@@ -1274,7 +1296,8 @@ fn thread_stop(tx: &mut Tx<'_>, command: Value) -> Outcome {
         crate::pull_requests::end_watches(&mut thread);
         tx.append(
             Draft::new(&c.thread_id, "thread.pull-request-synced", thread)
-                .command(command_id.as_deref()),
+                .command(command_id.as_deref())
+                .payload_instance(),
         )?;
     }
     let children = crate::families::stop_children(tx, &c.thread_id)?;
@@ -1591,8 +1614,13 @@ fn runtime_request_respond(tx: &mut Tx<'_>, command: Value) -> Outcome {
         request["answers"] = answers.clone();
     }
     let node = request["nodeId"].as_str().map(str::to_owned);
-    tx.append(Draft::new(&c.thread_id, "runtime-request.updated", request).node(node.as_deref()))?;
-    settle_request_rows(tx, &c, node.as_deref())?;
+    let instance = respond_instance(tx, &c.thread_id, &request)?;
+    tx.append(
+        Draft::new(&c.thread_id, "runtime-request.updated", request)
+            .node(node.as_deref())
+            .provider_instance(instance.as_deref()),
+    )?;
+    settle_request_rows(tx, &c, node.as_deref(), instance.as_deref())?;
     Ok(vec![Effect::Respond {
         thread_id: c.thread_id,
         request: json!({
@@ -1604,6 +1632,21 @@ fn runtime_request_respond(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }])
 }
 
+/// The instance T3 names on a response's events: the live session's when the request is
+/// answered through one, else none (`dispatchRuntimeRequestRespond`).
+fn respond_instance(tx: &Tx<'_>, thread_id: &str, request: &Value) -> StoreResult<Option<String>> {
+    let capability = &request["responseCapability"];
+    let Some(session) = capability["providerSessionId"]
+        .as_str()
+        .filter(|_| capability["type"] == "live")
+    else {
+        return Ok(None);
+    };
+    Ok(tx
+        .entity(thread_id, "providerSessions", session)?
+        .and_then(|row| row["providerInstanceId"].as_str().map(str::to_owned)))
+}
+
 /// The answered request's node and its turn item end (`runtime-request.respond` in T3's
 /// `Orchestrator`): `cancelled` for a declined or cancelled request, else `completed`; a
 /// question's item carries the answer (`questionAnswer`).
@@ -1611,6 +1654,7 @@ fn settle_request_rows(
     tx: &mut Tx<'_>,
     c: &RuntimeRequestRespond,
     node_id: Option<&str>,
+    instance: Option<&str>,
 ) -> StoreResult<()> {
     let Some(node_id) = node_id else {
         return Ok(());
@@ -1627,7 +1671,8 @@ fn settle_request_rows(
         tx.append(
             Draft::new(&c.thread_id, "node.updated", node)
                 .run(run.as_deref())
-                .node(Some(node_id)),
+                .node(Some(node_id))
+                .provider_instance(instance),
         )?;
     }
     let item = tx
@@ -1677,7 +1722,8 @@ fn settle_request_rows(
         tx.append(
             Draft::new(&c.thread_id, "turn-item.updated", item)
                 .run(run.as_deref())
-                .node(Some(node_id)),
+                .node(Some(node_id))
+                .provider_instance(instance),
         )?;
     }
     Ok(())
@@ -1697,7 +1743,7 @@ fn patch_thread(
     if bump_updated_at {
         thread["updatedAt"] = json!(now);
     }
-    tx.append(Draft::new(thread_id, event_type, thread))?;
+    tx.append(Draft::new(thread_id, event_type, thread).payload_instance())?;
     Ok(())
 }
 
@@ -1753,15 +1799,42 @@ fn thread_delete(tx: &mut Tx<'_>, command: Value) -> Outcome {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadVisit {
+    command_id: String,
     thread_id: String,
     visited_at: Value,
 }
 
+/// `thread.visit`: the time parses as T3's `DateTime.make` reads it, or the command is refused.
 fn thread_visit(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let c: ThreadVisit = decode(command)?;
-    patch_thread(tx, &c.thread_id, "thread.visited", false, |t, _| {
-        t["lastVisitedAt"] = c.visited_at;
-    })?;
+    live_thread(tx, &c.thread_id)?;
+    let text = c.visited_at.as_str().unwrap_or_default();
+    let Some(visited) = tx.date_input_millis(text) else {
+        return reject(format!(
+            "Thread {} visit time {text} is not a valid timestamp.",
+            c.thread_id
+        ));
+    };
+    // T3's `dispatchThreadVisit`: only a later visit moves the read mark, compared as times,
+    // and the event carries the visit, not the thread.
+    let thread = live_thread(tx, &c.thread_id)?;
+    // The stored mark may be in any form main stored; read it as the command time is read.
+    let moves_forward = thread["lastVisitedAt"]
+        .as_str()
+        .and_then(|last| tx.date_input_millis(last))
+        .is_none_or(|last| visited > last);
+    if !moves_forward {
+        return Ok(vec![]);
+    }
+    tx.append(
+        Draft::new(
+            &c.thread_id,
+            "thread.visit-recorded",
+            json!({"lastVisitedAt": crate::time::iso_from_millis(visited)}),
+        )
+        .command(Some(&c.command_id))
+        .instance_of(&thread),
+    )?;
     Ok(vec![])
 }
 
@@ -2224,7 +2297,7 @@ pub(crate) fn settle_provider_thread(
     }
     thread["status"] = json!(status);
     thread["updatedAt"] = json!(tx.now());
-    tx.append(Draft::new(thread_id, "provider-thread.updated", thread))?;
+    tx.append(Draft::new(thread_id, "provider-thread.updated", thread).instance_of(run))?;
     Ok(())
 }
 
@@ -2248,15 +2321,28 @@ fn thread_patch(
 ) -> Outcome {
     let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
     let mut thread = live_thread(tx, &thread_id)?;
-    let before = thread.clone();
     let now = tx.now().to_owned();
     patch(&mut thread, &now)?;
-    // A setter that changes nothing writes nothing, so a retry or a double click is quiet.
-    if thread != before {
-        let cid = command["commandId"].as_str().map(str::to_owned);
-        tx.append(Draft::new(&thread_id, event_type, thread).command(cid.as_deref()))?;
-    }
+    // T3's `dispatchThreadMutation` records the event even when nothing changed (a re-pin keeps
+    // `updatedAt`); a retry of the same command id is answered by its receipt instead.
+    let cid = command["commandId"].as_str().map(str::to_owned);
+    tx.append(
+        Draft::new(&thread_id, event_type, thread)
+            .command(cid.as_deref())
+            .payload_instance(),
+    )?;
     Ok(vec![])
+}
+
+/// T3's `dispatchThreadMutation` refuses settle, unsettle, snooze, unsnooze, auto-settle,
+/// pin, unpin and both reorders on an archived thread before any other check of its own.
+fn refuse_archived(tx: &Tx<'_>, command: &Value) -> Result<(), CommandError> {
+    let thread_id = command["threadId"].as_str().unwrap_or_default();
+    if is_null(&live_thread(tx, thread_id)?, "archivedAt") {
+        Ok(())
+    } else {
+        reject(format!("Thread {thread_id} is archived."))
+    }
 }
 
 fn is_null(thread: &Value, field: &str) -> bool {
@@ -2266,22 +2352,15 @@ fn is_null(thread: &Value, field: &str) -> bool {
 fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
     // T3's `thread.auto-settle` rechecks the live thread against the sweep's snapshot: a user's
-    // own choice or any change since wins. Then it is a settle. The snapshot is the shell's
-    // `updatedAt`, the row's activity time (#260 keeps the stored `updatedAt` equal to it).
+    // own choice or any change since wins. Then it is a settle.
     if command["type"] == "thread.auto-settle" {
         let thread = live_thread(tx, &thread_id)?;
-        let changed_at: String = tx
-            .conn()
-            .query_row(
-                "SELECT activity_at FROM threads WHERE id = ?1",
-                [&thread_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("store: {e}"))?;
-        let changed_at = conn_support::time::millis_from_iso(&changed_at);
+        let changed_at = thread["updatedAt"]
+            .as_str()
+            .and_then(crate::time::millis_from_iso);
         let snapshot = command["snapshotAt"]
             .as_str()
-            .and_then(conn_support::time::millis_from_iso);
+            .and_then(|at| tx.date_input_millis(at));
         let unchanged = matches!((changed_at, snapshot), (Some(at), Some(seen)) if at <= seen);
         if !is_null(&thread, "settledOverride") || !unchanged {
             return reject(format!(
@@ -2289,20 +2368,15 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
             ));
         }
     }
+    refuse_archived(tx, &command)?;
+    // T3 compares every run, queued ones too, and refuses when the latest is another.
     if let Some(expected) = command["expectedLatestRunId"].as_str() {
         let latest = tx
             .entities(&thread_id, "runs")?
             .into_iter()
-            .filter(|r| r["status"] != "queued")
             .max_by_key(|r| r["ordinal"].as_u64().unwrap_or(0));
-        if latest.is_some_and(|r| r["id"] != expected) {
-            return Ok(vec![]);
-        }
-    }
-    if command["type"] == "thread.auto-settle" {
-        let thread = live_thread(tx, &thread_id)?;
-        if !is_null(&thread, "autoSettleDisabledAt") || !is_null(&thread, "pinnedAt") {
-            return Ok(vec![]);
+        if latest.is_none_or(|r| r["id"] != expected) {
+            return reject("The thread received another run before settlement.");
         }
     }
     if active_run(tx, &thread_id)?.is_some() {
@@ -2314,6 +2388,7 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
     thread_patch(tx, &command, "thread.settled", |t, now| {
         let already =
             t["settledOverride"] == "settled" && !is_null(t, "settledAt") && is_null(t, "pinnedAt");
+        let snoozed = !is_null(t, "snoozedUntil") || !is_null(t, "snoozedAt");
         t["settledOverride"] = json!("settled");
         crate::pull_requests::end_watches(t);
         if !already {
@@ -2333,7 +2408,8 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
         ] {
             t[field] = Value::Null;
         }
-        if !already {
+        // T3 moves a settled thread that was still snoozed.
+        if !already || snoozed {
             t["updatedAt"] = json!(now);
         }
         Ok(())
@@ -2344,26 +2420,55 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }])
 }
 
+/// `thread.unsettle` as `Orchestrator.ts`. An undo of a settle sends `restoreUnsettledAt`, the
+/// Active anchor the settle cleared, so the thread goes back to its place, not to the top. An
+/// archived thread refuses it before the anchor is read. A thread already active keeps its
+/// anchor and `updatedAt`, but a fresh command still records `thread.unsettled`, as T3 does.
 fn thread_unsettle(tx: &mut Tx<'_>, command: Value) -> Outcome {
-    thread_patch(tx, &command, "thread.unsettled", |t, now| {
-        if t["settledOverride"] != "active" {
-            t["settledOverride"] = json!("active");
-            t["settledAt"] = Value::Null;
-            t["unsettledAt"] = json!(now);
-            t["updatedAt"] = json!(now);
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    refuse_archived(tx, &command)?;
+    let mut thread = live_thread(tx, &thread_id)?;
+    let now = tx.now().to_owned();
+    let anchor = match command.get("restoreUnsettledAt") {
+        None => json!(now),
+        Some(Value::Null) => Value::Null,
+        Some(at) => {
+            let text = at.as_str().unwrap_or_default();
+            let Some(millis) = tx.date_input_millis(text) else {
+                return reject(format!(
+                    "Thread {thread_id} unsettle anchor {text} is not a valid time."
+                ));
+            };
+            json!(crate::time::iso_from_millis(millis))
         }
-        Ok(())
-    })
+    };
+    if thread["settledOverride"] != "active" {
+        thread["settledOverride"] = json!("active");
+        thread["settledAt"] = Value::Null;
+        thread["unsettledAt"] = anchor;
+        thread["updatedAt"] = json!(now);
+    } else if thread.get("unsettledAt").is_none() {
+        thread["unsettledAt"] = Value::Null;
+    }
+    let cid = command["commandId"].as_str().map(str::to_owned);
+    let instance = thread["providerInstanceId"].as_str().map(str::to_owned);
+    tx.append(
+        Draft::new(&thread_id, "thread.unsettled", thread)
+            .command(cid.as_deref())
+            .provider_instance(instance.as_deref()),
+    )?;
+    Ok(vec![])
 }
 
 /// `thread.snooze` as `Orchestrator.ts`: the wake time must parse and be in the future, a
 /// pending approval refuses it, and only queued runs a person asked for block it. The wake time
 /// is stored as UTC in the wire form.
 fn thread_snooze(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
     let requested = command["snoozedUntil"].as_str().unwrap_or_default();
     let now = crate::time::millis_from_iso(tx.now()).unwrap_or(0);
-    let Some(until) = crate::time::millis_from_iso(requested).filter(|at| *at > now) else {
+    let Some(until) = tx.date_input_millis(requested).filter(|at| *at > now) else {
         return reject(format!(
             "Thread {thread_id} snooze wake time {requested} is not in the future."
         ));
@@ -2406,6 +2511,7 @@ fn is_automatic(message: &Value) -> bool {
 }
 
 fn thread_unsnooze(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     thread_patch(tx, &command, "thread.unsnoozed", |t, now| {
         if !is_null(t, "snoozedUntil") {
             t["snoozedUntil"] = Value::Null;
@@ -2418,6 +2524,7 @@ fn thread_unsnooze(tx: &mut Tx<'_>, command: Value) -> Outcome {
 }
 
 fn thread_auto_settle_set(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     let enabled = command["enabled"] == true;
     thread_patch(tx, &command, "thread.auto-settle-set", |t, now| {
         if enabled != is_null(t, "autoSettleDisabledAt") {
@@ -2429,9 +2536,11 @@ fn thread_auto_settle_set(tx: &mut Tx<'_>, command: Value) -> Outcome {
 }
 
 fn thread_pin(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     let order_key = command["orderKey"].clone();
     thread_patch(tx, &command, "thread.pinned", |t, now| {
         let was_pinned = !is_null(t, "pinnedAt");
+        let promotes = t["settledOverride"] == "settled" || !is_null(t, "snoozedUntil");
         if !was_pinned {
             t["pinnedAt"] = json!(now);
             if order_key.is_string() {
@@ -2448,12 +2557,15 @@ fn thread_pin(tx: &mut Tx<'_>, command: Value) -> Outcome {
         }
         t["snoozedUntil"] = Value::Null;
         t["snoozedAt"] = Value::Null;
-        t["updatedAt"] = json!(now);
+        if !was_pinned || promotes {
+            t["updatedAt"] = json!(now);
+        }
         Ok(())
     })
 }
 
 fn thread_unpin(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     thread_patch(tx, &command, "thread.unpinned", |t, now| {
         if !is_null(t, "pinnedAt") {
             t["pinnedAt"] = Value::Null;
@@ -2465,6 +2577,7 @@ fn thread_unpin(tx: &mut Tx<'_>, command: Value) -> Outcome {
 }
 
 fn thread_pin_reorder(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     let key = command["orderKey"].clone();
     thread_patch(tx, &command, "thread.pin-reordered", |t, now| {
         if t["pinOrderKey"] != key {
@@ -2476,6 +2589,7 @@ fn thread_pin_reorder(tx: &mut Tx<'_>, command: Value) -> Outcome {
 }
 
 fn thread_active_reorder(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    refuse_archived(tx, &command)?;
     let key = command["orderKey"].clone();
     thread_patch(tx, &command, "thread.active-reordered", |t, _| {
         t["activeOrderKey"] = key;
@@ -2528,7 +2642,9 @@ fn thread_pull_request_link(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let updated = crate::pull_requests::decide(&thread, &command, &now).unwrap_or(thread);
     let cid = command["commandId"].as_str().map(str::to_owned);
     tx.append(
-        Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+        Draft::new(&thread_id, "thread.pull-request-synced", updated)
+            .command(cid.as_deref())
+            .payload_instance(),
     )?;
     Ok(vec![])
 }
@@ -2581,7 +2697,11 @@ fn thread_issue_link(tx: &mut Tx<'_>, command: Value) -> Outcome {
         map.insert("updatedAt".into(), json!(now));
     }
     let cid = command["commandId"].as_str().map(str::to_owned);
-    tx.append(Draft::new(&thread_id, "thread.issue-synced", thread).command(cid.as_deref()))?;
+    tx.append(
+        Draft::new(&thread_id, "thread.issue-synced", thread)
+            .command(cid.as_deref())
+            .payload_instance(),
+    )?;
     Ok(vec![])
 }
 
@@ -2598,7 +2718,9 @@ fn thread_pull_request_link_sync(tx: &mut Tx<'_>, command: Value) -> Outcome {
     if let Some(updated) = crate::pull_requests::decide_link_sync(&thread, &command) {
         let cid = command["commandId"].as_str().map(str::to_owned);
         tx.append(
-            Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+            Draft::new(&thread_id, "thread.pull-request-synced", updated)
+                .command(cid.as_deref())
+                .payload_instance(),
         )?;
     }
     Ok(vec![])
@@ -2645,7 +2767,9 @@ fn thread_pull_request_sync(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let updated = crate::pull_requests::decide_branch_sync(&thread, &command, &now);
     let cid = command["commandId"].as_str().map(str::to_owned);
     tx.append(
-        Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+        Draft::new(&thread_id, "thread.pull-request-synced", updated)
+            .command(cid.as_deref())
+            .payload_instance(),
     )?;
     Ok(vec![])
 }
@@ -2707,7 +2831,9 @@ fn thread_pull_request_watch(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let updated = crate::pull_requests::decide_watch(&thread, &command, &now).unwrap_or(thread);
     let cid = command["commandId"].as_str().map(str::to_owned);
     tx.append(
-        Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+        Draft::new(&thread_id, "thread.pull-request-synced", updated)
+            .command(cid.as_deref())
+            .payload_instance(),
     )?;
     Ok(vec![])
 }
@@ -2720,7 +2846,9 @@ pub(crate) fn pull_request_watch_checks_reopen(tx: &mut Tx<'_>, command: Value) 
     if let Some(updated) = crate::pull_requests::reopen_checks(&thread) {
         let cid = command["commandId"].as_str().map(str::to_owned);
         tx.append(
-            Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+            Draft::new(&thread_id, "thread.pull-request-synced", updated)
+                .command(cid.as_deref())
+                .payload_instance(),
         )?;
     }
     Ok(vec![])
@@ -2794,7 +2922,9 @@ pub(crate) fn pull_request_watch_sync(tx: &mut Tx<'_>, command: Value) -> Outcom
     if changed {
         // T3 sends `thread.pull-request-link-updated` per link; this store keeps whole threads.
         tx.append(
-            Draft::new(&thread_id, "thread.pull-request-synced", thread).command(cid.as_deref()),
+            Draft::new(&thread_id, "thread.pull-request-synced", thread)
+                .command(cid.as_deref())
+                .payload_instance(),
         )?;
     }
     let Some(wake) = wake else {
@@ -2877,7 +3007,12 @@ fn thread_user_input_dismiss(tx: &mut Tx<'_>, command: Value) -> Outcome {
     request["status"] = json!("cancelled");
     request["resolvedAt"] = json!(tx.now());
     let node = request["nodeId"].as_str().map(str::to_owned);
-    tx.append(Draft::new(&thread_id, "runtime-request.updated", request).node(node.as_deref()))?;
+    let instance = respond_instance(tx, &thread_id, &request)?;
+    tx.append(
+        Draft::new(&thread_id, "runtime-request.updated", request)
+            .node(node.as_deref())
+            .provider_instance(instance.as_deref()),
+    )?;
     Ok(vec![Effect::Respond {
         thread_id,
         request: json!({"requestId": request_id, "decision": "cancel"}),
@@ -2897,7 +3032,7 @@ fn provider_session_detach(tx: &mut Tx<'_>, command: Value) -> Outcome {
     if let Some(mut session) = tx.entity(&thread_id, "providerSessions", session_id)? {
         session["status"] = json!("stopped");
         session["updatedAt"] = json!(tx.now());
-        tx.append(Draft::new(&thread_id, "provider-session.updated", session))?;
+        tx.append(Draft::new(&thread_id, "provider-session.updated", session).payload_instance())?;
     }
     Ok(vec![Effect::CloseSession { thread_id }])
 }

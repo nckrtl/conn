@@ -13,6 +13,62 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 `conn-support/src/input.rs` and the generator walk `tools/schema-rules.mjs`. Proof:
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
 
+**Undo of a settle and thread times (2026-11-23):** `thread.unsettle` reads
+`restoreUnsettledAt`, as T3's `Orchestrator.ts`: a time restores the Active anchor the settle
+cleared, `null` restores no anchor, a time that does not parse refuses the command, and a
+thread already active keeps its anchor and `updatedAt` but still records `thread.unsettled`.
+- Command times (`restoreUnsettledAt`, `snoozedUntil`, `visitedAt`) parse as T3's
+  `DateTime.make`: `conn-support/src/js_date.rs` ports V8's `Date.parse`, legacy forms
+  included, after Effect's zone rule; a time without a zone is local, in the server's zone
+  (`EngineConfig::zone`). Wire times outside years 0000 to 9999 get `toISOString`'s signed
+  six-digit year.
+- An archived thread refuses settle, auto-settle, unsettle, snooze, unsnooze, auto-settle set,
+  pin, unpin and both reorders before any other check, with T3's message.
+- The thread's `updatedAt` follows T3's `ProjectionStore.ts`: a thread event writes its
+  payload's, every other event its own time, in the row and the stored thread
+  (`PAYLOAD_UPDATED_AT_EVENTS`, generated). Pin and settle keep `updatedAt` where T3's deciders
+  do.
+- The event envelope names `providerInstanceId` where T3's does: a run's events the run's, a
+  provider event the session's, a thread event the thread's; none for a request answered by
+  message, closed link requests and remote delegation rows (`store::Instance`).
+
+- Command receipts are kept for good and record refusals, as T3's `CommandReceiptV2`: a retry
+  gets the recorded refusal again (`Command … was previously rejected: …`), and a receipt
+  answers only for its owner (`owner_kind` thread or project, `owner_id`; T3's
+  `commandThreadId`, so a fork's and a merge-back's is the target thread). Receipts from
+  before owners (main's schema 4) get theirs from their own execution: the event at the
+  receipt's sequence must carry its command id, and a delegation's parent is the thread whose
+  task row names the created child. One nothing proves is kept and refused. The upgrade runs
+  in one transaction, a page of receipts at a time. A project receipt records its project and
+  command type, read in the project write itself (T3's `ProjectService.commit`).
+  Refusals made before the decision (access, a disabled provider) stay open, as T3's
+  mode-limit refusals. A replayed `queue.resume` or `queued-run.start` checks the queue
+  again, and the queue start holds the queue when the run's provider is off for its project. A command that writes nothing answers its own thread's latest sequence.
+- Thread setters record their event even when nothing changes, as T3's deciders do.
+  `thread.auto-settle` refuses a thread set active or changed after its snapshot, then
+  settles. A settle whose `expectedLatestRunId` is not the latest run is refused. `thread.visit` keeps the later visit and records `thread.visit-recorded`.
+- The receipts' high-water mark reads an index. Opening the engine off the runtime thread
+  is #261's.
+
+Proof: `a_fork_receipt_belongs_to_its_target_thread`,
+`receipts_from_before_owners_name_them_or_refuse`,
+`a_repin_records_its_event_and_a_quiet_stop_answers_its_thread`,
+`a_replayed_queue_resume_starts_what_waits`, `auto_settle_rechecks_the_thread_against_its_snapshot`,
+`a_settle_for_a_stale_run_is_refused`,
+`a_delayed_visit_keeps_the_later_time`, `a_merge_back_first_message_names_its_instance`,
+`the_receipt_high_water_reads_an_index`, `a_reused_id_after_pruning_belongs_to_its_last_execution`,
+`a_legacy_delegation_belongs_to_its_parent`, `the_receipt_upgrade_is_all_or_nothing`,
+`a_project_write_checks_the_receipt_it_would_reuse`, `a_replayed_resume_holds_a_queue_whose_provider_is_off`,
+`a_stale_visit_loses_to_a_mark_in_mains_format`, `persists_rejected_command_receipts_across_retries` and the duplicate-create retry in
+`a_retried_command_returns_its_receipt` (T3's own tests, ported),
+`an_old_retry_after_an_undo_leaves_the_thread_as_it_is` (4,400 writes later),
+`date_input_matches_t3s` (T3's own answers for 1683 strings in five zones,
+`tools/gen-date-cases.mjs --check`), `each_event_type_sets_the_thread_updated_at_as_t3`,
+`thread_commands_move_updated_at_as_t3`, `an_archived_thread_refuses_lifecycle_commands_first`,
+`a_turns_events_name_the_provider_instance` and `thread_lifecycle_commands_reach_the_shell_row`
+in `conn-engine`; `client-check.mjs` (a year-10000 anchor decodes with T3's shell schema);
+`thread-cli-diff.mjs` compares every event type's `providerInstanceId` with the T3 server's.
+
 **Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left
 out, the child bound to it; a refused or replayed command removes it. Proof: four `conn-mcp`

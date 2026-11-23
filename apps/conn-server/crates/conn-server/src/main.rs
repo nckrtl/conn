@@ -50,6 +50,7 @@ fn run_server() {
         status_cwd: Some(options.state_dir.clone()),
         // Checks turn the probe off, so they never run this machine's `claude`.
         status_probe: std::env::var_os("CONN_CLAUDE_STATUS_PROBE").is_none_or(|v| v != "off"),
+        model_manifest: options.model_manifest.clone(),
         // The engine closes idle sessions (`--session-idle-timeout`), one rule for all.
         idle_timeout: None,
         // T3's text after the runtime instructions when the session has `conn`.
@@ -83,6 +84,8 @@ fn run_server() {
         state_dir: options.state_dir.clone(),
         attachments_dir: Some(options.state_dir.join("attachments")),
         self_command: None,
+        model_manifest: options.model_manifest.clone(),
+        status_notifier: options.status_notifier.clone(),
     };
     // `claudeAgent`, `codex` and `antigravity`, and one more provider per `providerInstances`
     // entry of these drivers, each with its entry's settings (`conn_server::instances`).

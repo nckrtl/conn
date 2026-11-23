@@ -35,6 +35,10 @@ pub struct AntigravityConfig {
     /// This server's executable: the stdio MCP bridge and the browser helper. `None`: the
     /// running executable.
     pub self_command: Option<String>,
+    /// The model manifest the server accepted last: its default and legacy marks.
+    pub model_manifest: conn_provider::LiveManifest,
+    /// Tells the server's config streams when a session changed the entry.
+    pub status_notifier: conn_provider::StatusNotifier,
 }
 
 pub struct AntigravityProvider {
@@ -42,7 +46,8 @@ pub struct AntigravityProvider {
     settings: AntigravitySettings,
     config: AntigravityConfig,
     dirs: Directories,
-    observed: std::sync::Mutex<Observed>,
+    /// Shared with the sessions' observers, which report what the agent lists.
+    observed: Arc<std::sync::Mutex<Observed>>,
     /// Tests start a scripted agent here instead of `agy`.
     #[cfg(test)]
     test_spawner: Option<session::Spawner>,
@@ -71,7 +76,7 @@ impl AntigravityProvider {
             settings,
             config,
             dirs,
-            observed: std::sync::Mutex::new(Observed::default()),
+            observed: Arc::default(),
             #[cfg(test)]
             test_spawner: None,
         }
@@ -100,16 +105,40 @@ impl AntigravityProvider {
         ))
     }
 
-    /// `onAuthRequired`, published before the failure that caused it is returned.
-    fn auth_required(&self) {
-        let mut observed = lock(&self.observed);
-        *observed = antigravity::auth_required(&self.settings, &observed);
+    /// Changes the entry and tells the config streams.
+    fn update(&self, change: impl FnOnce(&Observed) -> Observed) {
+        {
+            let mut observed = lock(&self.observed);
+            *observed = change(&observed);
+        }
+        self.config.status_notifier.notify();
     }
 
-    /// `onConfigOptionsUpdated`.
-    fn config_options_updated(&self, options: &Value) {
-        let mut observed = lock(&self.observed);
-        *observed = antigravity::config_options_updated(&observed, options);
+    /// `onAuthRequired`, published before the failure that caused it is returned.
+    fn auth_required(&self) {
+        self.update(|observed| antigravity::auth_required(&self.settings, observed));
+    }
+
+    /// The session events T3's driver forwards (`onConfigOptionsUpdated`,
+    /// `onAvailableCommands`); `cwd` is the session's workspace, `None` for a model refresh.
+    fn observer(&self, cwd: Option<String>) -> session::Observer {
+        let observed = self.observed.clone();
+        let notifier = self.config.status_notifier.clone();
+        Arc::new(move |update| {
+            {
+                let mut current = lock(&observed);
+                *current = match update {
+                    session::CatalogUpdate::ConfigOptions(options) => {
+                        antigravity::config_options_updated(&current, options)
+                    }
+                    session::CatalogUpdate::AvailableCommands(commands) => {
+                        let now = conn_support::time::now_iso();
+                        antigravity::available_commands(&current, commands, cwd.as_deref(), &now)
+                    }
+                };
+            }
+            notifier.notify();
+        })
     }
 
     /// `publishCatalog`: thinking levels differ per model and the agent reports them only
@@ -126,16 +155,17 @@ impl AntigravityProvider {
                 .map(str::to_owned)
         });
         let (Some(current), Some(_)) = (current, antigravity::thinking_config(options)) else {
+            // No model switch: what the agent already sent still counts.
+            session.drain().await;
             return;
         };
         let mut values = antigravity::model_option_values(options);
         values.push(current);
         for value in values {
-            // T3 ignores a refused selection.
-            if let Ok(options) = session.set_config_option_in_order("model", &value).await {
-                self.config_options_updated(&options);
-            }
+            // T3 ignores a refused selection; the observer hears the options it applied.
+            let _ = session.set_config_option_in_order("model", &value).await;
         }
+        session.drain().await;
     }
 
     fn self_command(&self) -> String {
@@ -189,10 +219,18 @@ impl AntigravityProvider {
             .flatten()
     }
 
-    /// `onSessionStarted`: the session proves the sign-in; its models and commands are listed.
-    fn session_started(&self, initialize: &Value, setup: &Value) {
-        let mut observed = lock(&self.observed);
-        *observed = antigravity::session_started(&observed, initialize, setup);
+    /// `onSessionStarted`: the session proves the sign-in; its models are listed, and its
+    /// workspace (`cwd`, none for a model refresh) gets a snapshot.
+    fn session_started(&self, initialize: &Value, setup: &Value, cwd: Option<&str>) {
+        let now = conn_support::time::now_iso();
+        self.update(|observed| {
+            antigravity::session_started(
+                observed,
+                initialize,
+                setup,
+                cwd.map(|cwd| (cwd, now.as_str())),
+            )
+        });
     }
 
     /// Starts `agy acp` and opens a session in `cwd` (T3's `openSession` start); the session
@@ -204,7 +242,9 @@ impl AntigravityProvider {
         model: String,
         provider_session_id: String,
         mcp_servers: Vec<conn_provider::McpServer>,
+        purpose: Purpose,
     ) -> ProviderResult<(AcpSession, mpsc::Receiver<conn_provider::ProviderEvent>)> {
+        let workspace = purpose == Purpose::Thread;
         if let Some(issue) = self.settings.config_issue() {
             return Err(ProviderError::Failed {
                 operation: "configure",
@@ -245,6 +285,9 @@ impl AntigravityProvider {
             // The `agy` CLI on `PATH` has no version known before `initialize`.
             runtime_version: None,
             self_command,
+            default_model: antigravity::catalog(&self.config.model_manifest)
+                .and_then(|catalog| catalog.default_model),
+            observer: Some(self.observer(workspace.then(|| cwd.clone()))),
         };
         let (tx, events) = mpsc::channel(session::EVENT_CAPACITY);
         let (session, _) = AcpSession::open(config, spawner, session::system_env(), tx)
@@ -255,7 +298,7 @@ impl AntigravityProvider {
                 }
             })?;
         let (initialize, setup) = session.handshake().await;
-        self.session_started(&initialize, &setup);
+        self.session_started(&initialize, &setup, workspace.then_some(cwd.as_str()));
         Ok((session, events))
     }
 
@@ -283,6 +326,7 @@ impl AntigravityProvider {
                     String::new(),
                     format!("antigravity-models-{}", conn_support::uuid_v4()),
                     Vec::new(),
+                    Purpose::ModelRefresh,
                 )
                 .await?;
             self.publish_catalog(&session).await;
@@ -298,6 +342,14 @@ impl AntigravityProvider {
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&cwd)).await;
         result
     }
+}
+
+/// Why a session starts: a thread's workspace gets a snapshot; a model refresh runs in a
+/// scratch folder that is no workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Purpose {
+    Thread,
+    ModelRefresh,
 }
 
 /// T3's `refreshModels` limit for the throwaway session.
@@ -370,7 +422,13 @@ fn spawner(
             env_set: launch.env,
         };
         let (events_tx, events) = mpsc::channel(session::EVENT_CAPACITY);
-        let process = match Process::spawn(&spec, MAX_LINE_BYTES, events_tx) {
+        // T3's stderr handler: a sign-in URL there ends the session as one on stdout does.
+        let process = match Process::spawn_observing_stderr(
+            &spec,
+            MAX_LINE_BYTES,
+            events_tx,
+            Some(Box::new(antigravity::stderr_sign_in)),
+        ) {
             Ok(process) => process,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&run_temp);
@@ -441,6 +499,7 @@ impl Provider for AntigravityProvider {
             &self.settings,
             &observed,
             checked_at,
+            antigravity::catalog(&self.config.model_manifest).as_ref(),
         ))
     }
 
@@ -495,6 +554,7 @@ impl Provider for AntigravityProvider {
                     selection["model"].as_str().unwrap_or("").to_owned(),
                     input.provider_session_id.as_str().to_owned(),
                     input.mcp_servers.clone(),
+                    Purpose::Thread,
                 )
                 .await?;
             let now = SystemEnv.now();
@@ -585,6 +645,31 @@ mod tests {
     fn provider(
         scripts: Vec<Vec<Value>>,
     ) -> (AntigravityProvider, Vec<Arc<Mutex<Script>>>, PathBuf) {
+        let (provider, scripts, dir, _) = provider_with(scripts, Default::default());
+        (provider, scripts, dir)
+    }
+
+    /// Counts the agent runtimes that ended (their stop dropped or run).
+    struct Ended(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for Ended {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// [`provider`] with a live manifest; also returns how many agent runtimes ended.
+    fn provider_with(
+        scripts: Vec<Vec<Value>>,
+        manifest: conn_provider::LiveManifest,
+    ) -> (
+        AntigravityProvider,
+        Vec<Arc<Mutex<Script>>>,
+        PathBuf,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let ended = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = ended.clone();
         let dir = std::env::temp_dir().join(format!("conn-agy-{}", conn_support::uuid_v4()));
         let scripts: Vec<_> = scripts
             .into_iter()
@@ -597,6 +682,8 @@ mod tests {
                 state_dir: dir.clone(),
                 attachments_dir: None,
                 self_command: Some("/conn-server".into()),
+                model_manifest: manifest,
+                status_notifier: Default::default(),
             },
             Some(&json!({"enabled": true})),
         );
@@ -605,13 +692,40 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| std::io::Error::other("no script left"))?;
             let (writer, events) = replay_agent::spawn(script);
+            let ended = Ended(counter.clone());
             Ok(session::Spawned {
                 writer,
                 events,
-                stop: Box::new(|_| Box::pin(async {})),
+                stop: Box::new(move |_| {
+                    drop(ended);
+                    Box::pin(async {})
+                }),
             })
         }));
-        (provider, scripts, dir)
+        (provider, scripts, dir, ended)
+    }
+
+    fn entry_of(provider: &AntigravityProvider) -> Value {
+        provider
+            .server_provider_entry("2026-11-23T00:00:00.000Z")
+            .unwrap()
+    }
+
+    fn levels(entry: &Value, slug: &str) -> (Vec<String>, Value) {
+        let model = entry["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["slug"] == slug)
+            .unwrap();
+        let descriptor = &model["capabilities"]["optionDescriptors"][0];
+        let ids = descriptor["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap().to_owned())
+            .collect();
+        (ids, descriptor["currentValue"].clone())
     }
 
     fn complete(script: &Arc<Mutex<Script>>) {
@@ -762,5 +876,219 @@ mod tests {
             refresh_failure_detail(&ProviderError::SessionStopped),
             REFRESH_FAILED
         );
+        // "never copies unrecognized agent error details into the refresh error".
+        let secret = "https://accounts.example.test/o/oauth2?code=sk-secret-123";
+        for data in [
+            json!({"details": format!("Token refresh failed for {secret}")}),
+            json!({"details": {"stack": "secret frame", "env": {"HOME": "/"}}}),
+            json!(["python-socks is required to use a SOCKS proxy"]),
+        ] {
+            let error = RpcError {
+                code: -32603,
+                message: format!("Internal error {secret}"),
+                data: Some(data.clone()),
+            };
+            assert_eq!((ANTIGRAVITY.rpc_failure)(&error), None, "{data}");
+            let generic = ProviderError::Failed {
+                operation: "session/new",
+                detail: error.message.clone(),
+            };
+            assert_eq!(refresh_failure_detail(&generic), REFRESH_FAILED, "{data}");
+        }
+        let known = RpcError {
+            code: -32603,
+            message: "Internal error".into(),
+            data: Some(json!({"details": format!(
+                "Traceback (most recent call last):\n  proxy {secret}\npython-socks is required to use a SOCKS proxy"
+            )})),
+        };
+        let detail = (ANTIGRAVITY.rpc_failure)(&known).map(|e| refresh_failure_detail(&e));
+        assert!(detail.as_deref().is_some_and(|d| !d.contains("sk-secret")));
+    }
+
+    /// T3's `classifyModels` with `ModelCatalog.current`: a fetched manifest's default and
+    /// legacy marks reach the entry, and a session that asks for the default gets it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_fetched_manifest_reaches_the_antigravity_entry() {
+        let live = conn_provider::LiveManifest::default();
+        let setup = json!([{"id": "model", "name": "Model", "category": "model", "type": "select",
+            "currentValue": "gemini-a",
+            "options": [{"value": "gemini-a", "name": "Gemini A"}, {"value": "gemini-b", "name": "Gemini B"},
+                        {"value": "gemini-old", "name": "Gemini Old"}]}]);
+        let (provider, _scripts, dir, _) = provider_with(vec![handshake(setup)], live.clone());
+        provider.refresh_models().unwrap().await.unwrap();
+        let default = |entry: &Value| {
+            entry["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["isDefault"] == true)
+                .map(|m| m["slug"].clone())
+        };
+        assert_eq!(default(&entry_of(&provider)), Some(json!("gemini-a")));
+        live.set(json!({"providers": {"antigravity": {
+            "profiles": {},
+            "defaults": {"chat": "gemini-b"},
+            "models": [{"slug": "gemini-b", "name": "B", "status": "current"},
+                       {"slug": "gemini-old", "name": "Old", "status": "legacy"}]
+        }}}));
+        let entry = entry_of(&provider);
+        assert_eq!(default(&entry), Some(json!("gemini-b")));
+        let old = entry["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["slug"] == "gemini-old")
+            .unwrap();
+        assert_eq!(old["isLegacy"], true);
+        let catalog = antigravity::catalog(&live).unwrap();
+        assert_eq!(catalog.default_model.as_deref(), Some("gemini-b"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3's `configOptionUpdates` check: an update the agent pushed while a selection was in
+    /// flight is newer than the selection's reply, which stays out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_update_during_a_selection_beats_its_stale_reply() {
+        let a = || options("gemini-a", &["low", "high"]);
+        let b = options("gemini-b", &["minimal", "max"]);
+        let stale = options("gemini-b", &["low", "high"]);
+        let mut script = handshake(a());
+        script.extend([
+            select("gemini-a"),
+            reply("session/set_config_option", json!({"configOptions": a()})),
+            select("gemini-b"),
+            json!({"type": "emit_inbound", "frame": {"kind": "notification", "method": "session/update",
+                "params": {"sessionId": "s1", "update": {"sessionUpdate": "config_option_update",
+                                                          "configOptions": b}}}}),
+            reply("session/set_config_option", json!({"configOptions": stale})),
+            select("gemini-a"),
+            reply("session/set_config_option", json!({"configOptions": a()})),
+        ]);
+        let (provider, scripts, dir) = provider(vec![script]);
+        provider.refresh_models().unwrap().await.unwrap();
+        complete(&scripts[0]);
+        let entry = entry_of(&provider);
+        assert_eq!(
+            levels(&entry, "gemini-b"),
+            (
+                vec!["minimal".to_owned(), "max".to_owned()],
+                json!("minimal")
+            )
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3 consumes `AvailableCommandsUpdated` and drains the events before it closes the
+    /// session, also when no model switch runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refresh_without_a_model_switch_keeps_the_agents_commands() {
+        let mut script = handshake(json!([{"id": "model", "name": "Model", "category": "model",
+            "type": "select", "currentValue": "gemini-a",
+            "options": [{"value": "gemini-a", "name": "Gemini A"}]}]));
+        script.push(json!({"type": "emit_inbound", "frame": {"kind": "notification", "method": "session/update",
+            "params": {"sessionId": "s1", "update": {"sessionUpdate": "available_commands_update",
+                "availableCommands": [{"name": "goal", "description": " Set a goal ",
+                                        "input": {"hint": "Objective"}},
+                                       {"name": "goal", "description": "again"}]}}}}));
+        let (provider, scripts, dir) = provider(vec![script]);
+        provider.refresh_models().unwrap().await.unwrap();
+        complete(&scripts[0]);
+        assert_eq!(
+            entry_of(&provider)["slashCommands"],
+            json!([{"name": "goal", "description": "Set a goal", "input": {"hint": "Objective"}}])
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3's expired-sign-in fixture: `agy` prints a plain-text sign-in URL. The refresh stops
+    /// the agent, and a client already subscribed sees the unauthenticated entry before the
+    /// sign-in error returns.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sign_in_url_ends_the_refresh_and_signs_out() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=fixture-state";
+        let signed_in = handshake(json!([{"id": "model", "name": "Model", "category": "model",
+            "type": "select", "currentValue": "gemini-a",
+            "options": [{"value": "gemini-a", "name": "Gemini A"}]}]));
+        let login = vec![
+            expect("initialize", json!("<any>")),
+            json!({"type": "emit_raw", "line": format!("{}{url}", antigravity::AUTH_STDOUT_PREFIX)}),
+        ];
+        let (provider, scripts, dir, ended) =
+            provider_with(vec![signed_in, login], Default::default());
+        provider.refresh_models().unwrap().await.unwrap();
+        assert_eq!(entry_of(&provider)["auth"]["status"], "authenticated");
+        let mut changes = provider.config.status_notifier.subscribe();
+        changes.mark_unchanged();
+        let error = provider.refresh_models().unwrap().await.unwrap_err();
+        assert_eq!(
+            error,
+            ProviderError::Failed {
+                operation: "refresh-models",
+                detail: REFRESH_SIGN_IN.into(),
+            }
+        );
+        assert!(
+            changes.has_changed().unwrap(),
+            "the config stream heard the sign-out"
+        );
+        let entry = entry_of(&provider);
+        assert_eq!(entry["auth"], json!({"status": "unauthenticated"}));
+        assert_eq!(entry["models"], json!([]));
+        assert_eq!(
+            ended.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "both agents ended"
+        );
+        assert_eq!(
+            lock(&scripts[1]).cursor,
+            2,
+            "the agent got no request after the URL"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `parseAntigravityAuthorizationUrl` and T3's stdout and stderr signals.
+    #[test]
+    fn sign_in_urls_are_recognised_as_t3_recognises_them() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=fixture-state";
+        assert!(antigravity::is_authorization_url(url));
+        for bad in [
+            "https://evil.example/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=s",
+            "https://accounts.google.com/o/oauth2/v2/auth?response_type=token&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=s",
+            "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A80%2F&state=s",
+            "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F",
+            "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=a&state=b",
+        ] {
+            assert!(!antigravity::is_authorization_url(bad), "{bad}");
+        }
+        let prefix = antigravity::AUTH_STDOUT_PREFIX;
+        assert_eq!(
+            antigravity::stdout_signal(&format!("{prefix}{url}")),
+            Some(ProviderError::Failed {
+                operation: antigravity::SIGN_IN_REQUIRED,
+                detail: antigravity::SIGN_IN_REQUIRED_MESSAGE.into(),
+            })
+        );
+        assert!(matches!(
+            antigravity::stdout_signal(&format!("{prefix}https://example.com")),
+            Some(ProviderError::Failed {
+                operation: "authorization-url",
+                ..
+            })
+        ));
+        assert_eq!(antigravity::stdout_signal("{\"jsonrpc\":\"2.0\"}"), None);
+        let carried = Some(format!("{prefix}{url}"));
+        assert_eq!(
+            antigravity::stderr_sign_in(&format!("{prefix}{url}\r")),
+            carried
+        );
+        let marker = format!("{}{}", antigravity::AUTH_BROWSER_MARKER, json!(url));
+        assert_eq!(antigravity::stderr_sign_in(&marker), carried);
+        assert_eq!(
+            antigravity::stderr_sign_in(&format!("{prefix}https://example.com")),
+            None
+        );
+        assert_eq!(antigravity::stderr_sign_in("I1123 log line"), None);
     }
 }

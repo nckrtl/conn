@@ -275,6 +275,39 @@ impl Provider for CodexProvider {
         })
     }
 
+    /// `snapshotForCwd`: the machine entry with the skills Codex sees in `cwd`. A disabled
+    /// instance answers its entry as it is.
+    fn snapshot_for_cwd(&self, cwd: &str) -> Option<BoxFuture<'_, ProviderResult<Value>>> {
+        let cwd = cwd.to_owned();
+        Some(Box::pin(async move {
+            let machine = crate::lock(&self.status).clone();
+            if !self.settings.enabled {
+                return Ok(machine);
+            }
+            let server_cwd = match &self.config.status_cwd {
+                Some(cwd) => cwd.clone(),
+                None => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+            };
+            let input = status::ProbeInput {
+                instance_id: self.instance_id.as_str(),
+                config: &self.config,
+                settings: &self.settings,
+                host_env: conn_support::login_env::child_env(),
+                cwd: server_cwd,
+                checked_at: conn_support::time::now_iso(),
+            };
+            let skills = status::skills_for_cwd(&input, &cwd)
+                .await
+                .map_err(|detail| ProviderError::Failed {
+                    operation: "snapshot-for-cwd",
+                    detail,
+                })?;
+            let mut scoped = machine;
+            scoped["skills"] = Value::Array(skills);
+            Ok(scoped)
+        }))
+    }
+
     fn refresh_status_on_interval(
         &self,
         _instance: Option<Value>,

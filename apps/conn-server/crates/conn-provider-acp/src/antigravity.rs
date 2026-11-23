@@ -22,6 +22,16 @@ const DISPLAY_NAME: &str = "Antigravity";
 pub(crate) const DEFAULT_MODEL: &str = "antigravity-default";
 /// `OPEN_MODEL_ACCESS_RELEASE`: from here on the agent offers every model to any client name.
 const OPEN_MODEL_ACCESS_RELEASE: [u64; 3] = [1, 5, 1];
+/// `ANTIGRAVITY_AUTH_STDOUT_PREFIX`: the line `agy` prints with a sign-in URL.
+pub(crate) const AUTH_STDOUT_PREFIX: &str =
+    "Open the following link to authenticate the ACP server: ";
+/// `ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE`: a sign-in URL with no sign-in flow to take it.
+pub(crate) const SIGN_IN_REQUIRED_MESSAGE: &str =
+    "Sign in to Antigravity in Settings before you continue.";
+/// `parseAntigravityAuthorizationUrl`'s failure text.
+const INVALID_AUTH_URL: &str = "Antigravity returned an invalid Google sign-in URL.";
+/// `maxAuthorizationUrlLength`.
+const MAX_AUTH_URL: usize = 16_384;
 /// `ANTIGRAVITY_AUTH_BROWSER_MARKER`: what our browser helper writes to stderr.
 pub const AUTH_BROWSER_MARKER: &str = "__T3_ANTIGRAVITY_AUTH_URL__";
 /// The subcommand of this server that stands in for a browser (`BROWSER`).
@@ -492,32 +502,48 @@ fn model_options(setup: &Value) -> (Option<String>, Option<String>, Vec<String>)
     )
 }
 
-/// `applyAntigravityAcpModelSelection` with no catalog default: the `model` config option and
-/// value to set, `None` when the session keeps its model, or the refusal T3 gives.
-pub(crate) fn model_switch(setup: &Value, model: &str) -> Result<Option<(String, String)>, String> {
+/// `applyAntigravityAcpModelSelection`: the `model` config option and value to set, `None`
+/// when the session keeps its model, or the refusal T3 gives. A selection that asks for the
+/// default takes the catalog's `default_model` when the agent lists it (or its family), else
+/// keeps the session's own model.
+pub(crate) fn model_switch(
+    setup: &Value,
+    model: &str,
+    default_model: Option<&str>,
+) -> Result<Option<(String, String)>, String> {
     let (config_id, current, options) = model_options(setup);
     let explicit = !model.is_empty() && model != DEFAULT_MODEL;
-    if !explicit {
+    let legacy_family = |model: &str| {
+        options
+            .iter()
+            .any(|family| model.starts_with(&format!("{family}-")))
+    };
+    let resolved = if explicit {
+        Some(model.to_owned())
+    } else {
+        default_model
+            .filter(|d| options.iter().any(|o| o == d) || legacy_family(d))
+            .map(str::to_owned)
+            .or_else(|| current.clone())
+    };
+    let Some(resolved) = resolved else {
         return Ok(None);
-    }
+    };
     let Some(config_id) = config_id else {
         return Ok(None);
     };
-    if current.as_deref() == Some(model) {
+    if current.as_deref() == Some(resolved.as_str()) {
         return Ok(None);
     }
-    if options.iter().any(|o| o == model) {
-        return Ok(Some((config_id, model.to_owned())));
+    if options.contains(&resolved) {
+        return Ok(Some((config_id, resolved)));
     }
     // `legacyAntigravityFamily`: 1.3 ids such as `gemini-3.8-flash-high` still work.
-    if options
-        .iter()
-        .any(|family| model.starts_with(&format!("{family}-")))
-    {
-        return Ok(Some((config_id, model.to_owned())));
+    if legacy_family(&resolved) {
+        return Ok(Some((config_id, resolved)));
     }
     Err(format!(
-        "Antigravity model '{model}' is unavailable for this Google account. Select an available model."
+        "Antigravity model '{resolved}' is unavailable for this Google account. Select an available model."
     ))
 }
 
@@ -600,6 +626,7 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     mcp_over_http: true,
     supports_image_prompts: true,
     rpc_failure,
+    stdout_signal: Some(stdout_signal),
 };
 
 /// `ProviderError::Failed` operation of an error reply that asks for a Google sign-in.
@@ -655,6 +682,204 @@ pub(crate) struct Observed {
     /// The thinking option each model reported while selected (T3's `thinkingLevels`);
     /// `None`: it has none. One entry per listed model at most; cleared on sign-out.
     pub thinking_levels: std::collections::BTreeMap<String, Option<Value>>,
+    /// The agent's commands (`onAvailableCommands`), machine-wide.
+    pub slash_commands: Vec<Value>,
+    /// What sessions in each workspace reported, at most [`MAX_WORKSPACE_SNAPSHOTS`].
+    pub workspaces: Vec<Value>,
+}
+
+/// `MAX_WORKSPACE_SNAPSHOTS` (`AntigravityProvider.ts`).
+const MAX_WORKSPACE_SNAPSHOTS: usize = 32;
+
+/// The bundled Antigravity catalog (`tools/gen-model-catalog.mjs`).
+const BUNDLED_CATALOG: &str = include_str!("antigravity_catalog.json");
+
+/// The parts of `ModelCatalog.current("antigravity")` this driver reads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Catalog {
+    pub default_model: Option<String>,
+    /// Slugs with their status (`current` or `legacy`).
+    pub models: Vec<(String, String)>,
+}
+
+/// `ModelCatalog.current`: the manifest the server accepted last, else the bundled one. `None`
+/// when the accepted manifest has no valid Antigravity catalog (`resolveProviderCatalog`).
+pub(crate) fn catalog(manifest: &conn_provider::LiveManifest) -> Option<Catalog> {
+    let section = match manifest.provider_catalog(DRIVER) {
+        None => return bundled_catalog().clone(),
+        Some(section) => section?,
+    };
+    catalog_from(&section)
+}
+
+/// The bundled catalog, parsed once.
+fn bundled_catalog() -> &'static Option<Catalog> {
+    static BUNDLED: std::sync::OnceLock<Option<Catalog>> = std::sync::OnceLock::new();
+    BUNDLED.get_or_init(|| {
+        serde_json::from_str::<Value>(BUNDLED_CATALOG)
+            .ok()
+            .and_then(|section| catalog_from(&section))
+    })
+}
+
+/// `resolveProviderCatalog`'s checks on one catalog: unique slugs, known profiles, a listed
+/// default.
+fn catalog_from(section: &Value) -> Option<Catalog> {
+    let default_model = section
+        .get("defaultChatModel")
+        .or_else(|| section.pointer("/defaults/chat"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut models: Vec<(String, String)> = Vec::new();
+    for entry in section.get("models")?.as_array()? {
+        let slug = entry.get("slug")?.as_str()?.to_owned();
+        if models.iter().any(|(s, _)| *s == slug) {
+            return None;
+        }
+        if let Some(profile) = entry.get("profile").and_then(Value::as_str)
+            && section.pointer(&format!("/profiles/{profile}")).is_none()
+            && section.get("defaultChatModel").is_none()
+        {
+            return None;
+        }
+        models.push((
+            slug,
+            entry["status"].as_str().unwrap_or("current").to_owned(),
+        ));
+    }
+    if default_model
+        .as_ref()
+        .is_some_and(|d| !models.iter().any(|(s, _)| s == d))
+    {
+        return None;
+    }
+    Some(Catalog {
+        default_model,
+        models,
+    })
+}
+
+/// `applyModelCatalog` without family matching: the catalog's legacy marks, and its default
+/// takes the default mark and aliases when the agent lists it.
+pub(crate) fn apply_catalog(models: &mut [Value], catalog: Option<&Catalog>) {
+    for model in models.iter_mut() {
+        if model["isCustom"] == true {
+            continue;
+        }
+        let legacy = catalog.is_some_and(|c| {
+            c.models
+                .iter()
+                .any(|(slug, status)| model["slug"] == slug.as_str() && status == "legacy")
+        });
+        if let Some(fields) = model.as_object_mut() {
+            if legacy {
+                fields.insert("isLegacy".into(), json!(true));
+            } else {
+                fields.remove("isLegacy");
+            }
+        }
+    }
+    let Some(requested) = catalog.and_then(|c| c.default_model.as_deref()) else {
+        return;
+    };
+    if !models.iter().any(|m| m["slug"] == requested) {
+        return;
+    }
+    let Some(previous) = models
+        .iter()
+        .find(|m| m["isDefault"] == true && m["slug"] != requested)
+        .cloned()
+    else {
+        return;
+    };
+    let moved = previous["aliases"].as_array().cloned().unwrap_or_default();
+    for model in models.iter_mut() {
+        let Some(fields) = model.as_object_mut() else {
+            continue;
+        };
+        if fields.get("slug") == previous.get("slug") {
+            fields.remove("isDefault");
+            fields.remove("aliases");
+        } else if fields.get("slug").and_then(Value::as_str) == Some(requested) {
+            let mut aliases = fields
+                .get("aliases")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for alias in &moved {
+                if !aliases.contains(alias) {
+                    aliases.push(alias.clone());
+                }
+            }
+            fields.insert("isDefault".into(), json!(true));
+            if !aliases.is_empty() {
+                fields.insert("aliases".into(), Value::Array(aliases));
+            }
+        }
+    }
+}
+
+/// `nativeCommands`: named commands once each, with a trimmed description and input hint.
+fn native_commands(commands: &Value) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for command in commands.as_array().into_iter().flatten() {
+        let Some(name) = command["name"].as_str() else {
+            continue;
+        };
+        if name.trim().is_empty() || !seen.insert(name.to_owned()) {
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".into(), json!(name));
+        let description = command["description"].as_str().unwrap_or("").trim();
+        if !description.is_empty() {
+            entry.insert("description".into(), json!(description));
+        }
+        let hint = command["input"]["hint"].as_str().unwrap_or("").trim();
+        if !hint.is_empty() {
+            entry.insert("input".into(), json!({"hint": hint}));
+        }
+        out.push(Value::Object(entry));
+    }
+    out
+}
+
+/// Puts `snapshot` (for its `cwd`) last, dropping the oldest past the limit.
+fn upsert_workspace(workspaces: &mut Vec<Value>, snapshot: Value) {
+    workspaces.retain(|w| w["cwd"] != snapshot["cwd"]);
+    workspaces.push(snapshot);
+    if workspaces.len() > MAX_WORKSPACE_SNAPSHOTS {
+        let extra = workspaces.len() - MAX_WORKSPACE_SNAPSHOTS;
+        workspaces.drain(..extra);
+    }
+}
+
+/// `onAvailableCommands`: the agent's commands, machine-wide and, for a session's `cwd`, in
+/// that workspace's snapshot. Ignored while signed out.
+pub(crate) fn available_commands(
+    previous: &Observed,
+    commands: &Value,
+    cwd: Option<&str>,
+    now: &str,
+) -> Observed {
+    let mut next = previous.clone();
+    if next.signed_out {
+        return next;
+    }
+    next.slash_commands = native_commands(commands);
+    if let Some(cwd) = cwd {
+        let skills = previous
+            .workspaces
+            .iter()
+            .find(|w| w["cwd"] == cwd)
+            .map_or_else(|| json!([]), |w| w["skills"].clone());
+        upsert_workspace(
+            &mut next.workspaces,
+            json!({"cwd": cwd, "checkedAt": now, "slashCommands": next.slash_commands, "skills": skills}),
+        );
+    }
+    next
 }
 
 /// `buildServerProvider` + `withInstanceIdentity` for Antigravity.
@@ -663,6 +888,7 @@ pub(crate) fn entry(
     settings: &AntigravitySettings,
     observed: &Observed,
     checked_at: &str,
+    catalog: Option<&Catalog>,
 ) -> Value {
     let auth = if observed.authenticated {
         json!({"status": "authenticated", "type": settings.auth_method, "label": settings.auth_label()})
@@ -704,8 +930,13 @@ pub(crate) fn entry(
     if !(observed.authenticated && settings.enabled && observed.status == Some("ready")) {
         entry.insert("message".into(), json!(message));
     }
-    entry.insert("models".into(), Value::Array(observed.models.clone()));
-    entry.insert("slashCommands".into(), json!([]));
+    let mut models = observed.models.clone();
+    apply_catalog(&mut models, catalog);
+    entry.insert("models".into(), Value::Array(models));
+    entry.insert(
+        "slashCommands".into(),
+        Value::Array(observed.slash_commands.clone()),
+    );
     entry.insert("skills".into(), json!([]));
     // Orbit installs and updates every provider CLI and owns `PATH`; this server installs
     // nothing (Nick, 2026-11-20). T3 says `canInstall: true` for its managed runtime.
@@ -715,7 +946,10 @@ pub(crate) fn entry(
     );
     entry.insert("supportsConversationRollback".into(), json!(true));
     entry.insert("supportsTextGeneration".into(), json!(false));
-    entry.insert("workspaceSnapshots".into(), json!([]));
+    entry.insert(
+        "workspaceSnapshots".into(),
+        Value::Array(observed.workspaces.clone()),
+    );
     entry.insert("instanceId".into(), json!(instance_id));
     entry.insert("driver".into(), json!(DRIVER));
     if let Some(name) = &settings.display_name {
@@ -753,6 +987,8 @@ pub(crate) fn check(
     next.installed = !missing;
     if missing {
         next.models.clear();
+        next.slash_commands.clear();
+        next.workspaces.clear();
     }
     next.status = Some(match (&error, next.authenticated) {
         (Some(_), _) => "error",
@@ -815,6 +1051,8 @@ pub(crate) fn auth_required(settings: &AntigravitySettings, previous: &Observed)
         message: Some(sign_in_message(settings)),
         models: Vec::new(),
         thinking_levels: Default::default(),
+        slash_commands: Vec::new(),
+        workspaces: Vec::new(),
     }
 }
 
@@ -977,7 +1215,12 @@ fn thinking_capabilities(config: Option<&Value>, observed: bool) -> Value {
 
 /// `onSessionStarted`: the session proves the sign-in; its models are listed. A version from
 /// a health check's `--version` stays; the session's own counts only before one.
-pub(crate) fn session_started(previous: &Observed, initialize: &Value, setup: &Value) -> Observed {
+pub(crate) fn session_started(
+    previous: &Observed,
+    initialize: &Value,
+    setup: &Value,
+    cwd: Option<(&str, &str)>,
+) -> Observed {
     let session_version = initialize["agentInfo"]["version"]
         .as_str()
         .filter(|v| !v.is_empty())
@@ -993,6 +1236,24 @@ pub(crate) fn session_started(previous: &Observed, initialize: &Value, setup: &V
         message: None,
         models: models_from_session(setup, &thinking_levels),
         thinking_levels,
+        slash_commands: previous.slash_commands.clone(),
+        workspaces: {
+            // A session's workspace gets a snapshot: its commands so far, else the machine's.
+            let mut workspaces = previous.workspaces.clone();
+            if let Some((cwd, now)) = cwd {
+                let kept = previous.workspaces.iter().find(|w| w["cwd"] == cwd);
+                let commands = kept.map_or_else(
+                    || Value::Array(previous.slash_commands.clone()),
+                    |w| w["slashCommands"].clone(),
+                );
+                let skills = kept.map_or_else(|| json!([]), |w| w["skills"].clone());
+                upsert_workspace(
+                    &mut workspaces,
+                    json!({"cwd": cwd, "checkedAt": now, "slashCommands": commands, "skills": skills}),
+                );
+            }
+            workspaces
+        },
     }
 }
 
@@ -1088,6 +1349,109 @@ pub(crate) fn models_from_session(
     out
 }
 
+// ---- sign-in URLs ---------------------------------------------------------------------------
+
+/// `parseAntigravityAuthorizationUrl`: Google's OAuth URL with one `state` (1 to 512
+/// characters, no spaces), one `response_type=code` and one loopback `redirect_uri` on a port
+/// from 1024.
+pub(crate) fn is_authorization_url(url: &str) -> bool {
+    if url.len() > MAX_AUTH_URL || url.chars().any(char::is_whitespace) || url.contains('#') {
+        return false;
+    }
+    let Some(query) = url.strip_prefix("https://accounts.google.com/o/oauth2/v2/auth?") else {
+        return false;
+    };
+    let pairs: Vec<(String, String)> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+        .collect();
+    let one = |key: &str| {
+        let mut found = pairs.iter().filter(|(k, _)| k == key);
+        match (found.next(), found.next()) {
+            (Some((_, value)), None) => Some(value.as_str()),
+            _ => None,
+        }
+    };
+    let state_ok = one("state").is_some_and(|state| {
+        !state.is_empty() && state.chars().count() <= 512 && !state.chars().any(char::is_whitespace)
+    });
+    let redirect_ok = one("redirect_uri").is_some_and(|uri| {
+        uri.strip_prefix("http://127.0.0.1:")
+            .and_then(|rest| rest.strip_suffix('/'))
+            .filter(|port| {
+                !port.is_empty()
+                    && port.len() <= 5
+                    && !port.starts_with('0')
+                    && port.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|port| port.parse::<u32>().ok())
+            .is_some_and(|port| (1024..=65535).contains(&port))
+    });
+    state_ok && redirect_ok && one("response_type") == Some("code")
+}
+
+/// `application/x-www-form-urlencoded` decoding, as `URLSearchParams` reads a query.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&byte) = bytes.get(i) {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        match byte {
+            b'+' => out.push(b' '),
+            b'%' => match (hex(i + 1), hex(i + 2)) {
+                (Some(high), Some(low)) => {
+                    out.push(u8::try_from(high * 16 + low).unwrap_or(b'?'));
+                    i += 2;
+                }
+                _ => out.push(b'%'),
+            },
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `makeAntigravityStdoutTransform` with no sign-in flow (this server has none): a sign-in URL
+/// ends the session with the sign-in instruction; a malformed one fails it.
+pub(crate) fn stdout_signal(line: &str) -> Option<conn_provider::ProviderError> {
+    let url = line
+        .strip_prefix(AUTH_STDOUT_PREFIX)?
+        .trim_end_matches(['\r', '\n']);
+    Some(if is_authorization_url(url) {
+        conn_provider::ProviderError::Failed {
+            operation: SIGN_IN_REQUIRED,
+            detail: SIGN_IN_REQUIRED_MESSAGE.to_owned(),
+        }
+    } else {
+        conn_provider::ProviderError::Failed {
+            operation: "authorization-url",
+            detail: INVALID_AUTH_URL.to_owned(),
+        }
+    })
+}
+
+/// `makeAntigravityStderrHandler`'s sign-in signals: a stderr line with the stdout prefix or
+/// our browser helper's marker (a JSON string) and a valid URL. Returns the stdout line that
+/// carries it to [`stdout_signal`]; other lines, and malformed URLs, give `None`.
+pub(crate) fn stderr_sign_in(line: &str) -> Option<String> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.len() > AUTH_BROWSER_MARKER.len().max(AUTH_STDOUT_PREFIX.len()) + MAX_AUTH_URL + 2 {
+        return None;
+    }
+    let url = if let Some(url) = line.strip_prefix(AUTH_STDOUT_PREFIX) {
+        url.to_owned()
+    } else {
+        serde_json::from_str::<String>(line.strip_prefix(AUTH_BROWSER_MARKER)?).ok()?
+    };
+    is_authorization_url(&url).then(|| format!("{AUTH_STDOUT_PREFIX}{url}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,18 +1471,29 @@ mod tests {
     fn model_switch_follows_t3() {
         let s = setup();
         assert_eq!(
-            model_switch(&s, "gemini-3.8-flash"),
+            model_switch(&s, "gemini-3.8-flash", None),
             Ok(Some(("model".into(), "gemini-3.8-flash".into())))
         );
-        assert_eq!(model_switch(&s, "gemini-3.1-pro"), Ok(None));
-        assert_eq!(model_switch(&s, DEFAULT_MODEL), Ok(None));
-        assert_eq!(model_switch(&s, ""), Ok(None));
+        assert_eq!(model_switch(&s, "gemini-3.1-pro", None), Ok(None));
+        assert_eq!(model_switch(&s, DEFAULT_MODEL, None), Ok(None));
+        assert_eq!(model_switch(&s, "", None), Ok(None));
         // A 1.3 id of a listed family passes through.
         assert_eq!(
-            model_switch(&s, "gemini-3.8-flash-high"),
+            model_switch(&s, "gemini-3.8-flash-high", None),
             Ok(Some(("model".into(), "gemini-3.8-flash-high".into())))
         );
-        assert!(model_switch(&s, "claude-x").is_err());
+        assert!(model_switch(&s, "claude-x", None).is_err());
+        // `resolveAntigravityModel`: the default selection takes the catalog's default when
+        // the agent lists it or its family, else keeps the session's model.
+        assert_eq!(
+            model_switch(&s, DEFAULT_MODEL, Some("gemini-4-argon")),
+            Ok(Some(("model".into(), "gemini-4-argon".into())))
+        );
+        assert_eq!(
+            model_switch(&s, "", Some("gemini-3.8-flash-high")),
+            Ok(Some(("model".into(), "gemini-3.8-flash-high".into())))
+        );
+        assert_eq!(model_switch(&s, "", Some("gemini-9")), Ok(None));
     }
 
     /// The version comes from this check's `--version`, never from an earlier one: a new
@@ -1138,7 +1513,13 @@ mod tests {
         let missing = check(&settings, &old, Err("gone".into()), Some("1.5.13".into()));
         assert_eq!(missing.version, None);
         assert_eq!(cli_version("not a version"), None);
-        let entry = entry("antigravity", &settings, &next, "2026-11-20T00:00:00.000Z");
+        let entry = entry(
+            "antigravity",
+            &settings,
+            &next,
+            "2026-11-20T00:00:00.000Z",
+            None,
+        );
         assert_eq!(entry["version"], "1.5.13");
         assert_eq!(entry["setup"]["canInstall"], false);
     }
@@ -1158,9 +1539,15 @@ mod tests {
         assert!(needs_session(&checked));
         let initialize =
             json!({"agentInfo": {"name": "Antigravity ACP Server", "version": "0.0.0"}});
-        let ready = session_started(&checked, &initialize, &setup());
+        let ready = session_started(&checked, &initialize, &setup(), None);
         assert!(!needs_session(&ready));
-        let entry = entry("antigravity", &settings, &ready, "2026-11-23T00:00:00.000Z");
+        let entry = entry(
+            "antigravity",
+            &settings,
+            &ready,
+            "2026-11-23T00:00:00.000Z",
+            None,
+        );
         assert_eq!(entry["status"], "ready");
         assert_eq!(entry["auth"]["status"], "authenticated");
         assert_eq!(entry["version"], "1.5.14");
@@ -1228,5 +1615,173 @@ mod tests {
             "driver": "antigravity", "enabled": true, "config": {"authMethod": "gemini-api-key"}
         })));
         assert!(none.config_issue().is_some());
+    }
+
+    // ---- ports of `AntigravityProvider.test.ts` ------------------------------------------
+
+    /// T3's `commands` and `expectedCommands`.
+    fn t3_commands() -> (Value, Value) {
+        (
+            json!([{"name": "plan", "description": "Create a plan",
+                    "input": {"type": "text", "hint": "What to plan"}},
+                   {"name": "logout", "description": "Sign out of Google"}]),
+            json!([{"name": "plan", "description": "Create a plan", "input": {"hint": "What to plan"}},
+                   {"name": "logout", "description": "Sign out of Google"}]),
+        )
+    }
+
+    fn signed_in(cwd: &str) -> Observed {
+        let initialize = json!({"agentInfo": {"name": "antigravity-acp", "version": "1.5.14"}});
+        session_started(
+            &Observed::default(),
+            &initialize,
+            &setup(),
+            Some((cwd, "2026-11-23T00:00:00.000Z")),
+        )
+    }
+
+    fn workspace_commands(observed: &Observed, cwd: &str) -> Value {
+        observed
+            .workspaces
+            .iter()
+            .find(|w| w["cwd"] == cwd)
+            .map_or(Value::Null, |w| w["slashCommands"].clone())
+    }
+
+    /// "offers each model the thinking levels it reported when selected".
+    #[test]
+    fn offers_each_model_the_thinking_levels_it_reported_when_selected() {
+        let thinking = |current: &str| {
+            json!({"id": "thinking_level", "name": "Thinking Level", "category": "thought_level",
+                   "type": "select", "currentValue": current,
+                   "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]})
+        };
+        let setup = json!({"configOptions": [
+            {"id": "model", "category": "model", "type": "select", "currentValue": "gemini",
+             "options": [{"value": "gemini", "name": "Gemini"}, {"value": "claude", "name": "Claude"},
+                         {"value": "plain", "name": "Plain"}, {"value": "unseen", "name": "Unseen"}]},
+            thinking("high")
+        ]});
+        let levels = std::collections::BTreeMap::from([
+            ("claude".to_owned(), Some(thinking("low"))),
+            ("plain".to_owned(), None),
+        ]);
+        let models = models_from_session(&setup, &levels);
+        let thinking_of = |slug: &str| {
+            models.iter().find(|m| m["slug"] == slug).unwrap()["capabilities"]["optionDescriptors"]
+                [0]
+            .clone()
+        };
+        assert_eq!(thinking_of("gemini")["id"], "thinking_level");
+        assert_eq!(thinking_of("gemini")["currentValue"], "high");
+        assert_eq!(thinking_of("claude")["currentValue"], "low");
+        assert_eq!(thinking_of("plain"), Value::Null);
+        assert_eq!(thinking_of("unseen")["id"], "thinking_level");
+        assert!(thinking_of("unseen").get("currentValue").is_none());
+    }
+
+    /// "publishes session metadata and native commands without another health probe".
+    #[test]
+    fn publishes_session_metadata_and_native_commands() {
+        let (commands, expected) = t3_commands();
+        let ready = signed_in("/workspace");
+        let next = available_commands(
+            &ready,
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:01.000Z",
+        );
+        assert_eq!(next.status, Some("ready"));
+        assert!(next.authenticated);
+        assert_eq!(Value::Array(next.slash_commands.clone()), expected);
+        assert_eq!(workspace_commands(&next, "/workspace"), expected);
+    }
+
+    /// "keeps a workspace's native commands when the catalog reports its own".
+    #[test]
+    fn keeps_a_workspaces_native_commands_when_the_catalog_reports_its_own() {
+        let (commands, expected) = t3_commands();
+        let ready = signed_in("/workspace");
+        let next = available_commands(
+            &ready,
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:01.000Z",
+        );
+        // The catalog probe runs in a scratch directory and reports no cwd.
+        let rest = json!(commands.as_array().unwrap()[1..]);
+        let next = available_commands(&next, &rest, None, "2026-11-23T00:00:02.000Z");
+        assert_eq!(workspace_commands(&next, "/workspace"), expected);
+        assert_eq!(
+            Value::Array(next.slash_commands),
+            json!(expected.as_array().unwrap()[1..])
+        );
+    }
+
+    /// "clears all account metadata on sign-out and authentication failure", for the
+    /// authentication failure (this server has no sign-out flow).
+    #[test]
+    fn clears_all_account_metadata_on_authentication_failure() {
+        let settings = AntigravitySettings::from_instance(Some(&json!({"enabled": true,
+            "config": {"authMethod": "gemini-api-key", "apiKey": "k"}})));
+        let (commands, _) = t3_commands();
+        let ready = available_commands(
+            &signed_in("/workspace"),
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:01.000Z",
+        );
+        let cleared = auth_required(&settings, &ready);
+        let shown = entry(
+            "antigravity",
+            &settings,
+            &cleared,
+            "2026-11-23T00:00:02.000Z",
+            None,
+        );
+        assert_eq!(shown["installed"], true);
+        assert_eq!(shown["status"], "warning");
+        assert_eq!(
+            shown["auth"],
+            json!({"status": "unauthenticated", "type": "gemini-api-key", "label": "Gemini API key"})
+        );
+        assert_eq!(
+            shown["message"],
+            "Connect with Gemini API key to use Antigravity and load models."
+        );
+        for key in ["models", "slashCommands", "skills", "workspaceSnapshots"] {
+            assert_eq!(shown[key], json!([]), "{key}");
+        }
+        assert_eq!(shown["supportsTextGeneration"], false);
+        // Later reports from a session do not restore the account's catalog.
+        let after = available_commands(
+            &cleared,
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:03.000Z",
+        );
+        let after = config_options_updated(&after, &setup()["configOptions"]);
+        assert_eq!(workspace_commands(&after, "/workspace"), Value::Null);
+        assert!(after.models.is_empty());
+        // A health check keeps it signed out and starts no session.
+        let checked = check(
+            &settings,
+            &after,
+            Ok(PathBuf::from("/usr/local/bin/agy")),
+            None,
+        );
+        let rechecked = entry(
+            "antigravity",
+            &settings,
+            &checked,
+            "2026-11-23T00:00:04.000Z",
+            None,
+        );
+        assert_eq!(rechecked["auth"]["status"], "unauthenticated");
+        assert_eq!(
+            rechecked["message"],
+            "Connect with Gemini API key to use Antigravity and load models."
+        );
+        assert!(!needs_session(&checked));
     }
 }

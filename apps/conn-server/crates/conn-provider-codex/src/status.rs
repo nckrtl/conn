@@ -1958,6 +1958,57 @@ fn account_status(
     ("ready", auth, None)
 }
 
+/// `makeCodexSkillsProbe`: the skills Codex sees in `workspace`. An `app-server` in the
+/// server's working folder answers `initialize` and `skills/list` with `forceReload`, then
+/// ends; a failure is tried once more. T3 keeps that helper alive for reuse; this server starts
+/// one per scan, so no process waits idle.
+pub async fn skills_for_cwd(input: &ProbeInput<'_>, workspace: &str) -> Result<Vec<Value>, String> {
+    let config = input.config;
+    let resolved = resolved_environment(config, &input.host_env);
+    let timeout = probe_timeout(PROBE_TIMEOUT, &resolved);
+    let mut spec = launch::launch_spec(
+        config,
+        config.launch_args_env().as_deref(),
+        get(&input.host_env, launch::ORIGINATOR_ENV).is_some(),
+    );
+    spec.cwd = Some(input.cwd.to_string_lossy().into_owned());
+    if let Some(home) = &config.home_path {
+        spec.env_set.retain(|(k, _)| k != "CODEX_HOME");
+        spec.env_set
+            .push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+    }
+    let failed = || format!("Failed to probe Codex skills for '{workspace}'");
+    let mut last = Err(failed());
+    for _ in 0..2 {
+        let Ok(client) = Client::spawn(&spec) else {
+            continue;
+        };
+        let skills = tokio::time::timeout(timeout, async {
+            client
+                .request(
+                    "initialize",
+                    json!({"clientInfo": {"name": CLIENT_NAME, "title": CLIENT_NAME, "version": launch::CLIENT_VERSION},
+                        "capabilities": {"experimentalApi": true}}),
+                )
+                .await?;
+            client.notify("initialized");
+            client
+                .request(
+                    "skills/list",
+                    json!({"cwds": [workspace], "forceReload": true}),
+                )
+                .await
+        })
+        .await;
+        client.close().await;
+        if let Ok(Ok(response)) = skills {
+            last = Ok(parse_skills(&response, workspace));
+            break;
+        }
+    }
+    last
+}
+
 /// `checkCodexProviderStatus` for one instance, as `CodexDriver` runs it.
 pub async fn check(input: ProbeInput<'_>) -> Value {
     let config = input.config;

@@ -34,7 +34,7 @@ use conn_contract::{
     ProviderUploadFeedbackInput, ProviderUploadFeedbackResult, lit,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use super::Deps;
@@ -144,13 +144,21 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
 /// Tells config streams that a provider entry changed (T3's `ProviderRegistry.streamChanges`),
 /// and holds the clients' activity leases that let the periodic probe run
 /// (`BackgroundPolicy`: `reportClientActivity`, `shouldRunScopeWork`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProviderStatus {
-    revision: Arc<watch::Sender<u64>>,
+    revision: conn_provider::StatusNotifier,
     leases: Arc<std::sync::Mutex<Vec<Lease>>>,
     /// The full probe pass in flight (T3's `refreshAllInFlightRef`): later callers wait for it.
     pass: Arc<std::sync::Mutex<Option<watch::Receiver<bool>>>>,
+    /// Per-workspace snapshots (T3's `workspaceSnapshots`), by instance id; at most
+    /// [`MAX_WORKSPACE_SNAPSHOTS`] per instance, the oldest dropped first.
+    workspaces: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<Value>>>>,
 }
+
+/// `MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER`.
+const MAX_WORKSPACE_SNAPSHOTS: usize = 16;
+/// `PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS`.
+const WORKSPACE_SNAPSHOT_TTL_MS: i64 = 5 * 60_000;
 
 /// One client's `ClientActivityLease`, as far as provider status needs it.
 #[derive(Clone, Debug)]
@@ -181,24 +189,87 @@ const MAX_LEASE_TTL: Duration = Duration::from_secs(120);
 /// Clients with a lease at once; the oldest goes first.
 const MAX_LEASES: usize = 64;
 
-impl Default for ProviderStatus {
-    fn default() -> Self {
+impl ProviderStatus {
+    /// Listens on `notifier`, which the providers share (`conn_provider::StatusNotifier`).
+    pub fn with_notifier(notifier: conn_provider::StatusNotifier) -> Self {
         Self {
-            revision: Arc::new(watch::channel(0).0),
-            leases: Arc::default(),
-            pass: Arc::default(),
+            revision: notifier,
+            ..Self::default()
         }
     }
-}
 
-impl ProviderStatus {
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
     }
 
+    fn workspaces(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<Value>>> {
+        self.workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn workspace_snapshot(&self, instance_id: &str, cwd: &str) -> Option<Value> {
+        self.workspaces()
+            .get(instance_id)?
+            .iter()
+            .find(|snapshot| snapshot["cwd"] == cwd)
+            .cloned()
+    }
+
+    /// `upsertProviderWorkspaceSnapshot`: what a scan found for `cwd`, replacing the last.
+    /// Commands still pending keep the ones found before; an errored scan counts as pending.
+    fn upsert_workspace(&self, instance_id: &str, cwd: &str, checked_at: &str, scoped: &Value) {
+        let mut workspaces = self.workspaces();
+        let snapshots = workspaces.entry(instance_id.to_owned()).or_default();
+        let previous = snapshots.iter().find(|s| s["cwd"] == cwd).cloned();
+        let pending = scoped["slashCommandsPending"]
+            .as_bool()
+            .unwrap_or(scoped["status"] == "error");
+        let mut snapshot = serde_json::Map::new();
+        snapshot.insert("cwd".into(), json!(cwd));
+        snapshot.insert("checkedAt".into(), json!(checked_at));
+        let commands = match (&previous, pending) {
+            (Some(previous), true) => previous["slashCommands"].clone(),
+            _ => scoped["slashCommands"].clone(),
+        };
+        snapshot.insert(
+            "slashCommands".into(),
+            if commands.is_array() {
+                commands
+            } else {
+                json!([])
+            },
+        );
+        if pending {
+            snapshot.insert("slashCommandsPending".into(), json!(true));
+        }
+        let skills = &scoped["skills"];
+        snapshot.insert(
+            "skills".into(),
+            if skills.is_array() {
+                skills.clone()
+            } else {
+                json!([])
+            },
+        );
+        let descriptors = scoped
+            .get("optionDescriptors")
+            .or_else(|| previous.as_ref().and_then(|p| p.get("optionDescriptors")));
+        if let Some(descriptors) = descriptors {
+            snapshot.insert("optionDescriptors".into(), descriptors.clone());
+        }
+        snapshots.retain(|s| s["cwd"] != cwd);
+        snapshots.push(Value::Object(snapshot));
+        if snapshots.len() > MAX_WORKSPACE_SNAPSHOTS {
+            let extra = snapshots.len() - MAX_WORKSPACE_SNAPSHOTS;
+            snapshots.drain(..extra);
+        }
+    }
+
     fn bump(&self) {
-        self.revision
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        self.revision.notify();
     }
 
     fn leases(&self) -> std::sync::MutexGuard<'_, Vec<Lease>> {
@@ -384,9 +455,16 @@ pub async fn refresh_all(deps: &Deps) {
                         let settings = instance_settings(&deps, provider.instance_id().as_str());
                         probes.spawn(async move { provider.refresh_status(settings).await });
                     }
-                    while probes.join_next().await.is_some() {}
+                    // A probe that ended abnormally leaves the manifest unprobed, so the next
+                    // opened picker runs the pass again.
+                    let mut complete = true;
+                    while let Some(joined) = probes.join_next().await {
+                        complete &= joined.is_ok();
+                    }
                     deps.provider_status.bump();
-                    if let (Some(model_manifest), Some(updated)) = (&deps.model_manifest, manifest)
+                    if complete
+                        && let (Some(model_manifest), Some(updated)) =
+                            (&deps.model_manifest, manifest)
                     {
                         model_manifest.set_probed(updated);
                     }
@@ -402,6 +480,88 @@ pub async fn refresh_all(deps: &Deps) {
         }
     };
     let _ = done.wait_for(|finished| *finished).await;
+}
+
+/// Whether a workspace refresh may answer from a kept snapshot (`fresh` in the request).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Freshness {
+    /// A snapshot younger than the TTL and not pending is kept.
+    KeepCurrent,
+    /// Scan again: the workspace's snapshots of other instances go, the instance is probed.
+    Fresh,
+}
+
+/// T3's `refreshWorkspaceSnapshot`: the instance's snapshot for one workspace, scanned by the
+/// provider (`snapshot_for_cwd`) unless a current one is kept. A failed scan keeps what was
+/// there. Without a per-workspace scan the instance is probed. Returns whether the instance
+/// scans workspaces (T3's `snapshotForCwd !== undefined`).
+pub async fn refresh_workspace(
+    deps: &Deps,
+    instance_id: &str,
+    cwd: &str,
+    freshness: Freshness,
+) -> bool {
+    let fresh = freshness == Freshness::Fresh;
+    let provider = deps
+        .providers
+        .snapshot()
+        .into_iter()
+        .find(|p| p.instance_id().as_str() == instance_id);
+    if fresh {
+        let mut workspaces = deps.provider_status.workspaces();
+        for (id, snapshots) in workspaces.iter_mut() {
+            if id != instance_id {
+                snapshots.retain(|snapshot| snapshot["cwd"] != cwd);
+            }
+        }
+    }
+    let Some(provider) = provider else {
+        return false;
+    };
+    let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
+    let checked_at = conn_support::time::iso_from_ms(conn_support::time::now_ms());
+    let entry = provider.server_provider_entry(&checked_at);
+    let scans = provider.snapshot_for_cwd(cwd);
+    let scanning = scans.is_some();
+    if entry.as_ref().is_none_or(|entry| entry["enabled"] != true) {
+        return scanning;
+    }
+    let kept = deps
+        .provider_status
+        .workspace_snapshot(instance_id, cwd)
+        .is_some_and(|snapshot| {
+            let pending =
+                snapshot["slashCommandsPending"] == true || snapshot["modelsPending"] == true;
+            let checked = snapshot["checkedAt"]
+                .as_str()
+                .and_then(conn_support::time::millis_from_iso)
+                .unwrap_or(i64::MIN);
+            !pending && now.saturating_sub(checked) < WORKSPACE_SNAPSHOT_TTL_MS
+        });
+    if kept && !fresh {
+        return scanning;
+    }
+    if fresh {
+        provider
+            .refresh_status(instance_settings(deps, instance_id))
+            .await;
+    }
+    let Some(scan) = scans else {
+        if !fresh {
+            provider
+                .refresh_status(instance_settings(deps, instance_id))
+                .await;
+        }
+        deps.provider_status.bump();
+        return false;
+    };
+    // The scan's start counts for the TTL, not the machine check's time.
+    if let Ok(scoped) = scan.await {
+        deps.provider_status
+            .upsert_workspace(instance_id, cwd, &checked_at, &scoped);
+    }
+    deps.provider_status.bump();
+    true
 }
 
 /// T3's `refreshModelCatalog`, for an opened model picker: refetch a manifest older than
@@ -441,6 +601,9 @@ pub async fn refresh_models(deps: &Deps, only: Option<&str>) -> Result<(), Failu
             continue;
         };
         if let Err(error) = refresh.await {
+            // The failed refresh may have changed the entry (a sign-in that ended): clients
+            // already subscribed see it before the error.
+            deps.provider_status.bump();
             let detail = match error {
                 conn_provider::ProviderError::Failed { detail, .. } => detail,
                 other => other.to_string(),
@@ -582,10 +745,22 @@ pub fn start_status_refresh(deps: &Deps) {
 
 /// `ServerConfig.providers` entries for the configured providers. `checked_at` is ISO-8601.
 pub fn server_providers(deps: &Deps, checked_at: &str) -> Vec<Value> {
-    deps.providers
-        .snapshot()
+    let providers = deps.providers.snapshot();
+    let mut workspaces = deps.provider_status.workspaces();
+    // Snapshots go with their instance: a removed instance's are dropped.
+    workspaces.retain(|id, _| providers.iter().any(|p| p.instance_id().as_str() == id));
+    providers
         .iter()
-        .filter_map(|p| p.server_provider_entry(checked_at))
+        .filter_map(|p| {
+            let mut entry = p.server_provider_entry(checked_at)?;
+            if let Some(snapshots) = workspaces.get(p.instance_id().as_str())
+                && !snapshots.is_empty()
+                && let Some(fields) = entry.as_object_mut()
+            {
+                fields.insert("workspaceSnapshots".into(), Value::Array(snapshots.clone()));
+            }
+            Some(entry)
+        })
         .collect()
 }
 

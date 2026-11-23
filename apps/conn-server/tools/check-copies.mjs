@@ -187,6 +187,32 @@ same(
     stateText("SIGN_IN_MESSAGE"),
     /const SIGN_IN_MESSAGE = "([^"]*)";/.exec(ts("apps/server/src/provider/AntigravityProvider.ts"))?.[1],
   );
+  const authTs = ts("apps/server/src/provider/antigravityAuthSupport.ts");
+  same(
+    "antigravity.rs AUTH_STDOUT_PREFIX = ANTIGRAVITY_AUTH_STDOUT_PREFIX",
+    stateText("AUTH_STDOUT_PREFIX"),
+    /ANTIGRAVITY_AUTH_STDOUT_PREFIX =\s*"([^"]*)";/.exec(authTs)?.[1],
+  );
+  same(
+    "antigravity.rs SIGN_IN_REQUIRED_MESSAGE = ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE",
+    stateText("SIGN_IN_REQUIRED_MESSAGE"),
+    /ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE =\s*"([^"]*)";/.exec(authTs)?.[1],
+  );
+  same(
+    "antigravity.rs INVALID_AUTH_URL = parseAntigravityAuthorizationUrl's",
+    stateText("INVALID_AUTH_URL"),
+    /authSupportError\("(Antigravity returned an invalid Google sign-in URL\.)"\)/.exec(authTs)?.[1],
+  );
+  same(
+    "antigravity.rs MAX_AUTH_URL = maxAuthorizationUrlLength",
+    /const MAX_AUTH_URL: usize = ([\d_]+);/.exec(agyStateRs)?.[1]?.replaceAll("_", ""),
+    /const maxAuthorizationUrlLength = ([\d_]+);/.exec(authTs)?.[1]?.replaceAll("_", ""),
+  );
+  same(
+    "server.rs USAGE_LIMITS_COMMAND = @t3tools/shared USAGE_LIMITS_COMMAND",
+    /const USAGE_LIMITS_COMMAND: \(&str, &str\) =\s*\("([^"]*)",\s*"([^"]*)"\);/.exec(rust("crates/conn-server/src/methods/server.rs"))?.slice(1).join("|"),
+    /USAGE_LIMITS_COMMAND = \{\s*name: "([^"]*)",\s*description: "([^"]*)",/.exec(ts("packages/shared/src/usageLimits.ts"))?.slice(1).join("|"),
+  );
   same(
     "antigravity.rs NO_BROWSER_PREFIX = antigravityAuthSupport's",
     stateText("NO_BROWSER_PREFIX"),

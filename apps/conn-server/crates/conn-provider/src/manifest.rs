@@ -1,5 +1,6 @@
-//! [`LiveManifest`]: the model manifest the server accepted last (T3's `ModelManifest.current`),
-//! shared with the providers that classify their models with it.
+//! What the server shares with its providers: [`LiveManifest`], the model manifest it accepted
+//! last (T3's `ModelManifest.current`), and [`StatusNotifier`], how a provider reports that its
+//! entry changed.
 
 use std::sync::{Arc, RwLock};
 
@@ -35,6 +36,29 @@ impl LiveManifest {
                 .and_then(|providers| providers.get(driver))
                 .cloned(),
         )
+    }
+}
+
+/// Tells the config streams that a provider entry changed (T3's `ProviderRegistry.streamChanges`).
+/// The server listens; a provider notifies when its entry changes outside a probe the server
+/// awaits, such as a sign-in that ended while a session started. Cheap to clone.
+#[derive(Clone, Debug)]
+pub struct StatusNotifier(Arc<tokio::sync::watch::Sender<u64>>);
+
+impl Default for StatusNotifier {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(0).0))
+    }
+}
+
+impl StatusNotifier {
+    pub fn notify(&self) {
+        self.0
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.subscribe()
     }
 }
 

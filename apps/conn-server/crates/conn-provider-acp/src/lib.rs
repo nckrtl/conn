@@ -453,6 +453,8 @@ impl Provider for AcpProvider {
                 attachments_dir: self.config.attachments_dir.clone(),
                 auth_method: None,
                 runtime_version: None,
+                default_model: None,
+                observer: None,
                 self_command: self.config.self_command.clone().unwrap_or_else(|| {
                     std::env::current_exe()
                         .map(|p| p.display().to_string())

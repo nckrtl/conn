@@ -14,29 +14,32 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
 
 **Model catalog refresh (2026-11-23):** `server.refreshProviders` follows T3's `ws.ts`.
-`modelCatalogOnly` answers no providers, refetches a manifest older than 5 minutes, and joins
-the shared full probe pass until the providers were probed with the manifest now known
-(T3's `refreshModelCatalog`). One full pass runs at a time on its own task: later callers wait
-for it, a cancelled caller does not stop it, and it records its manifest when it ends. An
-accepted manifest reaches Codex's model catalog (`conn_provider::LiveManifest`), as T3's
-drivers read `ModelCatalog.current`. `refreshModels` fetches the manifest at once, probes, then
-runs each targeted, enabled and installed provider's model refresh (Antigravity only, as in
-T3) and probes it again; a failure answers `ProviderSetupError` with operation
-`refresh-models`. Antigravity's refresh selects each model to list its thinking levels, and
-an expired sign-in publishes the `unauthenticated` entry before it fails. The reply follows
-`omitProviders`, `cwd` and `workspaceSnapshotsOnDemand`. Proof: the
-`refresh_providers_follows_model_catalog_only_and_refresh_models`,
-`model_catalog_refreshes_share_one_pass_that_outlives_its_first_caller`,
-`a_fetched_manifest_reaches_the_codex_entry_in_the_config`,
-`the_accepted_manifest_replaces_the_bundled_catalog`,
-`a_model_refresh_lists_each_models_thinking_levels`,
-`an_expired_sign_in_publishes_unauthenticated_before_the_failure` and
-`error_replies_keep_t3s_sign_in_and_python_socks_texts` tests (each fails with its fix
-reverted), and `check-copies.mjs` for the Antigravity texts. Not ported: T3's other
-`invalidateModelCaches` work (Claude's capability probe cache and the latest-version cache),
-because this server keeps neither; Claude and Antigravity still classify with their bundled
-catalogs; this server keeps no per-workspace snapshots, so a workspace refresh probes the
-instance.
+- `modelCatalogOnly` answers no providers, refetches a manifest older than 5 minutes, and
+  joins the shared full probe pass until the providers were probed with the manifest now
+  known (`refreshModelCatalog`). One pass runs at a time on its own task; a cancelled caller
+  does not stop it, and it records its manifest only when every probe ended normally.
+- An accepted manifest (`conn_provider::LiveManifest`) reaches Codex, Claude and Antigravity,
+  as T3's drivers read `ModelCatalog.current`.
+- `refreshModels` fetches the manifest at once, probes, then runs each targeted, enabled and
+  installed provider's model refresh (Antigravity only, as in T3). A failure answers
+  `ProviderSetupError` (`refresh-models`) after the config streams heard the entry change.
+- Antigravity: per-model thinking levels, T3's stale-reply rule, slash commands, the drain
+  before close, and the sign-in signals (error replies, stdout and stderr URLs) that sign the
+  entry out and notify the config streams (`conn_provider::StatusNotifier`).
+- With `instanceId` and `cwd` the instance's per-workspace scan runs (Codex: `skills/list`),
+  kept 5 minutes unless `fresh`; the reply follows `omitProviders`,
+  `workspaceSnapshotsOnDemand`, `providerCatalogsOnDemand`, `machineCatalog` and
+  `usageLimitsCommand`, with the pending snapshot and the catalog digest.
+
+Proof: tests in `methods::server`, `catalog` and `lib` (Claude), `antigravity`,
+`antigravity_provider`, `connection` and `process`, including ports of T3's
+`AntigravityProvider.test.ts` and `AntigravityDriver.test.ts` cases; each fails with its fix
+reverted. `check-copies.mjs` holds the T3 texts. Not ported: advertising
+`providerWorkspaceSnapshotsOnDemand` (the config stream does not yet strip snapshots per
+client or track catalogs per cwd, so clients do not send the on-demand fields); T3's scan
+claims, rescans and `scanCwd`; Claude's and Antigravity's per-workspace scans; Claude's and
+the latest-version caches (this server keeps neither); compiling a model only the accepted
+manifest lists from its profile (it compiles with its slug).
 
 **Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left

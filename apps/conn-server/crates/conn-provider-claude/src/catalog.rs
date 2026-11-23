@@ -31,6 +31,217 @@ pub(crate) fn catalog_json() -> Value {
     serde_json::from_str(CATALOG).unwrap_or(Value::Null)
 }
 
+/// `resolveClaudeModelCatalog` over the current manifest: `providerModels` and their Claude
+/// Code bounds (`compatibility`) from the manifest the server accepted last, else from the
+/// bundled catalog (also when the accepted one has no valid Claude catalog, as in T3).
+/// Selections still compile against the bundled catalog ([`compile`]).
+pub fn current(manifest: &conn_provider::LiveManifest, now_ms: i64) -> Value {
+    manifest
+        .provider_catalog("claudeAgent")
+        .flatten()
+        .and_then(|section| resolve(&section, now_ms))
+        .unwrap_or_else(catalog_json)
+}
+
+/// The picker's models from [`current`].
+pub fn current_provider_models(manifest: &conn_provider::LiveManifest, now_ms: i64) -> Vec<Value> {
+    match current(manifest, now_ms).get("providerModels") {
+        Some(Value::Array(models)) => models.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// `MODEL_NEW_BADGE_DURATION_MS`.
+const NEW_BADGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// `tryResolveClaudeModelCatalog` over `resolveProviderCatalog`: `None` for a repeated slug,
+/// a missing profile, an unlisted default, or adapters that do not decode.
+fn resolve(section: &Value, now_ms: i64) -> Option<Value> {
+    let profiles = section.get("profiles");
+    let default = section.pointer("/defaults/chat").and_then(Value::as_str);
+    let mut slugs: Vec<&str> = Vec::new();
+    let mut models = Vec::new();
+    let mut compatibility = Vec::new();
+    for entry in section.get("models")?.as_array()? {
+        let slug = entry.get("slug")?.as_str()?;
+        if slugs.contains(&slug) {
+            return None;
+        }
+        slugs.push(slug);
+        let profile = match entry.get("profile").and_then(Value::as_str) {
+            Some(name) => Some(profiles?.get(name)?),
+            None => None,
+        };
+        let profile_adapter = profile.and_then(|p| p.get("adapter"));
+        if !profile_adapter_is_valid(profile_adapter) {
+            return None;
+        }
+        let bounds = model_adapter_bounds(entry.get("adapter"))?;
+        let mut model = Map::new();
+        model.insert("slug".into(), Value::from(slug));
+        model.insert("name".into(), entry.get("name")?.clone());
+        for key in ["shortName", "subProvider", "aliases"] {
+            if let Some(value) = entry.get(key).filter(|v| !v.is_null()) {
+                model.insert(key.into(), value.clone());
+            }
+        }
+        let current = entry["status"] == "current";
+        let released = entry["releasedAt"]
+            .as_str()
+            .and_then(conn_support::time::millis_from_iso);
+        if current && released.is_some_and(|r| now_ms >= r && now_ms - r < NEW_BADGE_MS) {
+            model.insert("badge".into(), Value::from("new"));
+        }
+        model.insert("isCustom".into(), Value::Bool(false));
+        if default == Some(slug) {
+            model.insert("isDefault".into(), Value::Bool(true));
+        }
+        if entry["status"] == "legacy" {
+            model.insert("isLegacy".into(), Value::Bool(true));
+        }
+        let capabilities = profile
+            .and_then(|p| p.get("capabilities"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        model.insert("capabilities".into(), with_ultracode_toggle(capabilities));
+        models.push(Value::Object(model));
+        let mut bound = Map::new();
+        bound.insert("slug".into(), Value::from(slug));
+        if let Some(min) = bounds.0 {
+            bound.insert("minVersion".into(), Value::from(min));
+        }
+        if let Some(max) = bounds.1 {
+            bound.insert("maxVersionExclusive".into(), Value::from(max));
+        }
+        compatibility.push(Value::Object(bound));
+    }
+    if default.is_some_and(|chat| !slugs.contains(&chat)) {
+        return None;
+    }
+    Some(serde_json::json!({"providerModels": models, "compatibility": compatibility}))
+}
+
+/// `ClaudeProfileAdapterSchema`: `claudeCode` with an effort map, model suffixes and context
+/// window sizes of the right types.
+fn profile_adapter_is_valid(adapter: Option<&Value>) -> bool {
+    let Some(code) = adapter.and_then(|a| a.get("claudeCode")) else {
+        return adapter.is_none_or(Value::is_object);
+    };
+    let non_empty = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+    let record = |key: &str, check: &dyn Fn(&Value) -> bool| {
+        code.get(key).is_none_or(|map| {
+            map.as_object()
+                .is_some_and(|map| map.iter().all(|(k, v)| !k.trim().is_empty() && check(v)))
+        })
+    };
+    code.is_object()
+        && record("effortMap", &|v| v.is_null() || non_empty(v))
+        && record("modelSuffixes", &|v| {
+            v.as_object()
+                .is_some_and(|m| m.iter().all(|(k, v)| !k.trim().is_empty() && non_empty(v)))
+        })
+        && record("contextWindowTokens", &Value::is_number)
+        && code
+            .get("fixedContextWindowTokens")
+            .is_none_or(Value::is_number)
+}
+
+/// `ClaudeModelAdapterSchema`: the Claude Code bounds, each a version, the minimum below the
+/// maximum. `None` when they do not decode.
+fn model_adapter_bounds(adapter: Option<&Value>) -> Option<(Option<String>, Option<String>)> {
+    let Some(code) = adapter.and_then(|a| a.get("claudeCode")) else {
+        return adapter.is_none_or(Value::is_object).then_some((None, None));
+    };
+    let version = |key: &str| -> Option<Option<String>> {
+        match code.get(key) {
+            None => Some(None),
+            Some(value) => {
+                let text = value.as_str()?.trim();
+                crate::status::is_semver(text).then(|| Some(text.to_owned()))
+            }
+        }
+    };
+    let (min, max) = (version("minVersion")?, version("maxVersionExclusive")?);
+    if let (Some(min), Some(max)) = (&min, &max)
+        && crate::status::compare_versions(min, max).is_ge()
+    {
+        return None;
+    }
+    Some((min, max))
+}
+
+/// `withUltracodeToggle`: the manifest keeps Ultracode as an effort level; the picker shows it
+/// as a toggle, and a model that offered it keeps (or gains) `xhigh`.
+fn with_ultracode_toggle(capabilities: Value) -> Value {
+    let Some(descriptors) = capabilities["optionDescriptors"].as_array() else {
+        return capabilities;
+    };
+    let Some(at) = descriptors.iter().position(|d| {
+        d["id"] == "effort"
+            && d["type"] == "select"
+            && d["options"]
+                .as_array()
+                .is_some_and(|o| o.iter().any(|o| o["id"] == "ultracode"))
+    }) else {
+        return capabilities;
+    };
+    let effort = &descriptors[at];
+    let options = effort["options"].as_array().cloned().unwrap_or_default();
+    let default_id = effort["currentValue"]
+        .as_str()
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o["isDefault"] == true)
+                .and_then(|o| o["id"].as_str())
+        })
+        .map(str::to_owned);
+    let ultracode_by_default = default_id.as_deref() == Some("ultracode");
+    let has_xhigh = options.iter().any(|o| o["id"] == "xhigh");
+    let mut next_options = Vec::new();
+    for option in options {
+        let mut plain = option.clone();
+        let was_default = plain
+            .as_object_mut()
+            .and_then(|o| o.remove("isDefault"))
+            .is_some_and(|d| d == true);
+        if option["id"] == "ultracode" {
+            if !has_xhigh {
+                let mut xhigh = serde_json::json!({"id": "xhigh", "label": "Extra High"});
+                if was_default {
+                    xhigh["isDefault"] = Value::Bool(true);
+                }
+                next_options.push(xhigh);
+            }
+            continue;
+        }
+        let keeps_default = if ultracode_by_default {
+            option["id"] == "xhigh"
+        } else {
+            was_default
+        };
+        if keeps_default {
+            plain["isDefault"] = Value::Bool(true);
+        }
+        next_options.push(plain);
+    }
+    let mut effort = effort.clone();
+    if effort["currentValue"] == "ultracode" {
+        effort["currentValue"] = Value::from("xhigh");
+    }
+    effort["options"] = Value::Array(next_options);
+    let mut toggle =
+        serde_json::json!({"id": "ultracode", "label": "Ultracode", "type": "boolean"});
+    if ultracode_by_default {
+        toggle["currentValue"] = Value::Bool(true);
+    }
+    let mut next = descriptors.clone();
+    next.splice(at..=at, [effort, toggle]);
+    let mut capabilities = capabilities;
+    capabilities["optionDescriptors"] = Value::Array(next);
+    capabilities
+}
+
 /// The models the T3 server offers clients (`ServerProvider.models`): every model of its
 /// bundled catalog, with names, aliases, the legacy flag and option descriptors.
 pub fn provider_models() -> Vec<Value> {
@@ -234,5 +445,48 @@ mod tests {
             prompt_text("Ultrathink: x", Some("ultrathink")),
             "Ultrathink: x"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// The port of `tryResolveClaudeModelCatalog` gives, for T3's bundled manifest, the models
+    /// T3's own function gave (`model_catalog.json`, generated). Badges depend on the clock.
+    #[test]
+    fn the_bundled_manifest_resolves_to_t3s_catalog() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../server/src/provider/model-manifest.json"
+        );
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let resolved = resolve(&manifest["providers"]["claudeAgent"], 0).expect("resolves");
+        let strip = |models: &Value| -> Vec<Value> {
+            models
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    let mut m = m.clone();
+                    m.as_object_mut().unwrap().remove("badge");
+                    m
+                })
+                .collect()
+        };
+        let bundled = catalog_json();
+        assert_eq!(
+            strip(&resolved["providerModels"]),
+            strip(&bundled["providerModels"])
+        );
+        assert_eq!(resolved["compatibility"], bundled["compatibility"]);
+        // `resolveClaudeModelCatalog` falls back to the bundled catalog for an invalid one.
+        let live = conn_provider::LiveManifest::default();
+        let mut broken = manifest;
+        broken["providers"]["claudeAgent"]["models"][0]["adapter"]["claudeCode"]["minVersion"] =
+            Value::from("not a version");
+        live.set(broken);
+        assert_eq!(current(&live, 0)["compatibility"], bundled["compatibility"]);
     }
 }

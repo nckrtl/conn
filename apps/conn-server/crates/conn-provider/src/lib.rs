@@ -34,7 +34,7 @@ use conn_contract::{
 };
 
 pub use conn_contract::AppThread as ProviderAppThread;
-pub use manifest::LiveManifest;
+pub use manifest::{LiveManifest, StatusNotifier};
 use serde::{Deserialize, Serialize};
 pub use set::ProviderSet;
 use tokio::sync::mpsc;
@@ -97,6 +97,16 @@ pub trait Provider: Send + Sync {
     /// `refreshModels`: list the models again even when the last check listed them. `None`:
     /// this provider has no such refresh. An error's `Failed` detail is shown to the user.
     fn refresh_models(&self) -> Option<BoxFuture<'_, ProviderResult<()>>> {
+        None
+    }
+
+    /// T3's `ProviderInstance.snapshotForCwd`: the instance's entry as seen from one workspace
+    /// (its skills and commands there), for `server.refreshProviders` with `instanceId` and
+    /// `cwd`. `None`: this provider has no per-workspace scan.
+    fn snapshot_for_cwd(
+        &self,
+        _cwd: &str,
+    ) -> Option<BoxFuture<'_, ProviderResult<serde_json::Value>>> {
         None
     }
 

@@ -189,6 +189,8 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
         attachments_dir: None,
         auth_method: None,
         runtime_version: None,
+        default_model: None,
+        observer: None,
     };
     let (tx, mut rx) = mpsc::channel::<ProviderEvent>(session::EVENT_CAPACITY);
     let events = Arc::new(Mutex::new(Vec::new()));

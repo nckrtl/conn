@@ -34,7 +34,13 @@ pub(crate) enum Incoming {
         result: Result<Value, CallError>,
     },
     Closed(Option<ExitInfo>),
+    /// [`Connection::barrier`]: everything forwarded before it has been handled.
+    Barrier(oneshot::Sender<()>),
 }
+
+/// A line that is not JSON-RPC but ends the connection with this failure (Antigravity's
+/// sign-in URL on stdout). Pending calls fail with it.
+pub(crate) type Signal = fn(&str) -> Option<conn_provider::ProviderError>;
 
 /// Why a request got no result.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +48,8 @@ pub(crate) enum CallError {
     Rpc(RpcError),
     /// The agent exited or closed stdout before it replied.
     Closed,
+    /// The agent's output ended the connection with this failure ([`Signal`]).
+    Provider(conn_provider::ProviderError),
 }
 
 impl CallError {
@@ -49,6 +57,7 @@ impl CallError {
         match self {
             Self::Rpc(error) => error.message.clone(),
             Self::Closed => "the agent process exited".into(),
+            Self::Provider(error) => error.to_string(),
         }
     }
 }
@@ -69,6 +78,8 @@ struct Pending {
 pub(crate) struct Connection {
     writer: mpsc::Sender<String>,
     pending: Arc<Mutex<Pending>>,
+    /// The incoming channel, for [`Connection::barrier`].
+    incoming: mpsc::Sender<Incoming>,
 }
 
 impl std::fmt::Debug for Connection {
@@ -100,18 +111,30 @@ impl Connection {
     /// the channel of everything that is not a reply.
     pub(crate) fn start(
         writer: mpsc::Sender<String>,
+        events: mpsc::Receiver<ProcEvent>,
+        capacity: usize,
+    ) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::start_with_signal(writer, events, capacity, None)
+    }
+
+    /// [`Connection::start`] with a [`Signal`] checked on every stdout line.
+    pub(crate) fn start_with_signal(
+        writer: mpsc::Sender<String>,
         mut events: mpsc::Receiver<ProcEvent>,
         capacity: usize,
+        signal: Option<Signal>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
         let pending = Arc::new(Mutex::new(Pending {
             next_id: FIRST_REQUEST_ID,
             ..Pending::default()
         }));
         let (incoming_tx, incoming) = mpsc::channel(capacity);
+        let barrier_tx = incoming_tx.clone();
         let routed = pending.clone();
         tokio::spawn(async move {
             let mut skipped = 0u32;
             let mut exit = None;
+            let mut failure = None;
             while let Some(event) = events.recv().await {
                 let line = match event {
                     ProcEvent::Line(Line::Text(line)) => line,
@@ -127,6 +150,10 @@ impl Connection {
                         break;
                     }
                 };
+                if let Some(error) = signal.and_then(|signal| signal(&line)) {
+                    failure = Some(error);
+                    break;
+                }
                 let Some(frame) = Inbound::parse(&line) else {
                     skipped += 1;
                     if skipped <= LOGGED_SKIPS {
@@ -169,12 +196,20 @@ impl Connection {
                 pending.ordered.clear();
                 std::mem::take(&mut pending.waiting)
             };
+            let error = failure.map_or(CallError::Closed, CallError::Provider);
             for (_, reply) in waiting {
-                let _ = reply.send(Err(CallError::Closed));
+                let _ = reply.send(Err(error.clone()));
             }
             let _ = incoming_tx.send(Incoming::Closed(exit)).await;
         });
-        (Self { writer, pending }, incoming)
+        (
+            Self {
+                writer,
+                pending,
+                incoming: barrier_tx,
+            },
+            incoming,
+        )
     }
 
     /// Sends a request and waits for its reply.
@@ -230,6 +265,15 @@ impl Connection {
         Some(id)
     }
 
+    /// Resolves once the reader of the incoming channel has handled everything forwarded so
+    /// far (T3's `drainEvents` barrier), or right away when the connection is gone.
+    pub(crate) async fn barrier(&self) {
+        let (done_tx, done) = oneshot::channel();
+        if self.incoming.send(Incoming::Barrier(done_tx)).await.is_ok() {
+            let _ = done.await;
+        }
+    }
+
     pub(crate) async fn notify(&self, method: &str, params: J) -> bool {
         self.writer
             .send(protocol::notification(method, params))
@@ -275,5 +319,38 @@ mod waiting_tests {
         call.abort();
         assert!(call.await.is_err(), "cancelled");
         assert!(crate::lock(&connection.pending).waiting.is_empty());
+    }
+
+    /// T3's `drainEvents`: the barrier resolves only after the reader of the incoming channel
+    /// handled what the agent sent before it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_barrier_waits_for_the_updates_before_it() {
+        let (writer, _written) = mpsc::channel(4);
+        let (events_tx, events) = mpsc::channel(4);
+        let (connection, mut incoming) = Connection::start(writer, events, 4);
+        let update = r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#;
+        events_tx
+            .send(ProcEvent::Line(Line::Text(update.into())))
+            .await
+            .unwrap();
+        while incoming.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let barrier = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.barrier().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!barrier.is_finished(), "nothing was handled yet");
+        assert!(matches!(
+            incoming.recv().await,
+            Some(Incoming::Notification { .. })
+        ));
+        assert!(!barrier.is_finished(), "the barrier is not handled yet");
+        let Some(Incoming::Barrier(done)) = incoming.recv().await else {
+            panic!("the barrier comes after the update");
+        };
+        done.send(()).unwrap();
+        barrier.await.unwrap();
     }
 }

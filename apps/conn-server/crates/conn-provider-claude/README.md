@@ -14,7 +14,7 @@ in the Conn monorepo at the pinned commit.
 | `helper`           | The `claude` driver of the SDK host (`conn_provider_support::sdk_host`), with T3's key order |
 | `launch`           | The `query()` option object, its environment, the runtime policy → permission mode; `ClaudeConfig::with_instance` |
 | `launch_args`      | The instance's `launchArgs` as `makeClaudeQueryOptions` applies them, with an order-keeping JSON value |
-| `catalog`          | `compileClaudeModelSelection` over T3's bundled catalog (`model_catalog.json`, generated), and the models with their options that clients are offered |
+| `catalog`          | `compileClaudeModelSelection` over T3's bundled catalog (`model_catalog.json`, generated), and the models clients are offered: from the model manifest the server accepted last (`resolveClaudeModelCatalog`), else the bundled catalog. A model only the accepted manifest lists compiles with its slug and effort as given |
 | `ordered`          | JSON with T3's key order for what the SDK writes to the CLI verbatim                    |
 | `protocol`         | Typed SDK messages; unknown kinds and changed shapes fall back to raw JSON              |
 | `mapper`           | Pure state machine: SDK messages → `ProviderEvent`s and callback answers                |

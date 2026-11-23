@@ -82,7 +82,23 @@ pub(crate) struct Config {
     pub auth_method: Option<String>,
     /// The installed agent version when known before `initialize` (`runtimeVersion`).
     pub runtime_version: Option<String>,
+    /// The catalog's default model, used when the selection asks for the default
+    /// (`applyAntigravityAcpModelSelection`'s `defaultModel`).
+    pub default_model: Option<String>,
+    /// Told about the session's config options and commands as the agent reports them.
+    pub observer: Option<Observer>,
 }
+
+/// What the agent reported about the session's catalog (T3's `ConfigOptionsUpdated` and
+/// `AvailableCommandsUpdated` events).
+#[derive(Debug)]
+pub(crate) enum CatalogUpdate<'a> {
+    ConfigOptions(&'a Value),
+    AvailableCommands(&'a Value),
+}
+
+/// Receives [`CatalogUpdate`]s, in the order the agent sent them.
+pub(crate) type Observer = Arc<dyn Fn(CatalogUpdate<'_>) + Send + Sync>;
 
 struct Runtime {
     connection: Connection,
@@ -121,6 +137,8 @@ struct State<E: Env> {
     /// Requests whose reply the driver hands over in order with the agent's updates
     /// ([`AcpSession::set_config_option_in_order`]); one per caller in flight.
     ordered_calls: Vec<(i64, OrderedReply)>,
+    /// `config_option_update`s seen: a write's reply older than one of them stays out.
+    config_updates: u64,
 }
 
 type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
@@ -198,6 +216,9 @@ fn protocol_error(detail: impl Into<String>) -> ProviderError {
 }
 
 fn failed(flavor: &Flavor, operation: &'static str, error: &CallError) -> ProviderError {
+    if let CallError::Provider(error) = error {
+        return error.clone();
+    }
     if let CallError::Rpc(rpc) = error
         && let Some(recognised) = (flavor.rpc_failure)(rpc)
     {
@@ -492,6 +513,7 @@ impl AcpSession {
                 policy: config.policy.clone(),
                 active_model: None,
                 ordered_calls: Vec::new(),
+                config_updates: 0,
             }),
             config,
             abandoned_run: std::sync::Mutex::new(None),
@@ -541,7 +563,7 @@ impl AcpSession {
         value: &str,
     ) -> ProviderResult<Value> {
         let (reply_tx, reply) = tokio::sync::oneshot::channel();
-        {
+        let before = {
             // Held across the send, so the driver sees the waiter before the reply.
             let mut state = self.inner.state.lock().await;
             let Some(runtime) = &state.runtime else {
@@ -556,19 +578,27 @@ impl AcpSession {
                 return Err(ProviderError::SessionStopped);
             };
             state.ordered_calls.push((id, reply_tx));
-        }
+            state.config_updates
+        };
         let reply = reply
             .await
             .map_err(|_| ProviderError::SessionStopped)?
             .map_err(|e| failed(self.inner.config.flavor, "session/set_config_option", &e))?;
         let mut state = self.inner.state.lock().await;
-        match reply.get("configOptions") {
-            Some(options) if options.is_array() => {
-                state.setup["configOptions"] = options.clone();
-            }
-            _ => crate::antigravity::set_current(&mut state.setup, config_id, value),
-        }
+        self.inner
+            .apply_config_reply(&mut state, before, config_id, value, &reply);
         Ok(state.setup["configOptions"].clone())
+    }
+
+    /// `drainEvents`: waits until the driver has handled everything the agent sent so far.
+    pub(crate) async fn drain(&self) {
+        let connection = {
+            let state = self.inner.state.lock().await;
+            state.runtime.as_ref().map(|r| r.connection.clone())
+        };
+        if let Some(connection) = connection {
+            connection.barrier().await;
+        }
     }
 
     #[cfg(test)]
@@ -599,8 +629,12 @@ impl Inner {
             operation: "start",
             detail: format!("could not start {}: {error}", self.config.flavor.driver),
         })?;
-        let (connection, incoming) =
-            Connection::start(spawned.writer, spawned.events, EVENT_CAPACITY);
+        let (connection, incoming) = Connection::start_with_signal(
+            spawned.writer,
+            spawned.events,
+            EVENT_CAPACITY,
+            self.config.flavor.stdout_signal,
+        );
         let generation = {
             let mut state = self.state.lock().await;
             state.generation += 1;
@@ -735,14 +769,19 @@ impl Inner {
         model: &str,
         key: String,
     ) -> ProviderResult<()> {
-        let (session_id, switch) = {
+        let (session_id, switch, before) = {
             let state = self.state.lock().await;
             if state.active_model.as_deref() == Some(key.as_str()) {
                 return Ok(());
             }
             (
                 state.session_id.clone().unwrap_or_default(),
-                crate::antigravity::model_switch(&state.setup, model),
+                crate::antigravity::model_switch(
+                    &state.setup,
+                    model,
+                    self.config.default_model.as_deref(),
+                ),
+                state.config_updates,
             )
         };
         let switch = switch.map_err(|detail| ProviderError::Failed {
@@ -761,15 +800,35 @@ impl Inner {
                 .await
                 .map_err(|e| failed(self.config.flavor, "session/set_config_option", &e))?;
             let mut state = self.state.lock().await;
-            match reply.get("configOptions") {
-                Some(options) if options.is_array() => {
-                    state.setup["configOptions"] = options.clone();
-                }
-                _ => crate::antigravity::set_current(&mut state.setup, &config_id, &value),
-            }
+            self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
         }
         self.state.lock().await.active_model = Some(key);
         Ok(())
+    }
+
+    /// A `session/set_config_option` reply: its options, or the value written, unless the
+    /// agent pushed an update while the write was in flight; that update is newer (T3's
+    /// `configOptionUpdates` check). The observer hears the options it applied.
+    fn apply_config_reply(
+        &self,
+        state: &mut State<DynEnv>,
+        before: u64,
+        config_id: &str,
+        value: &str,
+        reply: &Value,
+    ) {
+        if state.config_updates != before {
+            return;
+        }
+        match reply.get("configOptions") {
+            Some(options) if options.is_array() => {
+                state.setup["configOptions"] = options.clone();
+            }
+            _ => crate::antigravity::set_current(&mut state.setup, config_id, value),
+        }
+        if let Some(observer) = &self.config.observer {
+            observer(CatalogUpdate::ConfigOptions(&state.setup["configOptions"]));
+        }
     }
 
     /// `session/new` (or load) params: `cwd`, then `mcpServers` (`sessionMcpServers`).
@@ -1009,6 +1068,9 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 };
                 inner.deliver(&mut state, outs).await;
             }
+            Incoming::Barrier(done) => {
+                let _ = done.send(());
+            }
             Incoming::Reply { id, result } => {
                 let waiter = {
                     let mut state = inner.state.lock().await;
@@ -1037,7 +1099,7 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                         message: error.message,
                         code: Some(error.code),
                     },
-                    Err(CallError::Closed) => continue,
+                    Err(CallError::Closed | CallError::Provider(_)) => continue,
                 };
                 inner.settle(generation, None, outcome).await;
             }
@@ -1155,12 +1217,23 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
         if state.generation != generation {
             return;
         }
-        // `ConfigOptionsUpdated`: the session's options follow the agent.
+        // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
+        // the agent, and the observer hears both.
         let update = &params["update"];
         if update["sessionUpdate"] == "config_option_update"
             && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
         {
             state.setup["configOptions"] = options.clone();
+            state.config_updates += 1;
+            if let Some(observer) = &inner.config.observer {
+                observer(CatalogUpdate::ConfigOptions(options));
+            }
+        }
+        if update["sessionUpdate"] == "available_commands_update"
+            && let Some(observer) = &inner.config.observer
+            && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
+        {
+            observer(CatalogUpdate::AvailableCommands(commands));
         }
         let outs = state.mapper.session_update(params);
         inner.deliver(&mut state, outs).await;

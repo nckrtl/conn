@@ -268,10 +268,11 @@ impl EngineHost for Host {
         match reason {
             ThreadClose::Settled => self.terminals.close_on_settle(thread_id),
             ThreadClose::Archived | ThreadClose::Deleted => {
+                // T3's `terminal.cleanup` effect: archive and delete both drop the history.
                 self.terminals.close(TerminalCloseInput {
                     thread_id: thread_id.to_owned(),
                     terminal_id: None,
-                    delete_history: Some(reason == ThreadClose::Deleted),
+                    delete_history: Some(true),
                 });
                 // The thread's device sessions end; the devices stay on for other threads.
                 if let Some(devices) = self.devices.get().cloned() {
@@ -333,6 +334,138 @@ mod tests {
     use crate::{methods::Deps, routes::mcp};
     use conn_engine::Engine;
     use serde_json::json;
+
+    fn cleanup_host(dir: &std::path::Path) -> Host {
+        let environment =
+            Arc::new(Environment::load(dir, None, dir.to_path_buf(), Default::default()).unwrap());
+        let terminals = TerminalManager::new(conn_terminal::TerminalConfig {
+            history_dir: Some(dir.join("terminals")),
+            shells: vec!["/bin/sh".into()],
+            poll_interval: std::time::Duration::from_millis(50),
+            kill_grace: std::time::Duration::from_millis(500),
+            persist_delay: std::time::Duration::from_millis(10),
+            ..conn_terminal::TerminalConfig::default()
+        });
+        Host {
+            mcp: OnceLock::new(),
+            files: None,
+            vcs: VcsShared::default(),
+            terminals,
+            environment,
+            scheduled_tasks: OnceLock::new(),
+            devices: OnceLock::new(),
+        }
+    }
+
+    fn attach(thread: &str, terminal: &str) -> conn_contract::TerminalAttachInput {
+        conn_contract::TerminalAttachInput {
+            thread_id: thread.into(),
+            terminal_id: terminal.into(),
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            worktree_path: None,
+            cols: None,
+            rows: None,
+            env: Some(conn_contract::support::Map::from([
+                ("PS1".to_owned(), "$ ".to_owned()),
+                ("HISTFILE".to_owned(), "/dev/null".to_owned()),
+            ])),
+            provider_instance_id: None,
+            stop_on_settle: None,
+            restart_if_not_running: None,
+            resume: None,
+            max_history_bytes: None,
+        }
+    }
+
+    /// The text a fresh attachment replays.
+    async fn replayed(host: &Host, thread: &str, terminal: &str) -> (String, Option<i64>) {
+        use conn_contract::TerminalAttachStreamEvent as E;
+        let mut sub = host.terminals.attach(attach(thread, terminal), 1).unwrap();
+        let E::Snapshot(s) = sub.next().await else {
+            panic!("an attachment starts with its snapshot")
+        };
+        (s.snapshot.history, s.snapshot.pid)
+    }
+
+    async fn print_marker(host: &Host, thread: &str, terminal: &str, marker: &str) -> i64 {
+        use conn_contract::TerminalAttachStreamEvent as E;
+        let mut sub = host.terminals.attach(attach(thread, terminal), 1).unwrap();
+        host.terminals
+            .write(
+                conn_contract::TerminalWriteInput {
+                    thread_id: thread.into(),
+                    terminal_id: terminal.into(),
+                    data: format!("printf '%s-%s\\n' {marker} seen\n"),
+                    binary: None,
+                    reply: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let wanted = format!("{marker}-seen");
+        let mut all = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !all.contains(&wanted) {
+                match sub.next().await {
+                    E::Output(o) => all.push_str(&o.data),
+                    E::Snapshot(s) => all.push_str(&s.snapshot.history),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the marker reaches the terminal");
+        host.terminals
+            .read(thread, terminal, None)
+            .and_then(|s| s.pid)
+            .unwrap()
+    }
+
+    fn alive(pid: i64) -> bool {
+        i32::try_from(pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    }
+
+    /// T3's archive effect (`terminal.cleanup`) closes with `deleteHistory`: after unarchive,
+    /// both named terminals reopen as new shells with clean scrollback.
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_stops_terminals_and_drops_their_scrollback() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-archive-terms-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = cleanup_host(&dir);
+        let first = print_marker(&host, "archived", "term-1", "archmarkone").await;
+        let second = print_marker(&host, "archived", "term-2", "archmarktwo").await;
+        let other = print_marker(&host, "other", "term-1", "othermarker").await;
+
+        host.thread_closed("archived", ThreadClose::Archived);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while alive(first) || alive(second) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("archive stops both shells");
+
+        for (terminal, old) in [("term-1", first), ("term-2", second)] {
+            let (history, pid) = replayed(&host, "archived", terminal).await;
+            assert!(
+                pid.is_some_and(|pid| pid != old),
+                "{terminal} is a new shell"
+            );
+            assert!(!history.contains("archmarkone-seen"), "{history:?}");
+            assert!(!history.contains("archmarktwo-seen"), "{history:?}");
+        }
+        // Another thread's terminal keeps running with its scrollback.
+        let (history, pid) = replayed(&host, "other", "term-1").await;
+        assert_eq!(pid, Some(other));
+        assert!(history.contains("othermarker-seen"), "{history:?}");
+        host.terminals.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn browser_access_is_scoped_to_project_and_captured_at_session_start() {

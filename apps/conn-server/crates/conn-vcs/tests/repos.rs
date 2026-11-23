@@ -1206,25 +1206,32 @@ async fn assert_commit_all_merges(fx: &Fixture, file: &str, resolution: &str) {
     );
 }
 
+/// Commit All from `sub/` commits `file` with its markers, as T3 does: its `git diff --check`
+/// reports no marker in this file.
+async fn assert_commit_all_keeps_markers(fx: &Fixture, file: &str) {
+    let content = std::fs::read_to_string(fx.work.join(file)).unwrap();
+    assert!(content.contains("<<<<<<< "), "{content}");
+    assert_commit_all_merges(fx, file, &content).await;
+}
+
 #[tokio::test]
-async fn commit_all_refuses_markers_that_a_binary_diff_driver_hides() {
+async fn commit_all_commits_markers_that_a_binary_diff_driver_hides_as_t3() {
     let fx = conflict_in("commit-binary-driver", "notes.txt", |work| {
         write(work, ".gitattributes", "*.txt diff=doc\n");
     });
     // `git diff --check` skips a file whose diff driver calls it binary.
     configure(&fx.work, &[("diff.doc.binary", "true")]);
 
-    assert_commit_all_refused(&fx, "notes.txt").await;
-    assert_commit_all_merges(&fx, "notes.txt", "resolved\n").await;
+    assert_commit_all_keeps_markers(&fx, "notes.txt").await;
 }
 
 #[tokio::test]
-async fn commit_all_refuses_a_conflict_in_a_file_named_with_a_newline() {
+async fn commit_all_commits_markers_in_a_file_named_with_a_newline_as_t3() {
     let file = "odd\nname.txt";
     let fx = conflict_in("commit-newline-name", file, |_| {});
 
-    assert_commit_all_refused(&fx, file).await;
-    assert_commit_all_merges(&fx, file, "resolved\n").await;
+    // `git diff --check` prints the raw name, so T3's line-by-line read never matches it.
+    assert_commit_all_keeps_markers(&fx, file).await;
 }
 
 #[tokio::test]
@@ -1258,7 +1265,7 @@ async fn commit_all_keeps_markers_the_file_already_had() {
 }
 
 #[tokio::test]
-async fn commit_all_reads_a_file_our_side_deleted_against_head() {
+async fn commit_all_commits_markers_in_a_file_our_side_deleted_as_t3() {
     let fx = Fixture::new("commit-deleted-by-us");
     write(&fx.work, "notes.txt", "base\n");
     write(&fx.work, "sub/chosen.txt", "one\n");
@@ -1283,8 +1290,8 @@ async fn commit_all_reads_a_file_our_side_deleted_against_head() {
         "<<<<<<< HEAD\n=======\nfeature\n>>>>>>> feature\n",
     );
 
-    assert_commit_all_refused(&fx, "notes.txt").await;
-    assert_commit_all_merges(&fx, "notes.txt", "feature\n").await;
+    // `git diff --check` compares the file with our side, stage 2, and there is none.
+    assert_commit_all_keeps_markers(&fx, "notes.txt").await;
 }
 
 #[tokio::test]
@@ -1294,15 +1301,9 @@ async fn commit_all_reads_markers_at_the_configured_width() {
         write(
             work,
             ".gitattributes",
-            "/notes.txt conflict-marker-size=12 diff=doc\n",
+            "/notes.txt conflict-marker-size=12\n",
         );
-        configure(
-            work,
-            &[
-                ("merge.conflictStyle", "diff3"),
-                ("diff.doc.binary", "true"),
-            ],
-        );
+        configure(work, &[("merge.conflictStyle", "diff3")]);
     });
     let notes = std::fs::read_to_string(fx.work.join("notes.txt")).unwrap();
     assert!(notes.starts_with("<<<<<<<<<<<< HEAD\n"), "{notes}");
@@ -1329,7 +1330,7 @@ fn merge_feature(work: &std::path::Path) {
 }
 
 #[tokio::test]
-async fn commit_all_refuses_a_rename_rename_conflict() {
+async fn commit_all_commits_a_rename_rename_conflict_as_t3() {
     let fx = Fixture::new("commit-rename-rename");
     let lines = (1..=20).map(|n| format!("{n}\n")).collect::<String>();
     write(&fx.work, "f.txt", &lines);
@@ -1352,33 +1353,18 @@ async fn commit_all_refuses_a_rename_rename_conflict() {
         std::fs::read_to_string(fx.work.join("h.txt")).unwrap(),
         merged
     );
-    let head = git(&fx.work, &["rev-parse", "HEAD"]);
-    let sub = fx.work.join("sub");
 
-    for refused in [
-        commit::prepare_context(&sub, None, true).await.unwrap_err(),
-        commit::create(&sub, "All", "", None).await.unwrap_err(),
-    ] {
-        assert!(
-            refused
-                .to_string()
-                .contains("Cannot commit with unresolved merge conflicts in g.txt, h.txt."),
-            "{refused}"
-        );
-    }
-    assert_eq!(git(&fx.work, &["rev-parse", "HEAD"]), head);
-    assert!(fx.work.join(".git/MERGE_HEAD").exists());
-
-    write(&fx.work, "g.txt", &lines);
-    std::fs::remove_file(fx.work.join("h.txt")).unwrap();
-    commit::create(&sub, "Merge", "", None).await.unwrap();
-    assert_eq!(git(&fx.work, &["show", "HEAD:g.txt"]), lines);
-    assert_eq!(git(&fx.work, &["ls-files", "--", "h.txt", "f.txt"]), "");
+    // `git diff --check` reads markers at the attribute's width only, as T3 relies on.
+    commit::create(&fx.work.join("sub"), "Merge", "", None)
+        .await
+        .unwrap();
+    assert_eq!(git(&fx.work, &["show", "HEAD:g.txt"]), merged);
+    assert_eq!(git(&fx.work, &["show", "HEAD:h.txt"]), merged);
     assert!(!fx.work.join(".git/MERGE_HEAD").exists());
 }
 
 #[tokio::test]
-async fn commit_all_refuses_default_markers_after_an_incoming_marker_size() {
+async fn commit_all_commits_default_markers_after_an_incoming_marker_size_as_t3() {
     let fx = Fixture::new("commit-incoming-attributes");
     write(&fx.work, "notes.txt", "base\n");
     write(&fx.work, "sub/chosen.txt", "one\n");
@@ -1406,8 +1392,8 @@ async fn commit_all_refuses_default_markers_after_an_incoming_marker_size() {
         "notes.txt: conflict-marker-size: 12\n"
     );
 
-    assert_commit_all_refused(&fx, "notes.txt").await;
-    assert_commit_all_merges(&fx, "notes.txt", "resolved\n").await;
+    // `git diff --check` reads twelve-wide markers only.
+    assert_commit_all_keeps_markers(&fx, "notes.txt").await;
 }
 
 #[tokio::test]

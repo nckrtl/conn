@@ -5,6 +5,8 @@
 //! where the hash is `sha256(<git common dir> NUL <branch>)`.
 
 use std::{
+    ffi::OsString,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -297,9 +299,10 @@ pub async fn remove_worktree(cwd: &Path, path: &Path, removal: Removal) -> VcsRe
     }
     args.push("--".into());
     args.push(target.to_string_lossy().into_owned());
+    let common = common_dir(cwd).await?;
     let annexed = blocking(cwd, {
         let target = target.clone();
-        move || AnnexLink::replace(&target)
+        move || AnnexLink::replace(&target, &common)
     })
     .await??;
     let removed = git("GitVcsDriver.removeWorktree", cwd, args)
@@ -341,6 +344,12 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| invalid(cwd, e.to_string()))
 }
 
+/// The original `.git` link, kept in the admin folder while `.git` is a gitfile, so the next
+/// removal attempt can restore it after an interruption.
+const ANNEX_LINK_RECORD: &str = "conn-annex-link";
+/// `.git`'s replacement is written here, then renamed over it.
+const DOT_GIT_SWAP: &str = ".git.conn-swap";
+
 /// git-annex replaces a linked worktree's `.git` file with a symlink to its admin folder, so its
 /// links into `.git/annex` resolve. Git refuses to remove such a worktree, so the removal puts
 /// the standard `gitdir:` file back for git and restores the link if the checkout survives.
@@ -352,56 +361,112 @@ struct AnnexLink {
 }
 
 impl AnnexLink {
-    /// Swaps the link for a `gitdir:` file when `.git` links to an admin folder whose `gitdir`
-    /// points back to `worktree`. `None` for any other layout.
-    fn replace(worktree: &Path) -> VcsResult<Option<Self>> {
-        let Some(link) = Self::find(worktree) else {
-            return Ok(None);
-        };
-        let failed = |e: std::io::Error| {
+    /// Records the link and swaps it for a `gitdir:` file when `.git` links to this repository's
+    /// registered admin folder for `worktree`; `common` is the repository's common Git dir. Also
+    /// picks up a swap an interrupted removal left. `None` for a layout git handles itself; any
+    /// other link is refused before the checkout changes.
+    fn replace(worktree: &Path, common: &Path) -> VcsResult<Option<Self>> {
+        let dot_git = worktree.join(".git");
+        let refuse = |detail: String| {
             VcsError::invalid(
                 "GitVcsDriver.removeWorktree",
                 &worktree.to_string_lossy(),
-                format!("fatal: failed to replace '{}': {e}", link.dot_git.display()),
+                format!("fatal: {detail}"),
             )
         };
-        std::fs::remove_file(&link.dot_git).map_err(failed)?;
-        link.write_gitdir_file().map_err(failed)?;
-        Ok(Some(link))
+        let is_link = std::fs::symlink_metadata(&dot_git).is_ok_and(|m| m.is_symlink());
+        if !is_link {
+            return Ok(Self::interrupted(worktree, dot_git, common));
+        }
+        let not_a_worktree = || refuse(format!("'{}' is not a working tree", worktree.display()));
+        let link = std::fs::read_link(&dot_git).map_err(|_| not_a_worktree())?;
+        let admin =
+            registered_admin(worktree, &worktree.join(&link), common).ok_or_else(not_a_worktree)?;
+        let this = Self {
+            dot_git,
+            link,
+            admin,
+        };
+        let record = this.admin.join(ANNEX_LINK_RECORD);
+        std::fs::write(&record, this.link.as_os_str().as_bytes())
+            .and_then(|()| {
+                replace_dot_git(&this.dot_git, |temp| {
+                    std::fs::write(temp, format!("gitdir: {}\n", this.admin.display()))
+                })
+            })
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&record);
+                refuse(format!(
+                    "failed to replace '{}': {e}",
+                    this.dot_git.display()
+                ))
+            })?;
+        Ok(Some(this))
     }
 
-    fn find(worktree: &Path) -> Option<Self> {
-        let dot_git = worktree.join(".git");
-        let link = std::fs::read_link(&dot_git).ok()?;
-        let admin = std::fs::canonicalize(worktree.join(&link)).ok()?;
-        let gitdir = std::fs::read_to_string(admin.join("gitdir")).ok()?;
-        let points_back = admin.join(gitdir.trim());
-        let points_back = std::fs::canonicalize(points_back.parent()?).ok()?;
-        (points_back == std::fs::canonicalize(worktree).ok()?).then_some(Self {
+    /// A gitfile left by a removal interrupted after the swap, with the link it replaced.
+    fn interrupted(worktree: &Path, dot_git: PathBuf, common: &Path) -> Option<Self> {
+        let gitfile = std::fs::read_to_string(&dot_git).ok()?;
+        let target = worktree.join(gitfile.strip_prefix("gitdir: ")?.trim_end());
+        let admin = registered_admin(worktree, &target, common)?;
+        let record = std::fs::read(admin.join(ANNEX_LINK_RECORD)).ok()?;
+        let link = PathBuf::from(OsString::from_vec(record));
+        if std::fs::canonicalize(worktree.join(&link)).ok()? != admin {
+            return None;
+        }
+        let _ = std::fs::remove_file(worktree.join(DOT_GIT_SWAP));
+        Some(Self {
             dot_git,
             link,
             admin,
         })
     }
 
-    fn write_gitdir_file(&self) -> std::io::Result<()> {
-        std::fs::write(&self.dot_git, format!("gitdir: {}\n", self.admin.display()))
-    }
-
-    /// Best effort: a kept checkout gets its link back, or the `gitdir:` file when the link
-    /// cannot be made.
+    /// A kept checkout gets its link back. If that fails, the gitfile stays usable and the
+    /// record stays for the next attempt.
     fn restore_if_kept(self) {
-        let Some(worktree) = self.dot_git.parent() else {
-            return;
-        };
-        if !worktree.exists() {
+        let kept = self.dot_git.parent().is_some_and(Path::exists);
+        if kept
+            && replace_dot_git(&self.dot_git, |temp| {
+                std::os::unix::fs::symlink(&self.link, temp)
+            })
+            .is_err()
+        {
             return;
         }
-        let _ = std::fs::remove_file(&self.dot_git);
-        if std::os::unix::fs::symlink(&self.link, &self.dot_git).is_err() {
-            let _ = self.write_gitdir_file();
-        }
+        let _ = std::fs::remove_file(self.admin.join(ANNEX_LINK_RECORD));
     }
+}
+
+/// The admin folder `target` resolves to, when it is the repository's
+/// `<common>/worktrees/<name>` and its `gitdir` names `worktree`'s own `.git`.
+fn registered_admin(worktree: &Path, target: &Path, common: &Path) -> Option<PathBuf> {
+    let admin = std::fs::canonicalize(target).ok()?;
+    if admin.parent()? != common.join("worktrees") {
+        return None;
+    }
+    let gitdir = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    let backlink = admin.join(gitdir.trim());
+    let names_dot_git = backlink.file_name()? == ".git"
+        && std::fs::canonicalize(backlink.parent()?).ok()?
+            == std::fs::canonicalize(worktree).ok()?;
+    names_dot_git.then_some(admin)
+}
+
+/// Writes `.git`'s replacement beside it, then renames it over `.git`, so an interruption leaves
+/// either the old or the new one.
+fn replace_dot_git(
+    dot_git: &Path,
+    write: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let temp = dot_git.with_file_name(DOT_GIT_SWAP);
+    // Left by an interrupted swap.
+    let _ = std::fs::remove_file(&temp);
+    let swapped = write(&temp).and_then(|()| std::fs::rename(&temp, dot_git));
+    if swapped.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    swapped
 }
 
 /// Deletes a local branch (`git branch -d`, or `-D` with `force`).
@@ -467,5 +532,75 @@ mod tests {
         );
         let multi = worktree_folder_name("/r", "ééééééééééééé");
         assert!(multi.split('-').next().unwrap().len() <= PREFIX_MAX_BYTES);
+    }
+
+    /// `.git` stays usable when a swap fails after writing its replacement, and when a removal
+    /// stops after the swap.
+    #[test]
+    fn dot_git_stays_usable_through_an_interrupted_swap() {
+        let root = std::env::temp_dir().join(format!("conn-vcs-annex-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let (repo, checkout) = (root.join("repo"), root.join("checkout"));
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&root, &["init", "-q", "-b", "main", "repo"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "annexed", "../checkout"],
+        );
+        let admin = PathBuf::from(git(&checkout, &["rev-parse", "--absolute-git-dir"]));
+        let dot_git = checkout.join(".git");
+        std::fs::remove_file(&dot_git).unwrap();
+        std::os::unix::fs::symlink(&admin, &dot_git).unwrap();
+        let usable = || assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+        let injected = || Err(std::io::Error::other("injected"));
+
+        // A failure after the temp write leaves the link.
+        replace_dot_git(&dot_git, |temp| {
+            std::fs::write(temp, "gitdir: /elsewhere\n")?;
+            injected()
+        })
+        .unwrap_err();
+        assert_eq!(std::fs::read_link(&dot_git).unwrap(), admin);
+        usable();
+
+        // A removal that stops after the swap leaves a working gitfile and the record.
+        let common = std::fs::canonicalize(repo.join(".git")).unwrap();
+        drop(AnnexLink::replace(&checkout, &common).unwrap().unwrap());
+        assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_file());
+        assert_eq!(
+            std::fs::read(admin.join(ANNEX_LINK_RECORD)).unwrap(),
+            admin.as_os_str().as_bytes()
+        );
+        usable();
+
+        // A failed restore keeps the gitfile, and the next attempt restores the link.
+        replace_dot_git(&dot_git, |temp| {
+            std::os::unix::fs::symlink(&admin, temp)?;
+            injected()
+        })
+        .unwrap_err();
+        assert!(std::fs::symlink_metadata(&dot_git).unwrap().is_file());
+        usable();
+        AnnexLink::replace(&checkout, &common)
+            .unwrap()
+            .unwrap()
+            .restore_if_kept();
+        assert_eq!(std::fs::read_link(&dot_git).unwrap(), admin);
+        assert!(!admin.join(ANNEX_LINK_RECORD).exists());
+        usable();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

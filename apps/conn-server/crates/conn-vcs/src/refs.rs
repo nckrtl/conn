@@ -390,6 +390,7 @@ pub async fn pull(cwd: &Path) -> VcsResult<VcsPullResult> {
         .map(Option::unwrap_or_default)
     };
     let before = head().await?;
+    let sole_upstream = sole_upstream(cwd, &branch).await?;
     let run_pull = |args: Vec<String>| {
         git("GitVcsDriver.pullCurrentBranch.pull", cwd, args)
             .timeout(Duration::from_secs(600))
@@ -401,18 +402,27 @@ pub async fn pull(cwd: &Path) -> VcsResult<VcsPullResult> {
             .run()
     };
     if let Err(error) = run_pull(vec!["pull".into(), "--ff-only".into()]).await {
-        // A full fetch fails on any branch's ref lock. Then retry only the configured upstream,
-        // while nothing else has moved the branch or HEAD. Git's lock stays in place.
-        let retry = match &error {
-            ProcessError::Exit { stderr, .. } if is_ref_lock_failure(stderr) => {
-                upstream_only_pull(cwd, &branch, &before).await?
+        // A full fetch fails on any branch's ref lock. Then retry only the upstream captured
+        // before it, while nothing has moved the branch, HEAD or upstream. Git's lock stays.
+        let retry = match (&error, sole_upstream) {
+            (ProcessError::Exit { stderr, .. }, Some(upstream)) if is_ref_lock_failure(stderr) => {
+                unmoved(cwd, &branch, &before, &upstream)
+                    .await?
+                    .then_some(upstream)
             }
             _ => None,
         };
-        let Some(args) = retry else {
+        let Some((remote, merge_ref)) = retry else {
             return Err(error.into());
         };
-        run_pull(args).await?;
+        run_pull(vec![
+            "pull".into(),
+            "--ff-only".into(),
+            "--".into(),
+            remote,
+            merge_ref,
+        ])
+        .await?;
     }
     let after = head().await?;
     Ok(VcsPullResult {
@@ -426,13 +436,8 @@ pub async fn pull(cwd: &Path) -> VcsResult<VcsPullResult> {
     })
 }
 
-/// `pull --ff-only -- <remote> <merge ref>` when the branch and HEAD are still the ones the
-/// pull started from and exactly one upstream ref is configured; otherwise `None`.
-async fn upstream_only_pull(
-    cwd: &Path,
-    branch: &str,
-    before: &str,
-) -> VcsResult<Option<Vec<String>>> {
+/// The branch's remote and merge ref, when exactly one merge ref is configured.
+async fn sole_upstream(cwd: &Path, branch: &str) -> VcsResult<Option<(String, String)>> {
     let remote = repo::config_get(cwd, &format!("branch.{branch}.remote")).await?;
     let merge_refs = repo::optional_text(git(
         "GitVcsDriver.pullCurrentBranch.mergeRefs",
@@ -445,28 +450,32 @@ async fn upstream_only_pull(
     ))
     .await?
     .unwrap_or_default();
-    let current_branch = repo::current_branch(cwd).await?;
+    let mut merge_refs = merge_refs.lines().filter(|line| !line.is_empty());
+    Ok(match (remote, merge_refs.next(), merge_refs.next()) {
+        (Some(remote), Some(merge_ref), None) => Some((remote, merge_ref.to_owned())),
+        _ => None,
+    })
+}
+
+/// Whether `branch` is still checked out at `before` with the same sole upstream.
+async fn unmoved(
+    cwd: &Path,
+    branch: &str,
+    before: &str,
+    upstream: &(String, String),
+) -> VcsResult<bool> {
+    if sole_upstream(cwd, branch).await?.as_ref() != Some(upstream)
+        || repo::current_branch(cwd).await?.as_deref() != Some(branch)
+    {
+        return Ok(false);
+    }
     let current_sha = repo::optional_text(git(
         "GitVcsDriver.pullCurrentBranch.currentSha",
         cwd,
         ["rev-parse", "HEAD"],
     ))
     .await?;
-    let mut merge_refs = merge_refs.lines().filter(|line| !line.is_empty());
-    let (Some(remote), Some(merge_ref), None) = (remote, merge_refs.next(), merge_refs.next())
-    else {
-        return Ok(None);
-    };
-    if current_branch.as_deref() != Some(branch) || current_sha.as_deref() != Some(before) {
-        return Ok(None);
-    }
-    Ok(Some(vec![
-        "pull".into(),
-        "--ff-only".into(),
-        "--".into(),
-        remote,
-        merge_ref.to_owned(),
-    ]))
+    Ok(current_sha.as_deref() == Some(before))
 }
 
 /// Git reports a ref it could not lock as `cannot lock ref` before 2.53, and as a fetching-ref
@@ -532,9 +541,10 @@ pub async fn init(input: VcsInitInput) -> VcsResult<()> {
 mod tests {
     use super::*;
 
-    /// T3 "does not retry a failed fetch if another operation moved branch/HEAD".
+    /// T3 "does not retry a failed fetch if another operation moved branch/HEAD", plus a
+    /// retargeted upstream.
     #[tokio::test]
-    async fn upstream_only_pull_needs_the_same_branch_and_head() {
+    async fn retry_needs_the_same_branch_head_and_upstream() {
         let dir =
             std::env::temp_dir().join(format!("conn-vcs-upstream-only-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -555,24 +565,29 @@ mod tests {
         run(&["config", "branch.main.remote", "origin"]);
         run(&["config", "branch.main.merge", "refs/heads/main"]);
         let head = run(&["rev-parse", "HEAD"]);
-        let retry = |branch: &'static str, sha: String| {
-            let dir = dir.clone();
-            async move { upstream_only_pull(&dir, branch, &sha).await.unwrap() }
+        let upstream = sole_upstream(&dir, "main").await.unwrap().unwrap();
+        assert_eq!(upstream, ("origin".into(), "refs/heads/main".into()));
+        let unmoved = |sha: String| {
+            let (dir, upstream) = (dir.clone(), upstream.clone());
+            async move { unmoved(&dir, "main", &sha, &upstream).await.unwrap() }
         };
 
-        let args = retry("main", head.clone()).await.unwrap();
-        assert_eq!(
-            args,
-            ["pull", "--ff-only", "--", "origin", "refs/heads/main"]
-        );
+        assert!(unmoved(head.clone()).await);
+        run(&["config", "branch.main.merge", "refs/heads/other"]);
+        assert!(!unmoved(head.clone()).await, "merge ref retargeted");
+        run(&["config", "branch.main.merge", "refs/heads/main"]);
+        run(&["config", "branch.main.remote", "fork"]);
+        assert!(!unmoved(head.clone()).await, "remote retargeted");
+        run(&["config", "branch.main.remote", "origin"]);
         run(&["commit", "-q", "--allow-empty", "-m", "concurrent commit"]);
-        assert_eq!(retry("main", head.clone()).await, None, "HEAD moved");
+        assert!(!unmoved(head).await, "HEAD moved");
         let head = run(&["rev-parse", "HEAD"]);
         run(&["checkout", "-q", "-b", "moved"]);
-        assert_eq!(retry("main", head.clone()).await, None, "branch moved");
+        assert!(!unmoved(head.clone()).await, "branch moved");
         run(&["checkout", "-q", "main"]);
         run(&["config", "--add", "branch.main.merge", "refs/heads/other"]);
-        assert_eq!(retry("main", head).await, None, "two upstream refs");
+        assert_eq!(sole_upstream(&dir, "main").await.unwrap(), None);
+        assert!(!unmoved(head).await, "two upstream refs");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -383,6 +383,133 @@ final class ConnSpikeUITests: XCTestCase {
         }
     }
 
+    /// Fidelity capture: walks the same screens in this app (`CONN_FIDELITY_APP=swift`) or the Expo
+    /// app (`expo`). At each screen it asks the host for a `simctl io screenshot` through
+    /// `CONN_FIDELITY_DIR/req` and waits for the name in `CONN_FIDELITY_DIR/ack`.
+    func testFidelityCapture() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let which = env["CONN_FIDELITY_APP"], let dir = env["CONN_FIDELITY_DIR"],
+              let pairingURL = env["CONN_PAIRING_URL"]
+        else { throw XCTSkip("Set CONN_FIDELITY_APP, CONN_FIDELITY_DIR and CONN_PAIRING_URL") }
+        let expo = which == "expo"
+        switch env["CONN_APPEARANCE"] {
+        case "dark": XCUIDevice.shared.appearance = .dark
+        case "light": XCUIDevice.shared.appearance = .light
+        default: break
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        func settle(_ seconds: Double = 1.0) { RunLoop.current.run(until: Date().addingTimeInterval(seconds)) }
+        func capture(_ name: String) {
+            settle(1.2)
+            let req = URL(fileURLWithPath: dir).appendingPathComponent("req")
+            let ack = URL(fileURLWithPath: dir).appendingPathComponent("ack")
+            try? name.write(to: req, atomically: true, encoding: .utf8)
+            let deadline = Date().addingTimeInterval(20)
+            while Date() < deadline {
+                if (try? String(contentsOf: ack, encoding: .utf8)) == name { return }
+                settle(0.2)
+            }
+            XCTFail("host did not capture \(name)")
+        }
+        func first(_ app: XCUIApplication, _ keys: [String], timeout: Double = 6) -> XCUIElement? {
+            let any = app.descendants(matching: .any)
+            let deadline = Date().addingTimeInterval(timeout)
+            repeat {
+                for key in keys {
+                    let byId = any.matching(identifier: key).firstMatch
+                    if byId.exists && byId.isHittable { return byId }
+                    let byLabel = app.buttons[key].firstMatch
+                    if byLabel.exists && byLabel.isHittable { return byLabel }
+                }
+                settle(0.3)
+            } while Date() < deadline
+            return nil
+        }
+        func tap(_ app: XCUIApplication, _ keys: [String]) -> Bool {
+            guard let element = first(app, keys) else { return false }
+            element.tap()
+            return true
+        }
+        func row(_ app: XCUIApplication, _ title: String) -> XCUIElement {
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", title, title)).firstMatch
+        }
+        func back(_ app: XCUIApplication) {
+            if !tap(app, ["Back", "thread.backButton"]) {
+                let nav = app.navigationBars.buttons.element(boundBy: 0)
+                if nav.exists { nav.tap() } else { app.swipeRight() }
+            }
+            settle(0.8)
+        }
+
+        let app: XCUIApplication
+        if expo {
+            app = XCUIApplication(bundleIdentifier: env["CONN_EXPO_BUNDLE"] ?? "com.nckrtl.conn")
+            app.activate()
+            settle(3)
+            let encoded = pairingURL.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? pairingURL
+            app.open(URL(string: "t3code://connections/new?pairingUrl=\(encoded)")!)
+            if springboard.buttons["Open"].waitForExistence(timeout: 3) { springboard.buttons["Open"].tap() }
+            settle(2)
+            XCTAssertTrue(tap(app, ["Connect"]), "Expo pairing form should offer Connect")
+            settle(4)
+        } else {
+            app = XCUIApplication()
+            app.launchArguments = ["--reset-session"]
+            app.launch()
+            let urlField = app.textFields["pairing.urlField"]
+            XCTAssertTrue(urlField.waitForExistence(timeout: 10), "Pairing URL field should appear")
+            urlField.tap()
+            urlField.typeText(pairingURL)
+            app.buttons["pairing.connectButton"].tap()
+        }
+
+        let content = row(app, "Plan a greeting in main.rs")
+        XCTAssertTrue(content.waitForExistence(timeout: 30), "The inbox should list the seeded threads")
+        settle(2)
+        capture("inbox")
+
+        content.tap()
+        settle(2)
+        capture("thread")
+        let composer = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
+        if composer.waitForExistence(timeout: 5) {
+            composer.tap()
+            settle(1.5)
+            capture("keyboard")
+        }
+        back(app)
+        if app.keyboards.count > 0 { back(app) }
+
+        for (title, name) in [("Clean the build folder", "approval"), ("Pick the cache store", "question")] {
+            let target = row(app, title)
+            if target.waitForExistence(timeout: 10) {
+                target.tap()
+                settle(2)
+                capture(name)
+                back(app)
+            }
+        }
+
+        if tap(app, ["workspace.tab.tasks", "Tasks"]) { settle(3); capture("tasks") }
+        if tap(app, ["workspace.tab.pullRequests", "Pull requests"]) { settle(3); capture("prs") }
+        if tap(app, ["workspace.tab.threads", "Threads"]) { settle(1) }
+        if tap(app, ["workspace.searchButton", "Search"]) {
+            settle(1)
+            if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
+            capture("search")
+            _ = tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"])
+            settle(1)
+        }
+        if tap(app, ["workspace.settingsButton", "Open settings"]) {
+            settle(1.5)
+            capture("settings")
+            if !tap(app, ["settings.closeButton", "Close", "Done"]) { app.swipeDown() }
+            settle(1)
+        }
+        if tap(app, ["inbox.newThreadButton", "New chat"]) { settle(1.5); capture("new-chat") }
+    }
+
     private func saveScreenshot(named name: String, dir: String?) {
         guard let dir, !dir.isEmpty else { return }
         let directory = URL(fileURLWithPath: dir, isDirectory: true)

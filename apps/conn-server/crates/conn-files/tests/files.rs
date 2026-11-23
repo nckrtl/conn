@@ -655,6 +655,26 @@ fn finds_a_path_inside_a_gitignored_nested_worktree_only_by_its_exact_path() {
     );
     assert!(names(&f, "src/fo", 25).is_empty());
     assert_eq!(names(&f, "src/foo.py", 1).len(), 1, "the limit holds");
+    // A drive-letter-like relative name is a path, not a Windows absolute one.
+    d.write(".worktrees/x/a:docs/new.py", "print(5)");
+    assert_eq!(
+        names(&f, "a:docs/new.py", 25),
+        [".worktrees/x/a:docs/new.py"]
+    );
+    // A link out of the workspace or into `.git` is not a file of the checkout.
+    symlink(
+        f.outside.join("secret.txt"),
+        f.project.join(".worktrees/x/src/leak.py"),
+    )
+    .unwrap();
+    symlink(
+        f.project.join(".git/HEAD"),
+        f.project.join(".worktrees/x/src/head.py"),
+    )
+    .unwrap();
+    for query in ["src/leak.py", "src/head.py"] {
+        assert!(names(&f, query, 25).is_empty(), "{query}");
+    }
     // A gone checkout's folder is no longer one of them.
     fs::remove_dir_all(f.project.join(".worktrees/x")).unwrap();
     d.write(".worktrees/x/src/foo.py", "print(4)");
@@ -674,6 +694,8 @@ fn name_globs_take_brace_alternatives_and_keep_literal_braces() {
         "src/foo{bar}.ts",
         "src/main.ts",
         "src/notes.md",
+        "src/UPPER.TS",
+        "src/clip.ts}",
     ] {
         d.write(path, "");
     }
@@ -690,7 +712,12 @@ fn name_globs_take_brace_alternatives_and_keep_literal_braces() {
         ]
     );
     assert_eq!(names(&f, "*.{ts}", 10), ["src/foo{bar}.ts", "src/main.ts"]);
-    assert_eq!(names(&f, "*.ts", 10), ["src/foo{bar}.ts", "src/main.ts"]);
+    // fff: `*.ext` filters extensions in any case; a brace glob matches case as written.
+    assert_eq!(
+        names(&f, "*.ts", 10),
+        ["src/UPPER.TS", "src/foo{bar}.ts", "src/main.ts"]
+    );
+    assert_eq!(names(&f, "*.ts}", 10), ["src/clip.ts}"]);
     assert_eq!(names(&f, "src/{main}.ts", 10), ["src/main.ts"]);
     assert_eq!(names(&f, "src/{foo{bar},notes}.md", 10), ["src/notes.md"]);
     assert_eq!(names(&f, "*.{TS}", 10), ["src/foo{bar}.ts", "src/main.ts"]);

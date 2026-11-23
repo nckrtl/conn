@@ -22,9 +22,9 @@ use nucleo_matcher::{
 };
 
 use crate::{
-    entries::{FileLinks, WalkEnd, walk_files},
+    entries::{FileLinks, WalkEnd, symlink_kind, walk_files},
     git, mime,
-    paths::InternalPaths,
+    paths::{self, InternalPaths},
 };
 
 /// `CONTENT_SEARCH_MAX_MATCHES_PER_FILE`.
@@ -59,20 +59,26 @@ struct Scorer {
 
 /// A name query fff reads as a glob over the whole path.
 enum Glob {
+    /// `*.ext`: fff filters by extension in any case, a stray `}` included. Holds `.ext`.
+    Extension(String),
     Valid(globset::GlobMatcher),
     /// A brace left open or closed twice: fff finds nothing for it.
     Invalid,
 }
 
 impl Glob {
-    /// `*` and `?` cross `/`, `{a,b}` picks one, without escapes or case. `[` never gets
-    /// here: [`normalize_query`] drops it.
+    /// `*` and `?` cross `/`, `{a,b}` picks one, without escapes, matching case as written.
+    /// `[` never gets here: [`normalize_query`] drops it.
     fn new(query: &str) -> Option<Self> {
         if !query.contains(['*', '?', '{']) {
             return None;
         }
+        if let Some(extension) = query.strip_prefix("*.")
+            && !extension.contains(['*', '?', '{', '/'])
+        {
+            return Some(Self::Extension(format!(".{extension}")));
+        }
         let glob = globset::GlobBuilder::new(query)
-            .case_insensitive(true)
             .literal_separator(false)
             .backslash_escape(false)
             .build();
@@ -80,7 +86,15 @@ impl Glob {
     }
 
     fn is_match(&self, path: &str) -> bool {
-        matches!(self, Self::Valid(m) if m.is_match(path))
+        match self {
+            Self::Extension(suffix) => path
+                .len()
+                .checked_sub(suffix.len())
+                .and_then(|start| path.get(start..))
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix)),
+            Self::Valid(m) => m.is_match(path),
+            Self::Invalid => false,
+        }
     }
 }
 
@@ -217,11 +231,10 @@ fn nested_worktree_files(
     internal: &InternalPaths,
 ) -> Vec<ProjectEntry> {
     let relative = query.trim().replace('\\', "/");
-    let windows_absolute = relative.as_bytes().get(1) == Some(&b':');
     if !relative.contains('/')
         || relative.ends_with('/')
         || relative.starts_with('/')
-        || windows_absolute
+        || paths::is_windows_absolute(&relative)
         || relative.split('/').any(|s| s == "..")
         || found.iter().any(|e| {
             e.kind == ProjectEntryKind::File
@@ -237,8 +250,8 @@ fn nested_worktree_files(
             let worktree = std::fs::canonicalize(worktree).ok()?;
             let nested = worktree.strip_prefix(&root).ok()?.to_str()?;
             let candidate = format!("{nested}/{relative}");
-            let full = root.join(&candidate);
-            (!nested.is_empty() && full.is_file() && !internal.contains(&full))
+            let kind = symlink_kind(&root.join(&candidate), &root, &[], internal);
+            (!nested.is_empty() && kind == Some(ProjectEntryKind::File))
                 .then(|| entry(&candidate, ProjectEntryKind::File))
         })
         .collect()

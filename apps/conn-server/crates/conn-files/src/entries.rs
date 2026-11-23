@@ -343,7 +343,9 @@ pub fn list_directory(
     })
 }
 
-fn symlink_kind(
+/// What `link` resolves to: a file or folder inside `real_root`, outside `.git` and server
+/// state. `None` for anything else.
+pub(crate) fn symlink_kind(
     link: &Path,
     real_root: &Path,
     ancestors: &[PathBuf],

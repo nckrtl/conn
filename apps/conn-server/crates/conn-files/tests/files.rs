@@ -669,6 +669,53 @@ fn served_path(served: Option<Served>) -> Option<PathBuf> {
     }
 }
 
+/// T3 `validates canonical preview dependency paths`, plus a media alias.
+#[test]
+fn page_dependencies_are_checked_on_their_canonical_path() {
+    let f = fixture("assets-canonical");
+    let d = Dir(f.project.clone());
+    d.write("report.html", "<!doctype html>");
+    for name in [
+        "report.css",
+        ".internal.css",
+        "notes.txt",
+        "clips/clip.mp4",
+        ".private.mp4",
+    ] {
+        d.write(name, "fixture");
+    }
+    let link = |target: &str, alias: &str| {
+        symlink(f.project.join(target), f.project.join(alias)).unwrap();
+    };
+    link("report.css", "theme.css");
+    link(".internal.css", "internal.css");
+    link("notes.txt", "notes.css");
+    link("clips/clip.mp4", "intro.mp4");
+    link(".private.mp4", "movie.mp4");
+    link("notes.txt", "notes.mp3");
+
+    let context = AssetContext {
+        workspace_root: Some(f.project.to_string_lossy().into_owned()),
+        project_favicon_path: None,
+    };
+    let now = now_ms();
+    let page = f
+        .files
+        .create_asset_url(
+            &resource(json!({"_tag": "workspace-file", "threadId": "t", "path": "report.html"})),
+            &context,
+            now,
+        )
+        .unwrap();
+    let (token, _) = token_and_name(&page.relative_url);
+    let resolve = |name: &str| served_path(f.files.resolve_asset(&token, name, now));
+    assert_eq!(resolve("theme.css"), Some(f.project.join("report.css")));
+    assert_eq!(resolve("intro.mp4"), Some(f.project.join("clips/clip.mp4")));
+    for denied in ["internal.css", "notes.css", "movie.mp4", "notes.mp3"] {
+        assert_eq!(resolve(denied), None, "{denied}");
+    }
+}
+
 #[test]
 fn signs_asset_urls_and_rechecks_them_when_served() {
     let f = fixture("assets");

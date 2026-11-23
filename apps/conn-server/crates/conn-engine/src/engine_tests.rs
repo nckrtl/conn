@@ -2073,7 +2073,14 @@ async fn older_settled_threads_page_and_trim() {
     let (engine, _) = open(&db);
     for n in 0..30 {
         let id = format!("s{n:02}");
-        dispatch(&engine, create(&id, &format!("c{id}"))).await;
+        let mut command = create(&id, &format!("c{id}"));
+        // One older settled thread and one in the shell share a title word.
+        match n {
+            3 => command["title"] = json!("Osprey release notes"),
+            27 => command["title"] = json!("Osprey launch"),
+            _ => {}
+        }
+        dispatch(&engine, command).await;
         dispatch(
             &engine,
             json!({"type": "thread.settle", "commandId": format!("x{id}"), "threadId": id,
@@ -2149,6 +2156,51 @@ async fn older_settled_threads_page_and_trim() {
     .await
     .unwrap();
     assert_eq!(counts["counts"][0]["count"], 5);
+
+    // The scheduled-task picker searches the omitted thread by title (`searchOlderSettled`):
+    // only older settled rows come back, in the requested projects.
+    let search = |query: &str, projects: Value, titles_only: bool| {
+        let engine = &engine;
+        let query = query.to_owned();
+        async move {
+            call(
+                engine,
+                "orchestration.searchThreads",
+                json!({"query": query, "titlesOnly": titles_only, "projectIds": projects,
+                       "olderSettledBefore": "2026-01-01T00:00:05.000Z"}),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let ids = |found: &Value| -> Vec<Value> {
+        found["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].clone())
+            .collect()
+    };
+    let found = search("osprey release", json!([project_id()]), true).await;
+    assert_eq!(ids(&found), [json!("s03")]);
+    assert_eq!(found["matches"], json!([]));
+    assert!(found["snapshotSequence"].as_u64().is_some());
+    assert_eq!(
+        ids(&search("Osprey", json!([project_id()]), true).await),
+        [json!("s03")]
+    );
+    assert!(ids(&search("osprey", json!(["another-project"]), true).await).is_empty());
+    // A mixed query still searches messages; without the cutoff no rows come back.
+    let mixed = search("osprey notes", json!([project_id()]), false).await;
+    assert_eq!(ids(&mixed), [json!("s03")]);
+    let plain = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "osprey"}),
+    )
+    .await
+    .unwrap();
+    assert!(plain.get("threads").is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]

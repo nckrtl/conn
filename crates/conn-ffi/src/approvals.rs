@@ -76,7 +76,7 @@ pub(crate) fn pending_approvals(thread: &ThreadState) -> Vec<FfiPendingApproval>
                 reason: details.and_then(|d| d.reason.clone()),
                 full_access_explanation: details
                     .and_then(|d| d.full_access_override)
-                    .map(|o| full_access_explanation(o).to_owned()),
+                    .map(full_access_explanation),
                 warning: details
                     .and_then(|d| d.options.as_deref())
                     .and_then(first_warning),

@@ -343,19 +343,37 @@ impl McpService {
         Ok(())
     }
 
-    /// `cleanUpSettledThread` after `closeOnSettle` (`ThreadSettlementService.ts:700`): a live,
-    /// settled thread runs its project's `runOnSettle` script in its own worktree. The host
-    /// calls it once per settlement: on the engine's transition to settled. Shared checkouts are skipped: a root checkout, and a delegate in its
-    /// parent's worktree. Returns the started script, if one started.
-    pub async fn run_settle_script(&self, thread_id: &str) -> Option<Value> {
+    /// The live thread, while the settlement named by `settled_at` (its committed `settledAt`)
+    /// is still its own: not undone, replaced by a later one, or deleted since.
+    async fn settled_thread(&self, thread_id: &str, settled_at: &str) -> Option<Value> {
+        let projection = self
+            .config
+            .engine
+            .get_thread_projection(thread_id.into())
+            .await
+            .ok()?;
+        let thread = &projection["thread"];
+        (thread["deletedAt"].is_null()
+            && thread["settledOverride"] == "settled"
+            && thread["settledAt"] == settled_at)
+            .then(|| thread.clone())
+    }
+
+    /// Whether `settled_at` still names the thread's settlement (`cleanUpSettledThread`'s
+    /// first check, before it closes terminals).
+    pub async fn is_current_settlement(&self, thread_id: &str, settled_at: &str) -> bool {
+        self.settled_thread(thread_id, settled_at).await.is_some()
+    }
+
+    /// `cleanUpSettledThread` after `closeOnSettle` (`ThreadSettlementService.ts:700`): a live
+    /// thread still in the settlement named by `settled_at` runs its project's `runOnSettle`
+    /// script in its own worktree. The host calls it once per settlement, on the engine's
+    /// transition to settled. Shared checkouts are skipped: a root checkout, and a delegate in
+    /// its parent's worktree. Returns the started script, if one started.
+    pub async fn run_settle_script(&self, thread_id: &str, settled_at: &str) -> Option<Value> {
         let config = self.config.worktrees.as_ref()?;
         let engine = &self.config.engine;
-        let settled = |projection: &Value| {
-            let thread = &projection["thread"];
-            (thread["deletedAt"].is_null() && thread["settledOverride"] == "settled")
-                .then(|| thread.clone())
-        };
-        let thread = settled(&engine.get_thread_projection(thread_id.into()).await.ok()?)?;
+        let thread = self.settled_thread(thread_id, settled_at).await?;
         let path = thread["worktreePath"].as_str()?.to_owned();
         let probe = std::path::PathBuf::from(&path);
         if !tokio::task::spawn_blocking(move || probe.exists())
@@ -364,8 +382,8 @@ impl McpService {
         {
             return None;
         }
-        // Read again after the worktree I/O: only a live, settled thread runs a script.
-        let thread = settled(&engine.get_thread_projection(thread_id.into()).await.ok()?)?;
+        // Read again after the worktree I/O: only the same live settlement runs a script.
+        let thread = self.settled_thread(thread_id, settled_at).await?;
         if thread["lineage"]["relationshipToParent"] == "subagent"
             && let Some(parent) = thread["lineage"]["parentThreadId"].as_str()
             && let Ok(parent) = engine.get_thread_projection(parent.into()).await

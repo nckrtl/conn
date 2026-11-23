@@ -14,6 +14,7 @@
 
 mod feed;
 mod history;
+mod processes;
 mod pty;
 mod sanitize;
 mod store;
@@ -175,6 +176,8 @@ struct Session {
     filter: HistoryFilter,
     utf8: Utf8Stream,
     sequence: i64,
+    /// Writes to the shell (`inputCount`): with `sequence`, the terminal's activity mark.
+    input_count: u64,
     updated_at: String,
     touched: u64,
     cols: u16,
@@ -392,6 +395,9 @@ impl TerminalManager {
             if input.reply == Some(true) && !state.accepts_query_reply(&key, viewer) {
                 return Ok(());
             }
+            if let Some(session) = state.sessions.get_mut(&key) {
+                session.input_count += 1;
+            }
             found
         };
         let bytes = pty_input(&input.data, input.binary == Some(true));
@@ -511,50 +517,57 @@ impl TerminalManager {
     }
 
     /// `closeIdle` (`Manager.ts:3880`): closes the thread's running terminals (or just
-    /// `terminal_id`) whose shell waits at its prompt, keeping their scrollback. A terminal
-    /// is kept when a foreground job runs, when its foreground group cannot be read, when
-    /// its shell was replaced by `exec` (the process is no longer the shell), and when it got
-    /// input or output while it was checked.
+    /// `terminal_id`) whose shell runs nothing, keeping their scrollback. One process table
+    /// read decides: a terminal is kept when its shell has a child (a foreground or background
+    /// job), was replaced by `exec`, or had input or output while it was checked. When the
+    /// table cannot be read, every terminal stays.
     pub async fn close_idle(&self, thread_id: &str, terminal_id: Option<&str>) {
-        let candidates: Vec<(Key, u64, i64, i32, String)> = {
+        self.close_idle_with(thread_id, terminal_id, processes::process_table())
+            .await;
+    }
+
+    async fn close_idle_with(
+        &self,
+        thread_id: &str,
+        terminal_id: Option<&str>,
+        table: impl std::future::Future<Output = std::io::Result<processes::ProcessTable>>,
+    ) {
+        let marks: Vec<(Key, (u64, i64, u64))> = {
             let state = self.inner.lock();
             state
                 .sessions
                 .iter()
-                .filter(|((thread, terminal), _)| {
-                    thread == thread_id && terminal_id.is_none_or(|t| t == terminal)
+                .filter(|((thread, terminal), s)| {
+                    thread == thread_id
+                        && terminal_id.is_none_or(|t| t == terminal)
+                        && s.proc.is_some()
                 })
-                .filter_map(|(key, s)| {
-                    let proc = s.proc.as_ref()?;
-                    let group = rustix::termios::tcgetpgrp(proc.control.as_ref())
-                        .ok()?
-                        .as_raw_nonzero()
-                        .get();
-                    (group == proc.pid).then(|| {
-                        (
-                            key.clone(),
-                            s.generation,
-                            s.sequence,
-                            proc.pid,
-                            s.shell.clone().unwrap_or_default(),
-                        )
-                    })
-                })
+                .map(|(key, s)| (key.clone(), s.activity_mark()))
                 .collect()
         };
-        for (key, generation, sequence, pid, shell) in candidates {
-            if exec_replaced(process_name(pid).await.as_deref(), &shell) {
-                continue;
+        if marks.is_empty() {
+            return;
+        }
+        let table = match table.await {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("conn-terminal: failed to close idle terminals of {thread_id}: {error}");
+                return;
             }
-            let mut state = self.inner.lock();
-            let unchanged = state.sessions.get(&key).is_some_and(|s| {
-                s.generation == generation
-                    && s.sequence == sequence
-                    && s.proc
-                        .as_ref()
-                        .is_some_and(|p| pty::foreground_job(p.control.as_ref(), p.pid).is_none())
+        };
+        let mut state = self.inner.lock();
+        for (key, mark) in marks {
+            let idle = state.sessions.get(&key).is_some_and(|s| {
+                s.activity_mark() == mark
+                    && s.proc.as_ref().is_some_and(|p| {
+                        !table.has_running_subprocess(
+                            p.pid,
+                            s.shell.as_deref(),
+                            pty::foreground_group(&p.control),
+                        )
+                    })
             });
-            if unchanged {
+            if idle {
                 self.inner.close_locked(&mut state, &key, false);
             }
         }
@@ -720,6 +733,7 @@ impl Inner {
                     filter: HistoryFilter::default(),
                     utf8: Utf8Stream::default(),
                     sequence: 0,
+                    input_count: 0,
                     updated_at: conn_support::time::now_iso(),
                     touched,
                     cols,
@@ -1128,6 +1142,11 @@ impl State {
 }
 
 impl Session {
+    /// `terminalActivityMark`: changes with each output, resize, write and restart.
+    fn activity_mark(&self) -> (u64, i64, u64) {
+        (self.generation, self.sequence, self.input_count)
+    }
+
     fn advance(&mut self) {
         self.sequence += 1;
         self.touched = tick();
@@ -1558,21 +1577,6 @@ async fn process_name(pid: i32) -> Option<String> {
         .trim_end_matches([')', ']'])
         .trim_start_matches('-');
     (!name.is_empty()).then(|| name.chars().take(MAX_LABEL_CHARS).collect())
-}
-
-/// A root with one of these names is still an interactive shell, e.g. after `.bashrc` runs
-/// `exec zsh` (`INTERACTIVE_SHELL_NAMES`, `Manager.ts:791`).
-const INTERACTIVE_SHELL_NAMES: [&str; 10] = [
-    "bash", "zsh", "fish", "sh", "dash", "ksh", "mksh", "tcsh", "csh", "nu",
-];
-
-/// `rootIsCommand` (`Manager.ts:815`): `exec <command>` replaced the shell, so the terminal's
-/// root process is that command. An unknown name is not a replacement.
-fn exec_replaced(root: Option<&str>, shell: &str) -> bool {
-    let shell = shell.rsplit('/').next().unwrap_or(shell);
-    root.is_some_and(|name| {
-        name != shell && !INTERACTIVE_SHELL_NAMES.contains(&name.trim_start_matches('-'))
-    })
 }
 
 /// Locks a std mutex. A poisoned lock means a thread panicked while it held the lock: a bug.

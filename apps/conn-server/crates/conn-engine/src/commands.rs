@@ -2297,12 +2297,16 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
         }
         Ok(())
     })?;
+    let settled_at = live_thread(tx, &thread_id)?["settledAt"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     Ok(vec![Effect::ThreadClosed {
         thread_id,
         reason: if again {
-            crate::ThreadClose::SettledAgain
+            crate::ThreadClose::SettledAgain { settled_at }
         } else {
-            crate::ThreadClose::Settled
+            crate::ThreadClose::Settled { settled_at }
         },
     }])
 }

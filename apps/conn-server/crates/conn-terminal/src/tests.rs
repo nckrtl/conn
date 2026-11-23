@@ -608,7 +608,8 @@ async fn closes_settled_terminals_only() {
 
 /// `closeIdle` (`Manager.test.ts:950`, "keeps a terminal whose shell was replaced by exec
 /// open on settlement"): a shell at its prompt closes; a foreground job, a shell replaced by
-/// `exec`, another thread's terminal and a terminal not named stay.
+/// `exec`, a shell whose background job still runs (`sleep 300 &`), another thread's terminal
+/// and a terminal not named stay.
 #[tokio::test(flavor = "current_thread")]
 async fn close_idle_closes_only_shells_at_their_prompt() {
     let manager = TerminalManager::new(config());
@@ -617,6 +618,7 @@ async fn close_idle_closes_only_shells_at_their_prompt() {
         ("t11", "idle"),
         ("t11", "job"),
         ("t11", "execd"),
+        ("t11", "background"),
         ("t12", "idle"),
     ] {
         let mut sub = manager.attach(attach_input(thread, terminal), 1).unwrap();
@@ -625,8 +627,22 @@ async fn close_idle_closes_only_shells_at_their_prompt() {
     }
     write(&manager, "t11", "job", "sleep 300\n").await;
     write(&manager, "t11", "execd", "exec sleep 300\n").await;
+    // The shell is back at its prompt while its child runs.
+    write(
+        &manager,
+        "t11",
+        "background",
+        "sleep 300 & echo BG-$((40+2))\n",
+    )
+    .await;
+    output_contains(&mut streams[3], "BG-42").await;
+    // Output during the check counts as activity: the idle shells finish printing first.
+    for (index, thread) in [(0, "t11"), (4, "t12")] {
+        write(&manager, thread, "idle", "echo IDLE-$((40+2))\n").await;
+        output_contains(&mut streams[index], "IDLE-42\r\n$ ").await;
+    }
     let pid = |terminal: &str| manager.read("t11", terminal, None).unwrap().pid.unwrap();
-    let (job_shell, execd) = (pid("job"), pid("execd"));
+    let (job_shell, execd, background) = (pid("job"), pid("execd"), pid("background"));
     let execd_pid = i32::try_from(execd).unwrap();
     tokio::time::timeout(WAIT, async {
         loop {
@@ -654,31 +670,50 @@ async fn close_idle_closes_only_shells_at_their_prompt() {
     left.sort();
     assert_eq!(
         left,
-        [("t11", "execd"), ("t11", "job"), ("t12", "idle")]
-            .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        [
+            ("t11", "background"),
+            ("t11", "execd"),
+            ("t11", "job"),
+            ("t12", "idle")
+        ]
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
     );
     manager.close_idle("t12", Some("other")).await;
     assert_eq!(
         manager.list().len(),
-        3,
+        4,
         "only the named terminal is checked"
     );
     manager.close_idle("t12", Some("idle")).await;
-    assert_eq!(manager.list().len(), 2);
-    assert!(alive(job_shell) && alive(execd));
-    drop(streams);
-}
+    assert_eq!(manager.list().len(), 3);
+    assert!(alive(job_shell) && alive(execd) && alive(background));
 
-#[test]
-fn exec_replaced_follows_t3_root_is_command() {
-    assert!(exec_replaced(Some("node"), "/bin/bash"));
-    assert!(!exec_replaced(Some("bash"), "/bin/bash"));
-    assert!(
-        !exec_replaced(Some("zsh"), "/bin/bash"),
-        "exec zsh from .bashrc"
-    );
-    assert!(!exec_replaced(Some("-sh"), "/tmp/shell"));
-    assert!(!exec_replaced(None, "/bin/bash"), "an unknown name");
+    // `terminalActivityMark`: input that arrives while the table is read keeps the terminal,
+    // before it produced any output.
+    let mut typed = manager.attach(attach_input("t13", "typed"), 1).unwrap();
+    assert!(matches!(typed.next().await, E::Snapshot(_)));
+    write(&manager, "t13", "typed", "echo READY-$((40+2))\n").await;
+    output_contains(&mut typed, "READY-42\r\n$ ").await;
+    let open = |manager: &TerminalManager| manager.list().iter().any(|t| t.thread_id == "t13");
+    manager
+        .close_idle_with("t13", None, async {
+            write(&manager, "t13", "typed", "Q").await;
+            Ok(processes::ProcessTable::default())
+        })
+        .await;
+    assert!(open(&manager), "input during the check keeps the terminal");
+    // A table that cannot be read keeps every terminal.
+    manager
+        .close_idle_with("t13", None, async {
+            Err(std::io::Error::other("ps failed"))
+        })
+        .await;
+    assert!(open(&manager), "a failed inspection keeps the terminal");
+    // Once its echo is out, the shell at its prompt is idle.
+    output_contains(&mut typed, "Q").await;
+    manager.close_idle("t13", None).await;
+    assert!(!open(&manager), "the quiet shell at its prompt closes");
+    drop(streams);
 }
 
 #[tokio::test(flavor = "current_thread")]

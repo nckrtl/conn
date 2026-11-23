@@ -34,6 +34,8 @@ pub struct Host {
     pub scheduled_tasks: OnceLock<conn_features::scheduled::ScheduledTasks>,
     /// Device sessions a closed thread held (`ResourceCleanupService.cleanupDevices`).
     pub devices: OnceLock<conn_devices::Devices>,
+    /// Settled-thread cleanups run one at a time, as T3's single event consumer runs them.
+    pub settle_cleanups: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -265,26 +267,14 @@ impl EngineHost for Host {
     }
 
     fn thread_closed(&self, thread_id: &str, reason: ThreadClose) {
-        match reason {
-            ThreadClose::Settled | ThreadClose::SettledAgain => {
-                // `closeOnSettle`: `stopOnSettle` terminals, then every idle one; then
-                // `cleanUpSettledThread` runs the project's settle script in the worktree.
-                self.terminals.close_on_settle(thread_id);
-                let terminals = self.terminals.clone();
-                // `settleActionRunAt`: the script runs once per settlement, so only on the
-                // transition to settled.
-                let mcp = self
-                    .mcp
-                    .get()
-                    .cloned()
-                    .filter(|_| reason == ThreadClose::Settled);
-                let thread_id = thread_id.to_owned();
-                tokio::spawn(async move {
-                    terminals.close_idle(&thread_id, None).await;
-                    if let Some(mcp) = mcp {
-                        mcp.run_settle_script(&thread_id).await;
-                    }
-                });
+        match &reason {
+            // `settleActionRunAt`: the script runs once per settlement, so only on the
+            // transition to settled.
+            ThreadClose::Settled { settled_at } => {
+                self.clean_up_settled(thread_id, settled_at.clone(), true);
+            }
+            ThreadClose::SettledAgain { settled_at } => {
+                self.clean_up_settled(thread_id, settled_at.clone(), false);
             }
             ThreadClose::Archived | ThreadClose::Deleted => {
                 self.terminals.close(TerminalCloseInput {
@@ -310,6 +300,31 @@ impl EngineHost for Host {
                 }
             });
         }
+    }
+}
+
+impl Host {
+    /// `cleanUpSettledThread` (`ThreadSettlementService.ts:700`) for the committed settlement
+    /// named by `settled_at`, one cleanup at a time. While that settlement is still the
+    /// thread's, `closeOnSettle` closes its `stopOnSettle` terminals and then every idle one;
+    /// then a new settlement (`first`) runs the project's settle script in the worktree.
+    fn clean_up_settled(&self, thread_id: &str, settled_at: String, first: bool) {
+        let (terminals, mcp) = (self.terminals.clone(), self.mcp.get().cloned());
+        let cleanups = self.settle_cleanups.clone();
+        let thread_id = thread_id.to_owned();
+        tokio::spawn(async move {
+            let _one_at_a_time = cleanups.lock().await;
+            if let Some(mcp) = &mcp
+                && !mcp.is_current_settlement(&thread_id, &settled_at).await
+            {
+                return;
+            }
+            terminals.close_on_settle(&thread_id);
+            terminals.close_idle(&thread_id, None).await;
+            if first && let Some(mcp) = mcp {
+                mcp.run_settle_script(&thread_id, &settled_at).await;
+            }
+        });
     }
 }
 
@@ -438,6 +453,7 @@ mod tests {
             environment: environment.clone(),
             scheduled_tasks: OnceLock::new(),
             devices: OnceLock::new(),
+            settle_cleanups: Arc::default(),
         });
         let mut config = conn_engine::EngineConfig::new(dir.join("engine.sqlite"));
         config.projects = vec![conn_engine::ProjectConfig {
@@ -547,6 +563,42 @@ mod tests {
                     .unwrap();
             }
         }
+        // Cleanups run one at a time, and each acts only while its settlement is the thread's:
+        // held back, a settlement undone and replaced runs nothing, its replacement once.
+        environment
+            .settings
+            .update(script("printf 'again\\n' >> settle-runs.txt"), None)
+            .unwrap();
+        let unsettle = |n: u32| json!({"type":"thread.unsettle","commandId":format!("unsettle-{n}"),"threadId":thread,"reason":"user"});
+        dispatch(unsettle(2)).await;
+        let held = host.settle_cleanups.lock().await;
+        dispatch(settle(4)).await;
+        dispatch(unsettle(3)).await;
+        dispatch(settle(5)).await;
+        drop(held);
+        let last = tokio::time::timeout(wait, async {
+            loop {
+                if let M::Upsert(upsert) = metadata.next().await
+                    && upsert.terminal.terminal_id.starts_with("settle-finish-")
+                    && ![&first, &failed].contains(&&upsert.terminal.terminal_id)
+                {
+                    return upsert.terminal.terminal_id;
+                }
+            }
+        })
+        .await
+        .expect("the current settlement runs its script");
+        tokio::time::timeout(wait, async {
+            loop {
+                if let M::Remove(removed) = metadata.next().await
+                    && removed.terminal_id == last
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("its terminal closes after exit 0");
         let runs = tokio::task::spawn_blocking({
             let file = worktree.join("settle-runs.txt");
             move || std::fs::read_to_string(file).unwrap()
@@ -554,8 +606,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            runs, "ran\n",
-            "one run for the first settlement, none for its repeat"
+            runs, "ran\nagain\n",
+            "one run per settlement: none for a repeat or for a settlement undone since"
         );
         terminals.shutdown().await;
         engine.shutdown().await;
@@ -590,6 +642,7 @@ mod tests {
             environment: environment.clone(),
             scheduled_tasks: OnceLock::new(),
             devices: OnceLock::new(),
+            settle_cleanups: Arc::default(),
         };
         host.mcp.set(service.clone()).unwrap();
         let issue = |project: Option<&str>| {

@@ -589,6 +589,8 @@ struct DiffContext {
     checkpoints: Vec<Value>,
     scopes: Vec<Value>,
     completed_runs: BTreeSet<String>,
+    /// The project's root: it shares the checkpoint refs of every worktree of its repository.
+    project_root: Option<String>,
 }
 
 fn diff_result(thread_id: &str, from: u64, to: u64, diff: String) -> Value {
@@ -678,10 +680,17 @@ impl Inner {
             .db(move |store| -> StoreResult<Option<DiffContext>> {
                 let tx = store.tx()?;
                 let read = (|| {
-                    if tx.thread(&tid)?.is_none() {
+                    let Some(thread) = tx.thread(&tid)? else {
                         return Ok(None);
-                    }
+                    };
+                    let project_root = match thread["projectId"].as_str() {
+                        Some(project) => tx
+                            .project(project)?
+                            .and_then(|p| p["workspaceRoot"].as_str().map(str::to_owned)),
+                        None => None,
+                    };
                     Ok(Some(DiffContext {
+                        project_root,
                         checkpoints: tx.entities(&tid, "checkpoints")?,
                         scopes: tx.entities(&tid, "checkpointScopes")?,
                         completed_runs: tx
@@ -780,7 +789,14 @@ impl Inner {
             return Err(unavailable(from));
         };
         let to_ref = to_checkpoint["ref"].as_str().unwrap_or_default().to_owned();
-        let cwd = PathBuf::from(scope["cwd"].as_str().unwrap_or_default());
+        let mut cwd = PathBuf::from(scope["cwd"].as_str().unwrap_or_default());
+        // A thread moved on and its last checkout was removed: earlier turns still read
+        // through the project, whose repository holds the same refs.
+        if !matches!(git::is_repository(&cwd).await, Ok(true))
+            && let Some(root) = ctx.project_root.as_deref()
+        {
+            cwd = PathBuf::from(root);
+        }
         let diff = patch(&cwd, &from_ref, &to_ref, ignore_whitespace)
             .await
             .map_err(|e| cause("VcsProcessExitError", e.to_string()))?;

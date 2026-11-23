@@ -1290,4 +1290,8 @@ async fn a_moved_thread_captures_its_new_checkout() {
     };
     assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
     assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
+    // Removing the new checkout leaves both readable through the project's repository.
+    repo.git(&["worktree", "remove", "--force", &work.root()]);
+    assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
+    assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
 }

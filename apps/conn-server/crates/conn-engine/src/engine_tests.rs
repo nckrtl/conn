@@ -328,6 +328,34 @@ async fn streams_resume_after_a_sequence() {
             .await
             .is_err()
     );
+
+    // A cursor older than the replay bound needs a snapshot, which a deleted thread has not.
+    dispatch(&engine, create("t2", "e1")).await;
+    let early = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "e2", "threadId": "t2",
+        "visitedAt": "2026-11-13T09:02:00.000Z"}),
+    )
+    .await;
+    for n in 0..130 {
+        dispatch(
+            &engine,
+            json!({"type": "thread.visit", "commandId": format!("e-visit-{n}"),
+            "threadId": "t2", "visitedAt": "2026-11-13T09:03:00.000Z"}),
+        )
+        .await;
+    }
+    dispatch(
+        &engine,
+        json!({"type": "thread.delete", "commandId": "e3", "threadId": "t2"}),
+    )
+    .await;
+    assert!(
+        engine
+            .subscribe_thread(from_json(json!({"threadId": "t2", "afterSequence": early})).unwrap())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

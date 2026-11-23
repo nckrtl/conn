@@ -273,22 +273,26 @@ pub fn read_file(
         .take(READ_FILE_MAX_BYTES)
         .read_to_end(&mut bytes)
         .map_err(|e| FileFailure::op(Operation::Read, &real_target, &real_target, e))?;
+    let binary = || FileFailure::plain(Failure::BinaryFile, Some(&real_target));
     if bytes.contains(&0) {
-        return Err(FileFailure::plain(Failure::BinaryFile, Some(&real_target)));
+        return Err(binary());
     }
     let truncated = size > READ_FILE_MAX_BYTES;
-    if truncated {
-        // A streaming decoder drops a character the byte limit split.
-        let valid = match std::str::from_utf8(&bytes) {
-            Ok(_) => bytes.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => bytes.len(),
-        };
-        bytes.truncate(valid);
-    }
+    // Invalid UTF-8 is refused: U+FFFD in the editor would overwrite the original bytes on save.
+    let contents = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        // Only the byte limit may split a character; the split character is dropped.
+        Err(e) if truncated && e.utf8_error().error_len().is_none() => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).map_err(|_| binary())?
+        }
+        Err(_) => return Err(binary()),
+    };
     Ok(ProjectReadFileResult {
         relative_path,
-        contents: String::from_utf8_lossy(&bytes).into_owned(),
+        contents,
         byte_length: size as i64,
         truncated,
         exists: None,

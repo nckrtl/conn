@@ -331,9 +331,7 @@ async fn supervise(s: Supervised) {
     } = s;
     #[cfg(unix)]
     let status = {
-        // Registered before the first look, so no exit goes unnoticed.
-        let sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
-        let ours = run_until_exit(&mut child, pid, &kill, held, sigchld).await;
+        let ours = run_until_exit(&mut child, pid, &kill, held).await;
         // Tools the agent started share the CLI's process group; stop what is left, while the
         // unreaped child still holds the group's id.
         if ours {
@@ -384,36 +382,25 @@ fn exit_signal(_: &std::process::ExitStatus) -> Option<i32> {
 
 /// Serves kills and [`Process::while_unreaped`] until the child exits, without reaping it.
 /// `true` when the exited child is still unreaped, so its pid and group id are still its own.
-/// `sigchld` wakes it on an exit; it also looks again on a backoff up to
-/// [`EXIT_RECHECK_MAX`], since a SIGCHLD wake-up can be missed (as `conn-terminal` polls).
 #[cfg(unix)]
 async fn run_until_exit(
     child: &mut Child,
     pid: u32,
     kill: &Notify,
     mut held: mpsc::Receiver<HeldRequest>,
-    mut sigchld: Option<tokio::signal::unix::Signal>,
 ) -> bool {
-    use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, waitid};
-    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
-    let Some(raw) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
-        return false;
-    };
-    let mut recheck = Duration::from_millis(5);
+    let mut exit = std::pin::pin!(wait_exit_after(Duration::ZERO, pid));
     loop {
-        match waitid(WaitId::Pid(raw), options) {
-            Ok(None) => {}
-            Ok(Some(_)) => return true,
-            // Reaped elsewhere: the pid is no longer ours to signal.
-            Err(rustix::io::Errno::CHILD) => return false,
-            // Interrupted or transient: look again, and keep serving kills meanwhile.
-            Err(_) => {}
-        }
         tokio::select! {
-            () = next_sigchld(&mut sigchld) => {}
-            () = tokio::time::sleep(recheck) => recheck = (recheck * 2).min(EXIT_RECHECK_MAX),
+            looked = &mut exit => match looked {
+                Ok(Exit::Exited) => return true,
+                Ok(Exit::Lost) => return false,
+                Err(error) if error.kind() == io::ErrorKind::InvalidInput => return false,
+                // Not `ECHILD`: look again after a poll, and keep serving kills meanwhile.
+                Err(_) => exit.set(wait_exit_after(EXIT_POLL, pid)),
+            },
             () = kill.notified() => {
-                signal_group(pid, Signal::KILL);
+                signal_group(pid, rustix::process::Signal::KILL);
                 let _ = child.start_kill();
             }
             Some(request) = held.recv() => {
@@ -424,21 +411,13 @@ async fn run_until_exit(
     }
 }
 
-/// The longest wait between two looks at a running child without a SIGCHLD.
+/// [`wait_exit_unreaped`] after `delay`.
 #[cfg(unix)]
-const EXIT_RECHECK_MAX: Duration = Duration::from_millis(200);
-
-/// The next SIGCHLD, for any child; never when the signal could not be registered (the
-/// recheck in [`run_until_exit`] covers that).
-#[cfg(unix)]
-async fn next_sigchld(sigchld: &mut Option<tokio::signal::unix::Signal>) {
-    if let Some(stream) = sigchld
-        && stream.recv().await.is_some()
-    {
-        return;
+async fn wait_exit_after(delay: Duration, pid: u32) -> io::Result<Exit> {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
     }
-    *sigchld = None;
-    std::future::pending::<()>().await;
+    wait_exit_unreaped(pid).await
 }
 
 /// Sends `signal` to the process group `pgid`. A group already gone is not an error.
@@ -451,6 +430,77 @@ pub fn signal_group(pgid: u32, signal: rustix::process::Signal) {
         return;
     };
     let _ = rustix::process::kill_process_group(pgid, signal);
+}
+
+/// How [`wait_exit_unreaped`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// The child has exited and is still unreaped: its pid and the process group named after
+    /// it are still its own, so signals by them reach no other process.
+    Exited,
+    /// `ECHILD`: no unreaped child of ours has this pid, because another waiter reaped it. The
+    /// pid may already name another process, so send nothing to it or its group.
+    Lost,
+}
+
+/// How often [`wait_exit_unreaped`] looks again without a SIGCHLD, which a masked signal or
+/// another thread's handler can keep from it.
+#[cfg(unix)]
+const EXIT_POLL: Duration = Duration::from_millis(50);
+
+/// Waits until the child `pid` exits, without reaping it, so its owner can still signal the
+/// pid and its group before the reap. Wakes on SIGCHLD and on a 50 ms timer.
+#[cfg(unix)]
+pub async fn wait_exit_unreaped(pid: u32) -> io::Result<Exit> {
+    use tokio::signal::unix::{SignalKind, signal};
+    // Registered before the first look, so no exit goes unnoticed.
+    wait_exit_woken_by(pid, signal(SignalKind::child()).ok()).await
+}
+
+/// [`wait_exit_unreaped`] woken by `sigchld`; tests pass a stream that never fires.
+#[cfg(unix)]
+async fn wait_exit_woken_by(
+    pid: u32,
+    mut sigchld: Option<tokio::signal::unix::Signal>,
+) -> io::Result<Exit> {
+    loop {
+        if let Some(exit) = exit_unreaped(pid)? {
+            return Ok(exit);
+        }
+        let tick = tokio::time::sleep(EXIT_POLL);
+        let Some(stream) = sigchld.as_mut() else {
+            tick.await;
+            continue;
+        };
+        let open = tokio::select! {
+            woke = stream.recv() => woke.is_some(),
+            () = tick => true,
+        };
+        if !open {
+            sigchld = None;
+        }
+    }
+}
+
+/// One look at the child `pid`, without reaping it or waiting: `None` while it runs.
+#[cfg(unix)]
+pub(crate) fn exit_unreaped(pid: u32) -> io::Result<Option<Exit>> {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    loop {
+        return match waitid(WaitId::Pid(pid), options) {
+            Ok(Some(_)) => Ok(Some(Exit::Exited)),
+            Ok(None) => Ok(None),
+            Err(Errno::INTR) => continue,
+            Err(Errno::CHILD) => Ok(Some(Exit::Lost)),
+            Err(error) => Err(error.into()),
+        };
+    }
 }
 
 /// Whether a process with this pid still runs. Signal 0 succeeds on a zombie too, and on Linux
@@ -725,7 +775,7 @@ mod tests {
     }
 
     /// A SIGCHLD that never arrives (here a registered stream for another signal) still lets
-    /// the supervisor notice the exit, with the child unreaped for the group kill.
+    /// the supervisor's exit wait notice the exit, with the child unreaped for the group kill.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn a_missed_sigchld_still_notices_the_exit() {
@@ -737,14 +787,13 @@ mod tests {
         let pid = child.id().unwrap();
         let silent = signal(SignalKind::user_defined2()).ok();
         assert!(silent.is_some());
-        let (_held_tx, held) = mpsc::channel(1);
-        let kill = Notify::new();
-        let noticed = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_until_exit(&mut child, pid, &kill, held, silent),
-        )
-        .await;
-        assert_eq!(noticed.ok(), Some(true), "the exit went unnoticed");
+        let noticed =
+            tokio::time::timeout(Duration::from_secs(5), wait_exit_woken_by(pid, silent)).await;
+        assert_eq!(
+            noticed.ok().and_then(Result::ok),
+            Some(Exit::Exited),
+            "the exit went unnoticed"
+        );
         assert!(child.wait().await.unwrap().success());
     }
 }

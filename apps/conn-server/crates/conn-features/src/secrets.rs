@@ -69,6 +69,20 @@ struct Inner {
 #[derive(Clone)]
 pub struct SecretRequests(Arc<Inner>);
 
+/// A reference `take` removed from the store, as it was on disk.
+pub struct Spent {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for Spent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Spent")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for SecretRequests {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretRequests")
@@ -248,15 +262,41 @@ impl SecretRequests {
     }
 
     pub async fn consume(&self, reference: &str, project: &str) -> Result<String, SecretError> {
+        self.take(reference, project).await.map(|(value, _)| value)
+    }
+
+    /// `consume`, keeping what it removed so a save that fails after it can `restore` it.
+    pub async fn take(
+        &self,
+        reference: &str,
+        project: &str,
+    ) -> Result<(String, Spent), SecretError> {
         let _lock = self.0.lock.lock().await;
         let (reference, project) = (reference.to_owned(), project.to_owned());
         self.disk(move |dir, now| {
             let value = read_ref(dir, &reference, &project, now)?;
-            secret_store::remove(dir, &store_name(&reference))
-                .map_err(|_| SecretError("consume_failed"))?;
-            Ok(value)
+            let name = store_name(&reference);
+            let bytes = secret_store::read(dir, &name)
+                .map_err(|_| SecretError("read_failed"))?
+                .ok_or(SecretError("ref_unavailable"))?;
+            secret_store::remove(dir, &name).map_err(|_| SecretError("consume_failed"))?;
+            Ok((value, Spent { name, bytes }))
         })
         .await
+    }
+
+    /// Puts a reference `take` spent back, with its first save time, so it stays one-use.
+    /// A failure is logged; the reference is then spent, as it was before the restore.
+    pub async fn restore(&self, spent: Spent) {
+        let _lock = self.0.lock.lock().await;
+        let _ = self
+            .disk(move |dir, _| {
+                create(dir, &spent.name, &spent.bytes).map_err(|error| {
+                    eprintln!("Could not put a secret reference back: {error}");
+                    SecretError("store_failed")
+                })
+            })
+            .await;
     }
 
     pub async fn save_to_file(&self, thread: &str, item: &str) -> Result<String, SecretError> {

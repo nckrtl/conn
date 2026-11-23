@@ -1078,6 +1078,7 @@ async fn a_first_run_never_binds_to_a_recreated_or_moved_task() {
 /// `checks a task's destination thread only when the destination changes`.
 #[tokio::test(start_paused = true)]
 async fn the_destination_thread_is_checked_only_when_it_changes() {
+    use std::os::unix::fs::PermissionsExt;
     let env = Env::new("destination", "2026-07-01T09:00:00.000Z");
     let archived = Arc::new(StdMutex::new(false));
     let flag = archived.clone();
@@ -1138,6 +1139,26 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         );
         assert!(unspent().await, "{thread} left the reference usable");
     }
+    // A malformed signature encoding is refused as input before the destination is read.
+    let mut malformed = signed("thread:missing", "task:destination");
+    malformed["schedule"]["signature"]["encoding"] = json!("rot13");
+    assert!(
+        matches!(
+            service.upsert(input(malformed)).await,
+            Err(Failure::Invalid(message)) if message.starts_with("Invalid schedule")
+        ),
+        "the encoding error comes first"
+    );
+    assert!(
+        unspent().await,
+        "a malformed save left the reference usable"
+    );
+    // A task write that fails puts the spent reference back.
+    std::fs::set_permissions(&env.dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let unwritten = failure(&service, signed("thread:destination", "task:signed")).await;
+    std::fs::set_permissions(&env.dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(unwritten, "Could not save schedule task.");
+    assert!(unspent().await, "a failed write left the reference usable");
     assert!(tasks(&service).await.is_empty());
     // The retry with a valid destination spends it once.
     let retried = upsert(&service, signed("thread:destination", "task:signed")).await;

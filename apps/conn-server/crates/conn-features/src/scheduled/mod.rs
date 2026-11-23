@@ -104,6 +104,12 @@ impl TaskError {
     }
 }
 
+/// An upsert's schedule after decoding: a timed one, or a webhook whose secret is not read yet.
+enum Requested {
+    Schedule(ScheduledTaskSchedule),
+    Webhook(conn_contract::ScheduledTaskUpsertScheduleWebhook),
+}
+
 /// How a call fails: a typed task error, or input the contract's schema refuses (a defect
 /// over RPC, as Effect answers a payload that does not decode).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -485,7 +491,8 @@ impl ScheduledTasks {
         }
     }
 
-    async fn persist(&self, tasks: &[ScheduledTask]) -> Result<(), String> {
+    /// Writes the store. A failed write is logged with `log`, from the blocking worker.
+    async fn persist(&self, tasks: &[ScheduledTask], log: Option<&str>) -> Result<(), String> {
         let hooks: serde_json::Map<String, Value> = self
             .inner
             .hooks
@@ -500,10 +507,17 @@ impl ScheduledTasks {
             .unwrap_or_default();
         let body = json!({"version": 1, "tasks": tasks, "webhooks": hooks}).to_string();
         let path = self.inner.path.clone();
-        tokio::task::spawn_blocking(move || conn_support::fs::write_private(&path, body.as_bytes()))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        let log = log.map(str::to_owned);
+        tokio::task::spawn_blocking(move || {
+            conn_support::fs::write_private(&path, body.as_bytes()).map_err(|error| {
+                if let Some(message) = log {
+                    eprintln!("scheduled tasks: {message} {error}");
+                }
+                error.to_string()
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Writes the store, mapping a failure to the task error T3 uses for that write.
@@ -513,10 +527,9 @@ impl ScheduledTasks {
         message: &str,
         task_id: Option<&str>,
     ) -> Result<(), TaskError> {
-        self.persist(tasks).await.map_err(|error| {
-            eprintln!("scheduled tasks: {message} {error}");
-            TaskError::new(message, task_id)
-        })
+        self.persist(tasks, Some(message))
+            .await
+            .map_err(|_| TaskError::new(message, task_id))
     }
 
     /// `list`: newest first by creation, then by id, so toggles and runs never reorder.
@@ -555,7 +568,7 @@ impl ScheduledTasks {
     async fn edit_store(&self, edit: impl FnOnce(&mut Vec<ScheduledTask>)) {
         let mut tasks = self.inner.tasks.lock().await;
         edit(&mut tasks);
-        let _ = self.persist(&tasks).await;
+        let _ = self.persist(&tasks, None).await;
     }
 
     pub async fn find(&self, id: &str) -> Option<ScheduledTask> {
@@ -584,8 +597,14 @@ impl ScheduledTasks {
                 "Expected a non-blank string for title and prompt".into(),
             ));
         }
-        let decoded =
-            schedule::decode_upsert_schedule(&input.schedule).map_err(|e| Failure::Invalid(e.0))?;
+        // A webhook schedule decodes here too, so its input errors come before the
+        // destination check and before its secretRef is spent.
+        let decoded = match schedule::decode_upsert_schedule(&input.schedule)
+            .map_err(|e| Failure::Invalid(e.0))?
+        {
+            Some(schedule) => Requested::Schedule(schedule),
+            None => Requested::Webhook(webhook::decode(&input)?),
+        };
         let now = self.now();
         let id = match (&input.id, &input.command_id) {
             (Some(id), _) => id.clone(),
@@ -628,9 +647,9 @@ impl ScheduledTasks {
         }
         // A webhook schedule keeps the stored token, and the stored secret unless a new one
         // comes (`upsert`, the `webhook` part).
-        let (schedule, credentials) = match decoded {
-            Some(schedule) => (schedule, None),
-            None => {
+        let (schedule, credentials, spent) = match decoded {
+            Requested::Schedule(schedule) => (schedule, None, None),
+            Requested::Webhook(webhook_input) => {
                 let stored = self
                     .inner
                     .hooks
@@ -639,13 +658,14 @@ impl ScheduledTasks {
                     .ok()
                     .and_then(|c| c.get(&id).cloned());
                 let save = webhook::prepare_save(
+                    webhook_input,
                     &input,
                     &id,
                     existing.as_ref().map(|e| (e, stored.as_ref())),
                     self.inner.secret_requests.as_ref(),
                 )
                 .await?;
-                (save.schedule, Some(save.credentials))
+                (save.schedule, Some(save.credentials), save.spent)
             }
         };
         let schedule_unchanged = existing.as_ref().is_some_and(|e| {
@@ -712,6 +732,10 @@ impl ScheduledTasks {
             .await
         {
             self.set_credentials(&id, previous);
+            // A crash between the spend and this write still loses the reference, as in T3.
+            if let (Some(spent), Some(secrets)) = (spent, &self.inner.secret_requests) {
+                secrets.restore(spent).await;
+            }
             return Err(error.into());
         }
         *tasks = next_tasks;
@@ -894,7 +918,7 @@ impl ScheduledTasks {
         slot.next_run_at = self.next_run_after_run(&source, Some(started_iso), now);
         slot.updated_at = format_iso(now);
         slot.run_count = slot.run_count.saturating_add(1);
-        if self.persist(&next_tasks).await.is_ok() {
+        if self.persist(&next_tasks, None).await.is_ok() {
             *tasks = next_tasks;
             drop(tasks);
             self.notify_changed();
@@ -1094,13 +1118,12 @@ impl ScheduledTasks {
         task.last_run_at = Some(started_iso.to_owned());
         task.last_run_status = ScheduledTaskRunStatus::Running;
         task.last_run_error = None;
-        if let Err(error) = self.persist(&next_tasks).await {
-            let message = "Could not mark schedule task as running.";
+        let message = "Could not mark schedule task as running.";
+        // The timer logs a scheduled run's failure with its cause, once while it repeats.
+        let log = (!matches!(trigger, Trigger::Scheduled)).then_some(message);
+        if let Err(error) = self.persist(&next_tasks, log).await {
             return Err(match trigger {
-                Trigger::Manual | Trigger::Webhook => {
-                    eprintln!("scheduled tasks: {message} {error}");
-                    TaskError::new(message, Some(id))
-                }
+                Trigger::Manual | Trigger::Webhook => TaskError::new(message, Some(id)),
                 // The timer logs it with its cause, once while it repeats.
                 Trigger::Scheduled => TaskError::new(format!("{message} {error}"), Some(id)),
             });
@@ -1242,7 +1265,7 @@ impl ScheduledTasks {
             };
             slot.last_run_status = ScheduledTaskRunStatus::Failed;
             slot.last_run_error = Some(error);
-            if service.persist(&next_tasks).await.is_ok() {
+            if service.persist(&next_tasks, None).await.is_ok() {
                 *tasks = next_tasks;
                 drop(tasks);
                 service.notify_changed();
@@ -1274,7 +1297,7 @@ impl ScheduledTasks {
             slot.last_run_status = ScheduledTaskRunStatus::Failed;
             slot.last_run_error = Some(error.to_owned());
         }
-        if self.persist(&next_tasks).await.is_ok() {
+        if self.persist(&next_tasks, None).await.is_ok() {
             *tasks = next_tasks;
             drop(tasks);
             self.notify_changed();
@@ -1302,9 +1325,9 @@ impl ScheduledTasks {
             task.updated_at = format_iso(now);
             task.run_count = task.run_count.saturating_add(1);
         }
-        if let Err(error) = self.persist(&next_tasks).await {
-            eprintln!("scheduled tasks: could not reset interrupted runs: {error}");
-        }
+        let _ = self
+            .persist(&next_tasks, Some("could not reset interrupted runs:"))
+            .await;
         *tasks = next_tasks;
         drop(tasks);
         self.notify_changed();

@@ -4594,6 +4594,25 @@ impl ConnApp {
             .collect()
     }
 
+    /// A `1`-`9` key with no control focused picks the pending question's option, as a key
+    /// pressed on a page's body does in Conn. The chat must be showing.
+    fn pick_question_option_from_idle_focus(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let chat_hidden = self.layout.right_panel_open && self.right_panel_maximized;
+        let idle = window
+            .focused(cx)
+            .is_none_or(|focused| focused == self.focus_handle);
+        if chat_hidden || !idle {
+            return false;
+        }
+        self.chat
+            .update(cx, |chat, cx| chat.on_question_key(event, window, cx, true))
+    }
+
     /// Handles a key while the add-surface menu is open: a surface's letter opens it, Escape
     /// closes the menu. Returns whether the key was used.
     fn handle_add_menu_key(
@@ -4996,25 +5015,6 @@ impl ConnApp {
 
     /// Dispatches one agent panel request received on `conn-client`'s auto-resubscribed
     /// `panels.requests` stream (`panel_open`, `database_query`, `mcp_connect`, `mcp_call`) and
-    /// A `1`-`9` key with no control focused picks the pending question's option, as a key
-    /// pressed on a page's body does in Conn. The chat must be showing.
-    fn pick_question_option_from_idle_focus(
-        &mut self,
-        event: &gpui_kit::KeyDownEvent,
-        window: &mut gpui_kit::Window,
-        cx: &mut Context<'_, Self>,
-    ) -> bool {
-        let chat_hidden = self.layout.right_panel_open && self.right_panel_maximized;
-        let idle = window
-            .focused(cx)
-            .is_none_or(|focused| focused == self.focus_handle);
-        if chat_hidden || !idle {
-            return false;
-        }
-        self.chat
-            .update(cx, |chat, cx| chat.on_question_key(event, window, cx, true))
-    }
-
     /// replies via `panels.respond`.
     fn dispatch_agent_panel_request(
         &self,
@@ -6062,6 +6062,9 @@ impl Render for ConnApp {
                         cx.stop_propagation();
                         return;
                     }
+                    if app.pick_question_option_from_idle_focus(event, window, cx) {
+                        return;
+                    }
                     if event.keystroke.key == "escape" && app.dismiss_shell_popovers(cx) {
                         cx.stop_propagation();
                     }
@@ -6126,9 +6129,6 @@ impl Render for ConnApp {
             .line_height(px(self.geometry.ui_line_height_px))
             .text_color(hsla(self.tokens.foreground));
 
-        if self.layout.sidebar_open {
-            root = root
-                .child(render_workspace_rail(
         let draft_rows = self.sidebar_draft_rows(cx);
         let draft_sidebar = DraftSidebar {
             rows: draft_rows
@@ -6140,6 +6140,9 @@ impl Render for ConnApp {
                 .collect(),
             undo_available: self.discarded_draft.is_some(),
         };
+        if self.layout.sidebar_open {
+            root = root
+                .child(render_workspace_rail(
                     &self.shell,
                     &self.orbit.workspaces,
                     self.active_workspace.as_deref(),
@@ -6274,6 +6277,3 @@ fn thread_stream_item_kind(item: &conn_state::ThreadStreamItem) -> &'static str 
         conn_state::ThreadStreamItem::Event(_) | conn_state::ThreadStreamItem::Event2(_) => "event",
     }
 }
-                    if app.pick_question_option_from_idle_focus(event, window, cx) {
-                        return;
-                    }

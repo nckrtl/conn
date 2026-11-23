@@ -168,6 +168,31 @@ impl<A> ComposerDraftStore<A> {
         self.parked.insert(key.to_owned(), draft);
     }
 
+    /// Changes the text parked under `key` (empty when nothing is parked) when `edit` returns the
+    /// new text, and drops the draft if that leaves it empty. A draft the composer shows
+    /// is not parked, so it is left alone. Returns whether the text changed.
+    pub(crate) fn edit_parked_text(
+        &mut self,
+        key: &str,
+        edit: impl FnOnce(&str) -> Option<String>,
+    ) -> bool {
+        if self.active_key.as_deref() == Some(key) {
+            return false;
+        }
+        let mut draft = self.parked.remove(key).unwrap_or_default();
+        let changed = match edit(&draft.text) {
+            Some(text) if text != draft.text => {
+                draft.text = text;
+                true
+            }
+            _ => false,
+        };
+        if !draft.is_empty() {
+            self.parked.insert(key.to_owned(), draft);
+        }
+        changed
+    }
+
     /// `true` once when the active draft was discarded and its live content must be cleared.
     pub(crate) fn take_discarded(&mut self) -> bool {
         std::mem::take(&mut self.active_discarded)
@@ -948,6 +973,29 @@ mod tests {
             Some(draft("", &[]))
         );
         assert_eq!(store.switch(Some(&a), draft("", &[])), Some(draft("", &[])));
+    }
+
+    #[test]
+    fn parked_text_is_edited_in_place() {
+        let mut store = ComposerDraftStore::<u32>::default();
+        let thread = thread_draft_key("t");
+        let question = super::question_answer_draft_key("q");
+        store.switch(Some(&question), draft("", &[]));
+        // Nothing parked yet: the edit starts from empty text and parks the result.
+        assert!(store.edit_parked_text(&thread, |text| Some(format!("{text}set aside"))));
+        assert_eq!(store.parked_draft(&thread), Some(&draft("set aside", &[])));
+        // The attachments stay, and an edit that changes nothing reports it.
+        store.park(&thread, draft("set aside", &[7]));
+        assert!(!store.edit_parked_text(&thread, |_| None));
+        assert!(!store.edit_parked_text(&thread, |text| Some(text.to_owned())));
+        assert!(store.edit_parked_text(&thread, |_| Some("moved".to_owned())));
+        assert_eq!(store.parked_draft(&thread), Some(&draft("moved", &[7])));
+        // Emptied text with no attachments drops the draft.
+        store.park(&thread, draft("only text", &[]));
+        assert!(store.edit_parked_text(&thread, |_| Some(String::new())));
+        assert!(store.parked_draft(&thread).is_none());
+        // The shown draft belongs to the composer.
+        assert!(!store.edit_parked_text(&question, |_| Some("x".to_owned())));
     }
 
     fn git_ref(name: &str) -> RefEntry {

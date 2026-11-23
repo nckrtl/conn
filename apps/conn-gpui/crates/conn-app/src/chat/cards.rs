@@ -443,6 +443,12 @@ impl ChatView {
         let pending = self.pending_card_ids.clone();
         self.secret_forms.retain(|id, _| pending.contains(id));
         self.user_input_cards.retain(|id, _| pending.contains(id));
+        self.question_panel.displaced.retain_keys(|key| {
+            pending.iter().any(|id| {
+                key.strip_prefix(id.as_str())
+                    .is_some_and(|rest| rest.starts_with(':'))
+            })
+        });
         for id in pending {
             let Some(entry) = self
                 .cache
@@ -521,14 +527,20 @@ impl ChatView {
         entry_id: &str,
         question: &UserInputQuestion,
         value: &str,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if self
+            .user_input_cards
+            .get(entry_id)
+            .is_none_or(|state| state.responding)
+        {
+            return;
+        }
+        self.set_aside_typed_answer(entry_id, question, window, cx);
         let Some(state) = self.user_input_cards.get_mut(entry_id) else {
             return;
         };
-        if state.responding {
-            return;
-        }
         let next = question.toggle_option(state.drafts.get(&question.id), value);
         state.drafts.insert(question.id.clone(), next);
         if !question.multi_select {
@@ -685,6 +697,7 @@ impl ChatView {
         if let Some(question) = questions.get(index)
             && !text.trim().is_empty()
         {
+            self.withdraw_restored_answer(&entry_id, &question.id, text, cx);
             self.set_user_input_custom(&entry_id, question, text, cx);
         }
         self.advance_user_input(&entry_id, cx);

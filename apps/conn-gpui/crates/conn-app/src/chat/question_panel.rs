@@ -16,9 +16,11 @@ use gpui_kit::{
 };
 
 use super::color::{banner_surface, hsla, hsla_alpha};
+use super::composer_state::thread_draft_key;
 use super::markdown::{self, MarkdownOptions, ProseStyle};
 use super::question_logic::{
-    KeyMods, PrimaryInput, clamp_context, every_question_answered, markdown_preview_text,
+    DisplacedAnswers, KeyMods, PrimaryInput, SET_ASIDE_DESCRIPTION, SET_ASIDE_TITLE,
+    carry_displaced_into_prompt, clamp_context, every_question_answered, markdown_preview_text,
     question_primary, shortcut_option_index, split_recommended_label,
 };
 use super::{BODY_FONT_PX, CHAT_CONTENT_MAX_WIDTH_PX, ChatView, UI_FONT_PX, UI_LINE_HEIGHT_PX};
@@ -60,6 +62,8 @@ pub(super) struct QuestionPanelState {
     clamp: Option<ClampCache>,
     /// The choice-only question that already took the keyboard focus.
     focus_claimed: Option<(String, usize)>,
+    /// Typed answers that picking an option moved into the thread's draft.
+    pub(super) displaced: DisplacedAnswers,
 }
 
 /// The context text as it clamps at one width.
@@ -79,6 +83,7 @@ impl QuestionPanelState {
             content_width: CHAT_CONTENT_MAX_WIDTH_PX - 2.0 * INSET_PX - 16.0,
             clamp: None,
             focus_claimed: None,
+            displaced: DisplacedAnswers::default(),
         }
     }
 }
@@ -256,8 +261,68 @@ impl ChatView {
         };
         let value = question.options[option].answer_value().to_owned();
         cx.stop_propagation();
-        self.select_user_input_option(&entry_id, question, &value, cx);
+        self.select_user_input_option(&entry_id, question, &value, window, cx);
         true
+    }
+
+    /// An option replaces the typed answer. The text is the user's, so it goes to the end of the
+    /// thread's draft, which comes back once the question is answered
+    /// (`onSelectActivePendingUserInputOption`).
+    pub(super) fn set_aside_typed_answer(
+        &mut self,
+        entry_id: &str,
+        question: &UserInputQuestion,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !question.allow_custom_answer {
+            return;
+        }
+        let typed = self
+            .composer
+            .update(cx, |composer, cx| composer.take_answer_text(window, cx));
+        let Some(thread_id) = self.thread_id.as_deref() else {
+            return;
+        };
+        let draft = thread_draft_key(thread_id);
+        let moved = self.composer.update(cx, |composer, _| {
+            composer.edit_parked_text(&draft, |prompt| {
+                Some(carry_displaced_into_prompt(prompt, &typed))
+            })
+        });
+        if !moved {
+            return;
+        }
+        self.question_panel
+            .displaced
+            .push(&draft, &format!("{entry_id}:{}", question.id), &typed);
+        self.set_error(
+            Some(format!("{SET_ASIDE_TITLE}. {SET_ASIDE_DESCRIPTION}")),
+            cx,
+        );
+    }
+
+    /// The typed answer is a text that was set aside: it is the answer again (typed back or
+    /// restored by undo), so the thread's draft must not keep a copy to send twice
+    /// (`withdrawRestoredAnswer`).
+    pub(super) fn withdraw_restored_answer(
+        &mut self,
+        entry_id: &str,
+        question_id: &str,
+        value: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(thread_id) = self.thread_id.as_deref() else {
+            return;
+        };
+        let draft = thread_draft_key(thread_id);
+        let key = format!("{entry_id}:{question_id}");
+        let displaced = &mut self.question_panel.displaced;
+        self.composer.update(cx, |composer, _| {
+            composer.edit_parked_text(&draft, |prompt| {
+                displaced.withdraw(&draft, &key, value, prompt)
+            })
+        });
     }
 
     /// The Next / Send pill: through the composer when it takes typed answers, so the typed text
@@ -573,8 +638,8 @@ impl ChatView {
                 row = row
                     .cursor_pointer()
                     .when(!selected, move |d| d.hover(move |s| s.bg(hover)))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.select_user_input_option(&select_id, &picked, &value, cx);
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.select_user_input_option(&select_id, &picked, &value, window, cx);
                     }));
             }
             let preview =

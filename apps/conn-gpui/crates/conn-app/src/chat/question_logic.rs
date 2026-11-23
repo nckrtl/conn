@@ -90,6 +90,127 @@ pub(super) fn every_question_answered(
     })
 }
 
+/// Between a set-aside answer and the text already in the thread draft (`DISPLACED_ANSWER_SEPARATOR`).
+const DISPLACED_ANSWER_SEPARATOR: &str = "\n\n";
+
+/// The title of the notice shown when picking an option sets typed text aside.
+pub(super) const SET_ASIDE_TITLE: &str = "Your typed text was set aside";
+/// The notice's second line.
+pub(super) const SET_ASIDE_DESCRIPTION: &str =
+    "It will be back in the composer once the question is answered.";
+
+/// The thread draft with the typed answer an option displaced added at its end
+/// (`carryDisplacedCustomAnswerIntoPrompt`). Blank text changes nothing.
+pub(super) fn carry_displaced_into_prompt(prompt: &str, displaced: &str) -> String {
+    let displaced = displaced.trim();
+    if displaced.is_empty() {
+        return prompt.to_owned();
+    }
+    if prompt.trim().is_empty() {
+        return displaced.to_owned();
+    }
+    format!(
+        "{}{DISPLACED_ANSWER_SEPARATOR}{displaced}",
+        prompt.trim_end()
+    )
+}
+
+/// Takes set-aside answer text back out of the thread draft once it is the answer again
+/// (`withdrawDisplacedCustomAnswerFromPrompt`). `later` is what was set aside after it, in
+/// order: together they locate this copy, so equal text inside another answer or the user's own
+/// draft is never the one removed.
+pub(super) fn withdraw_displaced_from_prompt(
+    prompt: &str,
+    displaced: &str,
+    later: &[String],
+) -> String {
+    let text = displaced.trim();
+    if text.is_empty() {
+        return prompt.to_owned();
+    }
+    let later: Vec<&str> = later
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let suffix = std::iter::once(text)
+        .chain(later.iter().copied())
+        .collect::<Vec<_>>()
+        .join(DISPLACED_ANSWER_SEPARATOR);
+    let Some(before) = prompt.strip_suffix(suffix.as_str()) else {
+        return prompt.to_owned();
+    };
+    let after = later.join(DISPLACED_ANSWER_SEPARATOR);
+    if before.is_empty() {
+        return after;
+    }
+    let Some(before) = before.strip_suffix(DISPLACED_ANSWER_SEPARATOR) else {
+        return prompt.to_owned();
+    };
+    if after.is_empty() {
+        before.to_owned()
+    } else {
+        format!("{before}{DISPLACED_ANSWER_SEPARATOR}{after}")
+    }
+}
+
+/// One answer set aside into a thread draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Displaced {
+    /// The draft it went into.
+    draft: String,
+    /// `{request}:{question}` it was typed for.
+    key: String,
+    text: String,
+}
+
+/// The answers set aside, in the order they went into their drafts, which is how a copy is
+/// found again (`displacedAnswers`).
+#[derive(Clone, Debug, Default)]
+pub(super) struct DisplacedAnswers {
+    entries: Vec<Displaced>,
+}
+
+impl DisplacedAnswers {
+    /// Records `text`, which went into `draft` for the question `key`.
+    pub(super) fn push(&mut self, draft: &str, key: &str, text: &str) {
+        self.entries.push(Displaced {
+            draft: draft.to_owned(),
+            key: key.to_owned(),
+            text: text.to_owned(),
+        });
+    }
+
+    /// `value` is the answer again (undo, or retyped): forgets its set-aside copy and returns
+    /// the draft without it, or `None` when the draft stays as it is
+    /// (`withdrawRestoredAnswer`).
+    pub(super) fn withdraw(
+        &mut self,
+        draft: &str,
+        key: &str,
+        value: &str,
+        prompt: &str,
+    ) -> Option<String> {
+        let index = self
+            .entries
+            .iter()
+            .rposition(|e| e.draft == draft && e.key == key && e.text.trim() == value.trim())?;
+        let displaced = self.entries.remove(index);
+        let later: Vec<String> = self.entries[index..]
+            .iter()
+            .filter(|e| e.draft == displaced.draft)
+            .map(|e| e.text.clone())
+            .collect();
+        let next = withdraw_displaced_from_prompt(prompt, &displaced.text, &later);
+        (next != prompt).then_some(next)
+    }
+
+    /// Drops what was set aside for requests that are gone.
+    pub(super) fn retain_keys(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.entries.retain(|e| keep(&e.key));
+    }
+}
+
 /// The modifier keys of a key press.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct KeyMods {
@@ -378,6 +499,89 @@ mod tests {
         assert!(every_question_answered(&questions, &drafts, 0, true));
         assert!(!every_question_answered(&questions, &drafts, 0, false));
         assert!(!every_question_answered(&questions, &drafts, 1, true));
+    }
+
+    #[test]
+    fn displaced_text_joins_the_thread_draft() {
+        assert_eq!(carry_displaced_into_prompt("", "first try"), "first try");
+        assert_eq!(
+            carry_displaced_into_prompt("  \n", " first try "),
+            "first try"
+        );
+        assert_eq!(
+            carry_displaced_into_prompt("my draft\n", " first try "),
+            "my draft\n\nfirst try"
+        );
+        // Blank text is not set aside.
+        assert_eq!(carry_displaced_into_prompt("my draft", " \n"), "my draft");
+    }
+
+    #[test]
+    fn withdrawing_takes_out_only_the_copy_that_was_set_aside() {
+        let none: [String; 0] = [];
+        assert_eq!(withdraw_displaced_from_prompt("a", "a", &none), "");
+        assert_eq!(
+            withdraw_displaced_from_prompt("mine\n\na", "a", &none),
+            "mine"
+        );
+        // Equal text elsewhere in the draft is not the copy.
+        assert_eq!(
+            withdraw_displaced_from_prompt("a\n\nmine", "a", &none),
+            "a\n\nmine"
+        );
+        assert_eq!(
+            withdraw_displaced_from_prompt("mine a", "a", &none),
+            "mine a"
+        );
+        // Later copies stay, in order.
+        let later = ["b".to_owned(), " ".to_owned(), "c".to_owned()];
+        assert_eq!(
+            withdraw_displaced_from_prompt("mine\n\na\n\nb\n\nc", "a", &later),
+            "mine\n\nb\n\nc"
+        );
+        assert_eq!(
+            withdraw_displaced_from_prompt("a\n\nb\n\nc", "a", &later),
+            "b\n\nc"
+        );
+        assert_eq!(withdraw_displaced_from_prompt("keep", "  ", &none), "keep");
+    }
+
+    #[test]
+    fn a_restored_answer_leaves_the_thread_draft_once() {
+        let mut displaced = DisplacedAnswers::default();
+        displaced.push("thread:t1", "req:q1", "first try");
+        displaced.push("thread:t1", "req:q1", "second");
+        displaced.push("thread:t2", "req:q1", "elsewhere");
+        let prompt = "first try\n\nsecond";
+        // Another thread's copy and other questions' copies are not touched.
+        assert_eq!(
+            displaced.withdraw("thread:t1", "req:q2", "first try", prompt),
+            None
+        );
+        assert_eq!(
+            displaced.withdraw("thread:t3", "req:q1", "first try", prompt),
+            None
+        );
+        // The copy is found by its draft, question and text; later copies stay.
+        assert_eq!(
+            displaced.withdraw("thread:t1", "req:q1", " first try ", prompt),
+            Some("second".to_owned())
+        );
+        // It is forgotten, so typing the same text again withdraws nothing more.
+        assert_eq!(
+            displaced.withdraw("thread:t1", "req:q1", "first try", "second"),
+            None
+        );
+        // A copy that is no longer at the end of the draft stays where it is.
+        assert_eq!(
+            displaced.withdraw("thread:t1", "req:q1", "second", "second and more"),
+            None
+        );
+        displaced.retain_keys(|key| key != "req:q1");
+        assert_eq!(
+            displaced.withdraw("thread:t2", "req:q1", "elsewhere", "elsewhere"),
+            None
+        );
     }
 
     #[test]

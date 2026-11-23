@@ -59,8 +59,9 @@ pub use crate::layout::{
 };
 pub use crate::shell::{ShellChange, ShellState, ThreadActivity};
 pub use crate::sidebar::{
-    DRAFT_STATUS_LABEL, SidebarDraft, SidebarDraftRow, draft_has_content, draft_preview,
-    draft_row_label, freeze_active_draft_row, sidebar_draft_row, sidebar_draft_rows,
+    DRAFT_STATUS_LABEL, DraftRowKey, SidebarDraft, SidebarDraftRow, draft_has_content,
+    draft_preview, draft_row_key, draft_row_label, freeze_active_draft_row, is_activation_key,
+    sidebar_draft_row, sidebar_draft_rows, threads_with_unsent_input,
 };
 pub use crate::thread::{
     EntryTiming, ItemStatus, PendingApproval, PendingRequest, RunStatus, RunTiming,

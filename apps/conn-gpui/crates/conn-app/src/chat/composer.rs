@@ -193,7 +193,6 @@ pub(crate) enum ComposerEvent {
     ScratchWorkspaceRoot(Option<String>),
 }
 
-/// Stateful GPUI entity for the Conn composer, model picker, `/` command menu, and `@` mentions.
 /// What the pending question's panel reads from the composer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct QuestionComposerStatus {
@@ -207,6 +206,7 @@ pub(crate) struct QuestionComposerStatus {
     pub(crate) blocked: bool,
 }
 
+/// Stateful GPUI entity for the Conn composer, model picker, `/` command menu, and `@` mentions.
 pub(crate) struct Composer {
     tokens: Tokens,
     connection: Option<Connection>,
@@ -244,9 +244,9 @@ pub(crate) struct Composer {
     permission_preview: Option<&'static str>,
     implement_menu_open: bool,
     stash: PromptStash,
-    branch: branch_picker::BranchUi,
     /// The host draws the stash badge in its own banner dock.
     stash_docked: bool,
+    branch: branch_picker::BranchUi,
     textarea: Entity<TextareaState>,
     model_search_input: Entity<InputState>,
     catalog: ModelCatalog,
@@ -279,9 +279,9 @@ pub(crate) struct Composer {
     dictation: DictationState,
     dictation_error: Option<String>,
     next_dictation_seq: u64,
-    _subscriptions: Vec<Subscription>,
     /// Send was pressed while dictating: submit once the transcript lands.
     submit_after_dictation: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl fmt::Debug for Composer {
@@ -393,8 +393,8 @@ impl Composer {
             permission_preview: None,
             implement_menu_open: false,
             stash: PromptStash::default(),
-            branch,
             stash_docked: false,
+            branch,
             textarea,
             model_search_input,
             catalog: ModelCatalog::default(),
@@ -423,8 +423,8 @@ impl Composer {
             dictation: DictationState::Idle,
             dictation_error: None,
             next_dictation_seq: 1,
-            _subscriptions: vec![textarea_sub, search_sub],
             submit_after_dictation: false,
+            _subscriptions: vec![textarea_sub, search_sub],
         };
         if composer.connection.is_some() {
             composer.refresh_providers(cx);
@@ -1097,6 +1097,16 @@ impl Composer {
 
     #[cfg(test)]
     #[must_use]
+    pub(crate) fn draft_text_for_test(&self, cx: &App) -> String {
+        self.textarea.read(cx).value().to_string()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parked_text_for_test(&self, key: &str) -> Option<String> {
+        self.drafts.parked_draft(key).map(|d| d.text.clone())
+    }
+
+    #[cfg(test)]
     pub(crate) fn attachment_states_for_test(&self) -> Vec<(String, String)> {
         self.attachments
             .iter()
@@ -1327,13 +1337,9 @@ impl Composer {
         let sid = session_id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let stop_res = crate::live::RT
-                let submit = std::mem::take(&mut composer.submit_after_dictation);
                 .spawn(async move {
                     let client = OperatorClient::from_config()?;
                     client.stop(&sid).await
-                        if submit {
-                            composer.submit(window, cx);
-                        }
                 })
                 .await;
 
@@ -1342,9 +1348,13 @@ impl Composer {
                     return;
                 }
                 composer.dictation = DictationState::Idle;
+                let submit = std::mem::take(&mut composer.submit_after_dictation);
                 match stop_res {
                     Ok(Ok(text)) => {
                         composer.apply_dictation_transcript(&text, window, cx);
+                        if submit {
+                            composer.submit(window, cx);
+                        }
                     }
                     Ok(Err(err)) => {
                         composer.dictation_error = Some(friendly_operator_error(&err));
@@ -1521,6 +1531,17 @@ impl Composer {
                 input.set_value("", window, cx);
             });
             self.attachments.clear();
+            None
+        };
+        cx.emit(ComposerEvent::Send {
+            text,
+            attachments: ready_attachments,
+            dispatch,
+            held_draft,
+        });
+        cx.notify();
+    }
+
     /// What the pending question's panel needs from the composer (`pendingPanelActions`).
     pub(crate) fn question_panel_status(&self, cx: &App) -> QuestionComposerStatus {
         let uploading = self
@@ -1537,6 +1558,32 @@ impl Composer {
                 || uploading
                 || matches!(self.dictation, DictationState::Transcribing { .. }),
         }
+    }
+
+    /// Takes the text typed for the question's answer and empties the editor, as Conn does when
+    /// an option replaces the typed answer (`promptRef.current = ""`).
+    pub(crate) fn take_answer_text(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> String {
+        let text = self.textarea.read(cx).value().to_string();
+        if !text.is_empty() {
+            self.textarea
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.on_draft_changed(cx);
+        }
+        text
+    }
+
+    /// Edits the unsent text of another draft, such as the thread's while a question's answer
+    /// is shown (see [`ComposerDraftStore::edit_parked_text`]).
+    pub(crate) fn edit_parked_text(
+        &mut self,
+        key: &str,
+        edit: impl FnOnce(&str) -> Option<String>,
+    ) -> bool {
+        self.drafts.edit_parked_text(key, edit)
     }
 
     /// Send on the question panel while dictating: ends the dictation, then submits its text.
@@ -1567,17 +1614,6 @@ impl Composer {
             return None;
         }
         stash::render_stash_badge_tab(&self.stash, &self.tokens, cx)
-    }
-
-            None
-        };
-        cx.emit(ComposerEvent::Send {
-            text,
-            attachments: ready_attachments,
-            dispatch,
-            held_draft,
-        });
-        cx.notify();
     }
 
     /// The live draft, to compare with the one an approval send held.
@@ -2933,8 +2969,6 @@ impl Render for Composer {
                     if m.platform && m.shift && !m.alt && !m.control {
                         match keystroke.key.as_str() {
                             "g" => composer.toggle_branch_picker(window, cx),
-                } else if self.stash_docked {
-                    None
                             "x" => composer.toggle_workspace_menu(cx),
                             "l" => composer.use_previous_worktree(window, cx),
                             _ => return,
@@ -2946,6 +2980,8 @@ impl Render for Composer {
             .when_some(
                 if self.stash.menu_open {
                     Some(render_stash_menu(&self.stash, &tokens, cx))
+                } else if self.stash_docked {
+                    None
                 } else {
                     render_stash_badge(&self.stash, &tokens, cx)
                 },

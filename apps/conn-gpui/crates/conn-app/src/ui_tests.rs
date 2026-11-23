@@ -1556,3 +1556,66 @@ fn drafts_are_saved_to_disk_and_come_back_on_the_next_start(cx: &mut TestAppCont
     });
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[gpui_kit::test]
+fn picking_an_option_sets_the_typed_answer_aside_in_the_thread_draft(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    let chat = cx.read(|cx| app.read(cx).chat_for_test());
+    let composer = cx.read(|cx| chat.read(cx).composer_for_test());
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // Picking an option with nothing typed sets nothing aside.
+        let vmpal = window.find_by_label("VMPal").bounds().center();
+        window.pointer_move(vmpal, None, cx);
+        window.pointer_down(vmpal, MouseButton::Left, cx);
+        window.pointer_up(vmpal, MouseButton::Left, cx);
+        window.render_frame(cx);
+        assert_eq!(chat.read(cx).error_for_test(), None);
+
+        chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        window.render_frame(cx);
+        window.input("first try", cx);
+        window.render_frame(cx);
+        assert_eq!(composer.read(cx).draft_text_for_test(cx), "first try");
+        let headless = window.find_by_label("Headless").bounds().center();
+        window.pointer_move(headless, None, cx);
+        window.pointer_down(headless, MouseButton::Left, cx);
+        window.pointer_up(headless, MouseButton::Left, cx);
+        window.render_frame(cx);
+
+        let thread_draft = "thread:thread-selected";
+        assert_eq!(composer.read(cx).draft_text_for_test(cx), "");
+        assert_eq!(
+            composer.read(cx).parked_text_for_test(thread_draft).as_deref(),
+            Some("first try")
+        );
+        assert_eq!(
+            chat.read(cx).error_for_test().as_deref(),
+            Some(
+                "Your typed text was set aside. It will be back in the composer once the question is answered."
+            )
+        );
+        assert_eq!(window.find_by_label("Headless").selected(), Some(true));
+
+        // A second answer goes after the first, with a blank line between.
+        chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        window.render_frame(cx);
+        window.input("second", cx);
+        window.render_frame(cx);
+        let vmpal = window.find_by_label("VMPal").bounds().center();
+        window.pointer_move(vmpal, None, cx);
+        window.pointer_down(vmpal, MouseButton::Left, cx);
+        window.pointer_up(vmpal, MouseButton::Left, cx);
+        window.render_frame(cx);
+        assert_eq!(
+            composer.read(cx).parked_text_for_test(thread_draft).as_deref(),
+            Some("first try\n\nsecond")
+        );
+    });
+}

@@ -451,6 +451,11 @@ impl ChatView {
     /// Returns the child composer entity for headless GPUI tests.
     #[cfg(test)]
     #[must_use]
+    pub(crate) fn error_for_test(&self) -> Option<String> {
+        self.error_banner.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn composer_for_test(&self) -> Entity<Composer> {
         self.composer.clone()
     }
@@ -3059,13 +3064,13 @@ impl Render for ChatView {
             if show_latest_pill {
                 container = container.child(toc::render_scroll_to_bottom_pill(&self.tokens, cx));
             }
+            container.into_any_element()
+        };
+
         let question_banner = self.render_question_banner(window, cx);
         let banner_docked = question_banner.is_some();
         self.composer
             .update(cx, |c, cx| c.set_stash_docked(banner_docked, cx));
-
-            container.into_any_element()
-        };
 
         let mut composer_lane = div()
             .flex_none()
@@ -3077,10 +3082,10 @@ impl Render for ChatView {
         }
         composer_lane = composer_lane.child(
             div()
-                .when_some(question_banner, |lane, banner| lane.child(banner))
                 .w_full()
                 .max_w(px(CHAT_CONTENT_MAX_WIDTH_PX))
                 .mx_auto()
+                .when_some(question_banner, |lane, banner| lane.child(banner))
                 .child(self.composer.clone()),
         );
 

@@ -441,7 +441,11 @@ final class ConnSpikeUITests: XCTestCase {
                 settle(1)
                 if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { break }
             }
-            field.typeText(text)
+            // A controlled RN input drops keys typed in one burst under load.
+            for character in text {
+                field.typeText(String(character))
+                settle(0.08)
+            }
         }
         func back(_ app: XCUIApplication) {
             if !tap(app, ["Back", "thread.backButton"]) {
@@ -465,7 +469,7 @@ final class ConnSpikeUITests: XCTestCase {
             let address = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
             XCTAssertTrue(address.waitForExistence(timeout: 10), "the pairing form should open")
-            focusAndType(address, parts[0])
+            focusAndType(address, parts[0].replacingOccurrences(of: "http://", with: ""))
             let code = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
             focusAndType(code, parts.count > 1 ? parts[1] : "")

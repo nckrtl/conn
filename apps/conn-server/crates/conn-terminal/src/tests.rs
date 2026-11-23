@@ -403,6 +403,36 @@ async fn keeps_a_viewers_resized_grid_when_the_same_viewer_attaches_again() {
     assert_eq!(manager.read("t12", "term-1", Some(0)).unwrap().pid, pid);
 }
 
+/// A viewer's grid belongs to the viewer, not to the stream that first reported it (T3's
+/// `retainViewer`): it stays until the viewer's last stream closes.
+#[tokio::test(flavor = "current_thread")]
+async fn keeps_a_viewers_grid_while_any_of_its_streams_stays_open() {
+    let manager = TerminalManager::new(config());
+    let sized = |cols: i64| {
+        let mut input = attach_input("t15", "term-1");
+        (input.cols, input.rows) = (Some(cols), Some(15));
+        input
+    };
+    let grid = |e: &E| match e {
+        E::Activity(a) => (a.cols, a.rows),
+        _ => (None, None),
+    };
+    let mut wide = manager.attach(sized(130), 1).unwrap();
+    assert!(matches!(wide.next().await, E::Snapshot(s) if s.snapshot.cols == Some(130)));
+    let unsized_stream = manager.attach(attach_input("t15", "term-1"), 2).unwrap();
+    let sized_stream = manager.attach(sized(54), 2).unwrap();
+    until(&mut wide, |e| grid(e) == (Some(54), Some(15))).await;
+
+    drop(sized_stream);
+    let snapshot = manager.read("t15", "term-1", Some(0)).unwrap();
+    assert_eq!((snapshot.cols, snapshot.rows), (Some(54), Some(15)));
+    write(&manager, "t15", "term-1", "stty size\n").await;
+    output_contains(&mut wide, "15 54").await;
+
+    drop(unsized_stream);
+    until(&mut wide, |e| grid(e) == (Some(130), Some(15))).await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn bounds_scrollback_and_resyncs_a_slow_viewer() {
     let manager = TerminalManager::new(TerminalConfig {

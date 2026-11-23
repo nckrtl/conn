@@ -130,6 +130,9 @@ pub struct SettingsStore {
     /// The last load failed in a way that may pass (a read, the provider history): the next
     /// admission reloads first ([`Self::reload_if_failed`]).
     retry: std::sync::atomic::AtomicBool,
+    /// Loads [`Self::reload_if_failed`] ran.
+    #[cfg(test)]
+    reloads: std::sync::atomic::AtomicUsize,
     /// Bumped after each write; `subscribeServerConfig` sends `settingsUpdated` on it.
     revision: watch::Sender<u64>,
 }
@@ -172,6 +175,8 @@ impl SettingsStore {
             state: Mutex::new(loaded),
             writer: Mutex::new(()),
             retry: std::sync::atomic::AtomicBool::new(retry),
+            #[cfg(test)]
+            reloads: std::sync::atomic::AtomicUsize::new(0),
             revision: watch::Sender::new(0),
         }
     }
@@ -189,6 +194,11 @@ impl SettingsStore {
     pub fn for_client(&self) -> Value {
         let mut settings = self.raw();
         with_idle_compaction(&mut settings);
+        // `OmittedWhenNull`: a null `defaultThreadEnvMode` stays off the wire, so older
+        // clients, which require a literal, keep decoding.
+        if settings.get("defaultThreadEnvMode") == Some(&Value::Null) {
+            settings.remove("defaultThreadEnvMode");
+        }
         redact(&mut settings);
         Value::Object(settings)
     }
@@ -209,6 +219,13 @@ impl SettingsStore {
             return;
         }
         let _writer = crate::lock(&self.writer);
+        // Another caller may have reloaded while this one waited for the writer.
+        if !self.needs_reload() {
+            return;
+        }
+        #[cfg(test)]
+        self.reloads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (reloaded, failure, retry) = load(&self.path, &self.secrets_dir);
         *self.lock() = reloaded;
         self.retry
@@ -396,6 +413,16 @@ fn load(path: &Path, secrets_dir: &Path) -> (Loaded, Option<String>, bool) {
         }
     };
     (Loaded { doc, materialized }, None, false)
+}
+
+/// Reloads `environment`'s settings on a blocking thread when their last load failed in a way
+/// that may have passed, before a read or an admission uses them (T3 keeps a failed load for
+/// no time).
+pub async fn refresh(environment: &std::sync::Arc<crate::environment::Environment>) {
+    if environment.settings.needs_reload() {
+        let environment = environment.clone();
+        let _ = tokio::task::spawn_blocking(move || environment.settings.reload_if_failed()).await;
+    }
 }
 
 /// The settings as the store would load them, without writing anything: for a reader that
@@ -1957,6 +1984,66 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.operation, "normalize");
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A link to a missing T3 database is not "no database": the load fails and the legacy
+    /// file stays. The history is read once for that load.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_history_link_keeps_the_legacy_file() {
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        let legacy = json!({ "providers": { "claudeAgent": { "enabled": false } } }).to_string();
+        fs::write(&path, &legacy).unwrap();
+        std::os::unix::fs::symlink("gone.sqlite", dir.join("statev2.sqlite")).unwrap();
+        file::HISTORY_READS.with(|reads| reads.set(0));
+        let store = SettingsStore::open(path.clone());
+        assert_eq!(
+            file::HISTORY_READS.with(std::cell::Cell::get),
+            1,
+            "read once"
+        );
+        assert!(!provider_instance_enabled(
+            &store.raw(),
+            None,
+            "claudeAgent"
+        ));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            legacy,
+            "kept for a retry"
+        );
+        assert!(store.needs_reload());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Retries that queue behind one writer load once between them.
+    #[test]
+    fn concurrent_retries_load_once() {
+        use std::sync::Arc;
+        let dir = temp_state();
+        let path = dir.join("settings.json");
+        fs::write(&path, json!({ "providers": {} }).to_string()).unwrap();
+        fs::create_dir(dir.join("statev2.sqlite")).unwrap();
+        let store = Arc::new(SettingsStore::open(path));
+        assert!(store.needs_reload());
+        fs::remove_dir(dir.join("statev2.sqlite")).unwrap();
+        let writer = crate::lock(&store.writer);
+        let retries: Vec<_> = (0..2)
+            .map(|_| {
+                let store = store.clone();
+                std::thread::spawn(move || store.reload_if_failed())
+            })
+            .collect();
+        // Both pass their first look and wait for the writer.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(writer);
+        for retry in retries {
+            retry.join().unwrap();
+        }
+        assert_eq!(store.reloads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(!store.needs_reload());
         fs::remove_dir_all(dir).unwrap();
     }
 

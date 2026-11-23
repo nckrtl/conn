@@ -84,32 +84,33 @@ export function schemaRule(ast, purpose) {
   return decode || Object.keys(rule).length ? rule : null;
 }
 
-// Where a persisted value may be `null`, by T3's own decoder: `{n: 1}` when `null` decodes at
-// that node, `f` for an object's known fields, `v` for a record's values, `i` for array items.
-// A known field is always listed, so an absent one means T3 ignores it as an excess key.
-export function nullRule(ast, depth = 0) {
-  if (ast._tag === "Suspend") return depth > 8 ? { n: 1 } : nullRule(ast.thunk(), depth + 1);
+// Where a persisted value may be `null`, by T3's encoded input schema (what settings.json may
+// hold): `{n: 1}` when that node takes `null`, `f` for an object's known fields, `v` for a
+// record's values, `i` for array items. A known field is always listed, so an absent one is an
+// excess key T3 ignores. Nested unions are flattened, so every branch's fields count.
+const SchemaAST = await pkg("effect/SchemaAST");
+export const nullRule = (ast) => encodedNullRule(SchemaAST.toEncoded(ast), 0);
+function encodedNullRule(ast, depth) {
+  if (ast._tag === "Suspend") return depth > 8 ? { n: 1 } : encodedNullRule(ast.thunk(), depth + 1);
   const rule = {};
   if (Exit.isSuccess(Schema.decodeUnknownExit(Schema.make(ast))(null))) rule.n = 1;
-  const shapes = (ast._tag === "Union" ? ast.types : [ast]).map((t) => {
-    if (t._tag === "Suspend") return t.thunk();
-    if (!["Objects", "Arrays", "Union"].includes(t._tag) && t.encoding?.length) return t.encoding.at(-1).to;
-    return t;
-  });
-  for (const shape of shapes) {
+  const branches = (t) => (t._tag === "Union" ? t.types.flatMap(branches) : t._tag === "Suspend" && depth <= 8 ? branches(t.thunk()) : [t]);
+  for (const shape of branches(ast)) {
     if (shape._tag === "Objects") {
       rule.f ??= {};
       for (const p of shape.propertySignatures) {
-        const child = nullRule(p.type, depth + 1);
+        const child = encodedNullRule(p.type, depth + 1);
         const known = rule.f[p.name];
-        // A field two members both name may be null when either allows it.
-        rule.f[p.name] = known ? { ...known, ...child, n: known.n || child.n || undefined } : child;
-        if (!rule.f[p.name].n) delete rule.f[p.name].n;
+        // A field two branches both name may be null when either allows it.
+        const merged = known ? { ...known, ...child } : child;
+        if (known?.n || child.n) merged.n = 1;
+        else delete merged.n;
+        rule.f[p.name] = merged;
       }
       const [index] = shape.indexSignatures;
-      if (index) rule.v = nullRule(index.type, depth + 1);
+      if (index) rule.v = encodedNullRule(index.type, depth + 1);
     }
-    if (shape._tag === "Arrays" && shape.rest.length === 1) rule.i = nullRule(shape.rest[0], depth + 1);
+    if (shape._tag === "Arrays" && shape.rest.length === 1) rule.i = encodedNullRule(shape.rest[0], depth + 1);
   }
   return rule;
 }

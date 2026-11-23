@@ -92,8 +92,11 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
 
     let (env, providers) = (environment.clone(), deps.clone());
     table.unary("server.getConfig", move |_, _: Value| {
-        let config = server_config(&env, current_providers(&providers));
-        async move { config }
+        let (env, providers) = (env.clone(), providers.clone());
+        async move {
+            crate::settings::refresh(&env).await;
+            server_config(&env, current_providers(&providers))
+        }
     });
     let providers = deps.clone();
     table.unary("server.refreshProviders", move |_, input: Value| {
@@ -111,8 +114,11 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
     // T3's `redactServerSettingsForClient`, as `server.getConfig` sends it.
     let env = environment.clone();
     table.unary("server.getSettings", move |_, _: Value| {
-        let settings = env.settings.for_client();
-        async move { Ok(settings) }
+        let env = env.clone();
+        async move {
+            crate::settings::refresh(&env).await;
+            Ok(env.settings.for_client())
+        }
     });
     // T3 reads `<state>/logs/server.trace.ndjson` and its rotations. This server writes no
     // trace, but its state folder may hold an earlier T3 server's: read them as T3 does.
@@ -181,14 +187,17 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
     table.stream("subscribeServerConfig", move |_, input: Value| {
         // Subscribed before the snapshot is built: a reload in between sends a new one.
         let descriptor = env.subscribe_descriptor();
-        let config = server_config(&env, current_providers(&providers));
         let env = env.clone();
         let deps = providers.clone();
         // Only clients that ask get `environmentThemesUpdated`; older ones die on it.
         let themes = themes
             .clone()
             .filter(|_| input["environmentThemes"] == Value::Bool(true));
-        async move { Ok(config_stream(env, deps, config?, descriptor, themes)) }
+        async move {
+            crate::settings::refresh(&env).await;
+            let config = server_config(&env, current_providers(&deps))?;
+            Ok(config_stream(env, deps, config, descriptor, themes))
+        }
     });
     let env = environment.clone();
     table.stream("subscribeAuthAccess", move |ctx, _: Value| {
@@ -716,6 +725,133 @@ mod tests {
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(saved.get("providers").is_none(), "the repaired load ran");
         assert_eq!(saved["providerInstances"]["claudeAgent"]["enabled"], false);
+        assert_eq!(
+            provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A history that cannot be read keeps a project's Claude opt-out for clients and at
+    /// launch through the real host; every settings read retries the failed load, and once it
+    /// succeeds clients get the file's settings, a null `defaultThreadEnvMode` left off.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_history_failure_keeps_project_overrides_and_reads_retry() {
+        use crate::table::{CallContext, Handler, MethodTable};
+        let dir =
+            std::env::temp_dir().join(format!("conn-server-cfg-{}", crate::auth::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("project").display().to_string();
+        let project = conn_engine::SqliteEngine::project_id_for(&root);
+        let path = dir.join("settings.json");
+        let file = json!({
+            "providers": {},
+            "defaultThreadEnvMode": null,
+            "projectSettingsOverrides": {
+                project.clone(): { "providerInstances": { "claudeAgent": { "enabled": false } } },
+            },
+        })
+        .to_string();
+        std::fs::write(&path, &file).unwrap();
+        let history = rusqlite::Connection::open(dir.join("statev2.sqlite")).unwrap();
+        history.execute_batch("CREATE TABLE other (x)").unwrap();
+        let env = Arc::new(
+            Environment::load(&dir, Some("Test".into()), dir.clone(), Default::default()).unwrap(),
+        );
+        let mut table = MethodTable::new();
+        register(
+            &mut table,
+            &Deps {
+                environment: Some(env.clone()),
+                ..Deps::default()
+            },
+        );
+        let call = |tag: &str| match table.get(tag) {
+            Some(Handler::Unary(call)) => call.clone(),
+            _ => panic!("{tag}"),
+        };
+        let view = call("server.getSettings")(CallContext::default(), json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            view["projectSettingsOverrides"][project.as_str()]["providerInstances"]["claudeAgent"]
+                ["enabled"],
+            false,
+            "{view}"
+        );
+
+        let host = Arc::new(crate::host::Host {
+            mcp: std::sync::OnceLock::new(),
+            files: None,
+            vcs: crate::methods::vcs::VcsShared::default(),
+            terminals: crate::methods::terminal::manager(Some(&env)),
+            environment: env.clone(),
+            scheduled_tasks: std::sync::OnceLock::new(),
+            devices: std::sync::OnceLock::new(),
+        });
+        let provider = Arc::new(conn_engine::fake::FakeProvider::new("claudeAgent"));
+        let mut engine = conn_engine::EngineConfig::new(dir.join("engine.sqlite"));
+        engine.projects = vec![conn_engine::ProjectConfig {
+            title: "Project".into(),
+            workspace_root: root.clone(),
+        }];
+        engine.providers = vec![provider.clone()];
+        engine.host = Some(host);
+        let engine = conn_engine::SqliteEngine::open(engine).unwrap();
+        let refused = |n: u32| {
+            let engine = &engine;
+            let thread = format!("t{n}");
+            let create = json!({
+                "type": "thread.create", "commandId": format!("create-{n}"), "threadId": thread,
+                "projectId": project, "title": "Claude",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "branch": null, "worktreePath": null, "createdBy": "user", "creationSource": "web",
+            });
+            let send = json!({
+                "type": "message.dispatch", "commandId": format!("send-{n}"), "threadId": thread,
+                "messageId": format!("message:{n}"), "text": "hello", "attachments": [],
+                "dispatchMode": {"type": "start_immediately"}, "createdBy": "user",
+                "creationSource": "web",
+            });
+            async move {
+                let _ = conn_engine::Engine::dispatch(
+                    engine,
+                    conn_contract::from_json(create).unwrap(),
+                )
+                .await;
+                conn_engine::Engine::dispatch(engine, conn_contract::from_json(send).unwrap())
+                    .await
+                    .is_err()
+            }
+        };
+        assert!(refused(1).await, "refused while the history fails");
+
+        history
+            .execute_batch(
+                "CREATE TABLE projection_thread_sessions (provider_name TEXT, provider_instance_id TEXT);
+                 CREATE TABLE provider_session_runtime (provider_name TEXT, provider_instance_id TEXT);",
+            )
+            .unwrap();
+        let view = call("server.getSettings")(CallContext::default(), json!({}))
+            .await
+            .unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            saved.get("providers").is_none(),
+            "the read retried the load"
+        );
+        assert!(view.get("defaultThreadEnvMode").is_none(), "{view}");
+        let config = call("server.getConfig")(CallContext::default(), json!({}))
+            .await
+            .unwrap();
+        assert!(config["settings"].get("defaultThreadEnvMode").is_none());
+        assert_eq!(
+            config["settings"]["projectSettingsOverrides"][project.as_str()]["providerInstances"]["claudeAgent"]
+                ["enabled"],
+            false
+        );
+        assert!(refused(2).await, "the project's opt-out holds");
         assert_eq!(
             provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
             0

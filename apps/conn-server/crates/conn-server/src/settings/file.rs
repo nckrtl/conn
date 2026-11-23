@@ -11,6 +11,12 @@ use conn_contract::ServerSettings;
 use super::ensure_object;
 use super::generated::{DEFAULT_DISABLED_DRIVERS, NULL_RULES};
 
+#[cfg(test)]
+thread_local! {
+    /// How often this thread read T3's provider history.
+    pub(super) static HISTORY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// T3's database beside the settings file; the provider history lives there.
 const T3_STATE_FILE: &str = "statev2.sqlite";
 
@@ -47,12 +53,12 @@ pub(super) fn decode(path: &Path) -> Decoded {
                 retryable: false,
             };
         }
-        Err(error) => return untrusted(path, error.to_string(), None, None).retry(),
+        Err(error) => return untrusted(error.to_string(), Fallback::default()).retry(),
     };
     let mut doc = match parse_lenient(&raw) {
         Ok(Value::Object(doc)) => doc,
-        Ok(_) => return untrusted(path, "the settings are not an object".into(), None, None),
-        Err(error) => return untrusted(path, error, None, None),
+        Ok(_) => return untrusted("the settings are not an object".into(), Fallback::default()),
+        Err(error) => return untrusted(error, Fallback::default()),
     };
     // `LegacyProviderSettingsJson`: decoded apart, so a readable opt-out holds even when an
     // unrelated field does not decode.
@@ -77,15 +83,32 @@ pub(super) fn decode(path: &Path) -> Decoded {
                 }
             }
             // T3's load fails on `read-provider-history`; the file stays for the next load.
-            // The instance map decoded, so its explicit choices hold meanwhile.
+            // The instance map and project overrides decoded, so their explicit choices hold
+            // meanwhile; the history is not read again.
             Err(error) => {
-                let instances = doc.get("providerInstances").cloned();
                 let failure = format!("read-provider-history: {error}");
-                untrusted(path, failure, Some(providers), instances).retry()
+                let fallback = Fallback {
+                    legacy: Some((providers, Vec::new())),
+                    instances: doc.get("providerInstances").cloned(),
+                    projects: doc.get("projectSettingsOverrides").cloned(),
+                };
+                untrusted(failure, fallback).retry()
             }
         },
-        (Err(error), legacy) => untrusted(path, error, legacy.ok().flatten(), None),
-        (Ok(()), Err(error)) => untrusted(path, error, None, None),
+        (Err(error), legacy) => {
+            let legacy = legacy
+                .ok()
+                .flatten()
+                .map(|providers| (providers, provider_history(path).unwrap_or_default()));
+            untrusted(
+                error,
+                Fallback {
+                    legacy,
+                    ..Fallback::default()
+                },
+            )
+        }
+        (Ok(()), Err(error)) => untrusted(error, Fallback::default()),
     }
 }
 
@@ -96,24 +119,33 @@ impl Decoded {
     }
 }
 
-/// T3's fallback for a file it cannot trust: the defaults, with restart continuation off and
-/// usage history kept, a provider instance map that decoded, and a legacy provider map it
-/// could still read.
-fn untrusted(
-    path: &Path,
-    failure: String,
-    legacy: Option<Map<String, Value>>,
+/// `(providerName, providerInstanceId)` rows of T3's provider history.
+type History = Vec<(String, Option<String>)>;
+
+/// What still holds when a file cannot be trusted: a legacy provider map T3 could read (with
+/// the provider history that read), and, when only the history failed, the provider instance
+/// map and project overrides that decoded.
+#[derive(Default)]
+struct Fallback {
+    legacy: Option<(Map<String, Value>, History)>,
     instances: Option<Value>,
-) -> Decoded {
+    projects: Option<Value>,
+}
+
+/// T3's fallback for a file it cannot trust: the defaults, with restart continuation off and
+/// usage history kept, and what [`Fallback`] carries.
+fn untrusted(failure: String, fallback: Fallback) -> Decoded {
     let mut doc = Map::new();
     // The file may hold an opt-out this server cannot read; never resume threads on a guess.
     doc.insert("continueThreadsAfterServerUpdate".into(), json!(false));
     doc.insert("usageHistoryRetentionDays".into(), json!("unlimited"));
-    if let Some(instances) = instances {
+    if let Some(instances) = fallback.instances {
         doc.insert("providerInstances".into(), instances);
     }
-    if let Some(providers) = legacy {
-        let history = provider_history(path).unwrap_or_default();
+    if let Some(projects) = fallback.projects {
+        doc.insert("projectSettingsOverrides".into(), projects);
+    }
+    if let Some((providers, history)) = fallback.legacy {
         migrate_legacy_providers(&mut doc, providers, &history);
     }
     Decoded {
@@ -262,6 +294,10 @@ fn normalize_persisted(doc: &mut Map<String, Value>) {
         }
     }
     retire_token(doc);
+    // `hiddenThreadTags`: entries that are not text drop alone.
+    if let Some(Value::Array(tags)) = doc.get_mut("hiddenThreadTags") {
+        tags.retain(Value::is_string);
+    }
     if let Some(Value::Object(projects)) = doc.get_mut("projectSettingsOverrides") {
         for overrides in projects.values_mut() {
             if let Value::Object(overrides) = overrides {
@@ -354,12 +390,19 @@ pub(super) fn check_refinements(settings: &Map<String, Value>) -> Result<(), Str
 /// `(providerName, providerInstanceId)` of the cursor, grok and opencode sessions T3 recorded
 /// in `statev2.sqlite` beside the settings file, read-only. Empty only when there is no such
 /// file; an error when anything there cannot be read.
-fn provider_history(settings_path: &Path) -> Result<Vec<(String, Option<String>)>, String> {
+fn provider_history(settings_path: &Path) -> Result<History, String> {
+    #[cfg(test)]
+    HISTORY_READS.with(|reads| reads.set(reads.get() + 1));
     let Some(db) = settings_path.parent().map(|dir| dir.join(T3_STATE_FILE)) else {
         return Ok(Vec::new());
     };
-    match fs::metadata(&db) {
+    // Only nothing at that path means no history: a link to a missing file is an error.
+    match fs::symlink_metadata(&db) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", db.display())),
+        Ok(_) => {}
+    }
+    match fs::metadata(&db) {
         Err(error) => return Err(format!("{}: {error}", db.display())),
         Ok(meta) if !meta.is_file() => return Err(format!("{}: not a file", db.display())),
         Ok(_) => {}
@@ -476,6 +519,24 @@ mod tests {
             json!({"url": "http://x//y", "list": [1, 2], "text": "a,}"})
         );
         assert!(parse_lenient("{\"a\": 1 /* open").is_err());
+    }
+
+    /// The cases `gen-upstream.mjs` decoded with T3's own `ServerSettings` decoder: the load
+    /// takes exactly those T3 takes.
+    #[test]
+    fn the_load_agrees_with_t3_on_persisted_nulls() {
+        for (text, t3_accepts) in super::super::generated::NULL_RULE_CASES {
+            let Value::Object(mut doc) = serde_json::from_str(text).unwrap() else {
+                panic!("{text}")
+            };
+            normalize_persisted(&mut doc);
+            assert_eq!(
+                check(&doc).is_ok(),
+                *t3_accepts,
+                "{text}: {:?}",
+                check(&doc)
+            );
+        }
     }
 
     #[test]

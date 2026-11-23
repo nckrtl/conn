@@ -434,6 +434,15 @@ final class ConnSpikeUITests: XCTestCase {
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", title, title)).firstMatch
         }
+        // React Native fields take focus a beat after the tap; type only once the keyboard is up.
+        func focusAndType(_ field: XCUIElement, _ text: String) {
+            for _ in 0..<4 {
+                field.tap()
+                settle(1)
+                if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { break }
+            }
+            field.typeText(text)
+        }
         func back(_ app: XCUIApplication) {
             if !tap(app, ["Back", "thread.backButton"]) {
                 let nav = app.navigationBars.buttons.element(boundBy: 0)
@@ -456,12 +465,10 @@ final class ConnSpikeUITests: XCTestCase {
             let address = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
             XCTAssertTrue(address.waitForExistence(timeout: 10), "the pairing form should open")
-            address.tap()
-            address.typeText(parts[0])
+            focusAndType(address, parts[0])
             let code = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
-            code.tap()
-            code.typeText(parts.count > 1 ? parts[1] : "")
+            focusAndType(code, parts.count > 1 ? parts[1] : "")
             let submit = app.navigationBars.buttons["Add environment"].firstMatch
             if submit.waitForExistence(timeout: 5) { submit.tap() } else { code.typeText("\n") }
             settle(4)

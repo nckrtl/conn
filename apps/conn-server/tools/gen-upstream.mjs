@@ -300,6 +300,7 @@ const nullRuleCases = (() => {
     { providerInstances: { claudeAgent: { driver: "claudeAgent", enabled: null } } },
     { hiddenThreadTags: [null, "keep"] },
     { worktreeCleanup: null },
+    { worktreeCleanup: { mode: "off", rules: null } },
     { worktreeCleanup: { mode: "custom", rules } },
     { worktreeCleanup: { mode: "custom", rules: { ...rules, worktreeKeepWhen: null } } },
     { responseStreamingMode: null },

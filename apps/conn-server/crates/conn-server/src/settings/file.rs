@@ -326,7 +326,7 @@ fn null_rules() -> &'static Value {
 
 /// Refuses an explicit `null` where T3's persisted schema takes none, at any depth
 /// ([`NULL_RULES`]); serde would read it as absent. A key the schema does not know is
-/// ignored, as T3 ignores excess keys.
+/// ignored, as T3 ignores excess keys, and so is a field of another branch of a tagged union.
 fn check_nulls(value: &Value, rule: &Value, path: &str) -> Result<(), String> {
     let visit = |value: &Value, rule: &Value, at: String| -> Result<(), String> {
         if value.is_null() {
@@ -340,6 +340,13 @@ fn check_nulls(value: &Value, rule: &Value, path: &str) -> Result<(), String> {
     };
     match value {
         Value::Object(fields) => {
+            // A tagged union: only the branch the tag names counts.
+            let rule = rule
+                .get("d")
+                .and_then(Value::as_str)
+                .and_then(|tag| fields.get(tag)?.as_str())
+                .and_then(|tag| rule.get("b")?.get(tag))
+                .unwrap_or(rule);
             for (key, field) in fields {
                 let known = rule
                     .get("f")

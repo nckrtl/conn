@@ -87,7 +87,9 @@ export function schemaRule(ast, purpose) {
 // Where a persisted value may be `null`, by T3's encoded input schema (what settings.json may
 // hold): `{n: 1}` when that node takes `null`, `f` for an object's known fields, `v` for a
 // record's values, `i` for array items. A known field is always listed, so an absent one is an
-// excess key T3 ignores. Nested unions are flattened, so every branch's fields count.
+// excess key T3 ignores. Nested unions are flattened, so every branch's fields count, unless
+// every object branch has a literal field of the same name: then `d` names that field and `b`
+// holds each branch's own rule by its literal, as T3 takes only the matching branch's fields.
 const SchemaAST = await pkg("effect/SchemaAST");
 export const nullRule = (ast) => encodedNullRule(SchemaAST.toEncoded(ast), 0);
 function encodedNullRule(ast, depth) {
@@ -111,6 +113,17 @@ function encodedNullRule(ast, depth) {
       if (index) rule.v = encodedNullRule(index.type, depth + 1);
     }
     if (shape._tag === "Arrays" && shape.rest.length === 1) rule.i = encodedNullRule(shape.rest[0], depth + 1);
+  }
+  const objects = branches(ast).filter((shape) => shape._tag === "Objects");
+  const literal = (shape, name) => {
+    const field = shape.propertySignatures.find((p) => p.name === name)?.type;
+    return field?._tag === "Literal" && typeof field.literal === "string" ? field.literal : undefined;
+  };
+  const tag = objects.length > 1 &&
+    objects[0].propertySignatures.map((p) => p.name).find((name) => objects.every((shape) => literal(shape, name) !== undefined));
+  if (tag) {
+    rule.d = tag;
+    rule.b = Object.fromEntries(objects.map((shape) => [literal(shape, tag), encodedNullRule(shape, depth + 1)]));
   }
   return rule;
 }

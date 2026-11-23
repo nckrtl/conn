@@ -512,6 +512,9 @@ pub async fn serve_with_instances(
             eprintln!("conn-server: {signal}, stopping");
             // Mark shutdown before draining: provider exits must leave runs for restart recovery.
             engine.begin_shutdown();
+            if let Some(mcp) = &mcp {
+                mcp.begin_stopping_remote_tasks();
+            }
             let _ = stop_tx.send(true);
             // Open WebSockets keep the graceful stop waiting; give them a moment, no more.
             let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
@@ -524,9 +527,10 @@ pub async fn serve_with_instances(
     // started outlives the server.
     terminals.shutdown().await;
     // Remote task followers stop before the engine closes, so none settles a task or wakes a
-    // parent during shutdown; bounded, as a follower stops at its next await.
+    // parent during shutdown. Unbounded: a follower stops at its next await, and a write the
+    // engine already took must commit before the engine closes.
     if let Some(mcp) = &mcp {
-        let _ = tokio::time::timeout(Duration::from_secs(5), mcp.stop_remote_tasks()).await;
+        mcp.stop_remote_tasks().await;
     }
     engine.shutdown().await;
     preview.shutdown().await;

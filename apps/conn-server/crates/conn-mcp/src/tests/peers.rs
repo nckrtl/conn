@@ -692,7 +692,7 @@ async fn shutdown_stops_a_follower_in_its_back_off() {
 }
 
 /// A completion already handed to the engine when the server stops is not dropped half way:
-/// the stop waits until it committed, so what is stored once the stop returns stays so.
+/// the stop waits until it committed, so the task keeps its one result and its parent's wake.
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_drains_a_completion_already_submitted() {
     let peer = Arc::new(StandIn {
@@ -711,38 +711,21 @@ async fn shutdown_drains_a_completion_already_submitted() {
     let parent = launch_as_swamp(&mut client, "Parent", "hang", "full-access", "default").await;
     until_provider_turn(&f, &parent).await;
     let task = remote_task(&f, &parent, "first").await;
-    // Recording the result takes a while inside the engine's transaction.
-    let db = rusqlite::Connection::open(f.dir.join("engine.sqlite")).unwrap();
-    db.execute_batch(
-        "CREATE TABLE slow (x INTEGER);
-         WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 200)
-         INSERT INTO slow SELECT x FROM n;
-         CREATE TRIGGER slow_result BEFORE INSERT ON events
-           WHEN NEW.type = 'subagent.updated'
-           BEGIN SELECT count(*) FROM slow a, slow b, slow c WHERE a.x + b.x + c.x < 0; END;",
-    )
-    .unwrap();
+    let hold = Arc::new(crate::remote_tasks::WriteHold::default());
+    *crate::lock(&f.service.remote.hold) = Some(hold.clone());
     f.service.follow_remote_task(&parent, &task);
     peer.waiting.notified().await;
     peer.release.notify_one();
-    // The follower hands its failure to the engine, which is now committing it.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    f.service.stop_remote_tasks().await;
-    let when_stopped = stored_task(&f, &parent, &task);
-    // Every write the engine had taken is done once a read gets through.
-    let engine = &f.service.config.engine;
-    engine
-        .get_thread_projection(parent.as_str().into())
-        .await
-        .unwrap();
-    let settled = stored_task(&f, &parent, &task);
-    assert_eq!(
-        (when_stopped.1, when_stopped.2),
-        (settled.1, settled.2),
-        "nothing committed after the stop returned"
-    );
-    assert!(
-        matches!((settled.1, settled.2), (0, 0) | (1, 1)),
-        "{settled:?}"
-    );
+    // The follower has handed its completion over; the engine has not taken it yet.
+    hold.entered.notified().await;
+    let mut stop = std::pin::pin!(f.service.stop_remote_tasks());
+    let pending =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(stop.as_mut().poll(cx).is_pending()))
+            .await;
+    assert!(pending, "the stop waits for the write it was handed");
+    hold.release.notify_one();
+    stop.await;
+    let (row, results, wakes) = stored_task(&f, &parent, &task);
+    assert!(!row["result"].is_null(), "{row}");
+    assert_eq!((results, wakes), (1, 1));
 }

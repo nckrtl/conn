@@ -62,6 +62,18 @@ pub(crate) struct Followers {
     writes: std::sync::atomic::AtomicUsize,
     /// Signalled as each follower or write ends.
     ended: tokio::sync::Notify,
+    /// Holds the next write after it is handed over, until the test releases it.
+    #[cfg(test)]
+    pub(crate) hold: std::sync::Mutex<Option<Arc<WriteHold>>>,
+}
+
+/// A test's barrier on one handed-over write: `entered` once it is counted, then it waits for
+/// `release` before the engine takes it.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct WriteHold {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
 }
 
 impl Default for Followers {
@@ -72,6 +84,8 @@ impl Default for Followers {
             stop: tokio::sync::watch::Sender::new(false),
             writes: std::sync::atomic::AtomicUsize::new(0),
             ended: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            hold: std::sync::Mutex::default(),
         }
     }
 }
@@ -158,11 +172,7 @@ impl McpService {
     /// A write a follower already handed to the engine is not cut off: it may be committing,
     /// so the stop waits until it is done, and later ones are refused.
     pub async fn stop_remote_tasks(&self) {
-        {
-            // Under the lock [`Self::submit`] checks the stop with, so no write slips past.
-            let _running = crate::lock(&self.remote.running);
-            self.remote.stop.send_replace(true);
-        }
+        self.begin_stopping_remote_tasks();
         loop {
             let ended = self.remote.ended.notified();
             let mut ended = std::pin::pin!(ended);
@@ -174,6 +184,14 @@ impl McpService {
             }
             ended.await;
         }
+    }
+
+    /// Signals the stop that [`Self::stop_remote_tasks`] waits out: no follower starts and no
+    /// new write is taken from here on.
+    pub fn begin_stopping_remote_tasks(&self) {
+        // Under the lock [`Self::submit`] checks the stop with, so no write slips past.
+        let _running = crate::lock(&self.remote.running);
+        self.remote.stop.send_replace(true);
     }
 
     /// Hands one remote task command to the engine as its own task, so a follower stopped
@@ -189,7 +207,14 @@ impl McpService {
         }
         let engine = self.config.engine.clone();
         let followers = self.remote.clone();
+        #[cfg(test)]
+        let hold = crate::lock(&self.remote.hold).take();
         tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(hold) = hold {
+                hold.entered.notify_one();
+                hold.release.notified().await;
+            }
             let done = engine.remote_task(command).await;
             followers.writes.fetch_sub(1, Ordering::SeqCst);
             followers.ended.notify_waiters();

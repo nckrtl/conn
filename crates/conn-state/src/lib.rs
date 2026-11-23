@@ -20,6 +20,7 @@ pub mod provider_auth;
 pub mod provider_settings;
 pub mod providers;
 mod question;
+pub mod secret_providers;
 mod scheduled;
 mod shell;
 mod sidebar;

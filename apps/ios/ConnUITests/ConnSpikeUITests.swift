@@ -467,6 +467,8 @@ final class ConnSpikeUITests: XCTestCase {
         let content = row(app, "Plan a greeting in main.rs")
         XCTAssertTrue(content.waitForExistence(timeout: 30), "The inbox should list the seeded threads")
         settle(2)
+        // Pairs the showcase simulator and leaves the app on the inbox.
+        if env["CONN_PAIR_ONLY"] == "1" { return }
         capture("inbox")
 
         content.tap()

@@ -1227,9 +1227,15 @@ async fn review_api(host: Arc<ReviewHost>) -> (String, tokio::task::JoinHandle<(
         .route("/user", get(|| async { Json(json!({"id":12,"login":"reader"})) }))
         .route(
             "/repos/a/b/pulls/{number}",
-            get(move |Path(number): Path<u32>| {
+            get(move |Path(number): Path<u32>, headers: axum::http::HeaderMap| {
                 let host = diffs.clone();
                 async move {
+                    let accept = headers.get("accept").and_then(|v| v.to_str().ok());
+                    if accept != Some("application/vnd.github.diff") {
+                        let head = revision_head(host.revision.load(Ordering::SeqCst));
+                        return json!({"base":{"sha":"0".repeat(40)},"head":{"sha":head}})
+                            .to_string();
+                    }
                     if number != 7 {
                         host.other_diff_reads.fetch_add(1, Ordering::SeqCst);
                         return revision_patch(80);
@@ -1248,6 +1254,16 @@ async fn review_api(host: Arc<ReviewHost>) -> (String, tokio::task::JoinHandle<(
                 async {
                     Json(json!({"files":[{"filename":"a.ts","status":"modified","patch":"@@ -1 +1 @@\n-base\n+pinned\n"}]}))
                 }
+            }),
+        )
+        .route(
+            "/repos/a/b/pulls/{number}/files",
+            get(|| async { Json(json!([{"filename":"a.ts","status":"modified"}])) }),
+        )
+        .route(
+            "/repos/a/b/contents/{*path}",
+            get(|axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
+                format!("contents at {}", query.unwrap_or_default())
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1348,6 +1364,45 @@ async fn an_unpinned_diff_follows_the_newest_observed_revision() {
         (after, host.diff_reads.load(Ordering::SeqCst)),
         (revision_patch(2), 3),
         "a fresh summary moves the diff on too"
+    );
+    task.abort();
+}
+
+/// Expanding a hunk reads the head the PR shows now: T3 never caches `diffFileContents`
+/// (`readDiffFileContents`), so a push cannot pair B's patch with A's contents.
+#[tokio::test]
+async fn unpinned_diff_file_contents_follow_a_push() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut file = reference();
+    file["changeType"] = json!("modified");
+    file["oldPath"] = json!("a.ts");
+    file["newPath"] = json!("a.ts");
+
+    let at_a = panel
+        .call("diffFileContents", file.clone())
+        .await
+        .expect("contents A");
+    assert_eq!(
+        at_a["newContents"],
+        format!("contents at ref={}", revision_head(0))
+    );
+
+    host.revision.store(1, Ordering::SeqCst);
+    let mut strict = reference();
+    strict["allowStale"] = json!(false);
+    let detail = panel.call("detail", strict).await.expect("detail B");
+    assert_eq!(detail["headSha"], revision_head(1));
+    let at_b = panel
+        .call("diffFileContents", file)
+        .await
+        .expect("contents B");
+    assert_eq!(
+        at_b["newContents"],
+        format!("contents at ref={}", revision_head(1)),
+        "expansion reads the head the PR detail reports"
     );
     task.abort();
 }

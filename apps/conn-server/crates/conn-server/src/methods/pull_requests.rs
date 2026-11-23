@@ -1163,6 +1163,12 @@ impl Panel {
                 .read_diff(input, pull_request, &project, &client, &lookup)
                 .await;
         }
+        // T3 reads unpinned contents uncached, so expansion matches the head the diff shows.
+        if method == "diffFileContents" && input.get("commit").is_none_or(Value::is_null) {
+            return self
+                .load_read(method, input, &project, &client, &lookup)
+                .await;
+        }
         let key = ReadKey {
             method: method.into(),
             input: input.to_string(),

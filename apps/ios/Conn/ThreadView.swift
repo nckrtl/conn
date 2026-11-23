@@ -196,6 +196,11 @@ struct ThreadView: View {
     }
 
     /// With a question open, text answers it and an empty composer runs the answer action.
+    private var overlayHasCards: Bool {
+        snapshot?.pendingApprovals.first != nil || questionPanelModel != nil
+            || (snapshot?.queuedCount ?? 0) > 0
+    }
+
     private var composerCanSend: Bool {
         guard let question = pendingQuestion, let panel = questionPanelModel else {
             return hasDraft && !store.isSending
@@ -269,9 +274,10 @@ struct ThreadView: View {
                         .frame(height: 1)
                         .id("timeline-bottom")
                 }
-                .padding(.horizontal, Kit.contentInset)
-                .padding(.top, Kit.Space.m)
-                .padding(.bottom, Kit.Space.l)
+                // `ThreadFeed`: full width, `paddingTop: 12`, 16 at the sides; the end inset is 12.
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 12)
             }
             .background(theme.background.ignoresSafeArea())
             .scrollDismissesKeyboard(.interactively)
@@ -288,8 +294,12 @@ struct ThreadView: View {
                     }
                 }
             }
-            .kitComposerBar {
-                VStack(alignment: .leading, spacing: Kit.Space.xs) {
+            // Mobile's thread overlay (`ThreadDetailScreen.tsx` 1640-1660, 1805-1862): the cards and the
+            // composer float over the full-width feed. `safeAreaBar` insets the feed and gives the
+            // bottom scroll-edge blur its height (mobile's `EdgeBlur` behind the composer).
+            .safeAreaBar(edge: .bottom, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                  VStack(alignment: .leading, spacing: 10.5) {
                     // Conn mobile pins the first pending approval above the composer.
                     if let approval = snapshot?.pendingApprovals.first {
                         HeightCappedScroll(maxHeight: approvalMaxHeight) {
@@ -301,7 +311,6 @@ struct ThreadView: View {
                             }
                         }
                         .id(approval.requestId)
-                        .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
                     if let question = pendingQuestion, let panel = questionPanelModel {
@@ -322,19 +331,21 @@ struct ThreadView: View {
                             onDismiss: { dismissQuestion(question) }
                         )
                         .id(question.requestId)
-                        .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
                     if let queued = snapshot?.queuedCount, queued > 0 {
                         KitBadge("\(queued) queued")
                             .accessibilityIdentifier("thread.queuedBadge")
                     }
+                  }
+                  // Cards: `px-[14px] pb-[7px] gap-2.5` (2pt more than the composer's 12).
+                  .padding(.horizontal, 2)
+                  .padding(.bottom, overlayHasCards ? 7 : 0)
 
-                    KitComposer(
-                        questionPanelModel?.composerPlaceholder
+                    ConnComposerPill(
+                        placeholder: questionPanelModel?.composerPlaceholder
                             ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
                         text: $draft,
-                        maxLines: 6,
                         isBusy: isWorking && !hasDraft && questionPanelModel == nil,
                         canSend: composerCanSend,
                         onSend: {
@@ -353,18 +364,7 @@ struct ThreadView: View {
                                 await store.stopThread(threadId: threadId)
                             }
                         },
-                        leading: {
-                            Menu {
-                                Button("Attachments (coming soon)") {}
-                                    .disabled(true)
-                            } label: {
-                                ConnIcon("plus")
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundStyle(theme.mutedForeground)
-                                    .frame(width: 28, height: 28)
-                            }
-                            .accessibilityLabel("More composer actions")
-                        },
+                        leading: { ConnComposerAttachButton() },
                         trailing: {
                             HStack(spacing: 4) {
                                 if isWorking && (hasDraft || questionPanelModel != nil) {
@@ -380,23 +380,26 @@ struct ThreadView: View {
                                     .buttonStyle(.plain)
                                     .accessibilityLabel("Stop")
                                 }
-                                HStack(spacing: 3) {
-                                    Image(systemName: "sparkle")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
-                                    Image(systemName: "chevron.down")
-                                        .font(.system(size: 9, weight: .semibold))
-                                        .foregroundStyle(theme.mutedForeground)
-                                }
-                                .padding(.trailing, 4)
+                                ConnComposerModelChip()
                             }
                         }
                     )
                     .accessibilityIdentifier("thread.composer")
+                    .padding(.top, 6)
                 }
+                // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
+                .padding(.horizontal, 12)
+                .padding(.bottom, 2)
             }
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
         }
+        // Mobile's `GLASS_HEADER_OPTIONS`: the native transparent bar, centered title and
+        // subtitle, and a minimal back button (`toolbarRole(.editor)` drops the back title).
+        .navigationTitle(displayTitle)
+        .navigationSubtitle(displaySubtitle ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarRole(.editor)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewHeight = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)
@@ -406,21 +409,6 @@ struct ThreadView: View {
             questionSteps = questionSteps.filter { $0.key == current }
         }
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text(displayTitle)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(theme.foreground)
-                        .lineLimit(1)
-                    if let subtitle = displaySubtitle {
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.mutedForeground)
-                            .lineLimit(1)
-                    }
-                }
-            }
-
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {

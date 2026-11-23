@@ -1,5 +1,6 @@
 import DesignKit
 import SwiftUI
+import UIKit
 
 /// 1:1 port of `NewTaskDraftScreen.tsx` + `DraftThreadHeader.tsx` + `DraftEnvironmentControl.tsx`.
 /// Opened directly when tapping "+" in `WorkspacePhoneBar`.
@@ -36,6 +37,10 @@ struct NewThreadDraftView: View {
     /// Mobile's `text-2xl font-t3-medium tracking-tight`: 26pt, weight 500, -0.025em.
     private static let heroFont = Font.system(size: 26, weight: .medium)
     private static let heroTracking: CGFloat = -0.65
+    /// One space in the hero font, including its tracking.
+    private static let heroSpaceWidth: CGFloat =
+        (" " as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 26, weight: .medium)]).width
+        + heroTracking
 
     private var canLaunch: Bool {
         !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isLaunching
@@ -55,10 +60,12 @@ struct NewThreadDraftView: View {
                         .tracking(Self.heroTracking)
                         .foregroundStyle(theme.foreground)
                     HStack(spacing: 0) {
-                        Text("in ")
+                        // SwiftUI drops a trailing space in `Text`, so the space after "in" is padding.
+                        Text("in")
                             .font(Self.heroFont)
                             .tracking(Self.heroTracking)
                             .foregroundStyle(theme.foreground)
+                            .padding(.trailing, Self.heroSpaceWidth)
                         Button {
                             showingProjectPicker = true
                         } label: {

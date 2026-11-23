@@ -64,6 +64,16 @@ struct MarkdownView: View {
                     .strokeBorder(theme.border, lineWidth: 0.5)
             )
 
+        case let .blockquote(inner):
+            // Mobile's enriched-markdown blockquote: a 2pt bar in the border colour, 12pt from the text.
+            HStack(alignment: .top, spacing: 12) {
+                Rectangle()
+                    .fill(theme.border)
+                    .frame(width: 2)
+                MarkdownView(source: inner, muted: muted)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+
         case let .listItem(marker, text):
             HStack(alignment: .firstTextBaseline, spacing: Kit.Space.s) {
                 Text(marker)
@@ -119,6 +129,7 @@ private enum MarkdownBlock {
     case paragraph(String)
     case codeBlock(language: String?, code: String)
     case listItem(marker: String, text: String)
+    case blockquote(String)
 }
 
 private func parseBlocks(_ source: String) -> [MarkdownBlock] {
@@ -162,6 +173,24 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
             continue
         }
 
+        if stripQuoteMarker(line) != nil {
+            flushParagraph()
+            var quoted: [String] = []
+            while index < lines.count {
+                let next = lines[index]
+                if let inner = stripQuoteMarker(next) {
+                    quoted.append(inner)
+                } else if isLazyContinuation(next, after: quoted.last) {
+                    quoted.append(next)
+                } else {
+                    break
+                }
+                index += 1
+            }
+            blocks.append(.blockquote(quoted.joined(separator: "\n")))
+            continue
+        }
+
         if let (level, headingText) = parseHeading(trimmed) {
             flushParagraph()
             blocks.append(.heading(level: level, text: headingText))
@@ -182,6 +211,28 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
 
     flushParagraph()
     return blocks
+}
+
+/// A `>` line's content: up to three spaces of indent, `>`, and one optional space.
+private func stripQuoteMarker(_ line: String) -> String? {
+    let indent = line.prefix { $0 == " " }.count
+    guard indent <= 3 else { return nil }
+    var rest = line.dropFirst(indent)
+    guard rest.first == ">" else { return nil }
+    rest = rest.dropFirst()
+    if rest.first == " " || rest.first == "\t" { rest = rest.dropFirst() }
+    return String(rest)
+}
+
+/// CommonMark's lazy continuation: a plain line right after quoted paragraph text stays in the quote.
+private func isLazyContinuation(_ line: String, after previous: String?) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    guard let previous, !previous.trimmingCharacters(in: .whitespaces).isEmpty, !trimmed.isEmpty else {
+        return false
+    }
+    let previousTrimmed = previous.trimmingCharacters(in: .whitespaces)
+    if previousTrimmed.hasPrefix("```") || parseHeading(previousTrimmed) != nil { return false }
+    return !trimmed.hasPrefix("```") && parseHeading(trimmed) == nil && parseListItem(trimmed) == nil
 }
 
 private func parseHeading(_ line: String) -> (Int, String)? {

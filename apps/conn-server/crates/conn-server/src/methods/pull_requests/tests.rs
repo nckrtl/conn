@@ -1351,6 +1351,96 @@ async fn an_unpinned_diff_follows_the_newest_observed_revision() {
     task.abort();
 }
 
+/// Pass 11.1: the guide's detail read records the head it saw, as T3 routes it through the
+/// PR detail service, so the next diff never serves an older head than the guide showed.
+#[tokio::test]
+async fn the_guides_detail_read_moves_the_http_diff_on() {
+    use conn_source_control::http::{self, HttpRequest, Method};
+    let host = Arc::new(ReviewHost::default());
+    let (base, api_task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let engine = shell(&dir.0);
+    let deps = Deps {
+        engine: Some(engine.clone()),
+        ..Deps::default()
+    };
+    assert!(
+        deps.pull_requests.0.set(panel(engine, &dir, &base)).is_ok(),
+        "inject shared service"
+    );
+    let mut table = MethodTable::new();
+    register(&mut table, &deps);
+    let table = Arc::new(table);
+    let auth = crate::auth::AuthStore::in_memory();
+    let session = auth
+        .issue_session(crate::auth::SessionRequest {
+            scopes: vec!["orchestration:read".into()],
+            label: None,
+            subject: None,
+            ttl_ms: crate::auth::SESSION_TTL_MS,
+        })
+        .expect("session");
+    let state = crate::AppState {
+        table: table.clone(),
+        auth,
+        descriptor: crate::environment::fixed_descriptor(json!({})),
+        engine: deps.engine.clone(),
+        deps,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind server");
+    let url = format!(
+        "http://{}/api/pull-requests/diff",
+        listener.local_addr().expect("addr")
+    );
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, crate::http::router(state))
+            .await
+            .expect("server");
+    });
+    let http_patch = || async {
+        let response = http::send(
+            HttpRequest::new(Method::Post, url.clone())
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", session.token))
+                .body(reference().to_string().into_bytes()),
+        )
+        .await
+        .expect("HTTP diff");
+        assert_eq!(response.status, 200, "{}", response.text());
+        text(
+            &serde_json::from_slice::<Value>(&response.body).expect("JSON"),
+            "patch",
+        )
+        .to_owned()
+    };
+
+    let summary = call(&table, "pullRequests.summary", reference())
+        .await
+        .expect("summary A");
+    assert_eq!(summary["updatedAt"], "2026-11-20T15:00:00Z");
+    assert_eq!(http_patch().await, revision_patch(0));
+
+    host.revision.store(1, Ordering::SeqCst);
+    let guide = call(&table, "pullRequests.reviewGuide", reference())
+        .await
+        .expect("guide");
+    assert_eq!(guide["currentHeadSha"], revision_head(1));
+    let after = http_patch().await;
+    println!(
+        "pass11.1 after guide B: patch {after:?}, host diff reads {}",
+        host.diff_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        (after, host.diff_reads.load(Ordering::SeqCst)),
+        (revision_patch(1), 2),
+        "the guide showed head B, so the diff is B's"
+    );
+    server_task.abort();
+    api_task.abort();
+}
+
 /// Pass 11.2: T3 bumps the viewed-files epoch when a write ends, on failure too, so a
 /// partly applied batch shows what the host accepted. Other reads stay cached.
 #[tokio::test]

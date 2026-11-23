@@ -938,10 +938,7 @@ impl Panel {
         } else {
             Value::Null
         };
-        let detail = client
-            .detail(&lookup)
-            .await
-            .map_err(|error| host_error(&error, "detail"))?;
+        let detail = self.fresh_detail(&project, &client, &lookup).await?;
         Ok(json!({"guide":guide,"run":run,"currentHeadSha":detail.get("headSha")}))
     }
     async fn report_state(&self, input: &Value) -> Result<Value, Failure> {
@@ -1093,6 +1090,21 @@ impl Panel {
                     && key.number == forgotten.number
             });
         }
+    }
+    /// An uncached host detail read that still records the revision it saw, so no later
+    /// diff serves an older head than this read showed.
+    async fn fresh_detail(
+        &self,
+        project: &Project,
+        client: &Client,
+        lookup: &Lookup,
+    ) -> Result<Value, Failure> {
+        let detail = client
+            .detail(lookup)
+            .await
+            .map_err(|error| host_error(&error, "detail"))?;
+        self.observe_revision(self.pull_request_key(client, project, lookup), &detail);
+        Ok(detail)
     }
     fn newest_revision(&self, pull_request: &ReadKey) -> Option<String> {
         self.revisions

@@ -1484,6 +1484,21 @@ pub(crate) fn mark_stop_unresponsive(
     Ok(())
 }
 
+/// The id of a run's provider stop reason notice (T3's `runSignalTurnItem`).
+pub fn provider_stop_reason_id(run_id: &str) -> String {
+    join_id(
+        "turn-item",
+        &["run", run_id, "signal", "provider-stop-reason"],
+    )
+}
+
+/// `subagentResultForRun`'s result for a completed child with no answer, with the hook's
+/// reason when a hook stopped it.
+pub fn completed_without_result(stop_reason: Option<&str>) -> String {
+    let text = "Child task completed without an assistant result.";
+    stop_reason.map_or_else(|| text.to_owned(), |reason| format!("{text}\n\n{reason}"))
+}
+
 /// `PROVIDER_STOP_REASON_SIGNAL`: Codex reports a turn a hook stopped as completed; the run
 /// keeps the hook's reason as a warning (`RunExecutionService`). Its id is T3's
 /// `runSignalTurnItem`, which `subagentProjection.ts` looks up.
@@ -1505,7 +1520,7 @@ pub(crate) fn write_provider_stop_reason(
         .unwrap_or(Value::Null);
     let now = tx.now().to_owned();
     let item = json!({
-        "id": join_id("turn-item", &["run", run_id, "signal", "provider-stop-reason"]),
+        "id": provider_stop_reason_id(run_id),
         "threadId": thread_id,
         "runId": run_id,
         "nodeId": root,

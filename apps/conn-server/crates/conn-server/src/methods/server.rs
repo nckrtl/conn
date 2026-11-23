@@ -1440,4 +1440,262 @@ done
         assert_eq!(crashes.probes.load(Relaxed), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    /// A provider that scans workspaces: each scan records its folder and lists one skill
+    /// named by the scan's number. The first scan waits for `release` when `gate_first`.
+    struct Scans {
+        id: conn_contract::ProviderInstanceId,
+        scanned: std::sync::Mutex<Vec<String>>,
+        gate_first: bool,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl Scans {
+        fn new(gate_first: bool) -> Arc<Self> {
+            Arc::new(Self {
+                id: "scans".into(),
+                scanned: std::sync::Mutex::new(Vec::new()),
+                gate_first,
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Semaphore::new(0),
+            })
+        }
+    }
+
+    impl conn_provider::Provider for Scans {
+        fn instance_id(&self) -> &conn_contract::ProviderInstanceId {
+            &self.id
+        }
+        fn driver(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(
+            &self,
+        ) -> conn_provider::BoxFuture<
+            '_,
+            conn_provider::ProviderResult<conn_contract::ProviderCapabilities>,
+        > {
+            Box::pin(async {
+                Err(conn_provider::ProviderError::Unsupported {
+                    operation: "capabilities",
+                })
+            })
+        }
+        fn open_session(
+            &self,
+            _input: conn_provider::OpenSessionInput,
+        ) -> conn_provider::BoxFuture<'_, conn_provider::ProviderResult<conn_provider::OpenedSession>>
+        {
+            Box::pin(async {
+                Err(conn_provider::ProviderError::Unsupported {
+                    operation: "open_session",
+                })
+            })
+        }
+        fn server_provider_entry(&self, _checked_at: &str) -> Option<Value> {
+            Some(json!({"instanceId": "scans", "driver": "codex", "enabled": true,
+                "installed": true, "status": "ready", "skills": [], "slashCommands": []}))
+        }
+        fn snapshot_for_cwd(
+            &self,
+            cwd: &str,
+        ) -> Option<conn_provider::BoxFuture<'_, conn_provider::ProviderResult<Value>>> {
+            let number = {
+                let mut scanned = self.scanned.lock().unwrap();
+                scanned.push(cwd.to_owned());
+                scanned.len()
+            };
+            Some(Box::pin(async move {
+                if number == 1 && self.gate_first {
+                    self.started.notify_one();
+                    let _ = self.release.acquire().await;
+                }
+                Ok(json!({"skills": [{"name": format!("scan-{number}")}], "slashCommands": []}))
+            }))
+        }
+    }
+
+    fn workspace_skills(deps: &Deps, cwd: &str) -> Vec<Value> {
+        current_providers(deps)[0]["workspaceSnapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["cwd"] == cwd)
+            .map(|s| s["skills"].as_array().unwrap().clone())
+            .unwrap_or_default()
+    }
+
+    /// T3's workspace refresh claims: a second ordinary refresh joins the scan in flight, a
+    /// `fresh` one scans again, and the older scan that ends last does not overwrite it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stale_workspace_scan_does_not_overwrite_a_fresh_one() {
+        use crate::table::{CallContext, Handler};
+        let (env, dir) = environment();
+        let scans = Scans::new(true);
+        let deps = Deps {
+            environment: Some(env.clone()),
+            providers: vec![scans.clone() as Arc<dyn conn_provider::Provider>].into(),
+            ..Deps::default()
+        };
+        let mut table = MethodTable::new();
+        register(&mut table, &deps);
+        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
+            panic!("server.refreshProviders is not registered");
+        };
+        let cwd = "/work/project";
+        let scoped = |fresh: bool| {
+            call(
+                CallContext::default(),
+                json!({"instanceId": "scans", "cwd": cwd, "fresh": fresh}),
+            )
+        };
+        let first = tokio::spawn(scoped(false));
+        scans.started.notified().await;
+        let joined = tokio::spawn(scoped(false));
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!joined.is_finished(), "the second refresh waits for the scan");
+        assert_eq!(scans.scanned.lock().unwrap().len(), 1, "one shared scan");
+        scoped(true).await.unwrap();
+        assert_eq!(workspace_skills(&deps, cwd), [json!({"name": "scan-2"})]);
+        scans.release.add_permits(1);
+        first.await.unwrap().unwrap();
+        joined.await.unwrap().unwrap();
+        assert_eq!(
+            workspace_skills(&deps, cwd),
+            [json!({"name": "scan-2"})],
+            "the stale scan is dropped"
+        );
+        assert_eq!(scans.scanned.lock().unwrap().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An engine whose only thread is archived, on a managed worktree.
+    struct Archived {
+        project_root: String,
+        worktree: String,
+    }
+
+    impl conn_engine::Engine for Archived {
+        fn dispatch(
+            &self,
+            _command: conn_contract::Command,
+        ) -> conn_engine::BoxFuture<
+            '_,
+            Result<
+                conn_contract::DispatchCommandResult,
+                conn_engine::EngineError<conn_contract::DispatchCommandError>,
+            >,
+        > {
+            Box::pin(std::future::ready(Err(conn_engine::EngineError::Internal(
+                "unused".into(),
+            ))))
+        }
+        fn subscribe_shell(
+            &self,
+            _input: conn_contract::SubscribeShellInput,
+        ) -> conn_engine::BoxFuture<
+            '_,
+            Result<
+                conn_engine::Subscription<
+                    conn_contract::ShellStreamItem,
+                    conn_contract::GetShellSnapshotError,
+                >,
+                conn_engine::EngineError<conn_contract::GetShellSnapshotError>,
+            >,
+        > {
+            Box::pin(std::future::ready(Err(conn_engine::EngineError::Internal(
+                "unused".into(),
+            ))))
+        }
+        fn subscribe_thread(
+            &self,
+            _input: conn_contract::SubscribeThreadInput,
+        ) -> conn_engine::BoxFuture<
+            '_,
+            Result<
+                conn_engine::Subscription<
+                    conn_contract::ThreadStreamItem,
+                    conn_contract::GetThreadProjectionError,
+                >,
+                conn_engine::EngineError<conn_contract::GetThreadProjectionError>,
+            >,
+        > {
+            Box::pin(std::future::ready(Err(conn_engine::EngineError::Internal(
+                "unused".into(),
+            ))))
+        }
+        fn shell_snapshot(
+            &self,
+        ) -> conn_engine::BoxFuture<
+            '_,
+            Result<Value, conn_engine::EngineError<conn_contract::GetShellSnapshotError>>,
+        > {
+            let snapshot = json!({"threads": [], "archivedThreads": [],
+                "projects": [{"id": "p1", "workspaceRoot": self.project_root}]});
+            Box::pin(std::future::ready(Ok(snapshot)))
+        }
+        fn call(
+            &self,
+            method: &str,
+            _input: Value,
+        ) -> conn_engine::BoxFuture<'_, Result<Value, conn_engine::EngineError<Value>>> {
+            let reply = (method == "orchestration.getArchivedShellSnapshot").then(|| {
+                json!({"threads": [{"id": "t1", "projectId": "p1", "branch": "feature",
+                    "worktreePath": self.worktree}]})
+            });
+            Box::pin(std::future::ready(
+                reply.ok_or_else(|| conn_engine::EngineError::Internal("unused".into())),
+            ))
+        }
+    }
+
+    /// T3's `workspaceScanDirectory`: a managed worktree that no longer exists is scanned at
+    /// its project's root, and the snapshot stays under the folder the client asked for.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_missing_managed_worktree_scans_its_project_root() {
+        use crate::table::{CallContext, Handler};
+        let (env, dir) = environment();
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let worktree = dir.join("worktrees/project/feature");
+        let (project, worktree) = (
+            project.display().to_string(),
+            worktree.display().to_string(),
+        );
+        let scans = Scans::new(false);
+        let deps = Deps {
+            environment: Some(env.clone()),
+            engine: Some(Arc::new(Archived {
+                project_root: project.clone(),
+                worktree: worktree.clone(),
+            })),
+            providers: vec![scans.clone() as Arc<dyn conn_provider::Provider>].into(),
+            ..Deps::default()
+        };
+        let mut table = MethodTable::new();
+        register(&mut table, &deps);
+        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
+            panic!("server.refreshProviders is not registered");
+        };
+        call(
+            CallContext::default(),
+            json!({"instanceId": "scans", "cwd": worktree}),
+        )
+        .await
+        .unwrap();
+        // An unmanaged missing folder is scanned as asked.
+        let elsewhere = dir.join("elsewhere").display().to_string();
+        call(
+            CallContext::default(),
+            json!({"instanceId": "scans", "cwd": elsewhere}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*scans.scanned.lock().unwrap(), [project, elsewhere]);
+        assert_eq!(workspace_skills(&deps, &worktree), [json!({"name": "scan-1"})]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

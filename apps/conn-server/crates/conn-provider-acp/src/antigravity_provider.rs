@@ -1091,4 +1091,177 @@ mod tests {
         );
         assert_eq!(antigravity::stderr_sign_in("I1123 log line"), None);
     }
+
+    /// Replaces the provider's agents with `scripts`; returns how many stops ran (not only
+    /// dropped): a run stop is what removes the `run-*` folder and ends the process tree.
+    fn count_stops(
+        provider: &mut AntigravityProvider,
+        scripts: Vec<Vec<Value>>,
+    ) -> (Vec<Arc<Mutex<Script>>>, Arc<std::sync::atomic::AtomicUsize>) {
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scripts: Vec<_> = scripts
+            .into_iter()
+            .map(|entries| Script::new(entries, "/w"))
+            .collect();
+        let queue = Arc::new(Mutex::new(scripts.iter().cloned().collect::<VecDeque<_>>()));
+        let counter = stops.clone();
+        provider.test_spawner = Some(Arc::new(move || {
+            let script = lock(&queue)
+                .pop_front()
+                .ok_or_else(|| std::io::Error::other("no script left"))?;
+            let (writer, events) = replay_agent::spawn(script);
+            let counter = counter.clone();
+            Ok(session::Spawned {
+                writer,
+                events,
+                stop: Box::new(move |_| {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Box::pin(async {})
+                }),
+            })
+        }));
+        (scripts, stops)
+    }
+
+    /// A handshake that fails while the agent still runs, and one whose agent exits, end the
+    /// agent as a close does: its stop runs once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_handshake_stops_the_agent() {
+        let refused = vec![
+            expect("initialize", json!("<any>")),
+            json!({"type": "emit_inbound", "frame": {"kind": "response", "method": "initialize",
+                "error": {"code": -32603, "message": "boom"}}}),
+        ];
+        let exits = vec![
+            expect("initialize", json!("<any>")),
+            json!({"type": "runtime_exit", "status": "failure"}),
+        ];
+        let (mut provider, _, dir, _) = provider_with(Vec::new(), Default::default());
+        let (_scripts, stops) = count_stops(&mut provider, vec![refused, exits]);
+        assert!(provider.refresh_models().unwrap().await.is_err());
+        assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(provider.refresh_models().unwrap().await.is_err());
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `agy` can print the sign-in URL right behind its `initialize` reply. The connection
+    /// keeps that failure: the next call fails with it, so the refresh signs out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sign_in_url_behind_the_initialize_reply_signs_out() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=fixture-state";
+        let login = vec![
+            expect("initialize", json!("<any>")),
+            reply(
+                "initialize",
+                json!({"protocolVersion": 1, "agentCapabilities": {}}),
+            ),
+            json!({"type": "emit_raw", "line": format!("{}{url}", antigravity::AUTH_STDOUT_PREFIX)}),
+        ];
+        let (mut provider, _, dir, _) = provider_with(Vec::new(), Default::default());
+        let (scripts, stops) = count_stops(&mut provider, vec![login]);
+        let error = provider.refresh_models().unwrap().await.unwrap_err();
+        assert_eq!(
+            error,
+            ProviderError::Failed {
+                operation: "refresh-models",
+                detail: REFRESH_SIGN_IN.into(),
+            }
+        );
+        assert_eq!(
+            entry_of(&provider)["auth"],
+            json!({"status": "unauthenticated"})
+        );
+        assert_eq!(lock(&scripts[0]).cursor, 3, "no request after the URL");
+        assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3's `refreshModels` starts its throwaway session as the agent opens it: the catalog
+    /// starts from the agent's own model. The manifest's default is for a thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_model_refresh_starts_from_the_agents_current_model() {
+        let live = conn_provider::LiveManifest::default();
+        live.set(json!({"providers": {"antigravity": {
+            "profiles": {},
+            "defaults": {"chat": "gemini-b"},
+            "models": [{"slug": "gemini-a", "name": "A", "status": "current"},
+                       {"slug": "gemini-b", "name": "B", "status": "current"}]
+        }}}));
+        let a = || options("gemini-a", &["low", "high"]);
+        let b = options("gemini-b", &["minimal", "max"]);
+        let mut script = handshake(a());
+        script.extend([
+            select("gemini-a"),
+            reply("session/set_config_option", json!({"configOptions": a()})),
+            select("gemini-b"),
+            reply("session/set_config_option", json!({"configOptions": b})),
+            select("gemini-a"),
+            reply("session/set_config_option", json!({"configOptions": a()})),
+        ]);
+        let (provider, scripts, dir, _) = provider_with(vec![script], live);
+        provider.refresh_models().unwrap().await.unwrap();
+        complete(&scripts[0]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3's runtime publishes one root session: another session's commands and options stay
+    /// out, and the root's commands sent before `session/new` answered still count.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_the_root_sessions_metadata_reaches_the_entry() {
+        let update = |session: &str, update: Value| {
+            json!({"type": "emit_inbound", "frame": {"kind": "notification",
+                "method": "session/update", "params": {"sessionId": session, "update": update}}})
+        };
+        let commands = |name: &str| {
+            json!({"sessionUpdate": "available_commands_update",
+                "availableCommands": [{"name": name, "description": name}]})
+        };
+        let model = |id: &str| {
+            json!([{"id": "model", "name": "Model", "category": "model", "type": "select",
+                "currentValue": id, "options": [{"value": id, "name": id}]}])
+        };
+        let script = vec![
+            expect("initialize", json!("<any>")),
+            reply(
+                "initialize",
+                json!({"protocolVersion": 1, "agentCapabilities": {}}),
+            ),
+            expect("authenticate", json!("<any>")),
+            reply("authenticate", json!({})),
+            expect("session/new", json!("<any>")),
+            update("s1", commands("root-cmd")),
+            update("child", commands("child-early")),
+            reply(
+                "session/new",
+                json!({"sessionId": "s1", "configOptions": model("gemini-a")}),
+            ),
+            update(
+                "child",
+                json!({"sessionUpdate": "config_option_update", "configOptions": model("gemini-z")}),
+            ),
+            update("child", commands("child-late")),
+        ];
+        let (provider, scripts, dir) = provider(vec![script]);
+        provider.refresh_models().unwrap().await.unwrap();
+        complete(&scripts[0]);
+        let entry = entry_of(&provider);
+        let names = |list: &Value, key: &str| -> Vec<String> {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v[key].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let commands = names(&entry["slashCommands"], "name");
+        assert!(commands.contains(&"root-cmd".to_owned()), "{commands:?}");
+        assert!(!commands.iter().any(|c| c.starts_with("child")), "{commands:?}");
+        let models = names(&entry["models"], "slug");
+        assert!(models.contains(&"gemini-a".to_owned()), "{models:?}");
+        assert!(!models.contains(&"gemini-z".to_owned()), "{models:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

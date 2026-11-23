@@ -253,7 +253,7 @@ pub fn provider_models() -> Vec<Value> {
 }
 
 /// Compiles a contract `ModelSelection` (as JSON).
-pub fn compile(selection: &Value) -> Compiled {
+pub fn compile(selection: &Value, _manifest: &conn_provider::LiveManifest) -> Compiled {
     let model = selection["model"].as_str().unwrap_or("default").trim();
     let options = selection["options"].as_array().cloned().unwrap_or_default();
     let option = |id: &str| options.iter().find(|o| o["id"] == id).map(|o| &o["value"]);
@@ -390,6 +390,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Against the bundled catalog (no manifest accepted).
+    fn compile(selection: &Value) -> Compiled {
+        super::compile(selection, &conn_provider::LiveManifest::default())
+    }
+
     fn selection(model: &str, options: Value) -> Value {
         json!({"instanceId": "claudeAgent", "model": model, "options": options})
     }
@@ -488,5 +493,107 @@ mod live_tests {
             Value::from("not a version");
         live.set(broken);
         assert_eq!(current(&live, 0)["compatibility"], bundled["compatibility"]);
+    }
+
+    fn bundled_manifest() -> Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../server/src/provider/model-manifest.json"
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn selection(model: &str, options: Value) -> Value {
+        serde_json::json!({"instanceId": "claudeAgent", "model": model, "options": options})
+    }
+
+    /// A model only the accepted manifest lists compiles against its profile, as the picker
+    /// shows it: the Ultracode toggle, the effort map and the model suffix all apply.
+    #[test]
+    fn a_manifest_only_model_compiles_from_its_profile() {
+        use serde_json::json;
+        let mut manifest = bundled_manifest();
+        let catalog = &mut manifest["providers"]["claudeAgent"];
+        catalog["profiles"]["next"] = json!({
+            "capabilities": {"optionDescriptors": [
+                {"id": "effort", "label": "Effort", "type": "select", "options": [
+                    {"id": "low", "label": "Low"},
+                    {"id": "high", "label": "High", "isDefault": true},
+                    {"id": "ultracode", "label": "Ultracode"}]},
+                {"id": "contextWindow", "label": "Context", "type": "select", "options": [
+                    {"id": "200k", "label": "200k", "isDefault": true},
+                    {"id": "1m", "label": "1M"}]}]},
+            "adapter": {"claudeCode": {"effortMap": {"high": "max"},
+                "modelSuffixes": {"contextWindow": {"1m": "[1m]"}}}}
+        });
+        catalog["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"slug": "claude-next", "name": "Claude Next", "status": "current",
+                "profile": "next"}));
+        let live = conn_provider::LiveManifest::default();
+        live.set(manifest);
+        let picker = current_provider_models(&live, 0);
+        let next = picker.iter().find(|m| m["slug"] == "claude-next").unwrap();
+        assert_eq!(
+            next.pointer("/capabilities/optionDescriptors/1/id"),
+            Some(&json!("ultracode")),
+            "the picker shows the toggle"
+        );
+        let ultracode = compile(
+            &selection("claude-next", json!([{"id": "ultracode", "value": true}])),
+            &live,
+        );
+        assert_eq!(ultracode.settings, json!({"ultracode": true}).as_object().cloned().unwrap());
+        assert_eq!(ultracode.effort.as_deref(), Some("max"), "high maps to max");
+        let wide = compile(
+            &selection("claude-next", json!([{"id": "contextWindow", "value": "1m"},
+                                            {"id": "effort", "value": "low"}])),
+            &live,
+        );
+        assert_eq!(wide.api_model_id, "claude-next[1m]");
+        assert_eq!(wide.effort.as_deref(), Some("low"));
+        // The legacy Ultracode effort turns the toggle on and runs at xhigh.
+        let legacy = compile(
+            &selection("claude-next", json!([{"id": "effort", "value": "ultracode"}])),
+            &live,
+        );
+        assert_eq!(legacy.settings, json!({"ultracode": true}).as_object().cloned().unwrap());
+    }
+
+    /// The port of `compileClaudeModelSelection` over a resolved manifest gives, for T3's
+    /// bundled manifest, what T3's own function gave (`model_catalog.json`, generated): every
+    /// model, every effort choice and every boolean option.
+    #[test]
+    fn compiling_against_the_bundled_manifest_matches_t3() {
+        let live = conn_provider::LiveManifest::default();
+        live.set(bundled_manifest());
+        let table = catalog_json();
+        let as_json = |c: Compiled| {
+            serde_json::json!({"apiModelId": c.api_model_id, "effort": c.effort,
+                "promptEffort": c.prompt_effort, "settings": c.settings})
+        };
+        let mut compared = 0;
+        for model in table["models"].as_array().unwrap() {
+            let slug = model["slug"].as_str().unwrap();
+            for (effort, expected) in model["efforts"].as_object().unwrap() {
+                let options = if effort.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::json!([{"id": "effort", "value": effort}])
+                };
+                let got = as_json(compile(&selection(slug, options), &live));
+                assert_eq!(&got, expected, "{slug} effort {effort:?}");
+                compared += 1;
+            }
+            for (flag, expected) in model["flags"].as_object().unwrap() {
+                let (id, value) = flag.split_once('=').unwrap();
+                let options = serde_json::json!([{"id": id, "value": value == "true"}]);
+                let got = as_json(compile(&selection(slug, options), &live));
+                assert_eq!(&got, expected, "{slug} {flag}");
+                compared += 1;
+            }
+        }
+        assert!(compared > 100, "{compared} cases");
     }
 }

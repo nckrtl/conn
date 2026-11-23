@@ -471,6 +471,27 @@ mod tests {
         assert!(info.stderr_tail.contains("after"));
     }
 
+    /// Antigravity's sign-in URL may be 16,384 characters behind its marker: an observer
+    /// sees a stderr line that long whole, and the tail still keeps only its last 4 KiB.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_observed_stderr_line_may_carry_a_16k_url() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let script = "printf 'url: %16384s\\n' x | tr ' ' a >&2";
+        let observer: StderrObserver =
+            Box::new(|line| line.starts_with("url: ").then(|| line.len().to_string()));
+        let _process =
+            Process::spawn_observing_stderr(&sh(script), 1024, tx, Some(observer)).unwrap();
+        let Some(ProcEvent::Line(Line::Text(len))) = rx.recv().await else {
+            panic!("the observed line arrives")
+        };
+        assert_eq!(len, (5 + 16_384).to_string());
+        let Some(ProcEvent::Exited(info)) = rx.recv().await else {
+            panic!("expected exit")
+        };
+        assert!(info.stderr_tail.len() <= STDERR_TAIL_BYTES);
+        assert!(info.stderr_tail.ends_with("ax\n"));
+    }
+
     /// A stderr line the observer recognises reaches the reader as stdout, after the stdout
     /// written before it; other stderr lines stay in the tail only.
     #[tokio::test(flavor = "current_thread")]

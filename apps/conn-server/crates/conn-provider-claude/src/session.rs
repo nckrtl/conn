@@ -726,8 +726,9 @@ fn end_detail(end: &QueryEnd) -> String {
 /// `compileClaudeModelSelection`: API model id, effort, settings and the prompt effort.
 fn model_selection(
     selection: &conn_contract::ModelSelection,
+    manifest: &conn_provider::LiveManifest,
 ) -> (String, Option<String>, Map<String, Value>) {
-    let compiled = catalog::compile(&to_json(selection));
+    let compiled = catalog::compile(&to_json(selection), manifest);
     (compiled.api_model_id, compiled.effort, compiled.settings)
 }
 
@@ -997,7 +998,8 @@ impl ClaudeSession {
         let inner = &self.inner;
         let native = native_thread_id(&input.provider_thread)
             .ok_or_else(|| failed_err("start_turn", "provider thread has no native Claude id"))?;
-        let (model, effort, selection_settings) = model_selection(&input.model_selection);
+        let (model, effort, selection_settings) =
+            model_selection(&input.model_selection, &inner.config.model_manifest);
         // `resolveSettings` may wait for the SDK host to launch; nothing is open yet.
         let run_id = input.run_id.as_str();
         let policy = self
@@ -1211,7 +1213,8 @@ impl ClaudeSession {
         native: Option<&str>,
         model_change: ModelChange,
     ) -> ProviderResult<bool> {
-        let (model, effort, settings) = model_selection(selection);
+        let (model, effort, settings) =
+            model_selection(selection, &self.inner.config.model_manifest);
         let live_change = {
             let state = self.inner.lock();
             state.live.as_ref().is_some_and(|live| {
@@ -1288,7 +1291,11 @@ impl ClaudeSession {
         }
         let run_id = input.run_id.as_str();
         // T3 reads the attachments before it opens the query (`ClaudeAdapterV2` startTurn).
-        let effort = catalog::compile(&to_json(&input.model_selection)).prompt_effort;
+        let effort = catalog::compile(
+            &to_json(&input.model_selection),
+            &self.inner.config.model_manifest,
+        )
+        .prompt_effort;
         let text = catalog::prompt_text(&input.message.text, effort.as_deref());
         let prepared = match self
             .inner
@@ -1854,7 +1861,10 @@ impl Session for ClaudeSession {
                 None => None,
             };
             let effort = match live_selection {
-                Some(selection) => catalog::compile(&to_json(selection)).prompt_effort,
+                Some(selection) => {
+                    catalog::compile(&to_json(selection), &self.inner.config.model_manifest)
+                        .prompt_effort
+                }
                 None => self.inner.lock().turn_prompt_effort.clone(),
             };
             let text = catalog::prompt_text(&input.message.text, effort.as_deref());

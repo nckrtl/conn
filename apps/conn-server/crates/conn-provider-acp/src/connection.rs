@@ -353,4 +353,43 @@ mod waiting_tests {
         done.send(()).unwrap();
         barrier.await.unwrap();
     }
+
+    fn sign_in(line: &str) -> Option<conn_provider::ProviderError> {
+        (line == "SIGN IN").then(|| conn_provider::ProviderError::Failed {
+            operation: "sign-in-required",
+            detail: "Sign in".into(),
+        })
+    }
+
+    /// A signal line right behind a reply: the reply still answers its call, and every later
+    /// call fails with the signal's error, not as a plain close.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_signal_behind_a_reply_fails_later_calls() {
+        let (writer, mut written) = mpsc::channel(4);
+        let (events_tx, events) = mpsc::channel(4);
+        let (connection, _incoming) =
+            Connection::start_with_signal(writer, events, 4, Some(sign_in));
+        let call = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.call("initialize", J::V(Value::Null)).await }
+        });
+        assert!(written.recv().await.is_some(), "the request went out");
+        let reply = format!(r#"{{"jsonrpc":"2.0","id":{FIRST_REQUEST_ID},"result":{{}}}}"#);
+        for line in [reply.as_str(), "SIGN IN"] {
+            events_tx
+                .send(ProcEvent::Line(Line::Text(line.into())))
+                .await
+                .unwrap();
+        }
+        assert_eq!(call.await.unwrap(), Ok(serde_json::json!({})));
+        while !crate::lock(&connection.pending).closed {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            connection
+                .call("authenticate", J::V(Value::Null))
+                .await,
+            Err(CallError::Provider(sign_in("SIGN IN").unwrap()))
+        );
+    }
 }

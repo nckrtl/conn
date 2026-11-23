@@ -680,4 +680,57 @@ pub(crate) mod tests {
         assert!(!dir.join(FILE_NAME).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// T3's bundled manifest, with `updatedAt` set.
+    fn bundled_manifest(updated_at: &str) -> Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../server/src/provider/model-manifest.json"
+        );
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        manifest["updatedAt"] = Value::from(updated_at);
+        manifest
+    }
+
+    /// `ModelManifestSchema` decodes each profile's `capabilities` as `ModelCapabilities`. A
+    /// fetched manifest whose Claude profile breaks that contract is refused, the last valid
+    /// one stays, and its Claude models still decode as the config's wire type.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_invalid_profile_keeps_the_last_valid_manifest() {
+        let dir = temp_dir("invalid-profile");
+        let valid = bundled_manifest("2999-01-01T00:00:00.000Z");
+        let mut invalid = bundled_manifest("2999-06-01T00:00:00.000Z");
+        let profiles = invalid["providers"]["claudeAgent"]["profiles"]
+            .as_object_mut()
+            .unwrap();
+        for profile in profiles.values_mut() {
+            profile["capabilities"] =
+                serde_json::json!({"optionDescriptors": [{"id": "effort", "type": "select"}]});
+        }
+        assert!(decode_manifest(&invalid).is_none());
+        let mut state = State::default();
+        let (url, server) = serve_once(valid.to_string(), 1);
+        assert!(refresh(&mut state, &dir, &Source::Url(url), true, 1).await);
+        assert_eq!(server.join().unwrap(), 1);
+        let kept = state.live.provider_catalog("claudeAgent");
+        let (url, server) = serve_once(invalid.to_string(), 1);
+        let later = 1 + MANIFEST_RETRY_MS;
+        let window = Window::Force;
+        assert!(!refresh_with(&mut state, &dir, &Source::Url(url), true, later, window).await);
+        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(state.live.provider_catalog("claudeAgent"), kept);
+        for model in conn_provider_claude::catalog::current_provider_models(&state.live, 0) {
+            let decoded: Result<conn_contract::ServerProvidersItemItemModelsItem, _> =
+                conn_contract::from_json(model.clone());
+            assert!(decoded.is_ok(), "{model}");
+        }
+        // A cache file with the invalid manifest is not read either.
+        std::fs::write(dir.join(FILE_NAME), cache_text(later, &invalid.to_string())).unwrap();
+        let mut fresh = State::default();
+        let off = Source::Url("http://127.0.0.1:9/m.json".into());
+        assert!(!refresh(&mut fresh, &dir, &off, false, later).await);
+        assert_eq!(fresh.live.provider_catalog("claudeAgent"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

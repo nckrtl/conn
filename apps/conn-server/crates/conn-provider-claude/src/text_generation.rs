@@ -74,7 +74,8 @@ pub fn cli_args(
     investigate: bool,
 ) -> Vec<String> {
     let model = selection["model"].as_str().unwrap_or_default();
-    let compiled = catalog::compile(selection);
+    // Text generation compiles against the bundled catalog, whose models it offers.
+    let compiled = catalog::compile(selection, &conn_provider::LiveManifest::default());
     // Only chosen values; Claude Code's own defaults apply otherwise, as in chat turns.
     let mut settings = Map::new();
     settings.insert("disableAllHooks".into(), json!(true));

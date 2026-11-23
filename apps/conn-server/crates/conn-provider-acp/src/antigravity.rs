@@ -1784,4 +1784,27 @@ mod tests {
         );
         assert!(!needs_session(&checked));
     }
+
+    /// A config update lists the account's models in full: thinking levels kept for a model
+    /// the agent no longer offers go, so the map stays one entry per listed model.
+    #[test]
+    fn a_complete_model_list_prunes_retired_thinking_levels() {
+        let mut previous = Observed {
+            authenticated: true,
+            ..Observed::default()
+        };
+        previous
+            .thinking_levels
+            .insert("gemini-retired".into(), None);
+        previous
+            .thinking_levels
+            .insert("gemini-3.8-flash".into(), None);
+        let options = &setup()["configOptions"];
+        let next = config_options_updated(&previous, options);
+        let kept: Vec<&str> = next.thinking_levels.keys().map(String::as_str).collect();
+        assert_eq!(kept, ["gemini-3.1-pro", "gemini-3.8-flash"]);
+        let started = session_started(&previous, &json!({}), &setup(), None);
+        let kept: Vec<&str> = started.thinking_levels.keys().map(String::as_str).collect();
+        assert_eq!(kept, ["gemini-3.1-pro", "gemini-3.8-flash"]);
+    }
 }

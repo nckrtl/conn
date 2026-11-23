@@ -19,6 +19,9 @@ use crate::{EngineError, Subscription};
 
 /// `THREAD_RESUME_MAX_REPLAY_EVENTS` in `ThreadStream.ts`: a longer gap gets a snapshot.
 const MAX_REPLAY_EVENTS: usize = 128;
+/// `THREAD_RESUME_MAX_RAW_PAYLOAD_BYTES` and `THREAD_RESUME_MAX_REPLAY_ENCODED_BYTES`: a
+/// replay larger than this, stored or as sent, gets a snapshot too.
+const MAX_REPLAY_BYTES: u64 = 1_048_576;
 const LIVE_READ_BATCH: usize = 256;
 
 fn shell_error(message: impl Into<String>) -> Result<GetShellSnapshotError, String> {
@@ -173,12 +176,22 @@ pub(crate) async fn subscribe_thread(
             // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
             // client that missed a deletion gets `thread.deleted`.
             let imported = store.imported_through();
-            if let Some(after) = after.filter(|after| can_replay(*after, high, imported))
-                && store.thread_known(&id)?
-            {
+            let replayable = match after.filter(|after| can_replay(*after, high, imported)) {
+                Some(after) if store.thread_known(&id)? => {
+                    let (count, stored) = store.thread_replay_stats(&id, after)?;
+                    (count <= MAX_REPLAY_EVENTS as u64 && stored <= MAX_REPLAY_BYTES)
+                        .then_some(after)
+                }
+                _ => None,
+            };
+            if let Some(after) = replayable {
                 let events = store.thread_events_after(&id, after, MAX_REPLAY_EVENTS + 1)?;
-                if events.len() <= MAX_REPLAY_EVENTS {
-                    let items = events.into_iter().map(event_item).collect();
+                let items: Vec<Value> = events.into_iter().map(event_item).collect();
+                let encoded: u64 = items
+                    .iter()
+                    .map(|item| serde_json::to_vec(item).map_or(0, |b| b.len() as u64))
+                    .sum();
+                if items.len() <= MAX_REPLAY_EVENTS && encoded <= MAX_REPLAY_BYTES {
                     return Ok(Some((items, high)));
                 }
             }

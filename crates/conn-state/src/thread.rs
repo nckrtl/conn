@@ -446,6 +446,9 @@ pub struct ThreadState {
     pub working: bool,
     pub sequence: Option<i64>,
     pub synchronized: bool,
+    /// True once the stream reported `thread.deleted` (T3 `threads.ts` keeps such a thread as
+    /// `deleted` with no data). The timeline is empty from then on; holders evict the thread.
+    pub deleted: bool,
     /// Server request id of each approval entry, by entry id, for `runtime-request.respond`.
     pub approval_requests: HashMap<String, String>,
     /// What each approval entry asks, by entry id (see [`ThreadState::approval_details`]).
@@ -1025,6 +1028,21 @@ impl ThreadState {
         }
     }
 
+    /// The thread was deleted: nothing of it stays to show or answer.
+    fn clear_deleted(&mut self) -> bool {
+        let changed = !self.deleted || !self.entries.is_empty() || self.working;
+        self.deleted = true;
+        self.working = false;
+        self.entries.clear();
+        self.pending_requests.clear();
+        self.approval_requests.clear();
+        self.approval_details.clear();
+        self.history_cursor = None;
+        self.has_more_history = false;
+        self.loading_earlier = false;
+        changed
+    }
+
     fn advance_sequence(&mut self, seq: i64) {
         self.sequence = Some(self.sequence.map_or(seq, |prev| prev.max(seq)));
     }
@@ -1324,6 +1342,12 @@ impl ThreadState {
                     self.subagent_models.insert(ev.payload.id, model);
                 }
                 changed
+            }
+            DomainEvent::ThreadArchived(ev)
+                if ev.r#type
+                    == conn_contract::OrchestrationV2DomainEventThreadArchivedType::ThreadDeleted =>
+            {
+                self.clear_deleted()
             }
             // Projection metadata events that do not directly add or alter timeline entries.
             DomainEvent::ThreadCreated(_)

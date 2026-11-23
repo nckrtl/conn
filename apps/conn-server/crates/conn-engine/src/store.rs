@@ -854,6 +854,23 @@ impl Store {
         })
     }
 
+    /// How many events of one thread follow `after`, and their stored bytes, without
+    /// decoding them (`getAgentReplayStats`).
+    pub(crate) fn thread_replay_stats(
+        &self,
+        thread_id: &str,
+        after: u64,
+    ) -> StoreResult<(u64, u64)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(event AS BLOB))), 0)
+                 FROM events WHERE thread_id = ?1 AND seq > ?2",
+                params![thread_id, after as i64],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(err)
+    }
+
     /// Stored events of one thread after `after`, at most `limit`, as `(sequence, event)`.
     pub(crate) fn thread_events_after(
         &self,

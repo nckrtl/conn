@@ -1268,15 +1268,27 @@ async fn a_moved_thread_captures_its_new_checkout() {
     )
     .await
     .unwrap();
-    let text = diff["diff"].as_str().unwrap();
-    assert!(
-        text.contains("new-only.txt") && !text.contains("old-only.txt"),
-        "{text}"
-    );
-    assert!(
-        first["diff"].as_str().unwrap().contains("first.txt"),
-        "{first}"
-    );
+    // Exactly the file the provider wrote: nothing from the previous checkout, and no
+    // deletion of turn 1's file, which the new checkout never had.
+    let files_in = |diff: &Value| -> Vec<String> {
+        diff["diff"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.strip_prefix("diff --git a/"))
+            .map(|l| l.split(" b/").next().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(files_in(&diff), ["new-only.txt"], "{diff}");
+    let second = checkpoint_at(&p, 2);
+    let changed: Vec<&str> = second["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, ["new-only.txt"]);
+    assert_eq!(files_in(&first), ["first.txt"], "{first}");
     // Both turn diffs read the same after a restart: the refs live in the shared repository.
     drop(stream);
     drop(engine);
@@ -1292,6 +1304,15 @@ async fn a_moved_thread_captures_its_new_checkout() {
     assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
     // Removing the new checkout leaves both readable through the project's repository.
     repo.git(&["worktree", "remove", "--force", &work.root()]);
+    assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
+    assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
+    // So does another repository taking the path.
+    std::fs::create_dir_all(work.root()).unwrap();
+    let other = std::process::Command::new("git")
+        .args(["init", "-q", &work.root()])
+        .output()
+        .unwrap();
+    assert!(other.status.success());
     assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
     assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
 }

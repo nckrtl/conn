@@ -314,6 +314,7 @@ async fn streams_resume_after_a_sequence() {
         .subscribe_thread(from_json(json!({"threadId": "t1", "afterSequence": visited, "requestCompletionMarker": true})).unwrap())
         .await
         .unwrap();
+    // crates/conn-state/tests/fixtures/thread_deleted_replay.json records this item.
     assert_eq!(next(&mut thread).await["event"]["type"], "thread.deleted");
     drop(thread);
     assert!(
@@ -328,6 +329,34 @@ async fn streams_resume_after_a_sequence() {
             .await
             .is_err()
     );
+
+    // A replay over 1 MiB stored gets a snapshot (`THREAD_RESUME_MAX_RAW_PAYLOAD_BYTES`).
+    dispatch(&engine, create("t3", "b1")).await;
+    let before = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "b2", "threadId": "t3",
+        "visitedAt": "2026-11-13T09:04:00.000Z"}),
+    )
+    .await;
+    let large = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "b3", "threadId": "t3",
+        "visitedAt": "2026-11-13T09:05:00.000Z"}),
+    )
+    .await;
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute(
+            "UPDATE events SET event = json_set(event, '$.payload.pad', ?1) WHERE seq = ?2",
+            rusqlite::params!["x".repeat(1_100_000), large as i64],
+        )
+        .unwrap();
+    let mut resumed = engine
+        .subscribe_thread(from_json(json!({"threadId": "t3", "afterSequence": before})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut resumed).await["kind"], "snapshot");
+    drop(resumed);
 
     // A cursor older than the replay bound needs a snapshot, which a deleted thread has not.
     dispatch(&engine, create("t2", "e1")).await;

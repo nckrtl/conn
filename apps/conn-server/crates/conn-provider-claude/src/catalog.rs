@@ -73,11 +73,11 @@ fn resolve(section: &Value, now_ms: i64) -> Option<Value> {
             Some(name) => Some(profiles?.get(name)?),
             None => None,
         };
-        let profile_adapter = profile.and_then(|p| p.get("adapter"));
+        let profile_adapter = profile.and_then(adapter);
         if !profile_adapter_is_valid(profile_adapter) {
             return None;
         }
-        let bounds = model_adapter_bounds(entry.get("adapter"))?;
+        let bounds = model_adapter_bounds(adapter(entry))?;
         runtime.push(
             profile_adapter
                 .and_then(|a| a.get("claudeCode"))
@@ -138,9 +138,6 @@ pub fn manifest_adapters_are_valid(manifest: &Value) -> bool {
     let Some(catalog) = manifest.pointer("/providers/claudeAgent") else {
         return true;
     };
-    fn adapter(item: &Value) -> Option<&Value> {
-        item.get("adapter").filter(|a| !a.is_null())
-    }
     let profiles_ok = catalog["profiles"].as_object().is_none_or(|profiles| {
         profiles
             .values()
@@ -152,6 +149,11 @@ pub fn manifest_adapters_are_valid(manifest: &Value) -> bool {
             .all(|m| model_adapter_bounds(adapter(m)).is_some())
     });
     profiles_ok && models_ok
+}
+
+/// An item's adapter; absent and null both read as `{}` (T3's `adapter ?? {}`).
+fn adapter(item: &Value) -> Option<&Value> {
+    item.get("adapter").filter(|a| !a.is_null())
 }
 
 /// `ClaudeProfileAdapterSchema`: `claudeCode` with an effort map, model suffixes and context
@@ -185,6 +187,9 @@ fn model_adapter_bounds(adapter: Option<&Value>) -> Option<(Option<String>, Opti
     let Some(code) = adapter.and_then(|a| a.get("claudeCode")) else {
         return adapter.is_none_or(Value::is_object).then_some((None, None));
     };
+    if !code.is_object() {
+        return None;
+    }
     let version = |key: &str| -> Option<Option<String>> {
         match code.get(key) {
             None => Some(None),
@@ -423,6 +428,18 @@ fn compile_resolved(resolved: &Value, selection: &Value) -> Compiled {
         prompt_effort,
         settings,
     }
+}
+
+/// A boolean option's resolved `currentValue` for `selection` (`getProviderOptionDescriptors`
+/// over the model's `capabilities`): the choice, the legacy Ultracode effort, or the default.
+pub fn resolved_boolean(capabilities: &Value, selection: &Value, id: &str) -> Option<bool> {
+    let selections = selection["options"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    option_descriptors(capabilities, selections)
+        .iter()
+        .find(|d| d["id"] == id && d["type"] == "boolean")
+        .and_then(|d| d["currentValue"].as_bool())
 }
 
 /// `getRawSelectionValueById`: the first selection with `id`, unless its value is null.
@@ -870,6 +887,27 @@ mod live_tests {
             legacy.settings,
             json!({"ultracode": true}).as_object().cloned().unwrap()
         );
+    }
+
+    /// T3 reads an absent or null adapter as `{}` (`adapter ?? {}`), on the model and on its
+    /// profile: a manifest-only model with null adapters reaches the picker.
+    #[test]
+    fn a_null_adapter_counts_as_empty() {
+        use serde_json::json;
+        let mut manifest = bundled_manifest();
+        let catalog = &mut manifest["providers"]["claudeAgent"];
+        catalog["profiles"]["bare"] = json!({"capabilities": {"optionDescriptors": []},
+            "adapter": null});
+        catalog["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"slug": "claude-bare",
+            "name": "Claude Bare", "status": "current", "profile": "bare", "adapter": null}));
+        assert!(manifest_adapters_are_valid(&manifest));
+        let live = conn_provider::LiveManifest::default();
+        live.set(manifest);
+        let picker = current_provider_models(&live, 0);
+        assert!(picker.iter().any(|m| m["slug"] == "claude-bare"));
     }
 
     /// T3's `compileClaudeModelSelection` passes an explicit `thinking` choice for a model

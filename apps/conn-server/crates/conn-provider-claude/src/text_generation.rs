@@ -54,11 +54,10 @@ fn chosen_bool(selection: &Value, id: &str) -> Option<bool> {
         .as_bool()
 }
 
-/// Whether the model, by slug or alias in `models` (the picker's), offers a boolean option
-/// `id`.
-fn has_boolean(models: &[Value], model: &str, id: &str) -> bool {
+/// The model, by slug or alias, in `models` (the picker's).
+fn model_entry<'a>(models: &'a [Value], model: &str) -> Option<&'a Value> {
     let model = model.trim();
-    let entry = models.iter().find(|m| m["slug"] == model).or_else(|| {
+    models.iter().find(|m| m["slug"] == model).or_else(|| {
         models.iter().find(|m| {
             m["aliases"].as_array().is_some_and(|aliases| {
                 aliases
@@ -67,11 +66,6 @@ fn has_boolean(models: &[Value], model: &str, id: &str) -> bool {
                     .any(|a| a.eq_ignore_ascii_case(model))
             })
         })
-    });
-    entry.is_some_and(|m| {
-        m.pointer("/capabilities/optionDescriptors")
-            .and_then(Value::as_array)
-            .is_some_and(|d| d.iter().any(|d| d["id"] == id && d["type"] == "boolean"))
     })
 }
 
@@ -89,21 +83,27 @@ pub fn cli_args(
     let compiled = catalog::compile(selection, manifest);
     let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
     let models = catalog::current_provider_models(manifest, now);
-    let has_boolean = |model: &str, id: &str| has_boolean(&models, model, id);
+    let capabilities = model_entry(&models, model).map(|m| &m["capabilities"]);
+    let has_boolean = |id: &str| {
+        capabilities
+            .and_then(|c| c["optionDescriptors"].as_array())
+            .is_some_and(|d| d.iter().any(|d| d["id"] == id && d["type"] == "boolean"))
+    };
+    // T3 reads Ultracode and Fast Mode from the resolved descriptors, thinking from the choice.
+    let resolved =
+        |id: &str| capabilities.and_then(|c| catalog::resolved_boolean(c, selection, id));
     // Only chosen values; Claude Code's own defaults apply otherwise, as in chat turns.
     let mut settings = Map::new();
     settings.insert("disableAllHooks".into(), json!(true));
-    if has_boolean(model, "thinking")
+    if has_boolean("thinking")
         && let Some(thinking) = chosen_bool(selection, "thinking")
     {
         settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
     }
-    if has_boolean(model, "fastMode") && chosen_bool(selection, "fastMode") == Some(true) {
+    if resolved("fastMode") == Some(true) {
         settings.insert("fastMode".into(), json!(true));
     }
-    if has_boolean(model, "ultracode")
-        && let Some(ultracode) = chosen_bool(selection, "ultracode")
-    {
+    if let Some(ultracode) = resolved("ultracode") {
         settings.insert("ultracode".into(), json!(ultracode));
     }
     let mut args: Vec<String> = [
@@ -357,7 +357,8 @@ mod tests {
             "capabilities": {"optionDescriptors": [
                 {"id": "effort", "label": "Effort", "type": "select", "options": [
                     {"id": "low", "label": "Low"},
-                    {"id": "high", "label": "High", "isDefault": true}]},
+                    {"id": "high", "label": "High", "isDefault": true},
+                    {"id": "ultracode", "label": "Ultracode"}]},
                 {"id": "thinking", "label": "Thinking", "type": "boolean"},
                 {"id": "contextWindow", "label": "Context", "type": "select", "options": [
                     {"id": "200k", "label": "200k", "isDefault": true},
@@ -365,9 +366,21 @@ mod tests {
             "adapter": {"claudeCode": {"effortMap": {"high": "max"},
                 "modelSuffixes": {"contextWindow": {"1m": "[1m]"}}}}
         });
-        catalog["models"].as_array_mut().unwrap().push(
+        catalog["profiles"]["fast"] = json!({
+            "capabilities": {"optionDescriptors": [
+                {"id": "effort", "label": "Effort", "type": "select", "options": [
+                    {"id": "high", "label": "High"},
+                    {"id": "ultracode", "label": "Ultracode", "isDefault": true}]},
+                {"id": "fastMode", "label": "Fast", "type": "boolean", "currentValue": true}]}
+        });
+        let models = catalog["models"].as_array_mut().unwrap();
+        models.push(
             json!({"slug": "claude-next", "name": "Claude Next", "status": "current",
                 "profile": "next"}),
+        );
+        models.push(
+            json!({"slug": "claude-fast", "name": "Claude Fast", "status": "current",
+                "profile": "fast"}),
         );
         let live = conn_provider::LiveManifest::default();
         live.set(manifest);
@@ -383,5 +396,30 @@ mod tests {
         assert_eq!(after("--effort"), "max");
         let settings: Value = serde_json::from_str(&after("--settings")).unwrap();
         assert_eq!(settings["alwaysThinkingEnabled"], false);
+        let settings_for = |model: &str, options: Value| {
+            let selection =
+                json!({"instanceId": "claudeAgent", "model": model, "options": options});
+            let args = cli_args(&selection, &live, "{}", true, false, false);
+            let at = args.iter().position(|a| a == "--settings").unwrap();
+            let effort = args
+                .iter()
+                .position(|a| a == "--effort")
+                .map(|at| args[at + 1].clone());
+            (
+                serde_json::from_str::<Value>(&args[at + 1]).unwrap(),
+                effort,
+            )
+        };
+        // A saved legacy Ultracode effort: the resolved toggle is on, at xhigh.
+        let (settings, effort) = settings_for(
+            "claude-next",
+            json!([{"id": "effort", "value": "ultracode"}]),
+        );
+        assert_eq!(settings["ultracode"], true, "{settings}");
+        assert_eq!(effort.as_deref(), Some("xhigh"));
+        // The manifest's defaults, with nothing chosen: Ultracode and Fast Mode on.
+        let (settings, _) = settings_for("claude-fast", json!([]));
+        assert_eq!(settings["ultracode"], true, "{settings}");
+        assert_eq!(settings["fastMode"], true, "{settings}");
     }
 }

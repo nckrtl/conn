@@ -961,6 +961,9 @@ pub(crate) mod tests {
             serde_json::json!({"claudeCode": {"minVersion": "not a version"}});
         let mut inverted = bundled_manifest("2999-06-01T00:00:00.000Z");
         inverted["providers"]["claudeAgent"]["models"][0]["adapter"] = serde_json::json!({"claudeCode": {"minVersion": "3.0.0", "maxVersionExclusive": "2.0.0"}});
+        let mut not_an_object = bundled_manifest("2999-06-01T00:00:00.000Z");
+        not_an_object["providers"]["claudeAgent"]["models"][0]["adapter"] =
+            serde_json::json!({"claudeCode": false});
         let mut bad_profile = bundled_manifest("2999-06-01T00:00:00.000Z");
         let profile = bad_profile["providers"]["claudeAgent"]["profiles"]
             .as_object_mut()
@@ -973,7 +976,13 @@ pub(crate) mod tests {
         bad_policy["compatibility"][0]["recommendedVersion"] = "0.1.0".into();
         let valid = bundled_manifest("2999-01-01T00:00:00.000Z");
         assert!(decode_manifest(&valid).is_some());
-        for invalid in [bad_version, inverted, bad_profile, bad_policy] {
+        for invalid in [
+            bad_version,
+            inverted,
+            not_an_object,
+            bad_profile,
+            bad_policy,
+        ] {
             assert!(decode_manifest(&invalid).is_none(), "accepted");
             let dir = temp_dir("invalid-adapter");
             let mut state = State::default();

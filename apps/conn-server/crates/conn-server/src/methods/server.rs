@@ -107,12 +107,16 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
                 super::provider::refresh_model_catalog(&deps).await;
                 return Ok(json!({ "providers": [] }));
             }
+            // A workspace (`cwd`, `fresh`) is not scanned and keeps main's behaviour: the
+            // instance is probed, nothing else is fetched, and the reply lists every entry.
+            if input["cwd"].is_string() {
+                super::provider::refresh(&deps, only).await;
+                return Ok(json!({ "providers": current_providers(&deps) }));
+            }
             let refresh_models = input["refreshModels"] == true;
             if refresh_models && let Some(manifest) = &deps.model_manifest {
                 manifest.refresh(Window::Force).await;
             }
-            // A workspace (`cwd`, `fresh`) is not scanned: the instance is probed and the
-            // reply lists every entry, as before workspace snapshots.
             super::provider::refresh(&deps, only).await;
             if refresh_models {
                 super::provider::refresh_models(&deps, only).await?;
@@ -491,12 +495,8 @@ fn open_stream(first: Vec<Value>) -> ItemStream {
 
 /// The providers `server.refreshProviders` answers with (T3's `ws.ts`), for a refresh
 /// without a workspace: none for `omitProviders`; with `workspaceSnapshotsOnDemand`, every
-/// entry without its workspace snapshots, and `usageLimitsCommand` adds `/usage-limits`. A
-/// request with a `cwd` gets every entry as it is: this server does not scan workspaces.
+/// entry without its workspace snapshots, and `usageLimitsCommand` adds `/usage-limits`.
 fn refresh_reply(input: &Value, providers: Vec<Value>) -> Vec<Value> {
-    if input["cwd"].is_string() {
-        return providers;
-    }
     if input["omitProviders"] == true {
         return Vec::new();
     }
@@ -821,6 +821,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(good.probes.load(Relaxed), probes + 1);
+        assert_eq!(reply["providers"], json!(current_providers(&deps)));
+        // A workspace refresh keeps main's behaviour even with `refreshModels`: one probe,
+        // no manifest fetch or model refresh, every entry in the reply.
+        let refreshes = good.refreshes.load(Relaxed);
+        let reply = call(json!({"instanceId": "good", "cwd": "/w", "refreshModels": true}))
+            .await
+            .unwrap();
+        assert_eq!(good.probes.load(Relaxed), probes + 2);
+        assert_eq!(good.refreshes.load(Relaxed), refreshes);
         assert_eq!(reply["providers"], json!(current_providers(&deps)));
         // On demand without a workspace: every entry, without its snapshots.
         let reply = call(json!({"workspaceSnapshotsOnDemand": true}))

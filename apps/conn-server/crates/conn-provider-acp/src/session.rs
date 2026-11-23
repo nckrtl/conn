@@ -764,6 +764,11 @@ impl Inner {
         let effort = self.config.effort.clone();
         self.configure(connection, &model, effort.as_deref())
             .await?;
+        // T3's start commits only when no termination was recorded (Antigravity's sign-in
+        // URL right behind the last reply).
+        if let Some(failure) = connection.failure() {
+            return Err(failure);
+        }
         Ok(session_id)
     }
 

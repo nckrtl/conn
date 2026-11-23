@@ -1299,6 +1299,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// T3's start checks the recorded termination when it commits: a sign-in URL right
+    /// behind the final `session/new` reply fails the open, signs out, and releases none of
+    /// the commands held since the start.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sign_in_url_behind_the_session_new_reply_signs_out() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2F&state=fixture-state";
+        let script = vec![
+            expect("initialize", json!("<any>")),
+            reply(
+                "initialize",
+                json!({"protocolVersion": 1, "agentCapabilities": {}}),
+            ),
+            expect("authenticate", json!("<any>")),
+            reply("authenticate", json!({})),
+            expect("session/new", json!("<any>")),
+            json!({"type": "emit_inbound", "frame": {"kind": "notification",
+                "method": "session/update", "params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [{"name": "root-cmd", "description": "Root"}]}}}}),
+            reply(
+                "session/new",
+                json!({"sessionId": "s1", "configOptions": []}),
+            ),
+            json!({"type": "emit_raw", "line": format!("{}{url}", antigravity::AUTH_STDOUT_PREFIX)}),
+        ];
+        let (provider, _, dir) = provider(vec![script]);
+        let error = provider.refresh_models().unwrap().await.unwrap_err();
+        assert_eq!(
+            error,
+            ProviderError::Failed {
+                operation: "refresh-models",
+                detail: REFRESH_SIGN_IN.into(),
+            }
+        );
+        let entry = entry_of(&provider);
+        assert_eq!(entry["auth"], json!({"status": "unauthenticated"}));
+        assert!(
+            !entry["slashCommands"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|c| c["name"] == "root-cmd")),
+            "{entry}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// T3's `refreshModels` starts its throwaway session as the agent opens it: the catalog
     /// starts from the agent's own model. The manifest's default is for a thread.
     #[tokio::test(flavor = "current_thread")]

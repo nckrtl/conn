@@ -230,6 +230,11 @@ impl Connection {
         )
     }
 
+    /// The failure that ended the connection ([`Signal`]), once the reader has recorded it.
+    pub(crate) fn failure(&self) -> Option<conn_provider::ProviderError> {
+        crate::lock(&self.pending).failure.clone()
+    }
+
     /// Sends a request and waits for its reply.
     pub(crate) async fn call(&self, method: &str, params: J) -> Result<Value, CallError> {
         let (tx, rx) = oneshot::channel();

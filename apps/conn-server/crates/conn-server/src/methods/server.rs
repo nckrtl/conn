@@ -488,6 +488,41 @@ mod tests {
         (Arc::new(env), dir)
     }
 
+    /// One unknown enum value on disk still gives clients a config, in the snapshot and the
+    /// stream the GPUI model catalog reads, and the file stays as the user wrote it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_undecodable_settings_file_still_gives_a_config() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-server-cfg-{}", crate::auth::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = "{\"responseStreamingMode\":\"typo\"}";
+        std::fs::write(dir.join("settings.json"), broken).unwrap();
+        let env = Arc::new(
+            Environment::load(&dir, Some("Test".into()), dir.clone(), Default::default()).unwrap(),
+        );
+        let config = server_config(&env, Vec::new()).unwrap();
+        assert_eq!(
+            config["settings"]["continueThreadsAfterServerUpdate"],
+            false
+        );
+        let mut stream = config_stream(
+            env.clone(),
+            Deps::default(),
+            config,
+            env.subscribe_descriptor(),
+            None,
+        );
+        let snapshot = stream.recv().await.unwrap().unwrap();
+        assert_eq!(snapshot["type"], "snapshot");
+        conn_contract::from_json::<conn_contract::ServerConfig>(snapshot["config"].clone())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.json")).unwrap(),
+            broken
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn the_config_stream_follows_settings_keybindings_and_providers() {
         let (env, dir) = environment();

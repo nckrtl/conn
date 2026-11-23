@@ -7,11 +7,15 @@
 #   └── Resources/          AppIcon.icns (Conn's macOS icon), sdk-host/
 #
 # Why: macOS privacy grants (Screen Recording, Files and Folders, ...) for a bare executable
-# are keyed by its path, so each new install path asks again and shows no icon. A signed
-# bundle is keyed by bundle id and team, so grants survive updates and show Conn's icon.
-# The server finds sdk-host/ in ../Resources (conn-provider-support, installed_helper).
+# are keyed by its path, so each new install path asks again and shows no icon. The bundle
+# gives the server a bundle id, a name and Conn's icon. Whether TCC then keys a launchd job's
+# grants by bundle id, and keeps them across a rebuild, is not yet proven (DROP-IN.md).
+# The server finds sdk-host/ in Contents/Resources (conn-provider-support, installed_helper).
+# The launchd job that runs the bundle sets AssociatedBundleIdentifiers to the bundle id.
 #
-# Usage: tools/macos-app.sh --from <release folder> --out <dir> [--build <CFBundleVersion>]
+# Usage: tools/macos-app.sh --from <release folder> --out <dir> [--build <n[.n[.n]]>] [--commit <sha>]
+#   --build   CFBundleVersion: one to three dot-separated integers (default: the server version)
+#   --commit  the git commit the binary was built from, kept in ConnServerCommit
 #   CONN_SIGN_IDENTITY  codesign identity (default: the Developer ID Application identity)
 # Prints the bundle path. Install it at ONE fixed path and replace it in place on updates.
 set -euo pipefail
@@ -23,16 +27,17 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 icon_png="$here/../../assets/conn/prod/conn-prod-macos-1024.png"
 
 fail() { echo "macos-app: $*" >&2; exit 1; }
-from="" out="" build=""
+from="" out="" build="" commit=""
 while (($#)); do
   case "$1" in
     --from) from="${2:?}"; shift 2 ;;
     --out) out="${2:?}"; shift 2 ;;
     --build) build="${2:?}"; shift 2 ;;
+    --commit) commit="${2:?}"; shift 2 ;;
     *) fail "unknown argument $1" ;;
   esac
 done
-[[ -n "$from" && -n "$out" ]] || fail "usage: --from <release folder> --out <dir> [--build <version>]"
+[[ -n "$from" && -n "$out" ]] || fail "usage: --from <release folder> --out <dir> [--build <n.n.n>] [--commit <sha>]"
 [[ "$(uname -s)" == Darwin ]] || fail "builds on macOS only"
 [[ -x "$from/conn-server" ]] || fail "no conn-server in $from"
 [[ -f "$from/sdk-host/index.mjs" ]] || fail "no sdk-host/index.mjs in $from"
@@ -40,7 +45,10 @@ done
 
 version="$("$from/conn-server" --version | awk '{print $2}')"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || fail "unexpected --version output: $version"
-build="${build:-$version}"
+build="${build:-${version%%[-+]*}}"
+# CFBundleVersion must parse as a build number (CFBundleGetVersionNumber), so no SHA in it.
+[[ "$build" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || fail "--build must be one to three dot-separated integers, not $build"
+[[ -z "$commit" || "$commit" =~ ^[0-9a-f]{7,40}$ ]] || fail "--commit must be a hex git SHA, not $commit"
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 app="$work/$NAME.app"
@@ -70,12 +78,14 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$build</string>
+  <key>ConnServerCommit</key><string>$commit</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
 plutil -lint "$app/Contents/Info.plist" >/dev/null
+[[ -n "$commit" ]] || plutil -remove ConnServerCommit "$app/Contents/Info.plist"
 
 # Signing the bundle signs its main executable with the bundle id and seals Resources.
 codesign --force --sign "$IDENTITY" --options runtime --timestamp "$app"

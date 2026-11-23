@@ -147,15 +147,23 @@ as a bare executable. `tools/macos-app.sh --from <folder with conn-server and sd
 to the process that launchd started, so they cover the server's children too: provider CLIs,
 `screencapture` calls by agents, and the Device panel's serve-sim stream, whose LiveKit WebRTC
 framework links ScreenCaptureKit and `CGDisplayStream`. For a bare executable TCC keys the
-grant by its path, so each new install path asks again and lists one more nameless entry
-without an icon. For a signed bundle TCC keys it by bundle id and team, and System Settings
-shows the bundle's name and icon.
+grant by its path (`client_type` 1 in `TCC.db`), so each new install path asked again and
+listed one more nameless entry without an icon.
+
+**Not yet proven.** The aim is that TCC keys the grant by bundle id and team, shows the
+bundle's name and icon, and keeps the grant when the bundle is replaced by a rebuild with the
+same designated requirement. launchd runs the bundle's Mach-O directly, not through
+LaunchServices, so this needs a test with real prompts: a disposable GUI LaunchAgent, children
+that ask for Screen Recording and Accessibility, then a rebuilt bundle. Until that passes, treat
+persistence as a goal.
 
 **Install.** Keep the bundle at one path (`~/Applications/Conn Server.app`) and replace it in
-place on updates; the launchd job runs `Contents/MacOS/conn-server`. The server finds the SDK
-host in `../Resources` when nothing sits beside the binary. The bundle is not notarized, so
-`spctl` rejects it ("Unnotarized Developer ID"); that does not matter for a launchd job,
-because Gatekeeper checks only quarantined files.
+place on updates. The launchd job runs `Contents/MacOS/conn-server` and sets
+`AssociatedBundleIdentifiers` to `com.nckrtl.conn-server`, so Login Items attributes the job to
+the bundle. The server finds the SDK host in `Contents/Resources` only inside a `.app`, after
+the folder beside the binary. `CFBundleVersion` is a numeric build number; the git commit goes in
+`ConnServerCommit`. The bundle is not notarized, so `spctl` rejects it ("Unnotarized Developer
+ID"); that does not matter for a launchd job, because Gatekeeper checks only quarantined files.
 
 ## 2. Conn desktop's local backend
 

@@ -130,6 +130,43 @@ fn marker_report(line: &[u8]) -> Option<(&[u8], usize)> {
     Some((path, std::str::from_utf8(number).ok()?.parse().ok()?))
 }
 
+/// Adds `git diff --check`'s leftover-marker reports for `files` to `reports`. `--check` exits
+/// 2 when it reports a problem.
+async fn marker_reports(
+    command: GitCommand,
+    files: &HashMap<&[u8], usize>,
+    reports: &mut HashMap<usize, HashSet<usize>>,
+) -> Result<(), ProcessError> {
+    each_record(command, b'\n', |line| {
+        if let Some((path, number)) = marker_report(line)
+            && let Some(&file) = files.get(path)
+        {
+            reports.entry(file).or_default().insert(number);
+        }
+    })
+    .await
+}
+
+/// Splits `paths` into runs whose pathspecs stay well under the platform's argument limit.
+fn path_batches(paths: &[OsString]) -> Vec<&[OsString]> {
+    const BUDGET: usize = 128 * 1024;
+    let mut batches = Vec::new();
+    let (mut start, mut size) = (0, 0);
+    for (n, path) in paths.iter().enumerate() {
+        // The pathspec prefix, its NUL and its argv pointer.
+        let cost = path.len() + 24;
+        if n > start && size + cost > BUDGET {
+            batches.push(&paths[start..n]);
+            (start, size) = (n, 0);
+        }
+        size += cost;
+    }
+    if start < paths.len() {
+        batches.push(&paths[start..]);
+    }
+    batches
+}
+
 async fn stage(
     cwd: &Path,
     selected: Option<&[String]>,
@@ -196,17 +233,20 @@ async fn stage(
             // The whole tree, not T3's pathspec per unmerged path: thousands of paths pass the
             // argument limit. Reports for other files are ignored.
             let check = diff(["--check", "--no-color"]);
-            let checked = each_record(run(check), b'\n', |line| {
-                if let Some((path, number)) = marker_report(line)
-                    && let Some(&file) = files.get(path)
-                {
-                    reports.entry(file).or_default().insert(number);
+            match marker_reports(run(check), &files, &mut reports).await {
+                Ok(()) | Err(ProcessError::Exit { code: 2, .. }) => {}
+                // Another file can make Git die before it reports; check T3's paths instead.
+                Err(ProcessError::Exit { .. }) => {
+                    reports.clear();
+                    for batch in path_batches(&unmerged) {
+                        let mut check = diff(["--check", "--no-color", "--"]);
+                        check.extend(batch.iter().map(literal));
+                        match marker_reports(run(check), &files, &mut reports).await {
+                            Ok(()) | Err(ProcessError::Exit { code: 2, .. }) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                 }
-            })
-            .await;
-            // `--check` exits non-zero when it reports a problem.
-            match checked {
-                Ok(()) | Err(ProcessError::Exit { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
             let mut conflicted = Vec::new();
@@ -468,7 +508,8 @@ pub async fn create(
 
 #[cfg(test)]
 mod tests {
-    use super::{marker_report, split_records};
+    use super::{marker_report, path_batches, split_records};
+    use std::ffi::OsString;
 
     #[test]
     fn records_survive_every_chunk_boundary() {
@@ -490,6 +531,20 @@ mod tests {
             assert_eq!(records, want, "split at {split}");
             assert_eq!(partial, b"c", "split at {split}");
         }
+    }
+
+    #[test]
+    fn splits_paths_into_batches_under_the_argument_limit() {
+        let paths: Vec<OsString> = (0..20_000)
+            .map(|n| format!("dir/{n:0>40}.txt").into())
+            .collect();
+        let batches = path_batches(&paths);
+        assert!(batches.len() > 1);
+        assert_eq!(batches.concat(), paths);
+        for batch in batches {
+            assert!(batch.iter().map(|p| p.len() + 24).sum::<usize>() <= 128 * 1024);
+        }
+        assert!(path_batches(&[]).is_empty());
     }
 
     #[test]

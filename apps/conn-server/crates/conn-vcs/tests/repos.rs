@@ -1319,6 +1319,23 @@ async fn commit_all_reads_markers_at_the_configured_width() {
     .await;
 }
 
+#[tokio::test]
+async fn commit_all_refuses_markers_when_another_file_fails_the_whole_tree_check() {
+    let fx = conflict_in("commit-check-fatal", "z.txt", |work| {
+        // Git dies on this pair, but only for a file it diffs.
+        write(
+            work,
+            ".gitattributes",
+            "a.txt whitespace=tab-in-indent,indent-with-non-tab\n",
+        );
+        write(work, "a.txt", "one\n");
+    });
+    write(&fx.work, "a.txt", "two\n");
+
+    assert_commit_all_refused(&fx, "z.txt").await;
+    assert_commit_all_merges(&fx, "z.txt", "resolved\n").await;
+}
+
 /// Runs `git merge feature` in `work` and checks that it conflicts.
 fn merge_feature(work: &std::path::Path) {
     let merge = std::process::Command::new("git")

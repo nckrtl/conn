@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 @MainActor
@@ -434,18 +435,17 @@ final class ConnSpikeUITests: XCTestCase {
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", title, title)).firstMatch
         }
-        // React Native fields take focus a beat after the tap; type only once the keyboard is up.
-        func focusAndType(_ field: XCUIElement, _ text: String) {
-            for _ in 0..<4 {
-                field.tap()
-                settle(1)
-                if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { break }
-            }
-            // A controlled RN input drops keys typed in one burst under load.
-            for character in text {
-                field.typeText(String(character))
-                settle(0.08)
-            }
+        // React Native's controlled fields drop keys and focus under load; a paste is one event.
+        func pasteInto(_ app: XCUIApplication, _ field: XCUIElement, _ text: String) {
+            UIPasteboard.general.string = text
+            field.tap()
+            settle(1)
+            field.press(forDuration: 1.2)
+            let paste = app.menuItems["Paste"].firstMatch
+            if paste.waitForExistence(timeout: 5) { paste.tap() }
+            let allow = springboard.buttons["Allow Paste"].firstMatch
+            if allow.waitForExistence(timeout: 2) { allow.tap() }
+            settle(1)
         }
         func back(_ app: XCUIApplication) {
             if !tap(app, ["Back", "thread.backButton"]) {
@@ -458,8 +458,9 @@ final class ConnSpikeUITests: XCTestCase {
         let app: XCUIApplication
         if expo {
             app = XCUIApplication(bundleIdentifier: env["CONN_EXPO_BUNDLE"] ?? "com.nckrtl.conn")
-            app.activate()
-            settle(3)
+            app.terminate()
+            app.launch()
+            settle(4)
             // Expo's own form (`ConnectionsNewRouteScreen.tsx`): Address and Code, then the
             // header's checkmark, "Add environment". A production build ignores pairing links.
             let parts = pairingURL.components(separatedBy: "/pair#token=")
@@ -469,10 +470,10 @@ final class ConnSpikeUITests: XCTestCase {
             let address = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
             XCTAssertTrue(address.waitForExistence(timeout: 10), "the pairing form should open")
-            focusAndType(address, parts[0].replacingOccurrences(of: "http://", with: ""))
+            pasteInto(app, address, parts[0].replacingOccurrences(of: "http://", with: ""))
             let code = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
-            focusAndType(code, parts.count > 1 ? parts[1] : "")
+            pasteInto(app, code, parts.count > 1 ? parts[1] : "")
             let submit = app.navigationBars.buttons["Add environment"].firstMatch
             if submit.waitForExistence(timeout: 5) { submit.tap() } else { code.typeText("\n") }
             settle(4)

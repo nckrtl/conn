@@ -740,7 +740,25 @@ fn signs_asset_urls_and_rechecks_them_when_served() {
         served_path(f.files.resolve_asset(&token, "app.js", now)),
         Some(f.project.join("docs/app.js"))
     );
-    for denied in [".env.js", "..%2Fimg%2Fa.png", "../img/a.png", "app.rs"] {
+    // Media next to the page plays through the same grant (T3's `clips/clip.*` case).
+    for media in ["clips/clip.mp4", "clips/clip.webm", "clips/clip.mp3"] {
+        d.write(&format!("docs/{media}"), "media bytes");
+        assert_eq!(
+            served_path(f.files.resolve_asset(&token, media, now)),
+            Some(f.project.join("docs").join(media)),
+            "{media}"
+        );
+    }
+    d.write("docs/clips/.hidden.mp4", "media bytes");
+    d.write("docs/fig.bmp", "bitmap");
+    for denied in [
+        ".env.js",
+        "..%2Fimg%2Fa.png",
+        "../img/a.png",
+        "app.rs",
+        "clips/.hidden.mp4",
+        "fig.bmp",
+    ] {
         assert!(
             f.files.resolve_asset(&token, denied, now).is_none(),
             "{denied}"

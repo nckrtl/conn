@@ -115,8 +115,9 @@ Where they differ, because the engine does not do it yet:
 - `conn_thread_wait` ends on `waiting` too, as Orbit's driver expects; no restart chains, since the
   engine ends a run on restart.
 - `conn_thread_update`: `rename` only.
-- `conn_thread_search` follows `searchThreads` (`ThreadSearch.ts`): title, branch and project hits
-  among the project's active listed threads, then message hits from the engine's index (one per
+- `conn_thread_search` follows `searchThreads` (`ThreadSearch.ts`): title, branch, project and
+  pull request hits among the project's active listed threads (a visible PR's number and the
+  newest three titles; `owner/repo#N`, its URL and the thread id by `matchReference`'s rule), then message hits from the engine's index (one per
   thread, outside the title hits), with a fifth of the slots kept for messages. Not ported:
   T3's title scoring (`scoreThreadSearch`) and message ranking (`rankMessageMatches`,
   `compareHits`). Ours orders titles by activity and takes each thread's newest message hit;

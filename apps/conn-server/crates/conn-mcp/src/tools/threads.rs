@@ -336,7 +336,10 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
             let project_hit = live_projects
                 .iter()
                 .any(|(id, title)| *id == &thread["projectId"] && title.contains(&query));
-            lower("title").contains(&query) || lower("branch").contains(&query) || project_hit
+            lower("title").contains(&query)
+                || lower("branch").contains(&query)
+                || project_hit
+                || pull_request_hit(&query, thread)
         })
         .take(limit)
         .collect();
@@ -378,6 +381,109 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
     matches.extend(message_hits);
     matches.truncate(limit);
     Ok(json!({ "currentThreadId": cx.caller_thread_id(), "matches": matches }))
+}
+
+/// A thread's pull requests as search reads them (`threadSearchPullRequests`): the branch's PR,
+/// then the visible linked ones newest first, else the legacy single link. Only the newest three
+/// linked PRs match by title.
+fn search_pull_requests(thread: &Value) -> Vec<(&Value, Option<&str>)> {
+    const SEARCHED_TITLES: usize = 3;
+    let mut found: Vec<(&Value, Option<&str>)> = Vec::new();
+    if thread["branchPullRequest"].is_object() {
+        found.push((&thread["branchPullRequest"], None));
+    }
+    match thread["pullRequests"].as_array() {
+        Some(links) if !links.is_empty() => {
+            let updated = |link: &Value| {
+                link["snapshot"]["updatedAt"]
+                    .as_str()
+                    .or(link["linkedAt"].as_str())
+                    .and_then(conn_support::time::millis_from_iso)
+                    .unwrap_or(0)
+            };
+            let mut visible: Vec<&Value> = links
+                .iter()
+                .filter(|link| link["source"] != "stack-dismissed")
+                .collect();
+            visible.sort_by_key(|link| std::cmp::Reverse(updated(link)));
+            found.extend(visible.into_iter().enumerate().map(|(index, link)| {
+                let title = (index < SEARCHED_TITLES)
+                    .then(|| link["snapshot"]["title"].as_str())
+                    .flatten();
+                (link, title)
+            }));
+        }
+        _ if thread["linkedPullRequest"].is_object() => {
+            found.push((&thread["linkedPullRequest"], None));
+        }
+        _ => {}
+    }
+    found
+}
+
+/// Whether a lowercased query finds the thread through its pull requests, as `scoreThreadSearch`
+/// does: the number (after a `pr`, `pull` or `#` prefix), a searched title, or a whole
+/// `owner/repo#N`, URL or thread id (`matchReference`).
+fn pull_request_hit(query: &str, thread: &Value) -> bool {
+    let pull_requests = search_pull_requests(thread);
+    // `threadFieldQuery`: a `pr`, `pull` or `pull request` before a number, then a `#`.
+    let field_query = ["pull request", "pull", "pr"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = query.strip_prefix(prefix)?.trim_start();
+            rest.trim_start_matches('#')
+                .starts_with(|c: char| c.is_ascii_digit())
+                .then_some(rest)
+        })
+        .unwrap_or(query);
+    let field_query = field_query
+        .strip_prefix('#')
+        .unwrap_or(field_query)
+        .trim_start();
+    let field_hit = !field_query.is_empty()
+        && pull_requests.iter().any(|(link, title)| {
+            link["number"]
+                .as_u64()
+                .is_some_and(|n| n.to_string().starts_with(field_query))
+                || title.is_some_and(|t| t.to_lowercase().contains(field_query))
+        });
+    field_hit || reference_hit(query, thread, &pull_requests)
+}
+
+/// `matchReference`: ids and links have many word starts, so only a query of eight or more
+/// characters matches them, anywhere when it holds a digit (never cutting a number short),
+/// else at the start.
+fn reference_hit(query: &str, thread: &Value, pull_requests: &[(&Value, Option<&str>)]) -> bool {
+    const REFERENCE_PREFIX_MIN: usize = 8;
+    if query.encode_utf16().count() < REFERENCE_PREFIX_MIN {
+        return false;
+    }
+    let anywhere = query.chars().any(char::is_numeric);
+    let not_cut = |text: &str, end: usize| {
+        !text
+            .get(end..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_numeric)
+    };
+    let matches = |reference: &str| {
+        let folded = reference.to_lowercase();
+        let at = folded.find(query);
+        if anywhere {
+            at.is_some_and(|at| not_cut(&folded, at + query.len()))
+                || (query.starts_with(&folded) && not_cut(query, folded.len()))
+        } else {
+            at == Some(0)
+        }
+    };
+    let references = pull_requests.iter().flat_map(|(link, _)| {
+        let repository = link["repository"].as_str().unwrap_or_default();
+        let number = link["number"].as_u64().unwrap_or_default();
+        [
+            format!("{repository}#{number}"),
+            link["url"].as_str().unwrap_or_default().to_owned(),
+        ]
+    });
+    thread["id"].as_str().is_some_and(matches) || references.into_iter().any(|r| matches(&r))
 }
 
 /// The tool's `limit` default, and the message hits `searchThreads` asks the index for.

@@ -265,3 +265,80 @@ async fn create_links_the_opened_pull_request_as_t3() {
         "The host accepted the PR but does not list it yet. Find it with pull_request_list."
     );
 }
+
+/// The search sources `conn_thread_search` returns for `thread` on `query`.
+async fn search_sources(swamp: &mut Client<'_>, thread: &str, query: &str) -> Vec<Value> {
+    let found = swamp
+        .ok(
+            "conn_thread_search",
+            json!({"projectId": project_id(), "query": query}),
+        )
+        .await;
+    found["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["threadId"] == thread)
+        .map(|hit| hit["source"].clone())
+        .collect()
+}
+
+/// T3's `searchThreads` reads a thread's linked pull requests (`threadSearchPullRequests`).
+#[tokio::test(flavor = "current_thread")]
+async fn search_finds_a_thread_by_its_linked_pull_request() {
+    let f = with_host(fixture("pr-search"), "open");
+    let mut swamp = Client::open(&f.service, client(true)).await;
+    let thread = launch_as_swamp(
+        &mut swamp,
+        "Spring maintenance",
+        "hang",
+        "full-access",
+        "default",
+    )
+    .await;
+    let url = "https://github.com/example/fixture/pull/7483";
+    swamp
+        .ok("link_pull_request", json!({"threadId": thread, "url": url}))
+        .await;
+    let listed = swamp
+        .ok("list_thread_pull_requests", json!({"threadId": thread}))
+        .await;
+    assert_eq!(listed["pullRequests"][0]["number"], 7483);
+
+    for query in [
+        "Spring maintenance",
+        "#7483",
+        "PR 7483",
+        "example/fixture#7483",
+        url,
+        "https://github.com/example/fixture/pull/7483/files",
+    ] {
+        assert_eq!(
+            search_sources(&mut swamp, &thread, query).await,
+            [json!("title")],
+            "{query}"
+        );
+    }
+    for query in ["#7484", "example/fixture#74830", "fixture/pull/74"] {
+        assert_eq!(
+            search_sources(&mut swamp, &thread, query).await,
+            Vec::<Value>::new(),
+            "{query}"
+        );
+    }
+
+    swamp
+        .ok(
+            "unlink_pull_request",
+            json!({"threadId": thread, "url": url}),
+        )
+        .await;
+    for query in ["#7483", "example/fixture#7483", url] {
+        assert_eq!(
+            search_sources(&mut swamp, &thread, query).await,
+            Vec::<Value>::new(),
+            "{query} after unlink"
+        );
+    }
+    f.service.config.engine.shutdown().await;
+}

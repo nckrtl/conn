@@ -58,7 +58,9 @@ pub(crate) struct Followers {
     rescan: AtomicBool,
     /// Set at shutdown: followers stop where they are, and no new one starts.
     stop: tokio::sync::watch::Sender<bool>,
-    /// Signalled as each follower ends.
+    /// Engine writes handed over and not yet done; a stop waits for them.
+    writes: std::sync::atomic::AtomicUsize,
+    /// Signalled as each follower or write ends.
     ended: tokio::sync::Notify,
 }
 
@@ -68,6 +70,7 @@ impl Default for Followers {
             running: std::sync::Mutex::default(),
             rescan: AtomicBool::default(),
             stop: tokio::sync::watch::Sender::new(false),
+            writes: std::sync::atomic::AtomicUsize::new(0),
             ended: tokio::sync::Notify::new(),
         }
     }
@@ -151,17 +154,49 @@ impl McpService {
     /// Stops every follower where it is, a back-off included, and waits until none runs, so
     /// nothing writes a result or wakes a parent while the engine closes. T3 closes the
     /// followers' scope the same way. Open tasks stay open for the next start.
+    ///
+    /// A write a follower already handed to the engine is not cut off: it may be committing,
+    /// so the stop waits until it is done, and later ones are refused.
     pub async fn stop_remote_tasks(&self) {
-        self.remote.stop.send_replace(true);
+        {
+            // Under the lock [`Self::submit`] checks the stop with, so no write slips past.
+            let _running = crate::lock(&self.remote.running);
+            self.remote.stop.send_replace(true);
+        }
         loop {
             let ended = self.remote.ended.notified();
             let mut ended = std::pin::pin!(ended);
             ended.as_mut().enable();
-            if crate::lock(&self.remote.running).is_empty() {
+            if crate::lock(&self.remote.running).is_empty()
+                && self.remote.writes.load(Ordering::SeqCst) == 0
+            {
                 return;
             }
             ended.await;
         }
+    }
+
+    /// Hands one remote task command to the engine as its own task, so a follower stopped
+    /// while it waits never drops a write the engine may be committing; the stop waits for
+    /// it. Refused once the stop is signalled.
+    async fn submit(&self, command: Value) -> Result<(), String> {
+        {
+            let _running = crate::lock(&self.remote.running);
+            if *self.remote.stop.borrow() {
+                return Err("The server is stopping.".into());
+            }
+            self.remote.writes.fetch_add(1, Ordering::SeqCst);
+        }
+        let engine = self.config.engine.clone();
+        let followers = self.remote.clone();
+        tokio::spawn(async move {
+            let done = engine.remote_task(command).await;
+            followers.writes.fetch_sub(1, Ordering::SeqCst);
+            followers.ended.notify_waiters();
+            done
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn scan_remote_tasks(self: &Arc<Self>) {
@@ -466,7 +501,7 @@ impl McpService {
         if let Some(model) = executed_model {
             command["executedModel"] = json!(model);
         }
-        match self.config.engine.remote_task(command).await {
+        match self.submit(command).await {
             Ok(()) => Ok(()),
             Err(error) => match self.read_remote_task(parent, task).await? {
                 Some((_, row)) if row["result"].is_string() => Ok(()),

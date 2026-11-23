@@ -1212,3 +1212,347 @@ fn pending_question_banner_sits_on_the_composer_and_digits_pick_its_options(
         assert_eq!(selected(window, cx, "Headless"), Some(false));
     });
 }
+
+fn two_project_shell() -> ShellState {
+    let mut shell = kitchen_sink_shell();
+    let other: ProjectShell = match from_json(json!({
+        "id": "proj-other",
+        "title": "orbit",
+        "workspaceRoot": "/tmp/orbit-parity",
+        "defaultModelSelection": null,
+        "scripts": [],
+        "createdAt": "2026-11-20T09:00:00.000Z",
+        "updatedAt": "2026-11-22T15:00:00.000Z",
+    })) {
+        Ok(project) => project,
+        Err(err) => panic!("second ProjectShell failed: {err}"),
+    };
+    shell.projects.push(other);
+    shell
+}
+
+/// Types `text` into the composer and renders, so the draft shows and parks like a user's.
+fn type_into_composer(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    app: &Entity<ConnApp>,
+    text: &str,
+) {
+    let chat = cx.read(|cx| app.read(cx).chat_for_test());
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        chat.update(cx, |chat, cx| {
+            chat.set_draft_text(text.to_owned(), window, cx)
+        });
+        window.render_frame(cx);
+    });
+}
+
+#[gpui_kit::test]
+fn a_draft_moved_onto_a_project_with_a_draft_leaves_that_draft_in_the_sidebar(
+    cx: &mut TestAppContext,
+) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+
+    // orbit gets a draft with text; conn-gpui gets another.
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-other".to_owned()), Some(window), cx);
+        });
+    });
+    type_into_composer(cx, window, &app, "orbit idea");
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-parity".to_owned()), Some(window), cx);
+        });
+    });
+    type_into_composer(cx, window, &app, "conn idea");
+    let (moved_id, _) = cx
+        .read(|cx| app.read(cx).open_draft_for_test())
+        .expect("a draft is open");
+
+    // The hero's picker moves the open draft onto orbit, which already has one.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_draft_project("proj-other".to_owned(), cx)
+        });
+    });
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test()),
+        Some((moved_id.clone(), "proj-other".to_owned())),
+        "the draft with content moves to the picked project"
+    );
+    let _ = cx.update_window(window, |_, window, cx| window.render_frame(cx));
+
+    // Orbit's own draft stays: an unmapped row, with its text and project.
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find_by_label("orbit idea, Unsent draft, orbit")
+                .is_some(),
+            "the displaced draft keeps a sidebar row"
+        );
+    });
+
+    // Leaving the moved draft lists it too, newest first.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected".to_owned(), cx)
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find_by_label("conn idea, Unsent draft, orbit")
+                .is_some()
+        );
+        assert!(
+            window
+                .try_find_by_label("orbit idea, Unsent draft, orbit")
+                .is_some()
+        );
+    });
+
+    // `New thread` in orbit opens the draft the project points at: the moved one.
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-other".to_owned()), Some(window), cx);
+        });
+    });
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test())
+            .map(|d| d.0),
+        Some(moved_id.clone()),
+    );
+
+    // The unmapped draft reopens from its row, with its text back in the composer.
+    let row = match cx.update_window(window, |_, window, cx| {
+        center_by_label(window, cx, "orbit idea, Unsent draft, orbit")
+    }) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate the draft row: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_move(row, None, cx);
+        window.pointer_down(row, MouseButton::Left, cx);
+        window.pointer_up(row, MouseButton::Left, cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+    });
+    let reopened = cx.read(|cx| app.read(cx).open_draft_for_test());
+    assert!(
+        reopened.is_some_and(|(id, project)| id != moved_id && project == "proj-other"),
+        "the unmapped draft is the one open now"
+    );
+    let chat = cx.read(|cx| app.read(cx).chat_for_test());
+    let _ = cx.update_window(window, |_, _, cx| {
+        assert!(
+            chat.read(cx).draft_has_content(cx),
+            "the reopened draft shows its text"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn discarding_a_draft_row_removes_it_and_undo_brings_it_back(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-other".to_owned()), Some(window), cx);
+        });
+    });
+    type_into_composer(cx, window, &app, "half a thought");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected".to_owned(), cx)
+        });
+    });
+    let row_label = "half a thought, Unsent draft, orbit";
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(window.try_find_by_label(row_label).is_some());
+        assert!(window.try_find_by_label("Discard draft").is_some());
+    });
+
+    // The row's `x` discards the draft and offers `Undo`.
+    let discard = match cx.update_window(window, |_, window, cx| {
+        center_by_label(window, cx, "Discard draft")
+    }) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate the discard button: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_move(discard, None, cx);
+        window.pointer_down(discard, MouseButton::Left, cx);
+        window.pointer_up(discard, MouseButton::Left, cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find_by_label(row_label).is_none(),
+            "the row is gone"
+        );
+        assert!(window.try_find_by_label("Undo discard").is_some());
+    });
+
+    let undo = match cx.update_window(window, |_, window, cx| {
+        center_by_label(window, cx, "Undo discard")
+    }) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate Undo: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_move(undo, None, cx);
+        window.pointer_down(undo, MouseButton::Left, cx);
+        window.pointer_up(undo, MouseButton::Left, cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find_by_label(row_label).is_some(),
+            "undo brings the draft row back with its text"
+        );
+        assert!(window.try_find_by_label("Undo discard").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn draft_row_menu_offers_copy_project_settings_and_discard(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-other".to_owned()), Some(window), cx);
+        });
+    });
+    type_into_composer(cx, window, &app, "menu draft");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected".to_owned(), cx)
+        });
+    });
+    let row = match cx.update_window(window, |_, window, cx| {
+        center_by_label(window, cx, "menu draft, Unsent draft, orbit")
+    }) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate the draft row: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_move(row, None, cx);
+        window.pointer_down(row, MouseButton::Right, cx);
+        window.pointer_up(row, MouseButton::Right, cx);
+        window.render_frame(cx);
+        for label in ["Copy", "Project settings"] {
+            assert!(
+                window.try_find_by_label(label).is_some(),
+                "{label} is listed"
+            );
+        }
+        // The row's own `x` and the menu's destructive item.
+        assert_eq!(window.find_all_by_label("Discard draft").len(), 2);
+    });
+    let copy = match cx.update_window(window, |_, window, cx| center_by_label(window, cx, "Copy")) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate Copy: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_move(copy, None, cx);
+        window.render_frame(cx);
+    });
+    let path = match cx.update_window(window, |_, window, cx| center_by_label(window, cx, "Path")) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate Path: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_move(path, None, cx);
+        window.pointer_down(path, MouseButton::Left, cx);
+        window.pointer_up(path, MouseButton::Left, cx);
+        window.render_frame(cx);
+    });
+    assert_eq!(
+        cx.read(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .as_deref(),
+        Some("/tmp/orbit-parity"),
+        "Copy > Path gives the draft's project folder"
+    );
+}
+
+#[gpui_kit::test]
+fn drafts_are_saved_to_disk_and_come_back_on_the_next_start(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let dir =
+        std::env::temp_dir().join(format!("conn-drafts-ui-{}", crate::drafts::new_draft_id()));
+    let path = dir.join("drafts.json");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_drafts_path_for_test(path.clone());
+            app.set_shell(two_project_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-other".to_owned()), Some(window), cx);
+        });
+    });
+    type_into_composer(cx, window, &app, "survives a restart");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected".to_owned(), cx);
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.settle_drafts_for_test(cx)));
+    let saved = std::fs::read_to_string(&path).expect("the drafts file is written");
+    assert!(saved.contains("survives a restart"));
+
+    // Discarding wipes the draft and its file entry; the saved copy is what a restart reads.
+    let _ = cx.update_window(window, |_, window, cx| {
+        let discard = center_by_label(window, cx, "Discard draft");
+        window.pointer_move(discard, None, cx);
+        window.pointer_down(discard, MouseButton::Left, cx);
+        window.pointer_up(discard, MouseButton::Left, cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find_by_label("survives a restart, Unsent draft, orbit")
+                .is_none()
+        );
+    });
+    std::fs::write(&path, saved).expect("puts the saved file back");
+    cx.update(|cx| app.update(cx, |app, cx| app.restore_saved_drafts_for_test(cx)));
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find_by_label("survives a restart, Unsent draft, orbit")
+                .is_some(),
+            "the saved draft is listed again, with its text"
+        );
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -36,6 +36,7 @@ use crate::app::ConnApp;
 use crate::icons;
 use crate::panels::chrome::ConnTooltipExt as _;
 use crate::shell::{CardJoin, MACOS_TRAFFIC_LIGHTS_INSET_PX, WORKSPACE_RAIL_WIDTH_PX, inset_card};
+use crate::sidebar::drafts::{DraftSidebar, render_draft_block, render_draft_undo_notice};
 use crate::sidebar::hover_card::render_thread_hover_card;
 use crate::sidebar::hover_card_state::RowRectCell;
 use crate::sidebar::{render_project_favicon, render_project_monogram};
@@ -87,7 +88,7 @@ pub(crate) fn render_thread_sidebar(
     layout: &LayoutState,
     workspaces: &[OrbitWorkspace],
     active_workspace: Option<&str>,
-    draft_project_id: Option<&str>,
+    drafts: &DraftSidebar<'_>,
     collapsed_projects: &HashSet<String>,
     search_input: &Entity<InputState>,
     renaming_thread_id: Option<&str>,
@@ -264,25 +265,8 @@ pub(crate) fn render_thread_sidebar(
 
     // Flat list of threads, scoped to `active_workspace` (either an Orbit workspace or a
     // direct project filter) and live sidebar search when set.
-    let active_orbit_ws = active_workspace.and_then(|id| workspaces.iter().find(|ws| ws.id == id));
-    let thread_in_scope = |thread: &ThreadShell| -> bool {
-        let Some(ws_id) = active_workspace else {
-            return true;
-        };
-        if let Some(orbit_ws) = active_orbit_ws {
-            if let Some(project) = shell.project(&thread.project_id) {
-                workspace_matches_project(
-                    orbit_ws,
-                    &project.id,
-                    &project.title,
-                    &project.workspace_root,
-                )
-            } else {
-                workspace_matches_project(orbit_ws, &thread.project_id, "", "")
-            }
-        } else {
-            ws_id == thread.project_id
-        }
+    let thread_in_scope = |thread: &ThreadShell| {
+        project_in_scope(shell, workspaces, active_workspace, &thread.project_id)
     };
 
     let now_secs = current_unix_secs();
@@ -306,12 +290,11 @@ pub(crate) fn render_thread_sidebar(
         .partition(|t| t.pinned_at.as_ref().is_some_and(Option::is_some));
     pinned.sort_by(|a, b| pin_order_key(a).cmp(&pin_order_key(b)));
 
-    let mut thread_rows = Vec::with_capacity(
-        pinned.len() + active.len() + 1 + usize::from(draft_project_id.is_some()),
-    );
-    if let Some(project_id) = draft_project_id {
-        let project = shell.project(project_id);
-        thread_rows.push(render_draft_sidebar_row(project, tokens, cx));
+    let mut thread_rows: Vec<gpui_kit::AnyElement> =
+        Vec::with_capacity(pinned.len() + active.len() + drafts.rows.len() + 2);
+    // Search lists threads only; drafts return when it clears (`SidebarDraftBlock`).
+    if !has_query {
+        thread_rows.extend(render_draft_block(&drafts.rows, tokens, cx));
     }
     for (idx, thread) in pinned.iter().enumerate() {
         let row_key = idx;
@@ -330,7 +313,7 @@ pub(crate) fn render_thread_sidebar(
             environment_label: hover.environment_label,
             tokens,
         };
-        thread_rows.push(render_thread_card(&row, cx));
+        thread_rows.push(render_thread_card(&row, cx).into_any_element());
     }
     if !pinned.is_empty() {
         // `pinned-divider`: a hairline between the Pinned and Active groups.
@@ -339,7 +322,8 @@ pub(crate) fn render_thread_sidebar(
                 .w_full()
                 .px(px(ROW_HORIZONTAL_INSET_PX))
                 .py(px(4.0))
-                .child(div().h(px(1.0)).bg(hsla_alpha(tokens.sidebar_border, 0.60))),
+                .child(div().h(px(1.0)).bg(hsla_alpha(tokens.sidebar_border, 0.60)))
+                .into_any_element(),
         );
     }
     for (idx, thread) in active.iter().enumerate() {
@@ -359,7 +343,7 @@ pub(crate) fn render_thread_sidebar(
             environment_label: hover.environment_label,
             tokens,
         };
-        thread_rows.push(render_thread_card(&row, cx));
+        thread_rows.push(render_thread_card(&row, cx).into_any_element());
     }
 
     // Settled shelf (`SidebarSectionHeader` in `Sidebar.tsx`): always shown, with its count
@@ -487,7 +471,12 @@ pub(crate) fn render_thread_sidebar(
         },
     )
     .child(top_row)
-    .child(list_scroll);
+    .child(list_scroll)
+    .children(
+        drafts
+            .undo_available
+            .then(|| render_draft_undo_notice(tokens, cx)),
+    );
 
     div()
         .id("sidebar-column")
@@ -1399,106 +1388,30 @@ fn settled_thread_timestamp(thread: &ThreadShell) -> &str {
         .unwrap_or(&thread.updated_at)
 }
 
-/// Active unsent draft row pinned at the top of the sidebar list (Conn `SidebarDraftBlock` parity).
-fn render_draft_sidebar_row(
-    project: Option<&ProjectShell>,
-    tokens: &Tokens,
-    cx: &mut Context<'_, ConnApp>,
-) -> gpui_kit::Div {
-    let fg = hsla(tokens.foreground);
-    let muted = hsla(tokens.sidebar_muted_foreground);
-    let hover_bg = hsla(tokens.sidebar_row_hover);
-    let active_bg = hsla(tokens.sidebar_row_active);
-
-    let favicon = project.map_or_else(
-        || render_project_monogram("New", ROW_FAVICON_PX, tokens),
-        |p| render_project_favicon(p, ROW_FAVICON_PX, tokens),
-    );
-    let project_name = project.map_or("Select project", |p| p.title.as_str());
-
-    let discard_btn = div()
-        .id("sidebar-draft-discard")
-        .a11y_button("sidebar.draft.discard", "Discard draft")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(20.0))
-        .flex_shrink_0()
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|app, _, _, cx| {
-            cx.stop_propagation();
-            app.cancel_new_thread(cx);
-        }))
-        .conn_tooltip("Discard draft", tokens)
-        .child(icons::concept("superhero/close.svg", 12.0, muted));
-
-    let mut card = div()
-        .id("sidebar-draft-row")
-        .a11y(
-            gpui_kit::Role::ListItem,
-            "sidebar.draft",
-            "New thread draft",
-        )
-        .aria_selected(true)
-        .flex()
-        .flex_col()
-        .w_full()
-        .px(px(ROW_HORIZONTAL_INSET_PX))
-        .py(px(SIDEBAR_CONTENT_INSET_PX))
-        .rounded(px(ROW_RADIUS_PX))
-        .border_t_1()
-        .bg(active_bg)
-        .border_color(hsla_alpha(tokens.shell_divider_raised, 0.50))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(CARD_ICON_TITLE_GAP_PX))
-                .w_full()
-                .h(px(TITLE_LINE_HEIGHT_PX))
-                .min_w_0()
-                .child(icons::concept("superhero/edit.svg", 14.0, muted))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(TITLE_FONT_SIZE_PX))
-                        .line_height(px(TITLE_LINE_HEIGHT_PX))
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .text_color(fg)
-                        .child("New thread"),
-                )
-                .child(discard_btn),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .w_full()
-                .mt(px(CARD_LINE_GAP_PX))
-                .pl(px(META_LINE_INDENT_PX))
-                .min_w_0()
-                .text_size(px(META_FONT_SIZE_PX))
-                .line_height(px(META_LINE_HEIGHT_PX))
-                .text_color(muted)
-                .child(favicon)
-                .child(div().min_w_0().truncate().child(project_name.to_owned())),
-        );
-
-    if tokens.appearance == Appearance::Light {
-        card = card
-            .border_1()
-            .border_color(hsla_alpha(tokens.sidebar_border, 0.70));
+/// A project passes the sidebar's scope: no filter, an Orbit workspace that lists it, or the
+/// directly filtered project.
+#[must_use]
+pub(crate) fn project_in_scope(
+    shell: &ShellState,
+    workspaces: &[OrbitWorkspace],
+    active_workspace: Option<&str>,
+    project_id: &str,
+) -> bool {
+    let Some(ws_id) = active_workspace else {
+        return true;
+    };
+    match workspaces.iter().find(|ws| ws.id == ws_id) {
+        Some(orbit_ws) => match shell.project(project_id) {
+            Some(project) => workspace_matches_project(
+                orbit_ws,
+                &project.id,
+                &project.title,
+                &project.workspace_root,
+            ),
+            None => workspace_matches_project(orbit_ws, project_id, "", ""),
+        },
+        None => ws_id == project_id,
     }
-
-    div().w_full().py(px(2.0)).child(card)
 }
 
 /// Active thread ids in sidebar order: pinned (`pinOrderKey`) first, then active.

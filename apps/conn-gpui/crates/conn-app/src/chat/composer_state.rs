@@ -72,11 +72,18 @@ pub(crate) fn thread_draft_key(thread_id: &str) -> String {
     format!("thread:{thread_id}")
 }
 
-/// Store key for a project's new-thread draft: one per project, like Conn's
-/// `projectDraftThreadKeyByProjectKey`.
+/// Store key for a new-thread draft. The key follows the draft's id, not its project, so a
+/// draft keeps its content when the picker moves it to another project (Conn's
+/// `draftsByThreadKey` is keyed by draft id too).
 #[must_use]
-pub(crate) fn new_thread_draft_key(environment_id: &str, project_id: &str) -> String {
-    format!("draft:new:{environment_id}:{project_id}")
+pub(crate) fn new_thread_draft_key(draft_id: &str) -> String {
+    format!("draft:{draft_id}")
+}
+
+/// The draft id behind a [`new_thread_draft_key`].
+#[must_use]
+pub(crate) fn draft_id_from_key(key: &str) -> Option<&str> {
+    key.strip_prefix("draft:")
 }
 
 /// Per-thread / per-draft unsent composer content, so switching threads never loses a prompt.
@@ -129,30 +136,36 @@ impl<A> ComposerDraftStore<A> {
         )
     }
 
-    /// The picker retargets the active new-thread draft to `next_key`
-    /// (`DraftHeroHeadline` `selectProject`). A draft with content moves along, so the project it
-    /// left has no draft; the target's own parked draft is displaced (Conn keeps it as an unmapped
-    /// draft row, which this client has no row for). An empty draft stays put, and the next
-    /// `switch` shows the target's own draft. Returns `true` when the content moved.
-    pub(crate) fn retarget(&mut self, next_key: &str, current_is_empty: bool) -> bool {
-        if current_is_empty
-            || self.active_discarded
-            || self.active_key.as_deref().is_none_or(|key| key == next_key)
-        {
-            return false;
-        }
-        self.parked.remove(next_key);
-        self.active_key = Some(next_key.to_owned());
-        true
-    }
-
-    /// Drops `key`'s draft once it is sent or discarded (`clearDraftThread`). When `key` is
-    /// active, the composer clears its live content on its next sync ([`Self::take_discarded`]).
-    pub(crate) fn discard(&mut self, key: &str) {
-        self.parked.remove(key);
+    /// Drops `key`'s draft once it is sent or discarded (`clearDraftThread`) and returns the
+    /// parked content it held. When `key` is active, the composer clears its live content on
+    /// its next sync ([`Self::take_discarded`]).
+    pub(crate) fn discard(&mut self, key: &str) -> Option<ComposerDraft<A>> {
         if self.active_key.as_deref() == Some(key) {
             self.active_discarded = true;
         }
+        self.parked.remove(key)
+    }
+
+    /// The content parked under `key`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn parked_draft(&self, key: &str) -> Option<&ComposerDraft<A>> {
+        self.parked.get(key)
+    }
+
+    /// Every parked draft with its key.
+    pub(crate) fn parked_drafts(&self) -> impl Iterator<Item = (&str, &ComposerDraft<A>)> {
+        self.parked.iter().map(|(key, draft)| (key.as_str(), draft))
+    }
+
+    /// Parks `draft` under `key` without making it active (a draft restored from disk, or an
+    /// undone discard). An empty draft is not kept, as in [`Self::switch`]. The draft is not
+    /// put under the active key, whose live content the composer owns.
+    pub(crate) fn park(&mut self, key: &str, draft: ComposerDraft<A>) {
+        if draft.is_empty() || self.active_key.as_deref() == Some(key) {
+            return;
+        }
+        self.parked.insert(key.to_owned(), draft);
     }
 
     /// `true` once when the active draft was discarded and its live content must be cleared.
@@ -746,9 +759,10 @@ mod tests {
         BranchPickerRow, ComposerDraft, ComposerDraftStore, PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
         PreviousWorktree, ProjectPickerItem, ProjectPickerRow, PromptHistoryEntry, RefEntry,
         ThreadWorkspace, branch_picker_rows, branch_selection_target, branch_trigger_label,
-        composer_placeholder, local_branch_name_from_remote_ref, new_thread_draft_key,
-        previous_worktree, project_picker_rows, prompt_history_entries, prompt_length_message,
-        recallable_prompt, ref_badge, sanitize_new_ref_name, step_prompt_history, thread_draft_key,
+        composer_placeholder, draft_id_from_key, local_branch_name_from_remote_ref,
+        new_thread_draft_key, previous_worktree, project_picker_rows, prompt_history_entries,
+        prompt_length_message, recallable_prompt, ref_badge, sanitize_new_ref_name,
+        step_prompt_history, thread_draft_key,
     };
 
     fn item<'a>(
@@ -802,7 +816,7 @@ mod tests {
         let mut store = ComposerDraftStore::<u32>::default();
         let a = thread_draft_key("a");
         let b = thread_draft_key("b");
-        let new = new_thread_draft_key("env", "p");
+        let new = new_thread_draft_key("p");
         assert_eq!(store.switch(Some(&a), draft("", &[])), Some(draft("", &[])));
         assert_eq!(store.switch(Some(&a), draft("typing", &[])), None);
 
@@ -837,7 +851,7 @@ mod tests {
     fn draft_store_reaches_parked_attachments() {
         let mut store = ComposerDraftStore::<u32>::default();
         let a = thread_draft_key("a");
-        let new = new_thread_draft_key("env", "p");
+        let new = new_thread_draft_key("p");
         store.switch(Some(&a), draft("", &[]));
         store.switch(Some(&new), draft("x", &[1, 2]));
         for att in store.parked_attachments_mut() {
@@ -850,11 +864,10 @@ mod tests {
     }
 
     #[test]
-    fn new_thread_drafts_are_kept_per_project() {
+    fn new_thread_drafts_are_kept_per_draft_id() {
         let mut store = ComposerDraftStore::<u32>::default();
-        let a = new_thread_draft_key("env", "a");
-        let b = new_thread_draft_key("env", "b");
-        let other_env = new_thread_draft_key("other", "a");
+        let a = new_thread_draft_key("a");
+        let b = new_thread_draft_key("b");
         assert_eq!(store.switch(Some(&a), draft("", &[])), Some(draft("", &[])));
         // Start in A, move on to B, start there, and A comes back with its text and attachments.
         assert_eq!(
@@ -869,64 +882,64 @@ mod tests {
             store.switch(Some(&b), draft("idea for a", &[3])),
             Some(draft("idea for b", &[]))
         );
-        // The same project on another environment is another draft.
-        assert_eq!(
-            store.switch(Some(&other_env), draft("idea for b", &[])),
-            Some(draft("", &[]))
-        );
+        assert_eq!(draft_id_from_key(&a), Some("a"));
+        assert_eq!(draft_id_from_key(&thread_draft_key("a")), None);
     }
 
     #[test]
-    fn retargeting_moves_a_draft_with_content_and_leaves_an_empty_one() {
+    fn two_drafts_for_one_project_never_share_content() {
+        // A draft moved to a project that already has one leaves that one parked under its own
+        // id: the moved draft keeps its own key, so nothing is replaced.
         let mut store = ComposerDraftStore::<u32>::default();
-        let a = new_thread_draft_key("env", "a");
-        let b = new_thread_draft_key("env", "b");
-        let c = new_thread_draft_key("env", "c");
-        store.switch(Some(&b), draft("", &[]));
-        store.switch(Some(&c), draft("b's own idea", &[]));
-        store.switch(Some(&a), draft("c's own idea", &[]));
-
-        // A has content: it follows the picker to B and replaces B's own draft.
-        assert!(store.retarget(&b, false));
-        assert_eq!(store.active_key(), Some(b.as_str()));
-        assert_eq!(store.switch(Some(&b), draft("moved", &[])), None);
-        // A has no draft left of its own.
+        let own = new_thread_draft_key("own");
+        let moved = new_thread_draft_key("moved");
+        store.switch(Some(&own), draft("", &[]));
+        store.switch(Some(&moved), draft("the project's own idea", &[]));
         assert_eq!(
-            store.switch(Some(&a), draft("moved", &[])),
+            store.switch(None, draft("moved idea", &[1])),
             Some(draft("", &[]))
         );
         assert_eq!(
-            store.switch(Some(&b), draft("", &[])),
-            Some(draft("moved", &[]))
+            store.parked_draft(&own),
+            Some(&draft("the project's own idea", &[]))
         );
+        assert_eq!(store.parked_draft(&moved), Some(&draft("moved idea", &[1])));
+        assert_eq!(store.parked_drafts().count(), 2);
+    }
 
-        // An empty draft stays put; the target shows its own draft after the switch.
-        assert!(!store.retarget(&c, true));
-        assert_eq!(store.active_key(), Some(b.as_str()));
+    #[test]
+    fn parking_restores_a_draft_without_making_it_active() {
+        let mut store = ComposerDraftStore::<u32>::default();
+        let a = new_thread_draft_key("a");
+        let b = new_thread_draft_key("b");
+        store.park(&a, draft("from disk", &[]));
+        store.park(&b, draft("  ", &[]));
+        assert!(store.parked_draft(&b).is_none());
+        assert_eq!(store.active_key(), None);
         assert_eq!(
-            store.switch(Some(&c), draft("", &[])),
-            Some(draft("c's own idea", &[]))
+            store.switch(Some(&a), draft("", &[])),
+            Some(draft("from disk", &[]))
         );
-        // No active draft, or the target is already active: nothing moves.
-        assert!(!store.retarget(&c, false));
-        assert!(!ComposerDraftStore::<u32>::default().retarget(&c, false));
+        // The active key's live content is the composer's, so parking under it does nothing.
+        store.park(&a, draft("late", &[]));
+        assert!(store.parked_draft(&a).is_none());
     }
 
     #[test]
     fn discarding_a_draft_clears_it_for_good() {
         let mut store = ComposerDraftStore::<u32>::default();
-        let a = new_thread_draft_key("env", "a");
-        let b = new_thread_draft_key("env", "b");
+        let a = new_thread_draft_key("a");
+        let b = new_thread_draft_key("b");
         let t = thread_draft_key("t");
         store.switch(Some(&a), draft("", &[]));
         store.switch(Some(&b), draft("parked a", &[1]));
 
-        // A parked draft is dropped at once.
-        store.discard(&a);
+        // A parked draft is dropped at once, and handed back for an undo.
+        assert_eq!(store.discard(&a), Some(draft("parked a", &[1])));
         assert_eq!(store.switch(Some(&a), draft("", &[])), Some(draft("", &[])));
 
         // The active draft's live content is not parked when the composer moves on.
-        store.discard(&a);
+        assert_eq!(store.discard(&a), None);
         assert!(store.take_discarded());
         assert!(!store.take_discarded());
         store.discard(&a);

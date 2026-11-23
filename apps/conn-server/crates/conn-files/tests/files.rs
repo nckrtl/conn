@@ -228,12 +228,26 @@ fn an_optional_read_in_a_removed_worktree_is_absent() {
     );
 
     // A root that exists but cannot be resolved is an error, optional or not.
+    // A file as a root component gives ENOTDIR for every user, root included.
+    let file = f._base.0.join("plain-file");
+    fs::write(&file, "x").unwrap();
+    let not_dir = read_at(&file.join("root"), "t3.json", true);
+    assert_eq!(root_failure(not_dir), realpath_root);
+
+    // Permission denied, where the runner can actually be denied (not root).
     let locked = f._base.0.join("locked");
     fs::create_dir_all(locked.join("root")).unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     let denied = read_at(&locked.join("root"), "t3.json", true);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(root_failure(denied), realpath_root);
+    match denied {
+        Err(failure) => assert_eq!(
+            (failure.failure, failure.operation.map(|(op, _)| op)),
+            realpath_root
+        ),
+        // A privileged runner traverses mode 000, and the optional file is simply absent.
+        Ok(result) => assert_eq!(result.exists, Some(false)),
+    }
 }
 
 #[test]

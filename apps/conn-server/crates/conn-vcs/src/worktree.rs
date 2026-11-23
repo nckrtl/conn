@@ -526,7 +526,17 @@ async fn resolves_to_git_dir(cwd: &Path, dot_git: &Path) -> VcsResult<bool> {
     .timeout(REMOVE_TIMEOUT)
     .run()
     .await?;
-    Ok(output.code == 0)
+    if output.code == 0 {
+        return Ok(true);
+    }
+    // Exit 128 is "no git dir here", but also "a git dir git cannot read". Only an absent
+    // `.git` entry is unpopulated; anything else there counts as populated, so removal refuses.
+    let dot_git = dot_git.to_owned();
+    blocking(cwd, move || match std::fs::symlink_metadata(&dot_git) {
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        Ok(_) => true,
+    })
+    .await
 }
 
 /// The admin folder `target` resolves to, when it is the repository's

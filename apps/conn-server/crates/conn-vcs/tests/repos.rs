@@ -583,6 +583,9 @@ enum Submodule {
     GitFileTrailingSpace,
     /// `HEAD` is a symlink (`core.preferSymlinkRefs`) to a branch `pack-refs` has packed.
     SymlinkedPackedHead,
+    /// A cloned `.git` git cannot read (an empty `commondir`), behind a `skip-worktree`
+    /// gitlink so status stays clean. `rev-parse --resolve-git-dir` exits 128 here too.
+    UnreadableGitDir,
     Unpopulated,
 }
 
@@ -594,6 +597,7 @@ async fn safe_annex_removal_refuses_a_populated_submodule() {
         Submodule::Cloned,
         Submodule::GitFileTrailingSpace,
         Submodule::SymlinkedPackedHead,
+        Submodule::UnreadableGitDir,
         Submodule::Unpopulated,
     ] {
         let populated = !matches!(layout, Submodule::Unpopulated);
@@ -639,6 +643,10 @@ async fn safe_annex_removal_refuses_a_populated_submodule() {
                 let head = lib.join(".git/HEAD");
                 assert!(head.is_symlink() && !head.is_file(), "{layout:?}");
             }
+            Submodule::UnreadableGitDir => {
+                git(&path, &["clone", "-q", sub.to_str().unwrap(), "lib"]);
+                write(&path.join("lib"), "draft.txt", "unsaved\n");
+            }
             Submodule::Unpopulated => {
                 std::fs::create_dir_all(path.join("lib")).unwrap();
             }
@@ -653,6 +661,10 @@ async fn safe_annex_removal_refuses_a_populated_submodule() {
             ],
         );
         git(&path, &["commit", "-q", "-m", "submodule"]);
+        if matches!(layout, Submodule::UnreadableGitDir) {
+            git(&path, &["update-index", "--skip-worktree", "lib"]);
+            std::fs::write(path.join("lib/.git/commondir"), "").unwrap();
+        }
         assert_eq!(git(&path, &["status", "--porcelain"]), "", "{layout:?}");
 
         let result = worktree::remove_worktree(&fx.work, &path, Removal::Safe).await;

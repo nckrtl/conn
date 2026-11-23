@@ -1216,3 +1216,78 @@ async fn a_rollback_session_gets_the_runtime_policy_override() {
     assert_eq!(policies.len(), 1, "{policies:?}");
     assert_eq!(policies[0]["approvalPolicy"], "never", "{policies:?}");
 }
+
+/// T3 rebuilds the root scope in the run's folder each run, so a thread moved to a sibling
+/// checkout captures the new checkout; earlier checkpoints stay readable from it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_moved_thread_captures_its_new_checkout() {
+    let db = TempDb::new("handoff-diff");
+    let repo = Repo::new("handoff-diff");
+    let work = Repo::plain("handoff-new");
+    repo.git(&["worktree", "add", "-b", "probe", &work.root(), "HEAD"]);
+    let (engine, _) = open_repo(&db, &repo);
+    dispatch(&engine, create_in(&repo, "t1", "first")).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    turn(&engine, &mut stream, "run-one", "write first.txt one").await;
+    let first = call(
+        &engine,
+        "orchestration.getTurnDiff",
+        json!({"threadId":"t1", "fromTurnCount":0, "toTurnCount":1}),
+    )
+    .await
+    .unwrap();
+    dispatch(
+        &engine,
+        json!({
+            "type":"thread.metadata.update", "threadId":"t1", "commandId":"move",
+            "worktreePath":work.root(), "branch":"probe", "expectedWorktreePath":null
+        }),
+    )
+    .await;
+    repo.write(
+        "old-only.txt",
+        "an unrelated edit in the previous checkout\n",
+    );
+    turn(
+        &engine,
+        &mut stream,
+        "run-two",
+        "write new-only.txt user-change",
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["checkpointScopes"][0]["cwd"], work.root());
+    let diff = call(
+        &engine,
+        "orchestration.getTurnDiff",
+        json!({"threadId":"t1", "fromTurnCount":1, "toTurnCount":2}),
+    )
+    .await
+    .unwrap();
+    let text = diff["diff"].as_str().unwrap();
+    assert!(
+        text.contains("new-only.txt") && !text.contains("old-only.txt"),
+        "{text}"
+    );
+    assert!(
+        first["diff"].as_str().unwrap().contains("first.txt"),
+        "{first}"
+    );
+    // Both turn diffs read the same after a restart: the refs live in the shared repository.
+    drop(stream);
+    drop(engine);
+    let (engine, _) = open_repo(&db, &repo);
+    let reread = |from: u64, to: u64| {
+        call(
+            &engine,
+            "orchestration.getTurnDiff",
+            json!({"threadId":"t1", "fromTurnCount":from, "toTurnCount":to}),
+        )
+    };
+    assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
+    assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
+}

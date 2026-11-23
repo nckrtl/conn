@@ -4,7 +4,7 @@
 //!
 //! - **Scope.** A thread has one root scope, `checkpoint-scope:thread:<id>:name:root`, made
 //!   when its first run starts (`checkpoint-scope.created`) in the run's folder; the run's root
-//!   node names it (`checkpointScopeId`).
+//!   node names it (`checkpointScopeId`). A run in another folder moves the scope there.
 //! - **Baseline.** Before the provider gets the message, the workspace is captured as ordinal
 //!   `run - 1` unless that ref exists (5 s budget; a failure starts the turn without one).
 //! - **Capture.** A provider turn that completes leaves the run `waiting`; the capture then
@@ -64,36 +64,33 @@ pub(crate) fn ensure_scope(
     let id = scope_id(thread_id);
     let run_id = run["id"].as_str();
     let root = run["rootNodeId"].as_str();
-    let stored = tx.entity(thread_id, "checkpointScopes", &id)?;
-    let scope = match stored {
-        Some(scope) if scope["providerThreadId"] == *provider_thread_id => scope,
+    let scope = match tx.entity(thread_id, "checkpointScopes", &id)? {
+        Some(scope) if scope["providerThreadId"] == *provider_thread_id && scope["cwd"] == cwd => {
+            None
+        }
+        // T3 rebuilds the root scope for every run in the run's folder (`Orchestrator.ts`
+        // `prepareRootRunScope`), so a thread moved to another checkout captures there.
         Some(mut scope) => {
             scope["providerThreadId"] = provider_thread_id.clone();
-            tx.append(
-                Draft::new(thread_id, "checkpoint-scope.created", scope.clone())
-                    .run(run_id)
-                    .node(root),
-            )?;
-            scope
+            scope["cwd"] = json!(cwd);
+            Some(scope)
         }
-        None => {
-            let scope = json!({
-                "id": id, "threadId": thread_id, "runId": run["id"], "nodeId": run["rootNodeId"],
-                "parentScopeId": null, "providerThreadId": provider_thread_id,
-                "kind": "root_run", "ordinalWithinParent": 0, "advancesAppRunCount": true,
-                "cwd": cwd, "createdAt": tx.now(),
-            });
-            tx.append(
-                Draft::new(thread_id, "checkpoint-scope.created", scope.clone())
-                    .run(run_id)
-                    .node(root),
-            )?;
-            scope
-        }
+        None => Some(json!({
+            "id": id, "threadId": thread_id, "runId": run["id"], "nodeId": run["rootNodeId"],
+            "parentScopeId": null, "providerThreadId": provider_thread_id,
+            "kind": "root_run", "ordinalWithinParent": 0, "advancesAppRunCount": true,
+            "cwd": cwd, "createdAt": tx.now(),
+        })),
     };
+    if let Some(scope) = scope {
+        tx.append(
+            Draft::new(thread_id, "checkpoint-scope.created", scope)
+                .run(run_id)
+                .node(root),
+        )?;
+    }
     node["checkpointScopeId"] = json!(id);
-    let cwd = scope["cwd"].as_str().unwrap_or(cwd).to_owned();
-    Ok((id, cwd))
+    Ok((id, cwd.to_owned()))
 }
 
 /// The status a folder gives a checkpoint before any ref is read.

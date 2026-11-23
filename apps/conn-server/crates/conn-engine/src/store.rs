@@ -416,6 +416,17 @@ impl Store {
         thread(&self.conn, thread_id).map(|t| t.is_some())
     }
 
+    /// Whether the thread was ever created here, deleted or not.
+    pub(crate) fn thread_known(&self, thread_id: &str) -> StoreResult<bool> {
+        self.conn
+            .query_row("SELECT 1 FROM threads WHERE id = ?1", [thread_id], |_| {
+                Ok(())
+            })
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(err)
+    }
+
     /// `OrchestrationV2ShellSnapshot` as of [`Self::high_water`].
     pub(crate) fn shell_snapshot(&self) -> StoreResult<Value> {
         let mut stmt = self

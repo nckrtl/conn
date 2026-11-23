@@ -170,16 +170,20 @@ pub(crate) async fn subscribe_thread(
     let first = inner
         .db(move |store| -> Result<Option<(Vec<Value>, u64)>, String> {
             let high = store.high_water();
-            if !store.thread_exists(&id)? {
-                return Ok(None);
-            }
+            // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
+            // client that missed a deletion gets `thread.deleted`.
             let imported = store.imported_through();
-            if let Some(after) = after.filter(|after| can_replay(*after, high, imported)) {
+            if let Some(after) = after.filter(|after| can_replay(*after, high, imported))
+                && store.thread_known(&id)?
+            {
                 let events = store.thread_events_after(&id, after, MAX_REPLAY_EVENTS + 1)?;
                 if events.len() <= MAX_REPLAY_EVENTS {
                     let items = events.into_iter().map(event_item).collect();
                     return Ok(Some((items, high)));
                 }
+            }
+            if !store.thread_exists(&id)? {
+                return Ok(None);
             }
             let (projection, omitted) = store
                 .thread_projection_with(&id, omit_local)?

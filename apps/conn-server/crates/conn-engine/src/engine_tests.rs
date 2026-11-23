@@ -273,7 +273,6 @@ async fn streams_resume_after_a_sequence() {
     assert_eq!(replayed["kind"], "event");
     assert_eq!(replayed["event"]["type"], "thread.visited");
     assert_eq!(next(&mut thread).await["kind"], "synchronized");
-
     let mut shell = engine
         .subscribe_shell(
             from_json(json!({"afterSequence": 0, "requestCompletionMarker": true})).unwrap(),
@@ -298,6 +297,37 @@ async fn streams_resume_after_a_sequence() {
         .await
         .unwrap();
     assert_eq!(next(&mut shell).await, json!({"kind": "snapshot-required"}));
+
+    // A client that missed the deletion resumes into `thread.deleted`, as on T3.
+    let visited = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "c3",
+        "threadId": "t1", "visitedAt": "2026-11-13T09:01:00.000Z"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.delete", "commandId": "c4", "threadId": "t1"}),
+    )
+    .await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1", "afterSequence": visited, "requestCompletionMarker": true})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut thread).await["event"]["type"], "thread.deleted");
+    drop(thread);
+    assert!(
+        engine
+            .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        engine
+            .subscribe_thread(from_json(json!({"threadId": "nope", "afterSequence": 0})).unwrap())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

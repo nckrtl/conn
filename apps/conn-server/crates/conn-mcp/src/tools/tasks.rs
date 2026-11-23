@@ -232,7 +232,7 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
     }
     cx.dispatch(command).await?;
     if let Some((project, _)) = &isolated {
-        run_setup_script(cx, &child, project).await;
+        prepare_child(cx, &command_id, &child, project).await?;
     }
 
     if wait {
@@ -299,23 +299,70 @@ async fn worktree_base(cx: &Cx<'_>, parent: &Value) -> Result<(Value, String), T
     Ok((project, base))
 }
 
-/// The project's `runOnWorktreeCreate` script in the child's new checkout, as T3's
-/// preparation runs it (`ProjectSetupScriptRunner.runForThread`). It starts in the child's
-/// terminal and does not hold the child back; a failure to start it is logged, as the
-/// worktree handoff does.
-async fn run_setup_script(cx: &Cx<'_>, child: &str, project: &Value) {
-    let Some(config) = cx.config().worktrees.as_ref() else {
-        return;
+/// `ThreadLaunchService.prepareRun` for a `worktree` child: the project's
+/// `runOnWorktreeCreate` script starts in the child's checkout. The child's run waits in
+/// `preparing` until a script marked `async: false` has ended, and fails without starting when
+/// that script fails. Any other script overlaps the agent.
+async fn prepare_child(
+    cx: &Cx<'_>,
+    command_id: &str,
+    child: &str,
+    project: &Value,
+) -> Result<(), ToolError> {
+    let projection = cx.projection(child).await?;
+    let Some(run_id) = projection["runs"]
+        .as_array()
+        .and_then(|runs| runs.iter().find(|r| r["status"] == "preparing"))
+        .and_then(|run| run["id"].as_str())
+        .map(str::to_owned)
+    else {
+        return Ok(());
     };
-    let Ok(projection) = cx.projection(child).await else {
-        return;
+    let path = projection["thread"]["worktreePath"]
+        .as_str()
+        .unwrap_or_default();
+    let started = match cx.config().worktrees.as_ref() {
+        Some(config) if !path.is_empty() => {
+            super::worktree::start_setup(config, child, project, path, true)
+                .await
+                .map(|started| started.completion)
+        }
+        _ => Ok(None),
     };
-    let Some(path) = projection["thread"]["worktreePath"].as_str() else {
-        return;
+    let service = cx.service.clone();
+    let (command_id, child) = (command_id.to_owned(), child.to_owned());
+    let settle = async move {
+        let outcome = match started {
+            Err(error) => Err(error),
+            Ok(None) => Ok(()),
+            Ok(Some(completion)) => match completion.await.ok().flatten() {
+                Some(0) => Ok(()),
+                code => Err(format!(
+                    "Setup script exited with {}.",
+                    code.map_or("no exit code".to_owned(), |c| c.to_string())
+                )),
+            },
+        };
+        let command = match outcome {
+            Ok(()) => {
+                json!({"type": "prepared-run.release", "commandId": format!("{command_id}:release"),
+                "threadId": child, "runId": run_id})
+            }
+            Err(message) => {
+                json!({"type": "prepared-run.fail", "commandId": format!("{command_id}:fail"),
+                "threadId": child, "runId": run_id,
+                "failure": {"class": "validation_error", "message": message, "code": null, "retryable": false}})
+            }
+        };
+        if let Ok(command) = conn_contract::from_json(command)
+            && let Err(error) = service.config.engine.dispatch(command).await
+        {
+            eprintln!("delegate_task preparation for {child}: {error:?}");
+        }
     };
-    if let Err(error) = super::worktree::setup(config, child, project, path).await {
-        eprintln!("delegate_task setup script for {child}: {error}");
-    }
+    // T3 schedules the preparation: the call returns while the child waits in `preparing`.
+    tokio::spawn(settle);
+    Ok(())
 }
 
 pub(super) async fn status(cx: &Cx<'_>, args: &Args) -> ToolResult {

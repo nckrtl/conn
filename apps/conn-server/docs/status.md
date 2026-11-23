@@ -17,8 +17,14 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left
 out, the child bound to it; a refused or replayed command removes it. Proof: four `conn-mcp`
 tests (`tests/delegate_worktree.rs`) and live Claude and Codex children on a scratch server.
-Left: T3's generated branch name and waiting for the setup script (both also open for a
-worktree launch). One difference by design: when the checkout fails, the call is
+The child's run waits in `preparing` (T3's `defer_start` with a workspace) until the
+project's `runOnWorktreeCreate` script has started; a script marked `async: false` must end
+first, and its failure fails the run with `workspace_preparation_failed` before it reaches
+the provider (`prepared-run.release`/`fail`, 2026-11-23). The end is seen through T3's
+sentinel wrapper for POSIX shells and fish; PowerShell and Nushell wrappers are not ported,
+so such a script fails the child. Left: T3's generated branch name, `prepared-run.retry`
+and `prepared-run.progress`, preparation on a replayed call, and the same wait for a
+worktree launch. One difference by design: when the checkout fails, the call is
 refused and no child is made; T3 makes the child and fails its run in preparation.
 
 **Known difference, stop in progress (2026-11-18):** with the provider's reply to

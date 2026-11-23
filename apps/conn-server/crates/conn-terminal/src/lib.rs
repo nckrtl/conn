@@ -235,6 +235,12 @@ impl TerminalManager {
             .ok_or_else(|| lookup_error(&key))
     }
 
+    /// The shells a terminal tries, in order; it starts the first that exists. A setup script
+    /// wraps its command for that shell (T3's `getShell`).
+    pub fn shells(&self) -> &[String] {
+        &self.inner.config.shells
+    }
+
     /// Opens a setup terminal and subscribes before its first output can be published.
     pub fn open_observed(
         &self,

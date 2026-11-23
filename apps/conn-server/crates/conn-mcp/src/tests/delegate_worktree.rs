@@ -315,3 +315,129 @@ async fn a_refused_child_leaves_no_worktree_or_branch() {
         1
     );
 }
+
+/// Audit 1.9, T3's `ThreadLaunchService.prepareRun`: a `worktree` child waits in `preparing`
+/// until its synchronous (`async: false`) setup ends. Held, the provider has started nothing;
+/// released, it starts once; a failed script starts nothing and fails the run. An async
+/// script (the default) still overlaps the agent. A gate file holds each script.
+#[tokio::test(flavor = "current_thread")]
+async fn a_worktree_child_waits_for_its_synchronous_setup() {
+    let host = GitHost::new("setup");
+    let provider = conn_engine::fake::FakeProvider::new("claudeAgent");
+    let calls = provider.calls.clone();
+    let mut f = fixture_with("delegate-worktree-setup", Some(host.clone()), provider);
+    let shell = f.dir.join("shell");
+    conn_support::test_util::executable(
+        &shell,
+        "#!/bin/sh\nexport HISTFILE=/dev/null\nexec /bin/sh \"$@\"\n",
+    )
+    .unwrap();
+    let terminals = conn_terminal::TerminalManager::new(conn_terminal::TerminalConfig {
+        shells: vec![shell.to_string_lossy().into_owned()],
+        ..Default::default()
+    });
+    Arc::get_mut(&mut f.service)
+        .unwrap()
+        .config
+        .worktrees
+        .as_mut()
+        .unwrap()
+        .terminals = Some(terminals.clone());
+    let root = git_project(&f).await;
+    let gate = root.join(".gate");
+    let script = "while [ ! -f \"$T3CODE_PROJECT_ROOT/.gate\" ]; do sleep 0.05; done; exit \"$(cat \"$T3CODE_PROJECT_ROOT/.gate\")\"";
+    let (_, caller) = running_parent(&f).await;
+    let mut agent = Client::open(&f.service, caller).await;
+    let starts = |child: &str| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.starts_with("start ") && call.contains(child))
+            .count()
+    };
+
+    for (request, sync, exit, outcome) in [
+        ("held", true, "0", "completed"),
+        ("broken", true, "3", "failed"),
+        ("overlap", false, "0", "completed"),
+    ] {
+        let _ = std::fs::remove_file(&gate);
+        let mut setup = json!({"id": "setup", "name": "Install", "icon": "play",
+            "command": script, "runOnWorktreeCreate": true});
+        if sync {
+            setup["async"] = json!(false);
+        }
+        f.service
+            .config
+            .engine
+            .call(
+                "projects.mutate",
+                json!({"type": "project.update",
+            "commandId": format!("setup-{request}"), "projectId": project_id(),
+            "scripts": [setup]}),
+            )
+            .await
+            .unwrap();
+        let task = agent
+            .ok(
+                "delegate_task",
+                json!({"task": "child work", "isolation": "worktree", "clientRequestId": request}),
+            )
+            .await;
+        let child = task["childThreadId"].as_str().unwrap().to_owned();
+        if sync {
+            let held = child_thread_projection(&f, &child).await;
+            assert_eq!(held["runs"][0]["status"], "preparing", "{request}");
+            assert_eq!(
+                starts(&child),
+                0,
+                "{request}: nothing reaches the provider while held"
+            );
+            std::fs::write(&gate, exit).unwrap();
+        }
+        agent
+            .ok(
+                "conn_thread_wait",
+                json!({"threadId": child, "timeoutMs": 30_000}),
+            )
+            .await;
+        let status = agent
+            .ok("task_status", json!({"taskId": task["taskId"]}))
+            .await;
+        assert_eq!(status["status"], outcome, "{request}: {status}");
+        if !sync {
+            // The agent finished while its async setup still waits at the gate.
+            assert!(!gate.exists(), "{request}");
+            std::fs::write(&gate, exit).unwrap();
+        }
+        let expected = usize::from(outcome == "completed");
+        assert_eq!(starts(&child), expected, "{request}");
+        if outcome == "failed" {
+            let ended = child_thread_projection(&f, &child).await;
+            let failure = ended["turnItems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == "error")
+                .map(|item| item["failure"].clone())
+                .unwrap();
+            assert_eq!(failure["code"], "workspace_preparation_failed");
+            assert_eq!(failure["message"], "Setup script exited with 3.");
+        }
+        terminals.close(
+            conn_contract::from_json(json!({"threadId": child, "terminalId": "setup-setup"}))
+                .unwrap(),
+        );
+    }
+}
+
+async fn child_thread_projection(f: &Fixture, child: &str) -> Value {
+    f.service
+        .config
+        .engine
+        .get_thread_projection(child.into())
+        .await
+        .map(|p| conn_contract::to_json(&p))
+        .unwrap()
+}

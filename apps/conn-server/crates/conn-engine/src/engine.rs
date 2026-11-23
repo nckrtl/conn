@@ -620,8 +620,9 @@ impl Inner {
     /// `delegate_task` with isolation `worktree` (`workspaceStrategy: {type: "worktree"}`): the
     /// child's checkout is made before the command commits, as a worktree launch makes its
     /// thread's, and the child thread records its branch and path. T3 prepares the same
-    /// checkout after the command, through `prepared-run.*`, which this server refuses. A
-    /// command already accepted makes nothing: its child keeps the first checkout.
+    /// checkout after the command. Either way the child's run waits in `preparing` until its
+    /// setup is done (`prepared-run.release`). A command already accepted makes nothing: its
+    /// child keeps the first checkout.
     async fn delegated_worktree(
         &self,
         mut command: Value,

@@ -447,11 +447,23 @@ final class ConnSpikeUITests: XCTestCase {
             app = XCUIApplication(bundleIdentifier: env["CONN_EXPO_BUNDLE"] ?? "com.nckrtl.conn")
             app.activate()
             settle(3)
-            let encoded = pairingURL.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? pairingURL
-            app.open(URL(string: "t3code://connections/new?pairingUrl=\(encoded)")!)
-            if springboard.buttons["Open"].waitForExistence(timeout: 3) { springboard.buttons["Open"].tap() }
+            // Expo's own form (`ConnectionsNewRouteScreen.tsx`): Address and Code, then the
+            // header's checkmark, "Add environment". A production build ignores pairing links.
+            let parts = pairingURL.components(separatedBy: "/pair#token=")
+            XCTAssertEqual(parts.count, 2, "pairing URL should be <origin>/pair#token=<code>")
+            XCTAssertTrue(tap(app, ["Add environment"]), "Expo should offer Add environment")
             settle(2)
-            XCTAssertTrue(tap(app, ["Connect"]), "Expo pairing form should offer Connect")
+            let address = app.textFields.matching(
+                NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
+            XCTAssertTrue(address.waitForExistence(timeout: 10), "the pairing form should open")
+            address.tap()
+            address.typeText(parts[0])
+            let code = app.textFields.matching(
+                NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
+            code.tap()
+            code.typeText(parts.count > 1 ? parts[1] : "")
+            let submit = app.navigationBars.buttons["Add environment"].firstMatch
+            if submit.waitForExistence(timeout: 5) { submit.tap() } else { code.typeText("\n") }
             settle(4)
         } else {
             app = XCUIApplication()

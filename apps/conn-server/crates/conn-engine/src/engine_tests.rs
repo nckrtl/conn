@@ -2096,6 +2096,37 @@ async fn older_settled_threads_page_and_trim() {
     );
     assert_eq!(snapshot["olderSettled"]["counts"][0]["count"], 5);
 
+    // The phone's HTTP reload trims as the socket does, and a current cursor keeps its rows.
+    let query = |omit: bool, resume_from: Option<u64>| crate::HttpShellQuery {
+        omit_idle_subagents: omit,
+        omit_older_settled: omit,
+        resume_from,
+    };
+    let http = engine.http_shell_snapshot(query(true, None)).await.unwrap();
+    assert_eq!(http, Some(snapshot.clone()));
+    let full = engine
+        .http_shell_snapshot(query(false, None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(full["threads"].as_array().unwrap().len(), 30);
+    assert!(full.get("olderSettled").is_none());
+    let sequence = snapshot["snapshotSequence"].as_u64().unwrap();
+    assert_eq!(
+        engine
+            .http_shell_snapshot(query(true, Some(sequence)))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        engine
+            .http_shell_snapshot(query(true, Some(sequence + 1)))
+            .await
+            .unwrap(),
+        Some(snapshot.clone())
+    );
+
     let page = call(
         &engine,
         "orchestration.getOlderSettledThreads",

@@ -474,6 +474,23 @@ impl Store {
         self.shell_changes_after(after).map(Some)
     }
 
+    /// Whether a shell stream resumes from `after` with changes rather than a snapshot: the
+    /// same rule `subscribeShell` applies to `afterSequence`.
+    pub(crate) fn shell_resumable(&self, after: u64) -> StoreResult<bool> {
+        if !crate::streams::can_replay(after, self.high_water(), self.imported_through()) {
+            return Ok(false);
+        }
+        let pruned: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM meta WHERE key = 'shell_pruned_through'), 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        Ok(i64::try_from(after).is_ok_and(|after| after >= pruned))
+    }
+
     pub(crate) fn shell_changes_after(&self, after: u64) -> StoreResult<Vec<Value>> {
         let mut stmt = self
             .conn

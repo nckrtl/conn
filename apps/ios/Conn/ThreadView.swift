@@ -394,12 +394,11 @@ struct ThreadView: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
         }
-        // Mobile's `GLASS_HEADER_OPTIONS`: the native transparent bar, centered title and
-        // subtitle, and a minimal back button (`toolbarRole(.editor)` drops the back title).
+        // Mobile's `GLASS_HEADER_OPTIONS`: the native transparent bar with a centered title and
+        // subtitle. The root has no title, so the back button is the bare chevron.
         .navigationTitle(displayTitle)
         .navigationSubtitle(displaySubtitle ?? "")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarRole(.editor)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewHeight = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)

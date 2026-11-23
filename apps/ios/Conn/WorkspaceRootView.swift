@@ -190,7 +190,7 @@ private struct WorkspacePhoneBar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .bottomBar) {
             Button(action: onOpenSettings) {
-                ConnIcon("ellipsis")
+                connImage("ellipsis")
             }
             .accessibilityLabel("Open settings")
             .accessibilityIdentifier("workspace.settingsButton")
@@ -221,7 +221,7 @@ private struct WorkspacePhoneBar: ToolbarContent {
         }
         ToolbarItem(placement: .bottomBar) {
             Button(action: onNewChat) {
-                ConnIcon("plus")
+                connImage("plus")
             }
             .accessibilityLabel("New chat")
             .accessibilityIdentifier("inbox.newThreadButton")
@@ -255,6 +255,7 @@ private struct WorkspacePhoneSwitcher: View {
         }
         .padding(.vertical, 4)
         .frame(width: width, height: 48)
+        .fixedSize()
     }
 
     private func item(_ tab: WorkspaceTab, icon: String, label: String) -> some View {
@@ -319,7 +320,7 @@ private struct WorkspaceFilterMenu: View {
                 }
             }
         } label: {
-            ConnIcon(filterActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
+            connImage(filterActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
                 .foregroundStyle(filterActive ? theme.primary : theme.foreground)
         }
         .accessibilityLabel("Filter")

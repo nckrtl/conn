@@ -250,6 +250,16 @@ fn keyed_rows(
     .collect()
 }
 
+/// [`Store::thread_replay_stats`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReplayStats {
+    pub(crate) events: u64,
+    /// The bytes of the events' payload JSON.
+    pub(crate) payload_bytes: u64,
+    /// Whether one of them is `thread.created`.
+    pub(crate) has_create: bool,
+}
+
 pub(crate) struct Store {
     conn: Connection,
     next_seq: u64,
@@ -854,19 +864,29 @@ impl Store {
         })
     }
 
-    /// How many events of one thread follow `after`, and their stored bytes, without
-    /// decoding them (`getAgentReplayStats`).
+    /// What a resume from `after` would replay (`getAgentReplayStats`), read from at most the
+    /// first `limit` events of the thread after it, in sequence order, without decoding them.
     pub(crate) fn thread_replay_stats(
         &self,
         thread_id: &str,
         after: u64,
-    ) -> StoreResult<(u64, u64)> {
+        limit: usize,
+    ) -> StoreResult<ReplayStats> {
         self.conn
             .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(event AS BLOB))), 0)
-                 FROM events WHERE thread_id = ?1 AND seq > ?2",
-                params![thread_id, after as i64],
-                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+                "SELECT COUNT(*),
+                        COALESCE(SUM(LENGTH(CAST(json_extract(event, '$.payload') AS BLOB))), 0),
+                        COALESCE(MAX(type = 'thread.created'), 0)
+                 FROM (SELECT event, type FROM events WHERE thread_id = ?1 AND seq > ?2
+                       ORDER BY seq LIMIT ?3)",
+                params![thread_id, after as i64, limit as i64],
+                |row| {
+                    Ok(ReplayStats {
+                        events: row.get::<_, i64>(0)? as u64,
+                        payload_bytes: row.get::<_, i64>(1)? as u64,
+                        has_create: row.get(2)?,
+                    })
+                },
             )
             .map_err(err)
     }
@@ -1358,6 +1378,31 @@ impl Tx<'_> {
 
     pub(crate) fn thread(&self, thread_id: &str) -> StoreResult<Option<Value>> {
         thread(&self.tx, thread_id)
+    }
+
+    /// The scope's folder when the checkpoint was captured: the `cwd` of the last
+    /// `checkpoint-scope.created` before its last capture that did not mark it `stale`.
+    /// `None` when the log does not hold both (rows imported from the T3 server).
+    pub(crate) fn checkpoint_capture_cwd(
+        &self,
+        thread_id: &str,
+        checkpoint_id: &str,
+    ) -> StoreResult<Option<String>> {
+        self.tx
+            .query_row(
+                "SELECT json_extract(event, '$.payload.cwd') FROM events
+                 WHERE thread_id = ?1 AND type = 'checkpoint-scope.created' AND seq < (
+                   SELECT MAX(seq) FROM events
+                   WHERE thread_id = ?1 AND type = 'checkpoint.captured'
+                     AND json_extract(event, '$.payload.id') = ?2
+                     AND json_extract(event, '$.payload.status') <> 'stale')
+                 ORDER BY seq DESC LIMIT 1",
+                [thread_id, checkpoint_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(err)
     }
 
     /// Whether a thread with this ID was ever deleted. Its rows stay under the ID, so a
@@ -2140,6 +2185,43 @@ mod tests {
         sort_messages_by_turn_items(&mut messages, &items);
         let order: Vec<&str> = messages.iter().filter_map(|m| m["id"].as_str()).collect();
         assert_eq!(order, ["u1", "a1", "u2", "a2", "wake"]);
+    }
+
+    /// T3's `getAgentReplayStats`: the first 129 events after the cursor, in sequence order,
+    /// and their payload JSON bytes; later events are never read.
+    #[test]
+    fn replay_stats_read_at_most_129_events() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-replay-stats", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let payload = json!({"n": "x".repeat(10)}).to_string();
+        for seq in 1..=300_i64 {
+            // Events past the bound are larger, so reading them would change the sum.
+            let payload = if seq > 129 {
+                json!({"n": "y".repeat(1000)}).to_string()
+            } else {
+                payload.clone()
+            };
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events (seq, thread_id, type, event) VALUES (?1, 't1', 'thread.visited', ?2)",
+                    params![seq, format!(r#"{{"type":"thread.visited","payload":{payload}}}"#)],
+                )
+                .unwrap();
+        }
+        let stats = store.thread_replay_stats("t1", 0, 129).unwrap();
+        assert_eq!(
+            stats,
+            ReplayStats {
+                events: 129,
+                payload_bytes: 129 * payload.len() as u64,
+                has_create: false,
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A row the engine cannot read fails the read; it never turns into `null` or vanishes.

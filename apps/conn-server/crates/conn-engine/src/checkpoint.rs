@@ -4,7 +4,9 @@
 //!
 //! - **Scope.** A thread has one root scope, `checkpoint-scope:thread:<id>:name:root`, made
 //!   when its first run starts (`checkpoint-scope.created`) in the run's folder; the run's root
-//!   node names it (`checkpointScopeId`). A run in another folder moves the scope there.
+//!   node names it (`checkpointScopeId`). A run in another folder or on another provider
+//!   thread rebuilds it from that run. Earlier checkpoints keep their refs: a moved thread's
+//!   next turn diff compares with the previous checkout's state, as on T3.
 //! - **Baseline.** Before the provider gets the message, the workspace is captured as ordinal
 //!   `run - 1` unless that ref exists (5 s budget; a failure starts the turn without one).
 //! - **Capture.** A provider turn that completes leaves the run `waiting`; the capture then
@@ -51,9 +53,10 @@ pub(crate) fn checkpoint_id(scope_id: &str, ordinal: u64) -> String {
     )
 }
 
-/// Where the run's checkpoints go: the scope id, the folder, and whether the run moved the
-/// scope to that folder from another one. Makes the scope or brings it up to the run's
-/// provider thread and folder, and names it on the node. Runs in the write that starts the run.
+/// Where the run's checkpoints go: the scope id and folder, naming the scope on the node.
+/// Runs in the write that starts the run. A scope that names another provider thread or
+/// folder is rebuilt from this run, as T3 builds it for every run
+/// (`CheckpointService.makeRootRunScope`), so a thread moved to another checkout captures there.
 pub(crate) fn ensure_scope(
     tx: &mut Tx<'_>,
     thread_id: &str,
@@ -61,48 +64,28 @@ pub(crate) fn ensure_scope(
     node: &mut Value,
     provider_thread_id: &Value,
     cwd: &str,
-) -> StoreResult<(String, String, bool)> {
+) -> StoreResult<(String, String)> {
     let id = scope_id(thread_id);
-    let run_id = run["id"].as_str();
-    let root = run["rootNodeId"].as_str();
-    let stored = tx.entity(thread_id, "checkpointScopes", &id)?;
-    let moved = stored
-        .as_ref()
-        .is_some_and(|scope| scope["cwd"].as_str().is_some_and(|old| old != cwd));
-    let scope = match stored {
-        Some(scope) if scope["providerThreadId"] == *provider_thread_id && scope["cwd"] == cwd => {
-            None
-        }
-        // T3 rebuilds the root scope for every run in the run's folder (`Orchestrator.ts`
-        // `prepareRootRunScope`), so a thread moved to another checkout captures there.
-        Some(mut scope) => {
-            scope["providerThreadId"] = provider_thread_id.clone();
-            scope["cwd"] = json!(cwd);
-            Some(scope)
-        }
-        None => Some(json!({
+    let current = tx
+        .entity(thread_id, "checkpointScopes", &id)?
+        .is_some_and(|scope| {
+            scope["providerThreadId"] == *provider_thread_id && scope["cwd"] == cwd
+        });
+    if !current {
+        let scope = json!({
             "id": id, "threadId": thread_id, "runId": run["id"], "nodeId": run["rootNodeId"],
             "parentScopeId": null, "providerThreadId": provider_thread_id,
             "kind": "root_run", "ordinalWithinParent": 0, "advancesAppRunCount": true,
             "cwd": cwd, "createdAt": tx.now(),
-        })),
-    };
-    if let Some(scope) = scope {
+        });
         tx.append(
             Draft::new(thread_id, "checkpoint-scope.created", scope)
-                .run(run_id)
-                .node(root),
+                .run(run["id"].as_str())
+                .node(run["rootNodeId"].as_str()),
         )?;
     }
     node["checkpointScopeId"] = json!(id);
-    Ok((id, cwd.to_owned(), moved))
-}
-
-/// Where a run that moved its thread to another checkout keeps that checkout's state from
-/// before the provider ran: its own turn compares with it. The scope's ordinal refs keep the
-/// earlier checkout's states for the earlier turns.
-pub(crate) fn move_baseline_ref(scope_id: &str, ordinal: u64) -> String {
-    git::checkpoint_ref(&join_id("checkpoint-move", &[scope_id]), ordinal)
+    Ok((id, cwd.to_owned()))
 }
 
 /// The status a folder gives a checkpoint before any ref is read.
@@ -282,16 +265,7 @@ fn needs_capture(run: &Value) -> bool {
 
 impl Inner {
     /// The baseline before a provider turn (`captureRunBaseline`). Never fails the turn.
-    ///
-    /// A run that `moved` the scope to this folder captures it apart
-    /// ([`move_baseline_ref`]): the previous ordinal's ref holds the earlier checkout.
-    pub(crate) async fn capture_baseline(
-        &self,
-        scope_id: &str,
-        cwd: &str,
-        run_ordinal: u64,
-        moved: bool,
-    ) {
+    pub(crate) async fn capture_baseline(&self, scope_id: &str, cwd: &str, run_ordinal: u64) {
         let Some(checkpoints) = &self.checkpoints else {
             return;
         };
@@ -300,25 +274,15 @@ impl Inner {
         if probe(&path).await != Probe::Repository {
             return;
         }
-        let move_ref = move_baseline_ref(scope_id, run_ordinal);
-        let reference = if moved {
-            move_ref
-        } else {
-            // A run with this ordinal that moved, then rolled back, left one behind.
-            if git::has_ref(&path, &move_ref).await.unwrap_or(false) {
-                let _ = git::delete_refs(&path, &[move_ref]).await;
+        let reference = git::checkpoint_ref(scope_id, run_ordinal.saturating_sub(1));
+        match git::has_ref(&path, &reference).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("conn-engine: checkpoint baseline lookup failed: {e}");
+                return;
             }
-            let reference = git::checkpoint_ref(scope_id, run_ordinal.saturating_sub(1));
-            match git::has_ref(&path, &reference).await {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("conn-engine: checkpoint baseline lookup failed: {e}");
-                    return;
-                }
-            }
-            reference
-        };
+        }
         match tokio::time::timeout(BASELINE_BUDGET, git::capture(&path, &reference)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => eprintln!("conn-engine: checkpoint baseline capture failed: {e}"),
@@ -454,10 +418,11 @@ impl Inner {
 
 /// The files a turn changed, without the ones a pull brought (`isGitImport`).
 async fn changed_files(cwd: &Path, scope_id: &str, ordinal: u64) -> Vec<Value> {
+    let previous = git::checkpoint_ref(scope_id, ordinal.saturating_sub(1));
     let current = git::checkpoint_ref(scope_id, ordinal);
-    let Some(previous) = turn_start_ref(cwd, scope_id, ordinal).await else {
+    if !git::has_ref(cwd, &previous).await.unwrap_or(false) {
         return vec![];
-    };
+    }
     let numstat = git::diff(git::DiffRequest {
         cwd,
         from_ref: &previous,
@@ -488,20 +453,6 @@ async fn changed_files(cwd: &Path, scope_id: &str, ordinal: u64) -> Vec<Value> {
             vec![]
         }
     }
-}
-
-/// The state turn `ordinal` started from in `cwd`: its move baseline when the run moved the
-/// thread to this checkout, else the previous ordinal's ref; `None` when neither exists.
-async fn turn_start_ref(cwd: &Path, scope_id: &str, ordinal: u64) -> Option<String> {
-    let moved = move_baseline_ref(scope_id, ordinal);
-    if git::has_ref(cwd, &moved).await.unwrap_or(false) {
-        return Some(moved);
-    }
-    let previous = git::checkpoint_ref(scope_id, ordinal.saturating_sub(1));
-    git::has_ref(cwd, &previous)
-        .await
-        .unwrap_or(false)
-        .then_some(previous)
 }
 
 /// The capture command's events (`checkpoint.capture`), when the run still needs them.
@@ -633,8 +584,6 @@ struct DiffContext {
     checkpoints: Vec<Value>,
     scopes: Vec<Value>,
     completed_runs: BTreeSet<String>,
-    /// The project's root: it shares the checkpoint refs of every worktree of its repository.
-    project_root: Option<String>,
 }
 
 fn diff_result(thread_id: &str, from: u64, to: u64, diff: String) -> Value {
@@ -724,17 +673,10 @@ impl Inner {
             .db(move |store| -> StoreResult<Option<DiffContext>> {
                 let tx = store.tx()?;
                 let read = (|| {
-                    let Some(thread) = tx.thread(&tid)? else {
+                    if tx.thread(&tid)?.is_none() {
                         return Ok(None);
-                    };
-                    let project_root = match thread["projectId"].as_str() {
-                        Some(project) => tx
-                            .project(project)?
-                            .and_then(|p| p["workspaceRoot"].as_str().map(str::to_owned)),
-                        None => None,
-                    };
+                    }
                     Ok(Some(DiffContext {
-                        project_root,
                         checkpoints: tx.entities(&tid, "checkpoints")?,
                         scopes: tx.entities(&tid, "checkpointScopes")?,
                         completed_runs: tx
@@ -833,36 +775,7 @@ impl Inner {
             return Err(unavailable(from));
         };
         let to_ref = to_checkpoint["ref"].as_str().unwrap_or_default().to_owned();
-        let scope_id = scope["id"].as_str().unwrap_or_default();
-        let to_ordinal = to_checkpoint["ordinalWithinScope"].as_u64().unwrap_or(to);
-        let scope_cwd = PathBuf::from(scope["cwd"].as_str().unwrap_or_default());
-        // The repository that holds the pair: the scope's folder, else the project's, which
-        // shares the refs of its worktrees (the thread moved on and its checkout went, or
-        // another repository took the path).
-        let candidates = [
-            Some(scope_cwd.clone()),
-            ctx.project_root.as_deref().map(PathBuf::from),
-        ];
-        let mut chosen = None;
-        for cwd in candidates.into_iter().flatten() {
-            if !matches!(git::is_repository(&cwd).await, Ok(true))
-                || !git::has_ref(&cwd, &to_ref).await.unwrap_or(false)
-            {
-                continue;
-            }
-            // One turn that moved the thread compares with the checkout it moved to.
-            let moved = move_baseline_ref(scope_id, to_ordinal);
-            let from_here = if from + 1 == to && git::has_ref(&cwd, &moved).await.unwrap_or(false) {
-                moved
-            } else {
-                from_ref.clone()
-            };
-            if git::has_ref(&cwd, &from_here).await.unwrap_or(false) {
-                chosen = Some((cwd, from_here));
-                break;
-            }
-        }
-        let (cwd, from_ref) = chosen.unwrap_or((scope_cwd, from_ref));
+        let cwd = PathBuf::from(scope["cwd"].as_str().unwrap_or_default());
         let diff = patch(&cwd, &from_ref, &to_ref, ignore_whitespace)
             .await
             .map_err(|e| cause("VcsProcessExitError", e.to_string()))?;

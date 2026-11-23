@@ -447,7 +447,8 @@ pub struct ThreadState {
     pub sequence: Option<i64>,
     pub synchronized: bool,
     /// True once the stream reported `thread.deleted` (T3 `threads.ts` keeps such a thread as
-    /// `deleted` with no data). The timeline is empty from then on; holders evict the thread.
+    /// `deleted` with no data), until a stream snapshot shows it again. Nothing of the thread is
+    /// cached meanwhile; holders evict it.
     pub deleted: bool,
     /// Server request id of each approval entry, by entry id, for `runtime-request.respond`.
     pub approval_requests: HashMap<String, String>,
@@ -1011,6 +1012,8 @@ impl ThreadState {
                 false
             }
             ThreadStreamItem::Snapshot(snapshot) => {
+                // The stream's snapshot is the server's thread now, as when it was created again.
+                self.deleted = false;
                 self.apply_projection(snapshot.projection, Some(snapshot.snapshot_sequence));
                 self.history_cursor = snapshot.history_cursor.flatten();
                 self.has_more_history = snapshot.has_more_history.unwrap_or(false);
@@ -1028,18 +1031,17 @@ impl ThreadState {
         }
     }
 
-    /// The thread was deleted: nothing of it stays to show or answer.
+    /// The thread was deleted: nothing of its cached projection stays to show or answer.
     fn clear_deleted(&mut self) -> bool {
         let changed = !self.deleted || !self.entries.is_empty() || self.working;
-        self.deleted = true;
-        self.working = false;
-        self.entries.clear();
-        self.pending_requests.clear();
-        self.approval_requests.clear();
-        self.approval_details.clear();
-        self.history_cursor = None;
-        self.has_more_history = false;
-        self.loading_earlier = false;
+        *self = Self {
+            thread_id: std::mem::take(&mut self.thread_id),
+            sequence: self.sequence,
+            synchronized: self.synchronized,
+            revision: self.revision,
+            deleted: true,
+            ..Self::default()
+        };
         changed
     }
 

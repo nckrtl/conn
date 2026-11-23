@@ -1217,37 +1217,58 @@ async fn a_rollback_session_gets_the_runtime_policy_override() {
     assert_eq!(policies[0]["approvalPolicy"], "never", "{policies:?}");
 }
 
-/// T3 rebuilds the root scope in the run's folder each run, so a thread moved to a sibling
-/// checkout captures the new checkout; earlier checkpoints stay readable from it.
-#[tokio::test(flavor = "current_thread")]
-async fn a_moved_thread_captures_its_new_checkout() {
-    let db = TempDb::new("handoff-diff");
-    let repo = Repo::new("handoff-diff");
-    let work = Repo::plain("handoff-new");
+/// A thread in worktree `repo` that ran `first` there, then moved to a sibling worktree of the
+/// same repository: the moved run has not started yet.
+async fn moved_thread(
+    db: &TempDb,
+    repo: &Repo,
+    work: &Repo,
+    first: &str,
+) -> (
+    SqliteEngine,
+    Subscription<conn_contract::ThreadStreamItem, conn_contract::GetThreadProjectionError>,
+) {
     repo.git(&["worktree", "add", "-b", "probe", &work.root(), "HEAD"]);
-    let (engine, _) = open_repo(&db, &repo);
-    dispatch(&engine, create_in(&repo, "t1", "first")).await;
+    let (engine, _) = open_repo(db, repo);
+    dispatch(&engine, create_worktree_thread(repo)).await;
     let mut stream = engine
         .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
         .await
         .unwrap();
     next(&mut stream).await;
-    turn(&engine, &mut stream, "run-one", "write first.txt one").await;
-    let first = call(
-        &engine,
-        "orchestration.getTurnDiff",
-        json!({"threadId":"t1", "fromTurnCount":0, "toTurnCount":1}),
-    )
-    .await
-    .unwrap();
+    turn(&engine, &mut stream, "run-one", first).await;
     dispatch(
         &engine,
         json!({
             "type":"thread.metadata.update", "threadId":"t1", "commandId":"move",
-            "worktreePath":work.root(), "branch":"probe", "expectedWorktreePath":null
+            "worktreePath":work.root(), "branch":"probe", "expectedWorktreePath":repo.root()
         }),
     )
     .await;
+    (engine, stream)
+}
+
+/// The files a unified diff touches, in its order.
+fn diff_files(diff: &Value) -> Vec<String> {
+    diff["diff"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.strip_prefix("diff --git a/"))
+        .map(|l| l.split(" b/").next().unwrap().to_owned())
+        .collect()
+}
+
+/// T3 rebuilds the root scope from the run that starts in another folder
+/// (`CheckpointService.makeRootRunScope`): the moved run's id, root node and folder.
+/// Its turn diff compares with the previous checkout's ref, as T3's does: a file only the
+/// previous checkout had shows as deleted (a gap T3 shares).
+#[tokio::test(flavor = "current_thread")]
+async fn a_moved_thread_captures_its_new_checkout() {
+    let db = TempDb::new("handoff-diff");
+    let repo = Repo::new("handoff-diff");
+    let work = Repo::plain("handoff-new");
+    let (engine, mut stream) = moved_thread(&db, &repo, &work, "write first.txt one").await;
     repo.write(
         "old-only.txt",
         "an unrelated edit in the previous checkout\n",
@@ -1260,7 +1281,11 @@ async fn a_moved_thread_captures_its_new_checkout() {
     )
     .await;
     let p = projection(&engine, "t1").await;
-    assert_eq!(p["checkpointScopes"][0]["cwd"], work.root());
+    let scope = &p["checkpointScopes"][0];
+    let run_two = &p["runs"][1];
+    assert_eq!(scope["cwd"], work.root(), "{scope}");
+    assert_eq!(scope["runId"], run_two["id"], "{scope}");
+    assert_eq!(scope["nodeId"], run_two["rootNodeId"], "{scope}");
     let diff = call(
         &engine,
         "orchestration.getTurnDiff",
@@ -1268,51 +1293,48 @@ async fn a_moved_thread_captures_its_new_checkout() {
     )
     .await
     .unwrap();
-    // Exactly the file the provider wrote: nothing from the previous checkout, and no
-    // deletion of turn 1's file, which the new checkout never had.
-    let files_in = |diff: &Value| -> Vec<String> {
-        diff["diff"]
-            .as_str()
-            .unwrap()
-            .lines()
-            .filter_map(|l| l.strip_prefix("diff --git a/"))
-            .map(|l| l.split(" b/").next().unwrap().to_owned())
-            .collect()
-    };
-    assert_eq!(files_in(&diff), ["new-only.txt"], "{diff}");
-    let second = checkpoint_at(&p, 2);
-    let changed: Vec<&str> = second["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| f["path"].as_str().unwrap())
-        .collect();
-    assert_eq!(changed, ["new-only.txt"]);
-    assert_eq!(files_in(&first), ["first.txt"], "{first}");
-    // Both turn diffs read the same after a restart: the refs live in the shared repository.
-    drop(stream);
-    drop(engine);
-    let (engine, _) = open_repo(&db, &repo);
-    let reread = |from: u64, to: u64| {
-        call(
-            &engine,
-            "orchestration.getTurnDiff",
-            json!({"threadId":"t1", "fromTurnCount":from, "toTurnCount":to}),
-        )
-    };
-    assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
-    assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
-    // Removing the new checkout leaves both readable through the project's repository.
-    repo.git(&["worktree", "remove", "--force", &work.root()]);
-    assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
-    assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
-    // So does another repository taking the path.
-    std::fs::create_dir_all(work.root()).unwrap();
-    let other = std::process::Command::new("git")
-        .args(["init", "-q", &work.root()])
-        .output()
-        .unwrap();
-    assert!(other.status.success());
-    assert_eq!(reread(0, 1).await.unwrap()["diff"], first["diff"]);
-    assert_eq!(reread(1, 2).await.unwrap()["diff"], diff["diff"]);
+    assert_eq!(diff_files(&diff), ["first.txt", "new-only.txt"], "{diff}");
+    let first = call(
+        &engine,
+        "orchestration.getTurnDiff",
+        json!({"threadId":"t1", "fromTurnCount":0, "toTurnCount":1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(diff_files(&first), ["first.txt"], "{first}");
+}
+
+/// T3 restores a checkpoint into the scope's current folder whatever checkout captured it, so
+/// rewinding files across a move would put checkout A's tree into checkout B. This server
+/// refuses that file restore; a conversation-only rewind still works.
+#[tokio::test(flavor = "current_thread")]
+async fn a_file_rewind_across_a_checkout_move_is_refused() {
+    let db = TempDb::new("moved-rewind");
+    let repo = Repo::new("moved-rewind");
+    let work = Repo::plain("moved-rewind-new");
+    let (engine, mut stream) = moved_thread(&db, &repo, &work, "write first.txt one").await;
+    work.write("b-only.txt", "only in the new checkout\n");
+    turn(&engine, &mut stream, "run-two", "write new-only.txt two").await;
+    let p = projection(&engine, "t1").await;
+    let target = checkpoint_at(&p, 1);
+    let message = refused_message(
+        engine
+            .dispatch(from_json(rollback("rb-1", &target, None)).unwrap())
+            .await,
+    );
+    assert!(message.contains("another checkout"), "{message}");
+    assert_eq!(
+        work.read("b-only.txt").as_deref(),
+        Some("only in the new checkout\n")
+    );
+    assert_eq!(work.read("new-only.txt").as_deref(), Some("two\n"));
+
+    dispatch(&engine, rollback("rb-2", &target, Some(false))).await;
+    let p = until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+    assert!(p["thread"]["rollbackFailure"].is_null(), "{}", p["thread"]);
+    assert_eq!(
+        work.read("b-only.txt").as_deref(),
+        Some("only in the new checkout\n")
+    );
+    assert_eq!(work.read("new-only.txt").as_deref(), Some("two\n"));
 }

@@ -2829,7 +2829,7 @@ fn shell_enrichment_snapshot_preserves_threads_and_sequence() {
 #[test]
 fn a_replayed_deletion_evicts_the_cached_thread() {
     let mut state = ThreadState::new("t1");
-    state.apply(decode_thread(json!({
+    let snapshot = json!({
         "kind": "snapshot",
         "snapshotSequence": 5,
         "projection": {
@@ -2885,7 +2885,20 @@ fn a_replayed_deletion_evicts_the_cached_thread() {
             "plans": [],
             "turnItems": [],
             "checkpointScopes": [],
-            "checkpoints": [],
+            "checkpoints": [{
+                "id": "cp-1",
+                "threadId": "t1",
+                "scopeId": "scope-1",
+                "runId": "run-1",
+                "nodeId": "node-1",
+                "parentCheckpointId": null,
+                "ordinalWithinScope": 1,
+                "appRunOrdinal": 1,
+                "ref": "refs/conn/cp-1",
+                "status": "ready",
+                "files": [{ "path": "README.md", "kind": "modified", "additions": 1, "deletions": 0 }],
+                "capturedAt": "2026-11-13T09:00:10.000Z"
+            }],
             "contextHandoffs": [],
             "contextTransfers": [],
             "visibleTurnItems": [
@@ -2973,8 +2986,11 @@ fn a_replayed_deletion_evicts_the_cached_thread() {
             ],
             "updatedAt": "2026-11-13T09:00:10.000Z"
         }
-    })));
+    });
+    state.apply(decode_thread(snapshot.clone()));
     assert!(!state.entries.is_empty());
+    assert_eq!(state.latest_run_id(), Some("run-1"));
+    assert!(state.checkpoint_for_run("run-1").is_some());
     assert!(!state.deleted);
     let fixture: Value = serde_json::from_str(include_str!("fixtures/thread_deleted_replay.json"))
         .expect("fixture is JSON");
@@ -2983,4 +2999,16 @@ fn a_replayed_deletion_evicts_the_cached_thread() {
     assert!(state.entries.is_empty());
     assert!(!state.working);
     assert!(state.pending_requests.is_empty());
+    assert_eq!(state.latest_run_id(), None, "no cached run is left");
+    assert!(
+        state.checkpoint_for_run("run-1").is_none(),
+        "nor its checkpoint"
+    );
+    assert_eq!(state.active_run_id(), None);
+
+    // The thread created again under its ID: the stream's snapshot is authoritative.
+    state.apply(decode_thread(snapshot));
+    assert!(!state.deleted);
+    assert!(!state.entries.is_empty());
+    assert_eq!(state.latest_run_id(), Some("run-1"));
 }

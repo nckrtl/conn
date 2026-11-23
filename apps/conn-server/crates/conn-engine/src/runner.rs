@@ -933,12 +933,11 @@ impl Inner {
             return Err(StartError::Abandoned);
         };
         // The baseline holds no change of this turn: the provider has not had the message.
-        if let Some((scope_id, cwd, moved)) = scope {
+        if let Some((scope_id, cwd)) = scope {
             self.capture_baseline(
                 &scope_id,
                 &cwd,
                 context.run["ordinal"].as_u64().unwrap_or(1),
-                moved,
             )
             .await;
         }

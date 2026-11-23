@@ -292,6 +292,83 @@ async fn switch_create_pull_and_init() {
     );
 }
 
+/// A clone whose `main` is one commit behind `origin/main`, with `other` pushed at the new commit.
+fn behind_remote(label: &str) -> (Fixture, String) {
+    let fx = Fixture::new(label);
+    let other = fx.other_clone();
+    write(&other, "remote.txt", "remote change\n");
+    let remote_head = commit_all(&other, "upstream delta");
+    git(
+        &other,
+        &["push", "-q", "origin", "main", "HEAD:refs/heads/other"],
+    );
+    (fx, remote_head)
+}
+
+/// T3 "pulls past an unrelated lock with custom fetch mapping=false/true".
+#[tokio::test]
+async fn pull_passes_an_unrelated_ref_lock() {
+    for custom_mapping in [false, true] {
+        let (fx, remote_head) = behind_remote("pull-lock");
+        // A tag named like the branch must not make the upstream-only pull ambiguous.
+        git(&fx.work, &["tag", "main"]);
+        let prefix = if custom_mapping {
+            git(&fx.work, &["remote", "rename", "origin", "team/upstream"]);
+            git(
+                &fx.work,
+                &[
+                    "config",
+                    "remote.team/upstream.fetch",
+                    "+refs/heads/*:refs/remotes/team/upstream/mapped/*",
+                ],
+            );
+            git(
+                &fx.work,
+                &[
+                    "update-ref",
+                    "refs/remotes/team/upstream/mapped/main",
+                    "HEAD",
+                ],
+            );
+            "refs/remotes/team/upstream/mapped"
+        } else {
+            "refs/remotes/origin"
+        };
+        let lock = fx.work.join(format!(".git/{prefix}/other.lock"));
+        std::fs::write(&lock, "fixture lock").unwrap();
+
+        let pulled = refs::pull(&fx.work).await.unwrap();
+
+        assert_eq!(
+            pulled.status,
+            VcsPullResultStatus::Pulled,
+            "{custom_mapping}"
+        );
+        assert_eq!(git(&fx.work, &["rev-parse", "HEAD"]).trim(), remote_head);
+        assert_eq!(
+            git(&fx.work, &["rev-parse", &format!("{prefix}/main")]).trim(),
+            remote_head
+        );
+        assert!(fx.work.join("remote.txt").exists());
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), "fixture lock");
+    }
+}
+
+/// T3 "reports an upstream lock after the fallback without removing it".
+#[tokio::test]
+async fn pull_reports_a_locked_upstream_and_keeps_the_lock() {
+    let (fx, _) = behind_remote("pull-upstream-lock");
+    let before = git(&fx.work, &["rev-parse", "HEAD"]);
+    let lock = fx.work.join(".git/refs/remotes/origin/main.lock");
+    std::fs::write(&lock, "fixture lock").unwrap();
+
+    assert!(refs::pull(&fx.work).await.is_err());
+
+    assert_eq!(git(&fx.work, &["rev-parse", "HEAD"]), before);
+    assert!(!fx.work.join("remote.txt").exists());
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "fixture lock");
+}
+
 #[tokio::test]
 async fn worktrees_are_created_listed_and_removed() {
     let fx = Fixture::new("wt");

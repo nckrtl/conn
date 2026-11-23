@@ -390,19 +390,30 @@ pub async fn pull(cwd: &Path) -> VcsResult<VcsPullResult> {
         .map(Option::unwrap_or_default)
     };
     let before = head().await?;
-    git(
-        "GitVcsDriver.pullCurrentBranch.pull",
-        cwd,
-        ["pull", "--ff-only"],
-    )
-    .timeout(Duration::from_secs(600))
-    .max_stdout(1_000_000, OnLimit::Truncate)
-    .env("GCM_INTERACTIVE", "never")
-    .env("GIT_ASKPASS", "")
-    .env("SSH_ASKPASS", "")
-    .env("SSH_ASKPASS_REQUIRE", "never")
-    .run()
-    .await?;
+    let run_pull = |args: Vec<String>| {
+        git("GitVcsDriver.pullCurrentBranch.pull", cwd, args)
+            .timeout(Duration::from_secs(600))
+            .max_stdout(1_000_000, OnLimit::Truncate)
+            .env("GCM_INTERACTIVE", "never")
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS", "")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .run()
+    };
+    if let Err(error) = run_pull(vec!["pull".into(), "--ff-only".into()]).await {
+        // A full fetch fails on any branch's ref lock. Then retry only the configured upstream,
+        // while nothing else has moved the branch or HEAD. Git's lock stays in place.
+        let retry = match &error {
+            ProcessError::Exit { stderr, .. } if is_ref_lock_failure(stderr) => {
+                upstream_only_pull(cwd, &branch, &before).await?
+            }
+            _ => None,
+        };
+        let Some(args) = retry else {
+            return Err(error.into());
+        };
+        run_pull(args).await?;
+    }
     let after = head().await?;
     Ok(VcsPullResult {
         status: if !before.is_empty() && before == after {
@@ -412,6 +423,76 @@ pub async fn pull(cwd: &Path) -> VcsResult<VcsPullResult> {
         },
         ref_name: branch,
         upstream_ref: Some(upstream),
+    })
+}
+
+/// `pull --ff-only -- <remote> <merge ref>` when the branch and HEAD are still the ones the
+/// pull started from and exactly one upstream ref is configured; otherwise `None`.
+async fn upstream_only_pull(
+    cwd: &Path,
+    branch: &str,
+    before: &str,
+) -> VcsResult<Option<Vec<String>>> {
+    let remote = repo::config_get(cwd, &format!("branch.{branch}.remote")).await?;
+    let merge_refs = repo::optional_text(git(
+        "GitVcsDriver.pullCurrentBranch.mergeRefs",
+        cwd,
+        [
+            "config".to_owned(),
+            "--get-all".into(),
+            format!("branch.{branch}.merge"),
+        ],
+    ))
+    .await?
+    .unwrap_or_default();
+    let current_branch = repo::current_branch(cwd).await?;
+    let current_sha = repo::optional_text(git(
+        "GitVcsDriver.pullCurrentBranch.currentSha",
+        cwd,
+        ["rev-parse", "HEAD"],
+    ))
+    .await?;
+    let mut merge_refs = merge_refs.lines().filter(|line| !line.is_empty());
+    let (Some(remote), Some(merge_ref), None) = (remote, merge_refs.next(), merge_refs.next())
+    else {
+        return Ok(None);
+    };
+    if current_branch.as_deref() != Some(branch) || current_sha.as_deref() != Some(before) {
+        return Ok(None);
+    }
+    Ok(Some(vec![
+        "pull".into(),
+        "--ff-only".into(),
+        "--".into(),
+        remote,
+        merge_ref.to_owned(),
+    ]))
+}
+
+/// Git reports a ref it could not lock as `cannot lock ref` before 2.53, and as a fetching-ref
+/// failure after.
+fn is_ref_lock_failure(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        let line = line.trim().to_ascii_lowercase();
+        let after_level = line
+            .strip_prefix("error: ")
+            .or_else(|| line.strip_prefix("fatal: "));
+        let cannot_lock = after_level
+            .and_then(|rest| rest.strip_prefix("cannot lock ref"))
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+        let create_lock = line
+            .strip_prefix("fatal: unable to create ")
+            .is_some_and(|rest| {
+                rest.starts_with(['\'', '"'])
+                    && (rest.contains(".lock':") || rest.contains(".lock\":"))
+            });
+        let fetching_ref = line
+            .strip_prefix("error: fetching ref ")
+            .is_some_and(|rest| {
+                rest.ends_with(" failed: incorrect old value provided")
+                    || rest.ends_with(" failed: reference already exists")
+            });
+        cannot_lock || create_lock || fetching_ref
     })
 }
 
@@ -450,6 +531,70 @@ pub async fn init(input: VcsInitInput) -> VcsResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T3 "does not retry a failed fetch if another operation moved branch/HEAD".
+    #[tokio::test]
+    async fn upstream_only_pull_needs_the_same_branch_and_head() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-vcs-upstream-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        run(&["config", "branch.main.remote", "origin"]);
+        run(&["config", "branch.main.merge", "refs/heads/main"]);
+        let head = run(&["rev-parse", "HEAD"]);
+        let retry = |branch: &'static str, sha: String| {
+            let dir = dir.clone();
+            async move { upstream_only_pull(&dir, branch, &sha).await.unwrap() }
+        };
+
+        let args = retry("main", head.clone()).await.unwrap();
+        assert_eq!(
+            args,
+            ["pull", "--ff-only", "--", "origin", "refs/heads/main"]
+        );
+        run(&["commit", "-q", "--allow-empty", "-m", "concurrent commit"]);
+        assert_eq!(retry("main", head.clone()).await, None, "HEAD moved");
+        let head = run(&["rev-parse", "HEAD"]);
+        run(&["checkout", "-q", "-b", "moved"]);
+        assert_eq!(retry("main", head.clone()).await, None, "branch moved");
+        run(&["checkout", "-q", "main"]);
+        run(&["config", "--add", "branch.main.merge", "refs/heads/other"]);
+        assert_eq!(retry("main", head).await, None, "two upstream refs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ref_lock_failures_match_t3() {
+        for stderr in [
+            "error: cannot lock ref 'refs/remotes/origin/other': Unable to create '/r/.git/refs/remotes/origin/other.lock': File exists.",
+            "fatal: Unable to create '/r/.git/refs/remotes/origin/main.lock': File exists.",
+            "error: fetching ref refs/remotes/origin/other failed: incorrect old value provided",
+            "From /r/origin\n error: fetching ref refs/remotes/origin/x failed: reference already exists\n",
+        ] {
+            assert!(is_ref_lock_failure(stderr), "{stderr}");
+        }
+        for stderr in [
+            "fatal: Not possible to fast-forward, aborting.",
+            "error: cannot lock refsx",
+            "fatal: Unable to create '/r/.git/index.lock'",
+            "hint: cannot lock ref",
+        ] {
+            assert!(!is_ref_lock_failure(stderr), "{stderr}");
+        }
+    }
 
     #[test]
     fn worktree_porcelain_skips_prunable_and_detached() {

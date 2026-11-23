@@ -222,14 +222,37 @@ fn content_matcher(input: &ProjectSearchContentsInput) -> Option<(RegexMatcher, 
     }
 }
 
-/// Byte ranges of every match in `line`.
-fn find_all(matcher: &RegexMatcher, line: &str) -> Vec<(usize, usize)> {
+/// Byte ranges of the matches in `line` that end by `until`, the shown preview's end: a long
+/// line's later matches are never shown, so they are not collected.
+fn find_all(matcher: &RegexMatcher, line: &str, until: usize) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
     let _ = matcher.find_iter(line.as_bytes(), |m| {
+        if m.end() > until {
+            return false;
+        }
         found.push((m.start(), m.end()));
         true
     });
     found
+}
+
+/// A file read that fails with `TimedOut` once `expired` says so, so a long file stops
+/// between buffered reads, not only at a matching line.
+struct Budgeted<'a, R> {
+    inner: R,
+    expired: &'a dyn Fn() -> bool,
+}
+
+impl<R: std::io::Read> std::io::Read for Budgeted<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if (self.expired)() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the content search time budget ran out",
+            ));
+        }
+        self.inner.read(buf)
+    }
 }
 
 fn is_word(c: char) -> bool {
@@ -261,6 +284,21 @@ pub fn search_contents(
     input: &ProjectSearchContentsInput,
     internal: &InternalPaths,
 ) -> ProjectSearchContentsResult {
+    let deadline = Instant::now() + CONTENT_TIME_BUDGET;
+    search_contents_until(root, input, internal, deadline, &|| {
+        Instant::now() >= deadline
+    })
+}
+
+/// [`search_contents`] with its budget: the walk stops at `deadline`, a file read once
+/// `expired` says so.
+fn search_contents_until(
+    root: &Path,
+    input: &ProjectSearchContentsInput,
+    internal: &InternalPaths,
+    deadline: Instant,
+    expired: &dyn Fn() -> bool,
+) -> ProjectSearchContentsResult {
     let limit = input.limit.clamp(1, 500) as usize;
     let Some((matcher, regex_fallback_error)) = content_matcher(input) else {
         return ProjectSearchContentsResult {
@@ -269,7 +307,6 @@ pub fn search_contents(
             regex_fallback_error: Some("The query is too long to search.".into()),
         };
     };
-    let deadline = Instant::now() + CONTENT_TIME_BUDGET;
     let mut matches: Vec<ProjectContentMatch> = Vec::new();
     // ripgrep's searcher reads line by line in a bounded buffer and skips binary files.
     let mut searcher = grep_searcher::SearcherBuilder::new()
@@ -289,7 +326,7 @@ pub fn search_contents(
             let mut in_file = 0;
             let mut late = false;
             let sink = grep_searcher::sinks::Lossy(|line_number, line: &str| {
-                if Instant::now() >= deadline {
+                if expired() {
                     late = true;
                     return Ok(false);
                 }
@@ -298,12 +335,10 @@ pub fn search_contents(
                     .char_indices()
                     .nth(MAX_LINE_CHARS)
                     .map_or(line.len(), |(i, _)| i);
-                let ranges: Vec<ProjectContentMatchRange> = find_all(&matcher, line)
+                let ranges: Vec<ProjectContentMatchRange> = find_all(&matcher, line, shown_end)
                     .into_iter()
                     .filter(|&(start, end)| {
-                        end <= shown_end
-                            && line.is_char_boundary(start)
-                            && line.is_char_boundary(end)
+                        line.is_char_boundary(start) && line.is_char_boundary(end)
                     })
                     .filter(|&(start, end)| !input.whole_word || whole_word(line, start, end))
                     .map(|(start, end)| ProjectContentMatchRange {
@@ -323,9 +358,15 @@ pub fn search_contents(
                 in_file += 1;
                 Ok(matches.len() <= limit && in_file < MAX_MATCHES_PER_FILE)
             });
-            let searched = searcher.search_path(&matcher, &full, sink);
+            let searched = std::fs::File::open(&full).and_then(|file| {
+                let reader = Budgeted {
+                    inner: file,
+                    expired,
+                };
+                searcher.search_reader(&matcher, reader, sink)
+            });
             // A file that vanished or cannot be read is not part of the answer; a line over the
-            // limit is, and is left unread.
+            // limit, or the budget running out mid-file, leaves the rest unread.
             if late
                 || searched.is_err_and(|e| {
                     !matches!(
@@ -336,7 +377,7 @@ pub fn search_contents(
             {
                 cut = true;
             }
-            matches.len() <= limit && Instant::now() < deadline
+            matches.len() <= limit && !expired()
         },
     );
     let truncated = cut || matches.len() > limit || end != WalkEnd::Complete;
@@ -362,6 +403,47 @@ mod tests {
         assert!(Scorer::new("*.ts").score("a/b/c.ts").is_some());
         assert!(Scorer::new("*.ts").score("a/b/c.tsx").is_none());
         assert_eq!(normalize_query("  @./Foo[1]"), "foo1]");
+    }
+
+    /// The budget running out inside a long file with no match ends the search there and
+    /// says the answer is partial.
+    #[test]
+    fn a_long_file_stops_at_the_budget() {
+        let root = std::env::temp_dir().join(format!("conn-search-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("large.txt"), "filler\n".repeat(2_000_000)).unwrap();
+        let input = ProjectSearchContentsInput {
+            cwd: String::new(),
+            query: "absent".into(),
+            limit: 10,
+            case_sensitive: true,
+            whole_word: false,
+            use_regex: false,
+        };
+        let reads = std::cell::Cell::new(0);
+        let expired = || {
+            reads.set(reads.get() + 1);
+            reads.get() > 3
+        };
+        let internal = InternalPaths::new(&root.join("state"));
+        let far = Instant::now() + Duration::from_secs(3600);
+        let found = search_contents_until(&root, &input, &internal, far, &expired);
+        assert!(found.matches.is_empty());
+        assert!(found.truncated, "the file was not read to its end");
+        assert!(
+            reads.get() < 10,
+            "stopped right after the budget: {} checks",
+            reads.get()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Only the matches inside the shown preview are collected, however many follow.
+    #[test]
+    fn collects_matches_only_up_to_the_preview() {
+        let matcher = RegexMatcherBuilder::new().build("ab").unwrap();
+        let line = "ab".repeat(100_000);
+        assert_eq!(find_all(&matcher, &line, 6), [(0, 2), (2, 4), (4, 6)]);
     }
 
     #[test]

@@ -326,6 +326,38 @@ pub fn signal_group(pgid: u32, signal: rustix::process::Signal) {
     let _ = rustix::process::kill_process_group(pgid, signal);
 }
 
+/// Waits until the child `pid` exits, without reaping it. Until its owner reaps it, the pid
+/// and the process group named after it stay the child's, so signals by them cannot reach a
+/// process that reused the id. `false` when `pid` is no unreaped child of ours.
+#[cfg(unix)]
+pub async fn wait_exit_unreaped(pid: u32) -> bool {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    use tokio::signal::unix::{SignalKind, signal};
+    let Some(raw) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return false;
+    };
+    // Registered before the first look, so no exit goes unnoticed.
+    let mut sigchld = signal(SignalKind::child()).ok();
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    loop {
+        match waitid(WaitId::Pid(raw), options) {
+            Ok(Some(_)) => return true,
+            Ok(None) | Err(Errno::INTR) => {}
+            Err(_) => return false,
+        }
+        let woke = match sigchld.as_mut() {
+            Some(stream) => stream.recv().await.is_some(),
+            None => false,
+        };
+        if !woke {
+            // No SIGCHLD stream: look again on a short timer.
+            sigchld = None;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 /// Whether a process with this pid still runs. Signal 0 succeeds on a zombie too, and on Linux
 /// a killed orphan stays a zombie until its new parent reaps it, so there a `Z` (or `X`) state
 /// in `/proc/<pid>/stat` counts as ended.

@@ -1,9 +1,9 @@
-//! Runs a provider CLI for a status probe (shared copy of `conn-provider-acp`'s `probe.rs`,
-//! which that crate can switch to), as T3's `spawnAndCollect` does
-//! (`packages/provider-core/src/server/snapshotProbe.ts` on Effect's Node spawner): its own
+//! Runs a provider CLI for a status probe (Grok's status and Antigravity's health check), as
+//! T3's `spawnAndCollect` does (`packages/provider-core/src/server/snapshotProbe.ts` on Effect's Node spawner): its own
 //! process group, the given environment and nothing else, stdin a pipe that stays open, stdout
 //! and stderr collected, and on a timeout SIGTERM to the group, then SIGKILL after 1 s
-//! (`PROBE_FORCE_KILL_AFTER`).
+//! (`PROBE_FORCE_KILL_AFTER`) unless the CLI and every pipe holder have ended. The CLI is
+//! reaped only after the last group signal, so a reused group id never gets one.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -91,22 +91,31 @@ pub async fn run_collect(
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let collect = async {
-        let (_, out, err, status) =
-            tokio::join!(feed, read_capped(stdout), read_capped(stderr), child.wait());
-        (out, err, status)
-    };
-    let result = tokio::time::timeout(timeout, collect).await;
+    // Kept past a timeout: after the group signal, closed pipes show the helpers have ended.
+    let mut output =
+        std::pin::pin!(async move { tokio::join!(read_capped(stdout), read_capped(stderr)) });
+    // The CLI stays unreaped until every signal to its group is sent, so no other process can
+    // hold the group id yet.
+    let result = tokio::time::timeout(timeout, async {
+        let (_, output, ours) = tokio::join!(feed, &mut output, exited_unreaped(pid));
+        (output, ours)
+    })
+    .await;
     drop(held);
     match result {
-        Ok((stdout, stderr, status)) => {
-            let status = status.map_err(|e| CommandError::Failed(e.to_string()))?;
+        Ok(((stdout, stderr), ours)) => {
             // A referenced detached child: the scope's release signals the group once more,
             // which ends any helper the CLI left behind.
             #[cfg(unix)]
-            if let Some(pid) = pid {
+            if let (true, Some(pid)) = (ours, pid) {
                 crate::process::signal_group(pid, rustix::process::Signal::TERM);
             }
+            #[cfg(not(unix))]
+            let _ = ours;
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| CommandError::Failed(e.to_string()))?;
             Ok(Some(CommandOutput {
                 stdout,
                 stderr,
@@ -114,12 +123,18 @@ pub async fn run_collect(
             }))
         }
         Err(_) => {
+            // Not reaped yet (`child.wait` has not run), so the pid is still the CLI's.
             #[cfg(unix)]
             if let Some(pid) = pid {
-                use crate::process::{signal_group, wait_gone};
+                use crate::process::{signal_group, wait_exit_unreaped};
                 use rustix::process::Signal;
                 signal_group(pid, Signal::TERM);
-                if !wait_gone(pid, FORCE_KILL_AFTER).await {
+                let ended = tokio::time::timeout(FORCE_KILL_AFTER, async {
+                    tokio::join!(&mut output, wait_exit_unreaped(pid))
+                })
+                .await
+                .is_ok();
+                if !ended {
                     signal_group(pid, Signal::KILL);
                 }
             }
@@ -128,6 +143,20 @@ pub async fn run_collect(
             Ok(None)
         }
     }
+}
+
+/// Whether the CLI has exited and is still unreaped ([`crate::process::wait_exit_unreaped`]).
+#[cfg(unix)]
+async fn exited_unreaped(pid: Option<u32>) -> bool {
+    match pid {
+        Some(pid) => crate::process::wait_exit_unreaped(pid).await,
+        None => false,
+    }
+}
+
+#[cfg(not(unix))]
+async fn exited_unreaped(_pid: Option<u32>) -> bool {
+    false
 }
 
 /// Node reports a signal death as a null code; Effect turns it into a number. A probe that
@@ -214,5 +243,35 @@ mod tests {
         .unwrap();
         assert_eq!(out, None);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The CLI exits at once and leaves a helper that holds stdout, so the probe times out.
+    /// When the group SIGTERM reaches the helper, it records the CLI's state: still an
+    /// unreaped zombie (`Z`), so the group id could not have been reused.
+    #[tokio::test]
+    async fn the_group_is_signalled_before_the_cli_is_reaped() {
+        let dir = std::env::temp_dir().join(format!("conn-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("leader-state");
+        let script = format!(
+            "( trap \"ps -o stat= -p $$ > '{}'; exit 0\" TERM; while :; do sleep 0.05; done ) & exit 0",
+            state.display()
+        );
+        let out = spawn_and_collect(
+            "sh",
+            &["-c", &script],
+            &path_env(),
+            None,
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, None);
+        let seen = std::fs::read_to_string(&state).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            seen.trim_start().starts_with('Z'),
+            "the CLI was already reaped when its group was signalled: {seen:?}"
+        );
     }
 }

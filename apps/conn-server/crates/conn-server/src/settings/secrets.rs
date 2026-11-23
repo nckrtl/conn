@@ -563,6 +563,9 @@ pub(super) fn move_legacy_hosts(
 ) -> Option<Vec<String>> {
     let mut hosts: Vec<(&str, Value)> = Vec::new();
     let mut moves: Vec<(String, String)> = Vec::new();
+    // Inline Bitbucket tokens, which the generated host table does not list:
+    // (field, store name, value).
+    let mut inline: Vec<(&str, String, String)> = Vec::new();
     for kind in RETIRED_HOST_KEYS {
         let Some(legacy) = settings.get(kind).filter(|v| v.is_object()) else {
             continue;
@@ -589,8 +592,14 @@ pub(super) fn move_legacy_hosts(
                 ("accessToken", "bitbucket-access-token"),
                 ("apiToken", "bitbucket-api-token"),
             ] {
-                if legacy.get(field).is_some_and(saved) {
-                    moves.push((from.to_owned(), new_name(field, None)));
+                match legacy.get(field) {
+                    Some(value) if saved(value) => {
+                        moves.push((from.to_owned(), new_name(field, None)));
+                    }
+                    Some(Value::String(value)) if !value.is_empty() => {
+                        inline.push((field, new_name(field, None), value.clone()));
+                    }
+                    _ => {}
                 }
             }
         } else if let Some(Value::Object(tokens)) = legacy.get("tokens") {
@@ -620,8 +629,23 @@ pub(super) fn move_legacy_hosts(
             return None;
         }
     }
+    for (_, name, value) in &inline {
+        if secret_store::write(dir, name, value.as_bytes()).is_err() {
+            eprintln!(
+                "conn-server: failed to move a source control secret into the store ({name})"
+            );
+            return None;
+        }
+    }
     let target = super::ensure_object(settings.entry("sourceControlHosts").or_insert(Value::Null));
-    for (kind, legacy) in hosts {
+    for (kind, mut legacy) in hosts {
+        if kind == "bitbucket"
+            && let Value::Object(fields) = &mut legacy
+        {
+            for (field, _, _) in &inline {
+                fields.insert((*field).to_owned(), json!(SECRET_REDACTED));
+            }
+        }
         target.insert(kind.to_owned(), legacy);
     }
     for kind in RETIRED_HOST_KEYS {

@@ -1532,7 +1532,7 @@ mod tests {
         conn_support::secret_store::write(&secrets, "bitbucket-access-token", b"bb").unwrap();
         let file = json!({
             "github": { "tokens": { "github.com": "ghp", "ghe.example.com": SECRET_REDACTED } },
-            "bitbucket": { "accessToken": SECRET_REDACTED },
+            "bitbucket": { "accessToken": SECRET_REDACTED, "apiToken": "bbapi" },
         });
         fs::write(dir.join("settings.json"), file.to_string()).unwrap();
         let store = SettingsStore::open(dir.join("settings.json"));
@@ -1556,6 +1556,16 @@ mod tests {
         assert_eq!(
             disk["sourceControlHosts"]["bitbucket"]["accessToken"],
             SECRET_REDACTED
+        );
+        // An inline legacy Bitbucket token moves to the store too.
+        assert_eq!(
+            disk["sourceControlHosts"]["bitbucket"]["apiToken"],
+            SECRET_REDACTED
+        );
+        assert!(!disk.to_string().contains("bbapi"), "{disk}");
+        assert_eq!(
+            stored(&dir, "source-control-Yml0YnVja2V0-YXBpVG9rZW4").as_deref(),
+            Some("bbapi")
         );
         assert_eq!(
             stored(&dir, &format!("source-control-Z2l0aHVi-dG9rZW5z-{ghe}")).as_deref(),

@@ -258,6 +258,55 @@ final class ConnSpikeUITests: XCTestCase {
         saveScreenshot(named: "question-answered\(suffix)", dir: screensDir)
     }
 
+    /// A send with an approval pending declines it and redirects the agent (mobile's
+    /// ThreadDetailScreen); the fake Grok's approval takes no feedback.
+    func testApprovalRedirectFlow() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairingURL = env["CONN_PAIRING_URL"], !pairingURL.isEmpty,
+              let title = env["CONN_APPROVAL_THREAD_TITLE"], !title.isEmpty
+        else {
+            throw XCTSkip("Set CONN_PAIRING_URL and CONN_APPROVAL_THREAD_TITLE")
+        }
+        let screensDir = env["CONN_SCREENS_DIR"]
+        let suffix = env["CONN_SCREEN_SUFFIX"] ?? ""
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session"]
+        app.launch()
+        let urlField = app.textFields["pairing.urlField"]
+        XCTAssertTrue(urlField.waitForExistence(timeout: 10), "Pairing URL field should appear")
+        urlField.tap()
+        urlField.typeText(pairingURL)
+        app.buttons["pairing.connectButton"].tap()
+
+        let threadRow = app.staticTexts[title].firstMatch
+        XCTAssertTrue(threadRow.waitForExistence(timeout: 15), "The approval thread should be listed")
+        threadRow.tap()
+
+        let card = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'thread.approval.'")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 15), "The approval card should open above the composer")
+        let composer = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
+        let placeholder = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@ OR placeholderValue == %@",
+                                  "Send a message to decline and redirect the agent",
+                                  "Send a message to decline and redirect the agent")).firstMatch
+        XCTAssertTrue(placeholder.waitForExistence(timeout: 5), "The composer should offer a redirect")
+        saveScreenshot(named: "approval-redirect-1\(suffix)", dir: screensDir)
+
+        composer.tap()
+        composer.typeText("Skip that and say hi")
+        app.buttons["Send"].firstMatch.tap()
+
+        let declined = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Approval answer")).firstMatch
+        XCTAssertTrue(declined.waitForExistence(timeout: 20), "The agent should get the decline")
+        let reply = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Fake Grok is here")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 20), "The redirect should reach the agent as a message")
+        XCTAssertFalse(card.exists, "The approval card should close once declined")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+        saveScreenshot(named: "approval-redirect-2\(suffix)", dir: screensDir)
+    }
+
     func testCaptureExpoReferenceScreens() throws {
         let env = ProcessInfo.processInfo.environment
         guard env["CONN_CAPTURE_EXPO"] == "1" else {

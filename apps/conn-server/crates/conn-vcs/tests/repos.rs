@@ -555,6 +555,100 @@ async fn file_contents_and_branch_commits() {
     assert!(commits.commits[0].committed_at.contains('T'));
 }
 
+/// T3 "compares a plain recorded base with the remote that base branch tracks".
+#[tokio::test]
+async fn a_plain_recorded_base_compares_with_the_remote_it_tracks() {
+    let fx = Fixture::new("tracked-base");
+    let upstream = fx.root.path().join("upstream.git");
+    git(
+        fx.root.path(),
+        &["init", "-q", "--bare", upstream.to_str().unwrap()],
+    );
+    git(
+        &fx.work,
+        &["remote", "add", "upstream", upstream.to_str().unwrap()],
+    );
+    write(&fx.work, "upstream.txt", "unrelated upstream work\n");
+    commit_all(&fx.work, "upstream work");
+    git(&fx.work, &["push", "-q", "-u", "upstream", "main"]);
+    git(
+        &fx.work,
+        &["checkout", "-q", "-b", "feature/from-local-main"],
+    );
+    git(
+        &fx.work,
+        &[
+            "config",
+            "branch.feature/from-local-main.t3-merge-base",
+            "main",
+        ],
+    );
+    write(&fx.work, "feature.txt", "intended branch change\n");
+    commit_all(&fx.work, "feature work");
+    write(&fx.work, "draft.txt", "draft\n");
+
+    let read = |base: Option<&str>| {
+        let cwd = fx.cwd();
+        let base = base.map(str::to_owned);
+        async move {
+            let mut input = preview_input(&cwd);
+            input.source_kind = Some(InputKind::BranchRange);
+            input.base_ref.clone_from(&base);
+            let preview = review::diff_preview(input).await.unwrap();
+            let range = preview
+                .sources
+                .into_iter()
+                .find(|s| s.kind == Kind::BranchRange)
+                .unwrap();
+            let mut files: Vec<_> = range.files.unwrap().into_iter().map(|f| f.path).collect();
+            files.sort();
+            let commits = review::branch_commits(ReviewBranchCommitsInput {
+                cwd,
+                base_ref: base,
+            })
+            .await
+            .unwrap();
+            let subjects: Vec<_> = commits.commits.into_iter().map(|c| c.subject).collect();
+            (range.base_ref.unwrap(), files, subjects)
+        }
+    };
+    let ours = (
+        "upstream/main".to_owned(),
+        vec!["draft.txt".to_owned(), "feature.txt".to_owned()],
+        vec!["feature work".to_owned()],
+    );
+    let theirs = (
+        "origin/main".to_owned(),
+        vec![
+            "draft.txt".to_owned(),
+            "feature.txt".to_owned(),
+            "upstream.txt".to_owned(),
+        ],
+        vec!["feature work".to_owned(), "upstream work".to_owned()],
+    );
+    assert_eq!(read(None).await, ours);
+    assert_eq!(read(Some("upstream/main")).await, ours);
+    assert_eq!(read(Some("origin/main")).await, theirs);
+    let local = status::local_status(&fx.work).await.unwrap();
+    let changes = local.branch_changes.unwrap();
+    assert_eq!(changes.base_ref.as_deref(), Some("upstream/main"));
+    assert_eq!(
+        status::remote_status(&fx.work)
+            .await
+            .unwrap()
+            .unwrap()
+            .ahead_count,
+        1
+    );
+
+    // Retargeting local main moves the implicit base with it.
+    git(
+        &fx.work,
+        &["branch", "-q", "--set-upstream-to=origin/main", "main"],
+    );
+    assert_eq!(read(None).await, theirs);
+}
+
 #[tokio::test]
 async fn provision_creates_a_worktree_and_runs_the_setup_script() {
     use conn_contract::{

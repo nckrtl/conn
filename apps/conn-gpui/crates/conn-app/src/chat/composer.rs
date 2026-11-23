@@ -193,6 +193,19 @@ pub(crate) enum ComposerEvent {
 }
 
 /// Stateful GPUI entity for the Conn composer, model picker, `/` command menu, and `@` mentions.
+/// What the pending question's panel reads from the composer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct QuestionComposerStatus {
+    /// The draft text, which becomes the answer on send.
+    pub(crate) typed: String,
+    /// Dictation is recording, so Send finishes it.
+    pub(crate) voice_active: bool,
+    /// A file is still uploading.
+    pub(crate) uploading: bool,
+    /// Sending is blocked outside the answer: offline, uploading or transcribing.
+    pub(crate) blocked: bool,
+}
+
 pub(crate) struct Composer {
     tokens: Tokens,
     connection: Option<Connection>,
@@ -231,6 +244,8 @@ pub(crate) struct Composer {
     implement_menu_open: bool,
     stash: PromptStash,
     branch: branch_picker::BranchUi,
+    /// The host draws the stash badge in its own banner dock.
+    stash_docked: bool,
     textarea: Entity<TextareaState>,
     model_search_input: Entity<InputState>,
     catalog: ModelCatalog,
@@ -264,6 +279,8 @@ pub(crate) struct Composer {
     dictation_error: Option<String>,
     next_dictation_seq: u64,
     _subscriptions: Vec<Subscription>,
+    /// Send was pressed while dictating: submit once the transcript lands.
+    submit_after_dictation: bool,
 }
 
 impl fmt::Debug for Composer {
@@ -376,6 +393,7 @@ impl Composer {
             implement_menu_open: false,
             stash: PromptStash::default(),
             branch,
+            stash_docked: false,
             textarea,
             model_search_input,
             catalog: ModelCatalog::default(),
@@ -405,6 +423,7 @@ impl Composer {
             dictation_error: None,
             next_dictation_seq: 1,
             _subscriptions: vec![textarea_sub, search_sub],
+            submit_after_dictation: false,
         };
         if composer.connection.is_some() {
             composer.refresh_providers(cx);
@@ -1319,9 +1338,13 @@ impl Composer {
         let sid = session_id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let stop_res = crate::live::RT
+                let submit = std::mem::take(&mut composer.submit_after_dictation);
                 .spawn(async move {
                     let client = OperatorClient::from_config()?;
                     client.stop(&sid).await
+                        if submit {
+                            composer.submit(window, cx);
+                        }
                 })
                 .await;
 
@@ -1509,6 +1532,54 @@ impl Composer {
                 input.set_value("", window, cx);
             });
             self.attachments.clear();
+    /// What the pending question's panel needs from the composer (`pendingPanelActions`).
+    pub(crate) fn question_panel_status(&self, cx: &App) -> QuestionComposerStatus {
+        let uploading = self
+            .attachments
+            .iter()
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+        QuestionComposerStatus {
+            typed: self.textarea.read(cx).value().to_string(),
+            voice_active: matches!(self.dictation, DictationState::Recording { .. }),
+            uploading,
+            blocked: self.environment_unavailable
+                || self.connection.is_none()
+                || self.send_disabled_reason.is_some()
+                || uploading
+                || matches!(self.dictation, DictationState::Transcribing { .. }),
+        }
+    }
+
+    /// Send on the question panel while dictating: ends the dictation, then submits its text.
+    pub(crate) fn finish_dictation_and_submit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let DictationState::Recording { session_id } = self.dictation.clone() {
+            self.submit_after_dictation = true;
+            self.stop_dictation(session_id, window, cx);
+        } else {
+            self.submit(window, cx);
+        }
+    }
+
+    /// Hands the stash badge to the host's banner dock (`ComposerBanner.Dock`), or takes it back.
+    pub(crate) fn set_stash_docked(&mut self, docked: bool, cx: &mut Context<'_, Self>) {
+        if self.stash_docked != docked {
+            self.stash_docked = docked;
+            cx.notify();
+        }
+    }
+
+    /// The stash badge's tab for a host dock; none while the drawer is open.
+    pub(crate) fn dock_stash_badge(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        if self.stash.menu_open {
+            return None;
+        }
+        stash::render_stash_badge_tab(&self.stash, &self.tokens, cx)
+    }
+
             None
         };
         cx.emit(ComposerEvent::Send {
@@ -2873,6 +2944,8 @@ impl Render for Composer {
                     if m.platform && m.shift && !m.alt && !m.control {
                         match keystroke.key.as_str() {
                             "g" => composer.toggle_branch_picker(window, cx),
+                } else if self.stash_docked {
+                    None
                             "x" => composer.toggle_workspace_menu(cx),
                             "l" => composer.use_previous_worktree(window, cx),
                             _ => return,

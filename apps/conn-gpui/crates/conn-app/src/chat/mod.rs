@@ -17,6 +17,7 @@ mod draft_hero;
 mod icons;
 pub(crate) mod markdown;
 mod question_logic;
+mod question_panel;
 mod spinner;
 mod toc;
 
@@ -236,6 +237,8 @@ pub(crate) struct ChatView {
     /// The first pending question request, which a composer send answers.
     pending_question_id: Option<String>,
     user_input_cards: HashMap<String, cards::UserInputCardState>,
+    /// The pending question's banner: lead-in, scroll, and what keeps the digit shortcuts live.
+    question_panel: question_panel::QuestionPanelState,
     secret_forms: HashMap<String, cards::SecretFormState>,
     /// Runs whose changed-files tree has every folder expanded.
     changed_files_expanded: HashSet<String>,
@@ -411,6 +414,7 @@ impl ChatView {
             pending_approval: None,
             pending_question_id: None,
             user_input_cards: HashMap::new(),
+            question_panel: question_panel::QuestionPanelState::new(cx),
             secret_forms: HashMap::new(),
             changed_files_expanded: HashSet::new(),
             changed_files_dir_overrides: HashMap::new(),
@@ -698,6 +702,7 @@ impl ChatView {
             } => Some(id.clone()),
             _ => None,
         });
+        self.sync_question_panel(thread);
         self.sync_working_timer(cx);
         let sync_start = std::time::Instant::now();
         let stats = self.cache.sync(
@@ -892,6 +897,7 @@ impl ChatView {
                     cx.emit(ChatEvent::OpenFile(path));
                 });
             })),
+            prose: None,
         }
     }
 
@@ -1600,7 +1606,6 @@ impl ChatView {
                 status,
                 pending,
                 answers,
-                dismissible,
                 ..
             } => self.render_user_input_card(
                 id,
@@ -1609,7 +1614,6 @@ impl ChatView {
                 *pending,
                 *status,
                 answers,
-                *dismissible,
                 cx,
             ),
             TimelineEntry::SecretRequest {
@@ -3058,6 +3062,11 @@ impl Render for ChatView {
             if show_latest_pill {
                 container = container.child(toc::render_scroll_to_bottom_pill(&self.tokens, cx));
             }
+        let question_banner = self.render_question_banner(window, cx);
+        let banner_docked = question_banner.is_some();
+        self.composer
+            .update(cx, |c, cx| c.set_stash_docked(banner_docked, cx));
+
             container.into_any_element()
         };
 
@@ -3071,6 +3080,7 @@ impl Render for ChatView {
         }
         composer_lane = composer_lane.child(
             div()
+                .when_some(question_banner, |lane, banner| lane.child(banner))
                 .w_full()
                 .max_w(px(CHAT_CONTENT_MAX_WIDTH_PX))
                 .mx_auto()

@@ -327,11 +327,13 @@ fn kitchen_sink_thread() -> ThreadState {
                         value: Some("vmpal".to_owned()),
                         label: "VMPal".to_owned(),
                         description: "Run inside nick-vm".to_owned(),
+                        preview: Some("Slow, but the pixels are real.".to_owned()),
                     },
                     UserInputOption {
                         value: Some("headless".to_owned()),
                         label: "Headless".to_owned(),
                         description: "Fast local GPUI test".to_owned(),
+                        preview: None,
                     },
                 ],
                 multi_select: false,
@@ -1144,4 +1146,69 @@ fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) 
         "estimated {estimated} vs laid-out {:?} with {lines} lines",
         card.size.height
     );
+}
+
+#[gpui_kit::test]
+fn pending_question_banner_sits_on_the_composer_and_digits_pick_its_options(
+    cx: &mut TestAppContext,
+) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    let chat = cx.read(|cx| app.read(cx).chat_for_test());
+    let selected = |window: &mut Window, cx: &mut gpui_kit::App, label: &str| {
+        window.render_frame(cx);
+        window.find_by_label(label).selected()
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // The banner is a drawer over the composer card: inset, and tucked under its top edge.
+        let banner = window.find_by_label("Mode").bounds();
+        let card = window.find_by_label("Message input card").bounds();
+        assert!(
+            banner.top() < card.top() && banner.bottom() > card.top(),
+            "banner {banner:?} must tuck under the composer card {card:?}"
+        );
+        assert!(
+            banner.left() > card.left() && banner.right() < card.right(),
+            "banner {banner:?} must sit inside the card's width {card:?}"
+        );
+        assert_eq!(selected(window, cx, "VMPal"), Some(false));
+        assert_eq!(selected(window, cx, "Headless"), Some(false));
+
+        // With the keyboard in the composer's editor, digits are text, not shortcuts.
+        chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        window.render_frame(cx);
+        window.press("2", cx);
+        assert_eq!(
+            selected(window, cx, "Headless"),
+            Some(false),
+            "a digit typed in the editor must not pick an option"
+        );
+        // The typed digit is the answer now, so no option shows as picked until it is removed.
+        window.press("backspace", cx);
+
+        // With it on the panel, they pick: the number is the option, and a modified digit,
+        // a number past the last option and a shifted digit do nothing.
+        let vmpal = window.find_by_label("VMPal").bounds().center();
+        window.pointer_move(vmpal, None, cx);
+        window.pointer_down(vmpal, MouseButton::Left, cx);
+        window.pointer_up(vmpal, MouseButton::Left, cx);
+        assert_eq!(selected(window, cx, "VMPal"), Some(true));
+        window.press("cmd-2", cx);
+        window.press("3", cx);
+        window.press("shift-2", cx);
+        assert_eq!(selected(window, cx, "VMPal"), Some(true));
+        assert_eq!(selected(window, cx, "Headless"), Some(false));
+        window.press("2", cx);
+        assert_eq!(selected(window, cx, "Headless"), Some(true));
+        assert_eq!(selected(window, cx, "VMPal"), Some(false));
+        window.press("1", cx);
+        assert_eq!(selected(window, cx, "VMPal"), Some(true));
+        assert_eq!(selected(window, cx, "Headless"), Some(false));
+    });
 }

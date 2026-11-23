@@ -341,6 +341,14 @@ pub struct PendingApproval {
     pub supports_feedback: bool,
 }
 
+/// Where an assistant message or a question sits in its run (`assistantMessageIdsBeforeQuestion`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ItemPlace {
+    run_id: Option<String>,
+    provider_turn_id: Option<String>,
+    ordinal: i64,
+}
+
 /// One thread's timeline from `orchestration.subscribeThread`.
 #[derive(Clone, Debug, Default)]
 pub struct ThreadState {
@@ -376,6 +384,8 @@ pub struct ThreadState {
     compactions: Vec<TrackedCompaction>,
     runs: HashMap<String, TrackedRun>,
     messages: HashMap<String, TrackedMessage>,
+    /// Where each assistant message and question sits in its run, by item id.
+    places: HashMap<String, ItemPlace>,
 }
 
 impl ThreadState {
@@ -410,6 +420,37 @@ impl ThreadState {
                 })
             })
             .collect()
+    }
+
+    /// What the agent wrote just before it asked question `entry_id`: the markdown of the last
+    /// assistant message of the same run and provider turn that comes before it, or `None` when
+    /// that message has no text (Conn's `contextMessageIds.at(-1)`).
+    #[must_use]
+    pub fn question_context(&self, entry_id: &str) -> Option<&str> {
+        let question = self.places.get(entry_id)?;
+        question.run_id.as_ref()?;
+        let (context_id, _) = self
+            .places
+            .iter()
+            .filter(|(_, place)| {
+                place.run_id == question.run_id
+                    && place.ordinal < question.ordinal
+                    && (place.provider_turn_id.is_none()
+                        || question.provider_turn_id.is_none()
+                        || place.provider_turn_id == question.provider_turn_id)
+            })
+            .filter(|(id, _)| {
+                self.entries
+                    .iter()
+                    .any(|e| matches!(e, TimelineEntry::Assistant { id: a, .. } if a == *id))
+            })
+            .max_by_key(|(_, place)| place.ordinal)?;
+        self.entries.iter().find_map(|entry| match entry {
+            TimelineEntry::Assistant { id, markdown, .. } if id == context_id => {
+                Some(markdown.as_str()).filter(|text| !text.trim().is_empty())
+            }
+            _ => None,
+        })
     }
 
     /// Computes the elapsed duration in milliseconds for a contiguous group of work entries.
@@ -677,6 +718,7 @@ impl ThreadState {
         }
 
         self.turn_checkpoints.clear();
+        self.places.clear();
         for checkpoint in &projection.checkpoints {
             self.record_checkpoint(checkpoint);
         }
@@ -723,6 +765,9 @@ impl ThreadState {
             }
             if let Some((id, timing)) = extract_projection_timing(&item) {
                 self.entry_timings.insert(id, timing);
+            }
+            if let Some((id, place)) = place_of_projection_item(&item) {
+                self.places.insert(id, place);
             }
             if let Some(entry) = map_projection_turn_item(item) {
                 if let Some(&idx) = entry_index.get(entry.id()) {
@@ -795,6 +840,7 @@ impl ThreadState {
                 _ => None,
             };
             let timing = extract_projection_timing(&item);
+            let place = place_of_projection_item(&item);
 
             let Some(entry) = map_projection_turn_item(item) else {
                 continue;
@@ -807,6 +853,9 @@ impl ThreadState {
             }
             if let Some((id, entry_timing)) = timing {
                 self.entry_timings.entry(id).or_insert(entry_timing);
+            }
+            if let Some((id, place)) = place {
+                self.places.entry(id).or_insert(place);
             }
             if let Some(&idx) = prepended_index.get(entry.id()) {
                 prepended[idx] = entry;
@@ -1100,6 +1149,9 @@ impl ThreadState {
                 }
                 let timing = extract_turn_item_timing(&ev.payload);
                 self.entry_timings.insert(item_id.clone(), timing);
+                if let Some((id, place)) = place_of_turn_item(&ev.payload) {
+                    self.places.insert(id, place);
+                }
                 if let Some(entry) = map_turn_item(ev.payload) {
                     let mut changed = compaction_changed;
                     if matches!(entry, TimelineEntry::User { .. }) {
@@ -1746,6 +1798,7 @@ fn map_user_input_request(item: UserInputRequestItem) -> Option<TimelineEntry> {
                     label: o.label,
                     description: o.description,
                     value: o.value,
+                    preview: o.preview,
                 })
                 .collect(),
             multi_select: q.multi_select == Some(true),
@@ -2015,6 +2068,48 @@ fn extract_turn_item_timing(item: &TurnItem) -> EntryTiming {
         TurnItem::LinkRequest(i) => timing_of!(i),
         TurnItem::Subagent(i) => timing_of!(i),
         TurnItem::DynamicTool(i) => timing_of!(i),
+    }
+}
+
+/// The place of an assistant message or a question; other items have none.
+fn place_of_projection_item(item: &ProjectionTurnItem) -> Option<(String, ItemPlace)> {
+    macro_rules! place_of {
+        ($i:expr) => {
+            Some((
+                $i.id.clone(),
+                ItemPlace {
+                    run_id: $i.run_id.clone(),
+                    provider_turn_id: $i.provider_turn_id.clone(),
+                    ordinal: $i.ordinal,
+                },
+            ))
+        };
+    }
+    match item {
+        ProjectionTurnItem::AssistantMessage(i) => place_of!(i),
+        ProjectionTurnItem::UserInputRequest(i) => place_of!(i),
+        _ => None,
+    }
+}
+
+/// [`place_of_projection_item`] for a streamed item.
+fn place_of_turn_item(item: &TurnItem) -> Option<(String, ItemPlace)> {
+    macro_rules! place_of {
+        ($i:expr) => {
+            Some((
+                $i.id.clone(),
+                ItemPlace {
+                    run_id: $i.run_id.clone(),
+                    provider_turn_id: $i.provider_turn_id.clone(),
+                    ordinal: $i.ordinal,
+                },
+            ))
+        };
+    }
+    match item {
+        TurnItem::AssistantMessage(i) => place_of!(i),
+        TurnItem::UserInputRequest(i) => place_of!(i),
+        _ => None,
     }
 }
 
@@ -2322,5 +2417,57 @@ mod timing_tests {
             Some((12_000.0, Some(140_000.0))),
             "compaction after_token_count serves as fallback context window usage"
         );
+    }
+
+    #[test]
+    fn question_context_is_the_last_assistant_message_before_it_in_its_run_and_turn() {
+        let assistant = |id: &str, text: &str| TimelineEntry::Assistant {
+            id: id.to_owned(),
+            markdown: text.to_owned(),
+            streaming: false,
+            created_at: None,
+            run_id: None,
+            status: ItemStatus::Completed,
+        };
+        let place = |run: &str, turn: Option<&str>, ordinal: i64| ItemPlace {
+            run_id: Some(run.to_owned()),
+            provider_turn_id: turn.map(str::to_owned),
+            ordinal,
+        };
+        let mut state = ThreadState::new("t");
+        state.entries = vec![
+            assistant("a-other-run", "from another run"),
+            assistant("a-early", "early"),
+            assistant("a-other-turn", "from another turn"),
+            assistant("a-late", "  late  "),
+            assistant("a-after", "after the question"),
+            assistant("a-empty", "  "),
+        ];
+        for (id, p) in [
+            ("a-other-run", place("r0", Some("turn-1"), 9)),
+            ("a-early", place("r1", Some("turn-1"), 1)),
+            ("a-other-turn", place("r1", Some("turn-0"), 4)),
+            ("a-late", place("r1", None, 3)),
+            ("a-after", place("r1", Some("turn-1"), 6)),
+            ("a-empty", place("r2", Some("turn-1"), 1)),
+            ("q", place("r1", Some("turn-1"), 5)),
+            ("q-empty", place("r2", Some("turn-1"), 2)),
+            (
+                "q-no-run",
+                ItemPlace {
+                    run_id: None,
+                    provider_turn_id: None,
+                    ordinal: 9,
+                },
+            ),
+        ] {
+            state.places.insert(id.to_owned(), p);
+        }
+        // `a-late` (ordinal 3, turn unknown) beats `a-early`; `a-other-turn` is another turn.
+        assert_eq!(state.question_context("q"), Some("  late  "));
+        // The nearest message has no text: nothing, not an older message.
+        assert_eq!(state.question_context("q-empty"), None);
+        assert_eq!(state.question_context("q-no-run"), None);
+        assert_eq!(state.question_context("missing"), None);
     }
 }

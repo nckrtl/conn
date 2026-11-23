@@ -13,6 +13,13 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 `conn-support/src/input.rs` and the generator walk `tools/schema-rules.mjs`. Proof:
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
 
+**Command receipts (2026-11-23):** as T3's `Orchestrator.ts` and `ProjectionMaintenance.ts`,
+a command the engine refuses is recorded with its error, and a retry with the same id is
+refused again ("Command … was previously rejected: …") even when the state has changed.
+Receipts are no longer pruned, so an old accepted id never runs a second time. Access
+refusals (the caller guard, a disabled provider) are not recorded: they are not the
+command's outcome. Proof: `a_command_id_keeps_its_outcome_across_a_reopen` (audit 1.6, 1.7).
+
 **Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left
 out, the child bound to it; a refused or replayed command removes it. Proof: four `conn-mcp`

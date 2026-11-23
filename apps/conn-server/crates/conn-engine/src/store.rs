@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS receipts (
   command_type TEXT NOT NULL,
   sequence     INTEGER NOT NULL
 );
+-- Commands the engine refused, so a retry with the same id is refused again (T3's `rejected`
+-- receipts). Like `receipts` and the event log, never pruned.
+CREATE TABLE IF NOT EXISTS rejected_commands (
+  command_id   TEXT PRIMARY KEY,
+  command_type TEXT NOT NULL,
+  error        TEXT NOT NULL
+);
 -- Rollbacks admitted and not yet committed or failed, so a restart can finish them (T3 keeps
 -- `provider-thread.rollback` in its effect outbox). `phase`: `admitted`; `provider`, the
 -- provider rollback was sent; `provider_done`, its answer is in `snapshot`.
@@ -220,8 +227,6 @@ pub(crate) type StoreResult<T> = Result<T, String>;
 
 /// Shell changes kept for resuming streams. An older cursor gets a fresh snapshot instead.
 pub(crate) const SHELL_CHANGES_KEEP: i64 = 1024;
-/// Command receipts kept for retries. Clients retry within seconds, not thousands of commands.
-pub(crate) const RECEIPTS_KEEP: i64 = 4096;
 /// Retention runs when the sequence crosses a multiple of this, not on every commit.
 const PRUNE_EVERY: u64 = 256;
 
@@ -392,6 +397,35 @@ impl Store {
             )
             .optional()
             .map(|seq| seq.map(|s| s as u64))
+            .map_err(err)
+    }
+
+    /// The error of a command the engine refused, when it refused this id.
+    pub(crate) fn rejection(&self, command_id: &str) -> StoreResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT error FROM rejected_commands WHERE command_id = ?1",
+                [command_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(err)
+    }
+
+    /// Records a refusal (T3's `commitRejectedCommand`). The first refusal of an id stays.
+    pub(crate) fn record_rejection(
+        &self,
+        command_id: &str,
+        command_type: &str,
+        error: &str,
+    ) -> StoreResult<()> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO rejected_commands (command_id, command_type, error)
+                 VALUES (?1, ?2, ?3)",
+                params![command_id, command_type, error],
+            )
+            .map(|_| ())
             .map_err(err)
     }
 
@@ -1959,8 +1993,8 @@ fn index_message(
     Ok(())
 }
 
-/// Bounds the tables that only serve resumes and retries. Events and projections stay: they
-/// are the history clients read.
+/// Bounds the shell changes that only serve resumes. Events and projections stay: they are the
+/// history clients read. Receipts stay too, as in T3: an old command id must never run twice.
 fn prune(conn: &Connection) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO meta (key, value)
@@ -1973,12 +2007,6 @@ fn prune(conn: &Connection) -> StoreResult<()> {
         "DELETE FROM shell_changes WHERE seq <= COALESCE(
            (SELECT value FROM meta WHERE key = 'shell_pruned_through'), 0)",
         [],
-    )
-    .map_err(err)?;
-    conn.execute(
-        "DELETE FROM receipts WHERE sequence < (
-           SELECT sequence FROM receipts ORDER BY sequence DESC LIMIT 1 OFFSET ?1)",
-        [RECEIPTS_KEEP],
     )
     .map_err(err)?;
     Ok(())

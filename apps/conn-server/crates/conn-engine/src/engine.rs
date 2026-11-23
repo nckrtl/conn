@@ -910,6 +910,13 @@ impl Inner {
         let inner = self.clone();
         let outcome = self
             .db(move |store| {
+                // T3's `replayCommandReceipt`: a refused id stays refused, so a retry cannot
+                // run against state that changed since.
+                if let Some(error) = store.rejection(&command_id).map_err(CommandError::Store)? {
+                    return Err(CommandError::Rejected(format!(
+                        "Command {command_id} was previously rejected: {error}"
+                    )));
+                }
                 if let Some(seq) = store.receipt(&command_id).map_err(CommandError::Store)? {
                     if guard.is_some() {
                         // A guarded caller never gets a second accept for one command.
@@ -983,6 +990,13 @@ impl Inner {
                     }
                     Err(e) => {
                         tx.rollback();
+                        // T3's `commitRejectedCommand`. Access refusals above are not
+                        // recorded: they are not this command's outcome.
+                        if let CommandError::Rejected(error) = &e {
+                            store
+                                .record_rejection(&command_id, &command_type, error)
+                                .map_err(CommandError::Store)?;
+                        }
                         Err(e)
                     }
                 }

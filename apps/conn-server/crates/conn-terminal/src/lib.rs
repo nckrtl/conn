@@ -273,7 +273,7 @@ impl TerminalManager {
         viewer: ViewerId,
     ) -> Result<Subscription, TerminalOpenError> {
         let key = (input.thread_id.clone(), input.terminal_id.clone());
-        let grid = input
+        let requested = input
             .cols
             .zip(input.rows)
             .map(|(c, r)| (clamp_cols(c), clamp_rows(r)));
@@ -290,6 +290,9 @@ impl TerminalManager {
             stop_on_settle: input.stop_on_settle,
         });
         let mut state = self.inner.lock();
+        // After a viewer's first size, its resizes own it: a client's attach retry resends the
+        // first size, so a viewer still attached keeps the grid it last reported.
+        let grid = state.viewer_grid(&key, viewer).or(requested);
         // The new viewer's grid counts before anything starts or resizes.
         let shared = min_grid(state.shared_grid(&key), grid);
         match (state.sessions.get(&key), launch) {
@@ -968,6 +971,14 @@ impl State {
             }
             (None, None) => true,
         }
+    }
+
+    /// The grid `viewer` last reported through one of its open attach streams.
+    fn viewer_grid(&self, key: &Key, viewer: ViewerId) -> Option<(u16, u16)> {
+        self.watchers
+            .get(key)?
+            .iter()
+            .find_map(|w| w.grid.filter(|_| w.viewer == Some(viewer)))
     }
 
     fn shared_grid(&self, key: &Key) -> Option<(u16, u16)> {

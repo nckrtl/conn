@@ -78,6 +78,8 @@ pub(crate) struct DraftProjectOption {
 /// View state rendered while composing a brand-new thread before `orchestration.launchThread`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DraftViewInfo {
+    /// The connected environment; part of the draft's store key.
+    pub(crate) environment_id: String,
     pub(crate) project_id: String,
     pub(crate) project_title: String,
     pub(crate) projects: Vec<DraftProjectOption>,
@@ -2902,8 +2904,11 @@ impl Render for ChatView {
                 .child(self.render_empty_no_thread(cx));
         }
 
-        let draft_key = if self.draft.is_some() {
-            Some(composer_state::NEW_THREAD_DRAFT_KEY.to_owned())
+        let draft_key = if let Some(draft) = &self.draft {
+            Some(composer_state::new_thread_draft_key(
+                &draft.environment_id,
+                &draft.project_id,
+            ))
         } else {
             self.thread_id
                 .as_deref()

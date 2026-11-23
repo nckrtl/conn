@@ -618,6 +618,12 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.drafts.take_discarded() {
+            self.attachments.clear();
+            self.textarea
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.on_draft_changed(cx);
+        }
         if self.drafts.active_key() == key {
             return;
         }
@@ -637,6 +643,18 @@ impl Composer {
             input.set_value(next.text, window, cx);
         });
         self.on_draft_changed(cx);
+    }
+
+    /// Moves the live draft to `key` when it has content (the hero's project picker). Returns
+    /// `true` when it moved; an empty draft stays, and the next sync shows `key`'s own draft.
+    pub(crate) fn retarget_draft_key(&mut self, key: &str, cx: &mut Context<'_, Self>) -> bool {
+        let empty = self.attachments.is_empty() && self.textarea.read(cx).value().trim().is_empty();
+        self.drafts.retarget(key, empty)
+    }
+
+    /// Drops `key`'s draft once it is sent or discarded (`clearDraftThread`).
+    pub(crate) fn discard_draft_key(&mut self, key: &str) {
+        self.drafts.discard(key);
     }
 
     /// Replaces the thread's recallable sent prompts.

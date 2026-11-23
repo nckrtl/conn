@@ -113,9 +113,9 @@ pub use crate::sidebar_nav::{
 };
 pub use crate::thread::{
     ApprovalDetails, EntryTiming, ItemStatus, PendingApproval, PendingRequest, RunStatus,
-    RunTiming, SecretRequestStatus, ThreadContextWindowSnapshot, ThreadState, TimelineEntry,
-    TurnCheckpointSummary, TurnItemStatus, parse_iso8601_epoch_ms, request_kind_label,
-    turn_item_detail,
+    RunTiming, SecretRequestStatus, SubagentModel, ThreadContextWindowSnapshot, ThreadState,
+    TimelineEntry, TurnCheckpointSummary, TurnItemStatus, parse_iso8601_epoch_ms,
+    request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

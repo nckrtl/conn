@@ -574,6 +574,97 @@ async fn safe_annex_removal_refuses_a_dirty_checkout() {
     }
 }
 
+/// A populated submodule (its checkout has its own `.git`) is refused like `<admin>/modules`,
+/// as git reads the worktree's index; an unpopulated one is not.
+#[tokio::test]
+async fn safe_annex_removal_refuses_a_populated_submodule() {
+    for populated in [true, false] {
+        let fx = Fixture::new("annex-submodule");
+        let (path, admin) = annexed_worktree(&fx);
+        let sub = fx.root.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        git(&sub, &["init", "-q", "-b", "main"]);
+        write(&sub, "lib.txt", "lib\n");
+        let sha = commit_all(&sub, "lib");
+        if populated {
+            git(&path, &["clone", "-q", sub.to_str().unwrap(), "lib"]);
+        } else {
+            std::fs::create_dir_all(path.join("lib")).unwrap();
+        }
+        git(
+            &path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},lib", sha.trim()),
+            ],
+        );
+        git(&path, &["commit", "-q", "-m", "submodule"]);
+        assert_eq!(git(&path, &["status", "--porcelain"]), "", "{populated}");
+
+        let result = worktree::remove_worktree(&fx.work, &path, Removal::Safe).await;
+
+        if !populated {
+            result.unwrap();
+            assert_removed(&fx, &path, &admin);
+            continue;
+        }
+        let refused = result.unwrap_err().to_string();
+        assert!(
+            refused.contains("working trees containing submodules cannot be moved or removed"),
+            "{refused}"
+        );
+        assert!(path.join("lib/lib.txt").exists());
+        assert!(path.join("lib/.git").is_dir());
+        assert!(admin.exists());
+
+        worktree::remove_worktree(&fx.work, &path, Removal::Force)
+            .await
+            .unwrap();
+        assert_removed(&fx, &path, &admin);
+    }
+}
+
+/// The dirty check reads the linked checkout even when its `config.worktree` points
+/// `core.worktree` at the main checkout, as git sets `GIT_DIR` and `GIT_WORK_TREE`.
+#[tokio::test]
+async fn safe_annex_removal_checks_the_linked_checkout() {
+    let fx = Fixture::new("annex-core-worktree");
+    let (path, admin) = annexed_worktree(&fx);
+    git(&fx.work, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &path,
+        &[
+            "config",
+            "--worktree",
+            "core.worktree",
+            fx.work.to_str().unwrap(),
+        ],
+    );
+    write(&path, "README.md", "draft\n");
+
+    let refused = worktree::remove_worktree(&fx.work, &path, Removal::Safe)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        refused.contains("contains modified or untracked files"),
+        "{refused}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "draft\n"
+    );
+    assert!(admin.exists());
+
+    worktree::remove_worktree(&fx.work, &path, Removal::Force)
+        .await
+        .unwrap();
+    assert_removed(&fx, &path, &admin);
+}
+
 /// A locked annexed worktree is refused, forced or not, as `git worktree remove --force` does.
 #[tokio::test]
 async fn annex_removal_refuses_a_locked_worktree() {

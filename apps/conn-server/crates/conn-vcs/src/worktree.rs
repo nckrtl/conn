@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     error::{VcsError, VcsResult},
-    process::{OnLimit, ProcessError},
+    process::{GitCommand, OnLimit, ProcessError},
     refs::parse_worktree_branches,
     repo::{self, git},
 };
@@ -22,6 +22,9 @@ const OPERATION: &str = "GitVcsDriver.createWorktree";
 /// Branch name prefix kept in a worktree folder name, in UTF-8 bytes.
 const PREFIX_MAX_BYTES: usize = 23;
 pub const REMOVE_TIMEOUT: Duration = Duration::from_secs(300);
+/// `git ls-files --stage` output read for gitlinks, about 400,000 entries. A larger index
+/// fails safe removal, and deletes nothing.
+const INDEX_MAX_BYTES: usize = 32 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateWorktree {
@@ -390,7 +393,7 @@ impl Annexed {
     /// submodules or with modified or untracked files.
     async fn remove(self, cwd: &Path, worktree: &Path, removal: Removal) -> VcsResult<()> {
         let admin = self.admin.clone();
-        let (locked, submodules) = blocking(cwd, move || {
+        let (locked, modules) = blocking(cwd, move || {
             let locked = admin.join("locked");
             let locked = locked.exists().then(|| {
                 std::fs::read_to_string(locked)
@@ -418,27 +421,23 @@ impl Annexed {
             None => {}
         }
         if removal == Removal::Safe {
-            if submodules {
+            if modules || self.has_populated_submodule(cwd).await? {
                 return Err(refuse(
                     worktree,
                     "working trees containing submodules cannot be moved or removed",
                 ));
             }
             // One byte answers the question.
-            let status = git(
-                "GitVcsDriver.removeWorktree",
-                &self.checkout,
-                [
+            let status = self
+                .git([
                     "status",
                     "--porcelain",
                     "--ignore-submodules=none",
                     "--untracked-files=all",
-                ],
-            )
-            .timeout(REMOVE_TIMEOUT)
-            .max_stdout(1, OnLimit::Truncate)
-            .run()
-            .await?;
+                ])
+                .max_stdout(1, OnLimit::Truncate)
+                .run()
+                .await?;
             if !status.stdout.is_empty() {
                 return Err(refuse(
                     worktree,
@@ -455,6 +454,40 @@ impl Annexed {
             .map_err(|e| refuse(&worktree_for_error, e))
     }
 
+    /// `git` on this worktree as `git worktree remove` runs it: `GIT_DIR` and `GIT_WORK_TREE`
+    /// set, so a `core.worktree` in its `config.worktree` cannot send it to another checkout.
+    fn git<const N: usize>(&self, args: [&str; N]) -> GitCommand {
+        git("GitVcsDriver.removeWorktree", &self.checkout, args)
+            .env("GIT_DIR", &self.admin)
+            .env("GIT_WORK_TREE", &self.checkout)
+            .timeout(REMOVE_TIMEOUT)
+    }
+
+    /// `validate_no_submodules`: an index entry of mode `160000` whose checkout has a `.git`
+    /// that resolves to a git directory. An unpopulated one does not count.
+    async fn has_populated_submodule(&self, cwd: &Path) -> VcsResult<bool> {
+        let index = self
+            .git(["ls-files", "--stage", "-z"])
+            .max_stdout(INDEX_MAX_BYTES, OnLimit::Fail)
+            .run()
+            .await?
+            .stdout;
+        let checkout = self.checkout.clone();
+        blocking(cwd, move || {
+            use std::os::unix::ffi::OsStrExt as _;
+            index
+                .split(|b| *b == 0)
+                .filter_map(|entry| {
+                    let tab = entry.iter().position(|b| *b == b'\t')?;
+                    let (meta, name) = (entry.get(..tab)?, entry.get(tab + 1..)?);
+                    meta.starts_with(b"160000 ")
+                        .then(|| checkout.join(std::ffi::OsStr::from_bytes(name)))
+                })
+                .any(|submodule| resolves_to_git_dir(&submodule.join(".git")))
+        })
+        .await
+    }
+
     /// Deletes the checkout, then the admin folder even if that failed, as git does, then
     /// `<common dir>/worktrees` once empty. `remove_dir_all` unlinks symlinks, including `.git`,
     /// and never follows them.
@@ -468,6 +501,25 @@ impl Annexed {
         }
         checkout.and(admin)
     }
+}
+
+/// `resolve_gitdir_gently`: `.git` is a git directory, or a `gitdir:` file that names one.
+fn resolves_to_git_dir(dot_git: &Path) -> bool {
+    let dir = if dot_git.is_dir() {
+        dot_git.to_owned()
+    } else {
+        let Some(target) = std::fs::read_to_string(dot_git).ok().and_then(|text| {
+            text.strip_prefix("gitdir:")
+                .map(|target| PathBuf::from(target.trim()))
+        }) else {
+            return false;
+        };
+        match dot_git.parent() {
+            Some(base) => base.join(target),
+            None => target,
+        }
+    };
+    dir.join("HEAD").is_file()
 }
 
 /// The admin folder `target` resolves to, when it is the repository's

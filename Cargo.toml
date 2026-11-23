@@ -5,7 +5,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["apps", "node_modules"]
+# `apps/*` and `native/*` keep their own workspaces.
+exclude = ["apps", "native", "node_modules"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +25,8 @@ conn-theme = { path = "crates/conn-theme" }
 # The wire and contract crates, still in the conn-server workspace.
 conn-wire = { path = "apps/conn-server/crates/conn-wire" }
 conn-contract = { path = "apps/conn-server/crates/conn-contract" }
+# Typed Orbit Gateway operations generated from OpenAPI (nckrtl/conn#227); no crate uses it yet.
+conn-gateway-api = { path = "apps/conn-server/crates/conn-gateway-api" }
 
 # Same pins as apps/conn-gpui, so both builds resolve the same versions.
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }

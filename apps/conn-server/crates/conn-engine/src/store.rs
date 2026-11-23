@@ -1966,11 +1966,16 @@ fn index_message(
 }
 
 /// The fold the search index holds, in the `meta` row `message_search_folded`: 1 was the first
-/// fold, which also took marks off other scripts' letters; 2 folds as T3's index (`fold.rs`).
-/// A `meta` mark, not a schema version, so this step composes with versioned steps in any order.
-const MESSAGE_SEARCH_FOLD: i64 = 2;
+/// fold, which also took marks off other scripts' letters; 2 lowercased as Rust does; 3 folds
+/// with SQLite's own table, as T3's index (`fold.rs`). A `meta` mark, not a schema version, so
+/// this step composes with versioned steps in any order.
+const MESSAGE_SEARCH_FOLD: i64 = 3;
 /// Messages between two progress lines of a refold.
 const REFOLD_REPORT_EVERY: u64 = 10_000;
+/// The text a refold batch reads before it writes: a batch ends at the row that reaches it, or
+/// at `REFOLD_BATCH_ROWS` rows.
+const REFOLD_BATCH_BYTES: usize = 4 << 20;
+const REFOLD_BATCH_ROWS: usize = 500;
 
 /// What a refold of the search index reports. Its lines carry T3's migration messages, which the
 /// desktop reads in the server's output: while a refold runs, it waits past its readiness limit
@@ -2047,41 +2052,49 @@ pub(crate) fn refold_message_search_once(
     Ok(())
 }
 
-/// Folds every `message_search` text again from its message's text, so an older fold that lost
-/// marks is rebuilt, a batch of rows at a time, so a large store never holds all its texts in
-/// memory. `progress` hears the messages read so far after each batch. A row whose message is
-/// gone keeps its text.
+/// The index rows after `?1` with their message texts, read in id order without a sort, so a
+/// batch reads only the rows it holds.
+const REFOLD_ROWS_SQL: &str = "SELECT k.id, s.text, COALESCE(json_extract(e.body, '$.text'), '')
+     FROM message_keys k
+     CROSS JOIN message_search s ON s.rowid = k.id
+     CROSS JOIN entities e ON e.thread_id = k.thread_id
+       AND e.kind = 'messages' AND e.id = k.message_id
+     WHERE k.id > ?1 ORDER BY k.id";
+
+/// Folds every `message_search` text again from its message's text, so an older fold is
+/// rebuilt. It reads rows in id order until their texts reach [`REFOLD_BATCH_BYTES`] or the row
+/// cap, so a store of large messages never holds many of them at once. `progress` hears the messages read so far
+/// after each batch. A row whose message is gone keeps its text.
 pub(crate) fn refold_message_search(
     conn: &Connection,
     progress: &mut dyn FnMut(u64),
 ) -> StoreResult<()> {
-    const BATCH: i64 = 500;
+    let mut stmt = conn.prepare(REFOLD_ROWS_SQL).map_err(err)?;
     let mut after = i64::MIN;
     let mut done = 0;
     loop {
-        let rows: Vec<(i64, String, String)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT k.id, s.text, COALESCE(json_extract(e.body, '$.text'), '')
-                     FROM message_keys k
-                     CROSS JOIN message_search s ON s.rowid = k.id
-                     CROSS JOIN entities e ON e.thread_id = k.thread_id
-                       AND e.kind = 'messages' AND e.id = k.message_id
-                     WHERE k.id > ?1 ORDER BY k.id LIMIT ?2",
-                )
-                .map_err(err)?;
-            stmt.query_map(params![after, BATCH], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .map_err(err)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(err)?
-        };
-        let Some(&(last, ..)) = rows.last() else {
+        let mut batch: Vec<(i64, String, String)> = Vec::new();
+        let mut bytes = 0;
+        {
+            let mut rows = stmt.query([after]).map_err(err)?;
+            while bytes < REFOLD_BATCH_BYTES
+                && batch.len() < REFOLD_BATCH_ROWS
+                && let Some(row) = rows.next().map_err(err)?
+            {
+                let row: (i64, String, String) = (
+                    row.get(0).map_err(err)?,
+                    row.get(1).map_err(err)?,
+                    row.get(2).map_err(err)?,
+                );
+                bytes += row.1.len() + row.2.len();
+                batch.push(row);
+            }
+        }
+        let Some(&(last, ..)) = batch.last() else {
             return Ok(());
         };
-        done += rows.len() as u64;
-        for (rowid, stored, text) in rows {
+        done += batch.len() as u64;
+        for (rowid, stored, text) in batch {
             let folded = crate::fold::fold(&text);
             if folded != stored {
                 conn.execute(
@@ -2565,7 +2578,7 @@ mod tests {
                  INSERT INTO message_keys (thread_id, message_id)
                    SELECT thread_id, id FROM entities WHERE kind = 'messages';
                  INSERT INTO message_search (rowid, text) SELECT id, 'ecole' FROM message_keys;
-                 UPDATE meta SET value = 1 WHERE key = 'message_search_folded';",
+                 UPDATE meta SET value = 2 WHERE key = 'message_search_folded';",
             )
             .unwrap();
         let mut events = vec![];
@@ -2605,6 +2618,69 @@ mod tests {
         events.clear();
         refold_message_search_once(&store.conn, &mut |event| events.push(event)).unwrap();
         assert_eq!(events, [], "the mark holds");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refold reads its rows a byte budget at a time, so a store of large messages never
+    /// holds a whole batch of them: a batch ends at the row that reaches the budget.
+    #[test]
+    fn a_refold_batch_stays_within_its_byte_budget() {
+        const ROWS: u64 = 20;
+        // 1 MiB of message text and the one-byte stale fold.
+        const ROW_BYTES: usize = (1 << 20) + 1;
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-refold-budget", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ROWS})
+                 INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
+                   SELECT 't1', 'messages', 'm' || i, i, i, NULL,
+                          json_object('id', 'm' || i, 'text', replace(printf('%.*c', 524288, 'x'), 'x', 'É'))
+                   FROM n;
+                 INSERT INTO message_keys (thread_id, message_id)
+                   SELECT thread_id, id FROM entities WHERE kind = 'messages';
+                 INSERT INTO message_search (rowid, text) SELECT id, 'x' FROM message_keys;"
+            ))
+            .unwrap();
+        let text_bytes: usize = store
+            .conn
+            .query_row(
+                "SELECT length(CAST(json_extract(body, '$.text') AS BLOB)) FROM entities LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text_bytes + 1, ROW_BYTES);
+        let mut batches = vec![];
+        let mut read = 0;
+        refold_message_search(&store.conn, &mut |done| {
+            batches.push(done - read);
+            read = done;
+        })
+        .unwrap();
+        assert_eq!(read, ROWS);
+        let plan = store.query_plan(REFOLD_ROWS_SQL, [0]);
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+        let most = REFOLD_BATCH_BYTES.div_ceil(ROW_BYTES) as u64;
+        assert!(
+            batches.iter().all(|&rows| rows <= most),
+            "rows per batch {batches:?}, budget {most}"
+        );
+        let folded: String = store
+            .conn
+            .query_row("SELECT text FROM message_search LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(folded, "e".repeat(text_bytes / 2));
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

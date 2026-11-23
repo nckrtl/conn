@@ -2,16 +2,16 @@
 //!
 //! - The message search index ([`fold`]): T3 indexes with SQLite's
 //!   `trigram remove_diacritics 1` tokenizer (`069_ThreadMessageSearch.ts`). It folds case and
-//!   takes the diacritics off Latin letters ("École" is "ecole"), but keeps the marks that tell
-//!   other scripts' letters apart ("が" is not "か"). The index stores folded text, so a query
-//!   folded the same way matches it in SQL.
+//!   takes a single diacritic off Latin letters ("École" is "ecole"), but keeps the marks that
+//!   tell other scripts' letters apart ("が" is not "か"). The index stores folded text, so a
+//!   query folded the same way matches it in SQL. The fold is SQLite's own table.
 //! - Titles, branches and pull requests ([`fold_search_query`], [`fold_field`]): `foldInPlace`
 //!   in `paletteSearch.ts`, which drops every mark a compatibility decomposition leaves.
 //!
 //! Both read words as `isWordStart` does ([`is_word_start`]).
 
 use unicode_normalization::UnicodeNormalization;
-use unicode_normalization::char::{decompose_canonical, decompose_compatible, is_combining_mark};
+use unicode_normalization::char::{decompose_compatible, is_combining_mark};
 
 /// The quotes `WRAPPING_QUOTES` in `paletteSearch.ts` strips from both ends of a query.
 pub(crate) const WRAPPING_QUOTES: &[char] = &[
@@ -33,10 +33,9 @@ pub fn fold(text: &str) -> String {
     out
 }
 
-/// Appends `c` folded as SQLite's trigram tokenizer folds it with `remove_diacritics`: lower
-/// case, a Latin letter with diacritics as its ASCII letter, a lone diacritic dropped. T3's
-/// index also stores apostrophes straight (`indexedMessageText`), and its matcher folds a final
-/// sigma.
+/// Appends `c` folded as SQLite's `trigram remove_diacritics 1` tokenizer folds it, from the
+/// table that tokenizer gives ([`sqlite_fold`]). T3's index also stores apostrophes straight
+/// (`indexedMessageText`).
 pub(crate) fn push_indexed(c: char, out: &mut String) {
     if c.is_ascii() {
         out.push(c.to_ascii_lowercase());
@@ -44,43 +43,34 @@ pub(crate) fn push_indexed(c: char, out: &mut String) {
     }
     match c {
         '\u{2018}' | '\u{2019}' => out.push('\''),
-        'ς' => out.push('σ'),
-        _ if is_sqlite_diacritic(c) => {}
-        _ => match latin_base(c) {
-            Some(base) => out.push(base),
-            None => out.extend(c.to_lowercase()),
+        _ => match sqlite_fold(c) {
+            Some(Some(folded)) => out.push(folded),
+            Some(None) => {}
+            None => out.push(c),
         },
     }
 }
 
-/// The ASCII letter that a letter with diacritics decomposes to ("é", "Ș", "ồ"), as SQLite's
-/// `fts5_remove_diacritic` table holds it. `None` for every other character.
-fn latin_base(c: char) -> Option<char> {
-    let mut parts = 0;
-    let mut base = None;
-    let mut marks_only = true;
-    decompose_canonical(c, |part| {
-        if parts == 0 {
-            base = Some(part);
-        } else if !is_sqlite_diacritic(part) {
-            marks_only = false;
-        }
-        parts += 1;
+/// What the bundled SQLite's tokenizer makes of a non-ASCII code point it changes: its simple
+/// case fold, then the ASCII letter of a Latin letter with one diacritic ("é", "Ș", "ſ" folds
+/// to "s"), or `Some(None)` for a diacritic it drops. `None` when SQLite keeps `c`, as it keeps
+/// "ǡ" (two marks), "が" and letters its Unicode tables predate. `sqlite-fold.txt` holds the
+/// table, generated from SQLite and checked against it in this module's tests.
+fn sqlite_fold(c: char) -> Option<Option<char>> {
+    static TABLE: std::sync::OnceLock<Vec<(char, Option<char>)>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let code = |hex: &str| u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+        include_str!("sqlite-fold.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| {
+                let (from, to) = line.split_once(' ')?;
+                Some((code(from)?, if to == "-" { None } else { Some(code(to)?) }))
+            })
+            .collect()
     });
-    base.filter(|base| parts > 1 && marks_only && base.is_ascii_alphabetic())
-        .map(|base| base.to_ascii_lowercase())
-}
-
-/// `sqlite3Fts5UnicodeIsdiacritic`: the combining marks (U+0300 to U+0331) that SQLite's
-/// `remove_diacritics` drops. Dakuten, Hangul jamo and other scripts' marks are not among them.
-fn is_sqlite_diacritic(c: char) -> bool {
-    const LOW: u32 = 0x0802_9fdf;
-    const HIGH: u32 = 0x0003_61f8;
-    match u32::from(c) {
-        code @ 0x300..=0x31f => (LOW >> (code - 0x300)) & 1 == 1,
-        code @ 0x320..=0x331 => (HIGH >> (code - 0x320)) & 1 == 1,
-        _ => false,
-    }
+    let at = table.binary_search_by_key(&c, |&(from, _)| from).ok()?;
+    table.get(at).map(|&(_, to)| to)
 }
 
 /// `foldSearchQuery` in `paletteSearch.ts`: quotes around a pasted query dropped, NFC, folded as
@@ -144,7 +134,53 @@ pub fn field_holds_words(text: &str, query: &str) -> bool {
         })
 }
 
+/// A thread title, branch or name, folded once for [`match_fields`].
+#[derive(Debug)]
+pub struct SearchField(Folded);
+
+impl SearchField {
+    pub fn new(text: &str) -> Self {
+        Self(Folded::new(text, push_field))
+    }
+}
+
+/// `matchSearchFields` in `paletteSearch.ts`, without typos or joined words: `Some` when every
+/// word of a folded query (`fold_search_query`) starts a word in `title` or in one of `others`,
+/// or, with four or more characters, sits inside a word of `title`. Filler words may be missing
+/// when another word is not one. `Some(true)` when a word matched in the title.
+pub fn match_fields(query: &str, title: &SearchField, others: &[SearchField]) -> Option<bool> {
+    let words: Vec<&str> = query.split(' ').filter(|word| !word.is_empty()).collect();
+    let filler_optional = words.iter().any(|word| !FILLER_WORDS.contains(word));
+    let mut in_title = false;
+    for word in &words {
+        let title_hit = title.0.has_at_word_start(word)
+            || (word.encode_utf16().count() >= 4 && title.0.text.contains(word));
+        in_title |= title_hit;
+        let optional = filler_optional && FILLER_WORDS.contains(word);
+        if !title_hit && !optional && !others.iter().any(|f| f.0.has_at_word_start(word)) {
+            return None;
+        }
+    }
+    (!words.is_empty()).then_some(in_title)
+}
+
+/// Where a token sits in a message, worst first (`findMessageToken`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Placement {
+    Inside,
+    Start,
+    Whole,
+}
+
+/// `HEX_ID`: a commit SHA or UUID part, seven or more hex characters with a digit.
+fn is_hex_id(run: &[char]) -> bool {
+    run.len() >= 7
+        && run.iter().all(char::is_ascii_hexdigit)
+        && run.iter().any(char::is_ascii_digit)
+}
+
 /// A text folded one character at a time, which still reads the original's word starts.
+#[derive(Debug)]
 pub(crate) struct Folded {
     pub(crate) text: String,
     /// For each byte of `text`, the index of the original character it came from.
@@ -170,30 +206,114 @@ impl Folded {
     }
 
     /// The original character where `needle` first occurs.
+    #[cfg(test)]
     pub(crate) fn find(&self, needle: &str) -> Option<usize> {
         self.text
             .find(needle)
             .and_then(|byte| self.origin.get(byte).copied())
     }
 
-    /// Whether `token` occurs where a word starts. A token that opens with punctuation (".ts")
-    /// brings its own boundary, so it counts anywhere.
-    pub(crate) fn has_at_word_start(&self, token: &str) -> bool {
-        let own_boundary = token.chars().next().is_some_and(|c| !is_alphanumeric(c));
+    /// Byte offsets in `text` where `token` occurs, overlapping ones included.
+    fn occurrences<'a>(&'a self, token: &'a str) -> impl Iterator<Item = usize> + 'a {
         let mut from = 0;
-        while let Some(at) = self.text.get(from..).and_then(|rest| rest.find(token)) {
-            let at = from + at;
-            if own_boundary || self.origin.get(at).is_some_and(|&i| self.starts_word(i)) {
-                return true;
+        std::iter::from_fn(move || {
+            if token.is_empty() {
+                return None;
             }
+            let at = from + self.text.get(from..)?.find(token)?;
             from = at
                 + self
                     .text
                     .get(at..)
                     .and_then(|rest| rest.chars().next())
                     .map_or(1, char::len_utf8);
+            Some(at)
+        })
+    }
+
+    /// Whether `token` occurs where a word starts. A token that opens with punctuation (".ts")
+    /// brings its own boundary, so it counts anywhere.
+    pub(crate) fn has_at_word_start(&self, token: &str) -> bool {
+        let own_boundary = token.chars().next().is_some_and(|c| !is_alphanumeric(c));
+        self.occurrences(token)
+            .any(|at| own_boundary || self.origin.get(at).is_some_and(|&i| self.starts_word(i)))
+    }
+
+    /// `findMessageToken` in `paletteSearch.ts`: the best placement of `token` and the original
+    /// characters where it has it. A hit past the start of a hex id ("cafe" in "7cafe52bb8")
+    /// does not count, though a pasted id prefix does. With `first_only`, the first whole word.
+    pub(crate) fn find_token(
+        &self,
+        token: &str,
+        first_only: bool,
+    ) -> Option<(Placement, Vec<usize>)> {
+        let mut best: Option<(Placement, Vec<usize>)> = None;
+        // The letters-and-digits run around the last hit, so hits in one long run ("0000" in a
+        // hex dump) do not rescan it.
+        let mut run = (0, 0, false);
+        for at in self.occurrences(token) {
+            let (Some(&start), Some(&last)) = (
+                self.origin.get(at),
+                self.origin.get(at + token.len().saturating_sub(1)),
+            ) else {
+                continue;
+            };
+            let end = last + 1;
+            if end > run.1 {
+                let alphanumeric =
+                    |i: &usize| self.chars.get(*i).copied().is_some_and(is_alphanumeric);
+                let run_start = (0..start)
+                    .rev()
+                    .take_while(alphanumeric)
+                    .last()
+                    .unwrap_or(start);
+                let run_end = (end..self.chars.len())
+                    .take_while(alphanumeric)
+                    .last()
+                    .map_or(end, |i| i + 1);
+                let hex = self.chars.get(run_start..run_end).is_some_and(is_hex_id);
+                run = (run_start, run_end, hex);
+            }
+            if run.2 && run.0 < start {
+                continue;
+            }
+            let placement = if !self.starts_word_at(start) {
+                Placement::Inside
+            } else if self.ends_word_at(end) {
+                Placement::Whole
+            } else {
+                Placement::Start
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(quality, _)| placement > *quality)
+            {
+                best = Some((placement, vec![start]));
+                if first_only && placement == Placement::Whole {
+                    return best;
+                }
+            } else if let Some((quality, places)) = &mut best
+                && placement == *quality
+                && !first_only
+            {
+                places.push(start);
+            }
         }
-        false
+        best
+    }
+
+    /// `startsWordAt`: punctuation brings its own boundary.
+    fn starts_word_at(&self, index: usize) -> bool {
+        self.chars
+            .get(index)
+            .is_some_and(|&c| !is_alphanumeric(c) || self.starts_word(index))
+    }
+
+    /// `endsWordAt`: whether a word ends right before `end`.
+    fn ends_word_at(&self, end: usize) -> bool {
+        self.chars
+            .get(end)
+            .is_none_or(|&c| !is_alphanumeric(c) || self.starts_word_at(end))
     }
 
     fn starts_word(&self, index: usize) -> bool {
@@ -269,10 +389,128 @@ mod tests {
             ("かがく", "かがく"),
             ("か\u{3099}", "か\u{3099}"),
             ("한글", "한글"),
+            // SQLite keeps a letter with two marks, and case-folds the long s.
+            ("ǡard", "ǡard"),
+            ("ſay", "say"),
         ] {
             assert_eq!(fold(text), folded, "{text}");
             assert_eq!(fold(folded), folded, "folding is idempotent: {folded}");
         }
+    }
+
+    /// The code points the fixture covers: SQLite folds only below U+10000 and Deseret, and
+    /// the rest of the second plane holds letters Rust lowercases that SQLite does not.
+    fn fixture_code_points() -> impl Iterator<Item = char> {
+        (0x80..=0x1_ffff).filter_map(char::from_u32)
+    }
+
+    /// What the bundled SQLite's `trigram remove_diacritics 1` tokenizer, T3's index, makes of
+    /// each code point that it changes: one line `<code point> <folded>`, or `-` when it drops it.
+    fn sqlite_fold_table() -> String {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE t USING fts5(x, tokenize = 'trigram remove_diacritics 1');
+             CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance');",
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO t (rowid, x) VALUES (?1, ?2)")
+                .unwrap();
+            for c in fixture_code_points() {
+                insert
+                    .execute(rusqlite::params![
+                        u32::from(c),
+                        format!("\u{2}\u{2}{c}\u{3}\u{3}")
+                    ])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        // The first trigram is the two sentinels and the folded code point, or the closing
+        // sentinel when SQLite dropped it.
+        let mut first = conn
+            .prepare("SELECT doc, term FROM v WHERE offset = 0 ORDER BY doc")
+            .unwrap();
+        let rows = first
+            .query_map([], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap();
+        let mut table = String::from(
+            "# SQLite's trigram remove_diacritics 1 fold, from fold.rs tests\n\
+             # (write_sqlite_fold_fixture). Code points it leaves alone are not listed.\n",
+        );
+        for row in rows {
+            let (code, term) = row.unwrap();
+            let folded: String = term.chars().skip(2).collect();
+            let line = match folded.as_str() {
+                "\u{3}" => format!("{code:04x} -\n"),
+                _ if folded == char::from_u32(code).unwrap().to_string() => continue,
+                _ => format!(
+                    "{code:04x} {}\n",
+                    folded
+                        .chars()
+                        .map(|c| format!("{:04x}", u32::from(c)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            };
+            table.push_str(&line);
+        }
+        table
+    }
+
+    #[test]
+    #[ignore = "writes src/sqlite-fold.txt"]
+    fn write_sqlite_fold_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sqlite-fold.txt");
+        std::fs::write(path, sqlite_fold_table()).unwrap();
+    }
+
+    /// The fixture is what the bundled SQLite does now: an SQLite update that folds differently
+    /// fails here.
+    #[test]
+    fn the_fixture_is_what_the_bundled_sqlite_folds() {
+        assert_eq!(sqlite_fold_table(), include_str!("sqlite-fold.txt"));
+    }
+
+    /// The index folds every code point as SQLite's tokenizer does, but for T3's own step:
+    /// `indexedMessageText` stores curly apostrophes straight.
+    #[test]
+    fn the_index_folds_every_code_point_as_sqlite() {
+        let changed: std::collections::HashMap<u32, String> = include_str!("sqlite-fold.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let mut parts = line.split(' ');
+                let code = u32::from_str_radix(parts.next().unwrap(), 16).unwrap();
+                let folded = parts
+                    .filter(|part| *part != "-")
+                    .map(|part| char::from_u32(u32::from_str_radix(part, 16).unwrap()).unwrap())
+                    .collect();
+                (code, folded)
+            })
+            .collect();
+        let differ: Vec<String> = fixture_code_points()
+            .filter(|c| !matches!(c, '\u{2018}' | '\u{2019}'))
+            .filter_map(|c| {
+                let sqlite = changed
+                    .get(&u32::from(c))
+                    .cloned()
+                    .unwrap_or_else(|| c.to_string());
+                let ours = fold(&c.to_string());
+                (ours != sqlite)
+                    .then(|| format!("U+{:04X} {c:?}: {ours:?}, SQLite {sqlite:?}", u32::from(c)))
+            })
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "{} differ:\n{}",
+            differ.len(),
+            differ.join("\n")
+        );
     }
 
     #[test]

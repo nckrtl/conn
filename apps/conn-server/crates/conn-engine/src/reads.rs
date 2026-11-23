@@ -76,17 +76,24 @@ const SEARCH_INDEXED_SQL: &str = search_sql!(
 const SEARCH_SCAN_SQL: &str =
     search_sql!("SELECT id AS rowid FROM message_keys WHERE ?1 IS NULL ORDER BY id DESC LIMIT ?4");
 
-/// The SQL inputs of one message search (`buildMessageSearch` in `ThreadSearch.ts`).
+/// The SQL inputs of one message search (`buildMessageSearch` in `ThreadSearch.ts`), and the
+/// words its matcher checks in each hit (`messageMatcher` in `paletteSearch.ts`).
 struct MessageSearch {
     /// Quoted long words for FTS5 `MATCH`, or `None` when the index cannot serve them.
     fts_match: Option<String>,
     /// Folded words each hit's folded text must contain as a substring.
     substrings: Vec<String>,
-    /// The word the snippet centres on.
-    needle: String,
-    /// Words too short to count inside a word (`MESSAGE_WORD_START_LENGTH`): each must start a
-    /// word in the message.
-    must_start_word: Vec<String>,
+    /// Every word, long ones first.
+    tokens: Vec<MatchToken>,
+}
+
+/// One query word as the matcher reads it.
+struct MatchToken {
+    /// The word as the index folds it.
+    folded: String,
+    /// Shorter than `MESSAGE_WORD_START_LENGTH` once lowercased: it must start a word, so "fts"
+    /// does not find "drafts".
+    must_start_word: bool,
 }
 
 impl MessageSearch {
@@ -97,44 +104,108 @@ impl MessageSearch {
             .trim_matches(crate::fold::WRAPPING_QUOTES)
             .nfc()
             .collect();
-        let query = crate::fold::fold(&query);
-        let (long, short): (Vec<&str>, Vec<&str>) = query
+        // `messageSearchTokens` counts a word's length lowercased, before the index folds it:
+        // "İce" is four characters, though the index reads "ice".
+        let words: Vec<(usize, String)> = query
             .split_whitespace()
-            .partition(|token| searchable(token));
-        let needle = (*long.first()?).to_owned();
+            .map(|word| (word.to_lowercase().chars().count(), crate::fold::fold(word)))
+            .filter(|(_, folded)| !folded.is_empty())
+            .collect();
+        let (long, short): (Vec<_>, Vec<_>) = words
+            .into_iter()
+            .partition(|(length, folded)| searchable(*length, folded));
+        if long.is_empty() {
+            return None;
+        }
         let indexed = long
             .iter()
-            .all(|token| token.chars().count() >= MESSAGE_TOKEN_MIN_LENGTH);
+            .all(|(length, _)| *length >= MESSAGE_TOKEN_MIN_LENGTH);
         let fts_match = indexed.then(|| {
             long.iter()
-                .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+                .map(|(_, token)| format!("\"{}\"", token.replace('"', "\"\"")))
                 .collect::<Vec<_>>()
                 .join(" ")
         });
         let mut substrings: Vec<String> = if indexed {
             vec![]
         } else {
-            long.iter().map(|t| (*t).to_owned()).collect()
+            long.iter().map(|(_, token)| token.clone()).collect()
         };
-        substrings.extend(short.iter().map(|t| (*t).to_owned()));
-        let must_start_word = long
-            .iter()
-            .chain(&short)
-            .filter(|token| token.chars().count() < MESSAGE_WORD_START_LENGTH)
-            .map(|token| (*token).to_owned())
+        substrings.extend(short.iter().map(|(_, token)| token.clone()));
+        let tokens = long
+            .into_iter()
+            .chain(short)
+            .map(|(length, folded)| MatchToken {
+                folded,
+                must_start_word: length < MESSAGE_WORD_START_LENGTH,
+            })
             .collect();
         Some(Self {
             fts_match,
             substrings,
-            needle,
-            must_start_word,
+            tokens,
         })
+    }
+
+    /// `messageMatcher`: where the snippet of a hit starts, as an index into its characters, or
+    /// `None` when a word sits only inside a hex id, or a short word only inside words. The
+    /// snippet starts at the shortest stretch that holds one best place of every word.
+    fn accept(&self, text: &str) -> Option<usize> {
+        let folded = crate::fold::Folded::new(text, crate::fold::push_indexed);
+        let first_only = self.tokens.len() == 1;
+        let mut places = Vec::with_capacity(self.tokens.len());
+        for token in &self.tokens {
+            let (placement, at) = folded.find_token(&token.folded, first_only)?;
+            if placement == crate::fold::Placement::Inside && token.must_start_word {
+                return None;
+            }
+            places.push(at);
+        }
+        Some(shortest_span(&places))
     }
 }
 
+/// `shortestSpan` in `paletteSearch.ts`: where the shortest stretch of text starts that holds
+/// one place of each word, from each word's places in order.
+fn shortest_span(places: &[Vec<usize>]) -> usize {
+    let mut hits: Vec<(usize, usize)> = places
+        .iter()
+        .enumerate()
+        .flat_map(|(word, at)| at.iter().map(move |&index| (index, word)))
+        .collect();
+    hits.sort_by_key(|&(index, _)| index);
+    let mut counts = vec![0_usize; places.len()];
+    let mut covered = 0;
+    let mut best = (hits.first().map_or(0, |&(index, _)| index), usize::MAX);
+    let mut left = 0;
+    for &(index, word) in &hits {
+        if let Some(count) = counts.get_mut(word) {
+            *count += 1;
+            if *count == 1 {
+                covered += 1;
+            }
+        }
+        while covered == places.len() {
+            let Some(&(first, first_word)) = hits.get(left) else {
+                break;
+            };
+            if index - first < best.1 {
+                best = (first, index - first);
+            }
+            if let Some(count) = counts.get_mut(first_word) {
+                *count -= 1;
+                if *count == 0 {
+                    covered -= 1;
+                }
+            }
+            left += 1;
+        }
+    }
+    best.0
+}
+
 /// Three characters or more, or two when one is a CJK word character.
-fn searchable(token: &str) -> bool {
-    let length = token.chars().count();
+fn searchable(length: usize, token: &str) -> bool {
     length >= MESSAGE_TOKEN_MIN_LENGTH || (length == 2 && token.chars().any(is_cjk_word))
 }
 
@@ -446,20 +517,14 @@ impl Store {
             }
             let message = &hit["message"];
             let text = message["text"].as_str().unwrap_or_default();
-            let folded = crate::fold::Folded::new(text, crate::fold::push_indexed);
-            // `messageMatcher` drops a message where a short word only sits inside words.
-            if !search
-                .must_start_word
-                .iter()
-                .all(|token| folded.has_at_word_start(token))
-            {
+            let Some(at) = search.accept(text) else {
                 continue;
-            }
+            };
             matches.push(json!({
                 "threadId": thread_id,
                 "projectId": hit["projectId"],
                 "source": if message["role"] == "user" { "user" } else { "assistant" },
-                "snippet": snippet(text, &folded, &search.needle),
+                "snippet": snippet(text, at),
                 "messageCreatedAt": message["createdAt"],
                 "messageId": message["id"],
             }));
@@ -574,11 +639,8 @@ fn count_occurrences(text: &str, needle: &str) -> u64 {
     text.to_lowercase().matches(needle).count() as u64
 }
 
-/// Up to 240 characters of the original text around the first match of a folded `needle`.
-/// Folding can change a character's length (`ﬁ` stays, a lone mark goes), so the match is found
-/// in `folded`, which maps back to the original characters.
-fn snippet(text: &str, folded: &crate::fold::Folded, needle: &str) -> String {
-    let at = folded.find(needle).unwrap_or(0);
+/// Up to 240 characters of the original text around the match that starts at character `at`.
+fn snippet(text: &str, at: usize) -> String {
     let start = at.saturating_sub(SNIPPET_CHARS / 3);
     text.chars()
         .skip(start)
@@ -594,11 +656,8 @@ mod tests {
     use super::*;
 
     fn snip(text: &str, needle: &str) -> String {
-        snippet(
-            text,
-            &crate::fold::Folded::new(text, crate::fold::push_indexed),
-            needle,
-        )
+        let folded = crate::fold::Folded::new(text, crate::fold::push_indexed);
+        snippet(text, folded.find(needle).unwrap_or(0))
     }
 
     /// `İ` (U+0130) lowercases to two characters, so a lowercase index is not an index into

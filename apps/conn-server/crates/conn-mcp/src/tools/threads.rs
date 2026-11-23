@@ -296,17 +296,12 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
             .and_then(|p| p["thread"]["projectId"].as_str().map(str::to_owned))
     });
     let shell = cx.shell().await?;
-    let live_projects: Vec<(&Value, String)> = shell["projects"]
+    let live_projects: Vec<(&Value, &str)> = shell["projects"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|p| p["deletedAt"].is_null())
-        .map(|p| {
-            (
-                &p["id"],
-                conn_engine::fold_field(p["title"].as_str().unwrap_or_default()),
-            )
-        })
+        .map(|p| (&p["id"], p["title"].as_str().unwrap_or_default()))
         .collect();
     // `titleCandidates`: not deleted or archived, not a subagent or side chat, in a live project.
     let mut candidates: Vec<&Value> = shell["threads"]
@@ -332,16 +327,11 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
         .iter()
         .copied()
         .filter(|thread| {
-            let folded =
-                |key: &str| conn_engine::fold_field(thread[key].as_str().unwrap_or_default());
-            let project_hit = live_projects
+            let project = live_projects
                 .iter()
-                .any(|(id, title)| *id == &thread["projectId"] && title.contains(&query));
-            !query.is_empty()
-                && (folded("title").contains(&query)
-                    || folded("branch").contains(&query)
-                    || project_hit
-                    || pull_request_hit(&query, thread))
+                .find(|(id, _)| *id == &thread["projectId"])
+                .map_or("", |(_, title)| *title);
+            thread_hit(&query, thread, project)
         })
         .take(limit)
         .collect();
@@ -423,14 +413,62 @@ fn search_pull_requests(thread: &Value) -> Vec<(&Value, Option<&str>)> {
     found
 }
 
-/// Whether a folded query finds the thread through its pull requests, as `scoreThreadSearch`
-/// does: every word at a word start in one PR's `#N` and searched title (`matchToken`,
-/// `matchHint`), after a `pr`, `pull` or `#` before a number; else a whole `owner/repo#N`, URL or
-/// thread id (`matchReference`).
-fn pull_request_hit(query: &str, thread: &Value) -> bool {
+/// Whether a folded query finds `thread`, as `scoreThreadSearch` without typos or joined words.
+/// Every word must sit in some field (`matchSearchFields`): the title, a PR's `#N` or searched
+/// title, the branch, or the project's name. When no word is in the title and the query has
+/// several, one field must explain the words left after the project's name (`matchHint`):
+/// "lakebed #7483" finds a thread of project Lakebed linked to #7483. Else the whole query may
+/// name the thread or a PR (`matchReference`).
+fn thread_hit(query: &str, thread: &Value, project_title: &str) -> bool {
     let pull_requests = search_pull_requests(thread);
-    // `threadFieldQuery`: a `pr`, `pull` or `pull request` before a number, then a `#`.
-    let field_query = ["pull request", "pull", "pr"]
+    let field_query = thread_field_query(query);
+    let branch = searchable_branch(thread["branch"].as_str().unwrap_or_default());
+    let title = conn_engine::SearchField::new(thread["title"].as_str().unwrap_or_default());
+    let mut others = Vec::new();
+    for (link, link_title) in &pull_requests {
+        let number = link["number"].as_u64().unwrap_or_default();
+        others.push(conn_engine::SearchField::new(&format!("#{number}")));
+        others.extend(link_title.map(conn_engine::SearchField::new));
+    }
+    others.push(conn_engine::SearchField::new(branch));
+    others.push(conn_engine::SearchField::new(project_title));
+    let Some(in_title) = conn_engine::match_fields(&field_query, &title, &others) else {
+        return reference_hit(query, thread, &pull_requests);
+    };
+    if in_title || !field_query.contains(' ') {
+        return true;
+    }
+    let hints: Vec<String> = pull_requests
+        .iter()
+        .map(|(link, link_title)| {
+            let number = link["number"].as_u64().unwrap_or_default();
+            match link_title {
+                Some(link_title) => format!("#{number} {link_title}"),
+                None => format!("#{number}"),
+            }
+        })
+        .chain([branch.to_owned(), project_title.to_owned()])
+        .collect();
+    let explained = |words: &str| {
+        hints
+            .iter()
+            .any(|hint| conn_engine::field_holds_words(hint, words))
+    };
+    if explained(&field_query) {
+        return true;
+    }
+    let rest = field_query
+        .split(' ')
+        .filter(|word| !conn_engine::field_holds_words(project_title, word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    !rest.is_empty() && rest != field_query && explained(&rest)
+}
+
+/// `threadFieldQuery`: a `pr`, `pull` or `pull request` before a number goes, then a `#`, and the
+/// app's worktree branch prefix, so the query reads as the stored fields do.
+fn thread_field_query(query: &str) -> String {
+    let unprefixed = ["pr", "pull request", "pull"]
         .iter()
         .find_map(|prefix| {
             let rest = query.strip_prefix(prefix)?.trim_start();
@@ -439,19 +477,38 @@ fn pull_request_hit(query: &str, thread: &Value) -> bool {
                 .then_some(rest)
         })
         .unwrap_or(query);
-    let field_query = field_query
+    let unprefixed = unprefixed
         .strip_prefix('#')
-        .unwrap_or(field_query)
-        .trim_start();
-    let field_hit = pull_requests.iter().any(|(link, title)| {
-        let number = link["number"].as_u64().unwrap_or_default();
-        let field = match title {
-            Some(title) => format!("#{number} {title}"),
-            None => format!("#{number}"),
-        };
-        conn_engine::field_holds_words(&field, field_query)
+        .map_or(unprefixed, str::trim_start);
+    // `FLAT_BRANCH_QUERY_PREFIX_PATTERN`: "t3-" before up to eight hex digits, while they are typed.
+    searchable_branch(unprefixed)
+        .split(' ')
+        .map(|word| match word.strip_prefix("t3-") {
+            Some(hex) if (1..=8).contains(&hex.len()) && hex.bytes().all(is_lower_hex) => hex,
+            _ => word,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `searchableBranch`: a branch without the app's worktree prefix ("t3/", "t3code/", or "t3-"
+/// before eight hex digits), which nearly every thread's branch has.
+fn searchable_branch(branch: &str) -> &str {
+    let nested = ["t3/", "t3code/"].iter().find_map(|prefix| {
+        branch
+            .strip_prefix(prefix)
+            .filter(|rest| rest.starts_with(|c: char| !c.is_whitespace()))
     });
-    field_hit || reference_hit(query, thread, &pull_requests)
+    let flat = || {
+        branch
+            .strip_prefix("t3-")
+            .filter(|hex| hex.len() == 8 && hex.bytes().all(is_lower_hex))
+    };
+    nested.or_else(flat).unwrap_or(branch)
+}
+
+fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }
 
 /// `matchReference`: ids and links have many word starts, so only a query of eight or more
@@ -1168,6 +1225,39 @@ mod tests {
             .iter()
             .filter_map(|i| i["position"].as_i64())
             .collect()
+    }
+
+    /// `scoreThreadSearch`: a project's name and a PR's number or title match together, and
+    /// the PR must explain the words left after the project's name.
+    #[test]
+    fn a_project_name_and_a_pull_request_match_together() {
+        let thread = json!({"id": "t1", "title": "Spring cleanup", "branch": "t3/8a2f1c3e",
+            "pullRequests": [{"number": 7483, "repository": "example/fixture",
+                "url": "https://github.com/example/fixture/pull/7483", "source": "manual",
+                "snapshot": {"title": "Résumé indexing"}}]});
+        let hit =
+            |query: &str| thread_hit(&conn_engine::fold_search_query(query), &thread, "Lakebed");
+        for query in [
+            "lakebed #7483",
+            "lakebed resume",
+            "Lakebed résumé indexing",
+            "#7483 lakebed",
+            "spring #7483",
+            "8a2f1c3e",
+            "t3/8a2f",
+        ] {
+            assert!(hit(query), "{query}");
+        }
+        // A `pr` prefix only counts at the start, as `threadFieldQuery` strips it.
+        for query in [
+            "lakebed #7484",
+            "lakebed draft",
+            "lakebed t3",
+            "lake #7483 draft",
+            "lakebed pr 7483",
+        ] {
+            assert!(!hit(query), "{query}");
+        }
     }
 
     #[test]

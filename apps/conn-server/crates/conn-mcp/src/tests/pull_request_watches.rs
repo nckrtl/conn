@@ -330,6 +330,13 @@ async fn search_finds_a_thread_by_its_linked_pull_request() {
         "Résumé",
         "indexing resume",
         "\u{201c}résumé index\u{201d}",
+        // `scoreThreadSearch`: each word in some field, and the PR explains the words left
+        // after the project's name.
+        "project #7483",
+        "Project resume",
+        "project indexing resume",
+        "spring #7483",
+        "#7483 maintenance",
     ] {
         assert_eq!(
             search_sources(&mut swamp, &thread, query).await,
@@ -343,6 +350,8 @@ async fn search_finds_a_thread_by_its_linked_pull_request() {
         "fixture/pull/74",
         "sume",
         "resume draft",
+        "project #7484",
+        "project draft",
     ] {
         assert_eq!(
             search_sources(&mut swamp, &thread, query).await,

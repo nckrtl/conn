@@ -176,14 +176,19 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
 - **Search.** `searchThreads` reads a trigram FTS5 index of final message texts
   (`message_search`) with `MATCH` and quoted words, as `ThreadSearch.ts`; SQLite's bundled
   build already has FTS5. The index holds text folded as T3's `trigram remove_diacritics 1`
-  tokenizer folds it (`src/fold.rs`): case, and the diacritics of Latin letters, so "ecole"
-  finds "École" but "かかく" does not find "かがく". Queries are NFC and fold the same way; the
-  snippet shows the original text. A `meta` mark (`message_search_folded`, now 2) folds an
-  older index again from the message texts, once, inside the engine's open; it prints T3's
-  migration lines (`databaseMigrationLog.ts`), so a desktop waiting for readiness keeps waiting.
+  tokenizer folds it (`src/fold.rs`), from a table generated from the bundled SQLite
+  (`src/sqlite-fold.txt`; a test fails when SQLite folds differently): case, and a single
+  diacritic of a Latin letter, so "ecole" finds "École" but "aard" does not find "ǡard" and
+  "かかく" does not find "かがく". Queries are NFC and fold the same way. A `meta` mark
+  (`message_search_folded`, now 3) folds an older index again from the message texts, once,
+  inside the engine's open, a byte-bounded batch at a time; it prints T3's migration lines
+  (`databaseMigrationLog.ts`), so a desktop waiting for readiness keeps waiting.
   Every word of three characters or more must match; shorter words only narrow, and a query
-  without a long word searches no messages (two CJK characters count as long). A word shorter
-  than four characters must start a word in the message (`messageMatcher`). Hidden threads drop out in SQL before the limit. Titles are the client's to match.
+  without a long word searches no messages (two CJK characters count as long). Word lengths
+  count before the index folds a word. As `messageMatcher`, a word shorter than four characters
+  must start a word in the message, a hit inside a hex id does not count, and the snippet shows
+  the original text from the shortest stretch that holds every word. Hidden threads drop out in
+  SQL before the limit. Titles are the client's to match.
 - **Background work.** A run that completes leaves its open command, dynamic tool and
   subagent rows running, as T3 does. The shell row's `pendingBackgroundTasks` is
   `derivePendingBackgroundWork` (`src/background.rs`): provider thread rosters, then those

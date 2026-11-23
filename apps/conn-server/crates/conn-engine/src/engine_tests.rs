@@ -3789,6 +3789,54 @@ async fn search_short_words_must_start_a_word() {
     engine.shutdown().await;
 }
 
+/// `messageMatcher` counts a word's length before the index folds it, and skips hits inside a
+/// hex id (`findMessageToken`). "İce" is four characters once lowercased, so it may sit inside
+/// "service"; "abc" is not a word of "42abc12".
+#[tokio::test(flavor = "current_thread")]
+async fn search_word_length_and_hex_ids_as_message_matcher() {
+    let db = TempDb::new("search-length-hex");
+    let (engine, _) = open(&db);
+    for (thread, text) in [
+        ("service", "the service runs"),
+        ("hex", "commit 42abc12 landed"),
+        ("word", "the abc rule"),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
+        dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
+        run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
+    }
+    assert_eq!(search(&engine, "İce").await, ["service"]);
+    assert_eq!(search(&engine, "abc").await, ["word"]);
+    assert_eq!(
+        search(&engine, "42abc12").await,
+        ["hex"],
+        "a pasted id still matches"
+    );
+    engine.shutdown().await;
+}
+
+/// The snippet shows the occurrence that qualified the message: "fts" only counts where it
+/// starts a word, not inside "drafts" 320 characters earlier.
+#[tokio::test(flavor = "current_thread")]
+async fn search_snippet_shows_the_accepted_occurrence() {
+    let db = TempDb::new("search-snippet-at");
+    let (engine, _) = open(&db);
+    let text = format!("drafts {} fts ready", "z".repeat(320));
+    dispatch(&engine, create("t", "t:c1")).await;
+    dispatch(&engine, message("t", "t:c2", &text)).await;
+    run_to_end(&engine, "t", "run:t:1").await;
+    let found = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "fts ready"}),
+    )
+    .await
+    .unwrap();
+    let snippet = found["matches"][0]["snippet"].as_str().unwrap_or_default();
+    assert!(snippet.contains("fts ready"), "{snippet}");
+    engine.shutdown().await;
+}
+
 /// Search follows `ThreadSearch.ts`: every long word must match, `%` and `_` are plain
 /// characters, short words narrow, two CJK characters count as a word, and deleted or
 /// archived threads drop out in SQL.

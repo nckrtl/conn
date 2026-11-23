@@ -999,16 +999,27 @@ fn merge_conflict(label: &str) -> Fixture {
 /// `file` at the root conflicts in a merge from `feature`. `prepare` runs on the work tree
 /// before the base commit, so it can add `.gitattributes` or Git settings.
 fn conflict_in(label: &str, file: &str, prepare: impl FnOnce(&std::path::Path)) -> Fixture {
+    conflict_between(label, file, ["base\n", "feature\n", "main\n"], prepare)
+}
+
+/// `file` holds `base`, then `feature` on that branch and `main` on `main`, which merges
+/// `feature` with a conflict.
+fn conflict_between(
+    label: &str,
+    file: &str,
+    [base, feature, main]: [&str; 3],
+    prepare: impl FnOnce(&std::path::Path),
+) -> Fixture {
     let fx = Fixture::new(label);
     prepare(&fx.work);
-    write(&fx.work, file, "base\n");
+    write(&fx.work, file, base);
     write(&fx.work, "sub/chosen.txt", "one\n");
     commit_all(&fx.work, "base");
     git(&fx.work, &["checkout", "-q", "-b", "feature"]);
-    write(&fx.work, file, "feature\n");
+    write(&fx.work, file, feature);
     commit_all(&fx.work, "feature");
     git(&fx.work, &["checkout", "-q", "main"]);
-    write(&fx.work, file, "main\n");
+    write(&fx.work, file, main);
     commit_all(&fx.work, "main");
     let merge = std::process::Command::new("git")
         .args(["merge", "feature"])
@@ -1225,6 +1236,55 @@ async fn commit_all_commits_a_resolution_with_a_lone_divider_line() {
         "Heading\n=======\n<<<<<<< only an opening\nresolved\n",
     )
     .await;
+}
+
+#[tokio::test]
+async fn commit_all_keeps_markers_the_file_already_had() {
+    // A file that documents conflict markers, as T3's `--check` reads only added lines.
+    let example = "Example:\n<<<<<<< ours\nmine\n=======\nyours\n>>>>>>> theirs\n";
+    let fx = conflict_between(
+        "commit-documented-markers",
+        "notes.txt",
+        [
+            &format!("{example}base\n"),
+            &format!("{example}feature\n"),
+            &format!("{example}main\n"),
+        ],
+        |_| {},
+    );
+
+    assert_commit_all_refused(&fx, "notes.txt").await;
+    assert_commit_all_merges(&fx, "notes.txt", &format!("{example}resolved\n")).await;
+}
+
+#[tokio::test]
+async fn commit_all_reads_a_file_our_side_deleted_against_head() {
+    let fx = Fixture::new("commit-deleted-by-us");
+    write(&fx.work, "notes.txt", "base\n");
+    write(&fx.work, "sub/chosen.txt", "one\n");
+    commit_all(&fx.work, "base");
+    git(&fx.work, &["checkout", "-q", "-b", "feature"]);
+    write(&fx.work, "notes.txt", "feature\n");
+    commit_all(&fx.work, "feature");
+    git(&fx.work, &["checkout", "-q", "main"]);
+    git(&fx.work, &["rm", "-q", "notes.txt"]);
+    commit_all(&fx.work, "main");
+    let merge = std::process::Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(&fx.work)
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge should conflict");
+    let stages = git(&fx.work, &["ls-files", "--unmerged"]);
+    assert!(!stages.contains(" 2\t"), "{stages}");
+    write(
+        &fx.work,
+        "notes.txt",
+        "<<<<<<< HEAD\n=======\nfeature\n>>>>>>> feature\n",
+    );
+
+    assert_commit_all_refused(&fx, "notes.txt").await;
+    assert_commit_all_merges(&fx, "notes.txt", "feature\n").await;
 }
 
 #[tokio::test]

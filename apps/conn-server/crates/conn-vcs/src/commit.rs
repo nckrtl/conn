@@ -73,45 +73,65 @@ async fn operation_in_progress(cwd: &Path) -> VcsResult<Option<&'static str>> {
     Ok(None)
 }
 
-/// Git's `conflict-marker-size` for each root-relative path, in order: 7 unless the attribute
-/// holds a positive number, as `ll_merge_marker_size` reads it.
-async fn marker_sizes(
+/// What the marker inspection needs to know about one unmerged path.
+struct Unmerged {
+    /// Git's `conflict-marker-size`: 7 unless the attribute holds a positive number, as
+    /// `ll_merge_marker_size` reads it.
+    marker_size: usize,
+    /// The index holds our side of the conflict (stage 2).
+    ours: bool,
+}
+
+async fn unmerged_details(
     cwd: &Path,
     files: &[String],
     index: Option<(&Path, &str)>,
-) -> VcsResult<Vec<usize>> {
-    const DEFAULT: usize = 7;
+) -> VcsResult<Vec<Unmerged>> {
+    const DEFAULT_MARKER_SIZE: usize = 7;
+    // Both commands take root-relative paths, and `ls-files` lists only the cwd's subtree.
     let top = command(cwd, ["rev-parse", "--show-cdup"]).text().await?;
     let top = cwd.join(top.trim_end_matches('\n'));
-    let mut check = command(
-        &top,
-        ["check-attr", "-z", "--stdin", "conflict-marker-size"],
-    );
-    if let Some((index, alternates)) = index {
-        check = indexed(check, index, alternates);
-    }
+    let run = |args: &[&str]| {
+        let c = command(&top, args.iter().copied());
+        match index {
+            Some((index, alternates)) => indexed(c, index, alternates),
+            None => c,
+        }
+    };
     let mut input = Vec::new();
     for file in files {
         input.extend_from_slice(file.as_bytes());
         input.push(0);
     }
-    let output = check.stdin(input).text().await?;
+    let attributes = run(&["check-attr", "-z", "--stdin", "conflict-marker-size"])
+        .stdin(input)
+        .text()
+        .await?;
+    // `<mode> <oid> <stage> TAB <path> NUL` per stage entry.
+    let stages = run(&["ls-files", "--unmerged", "-z"]).text().await?;
+    let ours = stages
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t'))
+        .filter(|(meta, _)| meta.ends_with(" 2"))
+        .map(|(_, path)| path)
+        .collect::<std::collections::HashSet<_>>();
     // `-z` prints `<path> NUL <attribute> NUL <value> NUL` per path.
-    let mut values = output.split('\0').skip(2).step_by(3);
+    let mut sizes = attributes.split('\0').skip(2).step_by(3);
     Ok(files
         .iter()
-        .map(|_| {
-            values
+        .map(|file| Unmerged {
+            marker_size: sizes
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|&size| size > 0)
-                .unwrap_or(DEFAULT)
+                .unwrap_or(DEFAULT_MARKER_SIZE),
+            ours: ours.contains(file.as_str()),
         })
         .collect())
 }
 
-/// Reads a file's diff from the empty tree one chunk at a time and notes whether it holds an
-/// opening and a closing conflict marker. A marker is `size` copies of `<` or `>` followed by
+/// Reads a file's diff one chunk at a time and notes whether its added lines hold an opening
+/// and a closing conflict marker. A marker is `size` copies of `<` or `>` followed by
 /// whitespace or the line end, as Git's `is_conflict_marker` reads it. Every conflict style
 /// opens and closes this way. A lone `=======` is valid content, such as a Markdown heading
 /// underline, so it does not count.
@@ -246,29 +266,40 @@ async fn stage(
             .map(str::to_owned)
             .collect::<Vec<_>>();
         if !unmerged.is_empty() {
-            let empty = run(vec![
-                "hash-object".into(),
-                "-t".into(),
-                "tree".into(),
-                "--stdin".into(),
-            ])
-            .stdin(Vec::new())
-            .text()
-            .await?;
-            let sizes = marker_sizes(cwd, &unmerged, index).await?;
+            let details = unmerged_details(cwd, &unmerged, index).await?;
+            let fallback = if details.iter().all(|detail| detail.ours) {
+                String::new()
+            } else if repo::has_head_commit(cwd).await? {
+                "HEAD".to_owned()
+            } else {
+                run(vec![
+                    "hash-object".into(),
+                    "-t".into(),
+                    "tree".into(),
+                    "--stdin".into(),
+                ])
+                .stdin(Vec::new())
+                .text()
+                .await?
+                .trim()
+                .to_owned()
+            };
             let mut conflicted = Vec::new();
-            for (file, size) in unmerged.iter().zip(sizes) {
-                // Git's cleaned text of the file, even where a diff driver calls it binary.
+            for (file, detail) in unmerged.iter().zip(details) {
+                // The lines added since our side, in Git's cleaned text, even where a diff driver
+                // calls the file binary. As with T3's `--check`, markers the file already had
+                // are content.
+                let side = if detail.ours { "--ours" } else { &fallback };
                 let mut args = diff([
                     "--no-color",
                     "--no-ext-diff",
                     "--no-textconv",
                     "--text",
-                    empty.trim(),
+                    side,
                     "--",
                 ]);
                 args.push(format!(":(top,literal){file}"));
-                let mut markers = Markers::new(size);
+                let mut markers = Markers::new(detail.marker_size);
                 run(args)
                     .scan(&mut |chunk: &[u8]| markers.feed(chunk))
                     .await?;
@@ -517,8 +548,16 @@ mod tests {
     }
 
     #[test]
+    fn only_added_lines_count() {
+        let patch = b"@@ -1,3 +1,4 @@\n <<<<<<< a\n->>>>>>> b\n+keep\n@@ -9 +10 @@\n >>>>>>> c\n";
+        assert_eq!(scan(7, &[patch]), (false, false));
+        let patch = b"@@ -1,3 +1,4 @@\n <<<<<<< a\n+<<<<<<< b\n@@ -9 +10 @@\n+>>>>>>> c\n";
+        assert_eq!(scan(7, &[patch]), (true, true));
+    }
+
+    #[test]
     fn header_lines_before_the_first_hunk_are_not_content() {
-        let patch = b"+<<<<<<< a\n+++ >>>>>>> b\n@@ -0,0 +1 @@\n+tail\n";
+        let patch = b"* Unmerged path f\n+<<<<<<< a\n+++ >>>>>>> b\n@@ -0,0 +1 @@\n+tail\n";
         assert_eq!(scan(7, &[patch]), (false, false));
     }
 }

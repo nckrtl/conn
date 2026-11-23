@@ -3805,7 +3805,9 @@ async fn fill_credential_answers_with_a_status_only() {
 /// instance of that driver fails before any work starts; it never falls back to the parent's.
 #[tokio::test(flavor = "current_thread")]
 async fn delegate_task_with_an_absent_driver_fails_before_it_runs() {
-    let f = fixture("delegate-driver");
+    let fake = FakeProvider::new("claudeAgent");
+    let sessions = fake.sessions.clone();
+    let f = fixture_with_provider("delegate-driver", None, Arc::new(fake), None);
     let mut operator = Client::open(&f.service, client(true)).await;
     let parent = launch_as_swamp(&mut operator, "Parent", "hang", "auto", "default").await;
     until_provider_turn(&f, &parent).await;
@@ -3840,6 +3842,11 @@ async fn delegate_task_with_an_absent_driver_fails_before_it_runs() {
         .await
         .unwrap();
     assert_eq!(projection["subagents"], json!([]));
+    assert_eq!(
+        sessions.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "only the parent's session started"
+    );
     // The parent's own driver still resolves to its instance.
     let task = agent
         .ok(

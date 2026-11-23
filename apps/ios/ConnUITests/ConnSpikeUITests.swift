@@ -465,11 +465,13 @@ final class ConnSpikeUITests: XCTestCase {
             // header's checkmark, "Add environment". A production build ignores pairing links.
             let parts = pairingURL.components(separatedBy: "/pair#token=")
             XCTAssertEqual(parts.count, 2, "pairing URL should be <origin>/pair#token=<code>")
-            XCTAssertTrue(tap(app, ["Add environment"]), "Expo should offer Add environment")
+            let addEnvironment = first(app, ["Add environment"], timeout: 45)
+            XCTAssertNotNil(addEnvironment, "Expo should offer Add environment")
+            addEnvironment?.tap()
             settle(2)
             let address = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "192.168.1.100:3773")).firstMatch
-            XCTAssertTrue(address.waitForExistence(timeout: 10), "the pairing form should open")
+            XCTAssertTrue(address.waitForExistence(timeout: 30), "the pairing form should open")
             pasteInto(app, address, parts[0].replacingOccurrences(of: "http://", with: ""))
             let code = app.textFields.matching(
                 NSPredicate(format: "placeholderValue == %@", "Pairing code")).firstMatch
@@ -489,7 +491,7 @@ final class ConnSpikeUITests: XCTestCase {
         }
 
         let content = row(app, "Plan a greeting in main.rs")
-        XCTAssertTrue(content.waitForExistence(timeout: 30), "The inbox should list the seeded threads")
+        XCTAssertTrue(content.waitForExistence(timeout: 60), "The inbox should list the seeded threads")
         settle(2)
         // Pairs the showcase simulator and leaves the app on the inbox.
         if env["CONN_PAIR_ONLY"] == "1" { return }

@@ -116,6 +116,44 @@ async fn run(
 ) -> Result<Value, String> {
     let err = |e: anyhow_like::AnyError| e.0;
     match text(cmd, "cmd") {
+        "spike-files-open" => {
+            let path = text(cmd, "path").to_owned();
+            if !conn_contract::source::workspace_relative(&path) {
+                return Err("Expected workspace-relative file".into());
+            }
+            app.update(cx, |app, cx| {
+                app.show_source_location(
+                    &conn_contract::source::SourceLocation { path, lines: None },
+                    cx,
+                )
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(json!("ok"))
+        }
+        "spike-files-state" => window
+            .update(cx, |_, window, cx| {
+                app.read_with(cx, |app, cx| app.spike_files_state(window, cx))
+            })
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string()),
+        "spike-drag" => {
+            let pt = |a: &str, b: &str| {
+                point(
+                    px(cmd[a].as_f64().unwrap_or_default() as f32),
+                    px(cmd[b].as_f64().unwrap_or_default() as f32),
+                )
+            };
+            let (start, end) = (pt("x", "y"), pt("toX", "toY"));
+            window
+                .update(cx, |_, window, cx| {
+                    window.pointer_move(start, None, cx);
+                    window.pointer_down(start, MouseButton::Left, cx);
+                    window.pointer_move(end, Some(MouseButton::Left), cx);
+                    window.pointer_up(end, MouseButton::Left, cx);
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(json!("ok"))
+        }
         "dump" => app
             .read_with(cx, |app, cx| app.automation_dump(cx))
             .map_err(|e| err(e.into())),

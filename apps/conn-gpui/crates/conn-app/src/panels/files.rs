@@ -1,6 +1,6 @@
 //! Files right-panel surfaces, as Conn's `FileBrowserPanel` and `FilePreviewPanel`: the Files
 //! tab is one full-width Pierre-themed lazy tree (`projects.listEntries`) under a soft search
-//! field and `ToolbarGroup`; a file opens as its own tab showing a syntect-highlighted
+//! field and `ToolbarGroup`; a file opens as its own tab showing a selectable syntax-highlighted
 //! read-only preview (`projects.readFile`) under a breadcrumb subheader.
 
 use crate::a11y::ConnA11yExt as _;
@@ -30,9 +30,10 @@ use super::color::to_hsla;
 use super::file_kind::{self, PreviewKind};
 use super::file_path::{self, Crumb};
 use super::header::superhero_icon;
-use super::highlight::{HighlightSpan, highlight_lines};
 use super::tree::FileTreeState;
 use crate::header::details_card::EditorTarget;
+use conn_contract::source::{SourceLines, SourceSelection};
+use gpui_kit::component::input::{Editor, EditorState, RangeDecoration, RangeDecorationStyle};
 
 /// Pierre tree compact row height (`FileBrowserPanel.tsx`: `itemHeight: 28`).
 /// Space above the first source line in the preview.
@@ -62,7 +63,6 @@ enum PreviewState {
     Loaded {
         path: String,
         raw_contents: String,
-        lines: Vec<Vec<HighlightSpan>>,
         truncated: bool,
     },
     Error {
@@ -91,6 +91,8 @@ pub(crate) enum FilesEvent {
     AddToChat(String),
     /// The Browser panel should show this URL (an HTML or PDF file's signed address).
     OpenInBrowser(String),
+    Attach(SourceSelection),
+    Definition(conn_contract::source::SourceLocation),
 }
 
 impl gpui_kit::EventEmitter<FilesEvent> for FilesPanel {}
@@ -160,6 +162,7 @@ pub(crate) struct FilesPanel {
     tokens: Tokens,
     connection: Option<Connection>,
     workspace_root: Option<String>,
+    thread: Option<String>,
     tree: FileTreeState,
     tree_error: Option<String>,
     preview: PreviewState,
@@ -167,6 +170,13 @@ pub(crate) struct FilesPanel {
     /// The Copy button shows a check for a moment after it copies (`useCopyToClipboard`).
     copied: bool,
     _copied_reset: Option<Task<()>>,
+    editor: Option<Entity<EditorState>>,
+    #[cfg(feature = "zed-files")]
+    zed: Option<Entity<zed_editor::Editor>>,
+    editor_subscription: Option<Subscription>,
+    highlight: Option<gpui_kit::component::input::RangeDecorationCollection>,
+    reveal: Option<PendingReveal>,
+    range_error: Option<String>,
     search_input: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
     context_generation: u64,
@@ -195,6 +205,12 @@ pub(crate) struct FilesPanel {
     thread_id: Option<String>,
     /// The open file shows its rendered view (Markdown or table) instead of its source.
     render_preview: bool,
+}
+
+struct PendingReveal {
+    lines: SourceLines,
+    excerpt: Option<String>,
+    done: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
 impl fmt::Debug for FilesPanel {
@@ -227,12 +243,20 @@ impl FilesPanel {
             tokens,
             connection,
             workspace_root: None,
+            thread: None,
             tree: FileTreeState::default(),
             tree_error: None,
             preview: PreviewState::Empty,
             word_wrap: false,
             copied: false,
             _copied_reset: None,
+            editor: None,
+            #[cfg(feature = "zed-files")]
+            zed: None,
+            highlight: None,
+            editor_subscription: None,
+            reveal: None,
+            range_error: None,
             search_input,
             _subscriptions: vec![sub],
             context_generation: 0,
@@ -257,7 +281,7 @@ impl FilesPanel {
     }
 
     /// Sets the thread whose files are shown (file addresses are signed per thread).
-    pub(crate) fn set_thread(&mut self, thread_id: Option<String>) {
+    pub(crate) fn set_signing_thread(&mut self, thread_id: Option<String>) {
         self.thread_id = thread_id;
     }
 
@@ -268,24 +292,49 @@ impl FilesPanel {
     ) {
         self.connection = connection;
         self.context_generation = self.context_generation.wrapping_add(1);
-        self.preview_generation = self.preview_generation.wrapping_add(1);
         self.tree.clear();
         self.tree_error = None;
-        self.preview = PreviewState::Empty;
+        self.reset_preview(cx);
         cx.notify();
+    }
+
+    pub(super) fn set_thread(&mut self, thread: Option<String>, cx: &mut Context<'_, Self>) {
+        self.thread = thread;
+        self.reset_preview(cx);
+    }
+
+    pub(super) fn is_showing(&self, thread: &str, path: &str) -> bool {
+        self.showing_preview
+            && self.thread.as_deref() == Some(thread)
+            && matches!(&self.preview,PreviewState::Loaded{path:current,..} if current==path)
+    }
+
+    pub(super) fn definition_error(&mut self, message: String, cx: &mut Context<'_, Self>) {
+        self.range_error = Some(message);
+        cx.notify();
+    }
+
+    pub(crate) fn reset_preview(&mut self, cx: &mut Context<'_, Self>) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview = PreviewState::Empty;
+        self.editor = None;
+        #[cfg(feature = "zed-files")]
+        {
+            self.zed = None;
+        }
+        self.editor_subscription = None;
+        self.highlight = None;
+        self.reveal = None;
+        self.range_error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_reveal(&mut self) {
+        self.reveal = None;
     }
 
     pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<'_, Self>) {
         self.tokens = tokens;
-        if let PreviewState::Loaded {
-            path,
-            raw_contents,
-            lines,
-            ..
-        } = &mut self.preview
-        {
-            *lines = highlight_lines(path, raw_contents, &self.tokens);
-        }
         cx.notify();
     }
 
@@ -299,10 +348,9 @@ impl FilesPanel {
         }
         self.workspace_root = workspace_root;
         self.context_generation = self.context_generation.wrapping_add(1);
-        self.preview_generation = self.preview_generation.wrapping_add(1);
         self.tree.clear();
         self.tree_error = None;
-        self.preview = PreviewState::Empty;
+        self.reset_preview(cx);
         if self.workspace_root.is_some() {
             self.load_directory(String::new(), cx);
         }
@@ -577,10 +625,10 @@ impl FilesPanel {
 
     /// Scrolls the pending line to the middle of the preview and flashes it for a moment.
     fn apply_pending_reveal(&mut self, cx: &mut Context<'_, Self>) {
-        let PreviewState::Loaded { lines, .. } = &self.preview else {
+        let PreviewState::Loaded { raw_contents, .. } = &self.preview else {
             return;
         };
-        let line_count = lines.len().max(1);
+        let line_count = raw_contents.lines().count().max(1);
         let Some(line) = self.pending_reveal.take() else {
             return;
         };
@@ -621,7 +669,108 @@ impl FilesPanel {
         }
     }
 
+    #[cfg(feature = "automation")]
+    pub(crate) fn spike_files_state(&self, window: &Window, cx: &App) -> serde_json::Value {
+        use gpui_kit::Focusable as _;
+        let path = match &self.preview {
+            PreviewState::Loaded { path, .. } => Some(path),
+            _ => None,
+        };
+        let ready = self.editor.is_some();
+        let focused = self
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.read(cx).focus_handle(cx).is_focused(window));
+        #[cfg(feature = "zed-files")]
+        let (ready, focused) = self.zed.as_ref().map_or((ready, focused), |e| {
+            (true, e.read(cx).focus_handle(cx).is_focused(window))
+        });
+        serde_json::json!({"path":path,"ready":ready,"focused":focused,"selected":self.selected_source(cx),"thread":self.thread})
+    }
+    pub(crate) fn selected_source(&self, cx: &App) -> Option<SourceSelection> {
+        let PreviewState::Loaded {
+            path,
+            #[cfg(feature = "zed-files")]
+            raw_contents,
+            ..
+        } = &self.preview
+        else {
+            return None;
+        };
+        #[cfg(feature = "zed-files")]
+        if let Some(zed) = &self.zed {
+            let range = super::zed_preview::selection(zed.read(cx), cx);
+            if range.is_empty() {
+                return None;
+            }
+            let raw_contents = zed_text::LineEnding::normalize_cow(raw_contents.as_str().into());
+            return Some(SourceSelection {
+                path: path.clone(),
+                lines: SourceLines::from_selection(&raw_contents, range.clone())?,
+                text: raw_contents.get(range)?.into(),
+            });
+        }
+        let editor = self.editor.as_ref()?.read(cx);
+        let range = editor.selected_range();
+        if range.is_empty() {
+            return None;
+        }
+        let text = editor.value();
+        Some(SourceSelection {
+            path: path.clone(),
+            lines: SourceLines::from_selection(&text, range.clone())?,
+            text: text.get(range)?.to_owned(),
+        })
+    }
+
+    pub(crate) fn reveal_lines(
+        &mut self,
+        path: String,
+        lines: SourceLines,
+        excerpt: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (done, receiver) = tokio::sync::oneshot::channel();
+        if !matches!(&self.preview, PreviewState::Loading(current) if current == &path) {
+            self.open_file(path, cx);
+        }
+        if let PreviewState::Error { message, .. } = &self.preview {
+            let _ = done.send(Err(message.clone()));
+        } else {
+            self.reveal = Some(PendingReveal {
+                lines,
+                excerpt,
+                done,
+            });
+        }
+        receiver
+    }
+
     fn open_file(&mut self, path: String, cx: &mut Context<'_, Self>) {
+        if !matches!(&self.preview, PreviewState::Loaded {path: current,..} if current == &path) {
+            self.editor = None;
+            #[cfg(feature = "zed-files")]
+            {
+                self.zed = None;
+            }
+            self.editor_subscription = None;
+        }
+        if let Some(previous) = self.highlight.take() {
+            previous.dispose(cx);
+        }
+        self.reveal = None;
+        self.range_error = None;
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            for dir in parent
+                .ancestors()
+                .filter_map(|p| p.to_str())
+                .filter(|p| !p.is_empty())
+            {
+                if self.tree.expand(dir) {
+                    self.load_directory(dir.to_owned(), cx);
+                }
+            }
+        }
         self.tree.select(Some(path.clone()));
         let (Some(conn), Some(cwd)) = (self.connection.clone(), self.workspace_root.clone()) else {
             self.preview = PreviewState::Error {
@@ -665,16 +814,35 @@ impl FilesPanel {
                 }
                 match res {
                     Ok(result) => {
-                        let lines = highlight_lines(&path, &result.contents, &panel.tokens);
+                        #[cfg(feature = "zed-files")]
+                        if let Some(zed) = &panel.zed {
+                            let editor = zed.read(cx);
+                            if editor.buffer().read(cx).snapshot(cx).text()
+                                != zed_text::LineEnding::normalize_cow(
+                                    result.contents.as_str().into(),
+                                )
+                            {
+                                panel.zed = None;
+                                panel.editor_subscription = None;
+                            }
+                        }
+                        if panel.editor.as_ref().is_some_and(|editor| {
+                            editor.read(cx).value().as_ref() != result.contents.as_str()
+                        }) {
+                            panel.editor = None;
+                            panel.editor_subscription = None;
+                        }
                         panel.preview = PreviewState::Loaded {
                             path,
                             raw_contents: result.contents,
-                            lines,
                             truncated: result.truncated,
                         };
                         panel.apply_pending_reveal(cx);
                     }
                     Err(err) => {
+                        if let Some(reveal) = panel.reveal.take() {
+                            let _ = reveal.done.send(Err(err.to_string()));
+                        }
                         panel.preview = PreviewState::Error {
                             path,
                             message: err.to_string(),
@@ -1018,6 +1186,12 @@ impl FilesPanel {
                     self.word_wrap,
                     cx.listener(|this, _, _, cx| {
                         this.word_wrap = !this.word_wrap;
+                        #[cfg(feature = "zed-files")]
+                        if let Some(editor) = &this.zed {
+                            editor.update(cx, |e, cx| {
+                                super::zed_preview::set_wrap(e, this.word_wrap, cx)
+                            });
+                        }
                         cx.notify();
                     }),
                 ));
@@ -1094,6 +1268,21 @@ impl FilesPanel {
                     "superhero/globe.svg",
                     false,
                     cx.listener(|this, _, _, cx| this.open_in_browser(cx)),
+                ));
+                buttons += 1;
+            }
+            if self.selected_source(cx).is_some() {
+                group = group.child(self.toolbar_button(
+                    "files-preview-attach-btn",
+                    "panel.files.attach",
+                    "Add selection",
+                    "superhero/attach.svg",
+                    false,
+                    cx.listener(|panel, _, _, cx| {
+                        if let Some(source) = panel.selected_source(cx) {
+                            cx.emit(FilesEvent::Attach(source));
+                        }
+                    }),
                 ));
                 buttons += 1;
             }
@@ -1280,11 +1469,13 @@ impl FilesPanel {
         col
     }
 
-    fn render_preview_column(&self, cx: &App) -> impl IntoElement {
+    fn render_preview_column(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let muted = to_hsla(self.tokens.muted_foreground);
-        let gutter_fg = to_hsla(self.tokens.muted_foreground.with_alpha(0.65));
-        let mono_font = mono_font_family(cx);
-
+        let body = v_flex().id("files-editor-host").flex_1().min_h_0().w_full();
         let container = v_flex()
             .id("files-preview-scroll")
             .a11y_group("panel.files.preview", "File preview")
@@ -1349,80 +1540,111 @@ impl FilesPanel {
                 }
             }
             PreviewState::Loaded {
-                lines, truncated, ..
+                path,
+                raw_contents,
+                truncated,
             } => {
-                let gutter_digits = lines.len().max(1).to_string().len().max(3);
-                let gutter_width = (gutter_digits as f32) * 8.0 + 18.0;
-                let mut body = container.pt(px(6.0)).pb(px(12.0)).px(px(12.0));
-
-                if *truncated {
-                    body = body.child(
-                        div()
-                            .mb(px(8.0))
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .rounded(px(6.0))
-                            .bg(to_hsla(self.tokens.warning.with_alpha(0.10)))
-                            .text_size(px(UI_TEXT_PX))
-                            .line_height(px(UI_LINE_HEIGHT_PX))
-                            .text_color(to_hsla(self.tokens.warning))
-                            .child("File preview was truncated."),
-                    );
-                }
-
-                for (idx, spans) in lines.iter().enumerate() {
-                    let line_no = idx + 1;
-                    let mut code_row = h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .font_family(mono_font.clone())
-                        .text_size(px(UI_TEXT_PX))
-                        .line_height(px(UI_LINE_HEIGHT_PX))
-                        .when(!self.word_wrap, |el| {
-                            el.overflow_hidden().whitespace_nowrap()
-                        });
-
-                    if spans.is_empty() {
-                        code_row = code_row.child(" ");
-                    } else {
-                        for span in spans {
-                            let mut el = div()
-                                .text_color(to_hsla(span.color))
-                                .child(span.text.clone());
-                            if span.bold {
-                                el = el.font_weight(gpui_kit::FontWeight::BOLD);
-                            }
-                            if span.italic {
-                                el = el.italic();
-                            }
-                            code_row = code_row.child(el);
-                        }
-                    }
-
-                    let flashing = self.revealed_line == Some(line_no);
-                    body = body.child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .when(flashing, |el| {
-                                el.bg(to_hsla(self.tokens.primary.with_alpha(0.16)))
-                            })
-                            .child(
-                                div()
-                                    .w(px(gutter_width))
-                                    .flex_shrink_0()
-                                    .pr(px(14.0))
-                                    .text_right()
-                                    .font_family(mono_font.clone())
-                                    .text_size(px(UI_TEXT_PX))
-                                    .line_height(px(UI_LINE_HEIGHT_PX))
-                                    .text_color(gutter_fg)
-                                    .child(line_no.to_string()),
+                #[cfg(feature = "zed-files")]
+                if super::zed_preview::enabled() && path.ends_with(".php") && !*truncated {
+                    let editor = self.zed.get_or_insert_with(|| {
+                        let editor = super::zed_preview::open(raw_contents, self.word_wrap, window, cx);
+                        self.editor_subscription = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
+                        editor
+                    });
+                    if let Some(reveal) = self.reveal.take() {
+                        let result = editor.update(cx, |editor, cx| {
+                            super::zed_preview::reveal(
+                                editor, raw_contents, reveal.lines, reveal.excerpt.as_deref(), cx,
                             )
-                            .child(code_row),
-                    );
+                        });
+                        let _ = reveal.done.send(result);
+                    }
+                    return body.child(editor.clone());
                 }
-                body
+                let editor = self.editor.get_or_insert_with(|| {
+                    let language = (raw_contents.len() <= 512 * 1024)
+                        .then(|| std::path::Path::new(path).extension()?.to_str())
+                        .flatten()
+                        .unwrap_or("text");
+                    let panel = cx.entity().downgrade();
+                    let editor = cx.new(|cx| {
+                        let mut editor = EditorState::new(window, cx)
+                            .language(language.to_owned())
+                            .default_value(raw_contents.clone())
+                            .soft_wrap(self.word_wrap)
+                            .line_number(true);
+                        if path.ends_with(".php")
+                            && !*truncated
+                            && let (Some(conn), Some(thread)) = (&self.connection, &self.thread)
+                        {
+                            super::files_definition::configure(
+                                &mut editor,
+                                conn.clone(),
+                                thread.clone(),
+                                path.clone(),
+                                panel,
+                            );
+                        }
+                        editor
+                    });
+                    self.editor_subscription = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
+                    editor
+                });
+                let mut body = body;
+                if self.reveal.is_some() && editor.read(cx).line_height().is_none() {
+                    let panel = cx.entity().downgrade();
+                    window.on_next_frame(move |_, cx| {
+                        let _ = panel.update(cx, |_, cx| cx.notify());
+                    });
+                } else if let Some(reveal) = self.reveal.take() {
+                    let text = editor.read(cx).value();
+                    let range = reveal.lines.bytes(&text).filter(|r| {
+                        reveal.excerpt.as_ref().is_none_or(|excerpt| {
+                            text.get(r.clone()).is_some_and(|actual| {
+                                actual == excerpt
+                                    || actual.replace("\r\n", "\n") == excerpt.replace("\r\n", "\n")
+                            })
+                        })
+                    });
+                    if let Some(range) = range {
+                        self.highlight = Some(editor.update(cx, |e, cx| {
+                            let row = e
+                                .display_map()
+                                .buffer_line_to_display_row(reveal.lines.start_line - 1);
+                            let mut offset = e.scroll_offset();
+                            if let Some(height) = e.line_height() {
+                                offset.y = -height * row.saturating_sub(2) as f32;
+                                e.set_scroll_offset(offset, cx);
+                            }
+                            e.create_range_decorations_collection(
+                                vec![
+                                    RangeDecoration::new(range)
+                                        .with_style(RangeDecorationStyle::Fill),
+                                ],
+                                cx,
+                            )
+                        }));
+                        let _ = reveal.done.send(Ok(()));
+                    } else {
+                        let message =
+                            "The requested lines are missing or their contents have changed.";
+                        self.range_error = Some(message.into());
+                        let _ = reveal.done.send(Err(message.into()));
+                    }
+                }
+                if let Some(error) = &self.range_error {
+                    body = body.child(muted_message(error, muted));
+                }
+                if *truncated {
+                    body = body.child(muted_message("File preview was truncated.", muted));
+                }
+                body.child(
+                    Editor::new(editor)
+                        .appearance(false)
+                        .bordered(false)
+                        .readonly(true)
+                        .size_full(),
+                )
             }
         }
     }
@@ -1668,12 +1890,12 @@ impl FilesPanel {
 }
 
 impl Render for FilesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self.showing_preview {
             return v_flex()
                 .size_full()
                 .child(self.render_preview_subheader(cx))
-                .child(self.render_preview_column(cx))
+                .child(self.render_preview_column(window, cx))
                 .children(self.render_row_menu(cx))
                 .into_any_element();
         }
@@ -2013,6 +2235,64 @@ fn muted_message(text: &str, color: gpui_kit::Hsla) -> impl IntoElement {
         .line_height(px(UI_LINE_HEIGHT_PX))
         .text_color(color)
         .child(text.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::TestAppContext;
+    use gpui_kit::test::TestWindowExt as _;
+
+    #[gpui_kit::test]
+    fn walkthrough_highlight_preserves_selection_and_rejects_stale_lines(cx: &mut TestAppContext) {
+        let (window, files) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut files = FilesPanel::new(tokens, None, window, cx);
+                    files.showing_preview = true;
+                    files.preview = PreviewState::Loaded {
+                        path: "routes/web.php".into(),
+                        raw_contents: "first\nsecond\nthird".into(),
+                        truncated: false,
+                    };
+                    files
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(files.read(cx).selected_source(cx).is_none());
+            let editor = files.read(cx).editor.clone().unwrap();
+            editor.update(cx, |e, cx| e.set_selected_range(6..12, cx));
+            for (excerpt, matches) in [("third", true), ("changed", false)] {
+                let (done, mut reply) = tokio::sync::oneshot::channel();
+                files.update(cx, |p, cx| {
+                    p.reveal = Some(PendingReveal {
+                        lines: SourceLines {
+                            start_line: 3,
+                            end_line: 3,
+                        },
+                        excerpt: Some(excerpt.into()),
+                        done,
+                    });
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                assert_eq!(reply.try_recv().unwrap().is_ok(), matches);
+                assert_eq!(files.read(cx).selected_source(cx).unwrap().text, "second");
+            }
+            assert_eq!(
+                files.read(cx).highlight.as_ref().unwrap().get_ranges(cx),
+                vec![13..18]
+            );
+            files.update(cx, |p, cx| p.reset_preview(cx));
+            assert!(files.read(cx).selected_source(cx).is_none());
+        })
+        .unwrap();
+    }
 }
 
 fn mono_font_family(cx: &App) -> SharedString {

@@ -13,6 +13,14 @@ name = "conn-app"
 path = "src/main.rs"
 
 [dependencies]
+zed_util = { package = "util", path = "../../.refs/zed-files-spike/crates/util", features = ["debug-embed"], optional = true }
+zed_editor = { package = "editor", path = "../../.refs/zed-files-spike/crates/editor", optional = true }
+zed_language = { package = "language", path = "../../.refs/zed-files-spike/crates/language", optional = true }
+zed_settings = { package = "settings", path = "../../.refs/zed-files-spike/crates/settings", optional = true }
+zed_theme = { package = "theme", path = "../../.refs/zed-files-spike/crates/theme", optional = true }
+zed_text = { package = "text", path = "../../.refs/zed-files-spike/crates/text", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
+lsp-types = "0.97"
 conn-client.workspace = true
 conn-desktop.workspace = true
 conn-contract.workspace = true
@@ -60,6 +68,7 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 tokio-tungstenite.workspace = true
 
 [features]
+zed-files = ["dep:zed_util", "dep:zed_editor", "dep:zed_language", "dep:zed_settings", "dep:zed_theme", "dep:zed_text", "dep:tree-sitter-php"]
 # Scripted UI automation and screenshot capture hook for visual verification in nick-vm
 # (modeled on .refs/threadbear/desktop/gpui/src/automation.rs). Never enabled in release builds.
 automation = ["gpui-kit/test-support"]

@@ -1,0 +1,96 @@
+//! Local Files experiment. The workspace and selection still belong to Conn.
+use gpui_kit::{App, AppContext, Context, Entity, Window};
+use std::{ops::Range, sync::Arc};
+use zed_editor::{Editor, MultiBufferOffset, RowHighlightOptions, ToOffset};
+use zed_language::{Buffer, Language, LanguageConfig};
+use zed_theme::ActiveTheme as _;
+
+pub(crate) fn enabled() -> bool {
+    std::env::var("CONN_FILES_EDITOR").as_deref() == Ok("zed")
+}
+
+pub(crate) fn init(cx: &mut App) {
+    if enabled() {
+        let defaults = zed_settings::default_settings().replace("\".ZedMono\"", "\"Menlo\"");
+        let settings = zed_settings::SettingsStore::new(cx, &defaults);
+        cx.set_global(settings);
+        zed_theme::init(zed_theme::LoadThemes::JustBase, cx);
+    }
+}
+
+pub(super) fn open(source: &str, wrap: bool, window: &mut Window, cx: &mut App) -> Entity<Editor> {
+    let config = LanguageConfig {
+        name: "PHP".into(),
+        ..Default::default()
+    };
+    let php = Language::new(config, Some(tree_sitter_php::LANGUAGE_PHP.into()))
+        .with_highlights_query(tree_sitter_php::HIGHLIGHTS_QUERY)
+        .expect("PHP query must match its bundled grammar");
+    php.set_theme(cx.theme().syntax());
+    let language = Arc::new(php);
+    let buffer = cx.new(|cx| {
+        let mut buffer = Buffer::local(source, cx);
+        buffer.set_language(Some(language), cx);
+        buffer.set_capability(zed_language::Capability::ReadOnly, cx);
+        buffer
+    });
+    cx.new(|cx| {
+        let mut editor = Editor::for_buffer(buffer, None, window, cx);
+        editor.set_read_only(true);
+        set_wrap(&mut editor, wrap, cx);
+        editor
+    })
+}
+
+pub(super) fn set_wrap(editor: &mut Editor, wrap: bool, cx: &mut Context<'_, Editor>) {
+    let mode = if wrap {
+        zed_settings::SoftWrap::EditorWidth
+    } else {
+        zed_settings::SoftWrap::None
+    };
+    editor.set_soft_wrap_mode(mode, cx);
+}
+
+pub(super) fn selection(editor: &Editor, cx: &App) -> Range<usize> {
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
+    let range = editor.selections.newest_anchor().range();
+    range.start.to_offset(&snapshot).0..range.end.to_offset(&snapshot).0
+}
+
+struct AgentReveal;
+
+pub(super) fn reveal(
+    editor: &mut Editor,
+    source: &str,
+    lines: conn_contract::source::SourceLines,
+    excerpt: Option<&str>,
+    cx: &mut Context<'_, Editor>,
+) -> Result<(), String> {
+    let text = zed_text::LineEnding::normalize_cow(source.into());
+    let bytes = lines
+        .bytes(&text)
+        .ok_or("The requested lines are missing.")?;
+    if let Some(expected) = excerpt
+        && &text[bytes.clone()] != zed_text::LineEnding::normalize_cow(expected.into()).as_ref()
+    {
+        return Err("The requested source has changed.".into());
+    }
+    // Zed treats an end anchor at column zero as exclusive, including on an empty row.
+    let end = bytes.end + usize::from(text.as_bytes().get(bytes.end) == Some(&b'\n'));
+    let buffer = editor.buffer().read(cx).snapshot(cx);
+    let anchors = buffer.anchor_before(MultiBufferOffset(bytes.start))
+        ..buffer.anchor_after(MultiBufferOffset(end));
+    editor.clear_row_highlights::<AgentReveal>();
+    editor.highlight_rows::<AgentReveal>(
+        anchors,
+        |_| gpui_kit::rgba(0x5983ff50).into(),
+        RowHighlightOptions {
+            autoscroll: true,
+            include_gutter: true,
+        },
+        cx,
+    );
+    editor.request_autoscroll(zed_editor::scroll::Autoscroll::center(), cx);
+    cx.notify();
+    Ok(())
+}

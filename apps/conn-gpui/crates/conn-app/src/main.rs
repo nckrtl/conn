@@ -211,6 +211,8 @@ fn main() {
     }
     application.run(|cx| {
         gpui_kit::init(cx);
+        #[cfg(feature = "zed-files")]
+        panels::zed_preview::init(cx);
         fonts::register(cx);
         colour_space::install(cx);
         vibrancy::install(cx);

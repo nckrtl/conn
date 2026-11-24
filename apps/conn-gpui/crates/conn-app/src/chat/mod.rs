@@ -161,7 +161,7 @@ pub(crate) enum ChatEvent {
         run_id: String,
     },
     /// Open a workspace-relative file in the right panel's File preview tab.
-    OpenFile(String),
+    OpenFile(conn_contract::source::SourceLocation),
     /// Switch the thread's runtime permission mode (`thread.runtime-mode.set`).
     RuntimeModeSelected(String),
     /// Switch the thread's interaction mode (`thread.interaction-mode.set`).
@@ -510,6 +510,35 @@ impl ChatView {
             .update(cx, |composer, cx| composer.attach_paths(paths, window, cx));
     }
 
+    pub(crate) fn attach_source(
+        &mut self,
+        source: &conn_contract::source::SourceSelection,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let label = format!(
+            "{}#L{}-L{}",
+            source.path, source.lines.start_line, source.lines.end_line
+        );
+        let content = format!("{label}\n\n{}", source.text);
+        let filename = format!(
+            "{}-L{}-L{}.txt",
+            source.path.rsplit('/').next().unwrap_or("source"),
+            source.lines.start_line,
+            source.lines.end_line
+        );
+        self.composer.update(cx, |c, cx| {
+            c.stage_and_upload_bytes(
+                filename,
+                "text/plain".to_owned(),
+                content.into_bytes(),
+                window,
+                cx,
+            );
+            c.focus_input(window, cx);
+        });
+    }
+
     /// Returns the child composer entity for headless GPUI tests.
     #[cfg(test)]
     #[must_use]
@@ -536,6 +565,11 @@ impl ChatView {
     }
 
     /// Moves keyboard focus into the composer input.
+    #[cfg(feature = "automation")]
+    pub(crate) fn spike_input_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
+        self.composer.read(cx).spike_input_focused(window, cx)
+    }
+
     pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.composer.update(cx, |c, cx| c.focus_input(window, cx));
     }

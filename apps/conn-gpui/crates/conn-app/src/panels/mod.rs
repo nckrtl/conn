@@ -15,6 +15,7 @@ mod diff_parser;
 mod file_kind;
 pub(crate) mod file_path;
 mod files;
+mod files_definition;
 pub(crate) mod header;
 mod highlight;
 mod laravel_toolbar;
@@ -27,6 +28,8 @@ pub(crate) mod terminal_demo;
 pub(crate) mod terminal_drawer;
 mod terminal_palette;
 mod tree;
+#[cfg(feature = "zed-files")]
+pub(crate) mod zed_preview;
 
 use std::fmt;
 use std::rc::Rc;
@@ -61,6 +64,8 @@ use crate::a11y::ConnA11yExt as _;
 pub(crate) enum RightPanelEvent {
     /// The Files tree asked to open a file as its own tab.
     OpenFile(String),
+    Definition(conn_contract::source::SourceLocation),
+    AttachSource(conn_contract::source::SourceSelection),
     /// A surface asked to show another surface (e.g. Linked items opening a pull request).
     OpenTab(RightPanelTab),
     /// The Files panel asked to add a file mention to the composer's draft.
@@ -136,6 +141,10 @@ impl RightPanel {
         cx.subscribe(
             &files,
             |this, _, event: &files::FilesEvent, cx| match event {
+                files::FilesEvent::Definition(location) => {
+                    cx.emit(RightPanelEvent::Definition(location.clone()))
+                }
+                files::FilesEvent::Attach(s) => cx.emit(RightPanelEvent::AttachSource(s.clone())),
                 files::FilesEvent::OpenFile(path) => {
                     cx.emit(RightPanelEvent::OpenFile(path.clone()))
                 }
@@ -460,9 +469,11 @@ impl RightPanel {
                 .update(cx, |p, cx| p.set_workspace_root(workspace_root, cx));
         }
         if self.thread_id != thread_id {
+            self.files
+                .update(cx, |files, cx| files.set_thread(thread_id.clone(), cx));
             self.thread_id = thread_id.clone();
             self.files
-                .update(cx, |p, _| p.set_thread(thread_id.clone()));
+                .update(cx, |p, _| p.set_signing_thread(thread_id.clone()));
             self.diff
                 .update(cx, |p, cx| p.set_thread(thread_id.clone(), cx));
         }
@@ -485,6 +496,9 @@ impl RightPanel {
     }
 
     fn sync_surface_visibility(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.surface_visible || self.tab != RightPanelTab::File {
+            self.files.update(cx, |files, _| files.cancel_reveal());
+        }
         let shows = |tab: RightPanelTab| self.surface_visible && self.tab == tab;
         let (show_browser, show_device) =
             (shows(RightPanelTab::Browser), shows(RightPanelTab::Device));
@@ -539,6 +553,34 @@ impl RightPanel {
     /// Reveals `line` of the file tab now showing (or loading) and flashes it.
     pub fn reveal_line(&mut self, line: usize, cx: &mut Context<'_, Self>) {
         self.files.update(cx, |p, cx| p.reveal_line(line, cx));
+    }
+
+    #[cfg(feature = "automation")]
+    pub(crate) fn spike_files_state(
+        &self,
+        window: &Window,
+        cx: &gpui_kit::App,
+    ) -> serde_json::Value {
+        self.files.read(cx).spike_files_state(window, cx)
+    }
+    pub(crate) fn selected_source(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Option<conn_contract::source::SourceSelection> {
+        (self.tab == RightPanelTab::File)
+            .then(|| self.files.read(cx).selected_source(cx))
+            .flatten()
+    }
+
+    pub(crate) fn reveal_lines(
+        &mut self,
+        path: String,
+        lines: conn_contract::source::SourceLines,
+        excerpt: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        self.files
+            .update(cx, |files, cx| files.reveal_lines(path, lines, excerpt, cx))
     }
 
     /// Shows the file at `path` (project-relative) as its own surface, as Conn's `file` tab.

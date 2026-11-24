@@ -107,7 +107,8 @@ pub(crate) struct MarkdownOptions<'a> {
     /// Active workspace root for resolving clicked `file://` links or inline-code file paths.
     pub(crate) workspace_root: Option<&'a str>,
     /// Optional callback invoked when a user clicks a workspace file link or inline file path.
-    pub(crate) on_open_file: Option<Rc<dyn Fn(String, &mut Window, &mut App)>>,
+    pub(crate) on_open_file:
+        Option<Rc<dyn Fn(conn_contract::source::SourceLocation, &mut Window, &mut App)>>,
 }
 
 impl MarkdownOptions<'_> {
@@ -1119,7 +1120,7 @@ fn render_table(
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClickTarget {
     Url(String),
-    WorkspaceFile(String),
+    WorkspaceFile(conn_contract::source::SourceLocation),
 }
 
 /// Renders inline spans as a single continuously flowing `StyledText` (or `InteractiveText` when
@@ -1175,7 +1176,7 @@ fn interactive_inline_text(
     styled: StyledText,
     ranges: Vec<Range<usize>>,
     targets: Vec<ClickTarget>,
-    on_open_file: Option<Rc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_open_file: Option<Rc<dyn Fn(conn_contract::source::SourceLocation, &mut Window, &mut App)>>,
 ) -> AnyElement {
     if ranges.is_empty() {
         return styled.into_any_element();
@@ -1252,14 +1253,14 @@ fn build_styled_text_with_targets(
     for span in spans {
         let target = if let Some(url) = &span.link {
             if file_links_enabled
-                && let Some(rel) = resolve_clickable_file_link(url, workspace_root)
+                && let Some(rel) = resolve_clickable_file_path(url, workspace_root)
             {
                 Some(ClickTarget::WorkspaceFile(rel))
             } else {
                 Some(ClickTarget::Url(url.clone()))
             }
         } else if span.style.code && file_links_enabled {
-            resolve_clickable_file_link(&span.text, workspace_root).map(ClickTarget::WorkspaceFile)
+            resolve_clickable_file_path(&span.text, workspace_root).map(ClickTarget::WorkspaceFile)
         } else {
             None
         };
@@ -1383,7 +1384,12 @@ fn build_styled_text_with_targets(
 
 /// Resolves a `file://` URL or inline-code token (e.g. `src/main.rs:42`, `Cargo.toml`, or
 /// `/abs/workspace/src/lib.rs#L10-L20`) to a workspace-relative path when it looks like a file.
-fn resolve_clickable_file_path(raw: &str, workspace_root: Option<&str>) -> Option<String> {
+fn resolve_clickable_file_path(
+    raw: &str,
+    workspace_root: Option<&str>,
+) -> Option<conn_contract::source::SourceLocation> {
+    use conn_contract::source::{SourceLines, SourceLocation};
+
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
         return None;
@@ -1395,10 +1401,36 @@ fn resolve_clickable_file_path(raw: &str, workspace_root: Option<&str>) -> Optio
     let without_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
     let without_frag = without_scheme.split('#').next().unwrap_or(without_scheme);
     let candidate = strip_line_col_suffix(without_frag);
-    if candidate.is_empty() || candidate.contains("..") {
+    if candidate.is_empty() {
         return None;
     }
 
+    let line_span = |first: &str, last: &str| {
+        let start_line: usize = first.parse().ok()?;
+        let end_line: usize = last.parse().ok()?;
+        (start_line > 0 && end_line >= start_line).then_some(SourceLines {
+            start_line,
+            end_line,
+        })
+    };
+    let lines = if let Some((_, anchor)) = without_scheme.split_once("#L") {
+        let (start, end) = anchor.split_once("-L").unwrap_or((anchor, anchor));
+        line_span(start, end)
+    } else {
+        without_frag
+            .strip_prefix(candidate)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|suffix| suffix.split(':').next())
+            .and_then(|line| line_span(line, line))
+    };
+    let location = |rel: &str| {
+        (conn_contract::source::workspace_relative(rel) && looks_like_file_path(rel)).then(|| {
+            SourceLocation {
+                path: rel.to_owned(),
+                lines,
+            }
+        })
+    };
     if candidate.starts_with('/') {
         let root = workspace_root?.trim_end_matches('/');
         if root.is_empty() {
@@ -1408,18 +1440,19 @@ fn resolve_clickable_file_path(raw: &str, workspace_root: Option<&str>) -> Optio
         let rel = candidate
             .strip_prefix(&format!("{root}/"))
             .or_else(|| candidate.strip_prefix(&format!("{private_root}/")))?;
-        return looks_like_file_path(rel).then(|| rel.to_owned());
+        return location(rel);
     }
 
     let rel = candidate.strip_prefix("./").unwrap_or(candidate);
-    looks_like_file_path(rel).then(|| rel.to_owned())
+    location(rel)
 }
 
 /// Like [`resolve_clickable_file_path`], but keeps where the link points: `path:line` when the
 /// link has a `:line[:column]` suffix or an `#L10` fragment. The Files panel opens the file at
 /// that line (`revealLine`).
+#[cfg(test)]
 fn resolve_clickable_file_link(raw: &str, workspace_root: Option<&str>) -> Option<String> {
-    let path = resolve_clickable_file_path(raw, workspace_root)?;
+    let path = resolve_clickable_file_path(raw, workspace_root)?.path;
     let trimmed = raw.trim();
     let without_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
     let (before_fragment, fragment) = match without_scheme.split_once('#') {
@@ -1568,15 +1601,30 @@ mod tests {
     fn resolves_clickable_workspace_file_paths_and_rejects_non_files() {
         assert_eq!(
             resolve_clickable_file_path("crates/conn-app/src/app.rs:42:10", Some("/repo")),
-            Some("crates/conn-app/src/app.rs".to_owned())
+            Some(conn_contract::source::SourceLocation {
+                path: "crates/conn-app/src/app.rs".into(),
+                lines: Some(conn_contract::source::SourceLines {
+                    start_line: 42,
+                    end_line: 42
+                })
+            })
         );
         assert_eq!(
             resolve_clickable_file_path("file:///repo/Cargo.toml#L10-L20", Some("/repo")),
-            Some("Cargo.toml".to_owned())
+            Some(conn_contract::source::SourceLocation {
+                path: "Cargo.toml".into(),
+                lines: Some(conn_contract::source::SourceLines {
+                    start_line: 10,
+                    end_line: 20
+                })
+            })
         );
         assert_eq!(
             resolve_clickable_file_path("./src/main.rs", None),
-            Some("src/main.rs".to_owned())
+            Some(conn_contract::source::SourceLocation {
+                path: "src/main.rs".into(),
+                lines: None
+            })
         );
         assert_eq!(
             resolve_clickable_file_path("https://example.com/a.rs", Some("/repo")),

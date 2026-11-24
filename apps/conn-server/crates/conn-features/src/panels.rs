@@ -125,7 +125,10 @@ mod tests {
     }
 }
 
-use conn_contract::{AgentPanelRequest, AgentPanelResponse};
+use conn_contract::{
+    AgentPanelRequest, AgentPanelResponse,
+    source::{DesktopPanelRequest, DesktopPanelResponse, FilesAction},
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -148,11 +151,19 @@ pub struct PanelError {
 #[derive(Debug)]
 struct Pending {
     remaining: usize,
-    answer: oneshot::Sender<AgentPanelResponse>,
+    answer: oneshot::Sender<DesktopPanelResponse>,
+    connection: Option<u64>,
 }
+#[derive(Debug)]
+struct Subscriber {
+    connection: u64,
+    files_thread: Option<String>,
+    tx: mpsc::Sender<DesktopPanelRequest>,
+}
+
 #[derive(Debug, Default)]
 struct State {
-    subscribers: Vec<mpsc::Sender<AgentPanelRequest>>,
+    subscribers: Vec<Subscriber>,
     pending: HashMap<String, Pending>,
 }
 
@@ -176,9 +187,16 @@ impl PanelBroker {
         self.inner.lock().expect("panel broker lock poisoned")
     }
 
-    pub fn subscribe(&self) -> Result<mpsc::Receiver<AgentPanelRequest>, PanelError> {
+    pub fn subscribe(&self) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
+        self.subscribe_for(0, None)
+    }
+    pub fn subscribe_for(
+        &self,
+        connection: u64,
+        files_thread: Option<String>,
+    ) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
         let mut state = self.state();
-        state.subscribers.retain(|tx| !tx.is_closed());
+        state.subscribers.retain(|tx| !tx.tx.is_closed());
         if state.subscribers.len() >= MAX_DESKTOPS {
             return Err(PanelError {
                 reason: "rejected",
@@ -186,22 +204,39 @@ impl PanelBroker {
             });
         }
         let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
-        state.subscribers.push(tx);
+        state.subscribers.push(Subscriber {
+            tx,
+            connection,
+            files_thread,
+        });
         Ok(rx)
     }
 
     pub fn has_desktop(&self) -> bool {
-        self.state().subscribers.iter().any(|tx| !tx.is_closed())
+        self.state().subscribers.iter().any(|tx| !tx.tx.is_closed())
     }
 
     pub fn respond(&self, response: AgentPanelResponse) {
+        self.respond_from(
+            0,
+            DesktopPanelResponse {
+                panel: response,
+                selection: None,
+            },
+        );
+    }
+
+    pub fn respond_from(&self, connection: u64, response: DesktopPanelResponse) {
         let mut state = self.state();
-        let Some(entry) = state.pending.get_mut(&response.request_id) else {
+        let Some(entry) = state.pending.get_mut(&response.panel.request_id) else {
             return;
         };
+        if entry.connection.is_some_and(|id| id != connection) {
+            return;
+        }
         entry.remaining = entry.remaining.saturating_sub(1);
-        if (response.ok || entry.remaining == 0)
-            && let Some(entry) = state.pending.remove(&response.request_id)
+        if (response.panel.ok || entry.remaining == 0)
+            && let Some(entry) = state.pending.remove(&response.panel.request_id)
         {
             let _ = entry.answer.send(response);
         }
@@ -209,12 +244,23 @@ impl PanelBroker {
 
     pub async fn show(
         &self,
-        mut request: AgentPanelRequest,
+        request: AgentPanelRequest,
         timeout: Duration,
     ) -> Result<AgentPanelResponse, PanelError> {
+        self.show_action(request, None, timeout)
+            .await
+            .map(|answer| answer.panel)
+    }
+
+    pub async fn show_action(
+        &self,
+        mut request: AgentPanelRequest,
+        files_action: Option<FilesAction>,
+        timeout: Duration,
+    ) -> Result<DesktopPanelResponse, PanelError> {
         let (answer, guard) = {
             let mut state = self.state();
-            state.subscribers.retain(|tx| !tx.is_closed());
+            state.subscribers.retain(|tx| !tx.tx.is_closed());
             if state.subscribers.is_empty() {
                 return Err(PanelError { reason:"no_desktop", message:"No Conn desktop app is connected to this server, so nothing can show the panel. Ask the user to open Conn on their Mac.".into() });
             }
@@ -227,8 +273,33 @@ impl PanelBroker {
             request.request_id = conn_support::uuid_v4();
             let (tx, rx) = oneshot::channel();
             let mut remaining = 0;
-            for subscriber in &state.subscribers {
-                if subscriber.try_send(request.clone()).is_ok() {
+            let targets: Vec<_> = state
+                .subscribers
+                .iter()
+                .filter(|s| {
+                    files_action.is_none() || s.files_thread.as_deref() == Some(&request.thread_id)
+                })
+                .collect();
+            if files_action.is_some() && targets.len() != 1 {
+                return Err(PanelError {
+                    reason: "rejected",
+                    message: if targets.is_empty() {
+                        "Open this thread in Conn GPUI to use Files."
+                    } else {
+                        "This thread is open in multiple windows. Keep it open in one to use Files."
+                    }
+                    .into(),
+                });
+            }
+            let connection = files_action
+                .as_ref()
+                .and_then(|_| targets.first().map(|s| s.connection));
+            let envelope = DesktopPanelRequest {
+                panel: request.clone(),
+                files_action,
+            };
+            for subscriber in targets {
+                if subscriber.tx.try_send(envelope.clone()).is_ok() {
                     remaining += 1;
                 }
             }
@@ -242,6 +313,7 @@ impl PanelBroker {
                 request.request_id.clone(),
                 Pending {
                     remaining,
+                    connection,
                     answer: tx,
                 },
             );
@@ -258,8 +330,9 @@ impl PanelBroker {
         let result = tokio::time::timeout(timeout, answer).await;
         drop(guard);
         match result {
-            Ok(Ok(mut response)) if response.ok => {
+            Ok(Ok(mut response)) if response.panel.ok => {
                 response
+                    .panel
                     .device_name
                     .get_or_insert_with(|| "Conn desktop".into());
                 Ok(response)
@@ -267,6 +340,7 @@ impl PanelBroker {
             Ok(Ok(response)) => Err(PanelError {
                 reason: "rejected",
                 message: response
+                    .panel
                     .error
                     .unwrap_or_else(|| format!("Conn could not show the {panel} panel.")),
             }),

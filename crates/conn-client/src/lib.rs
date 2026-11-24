@@ -125,7 +125,7 @@ pub enum ClientEvent {
     },
     /// Server→desktop agent panel request (`panels.requests`: `panel_open`, `database_query`,
     /// `mcp_connect`, `mcp_call`). Auto-resubscribed on WebSocket reconnect.
-    PanelRequest(conn_contract::AgentPanelRequest),
+    PanelRequest(conn_contract::source::DesktopPanelRequest),
     /// Live project annotation queue snapshot (`annotations.subscribe`). Auto-resubscribed on
     /// WebSocket reconnect.
     Annotations {
@@ -258,6 +258,44 @@ impl Connection {
                 .await
             },
             "device hub access",
+        )
+        .await
+    }
+
+    /// Looks up a Laravel definition on the server that owns this thread.
+    pub async fn source_definition(
+        &self,
+        query: conn_contract::source::DefinitionRequest,
+    ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
+        let url = self.http_base_url.join("api/files/definition")?;
+        let token = self
+            .bearer
+            .read()
+            .ok()
+            .and_then(|t| t.clone())
+            .ok_or_else(|| ClientError::Auth("No active connection.".into()))?;
+        let http = self.http.clone();
+        self.run_on_tokio(
+            async move {
+                let res = http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&query)
+                    .send()
+                    .await
+                    .map_err(|e| ClientError::Connection(e.to_string()))?;
+                if !res.status().is_success() {
+                    let status = res.status();
+                    let message = res.text().await.unwrap_or_default();
+                    return Err(ClientError::Connection(format!(
+                        "Definition lookup ({status}): {message}"
+                    )));
+                }
+                res.json()
+                    .await
+                    .map_err(|e| ClientError::Connection(e.to_string()))
+            },
+            "source definition",
         )
         .await
     }
@@ -533,9 +571,14 @@ impl Connection {
     pub fn subscribe_panel_requests(&self, device_name: Option<String>) {
         let _ = self
             .cmd_tx
-            .send(Command::SubscribePanelRequests(device_name));
+            .send(Command::SubscribePanelRequests(device_name, None));
     }
 
+    pub fn subscribe_files_thread(&self, device_name: String, thread: Option<String>) {
+        let _ = self
+            .cmd_tx
+            .send(Command::SubscribePanelRequests(Some(device_name), thread));
+    }
     /// Stops listening to `panels.requests`.
     pub fn unsubscribe_panel_requests(&self) {
         let _ = self.cmd_tx.send(Command::UnsubscribePanelRequests);

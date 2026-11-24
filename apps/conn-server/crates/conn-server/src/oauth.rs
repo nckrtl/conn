@@ -765,6 +765,8 @@ mod tests {
         ));
     }
 
+    /// A peer-link code made with `sessionTtl: "until-revoked"`: `/oauth/mcp/token` grants
+    /// the long session, and its `expires_in` (which the holder stores) says so.
     #[test]
     fn links_a_peer_with_a_peer_link_code() {
         let oauth = oauth();
@@ -783,7 +785,7 @@ mod tests {
         let verifier = "v".repeat(43);
         let challenge = base64::url_encode(&conn_support::hmac::sha256(verifier.as_bytes()));
         let code = auth
-            .issue_peer_link_pairing("auto", None, None)
+            .issue_peer_link_pairing("auto", None, Some(auth::MAX_TTL_MS))
             .unwrap()
             .code;
         let request = authorization(&client, &challenge);
@@ -817,6 +819,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(token["scope"], "orchestration:read orchestration:operate");
+        let expires_in = token["expires_in"].as_u64().unwrap();
+        assert!(
+            expires_in > (auth::MAX_TTL_MS / 1000).saturating_sub(60),
+            "{expires_in}"
+        );
         let session = auth
             .authenticate_mcp_client(token["access_token"].as_str().unwrap())
             .unwrap();

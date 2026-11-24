@@ -107,7 +107,8 @@ struct ModelPickerSheet: View {
             switch result {
             case .saved?, .unchanged?: dismiss()
             case .unavailable?: showingUnavailable = true
-            case nil: break
+            // The thread's scope is still loading; the sheet keeps its loading state.
+            case .notReady?, nil: break
             }
         }
     }

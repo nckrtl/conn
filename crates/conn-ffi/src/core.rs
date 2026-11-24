@@ -523,13 +523,7 @@ impl ConnCore {
             pending,
             reply,
         });
-        let empty = FfiModelPicker {
-            loaded: false,
-            selected_driver: None,
-            selected_label: None,
-            sections: Vec::new(),
-            has_pending: false,
-        };
+        let empty = FfiModelPicker::loading();
         if sent.is_err() {
             return empty;
         }
@@ -562,6 +556,7 @@ impl ConnCore {
         match rx.await.map_err(|_| FfiError::Closed)? {
             SaveDecision::Unchanged => Ok(FfiModelSave::Unchanged),
             SaveDecision::Unavailable => Ok(FfiModelSave::Unavailable),
+            SaveDecision::NotReady => Ok(FfiModelSave::NotReady),
             SaveDecision::Send { instance_id, model } => {
                 let command = conn_client::commands::set_model_selection(
                     &thread_id,
@@ -843,10 +838,6 @@ struct PumpState {
     /// Workspace scan history by `(instance_id, cwd)`.
     workspace_scans: HashMap<(String, String), WorkspaceScanState>,
     threads: HashMap<String, ThreadState>,
-    thread_projection_meta: HashMap<String, ThreadSnapshotMeta>,
-    /// Each opened thread's provider, project and worktree from its detail projection, for the
-    /// model picker of a thread the shell does not list.
-    thread_projection_picker: HashMap<String, PickerThread>,
     open_threads: HashSet<String>,
     ended_threads: HashSet<String>,
     shell_snapshot_required: bool,
@@ -861,23 +852,35 @@ impl PumpState {
         self.shell
             .find_thread(thread_id)
             .map(ThreadSnapshotMeta::from_shell)
-            .or_else(|| self.thread_projection_meta.get(thread_id).cloned())
+            .or_else(|| {
+                self.threads
+                    .get(thread_id)
+                    .and_then(ThreadState::thread)
+                    .map(ThreadSnapshotMeta::from_app_thread)
+            })
     }
 
-    /// The thread's provider and model for the model picker, from its shell row.
-    /// The thread a model picker serves: its shell row, else its detail projection.
-    fn picker_thread(&self, thread_id: &str) -> PickerThread {
+    /// The thread a model picker serves: its shell row, else the live record of its opened
+    /// thread state (current through `thread.model-selection-updated` and the like). `None` while
+    /// neither is known: the scope is not ready, never empty.
+    fn picker_thread(&self, thread_id: &str) -> Option<PickerThread> {
         let thread = self
             .shell
             .find_thread(thread_id)
             .map(PickerThread::from_shell)
-            .or_else(|| self.thread_projection_picker.get(thread_id).cloned())
-            .unwrap_or_default();
-        thread.or_project_root(|project_id| {
+            .or_else(|| {
+                let state = self.threads.get(thread_id)?;
+                let thread = state.thread()?;
+                Some(PickerThread::from_projection(
+                    thread,
+                    state.latest_run_id().is_some(),
+                ))
+            })?;
+        Some(thread.or_project_root(|project_id| {
             self.shell
                 .project(project_id)
                 .map(|project| project.workspace_root.clone())
-        })
+        }))
     }
 
     /// The catalog of what the thread may pick (conn-state's `thread_catalog`).
@@ -895,7 +898,9 @@ impl PumpState {
         if !self.server_config.is_loaded() {
             return idle;
         }
-        let thread = self.picker_thread(thread_id);
+        let Some(thread) = self.picker_thread(thread_id) else {
+            return idle;
+        };
         let (Some(instance_id), Some(cwd)) = (thread.instance_id, thread.cwd) else {
             return idle;
         };
@@ -1090,27 +1095,21 @@ impl PumpState {
                 reply,
             } => {
                 if let Some(projection) = *projection {
-                    self.thread_projection_meta.insert(
-                        thread_id.clone(),
-                        ThreadSnapshotMeta::from_app_thread(&projection.thread),
-                    );
-                    self.thread_projection_picker.insert(
-                        thread_id.clone(),
-                        PickerThread::from_projection(
-                            &projection.thread,
-                            !projection.runs.is_empty(),
-                        ),
-                    );
                     let mut state = ThreadState::new(thread_id.clone());
                     state.apply_projection(projection, sequence);
                     self.update_thread_run_meta(&thread_id, &state);
-                    let meta = self.resolve_thread_meta(&thread_id);
-                    let snapshot = build_thread_snapshot(&state, meta.as_ref());
                     self.threads.insert(thread_id.clone(), state);
+                    let meta = self.resolve_thread_meta(&thread_id);
+                    let snapshot = self
+                        .threads
+                        .get(&thread_id)
+                        .map(|state| build_thread_snapshot(state, meta.as_ref()));
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
                     self.connection.subscribe_thread(&thread_id);
-                    self.emit_or_buffer_thread(snapshot);
+                    if let Some(snapshot) = snapshot {
+                        self.emit_or_buffer_thread(snapshot);
+                    }
                 } else {
                     self.threads
                         .entry(thread_id.clone())
@@ -1129,15 +1128,23 @@ impl PumpState {
                 pending,
                 reply,
             } => {
-                let thread = self.picker_thread(&thread_id);
-                let catalog = self.catalog_for(&thread);
-                let input = PickerInput {
-                    query: &query,
-                    toggled: &toggled,
-                    pending: pending.as_ref().map(|(i, m)| (i.as_str(), m.as_str())),
+                let picker = match self.picker_thread(&thread_id) {
+                    Some(thread) => {
+                        let input = PickerInput {
+                            query: &query,
+                            toggled: &toggled,
+                            pending: pending.as_ref().map(|(i, m)| (i.as_str(), m.as_str())),
+                        };
+                        build_model_picker(
+                            &self.catalog_for(&thread),
+                            self.server_config.is_loaded(),
+                            &thread,
+                            &input,
+                        )
+                    }
+                    // No shell row and no detail yet: loading, never an empty scope.
+                    None => FfiModelPicker::loading(),
                 };
-                let picker =
-                    build_model_picker(&catalog, self.server_config.is_loaded(), &thread, &input);
                 let _ = reply.send(picker);
                 true
             }
@@ -1147,9 +1154,13 @@ impl PumpState {
                 model,
                 reply,
             } => {
-                let thread = self.picker_thread(&thread_id);
-                let catalog = self.catalog_for(&thread);
-                let _ = reply.send(model_to_save(&catalog, &thread, &instance_id, &model));
+                let decision = match self.picker_thread(&thread_id) {
+                    Some(thread) => {
+                        model_to_save(&self.catalog_for(&thread), &thread, &instance_id, &model)
+                    }
+                    None => SaveDecision::NotReady,
+                };
+                let _ = reply.send(decision);
                 true
             }
             PumpControl::PlanWorkspaceScan {
@@ -1221,20 +1232,7 @@ impl PumpState {
                     OrchestrationV2ThreadStreamItem::Snapshot(_)
                         | OrchestrationV2ThreadStreamItem::Synchronized(_)
                 );
-                if let OrchestrationV2ThreadStreamItem::Snapshot(ref snap) = item {
-                    self.thread_projection_meta.insert(
-                        thread_id.clone(),
-                        ThreadSnapshotMeta::from_app_thread(&snap.projection.thread),
-                    );
-                    self.thread_projection_picker.insert(
-                        thread_id.clone(),
-                        PickerThread::from_projection(
-                            &snap.projection.thread,
-                            !snap.projection.runs.is_empty(),
-                        ),
-                    );
-                }
-                let meta = self.resolve_thread_meta(&thread_id);
+                let meta_before = self.resolve_thread_meta(&thread_id);
                 let state = self
                     .threads
                     .entry(thread_id.clone())
@@ -1251,16 +1249,19 @@ impl PumpState {
                 }
                 let working = state.working;
                 let active_run_id = state.active_run_id().map(str::to_owned);
-                let thread_id_for_delete = thread_id.clone();
-                let snapshot = if self.open_threads.contains(&thread_id) && (changed || force_emit)
-                {
-                    Some(build_thread_snapshot(state, meta.as_ref()))
+                // A thread-level event (model, title, ...) changes the header, not the timeline.
+                let meta = self.resolve_thread_meta(&thread_id);
+                let emit = changed || force_emit || meta != meta_before;
+                let snapshot = if self.open_threads.contains(&thread_id) && emit {
+                    self.threads
+                        .get(&thread_id)
+                        .map(|state| build_thread_snapshot(state, meta.as_ref()))
                 } else {
                     None
                 };
                 if let Ok(mut guard) = self.thread_runs.write() {
                     guard.insert(
-                        thread_id,
+                        thread_id.clone(),
                         ThreadRunMeta {
                             working,
                             active_run_id,
@@ -1271,7 +1272,7 @@ impl PumpState {
                     self.emit_or_buffer_thread(snapshot);
                 }
                 if deleted_now {
-                    self.listener.on_thread_deleted(thread_id_for_delete);
+                    self.listener.on_thread_deleted(thread_id);
                 }
             }
             ClientEvent::StreamEnded { tag, key, error } => {
@@ -1359,8 +1360,6 @@ async fn run_pump(
         server_config: ServerConfigState::new(),
         workspace_scans: HashMap::new(),
         threads: HashMap::new(),
-        thread_projection_meta: HashMap::new(),
-        thread_projection_picker: HashMap::new(),
         open_threads: HashSet::new(),
         ended_threads: HashSet::new(),
         shell_snapshot_required: false,
@@ -1974,7 +1973,10 @@ mod tests {
             "status": "ready",
             "auth": { "status": "authenticated" },
             "checkedAt": "2026-11-24T00:00:00Z",
-            "models": [{ "slug": "model-a", "name": "Model A", "isCustom": false }],
+            "models": [
+                { "slug": "model-a", "name": "Model A", "isCustom": false },
+                { "slug": "model-b", "name": "Model B", "isCustom": false },
+            ],
         });
         if let (Some(target), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
             for (key, field) in extra {
@@ -2044,6 +2046,16 @@ mod tests {
         deleted["item"]["sequence"] = json!(1_000_000);
         deleted["item"]["event"]["payload"]["id"] = json!("t-del");
         let deleted_item = deleted["item"].clone();
+        // `thread.model-selection-updated` for t-link: model A becomes model B.
+        let mut switched = deleted["item"].clone();
+        switched["sequence"] = json!(2_000_000);
+        switched["event"]["id"] = json!("event:switch");
+        switched["event"]["type"] = json!("thread.model-selection-updated");
+        let mut switched_thread = thread_snapshot["projection"]["thread"].clone();
+        switched_thread["id"] = json!("t-link");
+        switched_thread["modelSelection"] = json!({ "instanceId": "codex", "model": "model-b" });
+        switched["event"]["payload"] = switched_thread;
+        switched["event"]["threadId"] = json!("t-link");
         let pending_reply = json!({ "providers": [provider_json("codex", json!({
             "workspaceSnapshots": [{
                 "cwd": "/tmp/demo",
@@ -2066,6 +2078,7 @@ mod tests {
                     return;
                 };
                 let mut config_request = None;
+                let mut link_request = None;
                 while let Some(Ok(Message::Text(text))) = ws.next().await {
                     let Ok(frames) = conn_wire::decode_client_message(&text) else {
                         continue;
@@ -2112,7 +2125,16 @@ mod tests {
                                 let mut snap = thread_snapshot.clone();
                                 snap["projection"]["thread"]["id"] = json!(thread_id);
                                 let mut values = vec![snap, json!({ "kind": "synchronized" })];
+                                if thread_id == "t-link" {
+                                    link_request = Some(req.id.clone());
+                                }
                                 if thread_id == "t-del" {
+                                    if let Some(link_id) = link_request.clone() {
+                                        send.push(FromServer::Chunk {
+                                            request_id: link_id,
+                                            values: vec![switched.clone()],
+                                        });
+                                    }
                                     values.push(deleted_item.clone());
                                     // The project turns `codex_work` back on, and nothing else.
                                     if let Some(config_id) = config_request.clone() {
@@ -2178,6 +2200,31 @@ mod tests {
             }),
             "the provider list and shell arrive"
         );
+
+        // Before the thread's detail arrives its scope is unknown: loading, and Save sends nothing.
+        let early = futures::executor::block_on(core.model_picker(
+            "t-link".to_owned(),
+            String::new(),
+            vec!["codex_work".to_owned()],
+            None,
+            None,
+        ));
+        assert!(
+            !early.loaded && early.sections.is_empty(),
+            "an unknown scope is loading, offering nothing from other projects"
+        );
+        for instance in ["codex", "codex_work"] {
+            let early_save = futures::executor::block_on(core.save_thread_model(
+                "t-link".to_owned(),
+                instance.to_owned(),
+                "model-b".to_owned(),
+            ))?;
+            assert_eq!(
+                early_save,
+                FfiModelSave::NotReady,
+                "Save waits for the scope ({instance})"
+            );
+        }
 
         core.open_thread("t-link".to_owned());
         assert!(
@@ -2257,6 +2304,52 @@ mod tests {
             offered(&core),
             ["codex", "codex_work"],
             "the reloaded picker follows the project"
+        );
+
+        // `thread.model-selection-updated` moved t-link from model A to model B.
+        assert!(
+            listener.wait_for(Duration::from_secs(5), |s| {
+                s.threads.iter().any(|th| {
+                    th.thread_id == "t-link" && th.model_label.as_deref() == Some("model-b")
+                })
+            }),
+            "the header follows the model event"
+        );
+        let picker = futures::executor::block_on(core.model_picker(
+            "t-link".to_owned(),
+            String::new(),
+            Vec::new(),
+            None,
+            None,
+        ));
+        assert_eq!(
+            picker.selected_label.as_deref(),
+            Some("Model B"),
+            "the chip shows model B"
+        );
+        let checked: Vec<_> = picker
+            .sections
+            .iter()
+            .flat_map(|section| section.models.iter())
+            .filter(|row| row.selected)
+            .map(|row| row.model.as_str())
+            .collect();
+        assert_eq!(checked, ["model-b"], "the sheet checks model B");
+        let back_to_a = futures::executor::block_on(core.save_thread_model(
+            "t-link".to_owned(),
+            "codex".to_owned(),
+            "model-a".to_owned(),
+        ))?;
+        assert_eq!(
+            back_to_a,
+            FfiModelSave::Saved,
+            "picking A again is a change, not Unchanged"
+        );
+        let dispatched = calls_rx.try_recv().expect("the switch reached the server");
+        assert_eq!(
+            dispatched.payload["modelSelection"]["model"].as_str(),
+            Some("model-a"),
+            "the switch back to A is sent"
         );
 
         core.disconnect();

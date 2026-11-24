@@ -41,7 +41,8 @@ pub struct FfiModelPickerSection {
 /// The chip and the sheet for one thread.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiModelPicker {
-    /// False until the server's provider list arrived.
+    /// False until the server's provider list and the thread's scope (shell row or detail)
+    /// arrived; the sheet shows its loading state.
     pub loaded: bool,
     /// The thread's provider driver, for the chip's icon (`ProviderIcon`).
     pub selected_driver: Option<String>,
@@ -61,6 +62,9 @@ pub enum FfiModelSave {
     Unchanged,
     /// The thread's catalog no longer offers the pick; nothing was sent and the sheet stays open.
     Unavailable,
+    /// The thread's project and provider are not known yet (no shell row, no detail); nothing
+    /// was sent.
+    NotReady,
 }
 
 /// [`model_to_save`]'s answer: the selection to send, or why nothing is sent.
@@ -69,6 +73,20 @@ pub(crate) enum SaveDecision {
     Send { instance_id: String, model: String },
     Unchanged,
     Unavailable,
+    NotReady,
+}
+
+impl FfiModelPicker {
+    /// Nothing to offer yet: the provider list or the thread's scope is still loading.
+    pub(crate) fn loading() -> Self {
+        Self {
+            loaded: false,
+            selected_driver: None,
+            selected_label: None,
+            sections: Vec::new(),
+            has_pending: false,
+        }
+    }
 }
 
 /// The thread a picker serves, read from its shell row.

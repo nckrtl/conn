@@ -136,12 +136,12 @@ run rust 30 "timeout wrapper" bash tools/check-timeout.test.sh
 run rust 60 "toolchain pin" toolchain_pin
 run rust 120 "cargo fmt --check" cargo fmt --check
 run rust 600 "cargo clippy" cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-run rust 900 "cargo test" cargo test --locked --workspace --no-fail-fast
+CARGO_INCREMENTAL=0 run rust 900 "cargo test" cargo test --locked --workspace --no-fail-fast
 if [ "$group" = all ]; then
   run rust 1200 "release build" cargo build --release --workspace --bins --examples --features fake-provider
 fi
 decode_check() {
-  CARGO_TARGET_DIR="$repo/target" cargo test --locked --manifest-path fixtures/decode-check/Cargo.toml
+  CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$repo/target" cargo test --locked --manifest-path fixtures/decode-check/Cargo.toml
 }
 run rust 300 "decode check" decode_check
 # The Gateway client types and ops match the pinned openapi.json (crates/conn-gateway-api).
@@ -275,7 +275,7 @@ run 4 120 "model-manifest-diff" \
   node crates/conn-server/tools/model-manifest-diff.mjs "$release/examples/model_manifest_cache"
 # Hand runs are sealed: plain `cargo test` with a decoy outer environment, the way out, and
 # the runner order (tools/sealed-run-check.mjs; needs no monorepo).
-run rust 180 "sealed-run" node tools/sealed-run-check.mjs
+CARGO_INCREMENTAL=0 run rust 180 "sealed-run" node tools/sealed-run-check.mjs
 # orbit-flow needs no monorepo.
 run 2 120 "orbit-flow (fake provider)" \
   node crates/conn-server/tools/orbit-flow.mjs "$release/examples/replay_server"

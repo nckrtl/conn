@@ -11,7 +11,7 @@ echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test --workspace"
-cargo test --workspace
+CARGO_INCREMENTAL=0 cargo test --workspace
 
 # The shared GPUI-free core (conn-client, conn-state, conn-theme, conn-orbit, conn-ffi) is its own
 # workspace at the repo root.
@@ -21,6 +21,6 @@ cargo fmt --all -- --check
 echo "==> shared crates: cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 echo "==> shared crates: cargo test --workspace"
-cargo test --workspace
+CARGO_INCREMENTAL=0 cargo test --workspace
 
 echo "==> all checks passed"

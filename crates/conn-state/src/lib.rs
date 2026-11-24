@@ -93,7 +93,7 @@ pub use crate::order_keys::{
 };
 pub use crate::panel_tabs::{
     ClosedTab, MAX_SAVED_THREAD_PANELS, PanelOwner, RightPanelTabs, SavedSurface, SavedThreadPanel,
-    SavedThreadPanels, ThreadPanel, ThreadPanels, browser_tab_title,
+    SavedThreadPanels, ThreadPanel, ThreadPanels, browser_tab_title, saved_panel_from_live_layout,
 };
 pub use crate::question::{
     clamp_context, markdown_preview_text, seed_user_input_drafts, split_recommended_label,

@@ -197,6 +197,16 @@ pub struct PanelOwner {
 }
 
 impl PanelOwner {
+    /// The environment part of panels on a primary connection whose environment id is not
+    /// known yet. Each session makes its own, so it never matches another server's panels;
+    /// [`ThreadPanels::migrate_environment`] moves them once the id is known, and they are not
+    /// written to disk before.
+    pub const PROVISIONAL_PREFIX: &str = "provisional:";
+    /// The environment part of panels saved before owners named an environment (and of those
+    /// keyed by the primary's address): the first primary environment this device learns
+    /// takes them.
+    pub const LEGACY_PRIMARY: &str = "legacy-primary";
+
     #[must_use]
     pub fn new(environment: impl Into<String>, thread: impl Into<String>) -> Self {
         Self {
@@ -204,6 +214,46 @@ impl PanelOwner {
             thread: thread.into(),
         }
     }
+
+    /// An environment key for a primary connection that has not said who it is (`session`
+    /// makes it unique to this run and connection).
+    #[must_use]
+    pub fn provisional_environment(session: &str) -> String {
+        format!("{}{session}", Self::PROVISIONAL_PREFIX)
+    }
+
+    #[must_use]
+    pub fn is_provisional(&self) -> bool {
+        self.environment.starts_with(Self::PROVISIONAL_PREFIX)
+    }
+}
+
+/// Reads an owner as every version wrote it: a bare thread id (the first per-thread panels),
+/// or `{environment, thread}` with the primary keyed by its address or `primary` (round two).
+/// Both of those mean the primary environment, which is learnt later: [`PanelOwner::LEGACY_PRIMARY`].
+fn owner_any_version<'de, D>(deserializer: D) -> Result<PanelOwner, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Any {
+        Thread(String),
+        Owner { environment: String, thread: String },
+    }
+    Ok(match Any::deserialize(deserializer)? {
+        Any::Thread(thread) => PanelOwner::new(PanelOwner::LEGACY_PRIMARY, thread),
+        Any::Owner {
+            environment,
+            thread,
+        } if environment.contains("://") || environment == "primary" => {
+            PanelOwner::new(PanelOwner::LEGACY_PRIMARY, thread)
+        }
+        Any::Owner {
+            environment,
+            thread,
+        } => PanelOwner::new(environment, thread),
+    })
 }
 
 /// Every thread's right panel, as `rightPanelStore.byThreadKey`. The shown thread's panel lives
@@ -219,6 +269,8 @@ pub struct ThreadPanels {
     /// Owners by when they last showed or were prepared, oldest first.
     recency: Vec<PanelOwner>,
     next_browser: BrowserTabId,
+    /// Saved entries this version could not read, written back as they were.
+    undecoded: Vec<serde_json::Value>,
 }
 
 impl ThreadPanels {
@@ -283,6 +335,54 @@ impl ThreadPanels {
         }
     }
 
+    /// Whether this session holds a panel for `owner`: shown, parked, prepared or restored.
+    #[must_use]
+    pub fn knows(&self, owner: &PanelOwner) -> bool {
+        self.owner.as_ref() == Some(owner) || self.recency.contains(owner)
+    }
+
+    /// Moves every panel on environment `from` to `to`: a primary connection said who it is.
+    /// Where `to` already has a panel for that thread (one read from disk), the moved one wins
+    /// if it holds anything, else the one already there stays. Returns the browser tabs of the
+    /// panels that lost, whose browsers the caller closes.
+    pub fn migrate_environment(&mut self, from: &str, to: &str) -> Vec<BrowserTabId> {
+        let mut dropped = Vec::new();
+        let moving: Vec<PanelOwner> = self
+            .parked
+            .keys()
+            .filter(|owner| owner.environment == from)
+            .cloned()
+            .collect();
+        for old in moving {
+            let Some(panel) = self.parked.remove(&old) else {
+                continue;
+            };
+            let new = PanelOwner::new(to, old.thread.clone());
+            let (keep, lose) = match self.parked.remove(&new) {
+                Some(existing) if !panel.worth_keeping() => (existing, panel),
+                Some(existing) => (panel, existing),
+                None => (panel, ThreadPanel::default()),
+            };
+            dropped.extend(lose.tabs.browser_ids());
+            self.parked.insert(new, keep);
+        }
+        for owner in self.recency.iter_mut().chain(self.owner.iter_mut()) {
+            if owner.environment == from {
+                owner.environment = to.to_owned();
+            }
+        }
+        // A thread now named twice keeps its most recent place.
+        let mut seen = std::collections::HashSet::new();
+        let mut recency: Vec<PanelOwner> = std::mem::take(&mut self.recency)
+            .into_iter()
+            .rev()
+            .filter(|owner| seen.insert(owner.clone()))
+            .collect();
+        recency.reverse();
+        self.recency = recency;
+        dropped
+    }
+
     /// Drops a deleted thread's or expired draft's parked panel and returns its browser tabs,
     /// whose browsers the caller closes.
     pub fn forget(&mut self, owner: &PanelOwner) -> Vec<BrowserTabId> {
@@ -294,7 +394,9 @@ impl ThreadPanels {
     }
 
     /// What to write to disk: the most recent [`MAX_SAVED_THREAD_PANELS`] panels that hold
-    /// anything, `shown` (the owner's) included. `url` gives a browser tab's address.
+    /// anything, `shown` (the owner's) included, and every entry read but not understood.
+    /// Panels of a primary not yet identified stay off disk. `url` gives a browser tab's
+    /// address.
     #[must_use]
     pub fn save(
         &self,
@@ -305,6 +407,7 @@ impl ThreadPanels {
             .recency
             .iter()
             .rev()
+            .filter(|key| !key.is_provisional())
             .filter_map(|key| {
                 let panel = if self.owner.as_ref() == Some(key) {
                     shown
@@ -317,13 +420,17 @@ impl ThreadPanels {
             })
             .take(MAX_SAVED_THREAD_PANELS)
             .collect();
-        SavedThreadPanels { threads }
+        SavedThreadPanels {
+            threads,
+            undecoded: self.undecoded.clone(),
+        }
     }
 
     /// Reads back what [`Self::save`] wrote, for threads this session has not shown or prepared
     /// yet. Returns the restored browser tabs with the address each should load.
     pub fn restore(&mut self, saved: SavedThreadPanels) -> Vec<(BrowserTabId, String)> {
         let mut addresses = Vec::new();
+        self.undecoded.extend(saved.undecoded);
         // Saved newest first; recency is oldest first.
         for thread in saved.threads.into_iter().rev() {
             if self.owner.as_ref() == Some(&thread.owner) || self.recency.contains(&thread.owner) {
@@ -374,40 +481,119 @@ impl ThreadPanels {
 pub const MAX_SAVED_THREAD_PANELS: usize = 200;
 
 /// Every thread's right panel as written to disk (`persist` of `rightPanelStore`).
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SavedThreadPanels {
     /// Newest first.
     pub threads: Vec<SavedThreadPanel>,
+    /// Entries this version cannot read (a newer one wrote them). They are written back
+    /// unchanged, after the others, so a save never loses them.
+    pub undecoded: Vec<serde_json::Value>,
 }
 
 impl SavedThreadPanels {
     #[must_use]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        let mut threads: Vec<serde_json::Value> = self
+            .threads
+            .iter()
+            .filter_map(|thread| serde_json::to_value(thread).ok())
+            .collect();
+        threads.extend(self.undecoded.iter().take(MAX_SAVED_THREAD_PANELS).cloned());
+        serde_json::json!({ "threads": threads }).to_string()
     }
 
-    /// Reads a saved file. An entry this version cannot read is skipped, not the whole file.
+    /// Reads a saved file, of this version or an earlier one (see `owner_any_version`). An
+    /// entry this version cannot read is kept in `undecoded`, not dropped.
     #[must_use]
     pub fn from_json(json: &str) -> Self {
         let value: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
-        let threads = value
+        let mut saved = Self::default();
+        for thread in value
             .get("threads")
             .and_then(serde_json::Value::as_array)
-            .map(|threads| {
-                threads
-                    .iter()
-                    .filter_map(|thread| serde_json::from_value(thread.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { threads }
+            .into_iter()
+            .flatten()
+        {
+            match serde_json::from_value(thread.clone()) {
+                Ok(decoded) => saved.threads.push(decoded),
+                Err(_) => saved.undecoded.push(thread.clone()),
+            }
+        }
+        saved
     }
+}
+
+/// One thread's panel as the live tree's first per-thread panels wrote it, one file per owner:
+/// `{open, tabs, selected, maximized}` with Rust-default enum tags (`{"Kind":"Files"}`,
+/// `{"File":"src/a.rs"}`, `{"Browser":2}`). Browser tabs had no saved address.
+#[must_use]
+pub fn saved_panel_from_live_layout(owner: PanelOwner, json: &str) -> Option<SavedThreadPanel> {
+    #[derive(Deserialize, PartialEq)]
+    enum Surface {
+        Kind(String),
+        File(String),
+        Browser(u64),
+    }
+    #[derive(Deserialize)]
+    struct Layout {
+        #[serde(default)]
+        open: bool,
+        #[serde(default)]
+        tabs: Vec<Surface>,
+        #[serde(default)]
+        selected: Option<Surface>,
+        #[serde(default)]
+        maximized: bool,
+    }
+    fn tab(name: &str) -> Option<RightPanelTab> {
+        Some(match name {
+            "Files" => RightPanelTab::Files,
+            "Diff" => RightPanelTab::Diff,
+            "Terminal" => RightPanelTab::Terminal,
+            "Browser" => RightPanelTab::Browser,
+            "Api" => RightPanelTab::Api,
+            "Database" => RightPanelTab::Database,
+            "Mcp" => RightPanelTab::Mcp,
+            "Tasks" => RightPanelTab::Tasks,
+            "PullRequest" => RightPanelTab::PullRequest,
+            "LinkedItems" => RightPanelTab::LinkedItems,
+            "Device" => RightPanelTab::Device,
+            _ => return None,
+        })
+    }
+    let layout: Layout = serde_json::from_str(json).ok()?;
+    let mut tabs = Vec::with_capacity(layout.tabs.len());
+    let mut active = None;
+    for surface in &layout.tabs {
+        let saved = match surface {
+            Surface::Kind(name) => match tab(name)? {
+                RightPanelTab::Browser => SavedSurface::Browser { url: None },
+                tab => SavedSurface::Panel { tab },
+            },
+            Surface::File(path) => SavedSurface::File { path: path.clone() },
+            Surface::Browser(_) => SavedSurface::Browser { url: None },
+        };
+        if layout.selected.as_ref() == Some(surface) {
+            active = Some(tabs.len());
+        }
+        tabs.push(saved);
+    }
+    Some(SavedThreadPanel {
+        owner,
+        open: layout.open,
+        maximized: layout.maximized,
+        terminal_open: false,
+        width: None,
+        tabs,
+        active,
+    })
 }
 
 /// One thread's saved right panel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedThreadPanel {
+    #[serde(deserialize_with = "owner_any_version")]
     pub owner: PanelOwner,
     #[serde(default)]
     pub open: bool,
@@ -871,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_file_with_an_unknown_entry_keeps_the_rest() {
+    fn a_saved_file_with_an_unknown_entry_keeps_it_for_the_next_write() {
         let json = r#"{"threads":[
             {"owner":{"environment":"env","thread":"a"},"open":true,"tabs":[{"kind":"panel","tab":"files"}],"active":0},
             {"owner":{"environment":"env","thread":"b"},"tabs":[{"kind":"hologram"}]}
@@ -884,6 +1070,7 @@ mod tests {
                 tab: RightPanelTab::Files
             }]
         );
+        assert_eq!(saved.undecoded.len(), 1);
         assert_eq!(
             SavedThreadPanels::from_json("not json"),
             SavedThreadPanels::default()
@@ -894,6 +1081,142 @@ mod tests {
         panels.switch(Some("a".into()), &mut shown);
         panels.restore(saved);
         assert!(shown.tabs.tabs().is_empty());
+        // The next write keeps the entry it could not read.
+        let written = SavedThreadPanels::from_json(&panels.save(&shown, |_| None).to_json());
+        assert_eq!(written.undecoded.len(), 1);
+        assert!(written.undecoded[0].to_string().contains("hologram"));
+    }
+
+    /// What the first per-thread panels (head e07e15698f) wrote: owners as bare thread ids.
+    const ROUND_ONE_FILE: &str = r#"{"threads":[{"owner":"thread-a","open":true,"maximized":false,"terminalOpen":false,"width":700.0,"tabs":[{"kind":"panel","tab":"files"}],"active":0}]}"#;
+
+    #[test]
+    fn earlier_files_load_and_go_to_the_first_primary_environment() {
+        let saved = SavedThreadPanels::from_json(ROUND_ONE_FILE);
+        assert!(saved.undecoded.is_empty());
+        assert_eq!(
+            saved.threads[0].owner,
+            PanelOwner::new(PanelOwner::LEGACY_PRIMARY, "thread-a")
+        );
+        // Round two keyed the primary by its address.
+        let round_two = r#"{"threads":[{"owner":{"environment":"http://127.0.0.1:3773","thread":"t"}},{"owner":{"environment":"mini","thread":"m"},"open":true}]}"#;
+        let owners: Vec<_> = SavedThreadPanels::from_json(round_two)
+            .threads
+            .into_iter()
+            .map(|t| t.owner)
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                PanelOwner::new(PanelOwner::LEGACY_PRIMARY, "t"),
+                PanelOwner::new("mini", "m")
+            ]
+        );
+
+        let mut panels = ThreadPanels::default();
+        panels.restore(saved);
+        assert!(
+            panels
+                .migrate_environment(PanelOwner::LEGACY_PRIMARY, "env-1")
+                .is_empty()
+        );
+        let mut shown = ThreadPanel::default();
+        panels.switch(Some(PanelOwner::new("env-1", "thread-a")), &mut shown);
+        assert!(shown.open);
+        assert_eq!(shown.tabs.tabs(), [FILES]);
+        assert_eq!(shown.width, Some(700.0));
+    }
+
+    #[test]
+    fn panels_of_an_unidentified_primary_stay_off_disk_and_move_when_it_says_who_it_is() {
+        let provisional = PanelOwner::provisional_environment("run-1");
+        let mut panels = ThreadPanels::default();
+        // Read from disk: the real environment's panels, one for a thread also used below.
+        panels.restore(SavedThreadPanels {
+            threads: vec![
+                SavedThreadPanel::new(
+                    &PanelOwner::new("env-1", "both"),
+                    &ThreadPanel {
+                        open: true,
+                        tabs: RightPanelTabs::restored(vec![FILES], Some(0)),
+                        ..ThreadPanel::default()
+                    },
+                    &|_| None,
+                ),
+                SavedThreadPanel::new(
+                    &PanelOwner::new("env-1", "untouched"),
+                    &ThreadPanel {
+                        open: true,
+                        tabs: RightPanelTabs::restored(vec![FILES], Some(0)),
+                        ..ThreadPanel::default()
+                    },
+                    &|_| None,
+                ),
+            ],
+            undecoded: Vec::new(),
+        });
+        let mut shown = ThreadPanel::default();
+        panels.switch(
+            Some(PanelOwner::new(provisional.clone(), "both")),
+            &mut shown,
+        );
+        let page = shown.tabs.add(RightPanelTab::Browser);
+        shown.open = true;
+        panels.switch(
+            Some(PanelOwner::new(provisional.clone(), "new")),
+            &mut shown,
+        );
+        shown.tabs.add(RightPanelTab::Diff);
+        shown.open = true;
+        let saved = panels.save(&shown, |_| None);
+        assert!(
+            saved.threads.iter().all(|t| !t.owner.is_provisional()),
+            "nothing of an unknown server is written"
+        );
+        panels.switch(None, &mut shown);
+
+        let dropped = panels.migrate_environment(&provisional, "env-1");
+        assert!(dropped.is_empty(), "the disk copy of `both` had no browser");
+        let threads: Vec<_> = panels
+            .save(&shown, |_| None)
+            .threads
+            .into_iter()
+            .map(|t| t.owner.thread)
+            .collect();
+        assert_eq!(threads, ["new", "both", "untouched"]);
+        panels.switch(Some(PanelOwner::new("env-1", "both")), &mut shown);
+        assert_eq!(
+            shown.tabs.tabs(),
+            [page],
+            "this session's panel wins over the disk copy"
+        );
+    }
+
+    #[test]
+    fn the_live_trees_layout_files_read() {
+        let owner = PanelOwner::new("nick", "t");
+        let saved = saved_panel_from_live_layout(
+            owner.clone(),
+            r#"{"open":true,"tabs":[{"Kind":"Files"},{"File":"src/a.rs"},{"Kind":"Browser"},{"Browser":2}],"selected":{"File":"src/a.rs"},"maximized":true}"#,
+        )
+        .expect("a live layout");
+        assert_eq!(saved.owner, owner);
+        assert!(saved.open && saved.maximized);
+        assert_eq!(
+            saved.tabs,
+            [
+                SavedSurface::Panel {
+                    tab: RightPanelTab::Files
+                },
+                SavedSurface::File {
+                    path: "src/a.rs".into()
+                },
+                SavedSurface::Browser { url: None },
+                SavedSurface::Browser { url: None },
+            ]
+        );
+        assert_eq!(saved.active, Some(1));
+        assert!(saved_panel_from_live_layout(owner, "{\"tabs\":[{\"Kind\":\"Nope\"}]}").is_none());
     }
 
     #[test]

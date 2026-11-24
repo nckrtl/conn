@@ -303,9 +303,12 @@ pub(crate) struct ConnApp {
     /// The other threads' right panels; `right_panel_tabs` and `layout.right_panel_open` hold
     /// the shown thread's (`rightPanelStore.byThreadKey`).
     thread_panels: ThreadPanels,
-    /// Where every thread's panel is saved, and what was written last.
-    thread_panels_path: Option<std::path::PathBuf>,
-    saved_thread_panels_json: Option<String>,
+    /// Where every thread's panel is saved, and its pending and last writes.
+    panel_saves: thread_panels::PanelSaves,
+    /// The primary server's environment id, once its config snapshot names it; panel owners
+    /// on the primary use it. Until then they use `provisional_panel_session`.
+    primary_environment: Option<String>,
+    provisional_panel_session: String,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -729,8 +732,9 @@ impl ConnApp {
             // No tab until one is picked: opening the panel shows the surface launcher.
             right_panel_tabs: RightPanelTabs::default(),
             thread_panels: ThreadPanels::default(),
-            thread_panels_path: thread_panels::thread_panels_file_path(),
-            saved_thread_panels_json: None,
+            panel_saves: thread_panels::PanelSaves::new(thread_panels::thread_panels_file_path()),
+            primary_environment: None,
+            provisional_panel_session: crate::commands::new_thread_id(),
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -784,6 +788,16 @@ impl ConnApp {
         app.expire_offline(cx);
         app.restore_saved_drafts(cx);
         app.restore_thread_panels(cx);
+        // A save still waiting for its delay is written before the app quits.
+        cx.on_app_quit(|app, cx| {
+            let write = app.flush_thread_panels(cx);
+            async move {
+                if let Some(write) = write {
+                    write.await;
+                }
+            }
+        })
+        .detach();
         app.sync_chat(cx);
         app.start_sidebar_clock(cx);
         if crate::orbit_sync::orbit_sync_enabled_by_env() {
@@ -1576,6 +1590,9 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) {
         self.record_primary_machine(&event);
+        if let conn_contract::ServerConfigStreamEvent::Snapshot(snapshot) = &event {
+            self.learn_primary_environment(snapshot.config.environment.environment_id.clone(), cx);
+        }
         let change = std::sync::Arc::make_mut(&mut self.server_config).apply(event);
         if change.config_changed {
             let root = self
@@ -3931,6 +3948,14 @@ impl ConnApp {
             }
             (None, None) => None,
         };
+        if let Some(owner) = &owner {
+            self.import_live_layout(owner);
+        }
+        self.switch_panel_owner(owner)
+    }
+
+    /// Shows `owner`'s panel in place of the one showing. `true` when the owner changed.
+    fn switch_panel_owner(&mut self, owner: Option<PanelOwner>) -> bool {
         let mut panel = ThreadPanel {
             tabs: std::mem::take(&mut self.right_panel_tabs),
             open: self.layout.right_panel_open,
@@ -3997,14 +4022,6 @@ impl ConnApp {
         );
         self.save_thread_panels(cx);
         error
-    }
-
-    /// The environment key of panels on the primary connection: its server's URL, known from
-    /// launch, so a panel keeps its key when the Orbit id of that server is learnt later.
-    fn primary_panel_environment(&self) -> String {
-        self.server_url
-            .clone()
-            .unwrap_or_else(|| "primary".to_owned())
     }
 
     /// Whose right panel thread `thread` shows: the thread on its own environment.
@@ -6847,6 +6864,7 @@ impl ConnApp {
     /// Right-panel tabs stay: they are not the server's, and the thread may come back.
     fn reset_environment_state(&mut self) {
         self.offline = offline::Offline::new();
+        self.forget_primary_environment();
         self.reset_linked_environments();
         self.shell = ShellState::default();
         self.server_config = std::sync::Arc::default();

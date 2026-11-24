@@ -72,6 +72,24 @@ impl PendingQueries {
         Some(self.queries.remove(index).1)
     }
 
+    /// Re-keys the queries waiting on environment `from` to `to`. A thread with a query
+    /// waiting under both keeps the newer one, queued under `from`.
+    pub(super) fn migrate_environment(&mut self, from: &str, to: &str) {
+        let moved: Vec<String> = self
+            .queries
+            .iter()
+            .filter(|(owner, _)| owner.environment == from)
+            .map(|(owner, _)| owner.thread.clone())
+            .collect();
+        self.queries
+            .retain(|(owner, _)| owner.environment != to || !moved.contains(&owner.thread));
+        for (owner, _) in &mut self.queries {
+            if owner.environment == from {
+                owner.environment = to.to_owned();
+            }
+        }
+    }
+
     /// Drops a deleted thread's query.
     pub(super) fn forget(&mut self, owner: &PanelOwner) {
         self.queries.retain(|(waiting, _)| waiting != owner);
@@ -146,6 +164,22 @@ mod tests {
         pending.end_vault_loads();
         assert!(!pending.finish_vault_load(stale));
         assert_eq!(pending.take(Some(&a), true).as_deref(), Some("select 3"));
+    }
+
+    #[test]
+    fn waiting_queries_move_when_the_primary_says_who_it_is() {
+        let mut pending = PendingQueries::default();
+        let early = PanelOwner::new("provisional:x", "a");
+        let _ = pending.queue(&early, "select 1".into());
+        let _ = pending.queue(&PanelOwner::new("mini", "a"), "select 2".into());
+        pending.migrate_environment("provisional:x", "nick");
+        assert_eq!(pending.waiting(&early), None);
+        assert_eq!(pending.waiting(&owner("a")), Some("select 1"));
+        assert_eq!(
+            pending.waiting(&PanelOwner::new("mini", "a")),
+            Some("select 2"),
+            "another environment's query stays"
+        );
     }
 
     #[test]

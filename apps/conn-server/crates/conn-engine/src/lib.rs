@@ -25,6 +25,7 @@ mod calls;
 mod checkpoint;
 mod clock;
 mod commands;
+pub use commands::{completed_without_result, provider_stop_reason_id};
 mod engine;
 mod feedback;
 mod guard;
@@ -497,6 +498,12 @@ pub trait Engine: Send + Sync {
         Box::pin(std::future::ready(Err(
             "Tasks in linked environments are not supported.".into(),
         )))
+    }
+
+    /// The thread's subagent rows alone (`getThreadRecords(threadId, ["subagents"])`), for a
+    /// follower that must not load the thread's whole history.
+    fn subagent_rows(&self, _thread_id: &str) -> BoxFuture<'_, Result<Vec<Value>, String>> {
+        Box::pin(std::future::ready(Ok(vec![])))
     }
 
     /// `(parentThreadId, taskId)` of each remote task a follower still owes something, at most

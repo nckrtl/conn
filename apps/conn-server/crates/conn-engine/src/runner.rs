@@ -1464,7 +1464,10 @@ impl Inner {
             map.remove(&thread_id);
         }
         drop(map);
-        lock(&self.detached).retain(|(_, detached)| !Arc::ptr_eq(detached, &live));
+        // During shutdown `close_all_sessions` owns the detached ones and closes them.
+        if !self.shutting_down() {
+            lock(&self.detached).retain(|(_, detached)| !Arc::ptr_eq(detached, &live));
+        }
     }
 
     /// `app_thread.created`: the child thread a subagent's rows are written to. Created once;
@@ -1957,13 +1960,13 @@ impl Inner {
             {
                 eprintln!("conn-engine: Force stop could not end the run: {e}");
             }
-            self.close_session(&thread_id).await;
+            self.close_thread_sessions(&thread_id).await;
             return Ok(json!({"outcome": "killed", "sharedWithThreadIds": []}));
         }
         if let Some(live) = self.live_thread(&thread_id) {
             live.take_active();
         }
-        self.close_session(&thread_id).await;
+        self.close_thread_sessions(&thread_id).await;
         if let Some(run_id) = run_id {
             // The Stop result says Force stop ended it.
             let (tid, run) = (thread_id.clone(), run.clone().unwrap_or_default());
@@ -2188,6 +2191,17 @@ impl Inner {
         if let Some(live) = live {
             self.command_output.finish_thread(thread_id);
             self.release(thread_id, live).await;
+        }
+    }
+
+    /// Force stop and deletion: the thread's session and every one a fresh run moved aside.
+    pub(crate) async fn close_thread_sessions(&self, thread_id: &str) {
+        self.close_session(thread_id).await;
+        let detached: Vec<(String, Arc<LiveThread>)> = lock(&self.detached)
+            .extract_if(.., |(id, _)| id == thread_id)
+            .collect();
+        for (thread_id, live) in detached {
+            self.release(&thread_id, live).await;
         }
     }
 

@@ -4108,6 +4108,47 @@ async fn a_scheduled_fresh_run_keeps_a_busy_session_open() {
     assert_eq!(count(&provider.sessions), 2);
 }
 
+/// Force stop ends every session of the thread: the current one and one a fresh schedule
+/// moved aside while it still ran background work.
+#[tokio::test(flavor = "current_thread")]
+async fn force_stop_closes_a_detached_busy_session() {
+    let db = TempDb::new("fresh-scheduled-force-stop");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    let fire = |command: &str, text: &str| {
+        fresh_message(
+            "t1",
+            command,
+            text,
+            json!({"scheduledTaskId": "task:busy", "dispatchMode": {"type": "queue_after_active"}}),
+        )
+    };
+    dispatch(&engine, fire("c2", "background-hold")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, fire("c3", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    assert_eq!(count(&provider.sessions), 2);
+    assert_eq!(count(&provider.closed), 0);
+    let stopped = call(
+        &engine,
+        "orchestration.forceStopThread",
+        json!({"threadId": "t1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stopped["outcome"], "killed");
+    assert_eq!(
+        count(&provider.closed),
+        2,
+        "the detached session closes too"
+    );
+}
+
 /// `ThreadFork.execution.test.ts` "a fresh send in a fork that has not run yet starts without
 /// the fork's context": a schedule's fresh send is refused, the user's supersedes the fork.
 #[tokio::test(flavor = "current_thread")]

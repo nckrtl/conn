@@ -54,6 +54,10 @@ pub(crate) enum Effect {
     CloseSession {
         thread_id: String,
     },
+    /// Ends every provider session of a deleted thread, the ones a fresh run moved aside too.
+    CloseThreadSessions {
+        thread_id: String,
+    },
     /// Sends a model selection to the thread's running provider turn
     /// (`provider-session.apply-model-selection`). The provider applies what it can live; the
     /// rest waits for the next turn.
@@ -97,6 +101,7 @@ impl Effect {
             | Self::StopBackgroundWork { thread_id, .. }
             | Self::Respond { thread_id, .. }
             | Self::CloseSession { thread_id }
+            | Self::CloseThreadSessions { thread_id }
             | Self::ApplyModelSelection { thread_id, .. }
             | Self::CleanupHtmlAttachments { thread_id, .. }
             | Self::ThreadClosed { thread_id, .. } => Some(thread_id),
@@ -1723,7 +1728,7 @@ fn thread_delete(tx: &mut Tx<'_>, command: Value) -> Outcome {
         let run_id = run["id"].as_str().unwrap_or_default();
         finish_run(tx, &c.thread_id, run_id, "cancelled", None)?;
     }
-    effects.push(Effect::CloseSession {
+    effects.push(Effect::CloseThreadSessions {
         thread_id: c.thread_id.clone(),
     });
     patch_thread(tx, &c.thread_id, "thread.deleted", true, |t, now| {

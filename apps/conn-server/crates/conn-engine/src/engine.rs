@@ -1071,6 +1071,9 @@ impl Inner {
             }
             Effect::Respond { thread_id, request } => self.respond(thread_id, request).await,
             Effect::CloseSession { thread_id } => self.close_session(&thread_id).await,
+            Effect::CloseThreadSessions { thread_id } => {
+                self.close_thread_sessions(&thread_id).await;
+            }
             Effect::ApplyModelSelection {
                 thread_id,
                 selection,

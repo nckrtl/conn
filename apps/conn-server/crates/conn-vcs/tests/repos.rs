@@ -2475,6 +2475,46 @@ async fn the_remote_poll_waits_for_fetching_and_client_activity() {
     assert_eq!(head(), upstream, "no pull on a branch switch while paused");
 }
 
+/// A restore clears only its own stale registration: another worktree whose folder is away
+/// (an unmounted drive) keeps its metadata, which a repository-wide `git worktree prune`
+/// would delete.
+#[tokio::test]
+async fn a_restore_keeps_other_missing_worktrees_registered() {
+    let root = TempDir::new("restore-scoped");
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "-q", "-b", "main"]);
+    git(&project, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let ours = root.path().join("worktrees/project/ours");
+    let away = root.path().join("drive/away");
+    for (branch, path) in [("ours", &ours), ("away", &away)] {
+        git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+    }
+    std::fs::remove_dir_all(&ours).unwrap();
+    std::fs::remove_dir_all(root.path().join("drive")).unwrap();
+    assert!(
+        worktree::restore_missing_worktree(&project, &ours, "ours")
+            .await
+            .unwrap()
+    );
+    assert_eq!(git(&ours, &["branch", "--show-current"]).trim(), "ours");
+    let list = git(&project, &["worktree", "list", "--porcelain"]);
+    assert!(
+        list.contains("branch refs/heads/away"),
+        "the unmounted worktree stays registered: {list}"
+    );
+}
+
 /// T3 `ProviderTurnStartService.test.ts` "recovers the local or pushed thread tip, else the
 /// current branch, remote default, or detached HEAD", through `restore_missing_worktree`.
 #[tokio::test]

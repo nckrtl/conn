@@ -1174,6 +1174,23 @@ async fn a_turn_restores_a_removed_worktree_from_its_branch() {
     assert!(path.join("thread.txt").exists());
 }
 
+/// T3 "restores into a leftover worktree folder": cleanup removed the checkout but left
+/// `node_modules`. The folder exists, yet it is no checkout, so the turn restores the branch
+/// there (T3 clears the leftover first: `git worktree add` refuses a non-empty folder).
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_restores_a_worktree_cleanup_left_only_node_modules_in() {
+    let fx = Fixture::new();
+    let (path, tip) = fx.removed_managed_worktree("thread/restore");
+    std::fs::create_dir_all(path.join("node_modules/pkg")).unwrap();
+    std::fs::write(path.join("node_modules/pkg/index.js"), "x\n").unwrap();
+    fx.thread_on("thread-r", &path, "thread/restore").await;
+    let (status, failure) = fx.turn("thread-r", "hello").await;
+    assert_eq!(status, "completed", "{failure}");
+    assert!(path.join(".git").exists(), "a checkout again");
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]).trim(), tip);
+    assert!(path.join("thread.txt").exists());
+}
+
 /// T3's `recreate` starts a lost branch again from the project's current branch, so a managed
 /// worktree whose branch is gone too comes back on a fresh branch and the turn runs.
 #[tokio::test(flavor = "current_thread")]

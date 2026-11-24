@@ -194,14 +194,6 @@ impl From<String> for StartError {
     }
 }
 
-/// `Path::is_dir` off the runtime thread: a stat can block on a slow mount.
-async fn is_dir(path: &str) -> bool {
-    let path = std::path::PathBuf::from(path);
-    tokio::task::spawn_blocking(move || path.is_dir())
-        .await
-        .unwrap_or(false)
-}
-
 fn status_name(status: TurnStatus) -> &'static str {
     match status {
         TurnStatus::Completed => "completed",
@@ -608,23 +600,28 @@ impl Inner {
         }
     }
 
-    /// T3's `restoreMissingWorktree` then `ProviderWorkspaceMissingError`: a thread whose
-    /// worktree folder is gone gets it back from its branch, under the lease the turn holds;
-    /// otherwise the turn fails naming the folder, before a session starts in it.
+    /// T3's `restoreMissingWorktree` then `ProviderWorkspaceMissingError`, under the lease the
+    /// turn holds: a worktree folder that is gone, or that cleanup left only `node_modules` in,
+    /// gets its branch back; a folder that is still no directory fails the turn, naming it,
+    /// before a session starts in it.
     async fn ensure_worktree(&self, worktree: crate::ThreadWorktree) -> Result<(), StartError> {
-        let path = worktree.worktree_path.clone();
-        if is_dir(&path).await {
-            return Ok(());
+        let path = std::path::PathBuf::from(&worktree.worktree_path);
+        if conn_vcs::worktree::needs_checkout(&path).await
+            && let Some(host) = &self.host
+        {
+            host.restore_worktree(worktree).await;
         }
-        if let Some(host) = &self.host
-            && host.restore_worktree(worktree).await
-            && is_dir(&path).await
+        let folder = path.clone();
+        if tokio::task::spawn_blocking(move || folder.is_dir())
+            .await
+            .unwrap_or(false)
         {
             return Ok(());
         }
         Err(StartError::Failed(format!(
-            "This thread's workspace folder no longer exists or is not a directory: {path}. \
-             Restore the folder at this path before retrying."
+            "This thread's workspace folder no longer exists or is not a directory: {}. \
+             Restore the folder at this path before retrying.",
+            path.display()
         )))
     }
 

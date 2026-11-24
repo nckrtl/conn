@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use conn_client::{ClientEvent, Connection, ConnectionStatus, ServerConfig};
-use conn_state::{LayoutState, PanelSurface, RightPanelTab, ShellState, ThreadState};
+use conn_state::{
+    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellState, ThreadState,
+};
 use conn_theme::{ShellGeometry, Tokens};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
@@ -43,7 +45,13 @@ pub(crate) use self::sidebar_more::PressMode;
 
 actions!(
     conn_app,
-    [ToggleSidebar, ToggleRightPanel, NewThread, ToggleTerminal]
+    [
+        ToggleSidebar,
+        ToggleRightPanel,
+        NewThread,
+        ToggleTerminal,
+        NewRightPanelSurface
+    ]
 );
 
 /// Registers global shell keyboard shortcuts (`Cmd+B`, `Cmd+Alt+B` and `Cmd+J`).
@@ -56,6 +64,8 @@ pub(crate) fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-n", NewThread, None),
         // `terminal.toggle` is `mod+j` in Conn's default keybindings.
         KeyBinding::new("cmd-j", ToggleTerminal, None),
+        // `rightPanel.new` (`mod+t`, `rightPanelOpen && !terminalFocus`) opens the `+` menu.
+        KeyBinding::new("cmd-t", NewRightPanelSurface, None),
     ]);
 }
 
@@ -255,10 +265,9 @@ pub(crate) struct ConnApp {
     saved_drafts_json: Option<String>,
     /// Approval requests with a `runtime-request.respond` in flight (`respondingRequestIds`).
     responding_approvals: HashSet<String>,
-    /// Right panel tabs the user has open, in order (Conn's `RightPanelTabs`).
-    right_panel_open_tabs: Vec<PanelSurface>,
-    /// The open file while `layout.right_panel_tab` is [`RightPanelTab::File`].
-    right_panel_file: Option<String>,
+    /// Right panel tabs the user has open, in order, and the active one (Conn's
+    /// `rightPanelStore`). Any number of browser tabs; one of every other kind.
+    right_panel_tabs: RightPanelTabs,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -492,9 +501,7 @@ impl ConnApp {
                     app.show_source_location(location, cx)
                 }
                 crate::chat::ChatEvent::OpenInBrowser(url) => {
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.navigate_browser(url.clone(), cx));
-                    app.select_right_panel_tab(RightPanelTab::Browser, cx);
+                    app.open_browser_tab(url.clone(), false, cx);
                 }
                 crate::chat::ChatEvent::RuntimeModeSelected(mode) => {
                     app.set_runtime_mode(mode, cx);
@@ -587,6 +594,10 @@ impl ConnApp {
                 crate::panels::RightPanelEvent::Annotation(action) => {
                     app.handle_annotation_action(action.clone(), cx);
                 }
+                crate::panels::RightPanelEvent::OpenBrowserTab { url, background } => {
+                    app.open_browser_tab(url.clone(), *background, cx);
+                }
+                crate::panels::RightPanelEvent::BrowserTitleChanged => cx.notify(),
             },
         )
         .detach();
@@ -674,8 +685,7 @@ impl ConnApp {
             saved_drafts_json: None,
             responding_approvals: HashSet::new(),
             // No tab until one is picked: opening the panel shows the surface launcher.
-            right_panel_open_tabs: Vec::new(),
-            right_panel_file: None,
+            right_panel_tabs: RightPanelTabs::default(),
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -3387,9 +3397,34 @@ impl ConnApp {
     /// Opens the Browser tab and loads `url`.
     #[cfg(feature = "automation")]
     pub(crate) fn browse(&mut self, url: String, cx: &mut Context<'_, Self>) {
-        self.select_right_panel_tab(RightPanelTab::Browser, cx);
+        let surface = self.right_panel_tabs.open(RightPanelTab::Browser);
+        self.show_right_panel_surface(cx);
+        if let PanelSurface::Browser(id) = surface {
+            self.right_panel
+                .update(cx, |panel, cx| panel.navigate_browser(id, url, cx));
+        }
+    }
+
+    /// Opens `url` in a new browser tab (`openUrlInPreview`): it shows, unless `background`
+    /// keeps the tab behind the active one.
+    pub(crate) fn open_browser_tab(
+        &mut self,
+        url: String,
+        background: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let id = if background {
+            self.right_panel_tabs.new_background_browser()
+        } else {
+            self.right_panel_tabs.new_browser()
+        };
         self.right_panel
-            .update(cx, |panel, cx| panel.navigate_browser(url, cx));
+            .update(cx, |panel, cx| panel.navigate_browser(id, url, cx));
+        if background && self.layout.right_panel_open {
+            cx.notify();
+        } else {
+            self.show_right_panel_surface(cx);
+        }
     }
 
     /// Diagnostic state of the Browser tab.
@@ -3795,15 +3830,20 @@ impl ConnApp {
     /// The open right panel has no tab, so it lists the surfaces to open.
     fn right_panel_shows_launcher(&self) -> bool {
         self.layout
-            .shows_surface_launcher(self.right_panel_open_tabs.len())
+            .shows_surface_launcher(self.right_panel_tabs.tabs().len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn right_panel_tabs(&self) -> &RightPanelTabs {
+        &self.right_panel_tabs
     }
 
     /// The active right-panel surface.
     fn right_panel_surface(&self) -> PanelSurface {
-        match (&self.layout.right_panel_tab, &self.right_panel_file) {
-            (RightPanelTab::File, Some(path)) => PanelSurface::File(path.clone()),
-            (tab, _) => PanelSurface::Kind(*tab),
-        }
+        self.right_panel_tabs
+            .active()
+            .cloned()
+            .unwrap_or(PanelSurface::Kind(self.layout.right_panel_tab))
     }
 
     #[cfg(feature = "automation")]
@@ -3811,7 +3851,7 @@ impl ConnApp {
         let mut state = self.right_panel.read(cx).spike_files_state(window, cx);
         if let PanelSurface::File(path) = self.right_panel.read(cx).displayed_surface(
             self.right_panel_surface(),
-            &self.right_panel_open_tabs,
+            self.right_panel_tabs.tabs(),
             cx,
         ) {
             state["displayedTab"] = path.into();
@@ -3833,13 +3873,22 @@ impl ConnApp {
         }
     }
 
-    /// Selects a right-panel tab and opens the right panel if it was closed.
+    /// Selects a right-panel tab and opens the right panel if it was closed. Browser shows the
+    /// browser tab shown last, or a new one (`togglePreviewPanel`).
     pub(crate) fn select_right_panel_tab(
         &mut self,
         tab: RightPanelTab,
         cx: &mut Context<'_, Self>,
     ) {
-        self.select_right_panel_surface(PanelSurface::Kind(tab), cx);
+        self.right_panel_tabs.open(tab);
+        self.show_right_panel_surface(cx);
+    }
+
+    /// The add menu's choice (`+`, its letter keys, the launcher): Browser always adds a new
+    /// tab (`createBrowserSurface`); other kinds show their one tab.
+    pub(crate) fn add_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<'_, Self>) {
+        self.right_panel_tabs.add(tab);
+        self.show_right_panel_surface(cx);
     }
 
     /// Shows `surface` (opening its tab) and opens the right panel if it was closed.
@@ -3848,39 +3897,55 @@ impl ConnApp {
         surface: PanelSurface,
         cx: &mut Context<'_, Self>,
     ) {
-        if !self.right_panel_open_tabs.contains(&surface) {
-            self.right_panel_open_tabs.push(surface.clone());
-        }
+        self.right_panel_tabs.activate(surface);
+        self.show_right_panel_surface(cx);
+    }
+
+    /// Opens the right panel on the active tab.
+    fn show_right_panel_surface(&mut self, cx: &mut Context<'_, Self>) {
         self.right_panel_add_menu_open = false;
-        self.layout.right_panel_tab = surface.kind();
-        if let PanelSurface::File(path) = surface {
-            self.right_panel_file = Some(path);
-        }
+        self.layout.right_panel_tab = self.right_panel_surface().kind();
         self.layout.right_panel_open = true;
         self.sync_chat(cx);
         self.sync_browser_visibility(cx);
         cx.notify();
     }
 
-    /// Closes a right panel tab; closing the last one closes the panel.
-    fn close_right_panel_tab(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
-        // Closing the last surface closes the panel, as in Conn.
-        if self.right_panel_open_tabs.len() <= 1 {
+    /// `rightPanel.new` (`Cmd+T`): opens the `+` menu while the right panel shows and the
+    /// terminal does not have the keyboard.
+    fn open_right_panel_add_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let terminal = self.right_panel.read(cx).terminal_entity();
+        let terminal_focused = terminal.focus_handle(cx).contains_focused(window, cx);
+        if !self.layout.right_panel_open || terminal_focused {
+            cx.propagate();
+            return;
+        }
+        if !self.right_panel_add_menu_open {
+            self.right_panel_add_menu_open = true;
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+        }
+    }
+
+    /// Closes a right panel tab (`closeSurface`); closing the last one closes the panel.
+    pub(crate) fn close_right_panel_tab(
+        &mut self,
+        surface: &PanelSurface,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(closed) = self.right_panel_tabs.close(surface) else {
+            return;
+        };
+        self.right_panel
+            .update(cx, |panel, cx| panel.close_surface(surface, cx));
+        if closed.was_last {
             self.right_panel_add_menu_open = false;
             if self.layout.right_panel_open {
                 self.toggle_right_panel(cx);
             }
-            return;
-        }
-        let Some(pos) = self.right_panel_open_tabs.iter().position(|t| t == surface) else {
-            return;
-        };
-        self.right_panel_open_tabs.remove(pos);
-        self.right_panel
-            .update(cx, |panel, cx| panel.release_closed_file(surface, cx));
-        if &self.right_panel_surface() == surface {
-            let next = self.right_panel_open_tabs[pos.saturating_sub(1)].clone();
-            self.select_right_panel_surface(next, cx);
+            cx.notify();
+        } else if closed.activated.is_some() {
+            self.show_right_panel_surface(cx);
         } else {
             cx.notify();
         }
@@ -5480,7 +5545,7 @@ impl ConnApp {
         }
         match RightPanelTab::from_menu_shortcut(&event.keystroke.key) {
             Some(tab) if self.available_right_panel_tabs().contains(&tab) => {
-                self.select_right_panel_tab(tab, cx);
+                self.add_right_panel_tab(tab, cx);
                 true
             }
             _ => false,
@@ -5511,7 +5576,7 @@ impl ConnApp {
             && self.available_right_panel_tabs().contains(&tab)
         {
             self.right_panel_add_menu_open = false;
-            self.select_right_panel_tab(tab, cx);
+            self.add_right_panel_tab(tab, cx);
             return true;
         }
         false
@@ -5528,12 +5593,14 @@ impl ConnApp {
         let available_tabs = self.available_right_panel_tabs();
         let active_surface = self.right_panel.read(cx).displayed_surface(
             self.right_panel_surface(),
-            &self.right_panel_open_tabs,
+            self.right_panel_tabs.tabs(),
             cx,
         );
+        let browser_titles = self.right_panel.read(cx).browser_titles(cx);
         let header = render_panel_header(
             PanelHeaderProps {
-                open_tabs: &self.right_panel_open_tabs,
+                open_tabs: self.right_panel_tabs.tabs(),
+                browser_titles: &browser_titles,
                 active_tab: &active_surface,
                 maximized: self.right_panel_maximized,
                 owns_window_leading_edge: self.right_panel_maximized && !self.layout.sidebar_open,
@@ -5572,7 +5639,7 @@ impl ConnApp {
                 on_add_tab: {
                     let app = app.clone();
                     Rc::new(move |tab, _, cx| {
-                        app.update(cx, |this, cx| this.select_right_panel_tab(tab, cx));
+                        app.update(cx, |this, cx| this.add_right_panel_tab(tab, cx));
                     })
                 },
                 on_toggle_maximize: {
@@ -5618,7 +5685,7 @@ impl ConnApp {
                 Rc::new({
                     let app = cx.entity();
                     move |tab, _, cx| {
-                        app.update(cx, |this, cx| this.select_right_panel_tab(tab, cx));
+                        app.update(cx, |this, cx| this.add_right_panel_tab(tab, cx));
                     }
                 }),
             ))
@@ -7159,6 +7226,9 @@ impl Render for ConnApp {
             }))
             .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| {
                 app.toggle_terminal_drawer(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &NewRightPanelSurface, window, cx| {
+                app.open_right_panel_add_menu(window, cx);
             }))
             .on_action(cx.listener(|app, _: &NewThread, window, cx| {
                 app.start_new_thread(None, Some(window), cx);

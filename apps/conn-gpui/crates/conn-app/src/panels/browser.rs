@@ -19,8 +19,8 @@ use conn_state::AnnotationRecord;
 use conn_theme::Tokens;
 use conn_web::{
     BrowserView, ContextMenuEvent, CursorKind, EditCommand, KeyEvent as WebKeyEvent, KeyEventKind,
-    Modifiers as WebModifiers, MouseButton as WebMouseButton, Rect as WebRect, WebRuntime,
-    WebRuntimeState,
+    Modifiers as WebModifiers, MouseButton as WebMouseButton, NewTabRequest, Rect as WebRect,
+    WebRuntime, WebRuntimeState,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
@@ -125,6 +125,16 @@ enum BrowserOverlayEvent {
     },
     LoadEnd,
     ContextMenu(ContextMenuEvent),
+    OpenTab(NewTabRequest),
+}
+
+/// What a browser tab tells its host.
+#[derive(Clone, Debug)]
+pub(crate) enum BrowserTabEvent {
+    /// The tab's title (page title or host) changed.
+    TitleChanged,
+    /// The page opened a link in a new tab (`target=_blank`, Cmd-click, middle click).
+    OpenTab(NewTabRequest),
 }
 
 #[derive(Default)]
@@ -194,9 +204,12 @@ pub(crate) struct BrowserPanel {
     /// The user has asked for a page (typed an address, used back, forward or reload, or clicked
     /// in the page), so a load is theirs and the reload button may spin.
     user_load: bool,
+    /// The tab title last reported with [`BrowserTabEvent::TitleChanged`].
+    reported_title: String,
 }
 
 impl EventEmitter<AnnotationAction> for BrowserPanel {}
+impl EventEmitter<BrowserTabEvent> for BrowserPanel {}
 
 impl fmt::Debug for BrowserPanel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -286,6 +299,31 @@ impl BrowserPanel {
             polling_runtime: false,
             context_menu: None,
             user_load: false,
+            reported_title: String::new(),
+        }
+        .with_reported_title()
+    }
+
+    fn with_reported_title(mut self) -> Self {
+        self.reported_title = self.tab_title();
+        self
+    }
+
+    /// The tab strip's title (`surfaceTitle`): the page title, else its host, else Browser.
+    pub(crate) fn tab_title(&self) -> String {
+        let view = self.view.borrow();
+        match view.as_ref() {
+            Some(view) => conn_state::browser_tab_title(&view.title(), &view.url()),
+            None => conn_state::browser_tab_title("", &self.url),
+        }
+    }
+
+    /// Tells the host when the tab title changed. Cheap enough to run on every frame.
+    fn report_title(&mut self, cx: &mut Context<'_, Self>) {
+        let title = self.tab_title();
+        if title != self.reported_title {
+            self.reported_title = title;
+            cx.emit(BrowserTabEvent::TitleChanged);
         }
     }
 
@@ -906,6 +944,7 @@ impl BrowserPanel {
         self.user_load = true;
         self.context_menu = None;
         self.ensure_runtime_and_load(cx);
+        self.report_title(cx);
     }
 
     /// Diagnostic state for the automation hook.
@@ -1175,6 +1214,10 @@ impl BrowserPanel {
                     browser_view.on_context_menu(move |event| {
                         let _ = menu_tx.send(BrowserOverlayEvent::ContextMenu(event));
                     });
+                    let tab_tx = overlay_tx.clone();
+                    browser_view.on_open_tab(move |request| {
+                        let _ = tab_tx.send(BrowserOverlayEvent::OpenTab(request));
+                    });
                     let start_tx = overlay_tx.clone();
                     let response_tx = overlay_tx.clone();
                     browser_view.on_load_start(move |_url| {
@@ -1197,7 +1240,11 @@ impl BrowserPanel {
                             panel.phase = RuntimePhase::Running;
                             panel.wake_task = Some(cx.spawn(async move |this, cx| {
                                 while wake_rx.recv().await.is_some() {
-                                    if this.update(cx, |_panel, cx| cx.notify()).is_err() {
+                                    let alive = this.update(cx, |panel, cx| {
+                                        panel.report_title(cx);
+                                        cx.notify();
+                                    });
+                                    if alive.is_err() {
                                         break;
                                     }
                                 }
@@ -1288,6 +1335,9 @@ impl BrowserPanel {
                                             if panel.context_menu.take().is_some() {
                                                 cx.notify();
                                             }
+                                        }
+                                        BrowserOverlayEvent::OpenTab(request) => {
+                                            cx.emit(BrowserTabEvent::OpenTab(request));
                                         }
                                         BrowserOverlayEvent::LoadEnd => {
                                             panel.overlay_injected_load_count.set(None);

@@ -3412,6 +3412,33 @@ fn the_right_panel_renders_the_launcher_then_a_picked_surface_without_panic(
     });
     frames(cx);
 
+    // The add menu's Browser adds a peer tab each time (`createBrowserSurface`), each with its
+    // own browser rendered in turn.
+    let browser_tabs = |cx: &mut TestAppContext| {
+        cx.update(|cx| app.read(cx).right_panel_tabs().browser_ids().count())
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(conn_state::RightPanelTab::Browser, cx);
+        });
+    });
+    frames(cx);
+    assert_eq!(browser_tabs(cx), 2, "a second browser tab opens");
+    let first = cx.update(|cx| app.read(cx).right_panel_tabs().tabs()[0].clone());
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_right_panel_surface(first.clone(), cx)
+        })
+    });
+    frames(cx);
+    cx.update(|cx| app.update(cx, |app, cx| app.close_right_panel_tab(&first, cx)));
+    frames(cx);
+    assert_eq!(browser_tabs(cx), 1, "closing one leaves the other");
+    assert!(
+        open(cx),
+        "closing a tab that is not the last keeps the panel"
+    );
+
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.toggle_right_panel(cx);

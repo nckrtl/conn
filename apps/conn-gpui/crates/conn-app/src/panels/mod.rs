@@ -35,7 +35,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use conn_client::Connection;
-use conn_state::{PanelSurface, RightPanelTab};
+use conn_state::{AnnotationRecord, BrowserTabId, PanelSurface, RightPanelTab, RightPanelTabs};
 use conn_theme::Tokens;
 use gpui_kit::component::v_flex;
 use gpui_kit::prelude::*;
@@ -44,7 +44,7 @@ use gpui_kit::{
 };
 
 use self::api::ApiPanel;
-use self::browser::BrowserPanel;
+use self::browser::{BrowserPanel, BrowserTabEvent};
 use self::color::to_hsla;
 use self::database::DatabasePanel;
 use self::device::DevicePanel;
@@ -75,9 +75,16 @@ pub(crate) enum RightPanelEvent {
     SendPrompt(String),
     /// Browser or Device panel emitted a project annotation queue action.
     Annotation(annotations::AnnotationAction),
+    /// A surface or a page asked to show `url` in a new browser tab (`openUrlInPreview`).
+    OpenBrowserTab { url: String, background: bool },
+    /// A browser tab's title changed, so the tab strip shows it.
+    BrowserTitleChanged,
 }
 
 impl gpui_kit::EventEmitter<RightPanelEvent> for RightPanel {}
+
+#[cfg(feature = "automation")]
+const NO_BROWSER_TAB: &str = "No browser tab is open.";
 
 /// Right-panel GPUI entity mounted inside Conn's right-panel card.
 #[expect(
@@ -87,7 +94,7 @@ impl gpui_kit::EventEmitter<RightPanelEvent> for RightPanel {}
 pub struct RightPanel {
     tokens: Tokens,
     tab: RightPanelTab,
-    open_tabs: Vec<PanelSurface>,
+    tabs: RightPanelTabs,
     /// The open file when `tab` is [`RightPanelTab::File`].
     file: Option<String>,
     add_menu_open: bool,
@@ -98,7 +105,16 @@ pub struct RightPanel {
     files: Entity<FilesPanel>,
     diff: Entity<DiffPanel>,
     terminal: Entity<TerminalPanel>,
-    browser: Entity<BrowserPanel>,
+    /// One browser per open browser tab, each with its own Chromium view.
+    browsers: Vec<(BrowserTabId, Entity<BrowserPanel>)>,
+    /// The browser tab that shows while `tab` is Browser.
+    active_browser: Option<BrowserTabId>,
+    /// Addresses asked for before a tab's browser exists; it loads them when made.
+    pending_browser_urls: Vec<(BrowserTabId, String)>,
+    /// What a new browser tab starts with.
+    connection: Option<Connection>,
+    environment_id: Option<String>,
+    annotations: Option<(Vec<AnnotationRecord>, bool, bool)>,
     api: Entity<ApiPanel>,
     database: Entity<DatabasePanel>,
     mcp: Entity<McpPanel>,
@@ -116,7 +132,7 @@ impl fmt::Debug for RightPanel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RightPanel")
             .field("tab", &self.tab)
-            .field("open_tabs", &self.open_tabs)
+            .field("tabs", &self.tabs)
             .field("project_id", &self.project_id)
             .field("workspace_root", &self.workspace_root)
             .field("thread_id", &self.thread_id)
@@ -160,37 +176,17 @@ impl RightPanel {
                     cx.emit(RightPanelEvent::InsertMention(mention.clone()));
                 }
                 files::FilesEvent::OpenInBrowser(url) => {
-                    this.browser
-                        .update(cx, |browser, cx| browser.navigate(url.clone(), cx));
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Browser));
+                    let _ = this;
+                    cx.emit(RightPanelEvent::OpenBrowserTab {
+                        url: url.clone(),
+                        background: false,
+                    });
                 }
             },
         )
         .detach();
         let diff = cx.new(|_| DiffPanel::new(tokens.clone(), connection.clone()));
         let terminal = cx.new(|cx| TerminalPanel::new(tokens.clone(), cx));
-        let browser =
-            cx.new(|cx| BrowserPanel::new(tokens.clone(), connection.clone(), window, cx));
-        cx.subscribe(
-            &browser,
-            |_, _, action: &annotations::AnnotationAction, cx| {
-                cx.emit(RightPanelEvent::Annotation(action.clone()));
-            },
-        )
-        .detach();
-        // "Open in Database" on a query of the debug bar.
-        let toolbar = browser.read(cx).laravel_toolbar();
-        cx.subscribe(
-            &toolbar,
-            |this, _, event: &LaravelToolbarEvent, cx| match event {
-                LaravelToolbarEvent::OpenQuery(sql) => {
-                    this.database
-                        .update(cx, |panel, cx| panel.set_agent_sql(sql.clone(), cx));
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
-                }
-            },
-        )
-        .detach();
         let api = cx.new(|cx| ApiPanel::new(tokens.clone(), window, cx));
         let api_toolbar = api.read(cx).laravel_toolbar();
         cx.subscribe(
@@ -234,7 +230,11 @@ impl RightPanel {
         Self {
             tokens,
             tab: RightPanelTab::Files,
-            open_tabs: vec![PanelSurface::Kind(RightPanelTab::Files)],
+            tabs: {
+                let mut tabs = RightPanelTabs::default();
+                tabs.activate(PanelSurface::Kind(RightPanelTab::Files));
+                tabs
+            },
             file: None,
             add_menu_open: false,
             maximized: false,
@@ -244,7 +244,12 @@ impl RightPanel {
             files,
             diff,
             terminal,
-            browser,
+            browsers: Vec::new(),
+            active_browser: None,
+            pending_browser_urls: Vec::new(),
+            connection,
+            environment_id: None,
+            annotations: None,
             api,
             database,
             mcp,
@@ -263,24 +268,144 @@ impl RightPanel {
         cx.notify();
     }
 
-    /// Loads `url` in the Browser tab (starting the CEF runtime on first use).
-    pub fn navigate_browser(&mut self, url: String, cx: &mut Context<'_, Self>) {
-        self.browser.update(cx, |b, cx| b.navigate(url, cx));
+    /// Loads `url` in browser tab `id` (starting the CEF runtime on first use). A tab whose
+    /// browser is not made yet loads it when it is.
+    pub fn navigate_browser(&mut self, id: BrowserTabId, url: String, cx: &mut Context<'_, Self>) {
+        match self.browser(id) {
+            Some(browser) => browser.update(cx, |b, cx| b.navigate(url, cx)),
+            None => {
+                self.pending_browser_urls.retain(|(tab, _)| *tab != id);
+                self.pending_browser_urls.push((id, url));
+            }
+        }
     }
 
-    /// Diagnostic state of the Browser tab.
+    fn browser(&self, id: BrowserTabId) -> Option<Entity<BrowserPanel>> {
+        self.browsers
+            .iter()
+            .find(|(tab, _)| *tab == id)
+            .map(|(_, browser)| browser.clone())
+    }
+
+    /// The browser tab that shows, or showed last.
+    fn active_browser_entity(&self) -> Option<Entity<BrowserPanel>> {
+        self.active_browser.and_then(|id| self.browser(id))
+    }
+
+    /// Browser tab `id`'s title for the tab strip (`surfaceTitle`).
+    pub fn browser_tab_title(&self, id: BrowserTabId, cx: &App) -> String {
+        match self.browser(id) {
+            Some(browser) => browser.read(cx).tab_title(),
+            None => self
+                .pending_browser_urls
+                .iter()
+                .find(|(tab, _)| *tab == id)
+                .map_or_else(
+                    || conn_state::browser_tab_title("", ""),
+                    |(_, url)| conn_state::browser_tab_title("", url),
+                ),
+        }
+    }
+
+    /// Makes browser tab `id`'s browser with what every tab shares, and loads its pending
+    /// address. Needs the window, so it runs while rendering.
+    fn ensure_browser(
+        &mut self,
+        id: BrowserTabId,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<BrowserPanel> {
+        if let Some(browser) = self.browser(id) {
+            return browser;
+        }
+        let tokens = self.tokens.clone();
+        let connection = self.connection.clone();
+        let browser = cx.new(|cx| BrowserPanel::new(tokens, connection, window, cx));
+        cx.subscribe(
+            &browser,
+            |_, _, action: &annotations::AnnotationAction, cx| {
+                cx.emit(RightPanelEvent::Annotation(action.clone()));
+            },
+        )
+        .detach();
+        cx.subscribe(&browser, |_, _, event: &BrowserTabEvent, cx| match event {
+            BrowserTabEvent::TitleChanged => cx.emit(RightPanelEvent::BrowserTitleChanged),
+            BrowserTabEvent::OpenTab(request) => cx.emit(RightPanelEvent::OpenBrowserTab {
+                url: request.url.clone(),
+                background: request.background,
+            }),
+        })
+        .detach();
+        // "Open in Database" on a query of the debug bar.
+        let toolbar = browser.read(cx).laravel_toolbar();
+        cx.subscribe(
+            &toolbar,
+            |this, _, event: &LaravelToolbarEvent, cx| match event {
+                LaravelToolbarEvent::OpenQuery(sql) => {
+                    this.database
+                        .update(cx, |panel, cx| panel.set_agent_sql(sql.clone(), cx));
+                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
+                }
+            },
+        )
+        .detach();
+        let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
+        let environment = self.environment_id.clone();
+        let annotations = self.annotations.clone();
+        let pending = self
+            .pending_browser_urls
+            .iter()
+            .position(|(tab, _)| *tab == id)
+            .map(|index| self.pending_browser_urls.remove(index).1);
+        browser.update(cx, |b, cx| {
+            b.set_project(project, cx);
+            b.set_workspace_root(root, cx);
+            if let Some(environment) = environment {
+                b.set_environment(environment, cx);
+            }
+            if let Some((records, watching, ready)) = annotations {
+                b.sync_annotations(records, watching, ready, cx);
+            }
+            if let Some(url) = pending {
+                b.navigate(url, cx);
+            }
+        });
+        self.browsers.push((id, browser.clone()));
+        self.sync_surface_visibility(cx);
+        browser
+    }
+
+    /// Drops the browsers of closed tabs, which closes their Chromium views.
+    fn retain_browsers(&mut self) {
+        let open: Vec<BrowserTabId> = self.tabs.browser_ids().collect();
+        self.browsers.retain(|(id, _)| open.contains(id));
+        self.pending_browser_urls
+            .retain(|(id, _)| open.contains(id));
+        if self.active_browser.is_some_and(|id| !open.contains(&id)) {
+            self.active_browser = None;
+        }
+    }
+
+    /// Diagnostic state of the active browser tab.
     #[cfg(feature = "automation")]
     pub fn browser_state(&self, cx: &App) -> serde_json::Value {
-        self.browser.read(cx).automation_state()
+        let mut state = self
+            .active_browser_entity()
+            .map_or(serde_json::Value::Null, |b| b.read(cx).automation_state());
+        if let Some(object) = state.as_object_mut() {
+            object.insert("tabCount".into(), self.browsers.len().into());
+        }
+        state
     }
 
-    /// The Browser tab's page title (empty before a page loads).
+    /// The active browser tab's page title (empty before a page loads).
     #[cfg_attr(
         not(feature = "automation"),
         expect(dead_code, reason = "driven by the automation hook")
     )]
     pub fn browser_title(&self, cx: &App) -> String {
-        self.browser.read(cx).title()
+        self.active_browser_entity()
+            .map_or_else(String::new, |b| b.read(cx).title())
     }
 
     #[cfg(feature = "automation")]
@@ -289,7 +414,8 @@ impl RightPanel {
         expression: &str,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.browser
+        self.active_browser_entity()
+            .ok_or_else(|| NO_BROWSER_TAB.to_owned())?
             .update(cx, |b, _| b.start_preview_eval(expression))
     }
 
@@ -300,7 +426,8 @@ impl RightPanel {
         params: &serde_json::Value,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.browser
+        self.active_browser_entity()
+            .ok_or_else(|| NO_BROWSER_TAB.to_owned())?
             .update(cx, |b, _| b.start_preview_call(op, params))
     }
 
@@ -310,7 +437,10 @@ impl RightPanel {
         path: &std::path::Path,
         cx: &App,
     ) -> Result<serde_json::Value, String> {
-        self.browser.read(cx).save_browser_screenshot(path)
+        self.active_browser_entity()
+            .ok_or_else(|| NO_BROWSER_TAB.to_owned())?
+            .read(cx)
+            .save_browser_screenshot(path)
     }
 
     /// Places an agent-provided SQL query in the Database editor without executing it.
@@ -368,9 +498,12 @@ impl RightPanel {
         project_ready: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        self.browser.update(cx, |p, cx| {
-            p.sync_annotations(annotations.clone(), watching, project_ready, cx);
-        });
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |p, cx| {
+                p.sync_annotations(annotations.clone(), watching, project_ready, cx);
+            });
+        }
+        self.annotations = Some((annotations.clone(), watching, project_ready));
         self.device.update(cx, |p, cx| {
             p.sync_annotations(annotations, watching, project_ready, cx);
         });
@@ -386,10 +519,12 @@ impl RightPanel {
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         self.linked_items
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
-        self.browser
-            .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        }
         self.device
-            .update(cx, |p, cx| p.set_connection(connection, cx));
+            .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        self.connection = connection;
         cx.notify();
     }
 
@@ -431,7 +566,9 @@ impl RightPanel {
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.device
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
-        self.browser.update(cx, |p, cx| p.set_tokens(tokens, cx));
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        }
         cx.notify();
     }
 
@@ -440,9 +577,10 @@ impl RightPanel {
         self.api.update(cx, |api, cx| {
             api.set_environment(environment_id.clone(), cx)
         });
-        self.browser.update(cx, |browser, cx| {
-            browser.set_environment(environment_id, cx)
-        });
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |b, cx| b.set_environment(environment_id.clone(), cx));
+        }
+        self.environment_id = Some(environment_id);
     }
 
     /// Updates the active project, workspace root, and thread context.
@@ -526,8 +664,10 @@ impl RightPanel {
             shows(RightPanelTab::PullRequest),
             shows(RightPanelTab::LinkedItems),
         );
-        self.browser
-            .update(cx, |b, cx| b.set_visible(show_browser, cx));
+        for (id, browser) in &self.browsers {
+            let show = show_browser && self.active_browser == Some(*id);
+            browser.update(cx, |b, cx| b.set_visible(show, cx));
+        }
         self.device
             .update(cx, |d, cx| d.set_visible(show_device, cx));
         // Diff, Pull request and Linked items load only while shown, as in Conn. Before, every
@@ -540,8 +680,8 @@ impl RightPanel {
             .update(cx, |p, cx| p.set_active(show_linked, cx));
     }
 
-    /// Switches the active right-panel tab (opening it if not yet in `open_tabs`),
-    /// lazily spawning the terminal PTY on first visit.
+    /// Switches the active right-panel tab (opening it if not yet open), lazily spawning the
+    /// terminal PTY on first visit. Browser shows the browser tab shown last, or a new one.
     pub fn set_tab(&mut self, tab: RightPanelTab, cx: &mut Context<'_, Self>) {
         if tab == RightPanelTab::File {
             if let Some(path) = self.file.clone() {
@@ -549,10 +689,12 @@ impl RightPanel {
             }
             return;
         }
-        let surface = PanelSurface::Kind(tab);
-        if !self.open_tabs.contains(&surface) {
-            self.open_tabs.push(surface);
+        if tab == RightPanelTab::Browser {
+            let surface = self.tabs.open(RightPanelTab::Browser);
+            self.set_surface(&surface, cx);
+            return;
         }
+        self.tabs.activate(PanelSurface::Kind(tab));
         self.add_menu_open = false;
         if self.tab == RightPanelTab::File || tab == RightPanelTab::Files {
             self.files.update(cx, |p, cx| p.show_tree(cx));
@@ -566,6 +708,16 @@ impl RightPanel {
         if tab == RightPanelTab::Terminal {
             self.terminal.update(cx, |p, cx| p.ensure_started(cx));
         }
+        cx.notify();
+    }
+
+    /// Shows browser tab `id`, opening it if it is new.
+    fn set_browser(&mut self, id: BrowserTabId, cx: &mut Context<'_, Self>) {
+        self.tabs.activate(PanelSurface::Browser(id));
+        self.add_menu_open = false;
+        self.tab = RightPanelTab::Browser;
+        self.active_browser = Some(id);
+        self.sync_surface_visibility(cx);
         cx.notify();
     }
 
@@ -604,10 +756,7 @@ impl RightPanel {
 
     /// Shows the file at `path` (project-relative) as its own surface, as Conn's `file` tab.
     pub fn set_file(&mut self, path: String, cx: &mut Context<'_, Self>) {
-        let surface = PanelSurface::File(path.clone());
-        if !self.open_tabs.contains(&surface) {
-            self.open_tabs.push(surface);
-        }
+        self.tabs.activate(PanelSurface::File(path.clone()));
         self.add_menu_open = false;
         self.tab = RightPanelTab::File;
         self.file = Some(path.clone());
@@ -621,6 +770,7 @@ impl RightPanel {
         match surface {
             PanelSurface::Kind(tab) => self.set_tab(*tab, cx),
             PanelSurface::File(path) => self.set_file(path.clone(), cx),
+            PanelSurface::Browser(id) => self.set_browser(*id, cx),
         }
     }
 
@@ -642,9 +792,19 @@ impl RightPanel {
     /// The active surface.
     #[must_use]
     pub fn surface(&self) -> PanelSurface {
-        match (&self.tab, &self.file) {
-            (RightPanelTab::File, Some(path)) => PanelSurface::File(path.clone()),
-            (tab, _) => PanelSurface::Kind(*tab),
+        match (&self.tab, &self.file, self.active_browser) {
+            (RightPanelTab::File, Some(path), _) => PanelSurface::File(path.clone()),
+            (RightPanelTab::Browser, _, Some(id)) => PanelSurface::Browser(id),
+            (tab, _, _) => PanelSurface::Kind(*tab),
+        }
+    }
+
+    /// Forgets a tab the shell closed; a browser tab's Chromium view closes with it.
+    pub fn close_surface(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
+        if self.tabs.close(surface).is_some() {
+            self.retain_browsers();
+            self.release_closed_file(surface, cx);
+            cx.notify();
         }
     }
 
@@ -658,22 +818,23 @@ impl RightPanel {
 
     /// Closes an open tab if more than one tab is open, activating an adjacent tab if needed.
     pub fn close_tab(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
-        if self.open_tabs.len() <= 1 {
+        if self.tabs.tabs().len() <= 1 {
             return;
         }
-        if let Some(pos) = self.open_tabs.iter().position(|t| t == surface) {
-            self.open_tabs.remove(pos);
+        if let Some(closed) = self.tabs.close(surface) {
+            self.retain_browsers();
             self.release_closed_file(surface, cx);
-            if &self.surface() == surface {
-                let next = self
-                    .open_tabs
-                    .get(pos.saturating_sub(1))
-                    .cloned()
-                    .unwrap_or(PanelSurface::Kind(RightPanelTab::Files));
+            if let Some(next) = closed.activated {
                 self.set_surface(&next, cx);
             }
             cx.notify();
         }
+    }
+
+    /// The add menu's choice: Browser adds a new tab, other kinds show their one tab.
+    fn add_tab(&mut self, tab: RightPanelTab, cx: &mut Context<'_, Self>) {
+        let surface = self.tabs.add(tab);
+        self.set_surface(&surface, cx);
     }
 
     /// Returns the currently active right-panel tab.
@@ -685,7 +846,16 @@ impl RightPanel {
     /// Returns the list of currently open right-panel tabs.
     #[must_use]
     pub fn open_tabs(&self) -> &[PanelSurface] {
-        &self.open_tabs
+        self.tabs.tabs()
+    }
+
+    /// The titles of the open browser tabs, for the tab strip.
+    #[must_use]
+    pub fn browser_titles(&self, cx: &App) -> Vec<(BrowserTabId, String)> {
+        self.tabs
+            .browser_ids()
+            .map(|id| (id, self.browser_tab_title(id, cx)))
+            .collect()
     }
 
     /// Renders the 44px header tab strip (`RightPanelTabs`), suitable for mounting either
@@ -717,7 +887,7 @@ impl RightPanel {
             on_add_tab: {
                 let entity = entity.clone();
                 Rc::new(move |tab, _, cx| {
-                    entity.update(cx, |this, cx| this.set_tab(tab, cx));
+                    entity.update(cx, |this, cx| this.add_tab(tab, cx));
                 })
             },
             on_toggle_maximize: {
@@ -738,10 +908,12 @@ impl RightPanel {
             on_open_sidebar: Rc::new(|_, _| {}),
         };
 
-        let active = self.displayed_surface(self.surface(), &self.open_tabs, cx);
+        let active = self.displayed_surface(self.surface(), self.tabs.tabs(), cx);
+        let browser_titles = self.browser_titles(cx);
         render_panel_header(
             PanelHeaderProps {
-                open_tabs: &self.open_tabs,
+                open_tabs: self.tabs.tabs(),
+                browser_titles: &browser_titles,
                 active_tab: &active,
                 maximized: self.maximized,
                 owns_window_leading_edge: false,
@@ -757,7 +929,7 @@ impl RightPanel {
 }
 
 impl Render for RightPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self.tab == RightPanelTab::Terminal {
             self.terminal.update(cx, |p, cx| p.ensure_started(cx));
         }
@@ -768,7 +940,10 @@ impl Render for RightPanel {
             RightPanelTab::Files | RightPanelTab::File => self.files.clone().into_any_element(),
             RightPanelTab::Diff => self.diff.clone().into_any_element(),
             RightPanelTab::Terminal => self.terminal.clone().into_any_element(),
-            RightPanelTab::Browser => self.browser.clone().into_any_element(),
+            RightPanelTab::Browser => match self.active_browser {
+                Some(id) => self.ensure_browser(id, window, cx).into_any_element(),
+                None => div().into_any_element(),
+            },
             RightPanelTab::Api => self.api.clone().into_any_element(),
             RightPanelTab::Database => self.database.clone().into_any_element(),
             RightPanelTab::Mcp => self.mcp.clone().into_any_element(),
@@ -880,10 +1055,12 @@ fn for_each_project_panel(
     panel.mcp.update(cx, |p, cx| {
         p.set_project(project_key.clone(), workspace_root.clone(), cx);
     });
-    panel.browser.update(cx, |p, cx| {
-        p.set_project(project_key.clone(), cx);
-        p.set_workspace_root(workspace_root.clone(), cx);
-    });
+    for (_, browser) in &panel.browsers {
+        browser.update(cx, |p, cx| {
+            p.set_project(project_key.clone(), cx);
+            p.set_workspace_root(workspace_root.clone(), cx);
+        });
+    }
     panel
         .api
         .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));

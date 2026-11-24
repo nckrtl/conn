@@ -28,6 +28,7 @@ type LoadEndCallback = Arc<dyn Fn(&str, i32) + Send + Sync>;
 type LoadStartCallback = Arc<dyn Fn(&str) + Send + Sync>;
 type ConsoleMessageCallback = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type ContextMenuCallback = Arc<dyn Fn(ContextMenuEvent) + Send + Sync>;
+type OpenTabCallback = Arc<dyn Fn(crate::NewTabRequest) + Send + Sync>;
 
 struct FrameBuffer {
     generation: u64,
@@ -54,6 +55,7 @@ struct Shared {
     toolbar_response: super::toolbar_hooks::ToolbarResponseSlot,
     on_console_message: Mutex<Option<ConsoleMessageCallback>>,
     on_context_menu: Mutex<Option<ContextMenuCallback>>,
+    on_open_tab: Mutex<Option<OpenTabCallback>>,
     /// When the last `load_url` was called, and how many paints came since (trace only).
     load_began: Mutex<Option<std::time::Instant>>,
     paints_since_load: AtomicU32,
@@ -150,6 +152,7 @@ impl MacBrowserView {
             toolbar_response: Arc::new(Mutex::new(None)),
             on_console_message: Mutex::new(None),
             on_context_menu: Mutex::new(None),
+            on_open_tab: Mutex::new(None),
             load_began: Mutex::new(None),
             paints_since_load: AtomicU32::new(0),
             load_error: Mutex::new(None),
@@ -169,7 +172,7 @@ impl MacBrowserView {
 
         let mut client = ViewClient::new(
             ViewRenderHandler::new(shared.clone()),
-            ViewLifeSpan::new(),
+            ViewLifeSpan::new(shared.clone()),
             ViewLoadHandler::new(shared.clone()),
             ViewDisplayHandler::new(shared.clone()),
             ViewContextMenu::new(shared.clone()),
@@ -372,6 +375,15 @@ impl MacBrowserView {
         callback: impl Fn(ContextMenuEvent) + Send + Sync + 'static,
     ) {
         if let Ok(mut slot) = self.shared.on_context_menu.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
+
+    pub(crate) fn on_open_tab(
+        &self,
+        callback: impl Fn(crate::NewTabRequest) + Send + Sync + 'static,
+    ) {
+        if let Ok(mut slot) = self.shared.on_open_tab.lock() {
             *slot = Some(Arc::new(callback));
         }
     }
@@ -1213,18 +1225,21 @@ wrap_render_handler! {
 }
 
 wrap_life_span_handler! {
-    struct ViewLifeSpan;
+    struct ViewLifeSpan {
+        shared: Arc<Shared>,
+    }
 
     impl LifeSpanHandler {
-        // Suppress unmanaged native popup windows in OSR mode.
+        // OSR cannot show native popup windows: a new-tab link goes to the host as a browser
+        // tab, and every popup is suppressed.
         fn on_before_popup(
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             _popup_id: c_int,
-            _target_url: Option<&CefString>,
+            target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
-            _target_disposition: WindowOpenDisposition,
+            target_disposition: WindowOpenDisposition,
             _user_gesture: c_int,
             _popup_features: Option<&PopupFeatures>,
             _window_info: Option<&mut WindowInfo>,
@@ -1233,6 +1248,20 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
+            let disposition = if target_disposition == WindowOpenDisposition::NEW_FOREGROUND_TAB {
+                crate::popup::Disposition::ForegroundTab
+            } else if target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB {
+                crate::popup::Disposition::BackgroundTab
+            } else {
+                crate::popup::Disposition::Other
+            };
+            let url = target_url.map(CefString::to_string).unwrap_or_default();
+            if let Some(request) = crate::popup::new_tab_for(disposition, &url) {
+                let callback = self.shared.on_open_tab.lock().ok().and_then(|slot| slot.clone());
+                if let Some(callback) = callback {
+                    callback(request);
+                }
+            }
             1
         }
     }

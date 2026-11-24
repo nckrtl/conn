@@ -226,6 +226,8 @@ impl OrbitServerTarget {
 pub struct OrbitFleet {
     pub nodes: Vec<OrbitServerTarget>,
     pub instances: Vec<OrbitServerTarget>,
+    /// The local Node's name given to [`Self::from_targets`], for [`Self::primary_agent_node`].
+    pub local_node_name: Option<String>,
 }
 
 impl OrbitFleet {
@@ -266,7 +268,11 @@ impl OrbitFleet {
             })
         });
 
-        Self { nodes, instances }
+        Self {
+            nodes,
+            instances,
+            local_node_name: local_node_name.map(str::to_owned),
+        }
     }
 
     /// Looks up any Node or Instance by its Gateway `server_id`.
@@ -306,18 +312,11 @@ impl OrbitFleet {
             .collect()
     }
 
-    /// Preferred default Orbit Node entry point: the agent entry (`agent_entry_node`), else the
-    /// local node fallback (first registered node, else `nodes.first()`, since
-    /// [`Self::from_targets`] sorts the local node first).
+    /// Preferred default Orbit Node entry point: [`select_primary_agent_node`] with the local
+    /// Node this fleet was built with.
     #[must_use]
     pub fn primary_agent_node(&self) -> Option<&OrbitServerTarget> {
-        agent_entry_node(&self.nodes, None)
-            .or_else(|| {
-                self.nodes
-                    .iter()
-                    .find(|n| n.status == OrbitTargetStatus::Registered)
-            })
-            .or_else(|| self.nodes.first())
+        select_primary_agent_node(&self.nodes, self.local_node_name.as_deref())
     }
 
     /// Selects the primary `agent`-role Node from this fleet, falling back only to
@@ -1588,6 +1587,27 @@ mod tests {
             select_primary_agent_node(&only_unusable, Some("mini")),
             None,
             "expired local node is not selected"
+        );
+
+        let other_agent = make_node(
+            "node-zed",
+            "zed",
+            "zed",
+            &["agent"],
+            OrbitTargetStatus::Registered,
+            false,
+        );
+        let remote_agents =
+            OrbitFleet::from_targets(vec![healthy_agent.clone(), other_agent], Some("nick"));
+        assert_eq!(
+            remote_agents.primary_agent_node(),
+            None,
+            "two unmarked remote agent nodes and no local node: no guess"
+        );
+        assert_eq!(
+            select_primary_agent_node(&remote_agents.nodes, Some("nick")),
+            None,
+            "the standalone selector agrees"
         );
 
         let fleet = OrbitFleet::from_targets(vec![healthy_agent], Some("nick"));

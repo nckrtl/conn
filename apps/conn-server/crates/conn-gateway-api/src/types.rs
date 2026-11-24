@@ -28,6 +28,7 @@ pub struct ConnEnvironment {
     pub instance_name: ::std::option::Option<::std::string::String>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub instance_url: ::std::option::Option<::std::string::String>,
+    #[serde(default)]
     pub is_primary_agent: bool,
     pub label: ::std::string::String,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
@@ -49,6 +50,7 @@ pub struct ConnEnvironment {
     pub renewal_error_code: ::std::option::Option<::std::string::String>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub reservation_id: ::std::option::Option<::std::string::String>,
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
     pub roles: ::std::vec::Vec<::std::string::String>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub server_version: ::std::option::Option<::std::string::String>,

@@ -45,10 +45,13 @@ fix the compile errors in the callers.
   validates them; strings stay `String` and numbers `i64`.
 - An untyped `{"type": "object"}` becomes `serde_json::Value`, marked `TODO(6200)` in the docs
   of the type and the operation.
-- Auth comes from each operation's `security`: `managedTargetBearer` gives
+- Auth comes from each route's `security`, else the document's: `managedTargetBearer` gives
   `AuthKind::ManagedBearer`, the document's default `wireguardPeer` gives `WireGuardPeer`. Any
   other scheme fails the generator, and so does a `/api/v1/conn/managed/` route without the
   managed bearer.
+- `ADDED_FIELDS` in the generator makes fields a newer Gateway added optional, with a default,
+  so answers from older live Gateways still decode (`ConnEnvironment.is_primary_agent` and
+  `roles`, release 2214). Drop an entry once every Gateway serves the field.
 
 ## The current document
 

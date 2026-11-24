@@ -1,8 +1,8 @@
 //! The pin holds, and generated operations build requests and decode answers.
 
 use conn_gateway_api::ops::{
-    ConnEnvironmentSession, ConnEnvironmentSessionSuccess, ConnManagedAck, ConnMe, OPERATION_IDS,
-    OperationShow,
+    ConnEnvironmentList, ConnEnvironmentSession, ConnEnvironmentSessionSuccess, ConnManagedAck,
+    ConnMe, OPERATION_IDS, OperationShow,
 };
 use conn_gateway_api::{AuthKind, DecodeError, GatewayOperation, Method, OPENAPI_SHA256, types};
 use sha2::{Digest, Sha256};
@@ -155,4 +155,26 @@ fn decodes_answers_by_status() {
         ),
         "an undocumented error status is refused"
     );
+}
+
+#[test]
+fn decodes_environments_from_gateways_before_release_2214() {
+    let answer = serde_json::to_vec(&serde_json::json!({
+        "data": [{
+            "admin_session_expires_at": "2026-11-24T00:00:00Z", "cleanup_pending": false,
+            "cleanup_version": 0, "environment_id": "env-1", "instance_id": null,
+            "instance_name": null, "instance_url": null, "label": "mini", "node_name": "mini",
+            "power_state": null, "project_id": null, "project_name": null, "project_slug": null,
+            "registered_at": "2026-11-24T00:00:00Z", "registered_by": "mini",
+            "renewal_checked_at": null, "renewal_error_code": null, "reservation_id": null,
+            "server_version": null, "status": "registered", "url": "http://10.44.0.8:3773"
+        }],
+        "meta": {"request_id": "r"}
+    }))
+    .expect("fixture encodes");
+    let list = ConnEnvironmentList::decode_success(200, &answer)
+        .expect("a row without roles or is_primary_agent decodes");
+    let row = list.data.first().expect("one row");
+    assert!(!row.is_primary_agent, "is_primary_agent defaults to false");
+    assert!(row.roles.is_empty(), "roles defaults to []");
 }

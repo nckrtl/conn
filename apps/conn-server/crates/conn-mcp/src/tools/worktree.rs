@@ -335,25 +335,6 @@ pub(crate) async fn setup(
     run_project_script(config, thread, project, path, ScriptTrigger::Setup).await
 }
 
-/// A started setup script. `completion` is set for a script T3 waits for (`async: false`):
-/// it yields the exit code, or `None` when the shell ended before the script did.
-pub(crate) struct SetupStarted {
-    pub(crate) status: Value,
-    pub(crate) completion: Option<tokio::sync::oneshot::Receiver<Option<i64>>>,
-}
-
-/// The setup script. With `observe`, a script marked `async: false` is followed to its end
-/// (T3's `observeCompletion`).
-pub(crate) async fn start_setup(
-    config: &WorktreeConfig,
-    thread: &str,
-    project: &Value,
-    path: &str,
-    observe: bool,
-) -> Result<SetupStarted, String> {
-    start_project_script(config, thread, project, path, ScriptTrigger::Setup, observe).await
-}
-
 /// Which project script a run picks (`runForThread`'s `trigger`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScriptTrigger {
@@ -373,31 +354,51 @@ pub(crate) async fn run_project_script(
     path: &str,
     trigger: ScriptTrigger,
 ) -> Result<Value, String> {
+    // A settle script is followed to its end (`observeCompletion`); after exit 0 its terminal
+    // closes when idle, as T3's settle cleanup does.
+    let observe = (trigger == ScriptTrigger::Settle).then(Observe::default);
     Ok(
-        start_project_script(config, thread, project, path, trigger, false)
+        start_project_script(config, thread, project, path, trigger, observe)
             .await?
-            .status,
+            .started,
     )
 }
 
-async fn start_project_script(
+/// `observeCompletion`: follow the script to its end, with its output lines.
+#[derive(Default)]
+pub(crate) struct Observe {
+    pub(crate) on_line: Option<Box<dyn FnMut(String) + Send>>,
+}
+
+/// A started (or absent) project script.
+pub(crate) struct ScriptRun {
+    /// `{status: "no-script"}`, or `{status: "started", scriptName, terminalId}`.
+    pub(crate) started: Value,
+    pub(crate) command: String,
+    /// The script's `async` flag: `false` asks the agent to wait for it (`script.async !== false`).
+    pub(crate) is_async: bool,
+    /// With [`Observe`]: the exit code, or `None` when the terminal ended first.
+    pub(crate) completion: Option<tokio::sync::oneshot::Receiver<Option<i64>>>,
+}
+
+/// [`run_project_script`], optionally followed to its end.
+pub(crate) async fn start_project_script(
     config: &WorktreeConfig,
     thread: &str,
     project: &Value,
     path: &str,
     trigger: ScriptTrigger,
-    observe_setup: bool,
-) -> Result<SetupStarted, String> {
+    observe: Option<Observe>,
+) -> Result<ScriptRun, String> {
     let settings = (config.settings)();
     let project_id = project["id"].as_str().unwrap_or_default();
+    // `resolveProjectScripts`: once folded, absent machine defaults are no scripts.
+    let none = json!([]);
     let scripts = settings["projectSettingsOverrides"][project_id]
         .get("defaultProjectScripts")
         .or_else(|| {
-            if settings["projectSettingsFolded"] == true {
-                settings.get("defaultProjectScripts")
-            } else {
-                None
-            }
+            (settings["projectSettingsFolded"] == true)
+                .then(|| settings.get("defaultProjectScripts").unwrap_or(&none))
         })
         .or_else(|| {
             settings["projectScriptOverrides"].get(project_id).map(|s| {
@@ -424,8 +425,10 @@ async fn start_project_script(
             ScriptTrigger::Settle => s["runOnSettle"] == true,
         })
     else {
-        return Ok(SetupStarted {
-            status: json!({"status":"no-script"}),
+        return Ok(ScriptRun {
+            started: json!({"status":"no-script"}),
+            command: String::new(),
+            is_async: true,
             completion: None,
         });
     };
@@ -448,10 +451,15 @@ async fn start_project_script(
     let mut readiness = tokio::task::spawn_blocking(move ||manager.open_observed(input))
         .await.map_err(|e|e.to_string())?.map_err(|_|format!("Project setup script operation 'openTerminal' failed for thread '{thread}' in '{path}'."))?;
     let command = script["command"].as_str().unwrap_or_default();
-    // A settle script is followed to its end (`observeCompletion`); after exit 0 its terminal
-    // closes when idle, as T3's settle cleanup does. A waited-for setup reports its exit code.
-    let settle = trigger == ScriptTrigger::Settle;
-    let observe = settle || (observe_setup && script["async"] == false);
+    let (done, completion) = match observe {
+        Some(_) => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
+    let mut on_line = observe.and_then(|o| o.on_line);
+    let observe = done.is_some();
     let sentinel = super::script_completion::sentinel(&conn_support::uuid_v4().replace('-', ""));
     let shell = terminals
         .shell(thread, &terminal)
@@ -474,46 +482,54 @@ async fn start_project_script(
             (kind, Some(line))
         }
     };
-    // Dropping `done` before a code is sent reports that the shell ended first.
-    let (done, completion) = if observe && !settle {
-        let (done, completion) = tokio::sync::oneshot::channel();
-        (Some(done), Some(completion))
-    } else {
-        (None, None)
-    };
     let (thread_owned, terminal_owned) = (thread.to_owned(), terminal.clone());
     tokio::spawn(async move {
-        let Some(line) = line else {
-            return;
-        };
-        // PowerShell and cmd have no line-editor signal.
-        let ready = matches!(
-            kind,
-            Some(super::script_completion::CompletionShell::PowerShell) | None
-        ) || shell_ready(&mut readiness).await;
-        if !ready {
-            return;
+        // Every way out before the sentinel reports no exit code (`abandon`).
+        let code = async {
+            let line = line?;
+            // PowerShell and cmd have no line-editor signal.
+            let ready = matches!(
+                kind,
+                Some(super::script_completion::CompletionShell::PowerShell) | None
+            ) || shell_ready(&mut readiness).await;
+            if !ready {
+                return None;
+            }
+            let input = from_json(
+                json!({"threadId":thread_owned,"terminalId":terminal_owned,"data":format!(" {line}\r")}),
+            )
+            .ok()?;
+            if terminals.write(input, None).await.is_err() || !observe {
+                return None;
+            }
+            let echoed: Vec<String> = line
+                .split('\r')
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let output = on_line
+                .as_deref_mut()
+                .map(|sink| super::script_completion::OutputLines {
+                    echoed: &echoed,
+                    sink,
+                });
+            let code = super::script_completion::completion(&mut readiness, &sentinel, output).await;
+            if code == Some(0) {
+                terminals
+                    .close_idle(&thread_owned, Some(&terminal_owned))
+                    .await;
+            }
+            code
         }
-        let Ok(input) = from_json(
-            json!({"threadId":thread_owned,"terminalId":terminal_owned,"data":format!(" {line}\r")}),
-        ) else {
-            return;
-        };
-        if terminals.write(input, None).await.is_err() || !observe {
-            return;
-        }
-        let code = super::script_completion::completion(&mut readiness, &sentinel).await;
-        if settle && code == Some(0) {
-            terminals
-                .close_idle(&thread_owned, Some(&terminal_owned))
-                .await;
-        }
+        .await;
         if let Some(done) = done {
             let _ = done.send(code);
         }
     });
-    Ok(SetupStarted {
-        status: json!({"status":"started","scriptName":script["name"],"terminalId":terminal}),
+    Ok(ScriptRun {
+        started: json!({"status":"started","scriptName":script["name"],"terminalId":terminal}),
+        command: command.to_owned(),
+        is_async: script["async"] != false,
         completion,
     })
 }

@@ -1116,7 +1116,43 @@ fn prepared_run_fail(tx: &mut Tx<'_>, command: Value) -> Outcome {
     )?;
     failure["code"] = json!("workspace_preparation_failed");
     finish_run(tx, &c.thread_id, &c.run_id, "failed", Some(failure))?;
-    Ok(crate::families::on_run_end(tx, &c.thread_id, &c.run_id)?)
+    let mut effects = crate::families::on_run_end(tx, &c.thread_id, &c.run_id)?;
+    // T3's run end starts the queue: a `validation_error` in a checkout that exists holds none.
+    effects.extend(start_next_queued(tx, &c.thread_id, None)?);
+    Ok(effects)
+}
+
+/// Ends a run's "Preparing workspace" item while it still runs, as T3 does when an archive
+/// cancels the run or a Stop interrupts it before its provider starts.
+fn end_preparation_item(
+    tx: &mut Tx<'_>,
+    thread_id: &str,
+    run: &Value,
+    status: &str,
+    title: &str,
+    output: Option<&str>,
+) -> StoreResult<()> {
+    let run_id = run["id"].as_str().unwrap_or_default();
+    let Some(mut item) = tx
+        .entity(thread_id, "turnItems", &preparation_item_id(run_id))?
+        .filter(|item| item["status"] == "running")
+    else {
+        return Ok(());
+    };
+    let now = tx.now().to_owned();
+    item["status"] = json!(status);
+    item["title"] = json!(title);
+    if let Some(output) = output {
+        item["output"] = json!(output);
+    }
+    item["completedAt"] = json!(now);
+    item["updatedAt"] = json!(now);
+    tx.append(
+        Draft::new(thread_id, "turn-item.updated", item)
+            .run(Some(run_id))
+            .node(run["rootNodeId"].as_str()),
+    )?;
+    Ok(())
 }
 
 fn user_message_item(
@@ -2241,6 +2277,14 @@ fn interrupt_before_start(
         });
         tx.append(draft("turn-item.updated", result))?;
     }
+    end_preparation_item(
+        tx,
+        thread_id,
+        run,
+        "interrupted",
+        "Workspace preparation interrupted",
+        Some(reason.unwrap_or("Interrupted before provider start")),
+    )?;
     if let Some(attempt_id) = run["activeAttemptId"].as_str()
         && let Some(mut attempt) = tx.entity(thread_id, "attempts", attempt_id)?
     {
@@ -2862,17 +2906,31 @@ fn has_running_delegated_tasks(tx: &Tx<'_>, thread_id: &str) -> StoreResult<bool
 }
 
 /// T3's archive of one thread (`Orchestrator.ts` `thread.archive`): queued and preparing runs
-/// are cancelled, live provider sessions detach, pending link requests close, and the thread's
+/// are cancelled (a delegated child's task finalizes), live provider sessions detach, pending link requests close, and the thread's
 /// terminals and devices go (`ThreadClosed`).
 fn archive_one(tx: &mut Tx<'_>, thread_id: &str) -> Outcome {
+    let mut ended = None;
     for run in tx.entities(thread_id, "runs")? {
         if matches!(run["status"].as_str(), Some("queued" | "preparing")) {
             let run_id = run["id"].as_str().unwrap_or_default();
+            end_preparation_item(
+                tx,
+                thread_id,
+                &run,
+                "cancelled",
+                "Workspace preparation cancelled",
+                None,
+            )?;
             finish_run(tx, thread_id, run_id, "cancelled", None)?;
+            ended = Some(run_id.to_owned());
         }
     }
+    // T3's run end: a delegated child's task finalizes with its cancelled run.
+    let mut effects = match &ended {
+        Some(run_id) => crate::families::on_run_end(tx, thread_id, run_id)?,
+        None => vec![],
+    };
     let now = tx.now().to_owned();
-    let mut effects = vec![];
     for session in tx.entities(thread_id, "providerSessions")? {
         if matches!(session["status"].as_str(), Some("stopped" | "error")) {
             continue;
@@ -2883,7 +2941,10 @@ fn archive_one(tx: &mut Tx<'_>, thread_id: &str) -> Outcome {
             json!({"providerSessionId": session["id"], "detachedAt": now,
                 "reason": "Thread archived."}),
         ))?;
-        if effects.is_empty() {
+        if !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseSession { .. }))
+        {
             effects.push(Effect::CloseSession {
                 thread_id: thread_id.to_owned(),
             });

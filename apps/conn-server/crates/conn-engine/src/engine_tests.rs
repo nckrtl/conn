@@ -13573,6 +13573,43 @@ async fn a_prepared_run_starts_only_when_released() {
     }
 }
 
+/// T3's `startNextQueuedRun` after `prepared-run.fail`: the failure is a `validation_error` and
+/// the checkout exists, so a message queued while the setup ran starts next.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_preparation_starts_the_queued_run() {
+    let db = TempDb::new("prepared-run-queue");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut send = message("t1", "c2", "work");
+    send["dispatchMode"] = json!({"type": "defer_start",
+        "workspaceStrategy": {"type": "worktree", "baseRef": "HEAD", "startFromOrigin": false}});
+    dispatch(&engine, send).await;
+    let queued = message_with(
+        "t1",
+        "c3",
+        "next",
+        json!({"type": "queue_after_active"}),
+        None,
+    );
+    dispatch(&engine, queued).await;
+    assert_eq!(
+        projection(&engine, "t1").await["runs"][1]["status"],
+        "queued"
+    );
+    dispatch(
+        &engine,
+        json!({"type": "prepared-run.fail", "commandId": "fail", "threadId": "t1",
+            "runId": "run:t1:1", "failure": {"class": "validation_error",
+            "message": "Setup script exited with 3.", "code": null, "retryable": false}}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][0]["status"], "failed");
+    assert_ne!(p["runs"][1]["status"], "queued", "the queue advanced");
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(p["runs"][1]["status"], "completed");
+}
+
 /// Removing a queued run leaves the active run's approval answerable (T3's
 /// `queuedRunCancellationEvents` touches only the queued run, its attempt and its node).
 #[tokio::test(flavor = "current_thread")]

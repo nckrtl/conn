@@ -673,6 +673,10 @@ async fn cancelling_a_child_during_setup_closes_its_setup_terminal() {
         .ok("task_status", json!({"taskId": task["taskId"]}))
         .await;
     assert_eq!(status["status"], "interrupted", "{status}");
+    // T3's interrupt before provider start ends the preparation item too.
+    let item = preparation_item(&f, &child).await;
+    assert_eq!(item["status"], "interrupted", "{item}");
+    assert_eq!(item["title"], "Workspace preparation interrupted");
     assert!(
         !calls
             .lock()
@@ -681,6 +685,54 @@ async fn cancelling_a_child_during_setup_closes_its_setup_terminal() {
             .any(|c| c.starts_with("start ") && c.contains(&child)),
         "the provider never starts"
     );
+}
+
+/// T3's archive of a preparing child (`thread.archive`): its run ends `cancelled`, its
+/// preparation item says so, and the parent's task finalizes in the same write.
+#[tokio::test(flavor = "current_thread")]
+async fn archiving_a_preparing_child_finalizes_its_task() {
+    let host = GitHost::new("setup-archive");
+    let mut f = fixture_with_host("delegate-worktree-setup-archive", Some(host.clone()));
+    let _terminals = with_terminals(&mut f);
+    git_project(&f).await;
+    set_setup_script(&f, "archive", HELD_SCRIPT, false).await;
+    let (_, caller) = running_parent(&f).await;
+    let mut agent = Client::open(&f.service, caller).await;
+    let task = agent
+        .ok(
+            "delegate_task",
+            json!({"task": "child work", "isolation": "worktree"}),
+        )
+        .await;
+    let child = task["childThreadId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        child_thread_projection(&f, &child).await["runs"][0]["status"],
+        "preparing"
+    );
+    dispatch(
+        &f,
+        json!({"type": "thread.archive", "commandId": "archive-child", "threadId": child}),
+    )
+    .await;
+    let status = agent
+        .ok("task_status", json!({"taskId": task["taskId"]}))
+        .await;
+    assert_eq!(status["status"], "cancelled", "{status}");
+    assert_eq!(status["workState"], "result_available", "{status}");
+    let item = preparation_item(&f, &child).await;
+    assert_eq!(item["status"], "cancelled", "{item}");
+    assert_eq!(item["title"], "Workspace preparation cancelled");
+}
+
+/// The child's "Preparing workspace" item.
+async fn preparation_item(f: &Fixture, child: &str) -> Value {
+    child_thread_projection(f, child).await["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["input"] == "Preparing workspace")
+        .cloned()
+        .unwrap()
 }
 
 async fn child_thread_projection(f: &Fixture, child: &str) -> Value {

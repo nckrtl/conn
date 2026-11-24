@@ -864,11 +864,12 @@ fn workflow_status(seen: &[serde_json::Value], task_id: &str) -> serde_json::Val
 }
 
 /// The spawned `stopTask` reaches the host a moment after the terminal event; under a loaded
-/// test run that moment can pass a second.
+/// test run that moment can pass a second. The host logs `call stopTask` before its `stop`
+/// line, so wait for the `stop` line itself.
 async fn logged_stops(log: &Path) -> Vec<String> {
     for _ in 0..1000 {
         let text = std::fs::read_to_string(log).unwrap_or_default();
-        if text.contains("call stopTask") {
+        if text.lines().any(|l| l.starts_with("stop ")) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

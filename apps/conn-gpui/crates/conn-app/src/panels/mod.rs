@@ -117,6 +117,9 @@ pub struct RightPanel {
     active_browser: Option<BrowserTabId>,
     /// Addresses asked for before a tab's browser exists; it loads them when made.
     pending_browser_urls: Vec<(BrowserTabId, String)>,
+    /// Each agent SQL handed to the Database editor, with the project it went to.
+    #[cfg(test)]
+    database_sql_writes: Vec<(Option<String>, String)>,
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
@@ -253,6 +256,8 @@ impl RightPanel {
             browsers: Vec::new(),
             active_browser: None,
             pending_browser_urls: Vec::new(),
+            #[cfg(test)]
+            database_sql_writes: Vec::new(),
             connection,
             environment_id: None,
             annotations: None,
@@ -299,6 +304,11 @@ impl RightPanel {
         id: BrowserTabId,
     ) -> Option<gpui_kit::WeakEntity<BrowserPanel>> {
         self.browser(id).map(|b| b.downgrade())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn database_sql_writes(&self) -> &[(Option<String>, String)] {
+        &self.database_sql_writes
     }
 
     #[cfg(test)]
@@ -467,6 +477,9 @@ impl RightPanel {
 
     /// Places an agent-provided SQL query in the Database editor without executing it.
     pub fn set_database_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) {
+        #[cfg(test)]
+        self.database_sql_writes
+            .push((self.project_id.clone(), sql.clone()));
         self.database
             .update(cx, |panel, cx| panel.set_agent_sql(sql, cx));
     }
@@ -520,12 +533,8 @@ impl RightPanel {
         project_ready: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        for (_, browser) in &self.browsers {
-            browser.update(cx, |p, cx| {
-                p.sync_annotations(annotations.clone(), watching, project_ready, cx);
-            });
-        }
         self.annotations = Some((annotations.clone(), watching, project_ready));
+        self.refresh_shown_browser(cx);
         self.device.update(cx, |p, cx| {
             p.sync_annotations(annotations, watching, project_ready, cx);
         });
@@ -643,6 +652,27 @@ impl RightPanel {
         cx.notify();
     }
 
+    /// The browser that shows gets the shown thread's project and annotations. Hidden ones,
+    /// which may belong to other threads, get nothing: each script call reaches a live page.
+    /// A hidden page catches up from its own thread's project when it shows again.
+    fn refresh_shown_browser(&self, cx: &mut Context<'_, Self>) {
+        if !self.surface_visible || self.tab != RightPanelTab::Browser {
+            return;
+        }
+        let Some(browser) = self.active_browser_entity() else {
+            return;
+        };
+        let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
+        let annotations = self.annotations.clone();
+        browser.update(cx, |p, cx| {
+            p.set_project(project, cx);
+            p.set_workspace_root(root, cx);
+            if let Some((annotations, watching, ready)) = annotations {
+                p.sync_annotations(annotations, watching, ready, cx);
+            }
+        });
+    }
+
     /// Optional hint for the active thread's completed turn count used by `orchestration.getFullThreadDiff`.
     pub fn set_turn_count(&mut self, turn_count: Option<i64>, cx: &mut Context<'_, Self>) {
         self.diff
@@ -690,6 +720,7 @@ impl RightPanel {
             let show = show_browser && self.active_browser == Some(*id);
             browser.update(cx, |b, cx| b.set_visible(show, cx));
         }
+        self.refresh_shown_browser(cx);
         self.device
             .update(cx, |d, cx| d.set_visible(show_device, cx));
         // Diff, Pull request and Linked items load only while shown, as in Conn. Before, every
@@ -1079,12 +1110,6 @@ fn for_each_project_panel(
     panel.mcp.update(cx, |p, cx| {
         p.set_project(project_key.clone(), workspace_root.clone(), cx);
     });
-    for (_, browser) in &panel.browsers {
-        browser.update(cx, |p, cx| {
-            p.set_project(project_key.clone(), cx);
-            p.set_workspace_root(workspace_root.clone(), cx);
-        });
-    }
     panel
         .api
         .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));

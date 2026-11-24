@@ -3533,7 +3533,7 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
     use conn_state::PanelSurface;
     const ONE: &str = "https://one.example/";
     const TWO: &str = "https://two.example/";
-    let (window, app) = mount_app(cx);
+    let (window, app) = mount_two_thread_app(cx);
     let frames = |cx: &mut TestAppContext| {
         for _ in 0..3 {
             let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
@@ -3547,7 +3547,7 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
         other => panic!("{other:?} is not a browser tab"),
     };
 
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-a", cx)));
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
     for url in [ONE, TWO] {
         cx.update(|cx| app.update(cx, |app, cx| app.open_browser_tab(url.into(), false, cx)));
         frames(cx);
@@ -3558,7 +3558,7 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
         .update(|cx| app.read(cx).browser_weak_for_test(one, cx))
         .expect("the first tab was shown, so it has a browser");
 
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-b", cx)));
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
     frames(cx);
     assert!(tabs(cx).is_empty(), "another thread starts with no tabs");
     assert!(!cx.update(|cx| app.read(cx).layout().right_panel_open));
@@ -3577,7 +3577,7 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
         .update(|cx| app.read(cx).browser_weak_for_test(b_tab, cx))
         .expect("the shown tab has a browser");
 
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-a", cx)));
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
     frames(cx);
     assert_eq!(tabs(cx), a_tabs, "thread A gets its tabs back");
     assert!(cx.update(|cx| app.read(cx).layout().right_panel_open));
@@ -3601,11 +3601,338 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
     );
     assert!(page_b.upgrade().is_some(), "a hidden thread keeps its page");
 
-    cx.update(|cx| app.update(cx, |app, cx| app.forget_thread_panel("thread-b", cx)));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.apply_event_for_test(thread_removed("thread-other"), cx)
+        })
+    });
     frames(cx);
     assert!(
         page_b.upgrade().is_none(),
         "a deleted thread's browser is released"
+    );
+}
+
+/// The server's word that `id` was deleted, as another client's delete arrives.
+fn thread_removed(id: &str) -> ClientEvent {
+    match from_json(json!({
+        "kind": "thread.removed",
+        "sequence": 10_000,
+        "location": "active",
+        "threadId": id,
+    })) {
+        Ok(item) => ClientEvent::Shell(item),
+        Err(err) => panic!("thread.removed failed: {err}"),
+    }
+}
+
+/// The server's word that `thread` moved to the archive.
+fn thread_archived(thread: &ThreadShell) -> ClientEvent {
+    let thread = match serde_json::to_value(thread) {
+        Ok(value) => value,
+        Err(err) => panic!("ThreadShell did not serialize: {err}"),
+    };
+    match from_json(json!({
+        "kind": "thread.updated",
+        "sequence": 10_001,
+        "location": "archive",
+        "thread": thread,
+    })) {
+        Ok(item) => ClientEvent::Shell(item),
+        Err(err) => panic!("thread.updated failed: {err}"),
+    }
+}
+
+/// Two projects, one thread each that the panel tests switch between.
+fn mount_two_thread_app(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<ConnApp>) {
+    let (window, app) = mount_app(cx);
+    let mut shell = two_project_shell();
+    shell.threads.push(make_thread_shell(ThreadSeedSpec {
+        id: "thread-other",
+        project_id: "proj-other",
+        title: "Other project thread",
+        status: "completed",
+        activity_run_status: None,
+        pinned_at: None,
+        settled_at: None,
+        pending_kind: None,
+    }));
+    cx.update(|cx| app.update(cx, |app, cx| app.set_shell(shell, cx)));
+    (window, app)
+}
+
+fn render_frames(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    for _ in 0..3 {
+        let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+        cx.run_until_parked();
+    }
+}
+
+/// Opens a browser tab on `thread` and returns its browser once it rendered.
+fn open_thread_browser(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    app: &Entity<ConnApp>,
+    thread: &str,
+) -> (
+    conn_state::BrowserTabId,
+    gpui_kit::WeakEntity<crate::panels::BrowserPanelHandle>,
+) {
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread(thread, cx);
+            app.add_right_panel_tab(conn_state::RightPanelTab::Browser, cx);
+        })
+    });
+    render_frames(cx, window);
+    let id = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_tabs()
+            .browser_ids()
+            .last()
+            .expect("a browser tab is open")
+    });
+    let page = cx
+        .update(|cx| app.read(cx).browser_weak_for_test(id, cx))
+        .expect("the shown tab has a browser");
+    (id, page)
+}
+
+/// A delete or archive from any client reaches this one as a shell event, and the thread's
+/// browsers go with it. An archived thread the user still looks at keeps its page until they
+/// leave it.
+#[gpui_kit::test]
+fn shell_events_release_deleted_and_archived_threads_browsers(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let (_, deleted) = open_thread_browser(cx, window, &app, "thread-selected");
+    let (_, archived) = open_thread_browser(cx, window, &app, "thread-pinned");
+    let (_, shown) = open_thread_browser(cx, window, &app, "thread-other");
+    let shell_thread = |cx: &mut TestAppContext, id: &str| {
+        cx.update(|cx| app.read(cx).shell().find_thread(id).cloned())
+            .expect("the thread is listed")
+    };
+    let pinned = shell_thread(cx, "thread-pinned");
+    let other = shell_thread(cx, "thread-other");
+
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.apply_event_for_test(thread_removed("thread-selected"), cx);
+            app.apply_event_for_test(thread_archived(&pinned), cx);
+            app.apply_event_for_test(thread_archived(&other), cx);
+        })
+    });
+    render_frames(cx, window);
+    assert!(
+        deleted.upgrade().is_none(),
+        "a deleted thread's browser goes"
+    );
+    assert!(
+        archived.upgrade().is_none(),
+        "an archived thread's browser goes"
+    );
+    assert!(
+        shown.upgrade().is_some(),
+        "the archived thread on screen keeps its page"
+    );
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-waiting", cx)));
+    render_frames(cx, window);
+    assert!(
+        shown.upgrade().is_none(),
+        "leaving the archived thread lets its page go"
+    );
+}
+
+/// Annotation and project syncs reach only the browser on screen, and only when they changed.
+/// A hidden thread's page keeps its own project and catches up when it shows.
+#[gpui_kit::test]
+fn hidden_browsers_get_no_annotation_scripts(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let (_, parity) = open_thread_browser(cx, window, &app, "thread-selected");
+    let (_, other) = open_thread_browser(cx, window, &app, "thread-other");
+    let scripts = |cx: &mut TestAppContext, page: &gpui_kit::WeakEntity<_>| {
+        cx.update(|cx| {
+            page.upgrade()
+                .map(|p: Entity<crate::panels::BrowserPanelHandle>| p.read(cx).annotation_scripts())
+        })
+        .expect("the page is alive")
+    };
+    let project = |cx: &mut TestAppContext, page: &gpui_kit::WeakEntity<_>| {
+        cx.update(|cx| {
+            page.upgrade()
+                .map(|p: Entity<crate::panels::BrowserPanelHandle>| {
+                    p.read(cx).project_for_test().map(str::to_owned)
+                })
+        })
+        .expect("the page is alive")
+    };
+    let push = |cx: &mut TestAppContext, watching: bool| {
+        cx.update(|cx| {
+            let panel = app.read(cx).right_panel_for_test().clone();
+            panel.update(cx, |p, cx| {
+                p.set_annotations(Vec::new(), watching, true, cx)
+            });
+        });
+    };
+    assert_eq!(project(cx, &parity).as_deref(), Some("proj-parity"));
+    assert_eq!(project(cx, &other).as_deref(), Some("proj-other"));
+    let (hidden_before, shown_before) = (scripts(cx, &parity), scripts(cx, &other));
+
+    push(cx, true);
+    assert_eq!(
+        scripts(cx, &parity),
+        hidden_before,
+        "a hidden page runs no script"
+    );
+    assert_eq!(
+        scripts(cx, &other),
+        shown_before + 1,
+        "the shown page hears the change"
+    );
+    push(cx, true);
+    assert_eq!(
+        scripts(cx, &other),
+        shown_before + 1,
+        "an unchanged queue runs no script"
+    );
+    assert_eq!(
+        project(cx, &parity).as_deref(),
+        Some("proj-parity"),
+        "nor does it move projects"
+    );
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    assert_eq!(project(cx, &parity).as_deref(), Some("proj-parity"));
+    assert!(
+        scripts(cx, &parity) > hidden_before,
+        "the page catches up on the queue once it shows"
+    );
+    assert_eq!(project(cx, &other).as_deref(), Some("proj-other"));
+}
+
+/// An agent in thread B sends SQL while the user looks at thread A's Database panel: A's query
+/// stays as it was, and B's Database tab gets the SQL in B's project (`openDatabaseQuery`).
+#[gpui_kit::test]
+fn background_database_sql_waits_for_its_own_thread(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let writes = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            app.read(cx)
+                .right_panel_for_test()
+                .read(cx)
+                .database_sql_writes()
+                .to_vec()
+        })
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.select_right_panel_tab(conn_state::RightPanelTab::Database, cx);
+        })
+    });
+    render_frames(cx, window);
+    let request: conn_contract::AgentPanelRequest = match from_json(json!({
+        "requestId": "req-sql",
+        "threadId": "thread-other",
+        "panel": "database",
+        "sql": "select 2",
+        "run": true,
+        "focusWindow": false,
+    })) {
+        Ok(request) => request,
+        Err(err) => panic!("AgentPanelRequest failed: {err}"),
+    };
+    let error =
+        cx.update(|cx| app.update(cx, |app, _| app.prepare_background_panel_for_test(&request)));
+    assert!(error.is_some(), "a query for another thread does not run");
+    render_frames(cx, window);
+    assert!(writes(cx).is_empty(), "A's Database panel is untouched");
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    assert_eq!(
+        writes(cx),
+        [(Some("proj-other".to_owned()), "select 2".to_owned())]
+    );
+    assert_eq!(
+        cx.update(|cx| app.read(cx).right_panel_tabs().active().cloned()),
+        Some(conn_state::PanelSurface::Kind(
+            conn_state::RightPanelTab::Database
+        ))
+    );
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    assert_eq!(writes(cx).len(), 1, "the SQL lands once");
+}
+
+/// A thread with no tabs shows the launcher, never another thread's browser.
+#[gpui_kit::test]
+fn an_empty_thread_never_shows_another_threads_browser(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let (_, page_a) = open_thread_browser(cx, window, &app, "thread-selected");
+    // B opens and closes a browser tab, so Browser is its last tab kind with none left.
+    let (b_tab, _) = open_thread_browser(cx, window, &app, "thread-other");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.close_right_panel_tab(&conn_state::PanelSurface::Browser(b_tab), cx);
+            app.toggle_right_panel(cx);
+            // The next chat sync (any batch from the server) pushes the panel's surface.
+            app.select_thread("thread-other", cx);
+        })
+    });
+    render_frames(cx, window);
+    assert!(cx.update(|cx| app.read(cx).right_panel_shows_launcher_for_test()));
+    let visible = cx.update(|cx| page_a.upgrade().map(|p| p.read(cx).visible_for_test()));
+    assert_eq!(
+        visible,
+        Some(false),
+        "A's page stays hidden behind B's launcher"
+    );
+}
+
+/// A discarded draft's browser stays while `Undo` can bring the draft back, and goes when the
+/// notice expires.
+#[gpui_kit::test]
+fn a_discarded_drafts_browser_goes_when_undo_expires(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.start_new_thread(Some("proj-other".to_owned()), Some(window), cx);
+        });
+    });
+    type_into_composer(cx, window, &app, "draft with a page");
+    let draft = cx
+        .update(|cx| app.read(cx).open_draft_id_for_test())
+        .expect("the draft is open");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(conn_state::RightPanelTab::Browser, cx)
+        })
+    });
+    render_frames(cx, window);
+    let id = cx
+        .update(|cx| app.read(cx).right_panel_tabs().browser_ids().last())
+        .expect("the draft has a browser tab");
+    let page = cx
+        .update(|cx| app.read(cx).browser_weak_for_test(id, cx))
+        .expect("the shown tab has a browser");
+
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| app.discard_draft_row(&draft, window, cx));
+    });
+    render_frames(cx, window);
+    assert!(
+        page.upgrade().is_some(),
+        "Undo can still bring the draft and its page back"
+    );
+
+    cx.executor()
+        .advance_clock(Duration::from_secs(conn_state::DISCARD_UNDO_SECS + 1));
+    render_frames(cx, window);
+    assert!(
+        page.upgrade().is_none(),
+        "an expired discard releases the draft's browser"
     );
 }
 

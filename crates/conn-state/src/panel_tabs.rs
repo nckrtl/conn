@@ -142,6 +142,9 @@ impl RightPanelTabs {
 pub struct ThreadPanel {
     pub tabs: RightPanelTabs,
     pub open: bool,
+    /// SQL an agent sent while the thread was not shown, for its Database panel once it shows
+    /// (`databaseStore.setPending`).
+    pub pending_sql: Option<String>,
 }
 
 /// Every thread's right panel, as `rightPanelStore.byThreadKey`. The shown thread's panel lives
@@ -174,7 +177,7 @@ impl ThreadPanels {
         let old = std::mem::replace(current, next);
         self.next_browser = self.next_browser.max(old.tabs.next_browser);
         if let Some(key) = self.owner.take()
-            && (old.open || !old.tabs.tabs().is_empty())
+            && (old.open || !old.tabs.tabs().is_empty() || old.pending_sql.is_some())
         {
             self.parked.insert(key, old);
         }
@@ -185,7 +188,14 @@ impl ThreadPanels {
 
     /// Opens a tab of kind `tab` on a thread that is not shown, so it is there when the thread
     /// shows (`preparePanel`). `shown` is the shown thread's tabs, which share the id range.
-    pub fn prepare(&mut self, owner: &str, tab: RightPanelTab, shown: &mut RightPanelTabs) {
+    /// `sql` waits for that thread's Database panel (`openDatabaseQuery`).
+    pub fn prepare(
+        &mut self,
+        owner: &str,
+        tab: RightPanelTab,
+        sql: Option<String>,
+        shown: &mut RightPanelTabs,
+    ) {
         debug_assert_ne!(
             self.owner.as_deref(),
             Some(owner),
@@ -195,6 +205,9 @@ impl ThreadPanels {
         panel.tabs.next_browser = self.next_browser.max(shown.next_browser);
         panel.tabs.open(tab);
         panel.open = true;
+        if sql.is_some() {
+            panel.pending_sql = sql;
+        }
         self.next_browser = panel.tabs.next_browser;
         shown.next_browser = self.next_browser;
     }
@@ -340,7 +353,15 @@ mod tests {
         shown.open = true;
         let a = shown.clone();
         // An agent opens a tab on a thread the user is not looking at.
-        panels.prepare("env:c", RightPanelTab::Browser, &mut shown.tabs);
+        panels.prepare("env:c", RightPanelTab::Browser, None, &mut shown.tabs);
+        // SQL for a hidden thread waits for that thread, not the shown one.
+        panels.prepare(
+            "env:d",
+            RightPanelTab::Database,
+            Some("select 1".into()),
+            &mut shown.tabs,
+        );
+        assert_eq!(shown.pending_sql, None);
 
         assert!(panels.switch(Some("env:b".into()), &mut shown));
         assert!(
@@ -364,6 +385,12 @@ mod tests {
             panic!("one prepared tab")
         };
         assert!(![&a1, &a2, &b1].contains(&c1));
+        panels.switch(Some("env:d".into()), &mut shown);
+        assert_eq!(shown.pending_sql.as_deref(), Some("select 1"));
+        assert_eq!(
+            shown.tabs.active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Database))
+        );
 
         // Deleting a thread hands back its browsers to close.
         let forgotten: Vec<_> = panels

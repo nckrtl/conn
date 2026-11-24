@@ -206,6 +206,9 @@ pub(crate) struct BrowserPanel {
     user_load: bool,
     /// The tab title last reported with [`BrowserTabEvent::TitleChanged`].
     reported_title: String,
+    /// `__connAnnotationsChanged` calls, CEF view or not, so tests can count them.
+    #[cfg(test)]
+    annotation_scripts: Cell<usize>,
 }
 
 impl EventEmitter<AnnotationAction> for BrowserPanel {}
@@ -305,6 +308,8 @@ impl BrowserPanel {
             context_menu: None,
             user_load: false,
             reported_title: String::new(),
+            #[cfg(test)]
+            annotation_scripts: Cell::new(0),
         }
         .with_reported_title()
     }
@@ -329,6 +334,21 @@ impl BrowserPanel {
     #[cfg(test)]
     pub(crate) fn target_url(&self) -> &str {
         &self.url
+    }
+
+    #[cfg(test)]
+    pub(crate) fn visible_for_test(&self) -> bool {
+        self.visible.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn annotation_scripts(&self) -> usize {
+        self.annotation_scripts.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_for_test(&self) -> Option<&str> {
+        self.project_id.as_deref()
     }
 
     /// The tab strip's title (`surfaceTitle`): the page title, else its host, else Browser.
@@ -391,6 +411,12 @@ impl BrowserPanel {
         project_ready: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.annotations.annotations == annotations
+            && self.annotations.watching == watching
+            && self.annotations.project_ready == project_ready
+        {
+            return;
+        }
         self.annotations.sync(annotations, watching, project_ready);
         self.notify_overlay_annotations_changed();
         self.maybe_show_existing_pins();
@@ -657,6 +683,9 @@ impl BrowserPanel {
     }
 
     fn notify_overlay_annotations_changed(&self) {
+        #[cfg(test)]
+        self.annotation_scripts
+            .set(self.annotation_scripts.get() + 1);
         if let Some(view) = self.view.borrow().as_ref() {
             view.execute_javascript("window.__connAnnotationsChanged?.();");
         }

@@ -1248,6 +1248,8 @@ impl ConnApp {
                     }
                     if shells_changed {
                         app.remerge_linked_shells();
+                        let changed = std::mem::take(&mut app.linked_changed_threads);
+                        app.release_gone_thread_panels(&changed, cx);
                         app.expire_offline(cx);
                         app.reconcile_offline(cx);
                         app.drive_older_pages(cx);
@@ -1338,6 +1340,7 @@ impl ConnApp {
                     self.resubscribe_ended_threads();
                 }
                 let changed = change.projects_changed || !change.threads_changed.is_empty();
+                self.linked_changed_threads.extend(change.threads_changed);
                 if changed {
                     self.linked.dirty.insert(environment_id);
                 }

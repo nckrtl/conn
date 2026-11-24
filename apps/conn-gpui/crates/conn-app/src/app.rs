@@ -272,6 +272,10 @@ pub(crate) struct ConnApp {
     /// The other threads' right panels; `right_panel_tabs` and `layout.right_panel_open` hold
     /// the shown thread's (`rightPanelStore.byThreadKey`).
     thread_panels: ThreadPanels,
+    /// The shown thread's [`ThreadPanel::pending_sql`].
+    pending_database_sql: Option<String>,
+    /// Threads linked shells changed since their last merge, for [`Self::release_gone_thread_panels`].
+    linked_changed_threads: Vec<String>,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -691,6 +695,8 @@ impl ConnApp {
             // No tab until one is picked: opening the panel shows the surface launcher.
             right_panel_tabs: RightPanelTabs::default(),
             thread_panels: ThreadPanels::default(),
+            pending_database_sql: None,
+            linked_changed_threads: Vec::new(),
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -1095,6 +1101,7 @@ impl ConnApp {
     /// The right panel is open and no GPUI overlay covers it.
     fn right_panel_surface_visible(&self) -> bool {
         self.layout.right_panel_open
+            && !self.right_panel_tabs.tabs().is_empty()
             && self.command_palette.is_none()
             && self.settings_modal.is_none()
             && self.workspace_editor.is_none()
@@ -1149,7 +1156,7 @@ impl ConnApp {
 
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
-        self.sync_panel_owner();
+        self.sync_panel_owner(cx);
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
@@ -1224,6 +1231,11 @@ impl ConnApp {
             panel.set_surface(&surface, cx);
             panel.set_surface_visible(surface_visible, cx);
         });
+        // SQL an agent sent while this thread was hidden reaches its own project's panel now.
+        if let Some(sql) = self.pending_database_sql.take() {
+            self.right_panel
+                .update(cx, |panel, cx| panel.set_database_sql(sql, cx));
+        }
         let (
             model_instance,
             model,
@@ -1433,6 +1445,7 @@ impl ConnApp {
                     self.layout.selected_thread_id = None;
                 }
                 self.release_settled_drop();
+                self.release_gone_thread_panels(&change.threads_changed, cx);
                 if change.snapshot_required || !change.threads_changed.is_empty() {
                     self.drive_older_pages(cx);
                 }
@@ -3843,7 +3856,8 @@ impl ConnApp {
     /// Puts the shown thread's (or draft's) right panel in place. Panels are keyed by thread or
     /// draft id alone: both are UUIDs, and a linked thread's environment can be learnt late. The panel it leaves keeps
     /// its tabs, and its browsers keep their pages, until the thread shows again.
-    fn sync_panel_owner(&mut self) {
+    fn sync_panel_owner(&mut self, cx: &mut Context<'_, Self>) {
+        let left = self.thread_panels.owner().map(str::to_owned);
         let owner = self
             .layout
             .selected_thread_id
@@ -3853,8 +3867,10 @@ impl ConnApp {
         let mut panel = ThreadPanel {
             tabs: std::mem::take(&mut self.right_panel_tabs),
             open: self.layout.right_panel_open,
+            pending_sql: self.pending_database_sql.take(),
         };
-        if self.thread_panels.switch(owner, &mut panel) {
+        let switched = self.thread_panels.switch(owner, &mut panel);
+        if switched {
             self.right_panel_add_menu_open = false;
             self.layout.right_panel_tab = panel
                 .tabs
@@ -3863,15 +3879,103 @@ impl ConnApp {
         }
         self.right_panel_tabs = panel.tabs;
         self.layout.right_panel_open = panel.open;
+        self.pending_database_sql = panel.pending_sql;
+        // An archived thread the user stayed on lets its panel go once they leave it.
+        if switched
+            && let Some(left) = left
+            && self.thread_is_archived(&left)
+        {
+            self.forget_thread_panel(&left, cx);
+        }
+    }
+
+    fn thread_is_archived(&self, id: &str) -> bool {
+        self.shell.archived_threads.iter().any(|t| t.id == id)
+    }
+
+    /// Shell events changed `ids`: a thread deleted or archived anywhere, by this client or
+    /// another, takes its panel and browsers with it (`removeThread`). A shown thread that went
+    /// is parked first, and an archived one the user still looks at goes when they leave it.
+    pub(crate) fn release_gone_thread_panels(
+        &mut self,
+        ids: &[String],
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.sync_panel_owner(cx);
+        for id in ids {
+            let gone = self.shell.find_thread(id).is_none() || self.thread_is_archived(id);
+            if gone && self.thread_panels.owner() != Some(id.as_str()) {
+                self.forget_thread_panel(id, cx);
+            }
+        }
+    }
+
+    /// An agent's `panel_open` for a thread the user is not looking at: its tab, and SQL for
+    /// its Database panel, wait in that thread's panel (`preparePanel`, `openDatabaseQuery`).
+    /// Nothing reaches the shown thread's panel. Returns why the request did not run, if so.
+    fn prepare_background_panel(
+        &mut self,
+        request: &conn_contract::AgentPanelRequest,
+        not_on_thread: &str,
+    ) -> Option<String> {
+        use conn_contract::AgentPanelKind;
+        if request.panel == AgentPanelKind::Mcp
+            && (request.mcp_server.is_some() || request.mcp_call.is_some())
+        {
+            return Some(not_on_thread.to_owned());
+        }
+        let sql = request
+            .sql
+            .clone()
+            .filter(|_| request.panel == AgentPanelKind::Database);
+        let ran = sql.is_some() && request.run == Some(true);
+        self.thread_panels.prepare(
+            &request.thread_id,
+            agent_panel_tab(request.panel),
+            sql,
+            &mut self.right_panel_tabs,
+        );
+        ran.then(|| format!("{not_on_thread} The query is in its Database panel."))
     }
 
     /// A deleted thread's right panel goes with it, and so do its browsers.
-    pub(crate) fn forget_thread_panel(&mut self, owner: &str, cx: &mut Context<'_, Self>) {
+    fn forget_thread_panel(&mut self, owner: &str, cx: &mut Context<'_, Self>) {
         for id in self.thread_panels.forget(owner) {
             self.right_panel.update(cx, |panel, cx| {
                 panel.close_surface(&PanelSurface::Browser(id), cx);
             });
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_draft_id_for_test(&self) -> Option<String> {
+        self.draft.as_ref().map(|d| d.draft_id.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn right_panel_shows_launcher_for_test(&self) -> bool {
+        self.right_panel_shows_launcher()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn right_panel_for_test(&self) -> &Entity<crate::panels::RightPanel> {
+        &self.right_panel
+    }
+
+    /// One server event, applied as the connection's batch loop applies it.
+    #[cfg(test)]
+    pub(crate) fn apply_event_for_test(&mut self, event: ClientEvent, cx: &mut Context<'_, Self>) {
+        self.apply_event(event, None, cx);
+        self.sync_chat(cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_background_panel_for_test(
+        &mut self,
+        request: &conn_contract::AgentPanelRequest,
+    ) -> Option<String> {
+        self.prepare_background_panel(request, "not on thread")
     }
 
     #[cfg(test)]
@@ -3899,11 +4003,17 @@ impl ConnApp {
     }
 
     /// The active right-panel surface.
+    /// With no tab open it is never a browser: the right panel holds other threads' browsers,
+    /// and an empty thread shows the launcher, not one of them.
     fn right_panel_surface(&self) -> PanelSurface {
+        let fallback = match self.layout.right_panel_tab {
+            RightPanelTab::Browser => RightPanelTab::Files,
+            tab => tab,
+        };
         self.right_panel_tabs
             .active()
             .cloned()
-            .unwrap_or(PanelSurface::Kind(self.layout.right_panel_tab))
+            .unwrap_or(PanelSurface::Kind(fallback))
     }
 
     #[cfg(feature = "automation")]
@@ -4901,10 +5011,7 @@ impl ConnApp {
             "delete thread",
             crate::commands::delete_thread(thread_id),
             cx,
-            move |app, cx| {
-                app.forget_thread_draft(&deleted, cx);
-                app.forget_thread_panel(&deleted, cx);
-            },
+            move |app, cx| app.forget_thread_draft(&deleted, cx),
         );
     }
 
@@ -5414,7 +5521,7 @@ impl ConnApp {
 
     /// Current shell state.
     #[cfg_attr(
-        not(feature = "automation"),
+        not(any(feature = "automation", test)),
         expect(dead_code, reason = "read by the automation hook")
     )]
     #[must_use]
@@ -6198,36 +6305,11 @@ impl ConnApp {
             .unwrap_or(false);
 
         if !on_thread {
-            let acts_on_mcp = request.panel == AgentPanelKind::Mcp
-                && (request.mcp_server.is_some() || request.mcp_call.is_some());
-            if !acts_on_mcp {
-                let tab = agent_panel_tab(request.panel);
-                let _ = this.update(cx, |app, _| {
-                    app.thread_panels
-                        .prepare(&request.thread_id, tab, &mut app.right_panel_tabs);
-                });
-            }
-            if request.panel == AgentPanelKind::Database
-                && let Some(sql) = request.sql.clone()
-            {
-                let _ = this.update(cx, |app, cx| {
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.set_database_sql(sql, cx));
-                });
-                if request.run == Some(true) {
-                    resp.ok = false;
-                    resp.error = Some(format!(
-                        "{not_on_thread} The query is in its Database panel."
-                    ));
-                }
-                return resp;
-            }
-            if request.panel == AgentPanelKind::Mcp
-                && (request.mcp_server.is_some() || request.mcp_call.is_some())
-            {
+            if let Ok(Some(error)) = this.update(cx, |app, _| {
+                app.prepare_background_panel(&request, not_on_thread)
+            }) {
                 resp.ok = false;
-                resp.error = Some(not_on_thread.to_owned());
-                return resp;
+                resp.error = Some(error);
             }
             return resp;
         }

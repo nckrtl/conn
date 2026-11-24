@@ -211,6 +211,10 @@ pub(crate) struct BrowserPanel {
     annotation_scripts: Cell<usize>,
     /// A page loaded while hidden; its bridge and pins go in when it shows.
     load_injection_pending: bool,
+    /// A page started loading while hidden; the debug bar's host script goes in when it shows.
+    host_script_pending: bool,
+    #[cfg(test)]
+    host_scripts: Cell<usize>,
     /// The automation hook needs this page while it is hidden, so its view is made anyway.
     view_while_hidden: Rc<Cell<bool>>,
     /// Preview requests the automation hook sent this page, view or not.
@@ -322,6 +326,9 @@ impl BrowserPanel {
             #[cfg(test)]
             annotation_scripts: Cell::new(0),
             load_injection_pending: false,
+            host_script_pending: false,
+            #[cfg(test)]
+            host_scripts: Cell::new(0),
             view_while_hidden: Rc::new(Cell::new(false)),
             #[cfg(all(test, feature = "automation"))]
             preview_requests: Cell::new(0),
@@ -521,6 +528,37 @@ impl BrowserPanel {
             self.load_injection_pending = true;
         }
         cx.notify();
+    }
+
+    /// A page started loading. The debug bar's host script goes in now only if it shows, as
+    /// the bridge does on load end.
+    fn on_load_start(&mut self, cx: &mut Context<'_, Self>) {
+        if self.visible.get() {
+            self.inject_host_script();
+        } else {
+            self.host_script_pending = true;
+        }
+        self.laravel_toolbar
+            .update(cx, |bar, cx| bar.on_load_start(cx));
+    }
+
+    fn inject_host_script(&mut self) {
+        self.host_script_pending = false;
+        #[cfg(test)]
+        self.host_scripts.set(self.host_scripts.get() + 1);
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(&host_script());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_start_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        self.on_load_start(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_scripts_for_test(&self) -> usize {
+        self.host_scripts.get()
     }
 
     fn inject_after_load(&mut self) {
@@ -1054,6 +1092,9 @@ impl BrowserPanel {
             apply_hidden(&self.view, &self.applied_hidden, !visible);
             if visible {
                 self.prewarm_runtime(cx);
+                if self.host_script_pending {
+                    self.inject_host_script();
+                }
                 if self.load_injection_pending {
                     self.inject_after_load();
                 }
@@ -1444,12 +1485,7 @@ impl BrowserPanel {
                                             });
                                         }
                                         BrowserOverlayEvent::LoadStart => {
-                                            if let Some(view) = panel.view.borrow().as_ref() {
-                                                view.execute_javascript(&host_script());
-                                            }
-                                            panel
-                                                .laravel_toolbar
-                                                .update(cx, |bar, cx| bar.on_load_start(cx));
+                                            panel.on_load_start(cx);
                                         }
                                         BrowserOverlayEvent::PreviewResult {
                                             request_id,

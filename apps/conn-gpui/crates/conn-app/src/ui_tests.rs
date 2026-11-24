@@ -4194,6 +4194,39 @@ fn hidden_browsers_get_no_annotation_scripts(cx: &mut TestAppContext) {
             }
         });
     };
+    // The same holds for the debug bar's host script on load start.
+    let host_scripts = |cx: &mut TestAppContext, page: &gpui_kit::WeakEntity<_>| {
+        cx.update(|cx| {
+            page.upgrade()
+                .map(|p: Entity<crate::panels::BrowserPanelHandle>| {
+                    p.read(cx).host_scripts_for_test()
+                })
+        })
+        .expect("the page is alive")
+    };
+    let load_start = |cx: &mut TestAppContext, page: &gpui_kit::WeakEntity<_>| {
+        cx.update(|cx| {
+            if let Some(p) = page.upgrade() {
+                let p: Entity<crate::panels::BrowserPanelHandle> = p;
+                p.update(cx, |p, cx| p.load_start_for_test(cx));
+            }
+        });
+    };
+    let hidden_hosts = host_scripts(cx, &parity);
+    load_start(cx, &parity);
+    assert_eq!(
+        host_scripts(cx, &parity),
+        hidden_hosts,
+        "a hidden page that starts loading runs no host script"
+    );
+    let shown_hosts = host_scripts(cx, &other);
+    load_start(cx, &other);
+    assert_eq!(
+        host_scripts(cx, &other),
+        shown_hosts + 1,
+        "a shown page gets its host script on load start"
+    );
+
     let (bridge_before, overlay_before) = injections(cx, &parity);
     load_end(cx, &parity);
     assert_eq!(
@@ -4215,6 +4248,11 @@ fn hidden_browsers_get_no_annotation_scripts(cx: &mut TestAppContext) {
         injections(cx, &parity).0,
         bridge_before + 1,
         "the hidden page takes its bridge once it shows"
+    );
+    assert_eq!(
+        host_scripts(cx, &parity),
+        hidden_hosts + 1,
+        "and its host script, once"
     );
     assert_eq!(project(cx, &parity).as_deref(), Some("proj-parity"));
     assert!(

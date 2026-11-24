@@ -11,8 +11,8 @@ rust-version.workspace = true
 conn-provider.workspace = true
 conn-support.workspace = true
 serde_json.workspace = true
-# `signal`: the supervisor wakes on SIGCHLD to see an exit before it reaps; already in the
-# server through conn-server and conn-terminal.
+# `signal`: SIGCHLD wakes `process::wait_exit_unreaped`; already in the server through
+# conn-server and conn-terminal.
 tokio = { workspace = true, features = ["sync", "process", "io-util", "time", "rt", "macros", "signal"] }
 # Signals process groups without forking `/bin/kill`, which slim images may lack. Already in
 # the tree through conn-terminal (`pty-process`); safe wrappers, no `unsafe` here.
@@ -25,6 +25,10 @@ conn-support = { workspace = true, features = ["test-util"] }
 # tree through conn-devices and conn-preview.
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true, features = ["signal"] }
+
+[[test]]
+name = "sigchld_masked"
+harness = false
 
 [[test]]
 name = "supervisor_sigchld_masked"

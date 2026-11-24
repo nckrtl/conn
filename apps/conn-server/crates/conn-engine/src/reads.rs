@@ -573,15 +573,15 @@ impl Store {
                 continue;
             }
             let message = &hit["message"];
-            let text = message["text"].as_str().unwrap_or_default();
-            let Some(at) = search.accept(text) else {
+            let text = link_labels(message["text"].as_str().unwrap_or_default());
+            let Some(at) = search.accept(&text) else {
                 continue;
             };
             matches.push(json!({
                 "threadId": thread_id,
                 "projectId": hit["projectId"],
                 "source": if message["role"] == "user" { "user" } else { "assistant" },
-                "snippet": snippet(text, at),
+                "snippet": snippet(&text, at),
                 "messageCreatedAt": message["createdAt"],
                 "messageId": message["id"],
             }));
@@ -749,6 +749,42 @@ fn snippet(text: &str, at: usize) -> String {
         String::from_utf16_lossy(shown.get(..end).unwrap_or_default()),
         if cut { "…" } else { "" }
     )
+}
+
+/// `MARKDOWN_LINK` in `ThreadSearch.ts`: a thread shows a link (or image) as its label, so search
+/// reads `[label](address)` as `label`.
+fn link_labels(text: &str) -> std::borrow::Cow<'_, str> {
+    fn link_at(rest: &str) -> Option<(&str, usize)> {
+        let body = rest.strip_prefix('!').unwrap_or(rest).strip_prefix('[')?;
+        let close = body.find([']', '\n'])?;
+        let address = body[close..].strip_prefix("](")?;
+        let end = address.find(|c: char| c == ')' || c.is_whitespace())?;
+        address[end..].starts_with(')').then(|| {
+            let used = rest.len() - address.len() + end + 1;
+            (&body[..close], used)
+        })
+    }
+    if !text.contains("](") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(next) = rest.find(['!', '[']) {
+        out.push_str(&rest[..next]);
+        rest = &rest[next..];
+        match link_at(rest) {
+            Some((label, used)) => {
+                out.push_str(label);
+                rest = &rest[used..];
+            }
+            None => {
+                out.push(rest.as_bytes()[0] as char);
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into()
 }
 
 #[cfg(test)]

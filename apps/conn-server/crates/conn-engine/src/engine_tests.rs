@@ -3848,6 +3848,29 @@ async fn search_snippet_shows_the_accepted_occurrence() {
     engine.shutdown().await;
 }
 
+/// `ThreadSearch.ts` matches a message as it reads (`MARKDOWN_LINK`): a link shows only its label,
+/// so its address finds nothing and the snippet shows the label.
+#[tokio::test(flavor = "current_thread")]
+async fn search_reads_a_markdown_link_as_its_label() {
+    let db = TempDb::new("search-link-label");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t", "t:c1")).await;
+    let text = "See [release notes](https://docs.example/quartz/changelog).";
+    dispatch(&engine, message("t", "t:c2", text)).await;
+    run_to_end(&engine, "t", "run:t:1").await;
+    assert_eq!(search(&engine, "quartz").await, Vec::<String>::new());
+    let found = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "release notes"}),
+    )
+    .await
+    .unwrap();
+    // The fake provider echoes the message, and its reply is the newest hit.
+    assert_eq!(found["matches"][0]["snippet"], "echo: See release notes.");
+    engine.shutdown().await;
+}
+
 /// Search follows `ThreadSearch.ts`: every long word must match, `%` and `_` are plain
 /// characters, short words narrow, two CJK characters count as a word, and deleted or
 /// archived threads drop out in SQL.

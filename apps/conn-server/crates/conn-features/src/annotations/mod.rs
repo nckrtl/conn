@@ -192,7 +192,7 @@ impl ProjectData {
             }
             let record = std::fs::read_to_string(data.dir.join(&name))
                 .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                .and_then(|text| parse_disk_json(&text));
             let Some(Value::Object(record)) = record else {
                 eprintln!("annotations: skipped an unreadable annotation file {name}");
                 data.skipped.insert(id.to_owned());
@@ -830,3 +830,77 @@ impl ProjectLookup for EngineProjects {
 
 #[cfg(test)]
 mod tests;
+
+/// A record file as T3's reader takes it: a leading byte order mark is dropped, and a lone
+/// UTF-16 surrogate escape (the overlay cuts labels by UTF-16 units, so it can split an emoji)
+/// reads as U+FFFD instead of refusing the whole file.
+fn parse_disk_json(text: &str) -> Option<Value> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    serde_json::from_str(text)
+        .ok()
+        .or_else(|| serde_json::from_str(&replace_lone_surrogates(text)).ok())
+}
+
+/// Rewrites each `\uXXXX` escape of an unpaired surrogate inside a JSON string to `\ufffd`.
+fn replace_lone_surrogates(text: &str) -> String {
+    fn escape_at(bytes: &[u8], i: usize) -> Option<u16> {
+        let hex = bytes.get(i..i + 6)?;
+        if hex[0] != b'\\' || hex[1] != b'u' {
+            return None;
+        }
+        u16::from_str_radix(std::str::from_utf8(&hex[2..]).ok()?, 16).ok()
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut start, mut in_string) = (0, 0, false);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                in_string = !in_string;
+                i += 1;
+            }
+            b'\\' if in_string => {
+                let Some(unit) = escape_at(bytes, i) else {
+                    i += 2;
+                    continue;
+                };
+                let high = (0xd800..0xdc00).contains(&unit);
+                let low = (0xdc00..0xe000).contains(&unit);
+                let paired = high
+                    && escape_at(bytes, i + 6).is_some_and(|next| (0xdc00..0xe000).contains(&next));
+                if paired {
+                    i += 12;
+                } else if high || low {
+                    out.push_str(&text[start..i]);
+                    out.push_str("\\ufffd");
+                    i += 6;
+                    start = i;
+                } else {
+                    i += 6;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&text[start..]);
+    out
+}
+
+#[cfg(test)]
+mod disk_json_tests {
+    use super::parse_disk_json;
+
+    #[test]
+    fn a_byte_order_mark_and_a_split_emoji_still_read() {
+        assert_eq!(
+            parse_disk_json("\u{feff}{\"id\":\"a\"}").unwrap()["id"],
+            "a"
+        );
+        // 24 ASCII characters and the high half of an emoji, as the overlay cuts a label.
+        let label =
+            r#"{"label":"abcdefghijklmnopqrstuvwx\ud83d","next":"\ud83d\ude00 ok \\ud83d"}"#;
+        let value = parse_disk_json(label).unwrap();
+        assert_eq!(value["label"], "abcdefghijklmnopqrstuvwx\u{fffd}");
+        assert_eq!(value["next"], "\u{1f600} ok \\ud83d");
+    }
+}

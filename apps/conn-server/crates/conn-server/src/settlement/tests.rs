@@ -52,7 +52,7 @@ fn persisted_link(state: Option<&str>, linked_at: &Value) -> Value {
 
 fn settle(after_days: Option<u64>, on_merge: bool, keep: bool) -> AutoSettle {
     AutoSettle {
-        after_days,
+        after_days: after_days.map(|days| days as f64),
         on_merge,
         keep_pull_requests: keep,
     }
@@ -273,6 +273,27 @@ fn a_project_inherits_or_disables_the_threshold() {
     );
     let never = settings(json!({"sidebarAutoSettleAfterDays": null}));
     assert_eq!(AutoSettle::for_project(&never, "p").after_days, None);
+}
+
+/// `SidebarAutoSettleAfterDays` is a number between 1 and 90, so a day count can be
+/// fractional: `inactivityAtMs < nowMs - days * DAY_MS` reads 1.5 days as 36 hours, for the
+/// environment and for a project override.
+#[test]
+fn a_fractional_day_count_settles_after_that_many_hours() {
+    let settings = |value: Value| value.as_object().unwrap().clone();
+    let global = settings(json!({"sidebarAutoSettleAfterDays": 1.5}));
+    let project = settings(json!({"sidebarAutoSettleAfterDays": null,
+        "projectSettingsOverrides": {"project-1": {"sidebarAutoSettleAfterDays": 1.5}}}));
+    for read in [&global, &project] {
+        assert!(auto_settlement_configured(read));
+        let idle = |hours: i64| shell(json!({"latestUserMessageAt": at(-hours * 60 * 60 * 1_000)}));
+        assert!(
+            decide(&idle(30), read, NOW_MS).is_none(),
+            "30 hours is under 1.5 days"
+        );
+        let command = decide(&idle(40), read, NOW_MS).expect("40 hours is past 1.5 days");
+        assert_eq!(command["settledAt"], at(-40 * 60 * 60 * 1_000));
+    }
 }
 
 // ---- The sweep on a real engine and controlled time ----

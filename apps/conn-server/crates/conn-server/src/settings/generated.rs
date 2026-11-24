@@ -7,7 +7,7 @@ pub(super) const DEFAULT_AGENT_BROWSER_ACCESS: bool = true;
 
 /// `DEFAULT_SERVER_SETTINGS`' automatic settlement: days of inactivity (`None`: never),
 /// settle on merge, keep threads with a pull request.
-pub(crate) const DEFAULT_AUTO_SETTLE_AFTER_DAYS: Option<u64> = Some(7);
+pub(crate) const DEFAULT_AUTO_SETTLE_AFTER_DAYS: Option<f64> = Some(7_f64);
 pub(crate) const DEFAULT_AUTO_SETTLE_ON_MERGE: bool = true;
 pub(crate) const DEFAULT_AUTO_SETTLE_KEEP_PULL_REQUESTS: bool = false;
 

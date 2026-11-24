@@ -226,12 +226,22 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
             pending_summary = json!({"id":secret.get("id"),"kind":"user_input","createdAt":created,"blocking":true,"userOnly":true});
         }
     }
-    let latest_user = one(
-        tx,
-        "SELECT body FROM entities WHERE thread_id = ?1 AND kind = 'messages'
-         AND json_extract(body, '$.role') = 'user' ORDER BY first_seq DESC LIMIT 1",
-        params![thread_id],
-    )?;
+    // The server's own idle compactions are not the user's messages (`idleCompactionOf`).
+    let latest_user = |authored: &str| {
+        one(
+            tx,
+            &format!(
+                "SELECT body FROM entities AS m WHERE thread_id = ?1 AND kind = 'messages'
+                 AND json_extract(body, '$.role') = 'user' {authored}
+                 AND NOT {IDLE_COMPACTION_MESSAGE_SQL} ORDER BY first_seq DESC LIMIT 1"
+            ),
+            params![thread_id],
+        )
+    };
+    let (latest_user, latest_authored) = (
+        latest_user("")?,
+        latest_user("AND json_extract(body, '$.createdBy') = 'user'")?,
+    );
     // `latestRootProviderFailure`: the newest failed error item on a failed run's root node.
     let failure = match &latest_run {
         Some(run) if run["status"] == "failed" => one(
@@ -323,9 +333,8 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "pendingGuestMessageCount": 0,
         "latestVisibleMessage": null,
         "latestUserMessageAt": latest_user.as_ref().map_or(Value::Null, |m| m["updatedAt"].clone()),
-        "latestUserAuthoredMessageAt": latest_user
+        "latestUserAuthoredMessageAt": latest_authored
             .as_ref()
-            .filter(|m| m["createdBy"] == "user")
             .map_or(Value::Null, |m| m["updatedAt"].clone()),
         "hasActionableProposedPlan": false,
         "pendingBackgroundTasks": pending_background,

@@ -391,7 +391,14 @@ async fn an_idle_large_context_compacts_before_its_cache_expires() {
         .await
         .unwrap()[0];
     assert_eq!(candidate["latestUserMessageAt"], user_message);
+    assert_eq!(candidate["latestUserAuthoredMessageAt"], user_message);
     assert_eq!(candidate["latestRunId"], run.as_str());
+    // The sidebar's times skip the compaction too (`idleCompactionOf` in `buildThreadShell`).
+    assert_eq!(shell["latestUserMessageAt"], user_message, "{shell}");
+    assert_eq!(
+        shell["latestUserAuthoredMessageAt"], user_message,
+        "{shell}"
+    );
 }
 
 /// The final check at the deadline: a user turn in between takes the timer over, and that turn

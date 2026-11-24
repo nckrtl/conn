@@ -34,9 +34,10 @@ fn ms(value: &Value) -> Option<i64> {
 
 /// A project's automatic settlement settings (`resolveProjectSettings`): the project's override
 /// when it has the key (a `null` day count included), else the environment's, else T3's default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The day count is a number, so it can be fractional (`SidebarAutoSettleAfterDays`).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoSettle {
-    pub after_days: Option<u64>,
+    pub after_days: Option<f64>,
     pub on_merge: bool,
     pub keep_pull_requests: bool,
 }
@@ -54,7 +55,7 @@ impl AutoSettle {
         Self {
             after_days: match value("sidebarAutoSettleAfterDays") {
                 Some(Value::Null) => None,
-                Some(days) => days.as_u64(),
+                Some(days) => days.as_f64(),
                 None => DEFAULT_AUTO_SETTLE_AFTER_DAYS,
             },
             on_merge: value("sidebarAutoSettleOnMerge")
@@ -281,14 +282,16 @@ pub fn resolve_auto_settlement_at(
     if settings.keep_pull_requests && has_pull_request {
         return None;
     }
-    let days = i64::try_from(settings.after_days?).ok()?;
+    let days = settings.after_days?;
     let timer_wake = ms(&thread["snoozedUntil"]).filter(|until| *until <= now);
     let inactive_since = [Some(activity), ms(&thread["lastSnoozeWakeAt"]), timer_wake]
         .into_iter()
         .flatten()
         .max()
         .unwrap_or(activity);
-    (inactive_since < now - days * DAY_MS).then_some(inactive_since)
+    // As T3, in floating point: `inactivityAtMs < nowMs - autoSettleAfterDays * DAY_MS`.
+    let settles = (inactive_since as f64) < now as f64 - days * DAY_MS as f64;
+    settles.then_some(inactive_since)
 }
 
 /// The `thread.auto-settle` for one candidate under `settings` at `now`, or `None` when it

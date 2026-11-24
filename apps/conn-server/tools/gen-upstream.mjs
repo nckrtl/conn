@@ -321,7 +321,7 @@ const secretsRs = rustfmt(
     "",
     "/// `DEFAULT_SERVER_SETTINGS`' automatic settlement: days of inactivity (`None`: never),",
     "/// settle on merge, keep threads with a pull request.",
-    `pub(crate) const DEFAULT_AUTO_SETTLE_AFTER_DAYS: Option<u64> = ${autoSettleAfterDays === null ? "None" : `Some(${autoSettleAfterDays})`};`,
+    `pub(crate) const DEFAULT_AUTO_SETTLE_AFTER_DAYS: Option<f64> = ${autoSettleAfterDays === null ? "None" : `Some(${autoSettleAfterDays}_f64)`};`,
     `pub(crate) const DEFAULT_AUTO_SETTLE_ON_MERGE: bool = ${settings.DEFAULT_SERVER_SETTINGS.sidebarAutoSettleOnMerge};`,
     `pub(crate) const DEFAULT_AUTO_SETTLE_KEEP_PULL_REQUESTS: bool = ${settings.DEFAULT_SERVER_SETTINGS.sidebarAutoSettleKeepPullRequests};`,
     "",

@@ -1063,6 +1063,17 @@ async fn member_messages(
     file: MemberFile,
     progress: &[serde_json::Value],
 ) -> Vec<(String, String)> {
+    member_messages_flushed(name, file, progress, None).await.1
+}
+
+/// [`member_messages`], and with `flush`, a transcript line appended once the turn ended: the
+/// messages until the terminal event, then all of them once one shows `flush`'s text.
+async fn member_messages_flushed(
+    name: &str,
+    file: MemberFile,
+    progress: &[serde_json::Value],
+    flush: Option<(&str, &str)>,
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
     use serde_json::{Value, json};
     let dir = Scratch::new(name);
     let relative = matches!(file, MemberFile::RelativeConfig(_));
@@ -1151,8 +1162,22 @@ async fn member_messages(
         .start_turn(turn(1, &thread, "inspect", "full-access", &cwd))
         .await
         .unwrap();
-    let seen = until(&mut events, is_terminal).await;
+    let mut seen = until(&mut events, is_terminal).await;
     assert_eq!(seen.last().unwrap()["status"], "completed");
+    let at_terminal = seen.len();
+    if let Some((line, text)) = flush {
+        use std::io::Write;
+        let mut handle = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        handle.write_all(line.as_bytes()).unwrap();
+        // Bounded: without the reread the text never comes.
+        let flushed = until(&mut events, |e| e["message"]["text"] == text);
+        if let Ok(more) = tokio::time::timeout(Duration::from_secs(10), flushed).await {
+            seen.extend(more);
+        }
+    }
     let coordinator = seen
         .iter()
         .rev()
@@ -1160,20 +1185,23 @@ async fn member_messages(
         .unwrap();
     let member = &coordinator["subagent"]["workflow"]["agents"][0];
     assert_eq!(member["agentId"], "a1");
-    let messages = seen
-        .iter()
-        .map(|e| &e["message"])
-        .filter(|m| m["threadId"] == member["childThreadId"] && m["role"] == "assistant")
-        .map(|m| {
-            (
-                m["id"].as_str().unwrap().to_owned(),
-                m["text"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
+    let messages = |events: &[serde_json::Value]| -> Vec<(String, String)> {
+        events
+            .iter()
+            .map(|e| &e["message"])
+            .filter(|m| m["threadId"] == member["childThreadId"] && m["role"] == "assistant")
+            .map(|m| {
+                (
+                    m["id"].as_str().unwrap().to_owned(),
+                    m["text"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (before, all) = (messages(&seen[..at_terminal]), messages(&seen));
     session.close().await;
     helper.stop_if_idle().await;
-    messages
+    (before, all)
 }
 
 fn texts(messages: Vec<(String, String)>) -> Vec<String> {
@@ -1301,4 +1329,29 @@ async fn transcripts_are_read_under_the_querys_config_dir() {
     let file = MemberFile::RelativeConfig(member_line("wf-line-1", "msg_a1", MEMBER_ANSWER));
     let shown = member_messages("member-relative-config", file, &settles_once()).await;
     assert_eq!(texts(shown), [MEMBER_ANSWER]);
+}
+
+/// The final flush window does not hold the query: while a member's reread waits out the
+/// window, the driver keeps taking frames (the root settles first), and the reread then shows
+/// the line Claude flushed in the meantime instead of the excerpt.
+#[tokio::test(flavor = "current_thread")]
+async fn the_flush_wait_keeps_the_driver_draining() {
+    if !node_available() {
+        return;
+    }
+    // Settled a second from now, so the window is still open when the coordinator ends.
+    let mut done = member_entry("done", 1, Some("Looks good"));
+    done["lastProgressAt"] = serde_json::json!(conn_support::time::now_ms() + 1000);
+    let mut pre_tool = member_line("wf-line-1", "msg_a1", "Let me look.");
+    pre_tool = pre_tool.replace("end_turn", "tool_use");
+    let final_line = member_line("wf-line-2", "msg_a2", "FINAL ANSWER");
+    let (before, all) = member_messages_flushed(
+        "member-flush-drain",
+        MemberFile::Written(pre_tool),
+        &[member_entry("start", 1, None), done],
+        Some((&final_line, "FINAL ANSWER")),
+    )
+    .await;
+    assert_eq!(texts(before), ["Let me look."]);
+    assert_eq!(texts(all), ["Let me look.", "FINAL ANSWER"]);
 }

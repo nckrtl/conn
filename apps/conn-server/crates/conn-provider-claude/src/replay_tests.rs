@@ -1268,11 +1268,19 @@ fn a_late_transcript_line_shows_on_the_next_settled_snapshot() {
         &transcript_line("wf-line-4", "end_turn", "A1 continued"),
     );
     let step = mapper.handle(member_progress("p-2", Some("A1 excerpt")));
+    let stale = step.iter().find_map(|o| match o {
+        Out::ReadMemberTranscript(member) => Some(member.clone()),
+        _ => None,
+    });
     outs.extend(import_reads(&mut mapper, step, &mut reads, &mut nothing));
     assert_eq!(
         member_answers(&outs),
         ["A1 from the transcript", "A1 continued"]
     );
+    // A late result for a cursor that has moved on since is dropped.
+    let stale = stale.unwrap();
+    let read = crate::session::read_member_transcript(&stale, &stale.dir);
+    assert!(mapper.member_transcript(stale, read).is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

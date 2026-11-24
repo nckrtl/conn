@@ -238,7 +238,7 @@ impl Inner {
     }
 
     /// Sends events and callback answers in order. Holds no lock.
-    async fn deliver(&self, query: Option<&QueryHandle>, outs: Vec<Out>) {
+    async fn deliver(self: &Arc<Self>, query: Option<&QueryHandle>, outs: Vec<Out>) {
         if outs.is_empty() {
             return;
         }
@@ -310,20 +310,19 @@ impl Inner {
                         .as_ref()
                         .map(|l| l.workflow_files_root.clone());
                     if let Some(delay) = member.delay {
-                        tokio::time::sleep(delay).await;
+                        // The flush wait runs on its own timer, so this driver keeps draining
+                        // its query and the shared SDK router never blocks on it.
+                        let inner = Arc::downgrade(self);
+                        let query = query.cloned();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            if let Some(inner) = inner.upgrade() {
+                                inner.import_member(query.as_ref(), member, root).await;
+                            }
+                        });
+                        continue;
                     }
-                    let answers = match root {
-                        Some(root) => {
-                            let job = member.clone();
-                            tokio::task::spawn_blocking(move || read_member_transcript(&job, &root))
-                                .await
-                                .ok()
-                                .flatten()
-                        }
-                        None => None,
-                    };
-                    let outs = self.lock().mapper.member_transcript(member, answers);
-                    Box::pin(self.deliver(query, outs)).await;
+                    self.import_member(query, member, root).await;
                 }
                 Out::Skipped(kind) => {
                     let mut state = self.lock();
@@ -337,6 +336,30 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Reads a member transcript off the runtime thread and shows what it gained. Boxed as
+    /// `Send`: it and `deliver` call each other, and the flush timer spawns it.
+    fn import_member<'a>(
+        self: &'a Arc<Self>,
+        query: Option<&'a QueryHandle>,
+        member: crate::mapper::MemberTranscript,
+        root: Option<std::path::PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let answers = match root {
+                Some(root) => {
+                    let job = member.clone();
+                    tokio::task::spawn_blocking(move || read_member_transcript(&job, &root))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            };
+            let outs = self.lock().mapper.member_transcript(member, answers);
+            self.deliver(query, outs).await;
+        })
     }
 
     fn start_abandoned(&self, run_id: &str) -> bool {
@@ -791,7 +814,7 @@ fn abandoned_error() -> ProviderError {
     )
 }
 
-async fn on_end(inner: &Inner, generation: u64, end: &QueryEnd, stopping: bool) {
+async fn on_end(inner: &Arc<Inner>, generation: u64, end: &QueryEnd, stopping: bool) {
     let outs = {
         let mut state = inner.lock();
         let current = state

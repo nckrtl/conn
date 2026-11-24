@@ -1301,7 +1301,13 @@ impl<E: Env> Mapper<E> {
             .by_task
             .get_mut(&member.task_id)
             .and_then(|sub| sub.members.get_mut(&member.index))
-            .filter(|state| state["attempt"].as_u64() == Some(member.attempt))
+            // A read from a cursor that has moved on since, or from an earlier attempt, is stale.
+            .filter(|state| {
+                state["attempt"].as_u64() == Some(member.attempt)
+                    && serde_json::from_value::<TranscriptCursor>(state["cursor"].clone())
+                        .unwrap_or_default()
+                        == member.cursor
+            })
         else {
             return out;
         };

@@ -142,8 +142,13 @@ jobs:
         id: folder
         run: |
           # One target folder for every run, beside the checkout (checkout's clean keeps it), so
-          # a run rebuilds only what changed and the runner's disk use stays bounded.
+          # a run rebuilds only what changed. Old toolchain and dependency builds pile up in it,
+          # so it starts over above 20 GiB.
           export CARGO_TARGET_DIR="$RUNNER_WORKSPACE/conn-server-target"
+          if [ -d "$CARGO_TARGET_DIR" ] && [ "$(du -sk "$CARGO_TARGET_DIR" | cut -f 1)" -gt $((20 * 1024 * 1024)) ]; then
+            echo "Target folder over 20 GiB; starting it over."
+            rm -rf "$CARGO_TARGET_DIR"
+          fi
           rm -rf dist
           node tools/release-tarball.mjs --platform macos-arm64 --out dist
           folder="$(echo dist/conn-server-*-macos-arm64)"

@@ -1837,6 +1837,35 @@ mod tests {
         assert_eq!(status, 200, "{body}");
         let extended: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(extended["sessionId"], admin.principal.session_id.as_str());
+        // The 30-day device session lacks access:write: it may not extend, not even itself.
+        let before = auth
+            .authenticate_bearer(&device.token)
+            .unwrap()
+            .expires_at_ms;
+        let device_head = format!(
+            "POST /api/auth/clients/extend HTTP/1.1\r\nauthorization: Bearer {}\r\ncontent-type: application/json",
+            device.token
+        );
+        for body in [
+            r#"{"sessionTtl":"until-revoked"}"#.to_owned(),
+            format!(
+                r#"{{"sessionId":"{}","sessionTtl":"until-revoked"}}"#,
+                device.principal.session_id
+            ),
+        ] {
+            let (status, reply) = call(addr, &device_head, &body).await;
+            assert_eq!(status, 403, "{body}: {reply}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap()["requiredPermission"],
+                "access:write"
+            );
+        }
+        assert_eq!(
+            auth.authenticate_bearer(&device.token)
+                .unwrap()
+                .expires_at_ms,
+            before
+        );
         let device_ttl =
             |ttl: &str| format!(r#"{{"sessionId":"{}"{ttl}}}"#, device.principal.session_id);
         for ttl in [
@@ -2041,6 +2070,111 @@ mod tests {
             })
             .await;
             assert!(closed.is_ok(), "the preview socket stayed open after {end}");
+        }
+        preview.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    /// Revocation ends the preview socket while a viewer command waits on the browser: the
+    /// fake browser never answers `Input.insertText`, and the socket still closes at once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_preview_socket_closes_mid_command_on_revoke_and_logout() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+        let root = std::env::temp_dir().join(format!("conn-http-hang-{}", auth::random_hex(6)));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("hang-Input.insertText"), "").unwrap();
+        let pending = root.join("pending-Input.insertText");
+        let preview = conn_preview::tabs::Preview::with_fixture(
+            root.clone(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../conn-preview/tests/fake-chrome.py"),
+        );
+        let opened = preview
+            .invoke("thread", "agent", "open", json!({}))
+            .await
+            .unwrap();
+        let tab = opened["tabId"].as_str().unwrap().to_owned();
+        let (addr, auth) = serve_with_deps(
+            None,
+            crate::methods::Deps {
+                preview: Some(preview.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        for end in ["revoke", "logout"] {
+            let _ = std::fs::remove_file(&pending);
+            let session = auth
+                .issue_session(auth::SessionRequest {
+                    scopes: vec!["orchestration:read".into(), "preview:operate".into()],
+                    label: None,
+                    subject: None,
+                    ttl_ms: auth::MAX_TTL_MS,
+                })
+                .unwrap();
+            let mut request =
+                format!("ws://{addr}/api/preview-stream/ws?threadId=thread&tabId={tab}")
+                    .into_client_request()
+                    .unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {}", session.token).parse().unwrap(),
+            );
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (mut socket, _) = tokio_tungstenite::client_async(request, tcp).await.unwrap();
+            // The control message first; take control, then send a command the browser holds.
+            let control = socket.next().await.unwrap().unwrap();
+            assert!(matches!(control, Message::Text(_)), "{end}: {control:?}");
+            socket
+                .send(Message::Text(
+                    json!({"type": "takeControl"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type": "text", "text": "x"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let arrived = tokio::time::timeout(Duration::from_secs(5), async {
+                while !pending.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            assert!(
+                arrived.is_ok(),
+                "{end}: the command never reached the browser"
+            );
+            match end {
+                "revoke" => {
+                    auth.revoke_session(None, &session.principal.session_id)
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {
+                    let logout = format!(
+                        "POST /api/auth/logout HTTP/1.1\r\nauthorization: Bearer {}",
+                        session.token
+                    );
+                    assert_eq!(call(addr, &logout, "").await.0, 200);
+                }
+            }
+            // The browser's reply never comes, so only revocation can close the socket.
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(Ok(message)) = socket.next().await {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(
+                closed.is_ok(),
+                "the preview socket stayed open mid-command after {end}"
+            );
         }
         preview.shutdown().await;
         let _ = tokio::fs::remove_dir_all(root).await;

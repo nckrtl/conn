@@ -3782,17 +3782,53 @@ fn shell_events_close_no_browser_tabs(cx: &mut TestAppContext) {
     }
 }
 
-/// The automation hook acts on the shown thread's browser only. A thread with no browser tab
-/// gets the no-browser error, even while another thread's browser is alive.
+/// Runs one automation command as the automation socket does.
+#[cfg(feature = "automation")]
+fn automation(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    app: &Entity<ConnApp>,
+    cmd: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let weak = app.downgrade();
+    let result = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = result.clone();
+    cx.spawn(move |mut acx| async move {
+        let outcome = crate::automation::run(&weak, window, &cmd, &mut acx).await;
+        *slot.borrow_mut() = Some(outcome);
+    })
+    .detach();
+    cx.run_until_parked();
+    let outcome = result.borrow_mut().take();
+    outcome.expect("the command finished")
+}
+
+#[cfg(feature = "automation")]
+fn preview_requests(
+    cx: &mut TestAppContext,
+    app: &Entity<ConnApp>,
+    id: conn_state::BrowserTabId,
+) -> Option<usize> {
+    cx.update(|cx| {
+        app.read(cx)
+            .browser_weak_for_test(id, cx)
+            .and_then(|weak| weak.upgrade())
+            .map(|page| page.read(cx).preview_requests())
+    })
+}
+
+/// Headless tests have no Chromium page, so a command that reaches a browser gets this from it.
+#[cfg(feature = "automation")]
+const NO_VIEW: &str = "No active browser view.";
+
+/// Browser commands act on the shown thread's tabs only. A thread with no browser tab gets
+/// "No browser tab is open." from every command, `browser-state` and `browser-title` included,
+/// while another thread's page is alive and untouched.
+#[cfg(feature = "automation")]
 #[gpui_kit::test]
-fn automation_acts_only_on_the_shown_threads_browser(cx: &mut TestAppContext) {
+fn browser_commands_without_a_browser_tab_say_so(cx: &mut TestAppContext) {
     let (window, app) = mount_two_thread_app(cx);
-    let (_, page_a) = open_thread_browser(cx, window, &app, "thread-selected");
-    let target = |cx: &mut TestAppContext| {
-        cx.update(|cx| app.read(cx).automation_browser_for_test(cx))
-            .map(|weak| weak.upgrade().map(|p| p.entity_id()))
-    };
-    assert_eq!(target(cx), Ok(page_a.upgrade().map(|p| p.entity_id())));
+    let (tab_a, _) = open_thread_browser(cx, window, &app, "thread-selected");
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.select_thread("thread-other", cx);
@@ -3800,8 +3836,57 @@ fn automation_acts_only_on_the_shown_threads_browser(cx: &mut TestAppContext) {
         })
     });
     render_frames(cx, window);
-    assert_eq!(target(cx), Err("No browser tab is open.".to_owned()));
-    // Back on A with Files on top, its last-shown browser is the one acted on.
+    for cmd in [
+        "browser-state",
+        "browser-title",
+        "browser-act",
+        "browser-eval",
+    ] {
+        assert_eq!(
+            automation(cx, window, &app, json!({ "cmd": cmd, "expression": "1" })),
+            Err("No browser tab is open.".to_owned()),
+            "{cmd}"
+        );
+    }
+    assert_eq!(
+        preview_requests(cx, &app, tab_a),
+        Some(0),
+        "A's page is untouched"
+    );
+}
+
+/// A tab whose browser the cap closed is still the thread's tab. Back on that thread with Files
+/// on top, `browser-act` makes its page again from the saved address and acts there.
+#[cfg(feature = "automation")]
+#[gpui_kit::test]
+fn browser_act_reaches_an_evicted_tab_of_the_shown_thread(cx: &mut TestAppContext) {
+    const PAGE: &str = "https://a.example/";
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.open_browser_tab(PAGE.into(), false, cx);
+        })
+    });
+    render_frames(cx, window);
+    let tab_a = cx
+        .update(|cx| app.read(cx).right_panel_tabs().browser_ids().last())
+        .expect("A has a browser tab");
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    for n in 0..7 {
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.open_browser_tab(format!("https://b{n}.example/"), false, cx)
+            })
+        });
+        render_frames(cx, window);
+    }
+    assert_eq!(
+        preview_requests(cx, &app, tab_a),
+        None,
+        "seven of B's browsers evict A's"
+    );
+
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.select_thread("thread-selected", cx);
@@ -3809,7 +3894,67 @@ fn automation_acts_only_on_the_shown_threads_browser(cx: &mut TestAppContext) {
         })
     });
     render_frames(cx, window);
-    assert_eq!(target(cx), Ok(page_a.upgrade().map(|p| p.entity_id())));
+    assert_eq!(
+        automation(
+            cx,
+            window,
+            &app,
+            json!({ "cmd": "browser-act", "action": "click" })
+        ),
+        Err(NO_VIEW.to_owned()),
+        "the command reaches a page, not the no-tab error"
+    );
+    assert_eq!(
+        preview_requests(cx, &app, tab_a),
+        Some(1),
+        "A's recreated page took it"
+    );
+    assert_eq!(
+        cx.update(|cx| app.read(cx).browser_target_for_test(tab_a, cx))
+            .as_deref(),
+        Some(PAGE),
+        "it loads A's saved address"
+    );
+}
+
+/// When the browser tab shown last closes, commands go to the thread's most recently shown
+/// remaining browser tab (`previewStateStore` `removeSession`).
+#[cfg(feature = "automation")]
+#[gpui_kit::test]
+fn browser_eval_falls_back_to_the_most_recent_remaining_tab(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    let mut ids = Vec::new();
+    for url in ["https://a.example/", "https://b.example/"] {
+        cx.update(|cx| app.update(cx, |app, cx| app.open_browser_tab(url.into(), false, cx)));
+        render_frames(cx, window);
+        ids.push(
+            cx.update(|cx| app.read(cx).right_panel_tabs().browser_ids().last())
+                .expect("a browser tab is open"),
+        );
+    }
+    let (a, b) = (ids[0], ids[1]);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_right_panel_tab(conn_state::RightPanelTab::Files, cx);
+            app.close_right_panel_tab(&conn_state::PanelSurface::Browser(b), cx);
+        })
+    });
+    render_frames(cx, window);
+    assert_eq!(
+        automation(
+            cx,
+            window,
+            &app,
+            json!({ "cmd": "browser-eval", "expression": "1" })
+        ),
+        Err(NO_VIEW.to_owned())
+    );
+    assert_eq!(
+        preview_requests(cx, &app, a),
+        Some(1),
+        "A's page took the eval"
+    );
 }
 
 /// `Cmd+T` opens the `+` menu, but not while a dialog such as Settings is open: the shortcut

@@ -11,8 +11,9 @@ use crate::layout::{BrowserTabId, PanelSurface, RightPanelTab};
 pub struct RightPanelTabs {
     tabs: Vec<PanelSurface>,
     active: Option<PanelSurface>,
-    /// The browser tab shown last, which the Browser toggle brings back (`activeTabId`).
-    last_browser: Option<BrowserTabId>,
+    /// Browser tabs by when they last showed, oldest first. The newest still open is the one
+    /// the Browser toggle and automation come back to (`activeTabId`, `latestSnapshot`).
+    browser_recency: Vec<BrowserTabId>,
     next_browser: BrowserTabId,
 }
 
@@ -38,11 +39,16 @@ impl RightPanelTabs {
         self.active.as_ref()
     }
 
-    /// The browser tab the panel shows now or showed last, while it is still open.
+    /// The browser tab the panel shows now or showed most recently, of those still open; a
+    /// tab never shown (a background link) comes after those, in strip order.
     #[must_use]
     pub fn last_browser(&self) -> Option<BrowserTabId> {
-        self.last_browser
-            .filter(|id| self.tabs.contains(&PanelSurface::Browser(*id)))
+        self.browser_recency
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| self.tabs.contains(&PanelSurface::Browser(*id)))
+            .or_else(|| self.browser_ids().next())
     }
 
     /// The ids of the open browser tabs, in strip order.
@@ -56,7 +62,8 @@ impl RightPanelTabs {
     /// Shows `surface`, appending it when it is not open yet (`upsertSurface`).
     pub fn activate(&mut self, surface: PanelSurface) {
         if let PanelSurface::Browser(id) = surface {
-            self.last_browser = Some(id);
+            self.browser_recency.retain(|shown| *shown != id);
+            self.browser_recency.push(id);
         }
         if !self.tabs.contains(&surface) {
             self.tabs.push(surface.clone());
@@ -96,7 +103,7 @@ impl RightPanelTabs {
     /// open one, else a new tab (`togglePreviewPanel`, `open(ref, "preview")`).
     pub fn open(&mut self, tab: RightPanelTab) -> PanelSurface {
         let surface = if tab == RightPanelTab::Browser {
-            match self.last_browser().or_else(|| self.browser_ids().next()) {
+            match self.last_browser() {
                 Some(id) => PanelSurface::Browser(id),
                 None => PanelSurface::Browser(self.allocate_browser()),
             }
@@ -112,6 +119,9 @@ impl RightPanelTabs {
     pub fn close(&mut self, surface: &PanelSurface) -> Option<ClosedTab> {
         let index = self.tabs.iter().position(|tab| tab == surface)?;
         self.tabs.remove(index);
+        if let PanelSurface::Browser(id) = surface {
+            self.browser_recency.retain(|shown| shown != id);
+        }
         let mut activated = None;
         if self.active.as_ref() == Some(surface) {
             let fallback = self
@@ -275,6 +285,26 @@ mod tests {
         // The last-shown tab closed: the first open browser tab shows.
         tabs.close(&first);
         assert_eq!(tabs.open(RightPanelTab::Browser), second);
+    }
+
+    #[test]
+    fn closing_the_last_shown_browser_falls_back_to_the_most_recent_one() {
+        let mut tabs = RightPanelTabs::default();
+        let a = tabs.add(RightPanelTab::Browser);
+        let b = tabs.add(RightPanelTab::Browser);
+        let c = tabs.add(RightPanelTab::Browser);
+        // Shown in the order a, c, b; then Files covers them.
+        for surface in [&a, &c, &b] {
+            tabs.activate(surface.clone());
+        }
+        tabs.open(RightPanelTab::Files);
+        tabs.close(&b);
+        // `c` showed after `a`, so it comes back, not `a`, the first in the strip.
+        assert_eq!(
+            tabs.last_browser().map(PanelSurface::Browser),
+            Some(c.clone())
+        );
+        assert_eq!(tabs.open(RightPanelTab::Browser), c);
     }
 
     #[test]

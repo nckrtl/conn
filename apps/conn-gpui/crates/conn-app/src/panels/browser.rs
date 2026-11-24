@@ -211,6 +211,11 @@ pub(crate) struct BrowserPanel {
     annotation_scripts: Cell<usize>,
     /// A page loaded while hidden; its bridge and pins go in when it shows.
     load_injection_pending: bool,
+    /// The automation hook needs this page while it is hidden, so its view is made anyway.
+    view_while_hidden: Rc<Cell<bool>>,
+    /// Preview requests the automation hook sent this page, view or not.
+    #[cfg(all(test, feature = "automation"))]
+    preview_requests: Cell<usize>,
     #[cfg(test)]
     bridge_injections: Cell<usize>,
     #[cfg(test)]
@@ -317,6 +322,9 @@ impl BrowserPanel {
             #[cfg(test)]
             annotation_scripts: Cell::new(0),
             load_injection_pending: false,
+            view_while_hidden: Rc::new(Cell::new(false)),
+            #[cfg(all(test, feature = "automation"))]
+            preview_requests: Cell::new(0),
             #[cfg(test)]
             bridge_injections: Cell::new(0),
             #[cfg(test)]
@@ -434,6 +442,32 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// Where the page is drawn, once it has been.
+    #[cfg(feature = "automation")]
+    pub(crate) fn web_bounds(&self) -> Option<WebRect> {
+        self.last_bounds.get()
+    }
+
+    /// Makes this page's view while it is hidden, at `bounds` if it was never drawn, so the
+    /// automation hook can act on a tab that is not on screen.
+    #[cfg(feature = "automation")]
+    pub(crate) fn make_view_while_hidden(
+        &mut self,
+        bounds: Option<WebRect>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.view_while_hidden.set(true);
+        if self.last_bounds.get().is_none() {
+            self.last_bounds.set(bounds);
+        }
+        self.maybe_create_view_deferred(cx);
+    }
+
+    #[cfg(all(test, feature = "automation"))]
+    pub(crate) fn preview_requests(&self) -> usize {
+        self.preview_requests.get()
+    }
+
     /// The page's address now, else the one it was asked to load.
     pub(crate) fn page_url(&self) -> String {
         self.current_url()
@@ -541,6 +575,8 @@ impl BrowserPanel {
         &mut self,
         expression: &str,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
+        #[cfg(test)]
+        self.preview_requests.set(self.preview_requests.get() + 1);
         self.ensure_bridge_injected();
         let guard = self.view.borrow();
         let Some(view) = guard.as_ref() else {
@@ -565,6 +601,8 @@ impl BrowserPanel {
         op: &str,
         params: &serde_json::Value,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
+        #[cfg(test)]
+        self.preview_requests.set(self.preview_requests.get() + 1);
         self.ensure_bridge_injected();
         let guard = self.view.borrow();
         let Some(view) = guard.as_ref() else {
@@ -1248,6 +1286,7 @@ impl BrowserPanel {
         let last_bounds = self.last_bounds.clone();
         let last_scale = self.last_scale.clone();
         let visible = self.visible.clone();
+        let view_while_hidden = self.view_while_hidden.clone();
         let applied_hidden = self.applied_hidden.clone();
         let entity = cx.entity().downgrade();
 
@@ -1255,7 +1294,9 @@ impl BrowserPanel {
         cx.defer(move |cx| {
             creating_flag.set(false);
             // A tab closed or hidden since the frame gets no Chromium view: nothing would close it.
-            if view_slot.borrow().is_some() || entity.upgrade().is_none() || !visible.get() {
+            // The automation hook's page is the exception; the cap closes it like any other.
+            let wanted = visible.get() || view_while_hidden.get();
+            if view_slot.borrow().is_some() || entity.upgrade().is_none() || !wanted {
                 return;
             }
             let rect = last_bounds.get().unwrap_or(bounds);

@@ -3434,31 +3434,40 @@ impl ConnApp {
         }
     }
 
-    /// Diagnostic state of the Browser tab.
+    /// Diagnostic state of the shown thread's browser tab.
     #[cfg(feature = "automation")]
-    pub(crate) fn browser_state(&self, cx: &App) -> serde_json::Value {
+    pub(crate) fn browser_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<serde_json::Value, String> {
+        let id = self.thread_browser();
         self.right_panel
-            .read(cx)
-            .browser_state(self.thread_browser(), cx)
+            .update(cx, |panel, cx| panel.browser_state(id, window, cx))
     }
 
-    /// The Browser tab's page title.
+    /// The shown thread's browser tab's page title.
     #[cfg(feature = "automation")]
-    pub(crate) fn browser_title(&self, cx: &App) -> String {
+    pub(crate) fn browser_title(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<String, String> {
+        let id = self.thread_browser();
         self.right_panel
-            .read(cx)
-            .browser_title(self.thread_browser(), cx)
+            .update(cx, |panel, cx| panel.browser_title(id, window, cx))
     }
 
     #[cfg(feature = "automation")]
     pub(crate) fn browser_preview_eval(
         &mut self,
         expression: &str,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
         let id = self.thread_browser();
         self.right_panel.update(cx, |panel, cx| {
-            panel.browser_preview_eval(id, expression, cx)
+            panel.browser_preview_eval(id, expression, window, cx)
         })
     }
 
@@ -3467,23 +3476,26 @@ impl ConnApp {
         &mut self,
         op: &str,
         params: &serde_json::Value,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
         let id = self.thread_browser();
         self.right_panel.update(cx, |panel, cx| {
-            panel.browser_preview_call(id, op, params, cx)
+            panel.browser_preview_call(id, op, params, window, cx)
         })
     }
 
     #[cfg(feature = "automation")]
     pub(crate) fn browser_screenshot(
-        &self,
+        &mut self,
         path: &std::path::Path,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
     ) -> Result<serde_json::Value, String> {
-        self.right_panel
-            .read(cx)
-            .browser_screenshot(self.thread_browser(), path, cx)
+        let id = self.thread_browser();
+        self.right_panel.update(cx, |panel, cx| {
+            panel.browser_screenshot(id, path, window, cx)
+        })
     }
 
     /// State read-out for the automation hook.
@@ -3902,26 +3914,12 @@ impl ConnApp {
 
     /// The shown thread's browser tab for the automation hook: the active one, else the one it
     /// showed last. None when this thread has no browser tab, whatever other threads hold.
-    #[cfg_attr(
-        not(any(test, feature = "automation")),
-        expect(dead_code, reason = "driven by the automation hook")
-    )]
+    #[cfg(feature = "automation")]
     fn thread_browser(&self) -> Option<conn_state::BrowserTabId> {
         match self.right_panel_tabs.active() {
             Some(PanelSurface::Browser(id)) => Some(*id),
             _ => self.right_panel_tabs.last_browser(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn automation_browser_for_test(
-        &self,
-        cx: &App,
-    ) -> Result<gpui_kit::WeakEntity<crate::panels::BrowserPanelHandle>, String> {
-        self.right_panel
-            .read(cx)
-            .automation_browser(self.thread_browser())
-            .map(|b| b.downgrade())
     }
 
     /// A thread deleted here takes its right panel and browsers with it. Shell events do not:

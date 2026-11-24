@@ -21,7 +21,7 @@ use conn_contract::{
 };
 use conn_files::{
     AssetContext, Files, KnownWorkspaces, Served,
-    attachments::{UploadOutcome, UploadRequest, now_ms, validate_claims},
+    attachments::{UploadOutcome, UploadRequest, now_ms, validate_claims, validate_limits},
     entries, search, workspace,
 };
 use serde_json::json;
@@ -1059,7 +1059,8 @@ fn a_claim_carries_its_documents_extracted_text() {
     );
 }
 
-/// `getProviderAttachmentLimitError`: at most 100 files per message or question response.
+/// `getProviderAttachmentLimitError`: at most 100 files per message or question response, and
+/// duplicates are a single message's or question's check.
 #[test]
 fn a_response_holds_at_most_100_files() {
     let files: Vec<ChatAttachment> = (0..101)
@@ -1079,6 +1080,13 @@ fn a_response_holds_at_most_100_files() {
         "You can attach up to 100 files per message or question response."
     );
     assert!(validate_claims(&files[..100]).is_ok());
+    // A whole question response may share one upload between questions; one question may not.
+    let shared = [files[0].clone(), files[0].clone()];
+    assert!(validate_limits(&shared).is_ok());
+    assert_eq!(
+        validate_claims(&shared).unwrap_err(),
+        "Duplicate attachment ids are not allowed."
+    );
 }
 
 #[test]

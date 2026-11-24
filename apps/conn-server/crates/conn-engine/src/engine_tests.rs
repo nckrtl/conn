@@ -9328,6 +9328,8 @@ struct RecordingHost {
     released: Mutex<Vec<Value>>,
     /// Attachments each claim was asked for, in order.
     claims: Mutex<Vec<Value>>,
+    /// Attachments each whole-response limit check saw, in order.
+    limit_checks: Mutex<Vec<Value>>,
     /// Ids each attachment cleanup removed, in order.
     deleted: Mutex<Vec<Vec<String>>>,
     deleted_event: tokio::sync::Notify,
@@ -9370,6 +9372,10 @@ impl crate::EngineHost for RecordingHost {
     ) -> crate::BoxFuture<'_, Result<Value, String>> {
         self.claims.lock().unwrap().push(attachments.clone());
         Box::pin(async move {
+            let list = attachments.as_array().unwrap();
+            if (1..list.len()).any(|i| list[..i].iter().any(|a| a["id"] == list[i]["id"])) {
+                return Err("Duplicate attachment ids are not allowed.".into());
+            }
             let claimed: Vec<Value> = attachments
                 .as_array()
                 .unwrap()
@@ -9387,6 +9393,13 @@ impl crate::EngineHost for RecordingHost {
     fn release_attachments(&self, attachments: Value) -> crate::BoxFuture<'_, ()> {
         self.released.lock().unwrap().push(attachments);
         Box::pin(async {})
+    }
+    fn check_attachment_limits(
+        &self,
+        attachments: Value,
+    ) -> crate::BoxFuture<'_, Result<(), String>> {
+        self.limit_checks.lock().unwrap().push(attachments);
+        Box::pin(async { Ok(()) })
     }
     fn delete_attachments(&self, ids: Vec<String>) -> crate::BoxFuture<'_, ()> {
         self.deleted.lock().unwrap().push(ids);
@@ -15097,14 +15110,29 @@ async fn a_queued_edit_removes_the_files_it_drops() {
     next(&mut thread).await;
     dispatch(&engine, message("t1", "c2", "hang")).await;
     until_provider_turn(&mut thread).await;
+    // An `html_render` page the thread shows, which a queued message also names.
+    let page = "t1-00000000-0000-4000-8000-000000000001-html";
+    engine
+        .inner()
+        .db(move |store| {
+            let mut tx = store.tx()?;
+            tx.append(crate::store::Draft::new("t1", "turn-item.updated", json!({
+                "id": "render", "threadId": "t1", "runId": "run:t1:1", "type": "dynamic_tool",
+                "toolName": "html_render", "status": "completed", "ordinal": 1,
+                "output": {"htmlRender": {"attachmentId": page, "title": "Page", "height": 100}},
+            })))?;
+            tx.commit(None)
+        })
+        .await
+        .unwrap();
     let queue = json!({"type": "queue_after_active"});
     let mut first = message_with("t1", "c3", "first", queue.clone(), None);
-    first["attachments"] = json!([text_file("pending-1")]);
+    first["attachments"] = json!([text_file("pending-1"), text_file(page)]);
     dispatch(&engine, first).await;
     let mut second = message_with("t1", "c4", "second", queue, None);
     second["attachments"] = json!([text_file("t1-1")]);
     dispatch(&engine, second).await;
-    // The second message still names the file: it stays.
+    // The second message still names the file, and the timeline shows the page: both stay.
     let edit = |command: &str, run: &str, attachments: Value| {
         json!({"type": "queued-run.edit", "commandId": command, "threadId": "t1", "runId": run,
             "text": "edited", "attachments": attachments})
@@ -15124,6 +15152,80 @@ async fn a_queued_edit_removes_the_files_it_drops() {
     .await
     .expect("the dropped file is cleaned up");
     assert_eq!(*host.deleted.lock().unwrap(), [vec!["t1-1".to_owned()]]);
+}
+
+/// `Orchestrator.ts`, `queued-run.edit`: a steer the provider declined waits in the queue with
+/// its timeline item already made; an edit updates that item with its message, so the run
+/// starts with the files the edit kept.
+#[tokio::test(flavor = "current_thread")]
+async fn editing_a_declined_steer_updates_its_timeline_item() {
+    let db = TempDb::new("edit-declined-steer");
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(
+        FakeProvider::new("claudeAgent").without_steering(),
+    )];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let mut steer = message_with(
+        "t1",
+        "c3",
+        "steer me",
+        json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+        None,
+    );
+    steer["attachments"] = json!([text_file("pending-a")]);
+    dispatch(&engine, steer).await;
+    let run = loop {
+        let item = next(&mut thread).await;
+        if item["event"]["type"] == "run.created"
+            && item["event"]["payload"]["userMessageId"] == "message:c3"
+        {
+            break item["event"]["payload"]["id"].clone();
+        }
+    };
+    dispatch(
+        &engine,
+        json!({"type": "queued-run.edit", "commandId": "c4", "threadId": "t1", "runId": run,
+            "text": "steered", "attachments": [text_file("pending-b")]}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let ids = |row: &Value| -> Vec<Value> {
+        row["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].clone())
+            .collect()
+    };
+    let message = p["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "message:c3")
+        .unwrap();
+    let item = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["type"] == "user_message" && i["messageId"] == "message:c3")
+        .unwrap();
+    assert_eq!(ids(message), [json!("t1-b")]);
+    assert_eq!(ids(item), [json!("t1-b")]);
+    assert_eq!(item["text"], "steered");
 }
 
 /// `ThreadMessageIntake.test.ts`, "claims question uploads and passes readable paths": each
@@ -15176,18 +15278,37 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
         "requestId": "question:run:t1:1",
         "answers": {"q": ["See file"], "r": "Other", "s": {"answers": ["A"]}},
         "attachmentsByQuestionId": {"q": [text_file("pending-a")], "r": [text_file("pending-b")],
-            "s": [text_file("pending-c")]}});
+            "s": [text_file("pending-a")]}});
+    // A duplicate within one question is refused.
+    let mut duplicate = answer.clone();
+    duplicate["commandId"] = json!("c-dup");
+    duplicate["attachmentsByQuestionId"] =
+        json!({"q": [text_file("pending-a"), text_file("pending-a")]});
+    assert!(
+        engine
+            .dispatch(from_json(duplicate).unwrap())
+            .await
+            .is_err()
+    );
     let before = host.claims.lock().unwrap().len();
     dispatch(&engine, answer.clone()).await;
-    // The limits see the whole response: one claim holds every question's files
-    // (`validateAttachmentLimits` before any copy).
+    // The limits see the whole response once (`validateAttachmentLimits`); each question's
+    // files are claimed on their own, so two questions may share one upload.
     assert_eq!(
-        host.claims.lock().unwrap()[before..],
-        [json!([
+        host.limit_checks.lock().unwrap().last().unwrap(),
+        &json!([
             text_file("pending-a"),
             text_file("pending-b"),
-            text_file("pending-c")
-        ])]
+            text_file("pending-a")
+        ])
+    );
+    assert_eq!(
+        host.claims.lock().unwrap()[before..],
+        [
+            json!([text_file("pending-a")]),
+            json!([text_file("pending-b")]),
+            json!([text_file("pending-a")]),
+        ]
     );
     until_run_ends(&mut thread).await;
     // A wrapped answer becomes the paths alone, as T3's `appendUserInputAttachmentPaths`
@@ -15197,7 +15318,7 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
         [json!({
             "q": ["See file", "saved at /files/t1-a"],
             "r": "Other\n\nsaved at /files/t1-b",
-            "s": "saved at /files/t1-c",
+            "s": "saved at /files/t1-a",
         })]
     );
     let p = projection(&engine, "t1").await;
@@ -15210,7 +15331,7 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
         .clone();
     assert_eq!(
         item["questionAnswer"]["attachmentsByQuestionId"],
-        json!({"q": [text_file("t1-a")], "r": [text_file("t1-b")], "s": [text_file("t1-c")]})
+        json!({"q": [text_file("t1-a")], "r": [text_file("t1-b")], "s": [text_file("t1-a")]})
     );
     let claims = host.claims.lock().unwrap().len();
     dispatch(&engine, answer).await;

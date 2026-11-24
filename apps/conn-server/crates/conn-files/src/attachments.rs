@@ -50,23 +50,39 @@ const UPLOAD_IMAGE_MIME_TYPES: &[&str] = &["image/gif", "image/jpeg", "image/png
 /// `PROVIDER_SEND_TURN_MAX_ATTACHMENTS`.
 const MAX_ATTACHMENTS: usize = 100;
 
-/// T3's file count, image budget and duplicate check, before copying any pending upload
-/// (`getProviderAttachmentLimitError`).
+/// T3's file count, image budget and duplicate check for one message or question, before
+/// copying any pending upload.
 pub fn validate_claims(attachments: &[ChatAttachment]) -> Result<(), String> {
+    validate_limits(attachments)?;
+    let ids: std::collections::HashSet<&str> = attachments
+        .iter()
+        .map(|attachment| match attachment {
+            ChatAttachment::Image(a) => a.id.as_str(),
+            ChatAttachment::File(a) => a.id.as_str(),
+            ChatAttachment::Unknown(a) => a.id.as_str(),
+        })
+        .collect();
+    if ids.len() != attachments.len() {
+        return Err("Duplicate attachment ids are not allowed.".into());
+    }
+    Ok(())
+}
+
+/// `getProviderAttachmentLimitError`: the file count and image budget, which a question
+/// response meets as a whole.
+pub fn validate_limits(attachments: &[ChatAttachment]) -> Result<(), String> {
     if attachments.len() > MAX_ATTACHMENTS {
         return Err(format!(
             "You can attach up to {MAX_ATTACHMENTS} files per message or question response."
         ));
     }
     let mut image_bytes = 0_u64;
-    let mut ids = std::collections::HashSet::with_capacity(attachments.len());
     for attachment in attachments {
-        let (id, mime, size, image) = match attachment {
-            ChatAttachment::Image(a) => (&a.id, &a.mime_type, a.size_bytes, true),
-            ChatAttachment::File(a) => (&a.id, &a.mime_type, a.size_bytes, false),
-            ChatAttachment::Unknown(a) => (&a.id, &a.mime_type, a.size_bytes, false),
+        let (mime, size, image) = match attachment {
+            ChatAttachment::Image(a) => (&a.mime_type, a.size_bytes, true),
+            ChatAttachment::File(a) => (&a.mime_type, a.size_bytes, false),
+            ChatAttachment::Unknown(a) => (&a.mime_type, a.size_bytes, false),
         };
-        ids.insert(id);
         if image
             || UPLOAD_IMAGE_MIME_TYPES
                 .iter()
@@ -77,9 +93,6 @@ pub fn validate_claims(attachments: &[ChatAttachment]) -> Result<(), String> {
     }
     if image_bytes > 80 * 1024 * 1024 {
         return Err("Images can total up to 80 MiB per message or question response. Use smaller images or send fewer at once.".into());
-    }
-    if ids.len() != attachments.len() {
-        return Err("Duplicate attachment ids are not allowed.".into());
     }
     Ok(())
 }

@@ -2011,6 +2011,20 @@ fn queued_run_edit(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }
     message["updatedAt"] = json!(tx.now());
     let kept = ids(&message["attachments"]);
+    // A declined steer already has its timeline item; the run reuses it when it starts.
+    let item_id = format!("turn-item:{message_id}");
+    if let Some(mut item) = tx
+        .entity(&c.thread_id, "turnItems", &item_id)?
+        .filter(|item| item["type"] == "user_message")
+    {
+        item["text"] = message["text"].clone();
+        item["attachments"] = message["attachments"].clone();
+        if message["context"].is_object() {
+            item["context"] = message["context"].clone();
+        }
+        item["updatedAt"] = message["updatedAt"].clone();
+        tx.append(Draft::new(&c.thread_id, "turn-item.updated", item).run(Some(&c.run_id)))?;
+    }
     tx.append(Draft::new(&c.thread_id, "message.updated", message).run(Some(&c.run_id)))?;
     let dropped: Vec<String> = before.into_iter().filter(|id| !kept.contains(id)).collect();
     if dropped.is_empty() {
@@ -2024,12 +2038,20 @@ fn queued_run_edit(tx: &mut Tx<'_>, command: Value) -> Outcome {
 }
 
 /// `getThreadAttachmentIds` with `includeShownByLiveFork`: every file a message, a question's
-/// answer or a waiting guest message of the thread names.
+/// answer, a tool result (an `html_render` page, an MCP App snapshot) or a waiting guest
+/// message of the thread names.
 pub(crate) fn referenced_attachment_ids(
     tx: &Tx<'_>,
     thread_id: &str,
 ) -> StoreResult<std::collections::HashSet<String>> {
     let mut referenced = std::collections::HashSet::new();
+    for item in tx.entities_where(thread_id, "turnItems", "type", "dynamic_tool")? {
+        let shown = crate::tool_output::html_render_from_tool_item(&item)
+            .or_else(|| crate::tool_output::mcp_app_from_tool_item(&item));
+        if let Some(id) = shown.as_ref().and_then(|r| r["attachmentId"].as_str()) {
+            referenced.insert(id.to_owned());
+        }
+    }
     let mut add = |list: &Value| {
         for attachment in list.as_array().into_iter().flatten() {
             if let Some(id) = attachment["id"].as_str() {

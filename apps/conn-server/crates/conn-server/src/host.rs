@@ -437,6 +437,13 @@ impl EngineHost for Host {
         })
     }
 
+    fn check_attachment_limits(&self, attachments: Value) -> BoxFuture<'_, Result<(), String>> {
+        let checked = from_json::<Vec<ChatAttachment>>(attachments)
+            .map_err(|e| e.to_string())
+            .and_then(|list| conn_files::attachments::validate_limits(&list));
+        Box::pin(std::future::ready(checked))
+    }
+
     fn delete_attachments(&self, ids: Vec<String>) -> BoxFuture<'_, ()> {
         let files = self.files.clone();
         Box::pin(async move {

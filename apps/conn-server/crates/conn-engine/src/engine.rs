@@ -3002,11 +3002,11 @@ fn some_copies(copies: Value) -> Option<Value> {
         .then_some(copies)
 }
 
-/// `runtime-request.respond` in `ThreadMessageIntake`: the response's uploads are claimed for
-/// the thread in one claim, so the file count and image budget hold for the whole response
-/// before any copy (`validateAttachmentLimits`). Each answer gains one line per file of its
-/// question with the file's readable path (`appendUserInputAttachmentPaths`), so the
-/// provider's answer protocol stays as it is.
+/// `runtime-request.respond` in `ThreadMessageIntake`: the file count and image budget hold
+/// for the whole response before any copy (`validateAttachmentLimits`); then each question's
+/// uploads are claimed on their own, so its duplicate check is per question and two
+/// questions may share an upload. Each answer gains one line per file with its readable path
+/// (`appendUserInputAttachmentPaths`), so the provider's answer protocol stays as it is.
 async fn claim_answer_attachments(
     host: &dyn EngineHost,
     thread_id: String,
@@ -3016,28 +3016,32 @@ async fn claim_answer_attachments(
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let mut counts = Vec::with_capacity(by_question.len());
-    let mut all = Vec::new();
-    for (question, attachments) in &by_question {
-        let list = attachments.as_array().cloned().unwrap_or_default();
-        counts.push((question.clone(), list.len()));
-        all.extend(list);
-    }
-    let all = Value::Array(all);
-    let claimed = host
-        .claim_attachments(thread_id, all.clone())
+    let all: Vec<Value> = by_question
+        .values()
+        .flat_map(|list| list.as_array().cloned().unwrap_or_default())
+        .collect();
+    host.check_attachment_limits(Value::Array(all))
         .await
         .map_err(DispatchError::Rejected)?;
-    let copies = new_copies(&all, &claimed);
-    let mut claimed = claimed.as_array().cloned().unwrap_or_default().into_iter();
     let mut answers = command["answers"].as_object().cloned().unwrap_or_default();
     let mut claimed_by_question = serde_json::Map::new();
-    for (question, count) in counts {
-        let files = Value::Array(claimed.by_ref().take(count).collect());
-        let references = match host.attachment_references(files.clone()).await {
-            Ok(references) => references,
+    let mut copies = Vec::new();
+    for (question, attachments) in by_question {
+        let prepared = async {
+            let claimed = host
+                .claim_attachments(thread_id.clone(), attachments.clone())
+                .await?;
+            if let Value::Array(made) = new_copies(&attachments, &claimed) {
+                copies.extend(made);
+            }
+            let references = host.attachment_references(claimed.clone()).await?;
+            Ok::<_, String>((claimed, references))
+        }
+        .await;
+        let (claimed, references) = match prepared {
+            Ok(prepared) => prepared,
             Err(error) => {
-                host.release_attachments(copies).await;
+                host.release_attachments(Value::Array(copies)).await;
                 return Err(DispatchError::Rejected(error));
             }
         };
@@ -3048,11 +3052,11 @@ async fn claim_answer_attachments(
                 with_references(answer, &references.join("\n")),
             );
         }
-        claimed_by_question.insert(question, files);
+        claimed_by_question.insert(question, claimed);
     }
     command["attachmentsByQuestionId"] = Value::Object(claimed_by_question);
     command["answers"] = Value::Object(answers);
-    Ok((command, some_copies(copies)))
+    Ok((command, some_copies(Value::Array(copies))))
 }
 
 /// An answer with `text` after it: one more entry of a list, a new paragraph of a text, or

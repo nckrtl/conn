@@ -240,6 +240,12 @@ pub trait EngineHost: Send + Sync {
         Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
+    /// The file count and image budget for a whole question response, before any copy
+    /// (`validateAttachmentLimits`). An error refuses the answer.
+    fn check_attachment_limits(&self, _attachments: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     /// Removes thread files no message or answer names any more (`attachment.cleanup`).
     fn delete_attachments(&self, _ids: Vec<String>) -> BoxFuture<'_, ()> {
         Box::pin(std::future::ready(()))

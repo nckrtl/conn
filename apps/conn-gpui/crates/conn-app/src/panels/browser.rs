@@ -209,6 +209,12 @@ pub(crate) struct BrowserPanel {
     /// `__connAnnotationsChanged` calls, CEF view or not, so tests can count them.
     #[cfg(test)]
     annotation_scripts: Cell<usize>,
+    /// A page loaded while hidden; its bridge and pins go in when it shows.
+    load_injection_pending: bool,
+    #[cfg(test)]
+    bridge_injections: Cell<usize>,
+    #[cfg(test)]
+    overlay_injections: Cell<usize>,
 }
 
 impl EventEmitter<AnnotationAction> for BrowserPanel {}
@@ -310,6 +316,11 @@ impl BrowserPanel {
             reported_title: String::new(),
             #[cfg(test)]
             annotation_scripts: Cell::new(0),
+            load_injection_pending: false,
+            #[cfg(test)]
+            bridge_injections: Cell::new(0),
+            #[cfg(test)]
+            overlay_injections: Cell::new(0),
         }
         .with_reported_title()
     }
@@ -464,13 +475,49 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// A page finished loading. Its bridge and pins go in now only if it shows; a hidden tab
+    /// takes them when it is shown, so a page in the background runs none of our scripts.
+    fn on_load_end(&mut self, cx: &mut Context<'_, Self>) {
+        self.overlay_injected_load_count.set(None);
+        self.annotations.annotating = false;
+        self.vault_logins.open = false;
+        if self.visible.get() {
+            self.inject_after_load();
+        } else {
+            self.load_injection_pending = true;
+        }
+        cx.notify();
+    }
+
+    fn inject_after_load(&mut self) {
+        self.load_injection_pending = false;
+        self.ensure_bridge_injected();
+        self.maybe_show_existing_pins();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_end_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        self.on_load_end(cx);
+    }
+
+    /// Bridge and overlay injections so far, CEF view or not.
+    #[cfg(test)]
+    pub(crate) fn injections_for_test(&self) -> (usize, usize) {
+        (self.bridge_injections.get(), self.overlay_injections.get())
+    }
+
     fn ensure_bridge_injected(&self) {
+        #[cfg(test)]
+        self.bridge_injections.set(self.bridge_injections.get() + 1);
         if let Some(view) = self.view.borrow().as_ref() {
             view.execute_javascript(BROWSER_OVERLAY_BRIDGE_JS);
         }
     }
 
     fn ensure_overlay_injected(&self, force: bool) {
+        #[cfg(test)]
+        self.overlay_injections
+            .set(self.overlay_injections.get() + 1);
         let guard = self.view.borrow();
         let Some(view) = guard.as_ref() else {
             return;
@@ -969,6 +1016,9 @@ impl BrowserPanel {
             apply_hidden(&self.view, &self.applied_hidden, !visible);
             if visible {
                 self.prewarm_runtime(cx);
+                if self.load_injection_pending {
+                    self.inject_after_load();
+                }
             } else {
                 self.context_menu = None;
             }
@@ -1397,12 +1447,7 @@ impl BrowserPanel {
                                             cx.emit(BrowserTabEvent::OpenTab(request));
                                         }
                                         BrowserOverlayEvent::LoadEnd => {
-                                            panel.overlay_injected_load_count.set(None);
-                                            panel.annotations.annotating = false;
-                                            panel.vault_logins.open = false;
-                                            panel.ensure_bridge_injected();
-                                            panel.maybe_show_existing_pins();
-                                            cx.notify();
+                                            panel.on_load_end(cx);
                                         }
                                     });
                                     if alive.is_err() {

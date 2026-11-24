@@ -1326,13 +1326,9 @@ impl ConnApp {
                 false
             }
             ClientEvent::Shell(item) => {
-                let removed = super::removed_thread(&item);
                 let Some(change) = self.linked.shells.apply(&environment_id, item) else {
                     return false;
                 };
-                if let Some(thread_id) = removed {
-                    self.release_thread_panel(&thread_id, cx);
-                }
                 if change.snapshot_required
                     && let Some(connection) = self.linked_connection(&environment_id)
                 {

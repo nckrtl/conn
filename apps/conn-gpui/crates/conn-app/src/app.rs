@@ -1419,7 +1419,6 @@ impl ConnApp {
                 }
             }
             ClientEvent::Shell(item) => {
-                let removed = removed_thread(&item);
                 let change = self.shell.apply(item);
                 self.remerge_linked_shells();
                 self.offline.shell_changed();
@@ -1434,9 +1433,6 @@ impl ConnApp {
                     self.layout.selected_thread_id = None;
                 }
                 self.release_settled_drop();
-                if let Some(thread_id) = removed {
-                    self.release_thread_panel(&thread_id, cx);
-                }
                 if change.snapshot_required || !change.threads_changed.is_empty() {
                     self.drive_older_pages(cx);
                 }
@@ -3441,13 +3437,17 @@ impl ConnApp {
     /// Diagnostic state of the Browser tab.
     #[cfg(feature = "automation")]
     pub(crate) fn browser_state(&self, cx: &App) -> serde_json::Value {
-        self.right_panel.read(cx).browser_state(cx)
+        self.right_panel
+            .read(cx)
+            .browser_state(self.thread_browser(), cx)
     }
 
     /// The Browser tab's page title.
     #[cfg(feature = "automation")]
     pub(crate) fn browser_title(&self, cx: &App) -> String {
-        self.right_panel.read(cx).browser_title(cx)
+        self.right_panel
+            .read(cx)
+            .browser_title(self.thread_browser(), cx)
     }
 
     #[cfg(feature = "automation")]
@@ -3456,8 +3456,10 @@ impl ConnApp {
         expression: &str,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.right_panel
-            .update(cx, |panel, cx| panel.browser_preview_eval(expression, cx))
+        let id = self.thread_browser();
+        self.right_panel.update(cx, |panel, cx| {
+            panel.browser_preview_eval(id, expression, cx)
+        })
     }
 
     #[cfg(feature = "automation")]
@@ -3467,8 +3469,10 @@ impl ConnApp {
         params: &serde_json::Value,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.right_panel
-            .update(cx, |panel, cx| panel.browser_preview_call(op, params, cx))
+        let id = self.thread_browser();
+        self.right_panel.update(cx, |panel, cx| {
+            panel.browser_preview_call(id, op, params, cx)
+        })
     }
 
     #[cfg(feature = "automation")]
@@ -3477,7 +3481,9 @@ impl ConnApp {
         path: &std::path::Path,
         cx: &App,
     ) -> Result<serde_json::Value, String> {
-        self.right_panel.read(cx).browser_screenshot(path, cx)
+        self.right_panel
+            .read(cx)
+            .browser_screenshot(self.thread_browser(), path, cx)
     }
 
     /// State read-out for the automation hook.
@@ -3894,9 +3900,33 @@ impl ConnApp {
         None
     }
 
-    /// A deleted thread's right panel goes with it, and so do its browsers. Said outright by a
-    /// local delete or a `thread.removed`, never inferred from the shell no longer listing it.
-    /// A thread still on screen keeps its panel until the user leaves; the browser cap bounds it.
+    /// The shown thread's browser tab for the automation hook: the active one, else the one it
+    /// showed last. None when this thread has no browser tab, whatever other threads hold.
+    #[cfg_attr(
+        not(any(test, feature = "automation")),
+        expect(dead_code, reason = "driven by the automation hook")
+    )]
+    fn thread_browser(&self) -> Option<conn_state::BrowserTabId> {
+        match self.right_panel_tabs.active() {
+            Some(PanelSurface::Browser(id)) => Some(*id),
+            _ => self.right_panel_tabs.last_browser(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn automation_browser_for_test(
+        &self,
+        cx: &App,
+    ) -> Result<gpui_kit::WeakEntity<crate::panels::BrowserPanelHandle>, String> {
+        self.right_panel
+            .read(cx)
+            .automation_browser(self.thread_browser())
+            .map(|b| b.downgrade())
+    }
+
+    /// A thread deleted here takes its right panel and browsers with it. Shell events do not:
+    /// `thread.removed` also means archived, and the thread can come back. The browser cap
+    /// bounds what threads deleted elsewhere leave behind.
     pub(crate) fn release_thread_panel(&mut self, thread_id: &str, cx: &mut Context<'_, Self>) {
         self.sync_panel_owner();
         self.forget_thread_panel(thread_id, cx);
@@ -3914,6 +3944,11 @@ impl ConnApp {
     #[cfg(test)]
     pub(crate) fn open_draft_id_for_test(&self) -> Option<String> {
         self.draft.as_ref().map(|d| d.draft_id.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn right_panel_add_menu_open_for_test(&self) -> bool {
+        self.right_panel_add_menu_open
     }
 
     #[cfg(test)]
@@ -4053,12 +4088,25 @@ impl ConnApp {
         cx.notify();
     }
 
+    /// A dialog, menu or popover is open, so a panel shortcut must leave the keyboard where it is
+    /// (`LAUNCHER_SHORTCUT_BLOCKING_LAYERS` in `RightPanelTabs.tsx`).
+    fn shortcut_blocking_layer_open(&self, cx: &App) -> bool {
+        self.settings_modal.is_some()
+            || self.command_palette.is_some()
+            || self.workspace_editor.is_some()
+            || self.thread_menu.is_some()
+            || self.rail_menu.is_some()
+            || self.sidebar_filter_menu_open
+            || self.chat.read(cx).model_picker_open(cx)
+    }
+
     /// `rightPanel.new` (`Cmd+T`): opens the `+` menu while the right panel shows and the
     /// terminal does not have the keyboard.
     fn open_right_panel_add_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let terminal = self.right_panel.read(cx).terminal_entity();
         let terminal_focused = terminal.focus_handle(cx).contains_focused(window, cx);
-        if !self.layout.right_panel_open || terminal_focused {
+        let blocked = !self.right_panel_add_menu_open && self.shortcut_blocking_layer_open(cx);
+        if !self.layout.right_panel_open || terminal_focused || blocked {
             cx.propagate();
             return;
         }
@@ -7261,18 +7309,6 @@ pub(crate) fn start_frame_log(cx: &mut App) {
         }
     })
     .detach();
-}
-
-/// The thread a shell event says was deleted.
-pub(crate) fn removed_thread(
-    item: &conn_contract::OrchestrationV2ShellStreamItem,
-) -> Option<String> {
-    match item {
-        conn_contract::OrchestrationV2ShellStreamItem::ThreadRemoved(removed) => {
-            Some(removed.thread_id.clone())
-        }
-        _ => None,
-    }
 }
 
 /// The right-panel tab an agent's `panel_open` request shows.

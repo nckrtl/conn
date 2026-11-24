@@ -94,7 +94,10 @@ const MAX_PARKED_BROWSERS: usize = 6;
 #[cfg(test)]
 pub(crate) type BrowserPanelHandle = BrowserPanel;
 
-#[cfg(feature = "automation")]
+#[cfg_attr(
+    not(any(test, feature = "automation")),
+    expect(dead_code, reason = "driven by the automation hook")
+)]
 const NO_BROWSER_TAB: &str = "No browser tab is open.";
 
 /// Right-panel GPUI entity mounted inside Conn's right-panel card.
@@ -466,11 +469,26 @@ impl RightPanel {
         }
     }
 
-    /// Diagnostic state of the active browser tab.
+    /// Browser tab `id`'s browser for the automation hook. `id` is the shown thread's tab, so
+    /// another thread's page is never the one acted on; none means that thread has no browser.
+    #[cfg_attr(
+        not(any(test, feature = "automation")),
+        expect(dead_code, reason = "driven by the automation hook")
+    )]
+    pub(crate) fn automation_browser(
+        &self,
+        id: Option<BrowserTabId>,
+    ) -> Result<Entity<BrowserPanel>, String> {
+        id.and_then(|id| self.browser(id))
+            .ok_or_else(|| NO_BROWSER_TAB.to_owned())
+    }
+
+    /// Diagnostic state of browser tab `id`.
     #[cfg(feature = "automation")]
-    pub fn browser_state(&self, cx: &App) -> serde_json::Value {
+    pub fn browser_state(&self, id: Option<BrowserTabId>, cx: &App) -> serde_json::Value {
         let mut state = self
-            .active_browser_entity()
+            .automation_browser(id)
+            .ok()
             .map_or(serde_json::Value::Null, |b| b.read(cx).automation_state());
         if let Some(object) = state.as_object_mut() {
             object.insert("tabCount".into(), self.browsers.len().into());
@@ -483,42 +501,43 @@ impl RightPanel {
         not(feature = "automation"),
         expect(dead_code, reason = "driven by the automation hook")
     )]
-    pub fn browser_title(&self, cx: &App) -> String {
-        self.active_browser_entity()
+    pub fn browser_title(&self, id: Option<BrowserTabId>, cx: &App) -> String {
+        self.automation_browser(id)
+            .ok()
             .map_or_else(String::new, |b| b.read(cx).title())
     }
 
     #[cfg(feature = "automation")]
     pub fn browser_preview_eval(
         &mut self,
+        id: Option<BrowserTabId>,
         expression: &str,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.active_browser_entity()
-            .ok_or_else(|| NO_BROWSER_TAB.to_owned())?
+        self.automation_browser(id)?
             .update(cx, |b, _| b.start_preview_eval(expression))
     }
 
     #[cfg(feature = "automation")]
     pub fn browser_preview_call(
         &mut self,
+        id: Option<BrowserTabId>,
         op: &str,
         params: &serde_json::Value,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.active_browser_entity()
-            .ok_or_else(|| NO_BROWSER_TAB.to_owned())?
+        self.automation_browser(id)?
             .update(cx, |b, _| b.start_preview_call(op, params))
     }
 
     #[cfg(feature = "automation")]
     pub fn browser_screenshot(
         &self,
+        id: Option<BrowserTabId>,
         path: &std::path::Path,
         cx: &App,
     ) -> Result<serde_json::Value, String> {
-        self.active_browser_entity()
-            .ok_or_else(|| NO_BROWSER_TAB.to_owned())?
+        self.automation_browser(id)?
             .read(cx)
             .save_browser_screenshot(path)
     }

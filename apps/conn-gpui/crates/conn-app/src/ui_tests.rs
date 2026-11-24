@@ -3601,11 +3601,8 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
     );
     assert!(page_b.upgrade().is_some(), "a hidden thread keeps its page");
 
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.apply_event_for_test(thread_removed("thread-other"), cx)
-        })
-    });
+    // What a delete made here does once the server took it.
+    cx.update(|cx| app.update(cx, |app, cx| app.release_thread_panel("thread-other", cx)));
     frames(cx);
     assert!(
         page_b.upgrade().is_none(),
@@ -3613,7 +3610,7 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
     );
 }
 
-/// The server's word that `id` was deleted, as another client's delete arrives.
+/// `thread.removed` as the TypeScript server sends it for both a delete and an archive.
 fn thread_removed(id: &str) -> ClientEvent {
     match from_json(json!({
         "kind": "thread.removed",
@@ -3628,6 +3625,11 @@ fn thread_removed(id: &str) -> ClientEvent {
 
 /// The server's word that `thread` moved to the archive.
 fn thread_archived(thread: &ThreadShell) -> ClientEvent {
+    thread_updated(thread, "archive")
+}
+
+/// `thread.updated` placing `thread` in `location` (`active` brings an archived thread back).
+fn thread_updated(thread: &ThreadShell, location: &str) -> ClientEvent {
     let thread = match serde_json::to_value(thread) {
         Ok(value) => value,
         Err(err) => panic!("ThreadShell did not serialize: {err}"),
@@ -3635,7 +3637,7 @@ fn thread_archived(thread: &ThreadShell) -> ClientEvent {
     match from_json(json!({
         "kind": "thread.updated",
         "sequence": 10_001,
-        "location": "archive",
+        "location": location,
         "thread": thread,
     })) {
         Ok(item) => ClientEvent::Shell(item),
@@ -3699,43 +3701,76 @@ fn open_thread_browser(
     (id, page)
 }
 
-/// `thread.removed` from any client releases the thread's browsers. Nothing else does: an
-/// archive, a server switch or a workspace filter only changes what the shell lists, and a
-/// thread missing from it is not known to be gone.
+/// Shell events close no browser tabs. `thread.removed` is what the TypeScript server sends for
+/// an archive as well as a delete, and the thread can come back; an archive, a workspace filter
+/// and a server switch only change what the shell lists. The browser cap bounds what is left.
 #[gpui_kit::test]
-fn only_a_removed_thread_releases_its_browsers(cx: &mut TestAppContext) {
+fn shell_events_close_no_browser_tabs(cx: &mut TestAppContext) {
+    const PAGE: &str = "https://docs.example/";
     let (window, app) = mount_two_thread_app(cx);
-    let (_, deleted) = open_thread_browser(cx, window, &app, "thread-selected");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.open_browser_tab(PAGE.into(), false, cx);
+        })
+    });
+    render_frames(cx, window);
+    let tabs = cx.update(|cx| app.read(cx).right_panel_tabs().tabs().to_vec());
+    let id = cx
+        .update(|cx| app.read(cx).right_panel_tabs().browser_ids().last())
+        .expect("a browser tab is open");
+    let removed = cx
+        .update(|cx| app.read(cx).browser_weak_for_test(id, cx))
+        .expect("the shown tab has a browser");
     let (_, archived) = open_thread_browser(cx, window, &app, "thread-pinned");
     let (_, filtered) = open_thread_browser(cx, window, &app, "thread-other");
     let (_, shown) = open_thread_browser(cx, window, &app, "thread-waiting");
-    let pinned = cx
-        .update(|cx| app.read(cx).shell().find_thread("thread-pinned").cloned())
-        .expect("the thread is listed");
+    let shell_thread = |cx: &mut TestAppContext, id: &str| {
+        cx.update(|cx| app.read(cx).shell().find_thread(id).cloned())
+            .expect("the thread is listed")
+    };
+    let (selected, pinned) = (
+        shell_thread(cx, "thread-selected"),
+        shell_thread(cx, "thread-pinned"),
+    );
 
+    // The TypeScript server archives with `thread.removed` (location active), then a restore
+    // brings the thread back with `thread.updated`.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.apply_event_for_test(thread_removed("thread-selected"), cx);
+            app.apply_event_for_test(thread_updated(&selected, "active"), cx);
             app.apply_event_for_test(thread_archived(&pinned), cx);
             // The filter hides thread-other's project from the sidebar.
             app.select_workspace(Some("proj-parity".to_owned()), cx);
         })
     });
     render_frames(cx, window);
-    assert!(
-        deleted.upgrade().is_none(),
-        "a removed thread's browser goes"
-    );
+    assert!(removed.upgrade().is_some(), "thread.removed closes nothing");
     assert!(archived.upgrade().is_some(), "an archive closes nothing");
     assert!(
         filtered.upgrade().is_some(),
         "a workspace filter closes nothing"
+    );
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    assert_eq!(
+        cx.update(|cx| app.read(cx).right_panel_tabs().tabs().to_vec()),
+        tabs,
+        "the restored thread has its tabs"
+    );
+    assert_eq!(
+        cx.update(|cx| app.read(cx).browser_target_for_test(id, cx))
+            .as_deref(),
+        Some(PAGE),
+        "and its page"
     );
 
     // A server switch empties the shell and the selection.
     cx.update(|cx| app.update(cx, |app, cx| app.switch_server_state_for_test(cx)));
     render_frames(cx, window);
     for (page, what) in [
+        (&removed, "restored"),
         (&archived, "archived"),
         (&filtered, "filtered"),
         (&shown, "shown"),
@@ -3745,6 +3780,71 @@ fn only_a_removed_thread_releases_its_browsers(cx: &mut TestAppContext) {
             "a server switch closes nothing ({what})"
         );
     }
+}
+
+/// The automation hook acts on the shown thread's browser only. A thread with no browser tab
+/// gets the no-browser error, even while another thread's browser is alive.
+#[gpui_kit::test]
+fn automation_acts_only_on_the_shown_threads_browser(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let (_, page_a) = open_thread_browser(cx, window, &app, "thread-selected");
+    let target = |cx: &mut TestAppContext| {
+        cx.update(|cx| app.read(cx).automation_browser_for_test(cx))
+            .map(|weak| weak.upgrade().map(|p| p.entity_id()))
+    };
+    assert_eq!(target(cx), Ok(page_a.upgrade().map(|p| p.entity_id())));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-other", cx);
+            app.select_right_panel_tab(conn_state::RightPanelTab::Files, cx);
+        })
+    });
+    render_frames(cx, window);
+    assert_eq!(target(cx), Err("No browser tab is open.".to_owned()));
+    // Back on A with Files on top, its last-shown browser is the one acted on.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.select_right_panel_tab(conn_state::RightPanelTab::Files, cx);
+        })
+    });
+    render_frames(cx, window);
+    assert_eq!(target(cx), Ok(page_a.upgrade().map(|p| p.entity_id())));
+}
+
+/// `Cmd+T` opens the `+` menu, but not while a dialog such as Settings is open: the shortcut
+/// leaves the keyboard where it is (`LAUNCHER_SHORTCUT_BLOCKING_LAYERS`).
+#[gpui_kit::test]
+fn cmd_t_does_nothing_while_settings_is_open(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let _ = open_thread_browser(cx, window, &app, "thread-selected");
+    let menu_open =
+        |cx: &mut TestAppContext| cx.update(|cx| app.read(cx).right_panel_add_menu_open_for_test());
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| app.open_settings(window, cx));
+        window.render_frame(cx);
+    });
+    let focused_before = cx
+        .update_window(window, |_, window, cx| window.focused(cx))
+        .ok()
+        .flatten();
+    press(cx, window, "cmd-t");
+    assert!(!menu_open(cx), "the + menu stays shut behind Settings");
+    let focused_after = cx
+        .update_window(window, |_, window, cx| window.focused(cx))
+        .ok()
+        .flatten();
+    assert_eq!(focused_after, focused_before, "Settings keeps the keyboard");
+
+    let _ = cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| app.open_settings(window, cx));
+        window.render_frame(cx);
+    });
+    press(cx, window, "cmd-t");
+    assert!(
+        menu_open(cx),
+        "with Settings closed, Cmd+T opens the + menu"
+    );
 }
 
 /// Browsers parked in tabs that do not show stay live up to a cap; past it the least recently
@@ -3931,8 +4031,46 @@ fn hidden_browsers_get_no_annotation_scripts(cx: &mut TestAppContext) {
         "nor does it move projects"
     );
 
+    // A page that finishes loading while hidden gets no bridge or overlay until it shows.
+    let injections = |cx: &mut TestAppContext, page: &gpui_kit::WeakEntity<_>| {
+        cx.update(|cx| {
+            page.upgrade()
+                .map(|p: Entity<crate::panels::BrowserPanelHandle>| {
+                    p.read(cx).injections_for_test()
+                })
+        })
+        .expect("the page is alive")
+    };
+    let load_end = |cx: &mut TestAppContext, page: &gpui_kit::WeakEntity<_>| {
+        cx.update(|cx| {
+            if let Some(p) = page.upgrade() {
+                let p: Entity<crate::panels::BrowserPanelHandle> = p;
+                p.update(cx, |p, cx| p.load_end_for_test(cx));
+            }
+        });
+    };
+    let (bridge_before, overlay_before) = injections(cx, &parity);
+    load_end(cx, &parity);
+    assert_eq!(
+        injections(cx, &parity),
+        (bridge_before, overlay_before),
+        "a hidden page that loads runs no bridge or overlay"
+    );
+    let shown_injections = injections(cx, &other);
+    load_end(cx, &other);
+    assert_eq!(
+        injections(cx, &other).0,
+        shown_injections.0 + 1,
+        "a shown page gets its bridge on load"
+    );
+
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
     render_frames(cx, window);
+    assert_eq!(
+        injections(cx, &parity).0,
+        bridge_before + 1,
+        "the hidden page takes its bridge once it shows"
+    );
     assert_eq!(project(cx, &parity).as_deref(), Some("proj-parity"));
     assert!(
         scripts(cx, &parity) > hidden_before,

@@ -370,7 +370,7 @@ struct Operation {
     success: Success,
     error_statuses: Vec<u16>,
     error_type: String,
-    managed_by_path: bool,
+    managed: bool,
     untyped: usize,
 }
 
@@ -513,11 +513,6 @@ impl Model {
             note.push('.');
             let _ = write!(doc, "\n\n{note}");
         }
-        if op.managed_by_path {
-            let note = " TODO(6200): the document names no auth; `ManagedBearer` comes from the \
-                        `/api/v1/conn/managed/` path.";
-            let _ = write!(doc, "\n\n{note}");
-        }
         let _ = writeln!(code, "#[doc = {doc:?}]");
         if op.params.is_empty() && op.body.is_none() {
             let _ = writeln!(
@@ -586,7 +581,7 @@ impl Model {
             }
         };
 
-        let auth = if op.managed_by_path {
+        let auth = if op.managed {
             "ManagedBearer"
         } else {
             "WireGuardPeer"
@@ -869,12 +864,11 @@ fn build_operation(
         }
     };
 
-    let has_security = operation
-        .get("security")
-        .and_then(Value::as_array)
-        .is_some_and(|list| !list.is_empty());
-    if has_security {
-        return Err("`security` is documented now: map it to AuthKind in the generator".into());
+    let managed = managed_auth(operation.get("security"))?;
+    if managed != path.starts_with(MANAGED_PREFIX) {
+        return Err(format!(
+            "`security` and the {MANAGED_PREFIX} path disagree about the managed bearer"
+        ));
     }
 
     Ok(Operation {
@@ -892,9 +886,39 @@ fn build_operation(
         success,
         error_statuses,
         error_type,
-        managed_by_path: path.starts_with(MANAGED_PREFIX),
+        managed,
         untyped,
     })
+}
+
+/// True when the operation's `security` asks for the managed bearer. An operation without its own
+/// `security` inherits the document's WireGuard peer requirement.
+fn managed_auth(security: Option<&Value>) -> Result<bool> {
+    let Some(security) = security else {
+        return Ok(false);
+    };
+    let requirements = security.as_array().ok_or("`security` is not a list")?;
+    if requirements.len() != 1 {
+        return Err(format!(
+            "`security` lists {} requirements; AuthKind maps exactly one",
+            requirements.len()
+        ));
+    }
+    let schemes = requirements[0]
+        .as_object()
+        .ok_or("a `security` requirement is not an object")?;
+    let mut managed = false;
+    for scheme in schemes.keys() {
+        match scheme.as_str() {
+            "wireguardPeer" => {}
+            "managedTargetBearer" => managed = true,
+            other => return Err(format!("`security` scheme {other} has no AuthKind")),
+        }
+    }
+    if !schemes.contains_key("wireguardPeer") {
+        return Err("`security` drops the WireGuard peer; AuthKind assumes it".into());
+    }
+    Ok(managed)
 }
 
 fn insert_definition(defs: &mut BTreeMap<String, Value>, name: &str, schema: Value) -> Result<()> {

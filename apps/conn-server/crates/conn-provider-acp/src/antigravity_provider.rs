@@ -319,14 +319,35 @@ impl AntigravityProvider {
     }
 
     /// A throwaway session in a scratch folder, closed once it has answered: the session
-    /// proves the credentials and lists the models ([`Self::session_started`]). With
-    /// `publish_by`, it also publishes the catalog ([`Self::publish_catalog`]) before that
-    /// time. On an abort or a failure the agent is stopped and both folders are gone before
-    /// this returns.
-    async fn throwaway_session(
+    /// proves the credentials and lists the models ([`Self::session_started`]), then
+    /// publishes the catalog ([`Self::publish_catalog`]). The control's abort ends both. On
+    /// an abort or a failure the agent is stopped and both folders are gone before this
+    /// returns.
+    async fn throwaway_session(&self, mut control: OpenControl) -> Result<(), OpenError> {
+        // The open consumes its abort, so the abort is relayed to the open and the publish.
+        let abort = control.abort.take();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let mut open_stopped = stopped.clone();
+        control.abort = Some(Box::pin(async move {
+            let _ = open_stopped.wait_for(|stop| *stop).await;
+        }));
+        let run = self.throwaway_run(control, stopped);
+        tokio::pin!(run);
+        if let Some(abort) = abort {
+            tokio::select! {
+                result = &mut run => return result,
+                () = abort => {
+                    stop.send_replace(true);
+                }
+            }
+        }
+        run.await
+    }
+
+    async fn throwaway_run(
         &self,
         mut control: OpenControl,
-        publish_by: Option<tokio::time::Instant>,
+        mut stopped: tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), OpenError> {
         let session_new = Arc::new(std::sync::Mutex::new(SessionNew::NotSent));
         control.session_new = Some(session_new.clone());
@@ -352,13 +373,9 @@ impl AntigravityProvider {
             .await;
         let result = match started {
             Ok((session, _events)) => {
-                let published = match publish_by {
-                    Some(deadline) => {
-                        tokio::time::timeout_at(deadline, self.publish_catalog(&session))
-                            .await
-                            .map_err(|_| OpenError::Aborted)
-                    }
-                    None => Ok(()),
+                let published = tokio::select! {
+                    () = self.publish_catalog(&session) => Ok(()),
+                    _ = stopped.wait_for(|stop| *stop) => Err(OpenError::Aborted),
                 };
                 session.close().await;
                 published
@@ -398,7 +415,7 @@ impl AntigravityProvider {
             abort: Some(Box::pin(tokio::time::sleep_until(deadline))),
             ..OpenControl::default()
         };
-        self.throwaway_session(control, Some(deadline))
+        self.throwaway_session(control)
             .await
             .map_err(|error| ProviderError::Failed {
                 operation: "refresh-models",
@@ -410,7 +427,8 @@ impl AntigravityProvider {
     }
 
     /// T3's Antigravity sign-in without a browser (`antigravityAuthUsesBrowser` false): a
-    /// session with the credentials from the settings. The error carries T3's text.
+    /// session with the credentials from the settings that publishes the catalog before it
+    /// succeeds, as T3's `onAuthenticated` does. The error carries T3's text.
     async fn check_credentials(&self, check: CredentialCheck) -> ProviderResult<()> {
         // Never start `agy` without a key: it would fall back to another sign-in.
         if !self.settings.has_key_sign_in() {
@@ -423,7 +441,7 @@ impl AntigravityProvider {
             on_step: Some(check.on_step),
             ..OpenControl::default()
         };
-        self.throwaway_session(control, None)
+        self.throwaway_session(control)
             .await
             .map_err(|error| ProviderError::Failed {
                 operation: "start",
@@ -946,7 +964,7 @@ mod tests {
             abort: Some(abort),
             ..OpenControl::default()
         };
-        let result = provider.throwaway_session(control, None).await;
+        let result = provider.throwaway_session(control).await;
         assert!(matches!(result, Err(OpenError::Aborted)), "{result:?}");
         assert_eq!(provider.scans.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert!(!conversations.join(format!("{ID}.meta")).exists());
@@ -1008,6 +1026,43 @@ mod tests {
         assert_eq!(
             levels("gemini-b"),
             (vec!["minimal", "max"], json!("minimal"), Value::Null)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// T3's sign-in runs `publishCatalog` before it succeeds (`onAuthenticated`): a
+    /// credential check lists each model's own thinking levels, as a refresh does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_credential_check_lists_each_models_thinking_levels() {
+        let a = || options("gemini-a", &["low", "high"]);
+        let b = options("gemini-b", &["minimal", "max"]);
+        let mut script = handshake(a());
+        script.extend([
+            select("gemini-a"),
+            reply("session/set_config_option", json!({"configOptions": a()})),
+            select("gemini-b"),
+            reply("session/set_config_option", json!({"configOptions": b})),
+            select("gemini-a"),
+            reply("session/set_config_option", json!({"configOptions": a()})),
+        ]);
+        let (mut provider, scripts, dir) = provider(vec![script]);
+        provider.settings = AntigravitySettings::from_instance(Some(&json!({
+            "enabled": true, "config": {"authMethod": "gemini-api-key", "apiKey": "k"}
+        })));
+        provider
+            .credential_check(CredentialCheck {
+                abort: Box::pin(std::future::pending()),
+                on_step: Box::new(|_| {}),
+            })
+            .await
+            .unwrap();
+        complete(&scripts[0]);
+        assert_eq!(
+            levels(&entry_of(&provider), "gemini-b"),
+            (
+                vec!["minimal".to_owned(), "max".to_owned()],
+                json!("minimal")
+            )
         );
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -8,14 +8,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use image::{Frame, RgbaImage};
+use image::RgbaImage;
 
 /// Decoded thumbnail pixels the chat keeps at most: about 15 full-width tiles at 2x. The rows
 /// on screen plus the list's overdraw must fit, or visible tiles would evict each other.
 pub(super) const THUMB_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
-/// Pixels one entry may hold, all frames together: a quarter of the budget, so four of the
+/// Pixels one entry may hold: a quarter of the budget, so four of the
 /// largest entries fit at once and never push each other out.
 pub(super) const ENTRY_MAX_BYTES: usize = THUMB_BUDGET_BYTES / 4;
 
@@ -88,7 +89,14 @@ pub(super) fn scaled_size(
     // Round up to keep covering the target; round down under the cap to stay within it.
     let round = |side: f64| if capped { side.floor() } else { side.ceil() };
     let side = |length: u32| (round(f64::from(length) * scale) as u32).clamp(1, length);
-    (side(width), side(height))
+    let (mut width, mut height) = (side(width), side(height));
+    // Rounding up can pass the cap by a row; the final whole pixels must fit it.
+    while width as usize * height as usize * 4 > max_bytes && (width > 1 || height > 1) {
+        let shrink = (max_bytes as f64 / (f64::from(width) * f64::from(height) * 4.0)).sqrt();
+        width = ((f64::from(width) * shrink).floor() as u32).max(1);
+        height = ((f64::from(height) * shrink).floor() as u32).max(1);
+    }
+    (width, height)
 }
 
 /// Crops `frame` to what a `target` tile shows and scales it down to fit (channel order kept).
@@ -108,81 +116,70 @@ pub(super) fn fit_frame(frame: &RgbaImage, target: TargetPx, max_bytes: usize) -
     }
 }
 
-/// Thumbnail frames in GPUI's `RenderImage` pixel order (BGRA, straight alpha, as GPUI's own
-/// decode), with their delays.
+/// A thumbnail in GPUI's `RenderImage` pixel order (BGRA, straight alpha, as GPUI's own
+/// decode). Always a still: a GIF shows its first frame.
 pub(super) struct Thumbnail {
-    pub(super) frames: Vec<Frame>,
+    pub(super) pixels: RgbaImage,
     /// Width over height of the upright picture before the crop.
     pub(super) aspect: Option<f32>,
 }
 
 impl Thumbnail {
-    /// Decoded bytes of every frame: what GPUI keeps for it.
-    pub(super) fn byte_len(&self) -> usize {
-        self.frames
-            .iter()
-            .map(|frame| frame.buffer().as_raw().len())
-            .sum()
-    }
-}
-
-/// Fits each of `frames` to `target`. When all of them together would pass
-/// [`ENTRY_MAX_BYTES`], only the first stays: a still thumbnail. `to_bgra` swaps RGBA input.
-pub(super) fn fit_frames(
-    frames: impl IntoIterator<Item = Frame>,
-    target: TargetPx,
-    to_bgra: bool,
-) -> Option<Thumbnail> {
-    let mut fitted: Vec<Frame> = Vec::new();
-    let mut aspect = None;
-    let mut bytes = 0;
-    for frame in frames {
-        if fitted.is_empty() {
-            let (width, height) = frame.buffer().dimensions();
-            aspect = (width > 0 && height > 0).then(|| width as f32 / height as f32);
-        }
-        let delay = frame.delay();
-        let mut pixels = fit_frame(frame.buffer(), target, ENTRY_MAX_BYTES);
+    /// Crops and scales an upright `picture` for `target`. `to_bgra` swaps RGBA input.
+    pub(super) fn fit(picture: &RgbaImage, target: TargetPx, to_bgra: bool) -> Self {
+        let (width, height) = picture.dimensions();
+        let aspect = (width > 0 && height > 0).then(|| width as f32 / height as f32);
+        let mut pixels = fit_frame(picture, target, ENTRY_MAX_BYTES);
         if to_bgra {
             for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
-        bytes += pixels.as_raw().len();
-        if bytes > ENTRY_MAX_BYTES && !fitted.is_empty() {
-            fitted.truncate(1);
-            break;
-        }
-        fitted.push(Frame::from_parts(pixels, 0, 0, delay));
+        Self { pixels, aspect }
     }
-    (!fitted.is_empty()).then_some(Thumbnail {
-        frames: fitted,
-        aspect,
-    })
+
+    /// Decoded bytes: what GPUI keeps for it.
+    pub(super) fn byte_len(&self) -> usize {
+        self.pixels.as_raw().len()
+    }
 }
 
-/// Decodes PNG, JPEG, WebP or GIF `bytes` into a thumbnail for `target`, turning a still
-/// picture upright from its EXIF orientation as GPUI does. `None` for other formats or bad
-/// data. Slow: call it off the UI thread.
-pub(super) fn decode_thumbnail(bytes: &[u8], target: TargetPx) -> Option<Thumbnail> {
-    use image::{AnimationDecoder as _, ImageDecoder as _};
+/// Decodes PNG, JPEG, WebP or the first frame of a GIF into a thumbnail for `target`, turning
+/// the picture upright from its EXIF orientation as GPUI does. `None` for other formats, bad
+/// data, or once `cancel` is set (checked between stages). Slow: call it off the UI thread.
+pub(super) fn decode_thumbnail(
+    bytes: &[u8],
+    target: TargetPx,
+    cancel: &AtomicBool,
+) -> Option<Thumbnail> {
+    use image::ImageDecoder as _;
+    let cancelled = || cancel.load(Ordering::Relaxed);
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
-    match reader.format()? {
-        image::ImageFormat::Gif => {
-            let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
-            fit_frames(decoder.into_frames().map_while(Result::ok), target, true)
-        }
-        image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP => {
-            let mut decoder = reader.into_decoder().ok()?;
-            let orientation = decoder.orientation().ok()?;
-            let mut picture = image::DynamicImage::from_decoder(decoder).ok()?;
-            picture.apply_orientation(orientation);
-            fit_frames([Frame::new(picture.into_rgba8())], target, true)
-        }
-        _ => None,
+    let format = reader.format()?;
+    if !matches!(
+        format,
+        image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::WebP
+            | image::ImageFormat::Gif
+    ) || cancelled()
+    {
+        return None;
     }
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().ok()?;
+    let mut picture = image::DynamicImage::from_decoder(decoder).ok()?;
+    if cancelled() {
+        return None;
+    }
+    picture.apply_orientation(orientation);
+    let picture = picture.into_rgba8();
+    if cancelled() {
+        return None;
+    }
+    Some(Thumbnail::fit(&picture, target, true))
 }
 
 /// A least-recently-used map whose entries cost bytes. Inserting past the budget evicts the
@@ -274,12 +271,15 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
     }
 }
 
-/// Thumbnail loads: at most `limit` run, the rest wait in order. A load whose tile was not
-/// drawn since the last [`Self::sweep`] is cancelled, so tiles scrolled past never decode.
+/// Thumbnail loads, by request id. At most `limit` hold a permit at once, and a load keeps
+/// its permit until its download and decode have returned ([`Self::exited`]), even after it
+/// was cancelled, so cancelled work never overlaps with more than `limit` loads. The rest wait
+/// in order. A load whose tile was not drawn since the last [`Self::sweep`] is cancelled.
 pub(super) struct LoadQueue<K, J> {
     limit: usize,
-    running: HashSet<K>,
-    pending: VecDeque<(K, J)>,
+    permits: usize,
+    running: HashMap<u64, K>,
+    pending: VecDeque<(u64, K, J)>,
     seen: HashSet<K>,
 }
 
@@ -287,21 +287,24 @@ impl<K: Eq + Hash + Clone, J> LoadQueue<K, J> {
     pub(super) fn new(limit: usize) -> Self {
         Self {
             limit: limit.max(1),
-            running: HashSet::new(),
+            permits: 0,
+            running: HashMap::new(),
             pending: VecDeque::new(),
             seen: HashSet::new(),
         }
     }
 
-    /// Asks to load `key`. Returns the job when a slot is free and it should start now.
+    /// Asks to load `key` as request `id`. Returns the load when a permit is free and it
+    /// should start now.
     #[must_use]
-    pub(super) fn request(&mut self, key: K, job: J) -> Option<(K, J)> {
+    pub(super) fn request(&mut self, id: u64, key: K, job: J) -> Option<(u64, K, J)> {
         self.seen.insert(key.clone());
-        if self.running.len() < self.limit {
-            self.running.insert(key.clone());
-            Some((key, job))
+        if self.permits < self.limit {
+            self.permits += 1;
+            self.running.insert(id, key.clone());
+            Some((id, key, job))
         } else {
-            self.pending.push_back((key, job));
+            self.pending.push_back((id, key, job));
             None
         }
     }
@@ -313,53 +316,59 @@ impl<K: Eq + Hash + Clone, J> LoadQueue<K, J> {
         }
     }
 
-    /// Frees the slot of the finished load `key` and returns the loads that start now.
+    /// The work of started load `id` returned, cancelled or not: frees its permit and returns
+    /// the loads that start now.
     #[must_use]
-    pub(super) fn finish(&mut self, key: &K) -> Vec<(K, J)> {
-        self.running.remove(key);
-        self.start_waiting()
-    }
-
-    /// Cancels every load not drawn since the last sweep. Returns the cancelled keys and the
-    /// loads that start in the freed slots.
-    #[must_use]
-    pub(super) fn sweep(&mut self) -> (Vec<K>, Vec<(K, J)>) {
-        let mut cancelled = Vec::new();
-        let seen = std::mem::take(&mut self.seen);
-        self.running.retain(|key| {
-            let keep = seen.contains(key);
-            if !keep {
-                cancelled.push(key.clone());
-            }
-            keep
-        });
-        self.pending.retain(|(key, _)| {
-            let keep = seen.contains(key);
-            if !keep {
-                cancelled.push(key.clone());
-            }
-            keep
-        });
-        (cancelled, self.start_waiting())
-    }
-
-    /// Forgets every load (reconnect); the caller drops their tasks.
-    pub(super) fn clear(&mut self) {
-        self.running.clear();
-        self.pending.clear();
-        self.seen.clear();
-    }
-
-    fn start_waiting(&mut self) -> Vec<(K, J)> {
+    pub(super) fn exited(&mut self, id: u64) -> Vec<(u64, K, J)> {
+        self.running.remove(&id);
+        self.permits = self.permits.saturating_sub(1);
         let mut started = Vec::new();
-        while self.running.len() < self.limit {
-            let Some((key, job)) = self.pending.pop_front() else {
+        while self.permits < self.limit {
+            let Some((id, key, job)) = self.pending.pop_front() else {
                 break;
             };
-            self.running.insert(key.clone());
-            started.push((key, job));
+            self.permits += 1;
+            self.running.insert(id, key.clone());
+            started.push((id, key, job));
         }
         started
+    }
+
+    /// Cancels every load not drawn since the last sweep and returns them. A cancelled running
+    /// load keeps its permit until it exits.
+    #[must_use]
+    pub(super) fn sweep(&mut self) -> Vec<(u64, K)> {
+        let seen = std::mem::take(&mut self.seen);
+        let mut cancelled = Vec::new();
+        self.running.retain(|id, key| {
+            let keep = seen.contains(key);
+            if !keep {
+                cancelled.push((*id, key.clone()));
+            }
+            keep
+        });
+        self.pending.retain(|(id, key, _)| {
+            let keep = seen.contains(key);
+            if !keep {
+                cancelled.push((*id, key.clone()));
+            }
+            keep
+        });
+        cancelled
+    }
+
+    /// Forgets every load (reconnect) and returns the running ids to cancel. Their permits
+    /// stay held until they exit.
+    #[must_use]
+    pub(super) fn clear(&mut self) -> Vec<u64> {
+        self.pending.clear();
+        self.seen.clear();
+        self.running.drain().map(|(id, _)| id).collect()
+    }
+
+    #[cfg(test)]
+    fn live_permits(&self) -> usize {
+        self.permits
     }
 }
 
@@ -470,51 +479,37 @@ mod tests {
         assert!(cache.peek(&0).is_none(), "the oldest went first");
     }
 
-    fn frames(count: usize, width: u32, height: u32) -> Vec<Frame> {
-        (0..count)
-            .map(|_| Frame::new(RgbaImage::new(width, height)))
-            .collect()
+    #[test]
+    fn rounding_never_passes_the_entry_cap() {
+        // The re-check case: a 1199x3624 picture at full width and 2x rounded up past 16 MiB.
+        let target = TargetPx::from_logical(CHAT_BUBBLE_MAX_PX, 0.0, 2.0);
+        let (width, height) = scaled_size(1199, 3624, target, ENTRY_MAX_BYTES);
+        assert!(width as usize * height as usize * 4 <= ENTRY_MAX_BYTES);
+        assert!(width >= target.width - 2, "only the overshoot is taken off");
     }
 
     #[test]
-    fn animations_are_charged_for_every_decoded_frame() {
-        let tile = TargetPx {
-            width: 64,
-            height: 48,
-        };
-        let thumb = fit_frames(frames(5, 640, 480), tile, true).expect("frames");
-        assert_eq!(thumb.frames.len(), 5);
-        assert_eq!(thumb.byte_len(), 5 * 64 * 48 * 4);
-    }
-
-    #[test]
-    fn an_animation_past_the_entry_cap_keeps_its_first_frame() {
-        let full_width = TargetPx {
-            width: 1024,
-            height: 0,
-        };
-        // Five 4 MiB frames pass the 16 MiB cap: a still first frame stays.
-        let thumb = fit_frames(frames(5, 1024, 1024), full_width, true).expect("frames");
-        assert_eq!(thumb.frames.len(), 1);
-        assert_eq!(thumb.byte_len(), 1024 * 1024 * 4);
-        assert!(thumb.byte_len() <= ENTRY_MAX_BYTES);
-        assert!(fit_frames(Vec::new(), full_width, true).is_none());
-    }
-
-    #[test]
-    fn gifs_decode_every_frame() {
+    fn gif_thumbnails_are_the_first_frame_still() {
+        let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+        let frames =
+            colors.map(|color| image::Frame::new(RgbaImage::from_pixel(8, 6, image::Rgba(color))));
         let mut bytes = Vec::new();
         {
             let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
-            encoder.encode_frames(frames(3, 8, 6)).expect("encode gif");
+            encoder.encode_frames(frames).expect("encode gif");
         }
         let tile = TargetPx {
             width: 8,
             height: 6,
         };
-        let thumb = decode_thumbnail(&bytes, tile).expect("decodes");
-        assert_eq!(thumb.frames.len(), 3);
-        assert_eq!(thumb.byte_len(), 3 * 8 * 6 * 4);
+        let thumb = decode_thumbnail(&bytes, tile, &AtomicBool::new(false)).expect("decodes");
+        assert_eq!(thumb.pixels.dimensions(), (8, 6));
+        assert_eq!(thumb.byte_len(), 8 * 6 * 4, "charged like any still");
+        let first = thumb.pixels.get_pixel(4, 3).0;
+        assert!(
+            first[2] > 200 && first[0] < 60,
+            "the red first frame: {first:?}"
+        );
     }
 
     /// A 64x32 JPEG, red on the left and blue on the right, with EXIF orientation 6 (turn 90°
@@ -552,11 +547,9 @@ mod tests {
             width: 1000,
             height: 0,
         };
-        let thumb = decode_thumbnail(&rotated_jpeg(), free).expect("decodes");
-        let [frame] = thumb.frames.as_slice() else {
-            panic!("one frame");
-        };
-        let pixels = frame.buffer();
+        let thumb =
+            decode_thumbnail(&rotated_jpeg(), free, &AtomicBool::new(false)).expect("decodes");
+        let pixels = &thumb.pixels;
         // Turned clockwise: 32 wide, 64 tall, the red left half now on top.
         assert_eq!(pixels.dimensions(), (32, 64));
         assert!((thumb.aspect.unwrap_or_default() - 0.5).abs() < 1e-4);
@@ -565,7 +558,9 @@ mod tests {
         let blue = pixels.get_pixel(16, 52).0;
         assert!(red[2] > 200 && red[0] < 60, "top is red: {red:?}");
         assert!(blue[0] > 200 && blue[2] < 60, "bottom is blue: {blue:?}");
-        assert!(decode_thumbnail(&[1, 2, 3], free).is_none());
+        assert!(decode_thumbnail(&[1, 2, 3], free, &AtomicBool::new(false)).is_none());
+        // Cancelled work stops before decoding.
+        assert!(decode_thumbnail(&rotated_jpeg(), free, &AtomicBool::new(true)).is_none());
     }
 
     #[test]
@@ -602,35 +597,53 @@ mod tests {
     #[test]
     fn loads_run_two_at_a_time_in_order() {
         let mut loads = LoadQueue::new(LOAD_CONCURRENCY);
-        assert_eq!(loads.request("a", 1), Some(("a", 1)));
-        assert_eq!(loads.request("b", 2), Some(("b", 2)));
-        assert_eq!(loads.request("c", 3), None);
-        assert_eq!(loads.request("d", 4), None);
-        assert_eq!(loads.finish(&"a"), vec![("c", 3)]);
-        assert_eq!(loads.finish(&"b"), vec![("d", 4)]);
-        assert!(loads.finish(&"c").is_empty());
+        assert_eq!(loads.request(1, "a", ()), Some((1, "a", ())));
+        assert_eq!(loads.request(2, "b", ()), Some((2, "b", ())));
+        assert_eq!(loads.request(3, "c", ()), None);
+        assert_eq!(loads.request(4, "d", ()), None);
+        assert_eq!(loads.exited(1), vec![(3, "c", ())]);
+        assert_eq!(loads.exited(2), vec![(4, "d", ())]);
+        assert!(loads.exited(3).is_empty());
+        assert_eq!(loads.live_permits(), 1);
     }
 
     #[test]
-    fn loads_of_tiles_scrolled_away_are_cancelled() {
+    fn cancelled_loads_hold_their_permits_until_their_work_exits() {
         let mut loads = LoadQueue::new(2);
-        assert!(loads.request("a", 1).is_some());
-        assert!(loads.request("b", 2).is_some());
-        assert!(loads.request("c", 3).is_none());
-        assert!(loads.request("d", 4).is_none());
+        assert!(loads.request(1, "a", ()).is_some());
+        assert!(loads.request(2, "b", ()).is_some());
+        assert!(loads.request(3, "c", ()).is_none());
+        assert!(loads.request(4, "d", ()).is_none());
         // Every request counts as drawn until the first sweep.
-        let (cancelled, started) = loads.sweep();
-        assert!(cancelled.is_empty() && started.is_empty());
-        // Only `b` and `d` are drawn again: `a` (running) and `c` (waiting) go, `d` starts.
-        loads.touch(&"b");
+        assert!(loads.sweep().is_empty());
+        // `a` and `b` scroll away while their downloads still run.
+        loads.touch(&"c");
         loads.touch(&"d");
-        let (mut cancelled, started) = loads.sweep();
+        let mut cancelled = loads.sweep();
         cancelled.sort_unstable();
-        assert_eq!(cancelled, ["a", "c"]);
-        assert_eq!(started, [("d", 4)]);
-        // A cancelled load finishing late frees nothing and starts nothing.
-        assert!(loads.finish(&"a").is_empty());
-        loads.clear();
-        assert_eq!(loads.request("e", 5), Some(("e", 5)));
+        assert_eq!(cancelled, [(1, "a"), (2, "b")]);
+        // Their work still holds both permits: nothing replaces them yet.
+        assert_eq!(loads.live_permits(), 2);
+        assert!(loads.request(5, "e", ()).is_none());
+        assert_eq!(loads.live_permits(), 2);
+        // Each one that returns admits exactly one waiting load.
+        assert_eq!(loads.exited(1), vec![(3, "c", ())]);
+        assert_eq!(loads.live_permits(), 2);
+        assert_eq!(loads.exited(2), vec![(4, "d", ())]);
+        assert_eq!(loads.exited(3), vec![(5, "e", ())]);
+        assert_eq!(loads.live_permits(), 2);
+    }
+
+    #[test]
+    fn a_reconnect_keeps_permits_until_old_work_exits() {
+        let mut loads = LoadQueue::new(2);
+        assert!(loads.request(1, "a", ()).is_some());
+        assert!(loads.request(2, "b", ()).is_some());
+        let mut running = loads.clear();
+        running.sort_unstable();
+        assert_eq!(running, [1, 2]);
+        assert!(loads.request(3, "a", ()).is_none());
+        assert_eq!(loads.exited(1), vec![(3, "a", ())]);
+        assert_eq!(loads.live_permits(), 2);
     }
 }

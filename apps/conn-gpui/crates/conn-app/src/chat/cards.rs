@@ -10,6 +10,8 @@
 //!   day-aware timestamps (`timestampFormat.ts`), Copy, and Fork.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use conn_state::{
@@ -288,70 +290,72 @@ impl ChatView {
         let job = ThumbJob {
             attachment_id: image.id.clone(),
             mime_type: image.mime_type.clone(),
-            request,
         };
-        let start = self.thumb_loads.borrow_mut().request(key, job);
-        if let Some((key, job)) = start {
-            self.start_thumb(key, job, cx);
+        let start = self.thumb_loads.borrow_mut().request(request, key, job);
+        if let Some(start) = start {
+            self.start_thumb(start, cx);
         }
         None
     }
 
-    /// Downloads and decodes one thumbnail; its slot in [`Self::thumb_loads`] is already taken.
+    /// Downloads and decodes one thumbnail; its permit in [`Self::thumb_loads`] is taken. The
+    /// task is never dropped: a cancel only sets its flag, so the permit stays held until the
+    /// download and decode have really returned.
     pub(super) fn start_thumb(
         &self,
-        key: super::ThumbKey,
-        job: super::attachment_thumb::ThumbJob,
+        (request, key, job): (u64, super::ThumbKey, super::attachment_thumb::ThumbJob),
         cx: &mut Context<'_, Self>,
     ) {
         use super::attachment_thumb::{SentImage, load_sent_image};
-        let Some(connection) = self.connection.clone() else {
-            return;
-        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.thumb_cancels
+            .borrow_mut()
+            .insert(request, cancel.clone());
+        let connection = self.connection.clone();
         let svg_renderer = cx.svg_renderer();
         let target = key.1;
-        let task_key = key.clone();
-        let task = cx.spawn(async move |this, cx| {
-            let loaded = match connection.fetch_attachment_bytes(&job.attachment_id).await {
-                Ok(bytes) => {
+        cx.spawn(async move |this, cx| {
+            let bytes = match connection {
+                Some(connection) if !cancel.load(Ordering::Relaxed) => connection
+                    .fetch_attachment_bytes(&job.attachment_id)
+                    .await
+                    .ok(),
+                _ => None,
+            };
+            let loaded = match bytes {
+                Some(bytes) if !cancel.load(Ordering::Relaxed) => {
                     cx.background_executor()
                         .spawn(async move {
-                            load_sent_image(&job.mime_type, bytes, target, svg_renderer)
+                            load_sent_image(&job.mime_type, bytes, target, svg_renderer, &cancel)
                         })
                         .await
                 }
-                Err(_) => (SentImage::Failed, 0),
+                _ => (SentImage::Failed, 0),
             };
-            let _ = this.update(cx, |view, cx| {
-                view.finish_thumb(key, job.request, loaded, cx);
-            });
-        });
-        self.thumb_tasks.borrow_mut().insert(task_key, task);
+            let _ = this.update(cx, |view, cx| view.finish_thumb(request, key, loaded, cx));
+        })
+        .detach();
     }
 
-    /// Stores a finished thumbnail load, unless a newer load or a reconnect replaced it, and
-    /// starts the next waiting load.
+    /// The work of load `request` returned: frees its permit, starts the next waiting load,
+    /// and stores the result unless a cancel, newer load or reconnect replaced it.
     fn finish_thumb(
         &mut self,
-        key: super::ThumbKey,
         request: u64,
+        key: super::ThumbKey,
         (image, cost): (super::attachment_thumb::SentImage, usize),
         cx: &mut Context<'_, Self>,
     ) {
         use super::attachment_thumb::SentImage;
+        self.thumb_cancels.get_mut().remove(&request);
+        for start in self.thumb_loads.get_mut().exited(request) {
+            self.start_thumb(start, cx);
+        }
         let current = matches!(
             self.attachment_thumbs.get_mut().peek(&key),
             Some(SentImage::Loading(waiting)) if *waiting == request
         );
         if current {
-            // This runs inside the task, so detach its handle instead of dropping it.
-            if let Some(task) = self.thumb_tasks.get_mut().remove(&key) {
-                task.detach();
-            }
-            let started = self.thumb_loads.get_mut().finish(&key);
-            for (key, job) in started {
-                self.start_thumb(key, job, cx);
-            }
             for old in self.attachment_thumbs.get_mut().insert(key, image, cost) {
                 old.release(cx);
             }
@@ -361,18 +365,32 @@ impl ChatView {
         }
     }
 
-    /// Cancels thumbnail loads of tiles not drawn since the last call, and starts waiting ones
-    /// in the freed slots. Runs once per chat render, before the timeline lays out its rows.
+    /// Cancels thumbnail loads of tiles not drawn since the last call. Runs once per chat
+    /// render, before the timeline lays out its rows.
     pub(super) fn sweep_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
-        let (cancelled, started) = self.thumb_loads.get_mut().sweep();
-        for key in cancelled {
-            self.thumb_tasks.get_mut().remove(&key);
-            if let Some(entry) = self.attachment_thumbs.get_mut().remove(&key) {
+        for (request, key) in self.thumb_loads.get_mut().sweep() {
+            if let Some(cancel) = self.thumb_cancels.get_mut().remove(&request) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            let stale = matches!(
+                self.attachment_thumbs.get_mut().peek(&key),
+                Some(super::attachment_thumb::SentImage::Loading(waiting)) if *waiting == request
+            );
+            if stale && let Some(entry) = self.attachment_thumbs.get_mut().remove(&key) {
                 entry.release(cx);
             }
         }
-        for (key, job) in started {
-            self.start_thumb(key, job, cx);
+    }
+
+    /// Cancels every thumbnail load and drops every thumbnail (reconnect). Running work keeps
+    /// its permit until it returns.
+    pub(super) fn clear_thumbs(&mut self, cx: &mut Context<'_, Self>) {
+        let _running = self.thumb_loads.get_mut().clear();
+        for (_, cancel) in self.thumb_cancels.get_mut().drain() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        for image in self.attachment_thumbs.get_mut().clear() {
+            image.release(cx);
         }
     }
 

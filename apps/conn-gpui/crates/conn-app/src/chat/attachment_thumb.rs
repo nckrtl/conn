@@ -7,6 +7,7 @@
 //! tile size ([`super::thumb_cache`]).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use conn_theme::Tokens;
 use gpui_kit::{
@@ -17,7 +18,7 @@ use gpui_kit::{
 };
 
 use super::icons;
-use super::thumb_cache::{TargetPx, decode_thumbnail, fit_frames, grid_tile_px};
+use super::thumb_cache::{TargetPx, Thumbnail, decode_thumbnail, grid_tile_px};
 use crate::a11y::ConnA11yExt as _;
 use crate::theme::{hsla, hsla_alpha};
 
@@ -96,42 +97,44 @@ impl SentImage {
     }
 }
 
-/// One thumbnail load: what to download and the request it fills.
+/// One thumbnail load: what to download.
 pub(super) struct ThumbJob {
     pub(super) attachment_id: String,
     pub(super) mime_type: String,
-    pub(super) request: u64,
 }
 
-/// Turns downloaded `bytes` into a cache entry and its cost in decoded bytes. PNG, JPEG, WebP
-/// and GIF decode here; SVG, BMP and TIFF go through GPUI's own decoder, then the same crop and
-/// scale, so every entry is a texture the chat owns and frees. Slow: run it off the UI thread.
+/// Turns downloaded `bytes` into a still thumbnail entry and its cost in decoded bytes. PNG,
+/// JPEG, WebP and a GIF's first frame decode here; SVG, BMP and TIFF go through GPUI's own
+/// decoder, then the same crop and scale, so every entry is a texture the chat owns and frees.
+/// Stops early once `cancel` is set. Slow: run it off the UI thread.
 pub(super) fn load_sent_image(
     mime_type: &str,
     bytes: Vec<u8>,
     target: TargetPx,
     svg_renderer: SvgRenderer,
+    cancel: &AtomicBool,
 ) -> (SentImage, usize) {
-    let thumb = decode_thumbnail(&bytes, target).or_else(|| {
+    let thumb = decode_thumbnail(&bytes, target, cancel).or_else(|| {
         let format = image_format_for_mime(mime_type)?;
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let decoded = Image::from_bytes(format, bytes)
             .to_image_data(svg_renderer)
             .ok()?;
-        let frames = (0..decoded.frame_count()).filter_map(|index| {
-            let size = decoded.size(index);
-            let pixels = image::RgbaImage::from_raw(
-                u32::try_from(size.width.0).ok()?,
-                u32::try_from(size.height.0).ok()?,
-                decoded.as_bytes(index)?.to_vec(),
-            )?;
-            Some(image::Frame::from_parts(pixels, 0, 0, decoded.delay(index)))
-        });
-        fit_frames(frames, target, false)
+        let size = decoded.size(0);
+        let first = image::RgbaImage::from_raw(
+            u32::try_from(size.width.0).ok()?,
+            u32::try_from(size.height.0).ok()?,
+            decoded.as_bytes(0)?.to_vec(),
+        )?;
+        drop(decoded);
+        (!cancel.load(Ordering::Relaxed)).then(|| Thumbnail::fit(&first, target, false))
     });
     match thumb {
         Some(thumb) => {
             let cost = thumb.byte_len();
-            let image = RenderImage::new(thumb.frames);
+            let image = RenderImage::new(vec![image::Frame::new(thumb.pixels)]);
             (SentImage::Ready(Arc::new(image), thumb.aspect), cost)
         }
         None => (SentImage::Failed, 0),

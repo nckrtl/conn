@@ -294,8 +294,8 @@ pub(crate) struct ChatView {
         std::cell::RefCell<thumb_cache::ByteLru<ThumbKey, attachment_thumb::SentImage>>,
     /// Thumbnail loads waiting or running, at most [`thumb_cache::LOAD_CONCURRENCY`] at once.
     thumb_loads: std::cell::RefCell<thumb_cache::LoadQueue<ThumbKey, attachment_thumb::ThumbJob>>,
-    /// The tasks of running thumbnail loads; dropping one cancels it.
-    thumb_tasks: std::cell::RefCell<HashMap<ThumbKey, gpui_kit::Task<()>>>,
+    /// The cancel flags of started thumbnail loads, by request.
+    thumb_cancels: std::cell::RefCell<HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Number of the next thumbnail load, so a stale load never fills a newer entry.
     next_thumb_request: std::cell::Cell<u64>,
     /// The window's scale factor while timeline rows render; thumbnails decode at it.
@@ -524,7 +524,7 @@ impl ChatView {
             thumb_loads: std::cell::RefCell::new(thumb_cache::LoadQueue::new(
                 thumb_cache::LOAD_CONCURRENCY,
             )),
-            thumb_tasks: std::cell::RefCell::new(HashMap::new()),
+            thumb_cancels: std::cell::RefCell::new(HashMap::new()),
             next_thumb_request: std::cell::Cell::new(0),
             thumb_scale: 1.0,
             interrupted_run_id: None,
@@ -556,11 +556,7 @@ impl ChatView {
     ) {
         self.connected = connection.is_some();
         self.connection = connection.clone();
-        self.thumb_loads.get_mut().clear();
-        self.thumb_tasks.get_mut().clear();
-        for image in self.attachment_thumbs.get_mut().clear() {
-            image.release(cx);
-        }
+        self.clear_thumbs(cx);
         self.composer
             .update(cx, |c, cx| c.set_connection(connection, cx));
         cx.notify();

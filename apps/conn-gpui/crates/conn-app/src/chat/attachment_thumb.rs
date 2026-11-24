@@ -183,6 +183,132 @@ pub(super) fn thumbnail(
     }
 }
 
+/// Gap between gallery tiles and the inset of the gallery inside a sent image bubble.
+pub(super) const GALLERY_INSET_PX: f32 = 3.0;
+/// Corner radius where two tiles meet or a tile meets an open cell.
+const GALLERY_TILE_RADIUS_PX: f32 = 3.0;
+/// Width over height of every gallery tile.
+const GALLERY_TILE_ASPECT: f32 = 4.0 / 3.0;
+const GALLERY_MAX_COLUMNS: usize = 4;
+
+/// Columns of a sent image gallery: one per image, at most four.
+pub(super) fn gallery_columns(image_count: usize) -> usize {
+    image_count.clamp(1, GALLERY_MAX_COLUMNS)
+}
+
+/// The outside corner of the gallery: the bubble radius less the inset around the gallery.
+fn gallery_outer_radius_px() -> f32 {
+    super::BUBBLE_RADIUS_PX - GALLERY_INSET_PX
+}
+
+/// Corner radii of one gallery tile, in px.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TileRadii {
+    pub(super) top_left: f32,
+    pub(super) top_right: f32,
+    pub(super) bottom_right: f32,
+    pub(super) bottom_left: f32,
+}
+
+/// Radii of tile `index` of `count` in a grid of `columns`. A tile on a corner of the gallery
+/// takes the outer radius (web masks the grid with `overflow: hidden`); every other corner is
+/// the small tile radius. A ragged last row leaves its right end open, so the tile above that
+/// gap keeps the small radius at its bottom right.
+pub(super) fn tile_radii(index: usize, count: usize, columns: usize) -> TileRadii {
+    let outer = gallery_outer_radius_px();
+    let row = index / columns;
+    let column = index % columns;
+    let last_row = count.div_ceil(columns).saturating_sub(1);
+    let pick = |on_corner: bool| {
+        if on_corner {
+            outer
+        } else {
+            GALLERY_TILE_RADIUS_PX
+        }
+    };
+    let (top, bottom) = (row == 0, row == last_row);
+    let (left, right) = (column == 0, column == columns - 1);
+    TileRadii {
+        top_left: pick(top && left),
+        top_right: pick(top && right),
+        bottom_right: pick(bottom && right),
+        bottom_left: pick(bottom && left),
+    }
+}
+
+/// Splits `items` into runs of equal `kind`, keeping their order: `(kind, start..end)`.
+pub(super) fn runs_by<T>(
+    items: &[T],
+    kind: impl Fn(&T) -> bool,
+) -> Vec<(bool, std::ops::Range<usize>)> {
+    let mut runs: Vec<(bool, std::ops::Range<usize>)> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let kind = kind(item);
+        match runs.last_mut() {
+            Some((last, range)) if *last == kind => range.end = index + 1,
+            _ => runs.push((kind, index..index + 1)),
+        }
+    }
+    runs
+}
+
+/// A 4:3 gallery tile that fills its grid cell: the picture centered and cropped to cover, with
+/// `radii` on its visible corners. GPUI's `img` clips a cover-scaled picture to the element
+/// bounds first and rounds that visible quad, so a portrait or landscape picture keeps its
+/// round corners. The tile paints no border, and the picture is absolutely placed so its
+/// natural size never feeds the grid row height.
+pub(super) fn gallery_tile(
+    image: Option<Arc<Image>>,
+    tokens: &Tokens,
+    radii: TileRadii,
+) -> AnyElement {
+    let muted = hsla(tokens.muted_foreground);
+    let fill = hsla_alpha(tokens.muted, 0.60);
+    let placeholder = move || {
+        div()
+            .size_full()
+            .rounded_tl(px(radii.top_left))
+            .rounded_tr(px(radii.top_right))
+            .rounded_br(px(radii.bottom_right))
+            .rounded_bl(px(radii.bottom_left))
+            .bg(fill)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icons::icon(icons::IMAGE, 16.0, muted))
+            .into_any_element()
+    };
+    match image {
+        Some(image) => img(ImageSource::Image(image))
+            .absolute()
+            .inset_0()
+            .size_full()
+            .rounded_tl(px(radii.top_left))
+            .rounded_tr(px(radii.top_right))
+            .rounded_br(px(radii.bottom_right))
+            .rounded_bl(px(radii.bottom_left))
+            .object_fit(ObjectFit::Cover)
+            .with_fallback(placeholder)
+            .into_any_element(),
+        None => div()
+            .absolute()
+            .inset_0()
+            .child(placeholder())
+            .into_any_element(),
+    }
+}
+
+/// The 4:3 cell of a gallery tile; [`gallery_tile`] fills it.
+pub(super) fn gallery_cell(
+    id: impl Into<gpui_kit::ElementId>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(id)
+        .relative()
+        .min_w_0()
+        .aspect_ratio(GALLERY_TILE_ASPECT)
+}
+
 /// A staged image in the composer strip (`ComposerAttachmentStrip.tsx`): a `64px` square,
 /// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner.
 pub(super) fn staged_image_chip(
@@ -293,6 +419,70 @@ mod tests {
     fn portrait_box_is_tall() {
         let aspect = image_aspect_ratio(&png(300, 600));
         assert!((box_height(400.0, aspect) - 800.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn gallery_has_one_column_per_image_up_to_four() {
+        let columns: Vec<usize> = [0, 1, 2, 3, 4, 5, 9].map(gallery_columns).into();
+        assert_eq!(columns, [1, 1, 2, 3, 4, 4, 4]);
+    }
+
+    #[test]
+    fn only_gallery_corners_take_the_outer_radius() {
+        let (outer, inner) = (11.0, 3.0);
+        let radii = |top_left, top_right, bottom_right, bottom_left| TileRadii {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        };
+        // (index, count): one tile, a full row, the middle of a row.
+        assert_eq!(
+            tile_radii(0, 1, gallery_columns(1)),
+            radii(outer, outer, outer, outer)
+        );
+        assert_eq!(tile_radii(0, 2, 2), radii(outer, inner, inner, outer));
+        assert_eq!(tile_radii(1, 3, 3), radii(inner, inner, inner, inner));
+        assert_eq!(tile_radii(2, 3, 3), radii(inner, outer, outer, inner));
+        // Five images: a full row of four, then one tile at the left. The open cells at the
+        // bottom right leave the fourth tile's bottom right square.
+        assert_eq!(tile_radii(0, 5, 4), radii(outer, inner, inner, inner));
+        assert_eq!(tile_radii(3, 5, 4), radii(inner, outer, inner, inner));
+        assert_eq!(tile_radii(4, 5, 4), radii(inner, inner, inner, outer));
+        // Eight images fill two rows, so the last tile closes the bottom right.
+        assert_eq!(tile_radii(7, 8, 4), radii(inner, inner, outer, inner));
+        // Six images: the sixth tile sits under the second, away from every corner.
+        assert_eq!(tile_radii(5, 6, 4), radii(inner, inner, inner, inner));
+    }
+
+    #[test]
+    fn mixed_message_runs_share_one_column_count() {
+        // image, file, image, image: three images make three columns for every run.
+        let kinds = [true, false, true, true];
+        let columns = gallery_columns(kinds.iter().filter(|kind| **kind).count());
+        assert_eq!(columns, 3);
+        let (outer, inner) = (11.0, 3.0);
+        let radii = |top_left, top_right, bottom_right, bottom_left| TileRadii {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        };
+        // A lone tile in a three-column grid is left aligned: its right edge is internal.
+        assert_eq!(tile_radii(0, 1, columns), radii(outer, inner, inner, outer));
+        // The two-tile run starts at the left edge and ends one column short of the right.
+        assert_eq!(tile_radii(0, 2, columns), radii(outer, inner, inner, outer));
+        assert_eq!(tile_radii(1, 2, columns), radii(inner, inner, inner, inner));
+    }
+
+    #[test]
+    fn attachments_keep_their_order_in_runs() {
+        let kinds = [true, true, false, false, true];
+        assert_eq!(
+            runs_by(&kinds, |kind| *kind),
+            [(true, 0..2), (false, 2..4), (true, 4..5)]
+        );
+        assert!(runs_by(&[] as &[bool], |kind| *kind).is_empty());
     }
 
     #[test]

@@ -2080,30 +2080,64 @@ impl ChatView {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .max_w(relative(0.8))
             .min_w_0()
             .rounded(px(BUBBLE_RADIUS_PX))
             .bg(hsla(self.tokens.message_surface))
             .border_t_1()
             .border_color(message_highlight(&self.tokens))
-            .px(px(16.0))
-            .pt(px(10.0))
-            .pb(px(12.0))
             .text_size(px(BODY_FONT_PX))
             .line_height(px(BODY_LINE_HEIGHT_PX))
             .text_color(hsla(self.tokens.message_foreground));
-        if !attachments.is_empty() {
-            bubble =
-                bubble.child(self.render_attachment_chips(&format!("user-{id}"), attachments, cx));
-        }
-        if !text.is_empty() {
-            bubble = bubble.child(div().min_w_0().child(text.to_owned()));
+        // A bubble with images is 80% wide with the galleries painted straight on it: a 3px
+        // inset all round (the 1px highlight is part of the top one), the caption padded back
+        // to the usual 16px sides and 12px below. The radius stays 14px when grouped.
+        let has_images = attachments
+            .iter()
+            .any(|att| matches!(att, ChatAttachment::Image(_)));
+        if has_images {
+            bubble = bubble
+                .w(relative(0.8))
+                .pt(px(attachment_thumb::GALLERY_INSET_PX - 1.0))
+                .pb(px(attachment_thumb::GALLERY_INSET_PX));
+            for block in self.render_sent_attachments(
+                &format!("user-{id}"),
+                attachments,
+                !text.is_empty(),
+                cx,
+            ) {
+                bubble = bubble.child(block);
+            }
+            if !text.is_empty() {
+                bubble = bubble.child(
+                    div()
+                        .min_w_0()
+                        .px(px(16.0))
+                        .pb(px(12.0 - attachment_thumb::GALLERY_INSET_PX))
+                        .child(text.to_owned()),
+                );
+            }
+        } else {
+            bubble = bubble
+                .max_w(relative(0.8))
+                .px(px(16.0))
+                .pt(px(10.0))
+                .pb(px(12.0));
+            if !attachments.is_empty() {
+                bubble = bubble.child(self.render_attachment_chips(
+                    &format!("user-{id}"),
+                    attachments,
+                    cx,
+                ));
+            }
+            if !text.is_empty() {
+                bubble = bubble.child(div().min_w_0().child(text.to_owned()));
+            }
         }
 
-        if grouped_with_previous {
+        if grouped_with_previous && !has_images {
             bubble = bubble.rounded_tr(px(BUBBLE_GROUPED_RADIUS_PX));
         }
-        if grouped_with_next {
+        if grouped_with_next && !has_images {
             bubble = bubble.rounded_br(px(BUBBLE_GROUPED_RADIUS_PX));
         }
 

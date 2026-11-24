@@ -37,10 +37,14 @@ pub(crate) fn apply(name: &str, tokens: &conn_theme::Tokens, cx: &mut App) {
     theme.styles.colors.editor_gutter_background = bg;
     theme.styles.colors.editor_foreground = crate::theme::hsla(tokens.foreground);
     theme.styles.colors.editor_line_number = crate::theme::hsla(tokens.muted_foreground);
+    let prefs = crate::editor_settings::current(cx);
     let font = crate::editor_settings::family(cx).to_string();
     cx.update_global::<zed_settings::SettingsStore, _>(|settings, cx| {
         settings.update_default_settings(cx, |settings| {
-            settings.theme.buffer_font_family = Some(font.into())
+            settings.theme.buffer_font_family = Some(font.into());
+            settings.theme.buffer_font_size = Some(prefs.font_size.into());
+            settings.theme.buffer_line_height =
+                Some(zed_settings::BufferLineHeight::Custom(prefs.line_height));
         });
     });
     zed_theme::GlobalTheme::update_theme(cx, Arc::new(theme));

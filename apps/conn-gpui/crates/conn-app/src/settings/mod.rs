@@ -1012,7 +1012,7 @@ impl SettingsModal {
             sections.push(self.scheduled_tasks.clone().into_any_element());
         }
 
-        if "editor font family syntax theme jetbrains mono one ayu gruvbox".contains(needle) {
+        if "editor font family font size line height syntax theme jetbrains mono one ayu gruvbox".contains(needle) {
             sections.push(self.render_editor_page(cx));
         }
 

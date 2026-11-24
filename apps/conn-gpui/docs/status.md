@@ -21,7 +21,7 @@ Keep this file accurate. Update it whenever a milestone lands, a proof passes, o
 
 ## Native Files walkthroughs
 
-In the local editor spike, Settings → Editor sets the native Files font and syntax palette for both renderers. JetBrains Mono is the default. The code and line-number gutter use the Files panel background in light and dark mode.
+In the local editor spike, Settings → Editor sets the native Files font family, font size, line height, and syntax palette for both renderers. JetBrains Mono is the default. The code and line-number gutter use the Files panel background in light and dark mode.
 
 Files opens source in a read-only editor. Select text and choose **Add selection** to attach a snapshot to the thread's prompt. Source links with line numbers open the corresponding range. A thread agent can read the current selection, show an exact excerpt, or resolve a Laravel definition. If two windows show the thread, Conn asks the agent to retry after one window leaves it.
 

@@ -1638,9 +1638,12 @@ impl FilesPanel {
                 if *truncated {
                     body = body.child(muted_message("File preview was truncated.", muted));
                 }
+                let prefs = crate::editor_settings::current(cx);
                 body.child(
                     Editor::new(editor)
                         .font_family(crate::editor_settings::family(cx))
+                        .text_size(px(prefs.font_size))
+                        .line_height(gpui_kit::relative(prefs.line_height))
                         .appearance(false)
                         .bordered(false)
                         .readonly(true)

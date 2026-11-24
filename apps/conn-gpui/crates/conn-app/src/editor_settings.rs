@@ -53,11 +53,31 @@ impl Palette {
     }
 }
 
-#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Preferences {
     pub(crate) font_family: String,
     pub(crate) palette: Palette,
+    pub(crate) font_size: f32,
+    pub(crate) line_height: f32,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            font_family: String::new(),
+            palette: Palette::default(),
+            font_size: 15.0,
+            line_height: 1.6,
+        }
+    }
+}
+
+impl Preferences {
+    fn clamp_dimensions(&mut self) {
+        self.font_size = self.font_size.clamp(8.0, 32.0);
+        self.line_height = (self.line_height.clamp(1.0, 2.5) * 100.0).round() / 100.0;
+    }
 }
 
 #[derive(Default)]
@@ -93,10 +113,11 @@ fn resolve_family(value: &str, cx: &App) -> SharedString {
 }
 
 pub(crate) fn init(cx: &mut App) {
-    let prefs: Preferences = crate::terminal_settings::settings_path("editor-settings.json")
+    let mut prefs: Preferences = crate::terminal_settings::settings_path("editor-settings.json")
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|data| serde_json::from_slice(&data).ok())
         .unwrap_or_default();
+    prefs.clamp_dimensions();
     cx.set_global(Store {
         family: resolve_family(&prefs.font_family, cx),
         prefs,
@@ -107,6 +128,7 @@ pub(crate) fn update(cx: &mut App, tokens: &Tokens, f: impl FnOnce(&mut Preferen
     let previous = current(cx);
     let mut prefs = previous.clone();
     f(&mut prefs);
+    prefs.clamp_dimensions();
     if prefs == previous {
         return;
     }
@@ -117,7 +139,10 @@ pub(crate) fn update(cx: &mut App, tokens: &Tokens, f: impl FnOnce(&mut Preferen
         eprintln!("Could not save editor settings: {error}");
     }
     let effective_family = resolve_family(&prefs.font_family, cx);
-    let changed = effective_family != family(cx) || prefs.palette != previous.palette;
+    let changed = effective_family != family(cx)
+        || prefs.palette != previous.palette
+        || prefs.font_size != previous.font_size
+        || prefs.line_height != previous.line_height;
     cx.set_global(Store {
         family: effective_family,
         prefs,

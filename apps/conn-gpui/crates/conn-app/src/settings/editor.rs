@@ -4,7 +4,8 @@ use crate::editor_settings::{self, Palette};
 impl SettingsModal {
     pub(super) fn render_editor_page(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let tokens = &self.tokens;
-        let selected = editor_settings::current(cx).palette;
+        let prefs = editor_settings::current(cx);
+        let selected = prefs.palette;
         let family = div()
             .id("editor-family-field")
             .a11y_group("settings.editor.font", "Editor font family")
@@ -49,6 +50,24 @@ impl SettingsModal {
                 editor_settings::update(cx, &this.tokens, |s| s.palette = palette);
             })));
         }
+        let size = super::terminal::dimension_stepper(
+            "editor-font-size",
+            "Font size",
+            format!("{} px", prefs.font_size),
+            self,
+            cx,
+            |modal, delta, cx| editor_settings::update(cx, &modal.tokens, |s| s.font_size += delta),
+        );
+        let height = super::terminal::dimension_stepper(
+            "editor-line-height",
+            "Line height",
+            format!("{:.2}×", prefs.line_height),
+            self,
+            cx,
+            |modal, delta, cx| {
+                editor_settings::update(cx, &modal.tokens, |s| s.line_height += 0.05 * delta)
+            },
+        );
         settings_section(
             "Editor",
             vec![
@@ -59,6 +78,8 @@ impl SettingsModal {
                     tokens,
                     &self.geometry,
                 ),
+                settings_row("Font size", Some("8 to 32 pixels."), size, tokens, &self.geometry),
+                settings_row("Line height", Some("A multiple of the font size, from 1 to 2.5."), height, tokens, &self.geometry),
                 settings_row(
                     "Syntax theme",
                     Some("Syntax colors follow the light or dark appearance of Files."),

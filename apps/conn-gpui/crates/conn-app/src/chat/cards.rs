@@ -317,7 +317,10 @@ impl ChatView {
         cx.spawn(async move |this, cx| {
             let bytes = match connection {
                 Some(connection) if !cancel.load(Ordering::Relaxed) => connection
-                    .fetch_attachment_bytes(&job.attachment_id)
+                    .fetch_attachment_bytes_within(
+                        &job.attachment_id,
+                        super::thumb_cache::LOAD_DEADLINES,
+                    )
                     .await
                     .ok(),
                 _ => None,
@@ -365,9 +368,13 @@ impl ChatView {
         }
     }
 
-    /// Cancels thumbnail loads of tiles not drawn since the last call. Runs once per chat
-    /// render, before the timeline lays out its rows.
+    /// Starts a thumbnail frame (the cache trims what is no longer drawn) and cancels loads of
+    /// tiles not drawn since the last call. Runs once per chat render, before the timeline
+    /// lays out its rows.
     pub(super) fn sweep_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
+        for old in self.attachment_thumbs.get_mut().begin_frame() {
+            old.release(cx);
+        }
         for (request, key) in self.thumb_loads.get_mut().sweep() {
             if let Some(cancel) = self.thumb_cancels.get_mut().remove(&request) {
                 cancel.store(true, Ordering::Relaxed);

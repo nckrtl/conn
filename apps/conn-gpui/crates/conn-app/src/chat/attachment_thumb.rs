@@ -3,11 +3,11 @@
 //! Web Conn shows the image itself (`ComposerAttachmentStrip.tsx`, `TimelineUserMessageRow.tsx`:
 //! `object-cover` in a rounded, bordered cell). A staged file already has its bytes; a sent
 //! message holds only the attachment id, so the chat downloads it through `assets.createUrl`
-//! and a signed `GET` (`Connection::fetch_attachment_bytes`) and keeps a thumbnail decoded at
+//! and a signed `GET` (`Connection::fetch_attachment_bytes_within`) and keeps a thumbnail decoded at
 //! tile size ([`super::thumb_cache`]).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use conn_theme::Tokens;
 use gpui_kit::{
@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 
 use super::icons;
-use super::thumb_cache::{TargetPx, Thumbnail, decode_thumbnail, grid_tile_px};
+use super::thumb_cache::{TargetPx, grid_tile_px, thumbnail_for};
 use crate::a11y::ConnA11yExt as _;
 use crate::theme::{hsla, hsla_alpha};
 
@@ -103,9 +103,9 @@ pub(super) struct ThumbJob {
     pub(super) mime_type: String,
 }
 
-/// Turns downloaded `bytes` into a still thumbnail entry and its cost in decoded bytes. PNG,
-/// JPEG, WebP and a GIF's first frame decode here; SVG, BMP and TIFF go through GPUI's own
-/// decoder, then the same crop and scale, so every entry is a texture the chat owns and frees.
+/// Turns downloaded `bytes` into a still thumbnail entry and its cost in decoded bytes
+/// ([`thumbnail_for`]): only SVG, BMP and TIFF go through GPUI's own decoder, then the same
+/// crop and scale, so every entry is a texture the chat owns and frees.
 /// Stops early once `cancel` is set. Slow: run it off the UI thread.
 pub(super) fn load_sent_image(
     mime_type: &str,
@@ -114,22 +114,17 @@ pub(super) fn load_sent_image(
     svg_renderer: SvgRenderer,
     cancel: &AtomicBool,
 ) -> (SentImage, usize) {
-    let thumb = decode_thumbnail(&bytes, target, cancel).or_else(|| {
+    let thumb = thumbnail_for(mime_type, bytes, target, cancel, |bytes| {
         let format = image_format_for_mime(mime_type)?;
-        if cancel.load(Ordering::Relaxed) {
-            return None;
-        }
         let decoded = Image::from_bytes(format, bytes)
             .to_image_data(svg_renderer)
             .ok()?;
         let size = decoded.size(0);
-        let first = image::RgbaImage::from_raw(
+        image::RgbaImage::from_raw(
             u32::try_from(size.width.0).ok()?,
             u32::try_from(size.height.0).ok()?,
             decoded.as_bytes(0)?.to_vec(),
-        )?;
-        drop(decoded);
-        (!cancel.load(Ordering::Relaxed)).then(|| Thumbnail::fit(&first, target, false))
+        )
     });
     match thumb {
         Some(thumb) => {

@@ -24,6 +24,13 @@ pub(super) const ENTRY_MAX_BYTES: usize = THUMB_BUDGET_BYTES / 4;
 /// one full-size decode, so this bounds the memory spike when many images arrive together.
 pub(super) const LOAD_CONCURRENCY: usize = 2;
 
+/// How long a thumbnail load waits for the server: the signed-URL call, then the whole
+/// download. Past them the load fails, so a stalled server never holds a permit for good.
+pub(super) const LOAD_DEADLINES: conn_client::FetchDeadlines = conn_client::FetchDeadlines {
+    rpc: std::time::Duration::from_secs(15),
+    download: std::time::Duration::from_secs(30),
+};
+
 /// A size in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TargetPx {
@@ -182,20 +189,49 @@ pub(super) fn decode_thumbnail(
     Some(Thumbnail::fit(&picture, target, true))
 }
 
+/// A thumbnail for downloaded `bytes` of `mime_type`. PNG, JPEG, WebP and a GIF's first frame
+/// decode here. Only SVG, BMP and TIFF, which this build of `image` cannot read, go to
+/// `gpui_first_frame` (GPUI's own decoder, which decodes every frame of a GIF); anything else
+/// that fails to decode is `None` and shows the missing-image tile.
+pub(super) fn thumbnail_for(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    target: TargetPx,
+    cancel: &AtomicBool,
+    gpui_first_frame: impl FnOnce(Vec<u8>) -> Option<RgbaImage>,
+) -> Option<Thumbnail> {
+    if let Some(thumb) = decode_thumbnail(&bytes, target, cancel) {
+        return Some(thumb);
+    }
+    let gpui_only = matches!(
+        mime_type.to_ascii_lowercase().as_str(),
+        "image/svg+xml" | "image/bmp" | "image/tiff"
+    );
+    if !gpui_only || cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let first = gpui_first_frame(bytes)?;
+    (!cancel.load(Ordering::Relaxed)).then(|| Thumbnail::fit(&first, target, false))
+}
+
 /// A least-recently-used map whose entries cost bytes. Inserting past the budget evicts the
-/// oldest costly entries; the entry just inserted always stays, so a picture larger than the
-/// budget still shows. Free entries (loads in flight, failures) are never evicted.
+/// oldest costly entries, but never one drawn in this frame or the last ([`Self::get`] marks
+/// it drawn): while more is on screen than the budget holds, the map runs over it, and
+/// [`Self::begin_frame`] trims it back once those entries are no longer drawn. Free entries
+/// (loads in flight, failures) are never evicted.
 pub(super) struct ByteLru<K, V> {
     entries: HashMap<K, Slot<V>>,
     budget: usize,
     total: usize,
     clock: u64,
+    frame: u64,
 }
 
 struct Slot<V> {
     value: V,
     cost: usize,
     used: u64,
+    drawn: u64,
 }
 
 impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
@@ -205,14 +241,24 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
             budget,
             total: 0,
             clock: 0,
+            frame: 0,
         }
     }
 
-    /// The entry under `key`, marked as just used.
+    /// Starts a frame: entries not drawn in the frame just ended lose their pin, and the map
+    /// trims back to its budget. Returns the values it pushed out.
+    #[must_use]
+    pub(super) fn begin_frame(&mut self) -> Vec<V> {
+        self.frame += 1;
+        self.evict_to_budget(None)
+    }
+
+    /// The entry under `key`, marked as used and drawn in this frame.
     pub(super) fn get(&mut self, key: &K) -> Option<&V> {
         self.clock += 1;
         let slot = self.entries.get_mut(key)?;
         slot.used = self.clock;
+        slot.drawn = self.frame;
         Some(&slot.value)
     }
 
@@ -220,7 +266,8 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
         self.entries.get(key).map(|slot| &slot.value)
     }
 
-    /// Puts `value` under `key` (replacing what was there) and returns the values it pushed out.
+    /// Puts `value` under `key` (replacing what was there), drawn in this frame, and returns
+    /// the values it pushed out.
     #[must_use]
     pub(super) fn insert(&mut self, key: K, value: V, cost: usize) -> Vec<V> {
         self.clock += 1;
@@ -228,6 +275,7 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
             value,
             cost,
             used: self.clock,
+            drawn: self.frame,
         };
         let mut evicted = Vec::new();
         if let Some(old) = self.entries.insert(key.clone(), slot) {
@@ -235,11 +283,21 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
             evicted.push(old.value);
         }
         self.total += cost;
+        evicted.extend(self.evict_to_budget(Some(&key)));
+        evicted
+    }
+
+    /// Evicts the least recently used costly entries that are not pinned (drawn in this frame
+    /// or the last) and not `keep`, until the map fits its budget or nothing else may go.
+    fn evict_to_budget(&mut self, keep: Option<&K>) -> Vec<V> {
+        let mut evicted = Vec::new();
         while self.total > self.budget {
             let oldest = self
                 .entries
                 .iter()
-                .filter(|(other, slot)| slot.cost > 0 && **other != key)
+                .filter(|(other, slot)| {
+                    slot.cost > 0 && slot.drawn + 1 < self.frame && Some(*other) != keep
+                })
                 .min_by_key(|(_, slot)| slot.used)
                 .map(|(other, _)| other.clone());
             let Some(oldest) = oldest else { break };
@@ -470,7 +528,9 @@ mod tests {
         assert!(cost * 12 < 50 * 1024 * 1024);
         let mut cache = ByteLru::new(THUMB_BUDGET_BYTES);
         let mut evicted = 0;
+        // One photo per frame as they scroll past.
         for id in 0..40 {
+            evicted += cache.begin_frame().len();
             evicted += cache.insert(id, (), cost).len();
             assert!(cache.total_bytes() <= THUMB_BUDGET_BYTES);
         }
@@ -568,6 +628,9 @@ mod tests {
         let mut cache = ByteLru::new(100);
         assert!(cache.insert("a", 1, 40).is_empty());
         assert!(cache.insert("b", 2, 40).is_empty());
+        // Two frames on, neither is pinned; `a` is drawn again.
+        assert!(cache.begin_frame().is_empty());
+        assert!(cache.begin_frame().is_empty());
         assert_eq!(cache.get(&"a"), Some(&1));
         assert_eq!(
             cache.insert("c", 3, 40),
@@ -587,11 +650,71 @@ mod tests {
         let mut cache = ByteLru::new(100);
         assert!(cache.insert("loading", 0, 0).is_empty());
         assert!(cache.insert("small", 1, 60).is_empty());
+        assert!(cache.begin_frame().is_empty());
+        assert!(cache.begin_frame().is_empty());
         assert_eq!(cache.insert("huge", 2, 500), vec![1]);
         assert_eq!(cache.peek(&"huge"), Some(&2));
         assert_eq!(cache.peek(&"loading"), Some(&0));
         assert_eq!(cache.clear().len(), 2);
         assert_eq!(cache.total_bytes(), 0);
+    }
+
+    #[test]
+    fn visible_tiles_past_the_budget_settle_without_reloading() {
+        // The re-check case: 280 tiles on screen together need more than the budget.
+        let cost = 246 * 1024;
+        let tiles = 280;
+        assert!(tiles * cost > THUMB_BUDGET_BYTES);
+        let mut cache = ByteLru::new(THUMB_BUDGET_BYTES);
+        let mut loads = 0;
+        for _frame in 0..5 {
+            assert!(
+                cache.begin_frame().is_empty(),
+                "nothing on screen is evicted"
+            );
+            for tile in 0..tiles {
+                if cache.get(&tile).is_none() {
+                    loads += 1;
+                    assert!(cache.insert(tile, (), cost).is_empty());
+                }
+            }
+        }
+        assert_eq!(loads, tiles, "each tile loaded once");
+        assert!(
+            cache.total_bytes() > THUMB_BUDGET_BYTES,
+            "over budget while drawn"
+        );
+        // They scroll away: one frame later the map is back within its budget.
+        assert!(cache.begin_frame().is_empty());
+        let evicted = cache.begin_frame();
+        assert!(!evicted.is_empty());
+        assert!(cache.total_bytes() <= THUMB_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn a_damaged_gif_never_reaches_the_gpui_decoder() {
+        // A GIF header and screen, then an image block that ends at once.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&[8, 0, 6, 0, 0, 0, 0, 0x2C, 0, 0, 0, 0, 8, 0, 6, 0, 0, 2]);
+        let tile = TargetPx {
+            width: 8,
+            height: 6,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut reached = false;
+        let thumb = thumbnail_for("image/gif", gif, tile, &cancel, |_| {
+            reached = true;
+            None
+        });
+        assert!(thumb.is_none(), "the missing-image tile");
+        assert!(!reached, "GIF never decodes all its frames in GPUI");
+        // A BMP, which this build cannot read, does go to GPUI.
+        let mut reached = false;
+        let _ = thumbnail_for("image/bmp", vec![b'B', b'M', 0, 0], tile, &cancel, |_| {
+            reached = true;
+            None
+        });
+        assert!(reached);
     }
 
     #[test]

@@ -3991,7 +3991,8 @@ public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendP
  */
 public struct FfiModelPicker: Equatable, Hashable {
     /**
-     * False until the server's provider list arrived.
+     * False until the server's provider list and the thread's scope (shell row or detail)
+     * arrived; the sheet shows its loading state.
      */
     public var loaded: Bool
     /**
@@ -4012,7 +4013,8 @@ public struct FfiModelPicker: Equatable, Hashable {
     // declare one manually.
     public init(
         /**
-         * False until the server's provider list arrived.
+         * False until the server's provider list and the thread's scope (shell row or detail)
+         * arrived; the sheet shows its loading state.
          */loaded: Bool, 
         /**
          * The thread's provider driver, for the chip's icon (`ProviderIcon`).
@@ -10194,6 +10196,11 @@ public enum FfiModelSave: Equatable, Hashable {
      * The thread's catalog no longer offers the pick; nothing was sent and the sheet stays open.
      */
     case unavailable
+    /**
+     * The thread's project and provider are not known yet (no shell row, no detail); nothing
+     * was sent.
+     */
+    case notReady
 
 
 
@@ -10221,6 +10228,8 @@ public struct FfiConverterTypeFfiModelSave: FfiConverterRustBuffer {
         
         case 3: return .unavailable
         
+        case 4: return .notReady
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10239,6 +10248,10 @@ public struct FfiConverterTypeFfiModelSave: FfiConverterRustBuffer {
         
         case .unavailable:
             writeInt(&buf, Int32(3))
+        
+        
+        case .notReady:
+            writeInt(&buf, Int32(4))
         
         }
     }

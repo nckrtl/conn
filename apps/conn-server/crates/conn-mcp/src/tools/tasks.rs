@@ -135,10 +135,10 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let selection =
         super::create_threads::resolve_target_rechecking(cx, parent_thread, &target, retried)
             .await?;
-    let runtime_mode = threads::resolve_runtime_mode(
-        parent_thread["runtimeMode"]
-            .as_str()
-            .unwrap_or("approval-required"),
+    let runtime_mode = super::create_threads::runtime_mode_for(
+        cx,
+        parent_thread,
+        &selection,
         str_arg(args, "runtimeMode"),
     )?;
     let interaction_mode = threads::resolve_interaction_mode(

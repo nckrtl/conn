@@ -48,45 +48,12 @@ pub(super) async fn create(cx: &Cx<'_>, args: &Args) -> ToolResult {
                 cx.projection(&thread_id).await?["thread"]["modelSelection"]["instanceId"].clone();
         }
         let selection = resolve_target_rechecking(cx, &parent["thread"], &target, accepted).await?;
-        let mut runtime = threads::resolve_runtime_mode(
-            parent["thread"]["runtimeMode"]
-                .as_str()
-                .unwrap_or("approval-required"),
+        let runtime = runtime_mode_for(
+            cx,
+            &parent["thread"],
+            &selection,
             request["runtimeMode"].as_str(),
         )?;
-        if let Some(provider) = (cx.config().providers)()
-            .iter()
-            .find(|p| p["instanceId"] == selection["instanceId"])
-            && let Some(supported) = provider["supportedRuntimeModes"]
-                .as_array()
-                .filter(|s| !s.is_empty())
-            && !supported.iter().any(|m| *m == runtime)
-        {
-            if request["runtimeMode"]
-                .as_str()
-                .is_some_and(|m| m != "inherit")
-            {
-                return Err(fail(
-                    "invalid_request",
-                    format!(
-                        "Provider {} does not offer runtime mode {runtime}, so it would run as approval-required. Use one of: {}.",
-                        selection["instanceId"].as_str().unwrap_or_default(),
-                        supported
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                ));
-            }
-            runtime = supported
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|m| super::runtime_rank(m) <= super::runtime_rank(&runtime))
-                .max_by_key(|m| super::runtime_rank(m))
-                .unwrap_or("approval-required")
-                .to_owned();
-        }
         let interaction = threads::resolve_interaction_mode(
             parent["thread"]["interactionMode"]
                 .as_str()
@@ -207,6 +174,53 @@ fn title(parent: &Value, request: &Value, index: usize) -> String {
     }
     let prefix = conn_support::text::utf16_prefix(detail, 77);
     format!("{prefix}...")
+}
+
+/// The parent's or the requested runtime mode, fitted to the modes the target provider offers
+/// (T3 `resolveRuntimeMode`): an inherited mode steps down, a requested one it lacks fails.
+pub(super) fn runtime_mode_for(
+    cx: &Cx<'_>,
+    parent: &Value,
+    selection: &Value,
+    requested: Option<&str>,
+) -> Result<String, super::ToolError> {
+    let mut runtime = threads::resolve_runtime_mode(
+        parent["runtimeMode"]
+            .as_str()
+            .unwrap_or("approval-required"),
+        requested,
+    )?;
+    if let Some(provider) = (cx.config().providers)()
+        .iter()
+        .find(|p| p["instanceId"] == selection["instanceId"])
+        && let Some(supported) = provider["supportedRuntimeModes"]
+            .as_array()
+            .filter(|s| !s.is_empty())
+        && !supported.iter().any(|m| *m == runtime)
+    {
+        if requested.is_some_and(|m| m != "inherit") {
+            return Err(fail(
+                "invalid_request",
+                format!(
+                    "Provider {} does not offer runtime mode {runtime}, so it would run as approval-required. Use one of: {}.",
+                    selection["instanceId"].as_str().unwrap_or_default(),
+                    supported
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        runtime = supported
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|m| super::runtime_rank(m) <= super::runtime_rank(&runtime))
+            .max_by_key(|m| super::runtime_rank(m))
+            .unwrap_or("approval-required")
+            .to_owned();
+    }
+    Ok(runtime)
 }
 
 /// TS `resolveTargetRechecking`: a named or inherited instance whose snapshot refuses the target

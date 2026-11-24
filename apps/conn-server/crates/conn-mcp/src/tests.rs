@@ -4255,3 +4255,66 @@ async fn delegate_task_converts_the_old_ultracode_effort() {
         "inherited"
     );
 }
+
+/// T3 `resolveRuntimeMode` (`OrchestratorMcpService.test.ts:4554`): a child inherits the
+/// broadest mode its provider offers, and an explicit mode the provider lacks is refused.
+#[tokio::test(flavor = "current_thread")]
+async fn delegate_task_fits_the_runtime_mode_to_the_target_provider() {
+    let mut antigravity = listing(
+        "antigravity",
+        "antigravity",
+        "authenticated",
+        json!([{"slug": "gemini-3-pro", "name": "Gemini"}]),
+    );
+    antigravity["supportedRuntimeModes"] =
+        json!(["approval-required", "auto-accept-edits", "full-access"]);
+    let listed = vec![
+        listing(
+            "claudeAgent",
+            "claudeAgent",
+            "authenticated",
+            json!([{"slug": "claude-haiku-5-5", "name": "Haiku"}]),
+        ),
+        antigravity,
+    ];
+    let f = fixture_with_providers(
+        "delegate-runtime-mode",
+        None,
+        vec![
+            Arc::new(FakeProvider::new("claudeAgent")),
+            Arc::new(FakeProvider::new("antigravity")),
+        ],
+        listed,
+        None,
+    );
+    let mut operator = Client::open(&f.service, client(true)).await;
+    let parent = launch_as_swamp(&mut operator, "Parent", "hang", "auto", "default").await;
+    until_provider_turn(&f, &parent).await;
+    let mut agent = Client::open(&f.service, agent_of(&f, &parent)).await;
+    let target = json!({"providerInstanceId": "antigravity", "model": "gemini-3-pro"});
+
+    let (code, message) = agent
+        .failure(
+            "delegate_task",
+            json!({"task": "explicit", "target": target, "runtimeMode": "auto"}),
+        )
+        .await;
+    assert_eq!(code, "invalid_request", "{message}");
+    assert!(
+        message.contains("approval-required, auto-accept-edits, full-access"),
+        "{message}"
+    );
+    assert_eq!(
+        projection_of_thread(&f, &parent).await["subagents"],
+        json!([])
+    );
+
+    let task = agent
+        .ok(
+            "delegate_task",
+            json!({"task": "inherited", "target": target, "mode": "async"}),
+        )
+        .await;
+    let child = projection_of_thread(&f, task["childThreadId"].as_str().unwrap()).await;
+    assert_eq!(child["thread"]["runtimeMode"], "auto-accept-edits");
+}

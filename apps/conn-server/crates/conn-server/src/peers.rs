@@ -1254,6 +1254,127 @@ impl PeerLinks {
             .await?
             .filter(|r| !r.expired(now_ms())))
     }
+
+    /// Runs [`Self::extend_links`] now and then once a day, for the life of the server.
+    pub fn start_upkeep(self: &Arc<Self>) {
+        let links = self.clone();
+        tokio::spawn(async move {
+            let mut every_day = tokio::time::interval(UPKEEP_INTERVAL);
+            loop {
+                every_day.tick().await;
+                links.extend_links().await;
+            }
+        });
+    }
+
+    /// Asks each peer to make a link that ends within a year last until revoked, so links
+    /// made before `until-revoked` existed need no re-pair. A failure changes nothing; the
+    /// next pass tries again.
+    pub(crate) async fn extend_links(&self) {
+        let rows = match self.read_rows().await {
+            Ok(rows) => rows,
+            Err(error) => return eprintln!("conn-server: peer link upkeep: {}", error.message),
+        };
+        let now = now_ms();
+        for row in rows {
+            if row.expired(now) || row.expires_at_ms > now.saturating_add(EXTEND_WITHIN_MS) {
+                continue;
+            }
+            let secret = row.secret_name.clone();
+            let token = self
+                .blocking(move |_, dir| {
+                    conn_support::secret_store::read(&dir, &secret).map_err(storage)
+                })
+                .await
+                .ok()
+                .flatten()
+                .and_then(|b| String::from_utf8(b).ok());
+            let Some(token) = token else { continue };
+            let mut extended = None;
+            for url in &row.urls {
+                match extend_at(url, &token).await {
+                    Ok(expires_at_ms) => {
+                        extended = Some(expires_at_ms);
+                        break;
+                    }
+                    Err(why) => eprintln!(
+                        "conn-server: peer link {} not extended at {url}: {why}",
+                        row.environment_id
+                    ),
+                }
+            }
+            let Some(expires_at_ms) = extended else {
+                continue;
+            };
+            let id = row.environment_id.clone();
+            let saved = self
+                .change(move |rows| {
+                    if let Some(row) = rows.iter_mut().find(|r| r.environment_id == id) {
+                        row.expires_at_ms = row.expires_at_ms.max(expires_at_ms);
+                    }
+                })
+                .await;
+            if let Err(error) = saved {
+                eprintln!("conn-server: peer link upkeep: {}", error.message);
+            }
+        }
+    }
+}
+
+/// How often [`PeerLinks::extend_links`] runs.
+const UPKEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Links that end sooner than this get extended.
+const EXTEND_WITHIN_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+/// The first Conn Server whose `extend` takes a peer link's own MCP bearer.
+const MIN_SELF_EXTEND_VERSION: (u64, u64, u64) = (0, 5, 1);
+
+/// Extends the link's session at `url` to `until-revoked`, after the `/health` gate. Returns
+/// the new end the peer reports.
+async fn extend_at(url: &str, token: &str) -> Result<u64, String> {
+    let health = http::send(
+        HttpRequest::new(Method::Get, format!("{url}/health")).timeout(LIST_PROBE_TIMEOUT),
+    )
+    .await
+    .map_err(|e| format!("/health: {e}"))?;
+    let health: Value = serde_json::from_slice(&health.body).unwrap_or_default();
+    let version = health["version"].as_str().and_then(parse_version);
+    if health["server"] != "conn-server" || version < Some(MIN_SELF_EXTEND_VERSION) {
+        let (major, minor, patch) = MIN_SELF_EXTEND_VERSION;
+        return Err(format!(
+            "the peer runs {} {}, not conn-server {major}.{minor}.{patch} or later",
+            health["server"], health["version"]
+        ));
+    }
+    let reply = http::send(
+        HttpRequest::new(Method::Post, format!("{url}/api/auth/clients/extend"))
+            .header("content-type", "application/json")
+            .secret_header("authorization", "Bearer ", Secret::new(token))
+            .body(
+                json!({"sessionTtl": "until-revoked"})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .timeout(Duration::from_secs(30)),
+    )
+    .await
+    .map_err(|e| format!("extend: {e}"))?;
+    if reply.status != 200 {
+        return Err(format!("extend answered {}", reply.status));
+    }
+    let body: Value = serde_json::from_slice(&reply.body).unwrap_or_default();
+    body["expiresAt"]
+        .as_str()
+        .and_then(conn_support::time::millis_from_iso)
+        .and_then(|ms| u64::try_from(ms).ok())
+        .ok_or_else(|| "extend answered without expiresAt".to_owned())
+}
+
+/// `major.minor.patch` of a release version; a pre-release or build suffix is ignored.
+fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    let core = text.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+    let version = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(version)
 }
 
 /// The addresses a link tries, every one in the order given (`[url, ...alternateUrls]`);
@@ -1945,6 +2066,7 @@ mod tests {
     }
 
     /// `fake_peer`, with `reply` building the whole `tools/call` answer from the tool name.
+    /// `POST /api/auth/clients/extend` answers `reply("extend")`, or 500 for `null`.
     async fn fake_peer_with(
         descriptors: Vec<(u16, String)>,
         reply: Arc<dyn Fn(&str) -> Value + Send + Sync>,
@@ -1987,6 +2109,11 @@ mod tests {
                         let n = counted.fetch_add(1, Ordering::SeqCst);
                         let (status, body) = descriptors[n.min(descriptors.len() - 1)].clone();
                         (status, "application/json", "", body)
+                    } else if head.starts_with("POST /api/auth/clients/extend ") {
+                        match reply("extend") {
+                            Value::Null => (500, "application/json", "", String::new()),
+                            answer => (200, "application/json", "", answer.to_string()),
+                        }
                     } else {
                         let request: Value = serde_json::from_str(&body).unwrap_or_default();
                         match request["method"].as_str() {
@@ -2120,6 +2247,126 @@ mod tests {
                 "t3_thread_send"
             ]
         );
+    }
+
+    /// A link that ends within a year is extended once the peer's `/health` shows a release
+    /// that takes the link's own bearer. A peer too old, not a Conn Server, or failing the
+    /// call leaves the stored end as it was. A link a year or more away is not asked about.
+    #[tokio::test(flavor = "current_thread")]
+    async fn links_near_their_end_extend_themselves() {
+        let (peers, _) = links_with_a_running_thread("extend").await;
+        let health = |server: &str, version: &str| {
+            json!({"status": "ok", "server": server, "version": version}).to_string()
+        };
+        let later = "2036-11-24T00:00:00.000Z";
+        let later_ms = conn_support::time::millis_from_iso(later).unwrap() as u64;
+        let answers = |expires: Value| -> Arc<dyn Fn(&str) -> Value + Send + Sync> {
+            Arc::new(move |_| expires.clone())
+        };
+        let good = json!({"sessionId": "s", "expiresAt": later});
+        let cases = [
+            (
+                "current",
+                health("conn-server", "0.5.1"),
+                answers(good.clone()),
+                true,
+            ),
+            (
+                "newer",
+                health("conn-server", "1.0.0-rc.1"),
+                answers(good.clone()),
+                true,
+            ),
+            (
+                "old",
+                health("conn-server", "0.4.2"),
+                answers(good.clone()),
+                false,
+            ),
+            // 0.5.0 has until-revoked, but its extend refuses a link's own MCP bearer.
+            (
+                "until-revoked-only",
+                health("conn-server", "0.5.0"),
+                answers(good.clone()),
+                false,
+            ),
+            ("t3", health("t3", "9.9.9"), answers(good.clone()), false),
+            (
+                "failing",
+                health("conn-server", "0.5.1"),
+                answers(Value::Null),
+                false,
+            ),
+            (
+                "far",
+                health("conn-server", "0.5.1"),
+                answers(good.clone()),
+                false,
+            ),
+        ];
+        let now = now_ms();
+        let mut expected = Vec::new();
+        for (name, health, reply, extends) in cases {
+            let (url, _) = fake_peer_with(vec![(200, health)], reply).await;
+            let ends = if name == "far" {
+                now + EXTEND_WITHIN_MS + 60_000
+            } else {
+                now + 60_000
+            };
+            let secret = format!("peer-link-{name}");
+            conn_support::secret_store::write(&peers.secrets_dir, &secret, b"token").unwrap();
+            let id = format!("environment:{name}");
+            expected.push((id.clone(), if extends { later_ms } else { ends }));
+            peers
+                .change(move |rows| {
+                    rows.push(Row {
+                        environment_id: id,
+                        secret_name: secret,
+                        label: name.into(),
+                        urls: vec![url],
+                        access: "auto".into(),
+                        linked_at_ms: now,
+                        expires_at_ms: ends,
+                        last_reached_at_ms: None,
+                        last_error: None,
+                    })
+                })
+                .await
+                .unwrap();
+        }
+        // An address that does not answer is skipped for the next one.
+        let dead = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        peers
+            .change(move |rows| {
+                if let Some(row) = rows
+                    .iter_mut()
+                    .find(|r| r.environment_id == "environment:current")
+                {
+                    row.urls.insert(0, dead);
+                }
+            })
+            .await
+            .unwrap();
+        peers.extend_links().await;
+        let rows = peers.read_rows().await.unwrap();
+        for (id, ends) in expected {
+            let row = rows.iter().find(|r| r.environment_id == id).unwrap();
+            assert_eq!(row.expires_at_ms, ends, "{id}");
+        }
+    }
+
+    #[test]
+    fn reads_release_versions() {
+        assert_eq!(parse_version("0.5.0"), Some((0, 5, 0)));
+        assert_eq!(parse_version("0.10.2-rc.1"), Some((0, 10, 2)));
+        assert_eq!(parse_version("0.5"), None);
+        assert_eq!(parse_version("0.5.0.1"), None);
+        assert_eq!(parse_version("x.5.0"), None);
+        assert!(Some((0, 5, 0)) < Some(MIN_SELF_EXTEND_VERSION));
+        assert!(None < Some(MIN_SELF_EXTEND_VERSION));
     }
 
     /// A forwarded result is decoded with the tool's success shape (`PeerMcpClient`): a peer

@@ -279,17 +279,26 @@ impl EngineHost for Host {
                 self.clean_up_settled(thread_id, settled_at.clone(), false);
             }
             ThreadClose::Archived | ThreadClose::Deleted => {
-                // T3's `terminal.cleanup` effect: archive and delete both drop the history.
-                self.terminals.close(TerminalCloseInput {
-                    thread_id: thread_id.to_owned(),
-                    terminal_id: None,
-                    delete_history: Some(true),
+                // T3's `terminal.cleanup` effect: archive and delete both drop the history. The
+                // close scans and unlinks history files under the manager's lock, so it runs on
+                // the blocking pool; the device sessions end after it.
+                let (terminals, devices) = (self.terminals.clone(), self.devices.get().cloned());
+                let thread_id = thread_id.to_owned();
+                tokio::spawn(async move {
+                    let close = TerminalCloseInput {
+                        thread_id: thread_id.clone(),
+                        terminal_id: None,
+                        delete_history: Some(true),
+                    };
+                    if let Err(error) =
+                        tokio::task::spawn_blocking(move || terminals.close(close)).await
+                    {
+                        eprintln!("terminal cleanup: {error}");
+                    }
+                    if let Some(devices) = devices {
+                        devices.cleanup_thread(&thread_id).await;
+                    }
                 });
-                // The thread's device sessions end; the devices stay on for other threads.
-                if let Some(devices) = self.devices.get().cloned() {
-                    let thread_id = thread_id.to_owned();
-                    tokio::spawn(async move { devices.cleanup_thread(&thread_id).await });
-                }
             }
         }
         // `ThreadDeletion`'s `preview.cleanup`: a deleted thread's tabs free their slots.
@@ -512,6 +521,43 @@ mod tests {
         let (history, pid) = replayed(&host, "other", "term-1").await;
         assert_eq!(pid, Some(other));
         assert!(history.contains("othermarker-seen"), "{history:?}");
+        host.terminals.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Archive drops the history on the blocking pool: with the terminal manager's lock held,
+    /// another RPC still completes on the server's one runtime thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_cleanup_leaves_the_runtime_thread_free() {
+        use crate::table::{CallContext, Handler, MethodTable};
+        let dir =
+            std::env::temp_dir().join(format!("conn-archive-blocking-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = cleanup_host(&dir);
+        let mut table = MethodTable::new();
+        crate::methods::server::register(&mut table, &Deps::default());
+        let Some(Handler::Unary(probe)) = table.get("server.probe") else {
+            panic!("server.probe")
+        };
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let terminals = host.terminals.clone();
+        let holder = std::thread::spawn(move || {
+            let _held = terminals.hold_lock();
+            held_tx.send(()).unwrap();
+            // A stalled runtime fails the test after 10 s instead of hanging it.
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok()
+        });
+        held_rx.recv().unwrap();
+        host.thread_closed("archived", ThreadClose::Archived);
+        probe(CallContext::default(), json!({})).await.unwrap();
+        let _ = done_tx.send(());
+        assert!(
+            holder.join().unwrap(),
+            "the RPC completed while history cleanup held the lock"
+        );
         host.terminals.shutdown().await;
         let _ = std::fs::remove_dir_all(dir);
     }

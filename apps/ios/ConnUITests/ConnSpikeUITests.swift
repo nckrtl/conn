@@ -530,7 +530,8 @@ final class ConnSpikeUITests: XCTestCase {
         }
         // The model chip opens the thread settings sheet.
         let modelChip = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ OR label BEGINSWITH %@", "composer.modelButton", "Model and reasoning settings"
+            format: "identifier == %@ OR label BEGINSWITH %@ OR label BEGINSWITH %@",
+            "composer.modelButton", "Model and reasoning settings", "Model, "
         )).firstMatch
         if modelChip.waitForExistence(timeout: 5) && modelChip.isHittable {
             modelChip.tap()
@@ -622,8 +623,8 @@ final class ConnSpikeUITests: XCTestCase {
         }
 
         let link = "http://127.0.0.1:3899/pair#token=url-item"
-        UIPasteboard.general.url = URL(string: link)
-        XCTAssertNil(UIPasteboard.general.string, "Copy Link stores only a URL item")
+        // "Copy Link" stores a `public.url` item. (UIKit may still offer it as a string here.)
+        UIPasteboard.general.setItems([["public.url": URL(string: link)!]])
         paste.tap()
         allowPaste()
         XCTAssertEqual(field.value as? String, link, "a URL item fills the field")
@@ -643,7 +644,7 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertTrue(error.waitForExistence(timeout: 5), "an empty clipboard says why nothing pasted")
         XCTAssertTrue(error.label.hasPrefix("The clipboard has no pairing URL"), "the empty-clipboard message")
 
-        UIPasteboard.general.url = URL(string: link)
+        UIPasteboard.general.setItems([["public.url": URL(string: link)!]])
         field.tap()
         field.press(forDuration: 1.2)
         let menuPaste = app.menuItems["Paste"].firstMatch

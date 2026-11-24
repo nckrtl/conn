@@ -105,8 +105,8 @@ struct ConnComposerModelChip: View {
     }
 }
 
-/// `ProviderIcon`: Claude's mark, Antigravity's image, and the knot for every other driver,
-/// drawn in `#e5e5e5` (dark) or `#171717` (light).
+/// `ProviderIcon`: Claude's mark, Antigravity's image, Grok's package icon, and the knot for every
+/// other driver, drawn in `#e5e5e5` (dark) or `#171717` (light).
 struct ProviderIcon: View {
     let driver: String?
     var size: CGFloat = 16
@@ -118,6 +118,14 @@ struct ProviderIcon: View {
             Image("provider-claude").resizable().scaledToFit().frame(width: size, height: size)
         case "antigravity":
             Image("provider-antigravity").resizable().scaledToFit().frame(width: size, height: size)
+        case "grok":
+            // `@t3tools/provider-grok/client`'s icon: #F5F5F5 (dark) or #0F0F0F (light).
+            Image("provider-grok")
+                .resizable()
+                .renderingMode(.template)
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .foregroundStyle(colorScheme == .dark ? Color(white: 0.96) : Color(white: 0.059))
         default:
             Image("provider-default")
                 .resizable()

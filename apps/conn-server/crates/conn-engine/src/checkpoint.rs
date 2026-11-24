@@ -4,7 +4,9 @@
 //!
 //! - **Scope.** A thread has one root scope, `checkpoint-scope:thread:<id>:name:root`, made
 //!   when its first run starts (`checkpoint-scope.created`) in the run's folder; the run's root
-//!   node names it (`checkpointScopeId`).
+//!   node names it (`checkpointScopeId`). A run in another folder or on another provider
+//!   thread rebuilds it from that run. Earlier checkpoints keep their refs: a moved thread's
+//!   next turn diff compares with the previous checkout's state, as on T3.
 //! - **Baseline.** Before the provider gets the message, the workspace is captured as ordinal
 //!   `run - 1` unless that ref exists (5 s budget; a failure starts the turn without one).
 //! - **Capture.** A provider turn that completes leaves the run `waiting`; the capture then
@@ -51,8 +53,10 @@ pub(crate) fn checkpoint_id(scope_id: &str, ordinal: u64) -> String {
     )
 }
 
-/// Where the run's checkpoints go: the scope, made or brought up to the run's provider
-/// thread, and the node naming it. Runs in the write that starts the run.
+/// Where the run's checkpoints go: the scope id and folder, naming the scope on the node.
+/// Runs in the write that starts the run. A scope that names another provider thread or
+/// folder is rebuilt from this run, as T3 builds it for every run
+/// (`CheckpointService.makeRootRunScope`), so a thread moved to another checkout captures there.
 pub(crate) fn ensure_scope(
     tx: &mut Tx<'_>,
     thread_id: &str,
@@ -62,38 +66,28 @@ pub(crate) fn ensure_scope(
     cwd: &str,
 ) -> StoreResult<(String, String)> {
     let id = scope_id(thread_id);
-    let run_id = run["id"].as_str();
-    let root = run["rootNodeId"].as_str();
-    let stored = tx.entity(thread_id, "checkpointScopes", &id)?;
-    let scope = match stored {
-        Some(scope) if scope["providerThreadId"] == *provider_thread_id => scope,
-        Some(mut scope) => {
-            scope["providerThreadId"] = provider_thread_id.clone();
-            tx.append(
-                Draft::new(thread_id, "checkpoint-scope.created", scope.clone())
-                    .run(run_id)
-                    .node(root),
-            )?;
-            scope
-        }
-        None => {
-            let scope = json!({
-                "id": id, "threadId": thread_id, "runId": run["id"], "nodeId": run["rootNodeId"],
-                "parentScopeId": null, "providerThreadId": provider_thread_id,
-                "kind": "root_run", "ordinalWithinParent": 0, "advancesAppRunCount": true,
-                "cwd": cwd, "createdAt": tx.now(),
-            });
-            tx.append(
-                Draft::new(thread_id, "checkpoint-scope.created", scope.clone())
-                    .run(run_id)
-                    .node(root),
-            )?;
-            scope
-        }
-    };
+    // An imported scope has no event yet: record its folder before this run captures.
+    let current = tx
+        .entity(thread_id, "checkpointScopes", &id)?
+        .is_some_and(|scope| {
+            scope["providerThreadId"] == *provider_thread_id && scope["cwd"] == cwd
+        })
+        && tx.has_scope_event(thread_id)?;
+    if !current {
+        let scope = json!({
+            "id": id, "threadId": thread_id, "runId": run["id"], "nodeId": run["rootNodeId"],
+            "parentScopeId": null, "providerThreadId": provider_thread_id,
+            "kind": "root_run", "ordinalWithinParent": 0, "advancesAppRunCount": true,
+            "cwd": cwd, "createdAt": tx.now(),
+        });
+        tx.append(
+            Draft::new(thread_id, "checkpoint-scope.created", scope)
+                .run(run["id"].as_str())
+                .node(run["rootNodeId"].as_str()),
+        )?;
+    }
     node["checkpointScopeId"] = json!(id);
-    let cwd = scope["cwd"].as_str().unwrap_or(cwd).to_owned();
-    Ok((id, cwd))
+    Ok((id, cwd.to_owned()))
 }
 
 /// The status a folder gives a checkpoint before any ref is read.
@@ -272,12 +266,12 @@ fn needs_capture(run: &Value) -> bool {
 }
 
 impl Inner {
-    /// The baseline before a provider turn (`captureRunBaseline`). Never fails the turn.
+    /// The baseline before a provider turn (`captureRunBaseline`). Never fails the turn. The
+    /// turn start holds the folder's lease.
     pub(crate) async fn capture_baseline(&self, scope_id: &str, cwd: &str, run_ordinal: u64) {
-        let Some(checkpoints) = &self.checkpoints else {
+        if self.checkpoints.is_none() {
             return;
-        };
-        let _held = checkpoints.workspace(cwd).await;
+        }
         let path = PathBuf::from(cwd);
         if probe(&path).await != Probe::Repository {
             return;
@@ -329,18 +323,38 @@ impl Inner {
         let (tid, rid) = (thread_id.clone(), run_id.clone());
         let effects = self
             .write(move |tx| {
+                // The run's end (the parent's wake) is written once, by the first capture to
+                // commit, whatever the run ended as. A capture that runs again after a restart
+                // finds its row marked.
+                // A capture row of an older build has no mark: a terminal run whose checkpoint
+                // committed had its end written by that capture.
+                let ended = tx.entity(&tid, "runs", &rid)?.is_some_and(|run| {
+                    run["status"] != "waiting" && !run["checkpointId"].is_null()
+                });
+                let first = !ended && !tx.run_end_recorded(&rid)?;
                 if let Some((ctx, events)) = captured {
                     commit_capture(tx, &tid, &rid, &ctx, events)?;
                 }
                 complete_waiting(tx, &tid, &rid)?;
-                let mut effects = crate::families::on_run_end(tx, &tid, &rid)?;
+                let mut effects = if first {
+                    tx.record_run_end(&rid)?;
+                    let effects = crate::families::on_run_end(tx, &tid, &rid)?;
+                    if tx
+                        .entity(&tid, "runs", &rid)?
+                        .is_some_and(|run| run["status"] == "completed")
+                    {
+                        commands::release_unattended_holds(tx, &tid, &rid)?;
+                    }
+                    effects
+                } else {
+                    vec![]
+                };
                 effects.extend(commands::start_next_queued(tx, &tid, None)?);
-                Ok(effects)
+                tx.enqueue(None, &effects)
             })
             .await;
-        match effects {
-            Ok(effects) => effects.into_iter().for_each(|e| self.spawn_effect(e)),
-            Err(e) => eprintln!("conn-engine: could not record a checkpoint: {e}"),
+        if let Err(e) = effects {
+            eprintln!("conn-engine: could not record a checkpoint: {e}");
         }
         if let Some(observer) = &self.observer {
             self.observe_end(observer.clone(), thread_id, run_id).await;
@@ -482,7 +496,9 @@ fn commit_capture(
     let root = ctx.root["id"].as_str().map(str::to_owned);
     let mut checkpoint = Value::Null;
     for row in rows {
-        let draft = Draft::new(thread_id, "checkpoint.captured", row.clone()).node(root.as_deref());
+        let draft = Draft::new(thread_id, "checkpoint.captured", row.clone())
+            .node(root.as_deref())
+            .instance_of(&run);
         let draft = if row["runId"].is_null() {
             draft
         } else {

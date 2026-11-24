@@ -23,12 +23,13 @@ use crate::{
     router,
 };
 
-/// Grok's `providerInstances.grok` settings as stored in `<state_dir>/settings.json`, so a Grok
-/// task due at start does not meet a disabled instance before the first status refresh. Reads
-/// the file with `std::fs`: call it before the runtime starts. A file that does not parse
-/// gives Grok's default (off); the settings store logs it.
+/// Grok's `providerInstances.grok` settings as the settings store reads `<state_dir>/settings.json`
+/// (legacy provider map and history included), so a Grok task due at start does not meet a
+/// disabled instance before the first status refresh. Reads the file with `std::fs`: call it
+/// before the runtime starts. A file that does not decode gives Grok's default (off); the
+/// settings store logs it.
 pub fn stored_grok_settings(state_dir: &std::path::Path) -> conn_provider_acp::GrokSettings {
-    let stored = crate::settings::read(&state_dir.join("settings.json")).unwrap_or_default();
+    let stored = crate::settings::effective(&state_dir.join("settings.json"));
     conn_provider_acp::GrokSettings::from_instance(
         stored.get("providerInstances").and_then(|p| p.get("grok")),
     )
@@ -51,6 +52,10 @@ pub struct ServeOptions {
     /// `--managed-provision`: serve managed callers on a second ingress
     /// (`crate::managed`).
     pub managed_provision: Option<PathBuf>,
+    /// Receives each model manifest the server accepts; `main` gives it to the providers.
+    pub model_manifest: conn_provider::LiveManifest,
+    /// Providers report entry changes here; the config streams listen.
+    pub status_notifier: conn_provider::StatusNotifier,
 }
 
 impl ServeOptions {
@@ -109,6 +114,8 @@ impl ServeOptions {
             session_idle: args.session_idle,
             sdk_host: args.sdk_host,
             managed_provision: args.managed_provision,
+            model_manifest: conn_provider::LiveManifest::default(),
+            status_notifier: conn_provider::StatusNotifier::default(),
         }
     }
 }
@@ -155,6 +162,8 @@ pub async fn serve_with_instances(
         session_idle,
         sdk_host: _,
         managed_provision,
+        model_manifest,
+        status_notifier,
     } = options;
     // SIGHUP asks for a reload (`reload.rs`). Its default action stops the process, so the
     // handler goes in before any startup work an Orbit finalize could overlap.
@@ -273,6 +282,11 @@ pub async fn serve_with_instances(
         environment: environment.clone(),
         scheduled_tasks: OnceLock::new(),
         devices: OnceLock::new(),
+        settlement_wake: Arc::default(),
+        idle_compaction: OnceLock::new(),
+        worktree_cleanup: OnceLock::new(),
+        previews: OnceLock::new(),
+        settle_cleanups: Arc::default(),
     });
 
     // A state folder the T3 server used: its threads and projects, once (`t3_import.rs`).
@@ -325,6 +339,16 @@ pub async fn serve_with_instances(
         Ok(Err(error)) => or_exit(Err(error), "cannot import the T3 server's state"),
         Err(error) => or_exit(Err(error), "cannot import the T3 server's state"),
     }
+    // Bound before the engine opens: every `/mcp` credential carries this address. Clients
+    // wait in the backlog until the router serves, below.
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("conn-server: cannot listen on {listen}: {error}");
+            std::process::exit(1);
+        }
+    };
+    let addr = or_exit(listener.local_addr(), "cannot read the listening address");
     let mut config = EngineConfig::new(state_dir.join("engine.sqlite"));
     config.projects = projects;
     config.provider_set = Some(providers.clone());
@@ -333,6 +357,7 @@ pub async fn serve_with_instances(
     config.turn_observer = Some(host.clone());
     config.checkpoints = !inert;
     config.recover_runs = !inert;
+    config.restart_policy = crate::settings::restart_policy(&environment.settings.raw());
     // Attention events for iOS push: off unless asked for, and only where a sender exists
     // (`attention.rs`). A container server sends through its managed Gateway client.
     let attention = !inert && crate::attention::enabled_by_env();
@@ -350,6 +375,9 @@ pub async fn serve_with_instances(
         None
     };
     config.attention = attention && (provision.is_some() || native_attention.is_some());
+    // The host's services (scheduled tasks, devices, `/mcp`) start below; a replayed effect
+    // must find them, so the worker starts after them.
+    config.hold_effects = true;
     let text_generators = Arc::new(crate::text_generation::TextGenerators::for_environment(
         environment.clone(),
     ));
@@ -357,8 +385,9 @@ pub async fn serve_with_instances(
         crate::text_generation::title::Titles::new(text_generators.clone())
             .with_providers(providers.clone(), Some(state_dir.join("attachments"))),
     ));
+    // Opening reads, migrates and recovers the store: on the blocking pool, not this thread.
     let sqlite_engine = Arc::new(or_exit(
-        SqliteEngine::open(config),
+        SqliteEngine::start(config).await,
         "cannot open the engine",
     ));
     let engine: Arc<dyn Engine> = sqlite_engine.clone();
@@ -379,6 +408,7 @@ pub async fn serve_with_instances(
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
     let preview = conn_preview::tabs::Preview::new(state_dir.clone());
+    let _ = host.previews.set(preview.clone());
     let mut deps = Deps {
         preview: Some(preview.clone()),
         panels: Some(conn_features::panels::PanelBroker::default()),
@@ -397,6 +427,7 @@ pub async fn serve_with_instances(
         files,
         vcs,
         terminals: Some(terminals.clone()),
+        workspace_locks: sqlite_engine.workspace_locks(),
         text_generators: Some(text_generators),
         oauth: Some(Arc::new(crate::oauth::McpOAuth::new(
             &state_dir.join("secrets"),
@@ -404,15 +435,33 @@ pub async fn serve_with_instances(
         // An inert copy holds the original's peer links: it must not use them.
         peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
         devices: Some(crate::methods::devices::start(environment.clone())),
+        provider_status: crate::methods::provider::ProviderStatus::with_notifier(status_notifier),
+        model_manifest: Some(crate::model_manifest::ModelManifest::new(
+            state_dir.clone(),
+            environment.clone(),
+            model_manifest,
+        )),
         ..Deps::default()
     };
     if let Some(devices) = &deps.devices {
         let _ = host.devices.set(devices.clone());
     }
-    deps.mcp = crate::routes::mcp::service(&deps);
-    if let Some(mcp) = &deps.mcp {
-        let _ = host.mcp.set(mcp.clone());
-    }
+    start_agent_tools(&mut deps, &host, &sqlite_engine, addr);
+    // After the MCP service, which settled threads' cleanup uses: the first sweep may settle.
+    // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.
+    let settlement = (!inert).then(|| {
+        let _ = host
+            .idle_compaction
+            .set(crate::idle_compaction::IdleCompaction::new(
+                sqlite_engine.clone(),
+                environment.clone(),
+            ));
+        crate::settlement::start(
+            sqlite_engine.clone(),
+            environment.clone(),
+            host.settlement_wake.clone(),
+        )
+    });
     let state = AppState {
         table: Arc::new(method_table(&deps)),
         auth: auth.clone(),
@@ -421,14 +470,7 @@ pub async fn serve_with_instances(
         deps,
     };
 
-    let listener = match tokio::net::TcpListener::bind(listen).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("conn-server: cannot listen on {listen}: {error}");
-            std::process::exit(1);
-        }
-    };
-    let addr = or_exit(listener.local_addr(), "cannot read the listening address");
+    crate::routes::preview_tunnel::serving_on(addr.port());
     let runtime = RuntimeState::new(&addr.ip().to_string(), addr.port(), conn_support::uuid_v4());
     // The write and its fsync run on a blocking thread, as all file work here does.
     let published = {
@@ -440,9 +482,6 @@ pub async fn serve_with_instances(
         Ok(Err(error)) => eprintln!("conn-server: could not write server-runtime.json: {error}"),
         Err(error) => eprintln!("conn-server: could not write server-runtime.json: {error}"),
     }
-    if let Some(mcp) = &state.deps.mcp {
-        mcp.set_listen_address(addr);
-    }
     println!("conn-server listening on http://{addr}");
     println!(
         "environment: {} ({})",
@@ -453,6 +492,7 @@ pub async fn serve_with_instances(
     println!("providers: {provider_names}");
     // Probes spawn provider CLIs; T3 starts them once the server is ready, too.
     // An inert copy starts none of these: each can start a turn or act on another host.
+    let mut worktree_cleanup = None;
     if !inert {
         crate::methods::provider::start_status_refresh(&state.deps);
         // Tasks in linked environments: their followers, again after a restart.
@@ -461,9 +501,25 @@ pub async fn serve_with_instances(
         }
         // Pull request watches: a sweep every two minutes, as T3's `PullRequestWatchReactor`.
         crate::methods::pull_requests::start_watches(&state.deps);
+        // Peer links made with dated sessions: upgraded to until-revoked at start and daily.
+        if let Some(peers) = &state.deps.peers {
+            peers.start_upkeep();
+        }
+        // Worktree cleanup: at start, hourly, and on rule changes and deletions, as T3's
+        // `StorageCleanup`.
+        let cleanup = crate::worktree_cleanup::WorktreeCleanup::new(
+            sqlite_engine.clone(),
+            environment.clone(),
+            terminals.clone(),
+            crate::methods::pull_requests::merge_lookup(&state.deps),
+        );
+        worktree_cleanup = Some(cleanup.start());
+        let _ = host.worktree_cleanup.set(cleanup);
     }
     // `model-manifest.json`, fetched and cached as the T3 server's provider checks do.
-    crate::model_manifest::start(state_dir.clone(), environment.clone());
+    if let Some(manifest) = &state.deps.model_manifest {
+        manifest.start();
+    }
     // `spawn` starts nothing when the engine has attention events off.
     let managed_server = match provision {
         Some(provision) => {
@@ -490,6 +546,7 @@ pub async fn serve_with_instances(
     }
 
     let devices = state.deps.devices.clone();
+    let mcp = state.deps.mcp.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let listener = axum::serve::ListenerExt::tap_io(listener, |stream| {
@@ -511,6 +568,9 @@ pub async fn serve_with_instances(
             eprintln!("conn-server: {signal}, stopping");
             // Mark shutdown before draining: provider exits must leave runs for restart recovery.
             engine.begin_shutdown();
+            if let Some(mcp) = &mcp {
+                mcp.begin_stopping_remote_tasks();
+            }
             let _ = stop_tx.send(true);
             // Open WebSockets keep the graceful stop waiting; give them a moment, no more.
             let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
@@ -519,9 +579,28 @@ pub async fn serve_with_instances(
     if let Some(managed) = managed_server {
         managed.abort();
     }
+    // Settlement and compaction stop before the engine does, so neither dispatches into it.
+    if let Some(settlement) = settlement {
+        settlement.abort();
+        let _ = settlement.await;
+    }
+    if let Some(idle) = host.idle_compaction.get() {
+        idle.shutdown().await;
+    }
+    // No removal starts once the server stops; one under way ends before terminals and
+    // sessions drain.
+    if let Some(cleanup) = worktree_cleanup {
+        cleanup.stop().await;
+    }
     // Shells and provider processes end with their whole process groups, so nothing they
     // started outlives the server.
     terminals.shutdown().await;
+    // Remote task followers stop before the engine closes, so none settles a task or wakes a
+    // parent during shutdown. Unbounded: a follower stops at its next await, and a write the
+    // engine already took must commit before the engine closes.
+    if let Some(mcp) = &mcp {
+        mcp.stop_remote_tasks().await;
+    }
     engine.shutdown().await;
     preview.shutdown().await;
     // Device hubs and agent daemons stop, here and on SSH hosts, as T3's finalizers do;
@@ -534,6 +613,22 @@ pub async fn serve_with_instances(
         // A failure exit also restarts units with Restart=on-failure.
         std::process::exit(1);
     }
+}
+
+/// Gives the engine's agents `/mcp` at `listen`, and only then starts the effects the engine
+/// held, the ones its recovery replays too. A resumed session keeps the credential it opens
+/// with, so its URL must already be the one this server answers on.
+pub(crate) fn start_agent_tools(
+    deps: &mut Deps,
+    host: &Host,
+    engine: &SqliteEngine,
+    listen: SocketAddr,
+) {
+    deps.mcp = crate::routes::mcp::service(deps, listen);
+    if let Some(mcp) = &deps.mcp {
+        let _ = host.mcp.set(mcp.clone());
+    }
+    engine.start_effects();
 }
 
 /// Binds the managed ingress and starts its authority, probe, lease, ACK and notice tasks.
@@ -578,6 +673,7 @@ async fn start_managed(
         }
     };
     if let Ok(addr) = listener.local_addr() {
+        crate::routes::preview_tunnel::serving_on(addr.port());
         println!("managed ingress on http://{addr}");
     }
     let ingress = managed::ingress::Managed::new(shared, gateway, provision.preview_tabs);
@@ -656,11 +752,20 @@ mod stored_grok_settings_tests {
         )
         .expect("settings");
         let settings = stored_grok_settings(&dir);
+        // T3's legacy map turns Grok on too, before the settings store migrates the file.
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"providers":{"grok":{"enabled":true,"binaryPath":"/opt/legacy-grok"}}}"#,
+        )
+        .expect("settings");
+        let legacy = stored_grok_settings(&dir);
         std::fs::write(dir.join("settings.json"), "{not json").expect("settings");
         let broken = stored_grok_settings(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(settings.enabled);
         assert_eq!(settings.binary_path, "/opt/grok");
+        assert!(legacy.enabled, "a legacy enable: on");
+        assert_eq!(legacy.binary_path, "/opt/legacy-grok");
         assert!(!broken.enabled, "a broken file: off");
     }
 }

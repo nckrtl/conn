@@ -22,9 +22,13 @@ rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["sync", "process", "io-util", "time", "rt", "macros"] }
 
 [dev-dependencies]
+# Writes the stub `agy` of the credential check tests.
+conn-support = { workspace = true, features = ["test-util"] }
 # examples/idle_memory.rs: live heap bytes of one idle session (the version conn-engine's
 # memory_load example uses). Dev only; not in the server binary.
 stats_alloc = "0.1"
+# A paused clock for the 90 s model refresh limit; tests only.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

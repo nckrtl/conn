@@ -31,8 +31,9 @@ mod projects;
 mod pull_request_forge;
 mod pull_requests;
 mod scheduled;
+mod script_completion;
 mod secrets;
-mod tasks;
+pub(crate) mod tasks;
 mod test_logins;
 mod themes;
 mod threads;
@@ -125,6 +126,9 @@ pub(crate) const HANDLED: &[&str] = &[
     "conn_worktree_handoff",
     "conn_worktree_list",
     "conn_worktree_status",
+    "files_definition",
+    "files_selection",
+    "files_reveal",
     "panel_open",
     "request_secret",
     "save_test_login",
@@ -336,6 +340,8 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "conn_thread_organize" => manage::organize(cx, &args).await,
         "conn_thread_transfer" => manage::transfer(cx, &args).await,
         "mcp_call" | "mcp_connect" => panels::invoke(cx, name, &args).await,
+        "files_definition" => panels::definition(cx, &args).await,
+        "files_selection" | "files_reveal" => panels::files(cx, name, &args).await,
         "panel_open" => panels::open(cx, &args).await,
         "request_secret" => secrets::request(cx, &args).await,
         "save_test_login" => test_logins::save(cx, &args).await,
@@ -640,23 +646,8 @@ impl Cx<'_> {
 
     /// Dispatches one contract command; returns the sequence of its last event.
     pub(crate) async fn dispatch(&self, command: Value) -> Result<u64, ToolError> {
-        let command: Command =
-            from_json(command).map_err(|e| internal(format!("bad command: {e}")))?;
-        match self.engine().dispatch(command).await {
-            Ok(result) => Ok(conn_contract::to_json(&result)["sequence"]
-                .as_u64()
-                .unwrap_or(0)),
-            Err(EngineError::Rejected(error)) => Err(fail(
-                "orchestration_error",
-                conn_contract::to_json(&error)["message"]
-                    .as_str()
-                    .unwrap_or("The command was refused.")
-                    .to_owned(),
-            )),
-            Err(EngineError::Internal(message)) => Err(internal(message)),
-        }
+        dispatch_to(self.engine(), command).await
     }
-
     /// `clientRequestId`, or a fresh key: retries with the same id replay the first call.
     fn request_key(args: &Args) -> String {
         args.get("clientRequestId")
@@ -680,6 +671,36 @@ impl Cx<'_> {
         let digest = Sha256::digest(pair.as_bytes());
         let hex = conn_support::hex::hex(&digest);
         format!("{prefix}{hex}")
+    }
+}
+
+/// [`Cx::dispatch`] on an engine handle, for work that outlives the call (a delegate's dispatch).
+pub(crate) async fn dispatch_to(
+    engine: &dyn conn_engine::Engine,
+    command: Value,
+) -> Result<u64, ToolError> {
+    let command: Command = from_json(command).map_err(|e| internal(format!("bad command: {e}")))?;
+    match engine.dispatch(command).await {
+        Ok(result) => Ok(conn_contract::to_json(&result)["sequence"]
+            .as_u64()
+            .unwrap_or(0)),
+        Err(EngineError::Rejected(error)) => {
+            let error = conn_contract::to_json(&error);
+            // TS `OrchestratorMcpService` maps `ThreadManagementThreadArchivedError` so.
+            let code = if error["cause"]["_tag"] == conn_engine::THREAD_ARCHIVED_ERROR {
+                "thread_not_sendable"
+            } else {
+                "orchestration_error"
+            };
+            Err(fail(
+                code,
+                error["message"]
+                    .as_str()
+                    .unwrap_or("The command was refused.")
+                    .to_owned(),
+            ))
+        }
+        Err(EngineError::Internal(message)) => Err(internal(message)),
     }
 }
 

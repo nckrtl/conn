@@ -9,6 +9,7 @@ mod coalesce;
 mod composer;
 mod core;
 mod model_picker;
+mod offline;
 mod orbit;
 mod phone_tasks;
 mod questions;
@@ -23,6 +24,7 @@ pub use crate::core::{ConnCore, CoreListener};
 pub use crate::model_picker::{
     FfiModelPicker, FfiModelPickerRow, FfiModelPickerSection, FfiModelSave,
 };
+pub use crate::offline::{FfiPromptMarker, OfflineReader};
 pub use crate::orbit::{
     FfiAgentRole, FfiAgentState, FfiAttentionKind, FfiChangeTone, FfiConversationRef,
     FfiDeliverable, FfiImplementerMode, FfiInsightCard, FfiInsightId, FfiInsightTrendPoint,

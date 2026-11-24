@@ -18,6 +18,7 @@ mod auth;
 pub mod commands;
 pub mod device_hub;
 mod driver;
+pub mod environments;
 pub mod history;
 pub mod perf;
 mod wire;
@@ -124,7 +125,7 @@ pub enum ClientEvent {
     },
     /// Server→desktop agent panel request (`panels.requests`: `panel_open`, `database_query`,
     /// `mcp_connect`, `mcp_call`). Auto-resubscribed on WebSocket reconnect.
-    PanelRequest(conn_contract::AgentPanelRequest),
+    PanelRequest(conn_contract::source::DesktopPanelRequest),
     /// Live project annotation queue snapshot (`annotations.subscribe`). Auto-resubscribed on
     /// WebSocket reconnect.
     Annotations {
@@ -261,6 +262,75 @@ impl Connection {
         .await
     }
 
+    /// Looks up a Laravel definition on the server that owns this thread.
+    pub async fn source_definition(
+        &self,
+        query: conn_contract::source::DefinitionRequest,
+    ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
+        self.navigation_request("api/files/definition", query).await
+    }
+
+    pub async fn first_source_definition(
+        &self,
+        query: conn_contract::source::DefinitionRequest,
+        hover: bool,
+    ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
+        let endpoint = if hover {
+            "api/files/definition?mode=hover"
+        } else {
+            "api/files/definition?mode=first"
+        };
+        self.navigation_request(endpoint, query).await
+    }
+
+    pub async fn prepare_php_navigation(
+        &self,
+        doc: conn_contract::source::PreparePhpNavigation,
+    ) -> Result<(), ClientError> {
+        self.navigation_request("api/files/prepare-php", doc).await
+    }
+
+    async fn navigation_request<
+        Q: Serialize + Send + Sync + 'static,
+        R: DeserializeOwned + Send + 'static,
+    >(
+        &self,
+        endpoint: &str,
+        query: Q,
+    ) -> Result<R, ClientError> {
+        let url = self.http_base_url.join(endpoint)?;
+        let token = self
+            .bearer
+            .read()
+            .ok()
+            .and_then(|t| t.clone())
+            .ok_or_else(|| ClientError::Auth("No active connection.".into()))?;
+        let http = self.http.clone();
+        self.run_on_tokio(
+            async move {
+                let res = http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&query)
+                    .send()
+                    .await
+                    .map_err(|e| ClientError::Connection(e.to_string()))?;
+                if !res.status().is_success() {
+                    let status = res.status();
+                    let message = res.text().await.unwrap_or_default();
+                    return Err(ClientError::Connection(format!(
+                        "Definition lookup ({status}): {message}"
+                    )));
+                }
+                res.json()
+                    .await
+                    .map_err(|e| ClientError::Connection(e.to_string()))
+            },
+            "source definition",
+        )
+        .await
+    }
+
     /// Shared HTTP client for auxiliary requests against the connected server.
     #[must_use]
     pub fn http_client(&self) -> &reqwest::Client {
@@ -369,12 +439,144 @@ impl Connection {
         }
     }
 
+    /// Downloads a stored chat attachment (`assets.createUrl` for an `attachment` resource,
+    /// then `GET` of the signed URL), as the web client does for message thumbnails.
+    ///
+    /// # Errors
+    /// Returns [`ClientError`] if the RPC, URL resolution or the download fails.
+    pub async fn fetch_attachment_bytes(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, ClientError> {
+        let payload = conn_contract::AssetCreateUrlInput {
+            resource: conn_contract::AssetResource::Attachment(
+                conn_contract::AssetResourceAttachment {
+                    tag: lit::Attachment,
+                    attachment_id: attachment_id.to_owned(),
+                    file_name: None,
+                    mime_type: None,
+                    disposition: None,
+                    render_intent: None,
+                },
+            ),
+        };
+        let created = self
+            .call::<conn_contract::rpc::assets::create_url::Payload, conn_contract::rpc::assets::create_url::Success>(
+                "assets.createUrl",
+                &payload,
+            )
+            .await?;
+        let url = self.http_base_url.join(&created.relative_url)?;
+        let http = self.http.clone();
+        let bearer = self.bearer.read().ok().and_then(|g| g.clone());
+        self.run_on_tokio(
+            async move {
+                let mut req = http.get(url);
+                if let Some(token) = bearer {
+                    req = req.bearer_auth(token);
+                }
+                let resp = req
+                    .send()
+                    .await
+                    .map_err(|err| ClientError::Connection(err.to_string()))?;
+                if !resp.status().is_success() {
+                    return Err(ClientError::Connection(format!(
+                        "attachment download failed ({})",
+                        resp.status()
+                    )));
+                }
+                resp.bytes()
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|err| ClientError::Connection(err.to_string()))
+            },
+            "attachment download",
+        )
+        .await
+    }
+
+    /// Asks the server for a signed URL to the workspace file `path` of thread `thread_id`
+    /// (`assets.createUrl`, `workspace-file`), as web Conn's file previews do.
+    ///
+    /// # Errors
+    /// Returns [`ClientError`] if the RPC or URL resolution fails.
+    pub async fn workspace_file_url(
+        &self,
+        thread_id: &str,
+        path: &str,
+    ) -> Result<url::Url, ClientError> {
+        let payload = conn_contract::AssetCreateUrlInput {
+            resource: conn_contract::AssetResource::WorkspaceFile(
+                conn_contract::AssetResourceWorkspaceFile {
+                    tag: lit::WorkspaceFile,
+                    thread_id: thread_id.to_owned(),
+                    path: path.to_owned(),
+                },
+            ),
+        };
+        let created = self
+            .call::<conn_contract::rpc::assets::create_url::Payload, conn_contract::rpc::assets::create_url::Success>(
+                "assets.createUrl",
+                &payload,
+            )
+            .await?;
+        Ok(self.http_base_url.join(&created.relative_url)?)
+    }
+
+    /// Downloads the workspace file `path` of thread `thread_id` as bytes (an image, say), through
+    /// a signed asset URL.
+    ///
+    /// # Errors
+    /// Returns [`ClientError`] if the RPC, URL resolution or the download fails.
+    pub async fn fetch_workspace_file_bytes(
+        &self,
+        thread_id: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, ClientError> {
+        let url = self.workspace_file_url(thread_id, path).await?;
+        let http = self.http.clone();
+        let bearer = self.bearer.read().ok().and_then(|g| g.clone());
+        self.run_on_tokio(
+            async move {
+                let mut req = http.get(url);
+                if let Some(token) = bearer {
+                    req = req.bearer_auth(token);
+                }
+                let resp = req
+                    .send()
+                    .await
+                    .map_err(|err| ClientError::Connection(err.to_string()))?;
+                if !resp.status().is_success() {
+                    return Err(ClientError::Connection(format!(
+                        "file download failed ({})",
+                        resp.status()
+                    )));
+                }
+                resp.bytes()
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|err| ClientError::Connection(err.to_string()))
+            },
+            "workspace file download",
+        )
+        .await
+    }
+
     /// Subscribes to `orchestration.subscribeShell`.
     ///
     /// Items arrive as [`ClientEvent::Shell`]. Automatically resubscribes after reconnect using
     /// the last observed sequence as `afterSequence`.
     pub fn subscribe_shell(&self) {
-        let _ = self.cmd_tx.send(Command::SubscribeShell);
+        let _ = self.cmd_tx.send(Command::SubscribeShell {
+            include_idle_subagents: false,
+        });
+    }
+
+    /// Includes idle children so an unsettled subagent can be cached before it is opened.
+    pub fn subscribe_shell_with_idle_subagents(&self) {
+        let _ = self.cmd_tx.send(Command::SubscribeShell {
+            include_idle_subagents: true,
+        });
     }
 
     /// Subscribes to `subscribeServerConfig`, which sends the server config and then every
@@ -396,6 +598,13 @@ impl Connection {
             .send(Command::SubscribeThread(thread_id.to_owned()));
     }
 
+    /// Requests a new bounded projection even when a previous stream can resume.
+    pub fn refresh_thread(&self, thread_id: &str) {
+        let _ = self
+            .cmd_tx
+            .send(Command::RefreshThread(thread_id.to_owned()));
+    }
+
     /// Interrupts and removes the thread subscription for `thread_id`.
     pub fn unsubscribe_thread(&self, thread_id: &str) {
         let _ = self
@@ -407,9 +616,25 @@ impl Connection {
     /// calls (`panel_open`, `database_query`, `mcp_connect`, `mcp_call`) resume immediately on
     /// WebSocket reconnect with zero retry gap.
     pub fn subscribe_panel_requests(&self, device_name: Option<String>) {
-        let _ = self
-            .cmd_tx
-            .send(Command::SubscribePanelRequests(device_name));
+        self.subscribe_files_thread(device_name, None, false);
+    }
+
+    pub fn subscribe_files_thread(
+        &self,
+        device_name: Option<String>,
+        files_thread: Option<String>,
+        files_only: bool,
+    ) {
+        let input = conn_contract::source::DesktopPanelSubscription {
+            panel: conn_contract::AgentPanelSubscribeInput { device_name },
+            files_thread,
+            files_only,
+        };
+        let _ = self.cmd_tx.send(Command::SubscribePanelRequests(input));
+    }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.cmd_tx.same_channel(&other.cmd_tx)
     }
 
     /// Stops listening to `panels.requests`.
@@ -840,6 +1065,11 @@ mod tests {
             json!(true),
             "resubscribe must keep acceptBoundedSnapshot=true"
         );
+
+        conn.refresh_thread("thread-1");
+        let fresh = sub_payloads_rx.recv().await.ok_or("missing refresh")?;
+        assert!(fresh.get("afterSequence").is_none());
+        assert_eq!(fresh["acceptBoundedSnapshot"], json!(true));
 
         // Typed orchestration.getTurnItem RPC.
         let item = conn

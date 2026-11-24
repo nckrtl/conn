@@ -975,6 +975,8 @@ impl<E: Env> Mapper<E> {
             running_tools: Vec::new(),
             running_compactions: Vec::new(),
             latest_failure: None,
+            continues: Vec::new(),
+            hook_stop_reason: None,
         };
         let task_ref = sub.task["nativeTaskRef"].clone();
         let mut provider_thread = sub.provider_thread.clone();
@@ -1226,48 +1228,124 @@ impl<E: Env> Mapper<E> {
         (owner.native_turn_id, node)
     }
 
-    /// The running turns that belong to a turn's lineage: the turn and every running
-    /// descendant (`isDescendantCodexTurn`), the turn first.
-    pub fn lineage(&self, native_turn: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        if let Some(turn) = self.turns.get(native_turn) {
-            out.push((turn.native_thread_id.clone(), native_turn.to_owned()));
-        }
-        for turn in self.turns.values() {
-            if turn.native_turn_id == native_turn {
-                continue;
-            }
-            let mut hops = 0;
-            let mut parent = turn
-                .subagent
-                .as_ref()
-                .and_then(|k| self.subagents.get(k))
-                .map(|s| s.parent.clone());
-            while let Some(scope) = parent {
-                if scope.native_turn_id == native_turn {
-                    out.push((turn.native_thread_id.clone(), turn.native_turn_id.clone()));
-                    break;
-                }
-                hops += 1;
-                if hops > MAX_SUBAGENTS {
-                    break;
-                }
-                parent = scope
-                    .subagent
-                    .as_ref()
-                    .and_then(|k| self.subagents.get(k))
-                    .map(|s| s.parent.clone());
-            }
-        }
+    /// A Stop's lineage roots (`lineageRoots`), as provider turn ids: the turn, and the earlier
+    /// turns of its goal run, whose subagents and background terminals the Stop also ends.
+    pub fn lineage_roots(&self, native_turn: &str) -> Vec<String> {
+        self.turns
+            .get(native_turn)
+            .map(|turn| {
+                let mut roots = vec![turn.provider_turn_id.clone()];
+                roots.extend(turn.continues.iter().cloned());
+                roots
+            })
+            .unwrap_or_default()
+    }
+
+    /// The running turns in the lineage of `roots` (provider turn ids): each running root and
+    /// every running descendant (`isDescendantCodexTurn`), the roots first.
+    pub fn lineage(&self, roots: &[String]) -> Vec<(String, String)> {
+        let ids = |turn: &Turn| (turn.native_thread_id.clone(), turn.native_turn_id.clone());
+        let mut out: Vec<(String, String)> = self
+            .turns
+            .values()
+            .filter(|turn| roots.contains(&turn.provider_turn_id))
+            .map(ids)
+            .collect();
+        out.extend(
+            self.turns
+                .values()
+                .filter(|turn| {
+                    !roots.contains(&turn.provider_turn_id) && self.descends_from(turn, roots)
+                })
+                .map(ids),
+        );
         out
+    }
+
+    /// Whether `turn` is a subagent turn below one of `roots` (`isDescendantCodexTurn`).
+    pub(super) fn descends_from(&self, turn: &Turn, roots: &[String]) -> bool {
+        let parent_of =
+            |key: Option<&String>| key.and_then(|k| self.subagents.get(k)).map(|s| &s.parent);
+        let mut parent = parent_of(turn.subagent.as_ref());
+        for _ in 0..=MAX_SUBAGENTS {
+            let Some(scope) = parent else {
+                return false;
+            };
+            if roots.contains(&scope.provider_turn_id) {
+                return true;
+            }
+            parent = parent_of(scope.subagent.as_ref());
+        }
+        false
     }
 
     /// Ends a running turn as interrupted without Codex's word, as T3's
     /// `finalizeRemainingInterruptLineage` does for a Stop's lineage.
     pub fn end_interrupted(&mut self, native_turn: &str) -> Vec<Out> {
+        self.end_turn(native_turn, "interrupted")
+    }
+
+    /// Ends a running turn with `status`, as its own `turn/completed` would.
+    pub fn end_turn(&mut self, native_turn: &str, status: &str) -> Vec<Out> {
         let mut out = Vec::new();
         let now = self.env.now();
-        self.finalize(native_turn, "interrupted", now, None, None, &mut out);
+        self.finalize(native_turn, status, now, None, None, &mut out);
+        out
+    }
+
+    /// The child threads of subagents Codex announced that have not settled, whether or not
+    /// their first turn started.
+    pub(super) fn unsettled_children(&self) -> impl Iterator<Item = &String> {
+        self.subagents
+            .iter()
+            .filter(|(_, sub)| active(&sub.task["status"]))
+            .map(|(thread, _)| thread)
+    }
+
+    /// Ends an unsettled subagent that runs no turn here: its node, its child's root node and
+    /// its task end with `status`.
+    pub fn end_idle_child(&mut self, child: &str, status: &str) -> Vec<Out> {
+        let mut out = Vec::new();
+        let now = self.env.now();
+        let Some(sub) = self
+            .subagents
+            .get(child)
+            .filter(|s| active(&s.task["status"]))
+        else {
+            return out;
+        };
+        push_event(
+            &mut out,
+            json!({"type": "node.updated", "node": {
+                "id": sub.child_root, "threadId": sub.child_thread_id, "runId": null,
+                "parentNodeId": null, "rootNodeId": sub.child_root, "kind": "root_turn",
+                "status": status, "countsForRun": false,
+                "providerThreadId": sub.provider_thread["id"], "providerTurnId": null,
+                "nativeItemRef": sub.task["nativeTaskRef"], "runtimeRequestId": null,
+                "checkpointScopeId": null, "startedAt": sub.started_at, "completedAt": now,
+            }}),
+        );
+        push_event(
+            &mut out,
+            json!({"type": "node.updated", "node": {
+                "id": sub.node_id, "threadId": sub.parent.thread_id, "runId": sub.parent.run_id,
+                "parentNodeId": sub.parent.root_node_id, "rootNodeId": sub.parent.root_node_id,
+                "kind": "subagent", "status": status, "countsForRun": false,
+                "providerThreadId": sub.provider_thread["id"],
+                "providerTurnId": sub.parent.provider_turn_id,
+                "nativeItemRef": sub.task["nativeTaskRef"], "runtimeRequestId": null,
+                "checkpointScopeId": null, "startedAt": sub.started_at, "completedAt": now,
+            }}),
+        );
+        self.task_update(
+            child,
+            TaskUpdate {
+                status: status_str(&json!(status)),
+                completed_at: Some(now),
+                ..TaskUpdate::default()
+            },
+            &mut out,
+        );
         out
     }
 }

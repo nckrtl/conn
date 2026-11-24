@@ -724,13 +724,6 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func markThreadUnread(threadId: String) async throws 
     
     /**
-     * The composer's model chip and the thread settings sheet's model list for `thread_id`.
-     * `toggled` holds the sections the user folded or unfolded; `pending` is the row tapped but
-     * not saved yet, as `(instance_id, model)`.
-     */
-    func modelPicker(threadId: String, query: String, toggled: [String], pendingInstanceId: String?, pendingModel: String?) async  -> FfiModelPicker
-    
-    /**
      * Loads and subscribes to `thread_id`, emitting snapshots to [`CoreListener::on_thread`].
      */
     func openThread(threadId: String) 
@@ -744,6 +737,11 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func pinThread(threadId: String, pinned: Bool) async throws 
+    
+    /**
+     * Opens this pairing's cache on the connection runtime.
+     */
+    func prepareOffline(directory: String) async throws  -> OfflineReader
     
     /**
      * Drops the active socket or reconnect backoff and reconnects immediately (e.g. when the
@@ -777,28 +775,6 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func respondUserInput(threadId: String, requestId: String, answers: [FfiUserInputSubmission]) async throws 
-    
-    /**
-     * Save in the thread settings sheet: switches `thread_id` to `model` on provider
-     * `instance_id` (`thread.model-selection.set`) only while the thread's catalog still offers
-     * it (`commitPendingModel`).
-     *
-     * # Errors
-     *
-     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-     */
-    func saveThreadModel(threadId: String, instanceId: String, model: String) async throws  -> FfiModelSave
-    
-    /**
-     * Asks the server to scan the thread's provider in the thread's cwd once, so models that only
-     * the project's own provider config lists reach the picker (`ProviderWorkspaceSnapshotScan`).
-     * Does nothing when that cwd was scanned already.
-     *
-     * # Errors
-     *
-     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-     */
-    func scanThreadWorkspaceModels(threadId: String) async throws 
     
     /**
      * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
@@ -1107,28 +1083,6 @@ open func markThreadUnread(threadId: String)async throws   {
 }
     
     /**
-     * The composer's model chip and the thread settings sheet's model list for `thread_id`.
-     * `toggled` holds the sections the user folded or unfolded; `pending` is the row tapped but
-     * not saved yet, as `(instance_id, model)`.
-     */
-open func modelPicker(threadId: String, query: String, toggled: [String], pendingInstanceId: String?, pendingModel: String?)async  -> FfiModelPicker  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_conncore_model_picker(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(query),FfiConverterSequenceString.lower(toggled),FfiConverterOptionString.lower(pendingInstanceId),FfiConverterOptionString.lower(pendingModel)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeFfiModelPicker_lift,
-            errorHandler: nil
-            
-        )
-}
-    
-    /**
      * Loads and subscribes to `thread_id`, emitting snapshots to [`CoreListener::on_thread`].
      */
 open func openThread(threadId: String)  {try! rustCall() {
@@ -1160,6 +1114,25 @@ open func pinThread(threadId: String, pinned: Bool)async throws   {
             completeFunc: ffi_conn_ffi_rust_future_complete_void,
             freeFunc: ffi_conn_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Opens this pairing's cache on the connection runtime.
+     */
+open func prepareOffline(directory: String)async throws  -> OfflineReader  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_prepare_offline(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(directory)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_u64,
+            completeFunc: ffi_conn_ffi_rust_future_complete_u64,
+            freeFunc: ffi_conn_ffi_rust_future_free_u64,
+            liftFunc: FfiConverterTypeOfflineReader_lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -1235,56 +1208,6 @@ open func respondUserInput(threadId: String, requestId: String, answers: [FfiUse
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_conncore_respond_user_input(
                         self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId),FfiConverterSequenceTypeFfiUserInputSubmission.lower(answers)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_void,
-            completeFunc: ffi_conn_ffi_rust_future_complete_void,
-            freeFunc: ffi_conn_ffi_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeFfiError_lift
-        )
-}
-    
-    /**
-     * Save in the thread settings sheet: switches `thread_id` to `model` on provider
-     * `instance_id` (`thread.model-selection.set`) only while the thread's catalog still offers
-     * it (`commitPendingModel`).
-     *
-     * # Errors
-     *
-     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-     */
-open func saveThreadModel(threadId: String, instanceId: String, model: String)async throws  -> FfiModelSave  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_conncore_save_thread_model(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(instanceId),FfiConverterString.lower(model)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeFfiModelSave_lift,
-            errorHandler: FfiConverterTypeFfiError_lift
-        )
-}
-    
-    /**
-     * Asks the server to scan the thread's provider in the thread's cwd once, so models that only
-     * the project's own provider config lists reach the picker (`ProviderWorkspaceSnapshotScan`).
-     * Does nothing when that cwd was scanned already.
-     *
-     * # Errors
-     *
-     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-     */
-open func scanThreadWorkspaceModels(threadId: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_conncore_scan_thread_workspace_models(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_void,
@@ -1449,11 +1372,6 @@ public protocol CoreListener: AnyObject, Sendable {
     
     func onError(message: String) 
     
-    /**
-     * The server's provider list changed; re-read [`ConnCore::model_picker`].
-     */
-    func onProvidersChanged() 
-    
 }
 /**
  * Foreign callback listener implemented in Swift to receive state updates from [`ConnCore`].
@@ -1555,17 +1473,6 @@ open func onError(message: String)  {try! rustCall() {
     uniffi_conn_ffi_fn_method_corelistener_on_error(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(message),uniffiCallStatus
-    )
-}
-}
-    
-    /**
-     * The server's provider list changed; re-read [`ConnCore::model_picker`].
-     */
-open func onProvidersChanged()  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_corelistener_on_providers_changed(
-            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
@@ -1707,28 +1614,6 @@ fileprivate struct UniffiCallbackInterfaceCoreListener {
                 }
                 return uniffiObj.onError(
                      message: try FfiConverterString.lift(message)
-                )
-            }
-
-            
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onProvidersChanged: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeCoreListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onProvidersChanged(
                 )
             }
 
@@ -2030,6 +1915,221 @@ public func FfiConverterTypeFfiTextFits_lift(_ handle: UInt64) throws -> FfiText
 #endif
 public func FfiConverterTypeFfiTextFits_lower(_ value: FfiTextFits) -> UInt64 {
     return FfiConverterTypeFfiTextFits.lower(value)
+}
+
+
+
+
+
+
+public protocol OfflineReaderProtocol: AnyObject, Sendable {
+    
+    func before(thread: String, id: String) async throws  -> FfiThreadSnapshot
+    
+    func outline(thread: String, online: Bool) async throws  -> [FfiPromptMarker]
+    
+    func promptWindow(thread: String, id: String, online: Bool) async throws  -> FfiThreadSnapshot
+    
+    func recent(thread: String) async throws  -> FfiThreadSnapshot
+    
+    func savedShell() async  -> FfiShellSnapshot?
+    
+    func serverBefore(thread: String, anchor: String, continuation: String?, snapshotCursor: String?) async throws  -> FfiThreadSnapshot
+    
+}
+open class OfflineReader: OfflineReaderProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_offlinereader(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_offlinereader(handle, $0) }
+    }
+
+    
+
+    
+open func before(thread: String, id: String)async throws  -> FfiThreadSnapshot  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_before(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+open func outline(thread: String, online: Bool)async throws  -> [FfiPromptMarker]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_outline(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterBool.lower(online)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiPromptMarker.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+open func promptWindow(thread: String, id: String, online: Bool)async throws  -> FfiThreadSnapshot  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_prompt_window(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterString.lower(id),FfiConverterBool.lower(online)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+open func recent(thread: String)async throws  -> FfiThreadSnapshot  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_recent(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+open func savedShell()async  -> FfiShellSnapshot?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_saved_shell(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiShellSnapshot.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func serverBefore(thread: String, anchor: String, continuation: String?, snapshotCursor: String?)async throws  -> FfiThreadSnapshot  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_server_before(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterString.lower(anchor),FfiConverterOptionString.lower(continuation),FfiConverterOptionString.lower(snapshotCursor)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOfflineReader: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = OfflineReader
+
+    public static func lift(_ handle: UInt64) throws -> OfflineReader {
+        return OfflineReader(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: OfflineReader) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OfflineReader {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: OfflineReader, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOfflineReader_lift(_ handle: UInt64) throws -> OfflineReader {
+    return try FfiConverterTypeOfflineReader.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOfflineReader_lower(_ value: OfflineReader) -> UInt64 {
+    return FfiConverterTypeOfflineReader.lower(value)
 }
 
 
@@ -3697,265 +3797,6 @@ public func FfiConverterTypeFfiInsightTrendPoint_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendPoint) -> RustBuffer {
     return FfiConverterTypeFfiInsightTrendPoint.lower(value)
-}
-
-
-/**
- * The chip and the sheet for one thread.
- */
-public struct FfiModelPicker: Equatable, Hashable {
-    /**
-     * False until the server's provider list arrived.
-     */
-    public var loaded: Bool
-    /**
-     * The thread's provider driver, for the chip's icon (`ProviderIcon`).
-     */
-    public var selectedDriver: String?
-    /**
-     * The thread's model name, for the chip's accessibility label.
-     */
-    public var selectedLabel: String?
-    public var sections: [FfiModelPickerSection]
-    /**
-     * The sheet's confirm button saves (`Save`) rather than closes (`Done`).
-     */
-    public var hasPending: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * False until the server's provider list arrived.
-         */loaded: Bool, 
-        /**
-         * The thread's provider driver, for the chip's icon (`ProviderIcon`).
-         */selectedDriver: String?, 
-        /**
-         * The thread's model name, for the chip's accessibility label.
-         */selectedLabel: String?, sections: [FfiModelPickerSection], 
-        /**
-         * The sheet's confirm button saves (`Save`) rather than closes (`Done`).
-         */hasPending: Bool) {
-        self.loaded = loaded
-        self.selectedDriver = selectedDriver
-        self.selectedLabel = selectedLabel
-        self.sections = sections
-        self.hasPending = hasPending
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiModelPicker: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiModelPicker: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiModelPicker {
-        return
-            try FfiModelPicker(
-                loaded: FfiConverterBool.read(from: &buf), 
-                selectedDriver: FfiConverterOptionString.read(from: &buf), 
-                selectedLabel: FfiConverterOptionString.read(from: &buf), 
-                sections: FfiConverterSequenceTypeFfiModelPickerSection.read(from: &buf), 
-                hasPending: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiModelPicker, into buf: inout [UInt8]) {
-        FfiConverterBool.write(value.loaded, into: &buf)
-        FfiConverterOptionString.write(value.selectedDriver, into: &buf)
-        FfiConverterOptionString.write(value.selectedLabel, into: &buf)
-        FfiConverterSequenceTypeFfiModelPickerSection.write(value.sections, into: &buf)
-        FfiConverterBool.write(value.hasPending, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelPicker_lift(_ buf: RustBuffer) throws -> FfiModelPicker {
-    return try FfiConverterTypeFfiModelPicker.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelPicker_lower(_ value: FfiModelPicker) -> RustBuffer {
-    return FfiConverterTypeFfiModelPicker.lower(value)
-}
-
-
-/**
- * One model row (`ModelRowContent`).
- */
-public struct FfiModelPickerRow: Equatable, Hashable {
-    public var instanceId: String
-    public var model: String
-    public var label: String
-    /**
-     * The sub-provider, or empty.
-     */
-    public var subtitle: String
-    public var isDefault: Bool
-    public var isLegacy: Bool
-    /**
-     * The checkmark: the pending pick, else the thread's model.
-     */
-    public var selected: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(instanceId: String, model: String, label: String, 
-        /**
-         * The sub-provider, or empty.
-         */subtitle: String, isDefault: Bool, isLegacy: Bool, 
-        /**
-         * The checkmark: the pending pick, else the thread's model.
-         */selected: Bool) {
-        self.instanceId = instanceId
-        self.model = model
-        self.label = label
-        self.subtitle = subtitle
-        self.isDefault = isDefault
-        self.isLegacy = isLegacy
-        self.selected = selected
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiModelPickerRow: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiModelPickerRow: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiModelPickerRow {
-        return
-            try FfiModelPickerRow(
-                instanceId: FfiConverterString.read(from: &buf), 
-                model: FfiConverterString.read(from: &buf), 
-                label: FfiConverterString.read(from: &buf), 
-                subtitle: FfiConverterString.read(from: &buf), 
-                isDefault: FfiConverterBool.read(from: &buf), 
-                isLegacy: FfiConverterBool.read(from: &buf), 
-                selected: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiModelPickerRow, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.instanceId, into: &buf)
-        FfiConverterString.write(value.model, into: &buf)
-        FfiConverterString.write(value.label, into: &buf)
-        FfiConverterString.write(value.subtitle, into: &buf)
-        FfiConverterBool.write(value.isDefault, into: &buf)
-        FfiConverterBool.write(value.isLegacy, into: &buf)
-        FfiConverterBool.write(value.selected, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelPickerRow_lift(_ buf: RustBuffer) throws -> FfiModelPickerRow {
-    return try FfiConverterTypeFfiModelPickerRow.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelPickerRow_lower(_ value: FfiModelPickerRow) -> RustBuffer {
-    return FfiConverterTypeFfiModelPickerRow.lower(value)
-}
-
-
-/**
- * One provider section: its header and, unless collapsed, its rows.
- */
-public struct FfiModelPickerSection: Equatable, Hashable {
-    public var instanceId: String
-    public var driver: String
-    public var label: String
-    public var collapsible: Bool
-    public var collapsed: Bool
-    public var modelCount: UInt32
-    public var models: [FfiModelPickerRow]
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(instanceId: String, driver: String, label: String, collapsible: Bool, collapsed: Bool, modelCount: UInt32, models: [FfiModelPickerRow]) {
-        self.instanceId = instanceId
-        self.driver = driver
-        self.label = label
-        self.collapsible = collapsible
-        self.collapsed = collapsed
-        self.modelCount = modelCount
-        self.models = models
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiModelPickerSection: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiModelPickerSection: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiModelPickerSection {
-        return
-            try FfiModelPickerSection(
-                instanceId: FfiConverterString.read(from: &buf), 
-                driver: FfiConverterString.read(from: &buf), 
-                label: FfiConverterString.read(from: &buf), 
-                collapsible: FfiConverterBool.read(from: &buf), 
-                collapsed: FfiConverterBool.read(from: &buf), 
-                modelCount: FfiConverterUInt32.read(from: &buf), 
-                models: FfiConverterSequenceTypeFfiModelPickerRow.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiModelPickerSection, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.instanceId, into: &buf)
-        FfiConverterString.write(value.driver, into: &buf)
-        FfiConverterString.write(value.label, into: &buf)
-        FfiConverterBool.write(value.collapsible, into: &buf)
-        FfiConverterBool.write(value.collapsed, into: &buf)
-        FfiConverterUInt32.write(value.modelCount, into: &buf)
-        FfiConverterSequenceTypeFfiModelPickerRow.write(value.models, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelPickerSection_lift(_ buf: RustBuffer) throws -> FfiModelPickerSection {
-    return try FfiConverterTypeFfiModelPickerSection.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelPickerSection_lower(_ value: FfiModelPickerSection) -> RustBuffer {
-    return FfiConverterTypeFfiModelPickerSection.lower(value)
 }
 
 
@@ -5893,6 +5734,76 @@ public func FfiConverterTypeFfiProject_lift(_ buf: RustBuffer) throws -> FfiProj
 #endif
 public func FfiConverterTypeFfiProject_lower(_ value: FfiProject) -> RustBuffer {
     return FfiConverterTypeFfiProject.lower(value)
+}
+
+
+public struct FfiPromptMarker: Equatable, Hashable {
+    public var id: String
+    public var preview: String
+    public var assistantPreview: String?
+    public var hasError: Bool
+    public var hasCheckpoint: Bool
+    public var isAgentPrompt: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, preview: String, assistantPreview: String?, hasError: Bool, hasCheckpoint: Bool, isAgentPrompt: Bool) {
+        self.id = id
+        self.preview = preview
+        self.assistantPreview = assistantPreview
+        self.hasError = hasError
+        self.hasCheckpoint = hasCheckpoint
+        self.isAgentPrompt = isAgentPrompt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiPromptMarker: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPromptMarker: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPromptMarker {
+        return
+            try FfiPromptMarker(
+                id: FfiConverterString.read(from: &buf), 
+                preview: FfiConverterString.read(from: &buf), 
+                assistantPreview: FfiConverterOptionString.read(from: &buf), 
+                hasError: FfiConverterBool.read(from: &buf), 
+                hasCheckpoint: FfiConverterBool.read(from: &buf), 
+                isAgentPrompt: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPromptMarker, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.preview, into: &buf)
+        FfiConverterOptionString.write(value.assistantPreview, into: &buf)
+        FfiConverterBool.write(value.hasError, into: &buf)
+        FfiConverterBool.write(value.hasCheckpoint, into: &buf)
+        FfiConverterBool.write(value.isAgentPrompt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPromptMarker_lift(_ buf: RustBuffer) throws -> FfiPromptMarker {
+    return try FfiConverterTypeFfiPromptMarker.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPromptMarker_lower(_ value: FfiPromptMarker) -> RustBuffer {
+    return FfiConverterTypeFfiPromptMarker.lower(value)
 }
 
 
@@ -7965,6 +7876,8 @@ public func FfiConverterTypeFfiThemeTokens_lower(_ value: FfiThemeTokens) -> Rus
  * Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
  */
 public struct FfiThreadSnapshot: Equatable, Hashable {
+    public var historyCursor: String?
+    public var serverPage: Bool
     public var threadId: String
     public var title: String?
     public var branch: String?
@@ -7988,7 +7901,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
+    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -7997,6 +7910,8 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
          * The question the panel above the composer asks; `entries` leaves its row out, since the
          * panel shows it (Conn mobile's `feedWithoutOpenQuestionRow`).
          */pendingQuestion: FfiPendingQuestion?) {
+        self.historyCursor = historyCursor
+        self.serverPage = serverPage
         self.threadId = threadId
         self.title = title
         self.branch = branch
@@ -8027,6 +7942,8 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadSnapshot {
         return
             try FfiThreadSnapshot(
+                historyCursor: FfiConverterOptionString.read(from: &buf), 
+                serverPage: FfiConverterBool.read(from: &buf), 
                 threadId: FfiConverterString.read(from: &buf), 
                 title: FfiConverterOptionString.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
@@ -8043,6 +7960,8 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiThreadSnapshot, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.historyCursor, into: &buf)
+        FfiConverterBool.write(value.serverPage, into: &buf)
         FfiConverterString.write(value.threadId, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.branch, into: &buf)
@@ -9808,91 +9727,6 @@ public func FfiConverterTypeFfiItemStatus_lift(_ buf: RustBuffer) throws -> FfiI
 #endif
 public func FfiConverterTypeFfiItemStatus_lower(_ value: FfiItemStatus) -> RustBuffer {
     return FfiConverterTypeFfiItemStatus.lower(value)
-}
-
-
-
-/**
- * What Save did (`commitPendingModel`).
- */
-
-public enum FfiModelSave: Equatable, Hashable {
-    
-    /**
-     * The thread switched to the picked model.
-     */
-    case saved
-    /**
-     * The pick is the thread's model already; nothing was sent.
-     */
-    case unchanged
-    /**
-     * The catalog no longer offers the pick; nothing was sent and the sheet stays open.
-     */
-    case unavailable
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension FfiModelSave: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiModelSave: FfiConverterRustBuffer {
-    typealias SwiftType = FfiModelSave
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiModelSave {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        
-        case 1: return .saved
-        
-        case 2: return .unchanged
-        
-        case 3: return .unavailable
-        
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiModelSave, into buf: inout [UInt8]) {
-        switch value {
-        
-        
-        case .saved:
-            writeInt(&buf, Int32(1))
-        
-        
-        case .unchanged:
-            writeInt(&buf, Int32(2))
-        
-        
-        case .unavailable:
-            writeInt(&buf, Int32(3))
-        
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelSave_lift(_ buf: RustBuffer) throws -> FfiModelSave {
-    return try FfiConverterTypeFfiModelSave.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiModelSave_lower(_ value: FfiModelSave) -> RustBuffer {
-    return FfiConverterTypeFfiModelSave.lower(value)
 }
 
 
@@ -12635,6 +12469,30 @@ fileprivate struct FfiConverterOptionTypeFfiQuestionPanel: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiShellSnapshot: FfiConverterRustBuffer {
+    typealias SwiftType = FfiShellSnapshot?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiShellSnapshot.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiShellSnapshot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiTaskAttention: FfiConverterRustBuffer {
     typealias SwiftType = FfiTaskAttention?
 
@@ -13146,56 +13004,6 @@ fileprivate struct FfiConverterSequenceTypeFfiInsightTrendPoint: FfiConverterRus
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeFfiModelPickerRow: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiModelPickerRow]
-
-    public static func write(_ value: [FfiModelPickerRow], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiModelPickerRow.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiModelPickerRow] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiModelPickerRow]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiModelPickerRow.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeFfiModelPickerSection: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiModelPickerSection]
-
-    public static func write(_ value: [FfiModelPickerSection], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiModelPickerSection.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiModelPickerSection] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiModelPickerSection]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiModelPickerSection.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterSequenceTypeFfiOrbitBranch: FfiConverterRustBuffer {
     typealias SwiftType = [FfiOrbitBranch]
 
@@ -13463,6 +13271,31 @@ fileprivate struct FfiConverterSequenceTypeFfiProject: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiProject.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiPromptMarker: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiPromptMarker]
+
+    public static func write(_ value: [FfiPromptMarker], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiPromptMarker.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPromptMarker] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiPromptMarker]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiPromptMarker.read(from: &buf))
         }
         return seq
     }
@@ -13969,19 +13802,6 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
- * The draft after a send fails. Mobile clears the draft when it sends, so typing during a slow
- * send is kept; a failed send puts the sent text back in front of it (`mergeComposerDraftText`).
- */
-public func composerRestoreDraft(current: String, sent: String) -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_func_composer_restore_draft(
-        FfiConverterString.lower(current),
-        FfiConverterString.lower(sent),uniffiCallStatus
-    )
-})
-}
-/**
  * Derives an Orbit clone Instance name from the thread's first message plus a suffix
  * (wrapping [`conn_orbit::orbit_thread_instance_name`]).
  */
@@ -14154,9 +13974,6 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_conn_ffi_checksum_func_composer_restore_draft() != 10150) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_conn_ffi_checksum_func_orbit_derive_instance_name() != 52176) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14220,13 +14037,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_mark_thread_unread() != 59744) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_conncore_model_picker() != 26213) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_conn_ffi_checksum_method_conncore_open_thread() != 64642) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_pin_thread() != 33458) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_prepare_offline() != 62782) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_reconnect() != 9304) {
@@ -14239,12 +14056,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_respond_user_input() != 18282) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_conncore_save_thread_model() != 11309) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_conncore_scan_thread_workspace_models() != 37806) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 39835) {
@@ -14274,7 +14085,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_corelistener_on_error() != 59631) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_corelistener_on_providers_changed() != 51608) {
+    if (uniffi_conn_ffi_checksum_method_offlinereader_before() != 42718) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_outline() != 14487) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_prompt_window() != 2929) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 57075) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_saved_shell() != 26240) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_server_before() != 34035) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_orbitcore_bound_profile() != 29553) {

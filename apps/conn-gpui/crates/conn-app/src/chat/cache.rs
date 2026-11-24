@@ -20,6 +20,9 @@ use super::markdown::{MarkdownBlock, parse_markdown};
 /// Maximum characters stored for a single-line TOC turn preview.
 const TOC_PREVIEW_MAX_CHARS: usize = 96;
 
+/// A longer queue shows its first messages and a toggle that shows the rest (web `QUEUE_VISIBLE_ROWS`).
+pub(super) const QUEUE_VISIBLE_ROWS: usize = 3;
+
 /// One cached timeline row ready for virtualized rendering.
 #[derive(Clone, Debug)]
 pub(super) struct CachedRow {
@@ -71,6 +74,14 @@ pub(super) enum VirtualItem {
     },
     QueuedUser {
         row_idx: usize,
+        /// Index among the queued messages, and how many there are (the web `Queued message n of N`).
+        position: usize,
+        total: usize,
+    },
+    /// The `Show all N queued` / `Show fewer` toggle under a queue longer than
+    /// `QUEUE_VISIBLE_ROWS` (web `QueuedRunsControl`).
+    QueuedToggle {
+        total: usize,
     },
     Assistant {
         row_idx: usize,
@@ -120,7 +131,11 @@ impl VirtualItem {
                 *grouped_with_previous as u8,
                 *grouped_with_next as u8
             ),
-            Self::QueuedUser { row_idx } => match &rows[*row_idx].entry {
+            Self::QueuedUser {
+                row_idx,
+                position,
+                total,
+            } => match &rows[*row_idx].entry {
                 TimelineEntry::QueuedUser {
                     id,
                     run_id,
@@ -128,12 +143,13 @@ impl VirtualItem {
                     attachments,
                     ..
                 } => format!(
-                    "qu:{id}:{run_id}:{:016x}:{}",
+                    "qu:{id}:{run_id}:{:016x}:{}:{position}:{total}",
                     fnv1a64(text.as_bytes()),
                     attachments.len()
                 ),
                 other => format!("qu:{}", other.id()),
             },
+            Self::QueuedToggle { total } => format!("qt:{total}"),
             Self::Assistant {
                 row_idx,
                 followed_by_work,
@@ -213,7 +229,7 @@ impl VirtualItem {
             }
             Self::Approval { row_idx }
             | Self::Notice { row_idx }
-            | Self::QueuedUser { row_idx } => rows[*row_idx].entry.id() == target_id,
+            | Self::QueuedUser { row_idx, .. } => rows[*row_idx].entry.id() == target_id,
             Self::Card { row_idx } => {
                 let id = rows[*row_idx].entry.id();
                 target_id == id || target_id.starts_with(&format!("{id}:"))
@@ -221,30 +237,48 @@ impl VirtualItem {
             Self::ChangedFiles { run_id, .. } => {
                 target_id.strip_prefix("changed-files:") == Some(run_id.as_str())
             }
-            Self::LoadEarlier { .. } | Self::Working => false,
+            Self::LoadEarlier { .. } | Self::QueuedToggle { .. } | Self::Working => false,
         }
     }
 }
 
 /// One user-turn marker for the left-edge TimelineMinimap / TOC rail.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct TocEntry {
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct TocEntry {
     /// 1-based user turn number.
-    pub(super) turn_number: usize,
+    pub(crate) turn_number: usize,
     /// Index in [`RowCache::items`] / GPUI `ListState` to jump to.
-    pub(super) item_index: usize,
+    #[serde(skip)]
+    pub(crate) item_index: usize,
     /// Contract entry id of the user prompt starting this turn.
-    pub(super) entry_id: String,
+    pub(crate) entry_id: String,
     /// Single-line truncated prompt preview.
-    pub(super) preview: String,
+    pub(crate) preview: String,
     /// Optional short plain-text excerpt of the turn's assistant reply (for minimap hover card).
-    pub(super) assistant_preview: Option<String>,
+    pub(crate) assistant_preview: Option<String>,
     /// Whether this turn was initiated by an agent prompt rather than the human user.
-    pub(super) is_agent_prompt: bool,
+    pub(crate) is_agent_prompt: bool,
     /// Whether the turn produced a git checkpoint with changed files.
-    pub(super) has_checkpoint: bool,
+    pub(crate) has_checkpoint: bool,
     /// Whether any notice/tool in this turn failed.
-    pub(super) has_error: bool,
+    pub(crate) has_error: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ThreadOutline {
+    pub(crate) markers: Vec<TocEntry>,
+    pub(super) by_id: std::collections::HashMap<String, usize>,
+}
+
+impl ThreadOutline {
+    pub(crate) fn new(markers: Vec<TocEntry>) -> Self {
+        let by_id = markers
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.entry_id.clone(), i))
+            .collect();
+        Self { markers, by_id }
+    }
 }
 
 /// Summary of work performed during [`RowCache::sync`].
@@ -286,6 +320,27 @@ fn is_active_work_entry(entry: &TimelineEntry) -> bool {
             ..
         }
     )
+}
+
+/// The task title for a delegated-task id: the matching `Subagent` row's title.
+pub(super) fn delegated_task_title(rows: &[CachedRow], id: &str) -> Option<String> {
+    rows.iter().find_map(|row| match &row.entry {
+        TimelineEntry::Subagent {
+            id: task_id,
+            child_thread_id,
+            title,
+            ..
+        } if task_id == id || child_thread_id.as_deref() == Some(id) => Some(title.clone()),
+        _ => None,
+    })
+}
+
+/// Agent-written text with delegated-task ids swapped for the task title (never the node id).
+pub(super) fn humanize_task_ids<'a>(
+    rows: &[CachedRow],
+    text: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    conn_state::conn_tools::humanize_delegated_task_ids(text, &|id| delegated_task_title(rows, id))
 }
 
 fn single_line_preview(text: &str) -> String {
@@ -343,6 +398,7 @@ fn assistant_excerpt(markdown: &str) -> String {
 /// Ordered cache of timeline rows, virtual list items, and turn TOC markers.
 #[derive(Debug, Default)]
 pub(super) struct RowCache {
+    prompt_positions: Vec<usize>,
     rows: Vec<CachedRow>,
     items: Vec<VirtualItem>,
     item_keys: Vec<String>,
@@ -392,10 +448,33 @@ impl RowCache {
         Some(next_after.saturating_sub(1))
     }
 
+    pub(super) fn prompt_at(&self, index: usize) -> Option<&str> {
+        let VirtualItem::User { row_idx, .. } = self.items.get(index)? else {
+            return None;
+        };
+        Some(self.rows[*row_idx].entry.id())
+    }
+
+    pub(super) fn active_outline_index(
+        &self,
+        top: usize,
+        outline: &ThreadOutline,
+    ) -> Option<usize> {
+        let end = self
+            .prompt_positions
+            .partition_point(|position| *position <= top);
+        // The body cache omits work rows that can separate two canonical prompt groups.
+        self.prompt_positions[..end]
+            .iter()
+            .rev()
+            .find_map(|position| outline.by_id.get(self.prompt_at(*position)?).copied())
+    }
+
     /// Clears all cached rows, virtual items, and TOC entries.
     pub(super) fn clear(&mut self) {
         self.rows.clear();
         self.items.clear();
+        self.prompt_positions.clear();
         self.item_keys.clear();
         self.toc.clear();
     }
@@ -586,7 +665,11 @@ impl RowCache {
                     idx += 1;
                 }
                 TimelineEntry::QueuedUser { .. } => {
-                    queued_items.push(VirtualItem::QueuedUser { row_idx: idx });
+                    queued_items.push(VirtualItem::QueuedUser {
+                        row_idx: idx,
+                        position: queued_items.len(),
+                        total: 0,
+                    });
                     idx += 1;
                 }
                 TimelineEntry::Assistant {
@@ -647,6 +730,7 @@ impl RowCache {
                 }
                 VirtualItem::LoadEarlier { .. }
                 | VirtualItem::QueuedUser { .. }
+                | VirtualItem::QueuedToggle { .. }
                 | VirtualItem::ChangedFiles { .. }
                 | VirtualItem::Working => return None,
             };
@@ -701,7 +785,7 @@ impl RowCache {
                             turn_number: toc.len() + 1,
                             item_index: out_idx,
                             entry_id: id.clone(),
-                            preview: single_line_preview(text),
+                            preview: single_line_preview(&humanize_task_ids(rows, text)),
                             assistant_preview: None,
                             is_agent_prompt: *created_by_agent,
                             has_checkpoint: false,
@@ -788,9 +872,26 @@ impl RowCache {
         }
 
         // Queued user messages always render at the bottom of the timeline, after Working.
+        let queued_total = queued_items.len();
+        for item in &mut queued_items {
+            if let VirtualItem::QueuedUser { total, .. } = item {
+                *total = queued_total;
+            }
+        }
         items.extend(queued_items);
+        if queued_total > QUEUE_VISIBLE_ROWS {
+            items.push(VirtualItem::QueuedToggle {
+                total: queued_total,
+            });
+        }
 
         let item_keys = items.iter().map(|item| item.stable_key(rows)).collect();
+        self.prompt_positions.clear();
+        self.prompt_positions.extend(
+            items.iter().enumerate().filter_map(|(index, item)| {
+                matches!(item, VirtualItem::User { .. }).then_some(index)
+            }),
+        );
         self.items = items;
         self.item_keys = item_keys;
         self.toc = toc;
@@ -1372,7 +1473,7 @@ mod tests {
             "Working row should precede queued messages"
         );
         assert!(
-            matches!(cache.items()[2], VirtualItem::QueuedUser { row_idx: 1 }),
+            matches!(cache.items()[2], VirtualItem::QueuedUser { row_idx: 1, .. }),
             "QueuedUser should sit at the bottom after Working"
         );
         assert_eq!(
@@ -1397,6 +1498,35 @@ mod tests {
         assert_eq!(
             stats.splice_start, 2,
             "editing queued text to same length must invalidate its VirtualItem key"
+        );
+    }
+
+    #[test]
+    fn delegated_task_ids_in_agent_prompts_show_the_task_title() {
+        let task_id = "node:delegated-task:command:mcp:abc:delegate-task";
+        let rows = vec![CachedRow::new(
+            TimelineEntry::Subagent {
+                id: task_id.to_owned(),
+                child_thread_id: None,
+                title: "Fix the minimap".to_owned(),
+                role: "claudeAgent".to_owned(),
+                status: conn_state::TurnItemStatus::Completed,
+                summary: None,
+                remote_child: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
+            },
+            None,
+        )];
+        let text = format!("Delegated task {task_id} reached a terminal state.");
+        assert_eq!(
+            humanize_task_ids(&rows, &text),
+            "Delegated task \u{201c}Fix the minimap\u{201d} reached a terminal state."
+        );
+        assert_eq!(
+            humanize_task_ids(&[], &text),
+            "Delegated task reached a terminal state."
         );
     }
 }

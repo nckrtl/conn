@@ -166,8 +166,12 @@ fn has_error_line(stderr: &str) -> bool {
         .any(|line| line.starts_with("error:") || line.starts_with("fatal:"))
 }
 
-/// True when `cwd` is inside a git work tree. A failed probe is an error, not "no".
+/// True when `cwd` is inside a git work tree. A failed probe is an error, not "no"; a missing
+/// folder is "no", as T3's work-tree probe reads it.
 pub async fn is_repository(cwd: &Path) -> VcsResult<bool> {
+    if !crate::repo::is_dir(cwd).await {
+        return Ok(false);
+    }
     let out = git(
         "CheckpointStore.isGitRepository",
         cwd,
@@ -177,7 +181,11 @@ pub async fn is_repository(cwd: &Path) -> VcsResult<bool> {
     .run()
     .await?;
     if out.code == 128 {
-        if out.stderr.contains("not a git repository") {
+        // Line starts only: a path inside another diagnostic can hold the same words.
+        if out.stderr.lines().any(|line| {
+            line.starts_with("fatal: not a git repository")
+                || line.starts_with("fatal: cannot use bare repository")
+        }) {
             return Ok(false);
         }
         return Err(VcsError::invalid(

@@ -10,7 +10,7 @@ use crate::table::MethodTable;
 
 mod annotations;
 pub(crate) mod devices;
-mod files;
+pub(crate) mod files;
 mod git;
 mod git_message;
 mod local_servers;
@@ -21,6 +21,7 @@ mod peer_links;
 mod preview;
 mod projects;
 pub mod provider;
+pub mod provider_auth;
 pub(crate) mod pull_requests;
 mod scheduled;
 mod secrets;
@@ -49,6 +50,9 @@ pub struct Deps {
     pub pull_requests: pull_requests::Shared,
     /// Shared with the engine host, so a thread's terminals close with it.
     pub terminals: Option<conn_terminal::TerminalManager>,
+    /// The engine's per-checkout lease ([`conn_engine::SqliteEngine::workspace_locks`]): a
+    /// terminal starts under it, so worktree cleanup never removes a folder a shell opens in.
+    pub workspace_locks: Option<Arc<conn_vcs::locks::WorkspaceLocks>>,
     /// Files, assets and attachments; without it those methods and routes are not served.
     pub files: Option<Arc<conn_files::Files>>,
     /// Scheduled tasks (`conn_features::scheduled`); without it `scheduledTasks.*` is not served.
@@ -71,6 +75,10 @@ pub struct Deps {
     pub oauth: Option<Arc<crate::oauth::McpOAuth>>,
     /// Links to other environments (`crate::peers`); without it `peerLinks.*` is not served.
     pub peers: Option<Arc<crate::peers::PeerLinks>>,
+    /// `model-manifest.json` (`crate::model_manifest`); `server.refreshProviders` refreshes it.
+    pub model_manifest: Option<Arc<crate::model_manifest::ModelManifest>>,
+    /// `provider.auth.*` flows (`provider_auth`).
+    pub provider_auth: provider_auth::AuthFlows,
 }
 
 impl std::fmt::Debug for Deps {

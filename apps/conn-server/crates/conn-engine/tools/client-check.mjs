@@ -40,6 +40,9 @@ const { resolveMergeBackTargetThreadId, deriveThreadRelationshipGraph } = await 
 const { boundedSnapshotProjection } = await load(
   "packages/shared/src/orchestrationV2BoundedSnapshot.ts",
 );
+const { threadSupportsProviderHandoff } = await load(
+  "packages/client-runtime/src/state/threadWorkflows.ts",
+);
 
 const exportPath = process.argv[2];
 if (!exportPath) throw new Error("usage: client-check.mjs <export.json>");
@@ -182,9 +185,13 @@ check("thread: user message and assistant reply", () => {
 const socket = followThread(exported.socketItems);
 check("thread: events rebuild the same projection as a snapshot", () => {
   assert.equal(socket.status, "live");
+  // `updatedAt` is the time of the last event. A snapshot's thread has it too: T3's
+  // `writeThreadTouches` writes it into the stored thread. The client's reducer moves the
+  // thread's only on thread events, so the two may differ, as they do with T3's server.
   const strip = (projection) => {
-    const { updatedAt: _ignored, ...rest } = encodeProjection(projection);
-    return rest;
+    const { updatedAt: _ignored, thread, ...rest } = encodeProjection(projection);
+    const { updatedAt: _thread, ...threadRest } = thread;
+    return { ...rest, thread: threadRest };
   };
   assert.deepEqual(strip(live.projection), strip(socket.projection));
 });
@@ -222,9 +229,13 @@ check("thread: a compact snapshot restores to the full projection", () => {
   assert.equal(raw.turnItemsOmitLocalVisible, true);
   assert.deepEqual(raw.projection.turnItems, []);
   assert.ok(raw.projection.visibleTurnItems.every((row) => row.item.textOmitted === true));
+  // `updatedAt` is the time of the last event. A snapshot's thread has it too: T3's
+  // `writeThreadTouches` writes it into the stored thread. The client's reducer moves the
+  // thread's only on thread events, so the two may differ, as they do with T3's server.
   const strip = (projection) => {
-    const { updatedAt: _ignored, ...rest } = encodeProjection(projection);
-    return rest;
+    const { updatedAt: _ignored, thread, ...rest } = encodeProjection(projection);
+    const { updatedAt: _thread, ...threadRest } = thread;
+    return { ...rest, thread: threadRest };
   };
   assert.deepEqual(strip(compact.projection), strip(socket.projection));
 });
@@ -319,6 +330,17 @@ check("background: the shell roster matches T3's derivePendingBackgroundWork", (
   });
   assert.ok(expected.length > 0, "the scenario leaves background work");
   assert.deepEqual(row.pendingBackgroundTasks, expected);
+});
+
+// An undo of a settle with an anchor past year 9999: the row decodes with T3's shell schema,
+// and the anchor is the time T3 writes for the same input.
+check("unsettle: an anchor past year 9999 decodes as T3 writes it", () => {
+  const decodeRow = Schema.decodeUnknownSync(contracts.OrchestrationV2ThreadShellJson);
+  const row = decodeRow(exported.farAnchorShell);
+  const expected = new Date("9999-12-31T23:30:00-01:00");
+  assert.equal(exported.farAnchorShell.unsettledAt, expected.toISOString());
+  assert.equal(row.unsettledAt.epochMilliseconds, expected.getTime());
+  assert.equal(row.settledOverride, "active");
 });
 
 // 10. Projects added and removed at runtime reach the shell.
@@ -446,6 +468,53 @@ check("merge-back: a pending transfer, then the fork's delta in the next run", (
   assert.equal(visible[marker].summary, handoff.summaryText);
   // The history goes to the provider, never into the user's message.
   assert.ok(!visible.some((item) => item.type === "user_message" && item.text.includes("Context handoff (")));
+});
+
+// Provider switch: a Claude turn, the thread moved to Codex, a Codex turn. The client opens
+// the model picker to other providers only when the live session says the server hands the
+// history over (`threadSupportsProviderHandoff`); the handoff, its transfer and its item.
+check("provider switch: the picker opens, and the next run carries the history", () => {
+  const items = exported.providerSwitchItems;
+  const firstEnd = items.findIndex(
+    (item) => item.event?.type === "run.updated" && item.event.payload.id === "run:thread-sw:1" && item.event.payload.status === "completed",
+  );
+  assert.ok(firstEnd !== -1, "the first run completes");
+  const before = followThread(items.slice(0, firstEnd + 1)).projection;
+  assert.equal(before.providerSessions.at(-1)?.capabilities.sessions.supportsProviderSwitchingViaHandoff, true);
+  assert.equal(threadSupportsProviderHandoff(before), true, "the picker offers other providers");
+  const { projection, status } = followThread(items);
+  assert.equal(status, "live");
+  assert.equal(projection.thread.providerInstanceId, "codex");
+  const run = projection.runs.find((r) => r.id === "run:thread-sw:2");
+  assert.equal(run.status, "completed");
+  assert.equal(run.providerInstanceId, "codex");
+  const transfers = projection.contextTransfers.filter((t) => t.type === "provider_handoff");
+  assert.equal(transfers.length, 1);
+  const [transfer] = transfers;
+  assert.equal(transfer.status, "consumed");
+  assert.equal(transfer.sourcePoint.runId, "run:thread-sw:1");
+  assert.equal(transfer.sourceProviderInstanceId, "claudeAgent");
+  assert.equal(transfer.targetProviderInstanceId, "codex");
+  assert.equal(transfer.resolution.strategy, "portable_context");
+  const handoff = projection.contextHandoffs.find((h) => h.id === transfer.resolution.contextHandoffId);
+  assert.ok(handoff, "the transfer names its handoff");
+  assert.equal(run.contextHandoffId, handoff.id);
+  assert.equal(handoff.strategy, "full_thread_summary");
+  assert.deepEqual(handoff.coveredRunOrdinals, { from: 1, to: 1 });
+  assert.equal(handoff.toProviderThreadId, run.providerThreadId);
+  assert.ok(handoff.summaryText.includes("remember blue-17"), handoff.summaryText);
+  // The fake Codex takes injected history, as `thread/inject_items`.
+  assert.equal(handoff.delivery?.status, "injected");
+  const visible = projection.visibleTurnItems.map(({ item }) => item);
+  const marker = visible.findIndex((item) => item.type === "handoff");
+  const message = visible.findIndex(
+    (item) => item.type === "user_message" && item.text === "what was the marker?",
+  );
+  assert.ok(marker !== -1 && message === marker + 1, "the handoff item shows just before the message");
+  assert.equal(visible[marker].title, "Provider handoff");
+  assert.deepEqual(visible[marker].fromProviderInstanceIds, ["claudeAgent"]);
+  assert.equal(visible[marker].toProviderInstanceId, "codex");
+  assert.equal(visible[marker].toModel, "gpt-5");
 });
 
 // Pull request links: T3's GitHub keys, a stack tombstone lifted by hand.

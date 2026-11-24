@@ -22,10 +22,10 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 
-use crate::commands::{failure, finish_run_as, hold_queue, start_next_queued};
+use crate::commands::{Held, RunEnd, failure, finish_run_as, hold_queued, start_next_queued};
 use crate::engine::Inner;
 use crate::lock;
-use crate::store::Draft;
+use crate::store::{Draft, Instance};
 use crate::streaming::AssistantStreaming;
 
 /// A thread whose provider session is open.
@@ -43,10 +43,16 @@ pub(crate) struct LiveThread {
     /// Waiters for the pump to store the events already sent ([`Inner::events_stored`]).
     stored_waiters: Mutex<Vec<oneshot::Sender<()>>>,
     stored_wanted: tokio::sync::Notify,
+    /// How the session's close ended, set before [`Self::closed`] is notified
+    /// ([`Inner::close_session`]).
+    release: Mutex<Option<conn_provider::Closed>>,
     /// Since when background work has kept this idle session open.
     held_since: Mutex<Option<u64>>,
     /// The provider session's id, for its provider threads.
     provider_session_id: String,
+    /// The folder the session works in. Kept here: archiving deletes the session rows while a
+    /// session a fresh run moved aside still runs (worktree cleanup must not remove it).
+    pub(crate) cwd: Option<String>,
     /// `backgroundTasksEndWithProcess`: releasing the session clears its threads' rosters.
     background_tasks_end_with_process: bool,
     /// The agent tools this session got; revoked when its process ends
@@ -129,6 +135,11 @@ impl LiveThread {
         elapsed(*held.get_or_insert(now)) >= max_hold
     }
 
+    /// Work goes on after the session's last turn (`sessionHasBackgroundWork`).
+    fn has_background_work(&self) -> bool {
+        !lock(&self.state).background_turns.is_empty() || self.session.has_pending_background_work()
+    }
+
     fn active(&self) -> Option<ActiveRun> {
         lock(&self.state).active.clone()
     }
@@ -137,12 +148,26 @@ impl LiveThread {
     }
 }
 
+/// A stored user message as every provider reads it: chips expanded into a context envelope,
+/// citations expanded (`ProviderTurnStartService`, `ProviderTurnControlService.steer`).
+fn provider_text(message: &Value) -> String {
+    let records = message["context"]["records"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    crate::composer_context::project_for_provider(
+        message["text"].as_str().unwrap_or_default(),
+        records,
+    )
+}
+
 /// What a turn start needs from the store.
 struct TurnContext {
     thread: Value,
     run: Value,
     message: Value,
     cwd: Option<String>,
+    /// The thread's own worktree, when the turn runs in it.
+    worktree: Option<crate::ThreadWorktree>,
     provider_thread: Option<Value>,
     /// The source to fork natively, on a fork's first turn.
     fork: Option<crate::fork::NativeFork>,
@@ -212,6 +237,8 @@ impl Inner {
                 &run_id,
                 "failed",
                 Some(failure("provider_error", &message, None)),
+                None,
+                RunEnd::Settled,
             )
             .await;
         }
@@ -316,10 +343,14 @@ impl Inner {
         let Some(live) = self.live_thread(thread_id) else {
             return;
         };
+        self.stored(&live).await;
+    }
+
+    /// Waits until `live`'s pump stored the events already sent.
+    async fn stored(&self, live: &LiveThread) {
         let (done, stored) = oneshot::channel();
         lock(&live.stored_waiters).push(done);
         live.stored_wanted.notify_one();
-        drop(live);
         // A pump that ended drops the sender.
         let _ = stored.await;
     }
@@ -334,14 +365,20 @@ impl Inner {
         run_id: &str,
         status: &'static str,
         failure: Option<Value>,
+        stop_reason: Option<String>,
+        end: RunEnd,
     ) {
         let (thread, run) = (thread_id.to_owned(), run_id.to_owned());
         let (thread_id, run_id) = (thread_id.to_owned(), run_id.to_owned());
-        let held_on_failure = failure
-            .as_ref()
-            .is_some_and(|f| f["class"] != "validation_error");
+        // A usage limit writes no hold: starting checks the limited provider instead
+        // (`usageLimitHoldsQueue`), so work on another provider can still start.
+        let held_on_failure = failure.as_ref().is_some_and(|f| {
+            !matches!(
+                f["class"].as_str(),
+                Some("validation_error" | "usage_limit")
+            )
+        });
         let checkpointing = self.checkpoints.is_some();
-        let inner = self.clone();
         let next = self
             .write(move |tx| {
                 // A run with a checkpoint scope is captured first (`checkpoint.capture`): a
@@ -367,13 +404,26 @@ impl Inner {
                     status,
                     persisted,
                     failure,
+                    stop_reason.as_deref(),
                     crate::commands::IdleWrite::TurnEnd,
+                    end,
                 )?;
+                if ended
+                    && status == "completed"
+                    && let Some(reason) = &stop_reason
+                {
+                    crate::commands::write_provider_stop_reason(tx, &thread_id, &run_id, reason)?;
+                }
                 // A failure holds the queue, so queued messages do not hit the same wall. A
                 // late end of a run that already ended (a start failing after Force stop)
                 // holds nothing.
-                if held_on_failure && ended {
-                    hold_queue(tx, &thread_id)?;
+                // Only work that would run on the failed provider is held (`providerFailed`
+                // compares the failed run's instance with the next run's).
+                if held_on_failure
+                    && ended
+                    && crate::commands::next_runs_on_failed_provider(tx, &thread_id, &run_id)?
+                {
+                    hold_queued(tx, &thread_id, Held::ExceptBufferedWakes)?;
                 }
                 // `checkpoint.capture` waits in the thread's lane, as T3's effect: a rollback
                 // admitted meanwhile runs after it and sees the run completed. The capture ends
@@ -385,22 +435,18 @@ impl Inner {
                     }]
                 } else {
                     let mut effects = crate::families::on_run_end(tx, &thread_id, &run_id)?;
+                    if status == "completed" {
+                        crate::commands::release_unattended_holds(tx, &thread_id, &run_id)?;
+                    }
                     effects.extend(start_next_queued(tx, &thread_id, None)?);
                     effects
                 };
-                // Lane slots are taken under the store lock, so lane order is commit order.
-                let reserved = effects
-                    .into_iter()
-                    .map(|effect| inner.reserve_effect(effect))
-                    .collect::<Vec<_>>();
-                Ok((reserved, captured))
+                tx.enqueue(None, &effects)?;
+                Ok(captured)
             })
             .await;
         match next {
-            Ok((reserved, captured)) => {
-                reserved
-                    .into_iter()
-                    .for_each(crate::engine::ReservedEffect::start);
+            Ok(captured) => {
                 if captured {
                     return;
                 }
@@ -524,11 +570,13 @@ impl Inner {
                 closed: tokio::sync::Notify::new(),
                 stored_waiters: Mutex::new(Vec::new()),
                 stored_wanted: tokio::sync::Notify::new(),
+                release: Mutex::new(None),
                 held_since: Mutex::new(None),
                 provider_session_id: provider_session["id"]
                     .as_str()
                     .unwrap_or_default()
                     .to_owned(),
+                cwd: provider_session["cwd"].as_str().map(str::to_owned),
                 background_tasks_end_with_process: opened.background_tasks_end_with_process,
                 tools,
                 loaded_key: Mutex::new(None),
@@ -538,11 +586,10 @@ impl Inner {
             // `providerSession`), before any of its events.
             let tid = thread_id.to_owned();
             self.write(move |tx| {
-                tx.append(Draft::new(
-                    &tid,
-                    "provider-session.updated",
-                    provider_session,
-                ))
+                tx.append(
+                    Draft::new(&tid, "provider-session.updated", provider_session)
+                        .payload_instance(),
+                )
             })
             .await?;
             tokio::spawn(
@@ -551,6 +598,31 @@ impl Inner {
             );
             Ok(Some(live))
         }
+    }
+
+    /// T3's `restoreMissingWorktree` then `ProviderWorkspaceMissingError`, under the lease the
+    /// turn holds: a worktree folder that is gone, or that cleanup left only `node_modules` in,
+    /// gets its branch back; a folder that is still no directory fails the turn, naming it,
+    /// before a session starts in it.
+    async fn ensure_worktree(&self, worktree: crate::ThreadWorktree) -> Result<(), StartError> {
+        let path = std::path::PathBuf::from(&worktree.worktree_path);
+        if conn_vcs::worktree::needs_checkout(&path).await
+            && let Some(host) = &self.host
+        {
+            host.restore_worktree(worktree).await;
+        }
+        let folder = path.clone();
+        if tokio::task::spawn_blocking(move || folder.is_dir())
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        Err(StartError::Failed(format!(
+            "This thread's workspace folder no longer exists or is not a directory: {}. \
+             Restore the folder at this path before retrying.",
+            path.display()
+        )))
     }
 
     async fn try_start_turn(
@@ -574,10 +646,22 @@ impl Inner {
                         .entity(&tid, "messages", message_id)?
                         .unwrap_or(Value::Null);
                     let project = tx.project(thread["projectId"].as_str().unwrap_or_default())?;
-                    let cwd = thread["worktreePath"]
-                        .as_str()
-                        .or_else(|| project.as_ref().and_then(|p| p["workspaceRoot"].as_str()))
+                    let project_root = project
+                        .as_ref()
+                        .and_then(|p| p["workspaceRoot"].as_str())
                         .map(str::to_owned);
+                    let worktree =
+                        thread["worktreePath"]
+                            .as_str()
+                            .map(|path| crate::ThreadWorktree {
+                                worktree_path: path.to_owned(),
+                                branch: thread["branch"].as_str().map(str::to_owned),
+                                project_root: project_root.clone(),
+                            });
+                    let cwd = worktree
+                        .as_ref()
+                        .map(|w| w.worktree_path.clone())
+                        .or(project_root);
                     let instance = run["providerInstanceId"].as_str().unwrap_or_default();
                     let same_instance =
                         |pt: &Value| pt["providerInstanceId"].as_str() == Some(instance);
@@ -593,7 +677,7 @@ impl Inner {
                     // A wake acts on the active session; a message continues the conversation,
                     // past a scheduled fresh run's side conversation (`dispatchProviderThread`).
                     let wake = message["notification"].is_object()
-                        || message["delegatedCompletion"].is_object();
+                        || crate::commands::is_delegated_completion(&message);
                     let active_id = thread["activeProviderThreadId"].clone();
                     let active = match active {
                         Some(pt) if !wake => {
@@ -606,8 +690,13 @@ impl Inner {
                     let provider_thread = match active {
                         _ if fresh => None,
                         Some(pt) => Some(pt),
-                        None => tx
-                            .entities_where(
+                        None => {
+                            // A thread older than the last `/clear` holds cleared history.
+                            let boundary = crate::fresh::boundary(
+                                &tx.entities(&tid, "runs")?,
+                                &tx.entities_where(&tid, "turnItems", "type", "user_message")?,
+                            );
+                            tx.entities_where(
                                 &tid,
                                 "providerThreads",
                                 "providerInstanceId",
@@ -617,13 +706,15 @@ impl Inner {
                             .filter(|pt| {
                                 pt["ownerNodeId"].is_null()
                                     && pt["appThreadId"].as_str().is_none_or(|a| a == tid)
+                                    && !crate::fresh::predates(pt, boundary)
                             })
                             .max_by_key(|pt| {
                                 (
                                     pt["lastRunOrdinal"].as_u64().unwrap_or(0),
                                     pt["updatedAt"].as_str().unwrap_or_default().to_owned(),
                                 )
-                            }),
+                            })
+                        }
                     };
                     let fork = match provider_thread {
                         Some(_) => None,
@@ -649,6 +740,7 @@ impl Inner {
                         run,
                         message,
                         cwd,
+                        worktree,
                         provider_thread,
                         fork,
                         handoffs,
@@ -666,9 +758,19 @@ impl Inner {
         };
         if let Some(cwd) = self.policy_override.as_ref().and_then(|p| p.cwd.clone()) {
             context.cwd = Some(cwd);
+            context.worktree = None;
         }
         if context.run["status"] != "starting" {
             return Err(StartError::Abandoned);
+        }
+        // T3 starts a turn under the checkout's lease, which worktree cleanup removes it under:
+        // a start waits out a removal, and cleanup's last read sees a started run.
+        let lease = match (&self.checkpoints, &context.cwd) {
+            (Some(locks), Some(cwd)) => Some(locks.workspace(cwd).await),
+            _ => None,
+        };
+        if let Some(worktree) = context.worktree.take() {
+            self.ensure_worktree(worktree).await?;
         }
 
         let model_selection: conn_contract::ModelSelection =
@@ -688,11 +790,16 @@ impl Inner {
             .unwrap_or_default();
         // A live session of another instance closes; the run opens one on its own instance.
         // A fresh run releases the session too: each holds one native conversation
-        // (`sessionsReleasedByFreshContext`).
-        if let Some(live) = self.live_thread(thread_id)
-            && (live.instance != instance || context.fresh || context.leaves_side_conversation)
-        {
-            self.close_session(thread_id).await;
+        // (`sessionsReleasedByFreshContext`). One still running background work stays open
+        // beside the new session, as closing it would end that work.
+        if let Some(live) = self.live_thread(thread_id) {
+            if context.fresh && live.has_background_work() {
+                lock(&self.live).remove(thread_id);
+                lock(&self.detached).push((thread_id.to_owned(), live));
+            } else if live.instance != instance || context.fresh || context.leaves_side_conversation
+            {
+                self.close_session(thread_id).await;
+            }
         }
         let live = match self.live_thread(thread_id) {
             Some(live) => live,
@@ -871,10 +978,33 @@ impl Inner {
                         .run(Some(&rid))
                         .node(Some(&root_id))
                 };
-                if provider_thread_json["id"].is_string() {
+                let mut stored_row = None;
+                // `providerTurnOrdinal`: after every turn already on the provider thread, as a
+                // goal run Codex continued holds more turns than runs.
+                let turn_ordinal = match provider_thread_json["id"].as_str() {
+                    Some(id) => tx
+                        .entities_where(&tid, "providerTurns", "providerThreadId", id)?
+                        .iter()
+                        .filter_map(|turn| turn["ordinal"].as_u64())
+                        .max()
+                        .unwrap_or(0),
+                    None => 0,
+                } + 1;
+                if let Some(id) = provider_thread_json["id"].as_str() {
                     let mut running = provider_thread_json.clone();
                     running["updatedAt"] = json!(now);
-                    tx.append(Draft::new(&tid, "provider-thread.updated", running))?;
+                    // The session's cached row predates goal updates the provider reported since.
+                    if let Some(goal) = tx
+                        .entity(&tid, "providerThreads", id)?
+                        .and_then(|stored| stored.get("goal").cloned())
+                    {
+                        running["goal"] = goal;
+                    }
+                    tx.append(
+                        Draft::new(&tid, "provider-thread.updated", running.clone())
+                            .instance_of(&run),
+                    )?;
+                    stored_row = Some(running);
                 }
                 if let Some(transfer) = &fork_transfer {
                     tx.append(
@@ -883,6 +1013,7 @@ impl Inner {
                             "context-transfer.updated",
                             crate::fork::consumed(transfer, &provider_thread_json, &run, &now),
                         )
+                        .instance_of(&run)
                         .run(Some(&rid)),
                     )?;
                 }
@@ -890,7 +1021,9 @@ impl Inner {
                     && thread["activeProviderThreadId"] != pt_id
                 {
                     thread["activeProviderThreadId"] = pt_id.clone();
-                    tx.append(Draft::new(&tid, "thread.metadata-updated", thread))?;
+                    tx.append(
+                        Draft::new(&tid, "thread.metadata-updated", thread).payload_instance(),
+                    )?;
                 }
                 tx.append(draft(
                     "run-attempt.created",
@@ -925,12 +1058,22 @@ impl Inner {
                     node["providerThreadId"] = pt_id;
                     tx.append(draft("node.updated", node))?;
                 }
-                Ok(Some(scope))
+                Ok(Some((scope, stored_row, turn_ordinal)))
             })
             .await?;
-        let Some(scope) = started else {
+        let Some((scope, stored_row, turn_ordinal)) = started else {
             live.take_active();
             return Err(StartError::Abandoned);
+        };
+        // The turn, the live cache and the handoffs get the row just stored, goal included: a
+        // provider shows a goal change only against the row its turn started with.
+        let (provider_thread, running_json) = match stored_row {
+            Some(row) => {
+                let provider_thread = from_json(row.clone()).unwrap_or(provider_thread);
+                lock(&live.state).provider_thread = Some(provider_thread.clone());
+                (provider_thread, row)
+            }
+            None => (provider_thread, running_json),
         };
         // The baseline holds no change of this turn: the provider has not had the message.
         if let Some((scope_id, cwd)) = scope {
@@ -941,6 +1084,7 @@ impl Inner {
             )
             .await;
         }
+        drop(lease);
         if let Some(observer) = &self.observer {
             observer
                 .turn_started(crate::TurnPoint {
@@ -953,10 +1097,7 @@ impl Inner {
                 .await;
         }
 
-        let user_text = context.message["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let user_text = provider_text(&context.message);
         let delivery = self
             .deliver_handoffs(
                 &live,
@@ -988,7 +1129,7 @@ impl Inner {
             thread_id: thread_id.into(),
             run_id: run_id.into(),
             run_ordinal: context.run["ordinal"].as_u64().unwrap_or(1) as u32,
-            provider_turn_ordinal: context.run["ordinal"].as_u64().unwrap_or(1) as u32,
+            provider_turn_ordinal: u32::try_from(turn_ordinal).unwrap_or(u32::MAX),
             attempt_id: attempt_id.as_str().into(),
             root_node_id: root.as_str().into(),
             provider_thread,
@@ -1107,9 +1248,15 @@ impl Inner {
             None,
         );
         let injects = live.session.injects_history();
-        let plan =
-            crate::handoff::plan_delivery(&ready, native.as_deref(), budget, &delivered, injects)
-                .map_err(|e| StartError::Failed(e.message().to_owned()))?;
+        let plan = crate::handoff::plan_delivery(
+            &ready,
+            native.as_deref(),
+            provider_thread_json["appThreadId"].as_str(),
+            budget,
+            &delivered,
+            injects,
+        )
+        .map_err(|e| StartError::Failed(e.message().to_owned()))?;
         let Some(plan) = plan else {
             return Ok(None);
         };
@@ -1181,6 +1328,10 @@ impl Inner {
         // Events taken so far, and who waits for the count to reach a mark.
         let mut taken: u64 = 0;
         let mut marks: Vec<(u64, oneshot::Sender<()>)> = Vec::new();
+        // After a close: what the session already sent is still stored. Then a run it left
+        // open detaches; the pump ends with a process that ended, and reads on while a shared
+        // one (Codex's `app-server`) still reports the session's subagents.
+        let mut closing: Option<conn_provider::Closed> = None;
         loop {
             // A held snapshot is stored once its message was idle long enough. The timer
             // only runs on a clock that moves by itself; on a `ManualClock` a snapshot comes
@@ -1196,36 +1347,63 @@ impl Inner {
             for (_, waiter) in marks.extract_if(.., |(mark, _)| *mark <= taken) {
                 let _ = waiter.send(());
             }
-            let event = match (ahead.pop_front(), wake) {
-                (Some(event), _) => Some(event),
-                (None, Some((at, when))) => tokio::select! {
-                    event = events.recv() => event,
-                    () = live.closed.notified() => None,
-                    () = live.stored_wanted.notified() => {
-                        let waiting = (ahead.len() + events.len()) as u64;
-                        let new = std::mem::take(&mut *lock(&live.stored_waiters));
-                        marks.extend(new.into_iter().map(|w| (taken + waiting, w)));
-                        continue;
-                    }
-                    () = sleep_until(when) => {
-                        // The timer slept until `at`; the clock may read a little earlier.
-                        let now = self.clock.now_millis().max(at);
-                        self.commit(streaming.take_idle_flushes(now)).await;
-                        continue;
-                    }
+            let next = match (ahead.pop_front(), wake, closing) {
+                (Some(event), _, _) => Next::Event(Some(event)),
+                (None, _, Some(closed)) => match events.try_recv() {
+                    Ok(event) => Next::Event(Some(event)),
+                    Err(_) if closed == conn_provider::Closed::RuntimeShared => Next::Drained,
+                    Err(_) => Next::Event(None),
                 },
-                (None, None) => tokio::select! {
-                    event = events.recv() => event,
-                    () = live.closed.notified() => None,
-                    () = live.stored_wanted.notified() => {
-                        let waiting = (ahead.len() + events.len()) as u64;
-                        let new = std::mem::take(&mut *lock(&live.stored_waiters));
-                        marks.extend(new.into_iter().map(|w| (taken + waiting, w)));
-                        continue;
+                (None, wake, None) => {
+                    let timer = async {
+                        match wake {
+                            Some((at, when)) => {
+                                sleep_until(when).await;
+                                at
+                            }
+                            None => std::future::pending().await,
+                        }
+                    };
+                    tokio::select! {
+                        event = events.recv() => Next::Event(event),
+                        () = live.closed.notified() => Next::Closed,
+                        () = live.stored_wanted.notified() => {
+                            Next::Stored((ahead.len() + events.len()) as u64)
+                        }
+                        at = timer => Next::Flush(at),
                     }
-                },
+                }
+            };
+            let event = match next {
+                Next::Event(event) => event,
+                Next::Closed => {
+                    let closed = lock(&live.release).take();
+                    closing = Some(closed.unwrap_or(conn_provider::Closed::RuntimeStopped));
+                    continue;
+                }
+                // Everything the session sent before its close returned is stored.
+                Next::Drained => {
+                    closing = None;
+                    if !self.shutting_down() {
+                        self.end_detached_run(&thread_id, &live).await;
+                    }
+                    continue;
+                }
+                Next::Stored(waiting) => {
+                    let new = std::mem::take(&mut *lock(&live.stored_waiters));
+                    marks.extend(new.into_iter().map(|w| (taken + waiting, w)));
+                    continue;
+                }
+                Next::Flush(at) => {
+                    // The timer slept until `at`; the clock may read a little earlier.
+                    let now = self.clock.now_millis().max(at);
+                    self.commit(streaming.take_idle_flushes(now)).await;
+                    continue;
+                }
             };
             let Some(event) = event else { break };
+            #[cfg(test)]
+            self.test_pause("pump.event").await;
             let event = self.capture_app_event(&live, event).await;
             taken += 1;
             // T3's adapters offer a continuation to `ProviderContinuationRequests`, a queue apart
@@ -1304,6 +1482,14 @@ impl Inner {
             let active = live.active();
             let run_id = active.as_ref().map(|a| a.run_id.clone());
             let mut translated = translate(&thread_id, active.as_ref(), event);
+            // T3's `ProviderEventIngestor` names the session's instance on every event it
+            // stores.
+            if let Translated::Event(draft)
+            | Translated::ProviderTurn(_, draft)
+            | Translated::Subagent(draft, _) = &mut translated
+            {
+                draft.provider_instance = Instance::Given(live.instance.clone());
+            }
             // A session belongs to one instance, so its provider threads do too. The engine sets
             // it, as `Orchestrator.ts` builds provider threads from the run's instance.
             if let Translated::Event(draft) = &mut translated
@@ -1353,7 +1539,7 @@ impl Inner {
                 }
                 _ => None,
             };
-            if matches!(translated, Translated::Terminal(..)) {
+            if matches!(translated, Translated::Terminal { .. }) {
                 self.command_output.finish_thread(&thread_id);
             }
             match translated {
@@ -1396,11 +1582,12 @@ impl Inner {
                     }
                 }
                 Translated::CreateThread(thread) => {
-                    self.create_provider_thread(thread).await;
+                    self.create_provider_thread(thread, &live.instance).await;
                 }
                 Translated::Subagent(draft, subagent) => {
                     self.commit(vec![draft]).await;
-                    self.sync_subagent_thread_model(subagent).await;
+                    self.sync_subagent_thread_model(subagent, &live.instance)
+                        .await;
                 }
                 Translated::Steer { message_id, status } => {
                     self.steer_updated(&thread_id, message_id, status).await;
@@ -1409,13 +1596,20 @@ impl Inner {
                     self.request_continuation(&thread_id, detail, notification, delivery)
                         .await;
                 }
-                Translated::Terminal(status, failure, broken) => {
+                Translated::Terminal {
+                    status,
+                    failure,
+                    broken,
+                    reason,
+                    end,
+                } => {
                     // The root run's messages are closed; none of its text is flushed later.
                     streaming.forget_thread(&thread_id);
                     reserved.retain(|(tid, _)| *tid != thread_id);
                     if let Some(run_id) = run_id {
                         live.take_active();
-                        self.end_run(&thread_id, &run_id, status, failure).await;
+                        self.end_run(&thread_id, &run_id, status, failure, reason, end)
+                            .await;
                         if broken {
                             self.mark_thread_broken(&thread_id, &run_id).await;
                         }
@@ -1423,48 +1617,70 @@ impl Inner {
                 }
             }
             if let Some(command) = pushed
-                && let Err(
-                    crate::engine::DispatchError::Rejected(e)
-                    | crate::engine::DispatchError::Internal(e),
-                ) = self.dispatch_value(command).await
+                && let Err(e) = self.dispatch_value(command).await
             {
                 eprintln!("conn-engine: could not reopen watched checks after a push: {e}");
             }
         }
-        if !self.shutting_down()
-            && let Some(active) = live.take_active()
-        {
-            self.end_run(
-                &thread_id,
-                &active.run_id,
-                "failed",
-                Some(failure(
-                    "provider_error",
-                    "The provider session ended during the turn.",
-                    None,
-                )),
-            )
-            .await;
-        }
-        let mut map = lock(&self.live);
-        if map
+        // A session that ended on its own (its process exited), still the thread's current
+        // one or one a fresh run moved aside: its native subagents died with it. A closed or
+        // replaced session is handled by `release`, which knows whether the process ended.
+        let owned = lock(&self.live)
             .get(&thread_id)
             .is_some_and(|current| Arc::ptr_eq(current, &live))
-        {
-            map.remove(&thread_id);
+            || lock(&self.detached)
+                .iter()
+                .any(|(_, detached)| Arc::ptr_eq(detached, &live));
+        if owned && live.background_tasks_end_with_process && !self.shutting_down() {
+            // Before the run ends, so its end does not fail their open items.
+            self.end_released_subagents(&thread_id, &live.provider_session_id, self.now_ms())
+                .await;
+        }
+        if !self.shutting_down() {
+            self.end_detached_run(&thread_id, &live).await;
+        }
+        let removed = {
+            let mut map = lock(&self.live);
+            map.get(&thread_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &live))
+                && map.remove(&thread_id).is_some()
+        };
+        // During shutdown `close_all_sessions` owns the detached ones and closes them.
+        let mut left_detached = false;
+        if !self.shutting_down() {
+            let mut detached = lock(&self.detached);
+            let before = detached.len();
+            detached.retain(|(_, entry)| !Arc::ptr_eq(entry, &live));
+            left_detached = detached.len() < before;
+        }
+        // Either way its folder may be free now.
+        if (removed || left_detached) && !self.shutting_down() {
+            self.session_released();
+        }
+    }
+
+    /// A session left `live` or `detached`: its folder no longer holds a worktree (T3's cleanup
+    /// wakes on `provider-session.updated` stopped).
+    fn session_released(&self) {
+        if let Some(host) = &self.host {
+            host.session_released();
         }
     }
 
     /// `app_thread.created`: the child thread a subagent's rows are written to. Created once;
     /// a provider that announces it again changes nothing.
-    async fn create_provider_thread(&self, thread: Value) {
+    async fn create_provider_thread(&self, thread: Value, instance: &str) {
+        let instance = instance.to_owned();
         let Some(id) = thread["id"].as_str().map(str::to_owned) else {
             return;
         };
         let result = self
             .write(move |tx| {
                 if tx.thread(&id)?.is_none() {
-                    tx.append(Draft::new(&id, "thread.created", thread))?;
+                    tx.append(
+                        Draft::new(&id, "thread.created", thread)
+                            .provider_instance(Some(&instance)),
+                    )?;
                 }
                 Ok(())
             })
@@ -1476,7 +1692,8 @@ impl Inner {
 
     /// `syncSubagentThreadModel` (`ProviderEventIngestor`): a provider reveals a native
     /// subagent's model late, and its child thread takes it.
-    async fn sync_subagent_thread_model(&self, subagent: Value) {
+    async fn sync_subagent_thread_model(&self, subagent: Value, instance: &str) {
+        let instance = instance.to_owned();
         if subagent["origin"] != "provider_native" {
             return;
         }
@@ -1509,7 +1726,10 @@ impl Inner {
                 }
                 thread["modelSelection"] = reported;
                 thread["updatedAt"] = json!(tx.now());
-                tx.append(Draft::new(&child, "thread.model-selection-updated", thread))?;
+                tx.append(
+                    Draft::new(&child, "thread.model-selection-updated", thread)
+                        .provider_instance(Some(&instance)),
+                )?;
                 Ok(())
             })
             .await;
@@ -1594,10 +1814,7 @@ impl Inner {
             "createdBy": "agent",
             "creationSource": creation_source,
         });
-        if let Err(
-            crate::engine::DispatchError::Rejected(e) | crate::engine::DispatchError::Internal(e),
-        ) = self.dispatch_value(command).await
-        {
+        if let Err(e) = self.dispatch_value(command).await {
             eprintln!("conn-engine: could not start a continuation turn: {e}");
         }
     }
@@ -1613,19 +1830,31 @@ impl Inner {
         }
     }
 
-    async fn commit(&self, drafts: Vec<Draft>) {
+    async fn commit(self: &Arc<Self>, drafts: Vec<Draft>) {
         if drafts.is_empty() {
             return;
         }
-        if let Err(e) = self
+        let written = self
             .write(move |tx| {
+                let mut settled = Vec::new();
                 for draft in drafts {
+                    if crate::families::settles_child_work(tx, &draft)?
+                        && !settled.contains(&draft.thread_id)
+                    {
+                        settled.push(draft.thread_id.clone());
+                    }
                     tx.append(draft)?;
                 }
-                Ok(())
+                // `Orchestrator.ts:16085`: work a child's task waited on ended with no run update,
+                // so its end is where the task can settle.
+                let mut effects = Vec::new();
+                for thread_id in settled {
+                    effects.extend(crate::families::finalize_tasks(tx, &thread_id)?);
+                }
+                tx.enqueue(None, &effects)
             })
-            .await
-        {
+            .await;
+        if let Err(e) = written {
             eprintln!("conn-engine: could not record provider events: {e}");
         }
     }
@@ -1674,7 +1903,15 @@ impl Inner {
             live.take_active();
             self.close_session(&thread_id).await;
         }
-        self.end_run(&thread_id, &run_id, "interrupted", None).await;
+        self.end_run(
+            &thread_id,
+            &run_id,
+            "interrupted",
+            None,
+            None,
+            RunEnd::Settled,
+        )
+        .await;
     }
 
     /// Stop with no active run (`ProviderTurnControlService.interrupt` on a settled turn):
@@ -1790,11 +2027,7 @@ impl Inner {
                 "queuedRunId": queued,
                 "targetRunId": run_id,
             });
-            if let Err(
-                crate::engine::DispatchError::Rejected(e)
-                | crate::engine::DispatchError::Internal(e),
-            ) = self.dispatch_value(command).await
-            {
+            if let Err(e) = self.dispatch_value(command).await {
                 eprintln!("conn-engine: a waiting steer stays queued: {e}");
             }
         }
@@ -1844,10 +2077,14 @@ impl Inner {
                         scheduled_task_id: message["scheduledTaskId"].as_str().map(str::to_owned),
                         sender_thread_id: message["senderThreadId"].as_str().map(str::to_owned),
                         message_id: message_id.as_str().into(),
-                        text: message["text"].as_str().unwrap_or_default().to_owned(),
+                        text: provider_text(message),
                         attachments: from_json(message["attachments"].clone()).unwrap_or_default(),
                     },
                     model_selection: None,
+                    app_context: self
+                        .app_context(thread_id.clone())
+                        .await
+                        .unwrap_or_default(),
                 })
                 .await
                 .is_ok(),
@@ -1872,10 +2109,7 @@ impl Inner {
         if message["context"].is_object() {
             command["context"] = message["context"].clone();
         }
-        if let Err(
-            crate::engine::DispatchError::Rejected(e) | crate::engine::DispatchError::Internal(e),
-        ) = self.dispatch_value(command).await
-        {
+        if let Err(e) = self.dispatch_value(command).await {
             eprintln!("conn-engine: could not queue a declined steer: {e}");
         }
     }
@@ -1938,20 +2172,16 @@ impl Inner {
                 "runId": run_id,
                 "reason": crate::commands::FORCE_STOP_REASON,
             });
-            if let Err(
-                crate::engine::DispatchError::Rejected(e)
-                | crate::engine::DispatchError::Internal(e),
-            ) = self.dispatch_value(command).await
-            {
+            if let Err(e) = self.dispatch_value(command).await {
                 eprintln!("conn-engine: Force stop could not end the run: {e}");
             }
-            self.close_session(&thread_id).await;
+            self.close_thread_sessions(&thread_id).await;
             return Ok(json!({"outcome": "killed", "sharedWithThreadIds": []}));
         }
         if let Some(live) = self.live_thread(&thread_id) {
             live.take_active();
         }
-        self.close_session(&thread_id).await;
+        self.close_thread_sessions(&thread_id).await;
         if let Some(run_id) = run_id {
             // The Stop result says Force stop ended it.
             let (tid, run) = (thread_id.clone(), run.clone().unwrap_or_default());
@@ -1962,13 +2192,22 @@ impl Inner {
                         &tid,
                         &run,
                         Some(crate::commands::FORCE_STOP_REASON),
+                        None,
                     )
                 })
                 .await
             {
                 eprintln!("conn-engine: could not record the Force stop: {e}");
             }
-            self.end_run(&thread_id, &run_id, "interrupted", None).await;
+            self.end_run(
+                &thread_id,
+                &run_id,
+                "interrupted",
+                None,
+                None,
+                RunEnd::Settled,
+            )
+            .await;
         }
         Ok(json!({"outcome": "killed", "sharedWithThreadIds": []}))
     }
@@ -2060,7 +2299,7 @@ impl Inner {
 
     /// Closes provider sessions idle for `idle`, so an idle thread does not keep a provider
     /// process. The next turn opens a session and resumes the stored provider thread.
-    pub(crate) async fn reap_idle(&self, idle: Duration) {
+    pub(crate) async fn reap_idle(self: &Arc<Self>, idle: Duration) {
         let idle_threads: Vec<String> = lock(&self.live)
             .iter()
             .filter(|(_, live)| live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold))
@@ -2068,6 +2307,15 @@ impl Inner {
             .collect();
         for thread_id in idle_threads {
             self.close_session(&thread_id).await;
+        }
+        let idle_detached: Vec<(String, Arc<LiveThread>)> = lock(&self.detached)
+            .extract_if(.., |(_, live)| {
+                live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold)
+            })
+            .collect();
+        for (thread_id, live) in idle_detached {
+            let released_at = self.now_ms();
+            self.release(&thread_id, live, released_at).await;
         }
     }
 
@@ -2137,7 +2385,8 @@ impl Inner {
     /// started. The server calls this before it exits. No session opens after it began.
     pub(crate) async fn close_all_sessions(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        let closing: Vec<(String, Arc<LiveThread>)> = lock(&self.live).drain().collect();
+        let mut closing: Vec<(String, Arc<LiveThread>)> = lock(&self.live).drain().collect();
+        closing.append(&mut lock(&self.detached));
         let mut closes = Vec::with_capacity(closing.len());
         self.drop_kept_tools(|_, _| true);
         for (thread_id, live) in closing {
@@ -2162,37 +2411,93 @@ impl Inner {
     /// once its process has ended, with those kept for other threads on that process. While a
     /// shared process (Codex's `app-server`) still runs, its MCP client may still use them,
     /// so they are kept for the thread's next session.
-    pub(crate) async fn close_session(&self, thread_id: &str) {
+    pub(crate) async fn close_session(self: &Arc<Self>, thread_id: &str) {
         let live = lock(&self.live).remove(thread_id);
         if let Some(live) = live {
+            let released_at = self.now_ms();
             self.command_output.finish_thread(thread_id);
-            let closed = live.session.close().await;
-            let instance = self
-                .providers
-                .resolve(&live.instance)
-                .map(|p| p.instance_id().as_str().to_owned())
-                .unwrap_or_else(|| live.instance.clone());
-            match (closed, live.tools.clone()) {
-                (conn_provider::Closed::RuntimeShared, Some(tools)) if !self.shutting_down() => {
-                    self.keep_tools(thread_id, &instance, tools);
+            self.release(thread_id, live, released_at).await;
+        }
+    }
+
+    /// Force stop and deletion: the thread's session and every one a fresh run moved aside.
+    pub(crate) async fn close_thread_sessions(self: &Arc<Self>, thread_id: &str) {
+        self.close_session(thread_id).await;
+        let detached: Vec<(String, Arc<LiveThread>)> = lock(&self.detached)
+            .extract_if(.., |(id, _)| id == thread_id)
+            .collect();
+        for (thread_id, live) in detached {
+            let released_at = self.now_ms();
+            self.release(&thread_id, live, released_at).await;
+        }
+    }
+
+    /// Closes one session: its tools, its row, the native subagents of a process that ended
+    /// with it and, where they end with it, its rosters.
+    async fn release(&self, thread_id: &str, live: Arc<LiveThread>, released_at: i64) {
+        // The pump stores what the session sent in order. A turn the close itself ends
+        // says so (`TerminalCause::SessionClosed`), so it detaches the run instead of
+        // ending it as a Stop; a Stop the provider confirmed before keeps its status.
+        let closed = live.session.close().await;
+        let instance = self
+            .providers
+            .resolve(&live.instance)
+            .map(|p| p.instance_id().as_str().to_owned())
+            .unwrap_or_else(|| live.instance.clone());
+        match (closed, live.tools.clone()) {
+            (conn_provider::Closed::RuntimeShared, Some(tools)) if !self.shutting_down() => {
+                self.keep_tools(thread_id, &instance, tools);
+            }
+            (closed, tools) => {
+                self.revoke_tools(tools.as_ref().map(|t| t.key.as_str()));
+                if closed == conn_provider::Closed::RuntimeStopped {
+                    self.drop_kept_tools(|_, kept| kept == instance);
                 }
-                (closed, tools) => {
-                    self.revoke_tools(tools.as_ref().map(|t| t.key.as_str()));
-                    if closed == conn_provider::Closed::RuntimeStopped {
-                        self.drop_kept_tools(|_, kept| kept == instance);
-                    }
-                }
             }
-            // `notify_one` keeps a permit, so a pump not yet waiting still sees it.
-            live.closed.notify_one();
-            if !self.shutting_down() {
-                self.record_release(thread_id, &live.provider_session_id)
-                    .await;
-            }
-            if live.background_tasks_end_with_process && !self.shutting_down() {
-                self.clear_released_rosters(thread_id, &live.provider_session_id)
-                    .await;
-            }
+        }
+        // Only a process that ended takes its native subagents along; a shared one
+        // (Codex's `app-server`) may still run them.
+        if live.background_tasks_end_with_process
+            && closed == conn_provider::Closed::RuntimeStopped
+            && !self.shutting_down()
+        {
+            self.end_released_subagents(thread_id, &live.provider_session_id, released_at)
+                .await;
+        }
+        // The pump stores what the session sent before the close returned, then detaches a
+        // run it left open. A process that outlives the session (Codex's shared
+        // `app-server`) still reports the subagents it runs for it, as T3's adapter keeps
+        // their turn contexts: the pump then reads on until the session drops its events.
+        // `notify_one` keeps a permit, so a pump not yet waiting still sees it.
+        *lock(&live.release) = Some(if self.shutting_down() {
+            conn_provider::Closed::RuntimeStopped
+        } else {
+            closed
+        });
+        live.closed.notify_one();
+        if !self.shutting_down() {
+            self.record_release(thread_id, &live.provider_session_id)
+                .await;
+            self.session_released();
+        }
+        if live.background_tasks_end_with_process && !self.shutting_down() {
+            self.clear_released_rosters(thread_id, &live.provider_session_id)
+                .await;
+        }
+    }
+
+    /// A run its session left open fails: the session ended during the turn.
+    async fn end_detached_run(self: &Arc<Self>, thread_id: &str, live: &LiveThread) {
+        if let Some(active) = live.take_active() {
+            self.end_run(
+                thread_id,
+                &active.run_id,
+                "failed",
+                Some(session_ended()),
+                None,
+                RunEnd::Detached,
+            )
+            .await;
         }
     }
 
@@ -2213,7 +2518,9 @@ impl Inner {
                     }
                     session["updatedAt"] = json!(now);
                     session["lastError"] = Value::Null;
-                    tx.append(Draft::new(&tid, "provider-session.updated", session))?;
+                    tx.append(
+                        Draft::new(&tid, "provider-session.updated", session).payload_instance(),
+                    )?;
                 }
                 for mut request in tx.entities(&tid, "runtimeRequests")? {
                     let live = request["responseCapability"]["type"] == "live"
@@ -2233,6 +2540,32 @@ impl Inner {
 
     /// `readReleasedProviderThreads`: the session's background tasks ended with its process,
     /// so its provider threads' rosters (`pendingBackgroundTasks`) are cleared.
+    fn now_ms(&self) -> i64 {
+        i64::try_from(self.clock.now_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// `writeReleasedSubagentEvents`: the released session's open native subagents end
+    /// interrupted.
+    async fn end_released_subagents(&self, thread_id: &str, provider_session_id: &str, at: i64) {
+        let (tid, sid) = (thread_id.to_owned(), provider_session_id.to_owned());
+        let result = self
+            .write(move |tx| {
+                crate::families::end_orphaned_native_subagents(
+                    tx,
+                    &tid,
+                    "interrupted",
+                    Some(&crate::families::ReleasedSession {
+                        provider_session_id: &sid,
+                        released_at: at,
+                    }),
+                )
+            })
+            .await;
+        if let Err(e) = result {
+            eprintln!("conn-engine: could not end orphaned subagents: {e}");
+        }
+    }
+
     async fn clear_released_rosters(&self, thread_id: &str, provider_session_id: &str) {
         let (tid, sid) = (thread_id.to_owned(), provider_session_id.to_owned());
         let cleared = self
@@ -2243,7 +2576,9 @@ impl Inner {
                         .is_some_and(|tasks| !tasks.is_empty());
                     if thread["providerSessionId"] == sid.as_str() && held {
                         thread["pendingBackgroundTasks"] = json!([]);
-                        tx.append(Draft::new(&tid, "provider-thread.updated", thread))?;
+                        tx.append(
+                            Draft::new(&tid, "provider-thread.updated", thread).payload_instance(),
+                        )?;
                     }
                 }
                 Ok(())
@@ -2255,12 +2590,47 @@ impl Inner {
     }
 }
 
+/// What the pump's wait ended with.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one short-lived value per pump step; boxing would allocate for every event"
+)]
+enum Next {
+    /// An event, or `None` once the session's events ended.
+    Event(Option<ProviderEvent>),
+    /// The session closed: what was received is still stored.
+    Closed,
+    /// A waiter wants the events already sent stored; this many are waiting.
+    Stored(u64),
+    /// A held snapshot came due at this time.
+    Flush(u64),
+    /// After a close on a shared process: every event the session sent before it is stored.
+    Drained,
+}
+
+fn session_ended() -> Value {
+    failure(
+        "provider_error",
+        "The provider session ended during the turn.",
+        None,
+    )
+}
+
 enum Translated {
     Ignore,
     Event(Draft),
     ProviderTurn(ProviderTurnId, Draft),
-    /// The status, the failure, and whether the native thread is broken.
-    Terminal(&'static str, Option<Value>, bool),
+    /// The run's turn ended.
+    Terminal {
+        status: &'static str,
+        failure: Option<Value>,
+        /// The native thread cannot take another turn.
+        broken: bool,
+        /// The provider's stop reason.
+        reason: Option<String>,
+        /// `Detached` when the run's native children keep working without it.
+        end: RunEnd,
+    },
     /// A provider-made thread (a subagent's child): created once, never overwritten.
     CreateThread(Value),
     /// A steer was taken or dropped: the user message's turn item follows.
@@ -2427,11 +2797,33 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
                 }
                 _ => None,
             };
-            Translated::Terminal(
+            let broken = terminal.thread_disposition == ThreadDisposition::Broken;
+            // The session's close ended the turn: the run detaches, as when its session ends
+            // during the turn. Only the provider's own end confirms a Stop.
+            if terminal.cause == conn_provider::TerminalCause::SessionClosed
+                && terminal.status != TurnStatus::Completed
+            {
+                return Translated::Terminal {
+                    status: "failed",
+                    failure: Some(session_ended()),
+                    broken,
+                    reason: None,
+                    end: RunEnd::Detached,
+                };
+            }
+            Translated::Terminal {
                 status,
                 failure,
-                terminal.thread_disposition == ThreadDisposition::Broken,
-            )
+                broken,
+                reason: terminal.reason,
+                // A failed root whose native children keep working settles without them
+                // (`childTurnsContinue`).
+                end: if terminal.status == TurnStatus::Failed && terminal.child_turns_continue {
+                    RunEnd::Detached
+                } else {
+                    RunEnd::Settled
+                },
+            }
         }
         ProviderEvent::AppThreadCreated { app_thread, .. } => {
             Translated::CreateThread(to_json(&app_thread))

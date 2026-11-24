@@ -27,6 +27,12 @@ pub fn build_thread_history_url(
     thread_id: &str,
     cursor: &str,
 ) -> Result<Url, ClientError> {
+    let mut url = thread_url(http_base_url, thread_id, "history")?;
+    url.query_pairs_mut().append_pair("cursor", cursor);
+    Ok(url)
+}
+
+fn thread_url(http_base_url: &Url, thread_id: &str, resource: &str) -> Result<Url, ClientError> {
     let mut url = http_base_url.clone();
     url.set_query(None);
     url.set_fragment(None);
@@ -38,9 +44,8 @@ pub fn build_thread_history_url(
             ))
         })?;
         segments.pop_if_empty();
-        segments.extend(["api", "orchestration", "threads", thread_id, "history"]);
+        segments.extend(["api", "orchestration", "threads", thread_id, resource]);
     }
-    url.query_pairs_mut().append_pair("cursor", cursor);
     Ok(url)
 }
 
@@ -62,6 +67,96 @@ impl Connection {
         cursor: &str,
     ) -> Result<OrchestrationV2ThreadHistoryPage, ClientError> {
         let url = build_thread_history_url(&self.http_base_url, thread_id, cursor)?;
+        self.get_history_json(url).await
+    }
+
+    /// Reads a history page for the native message cache, omitting tool work.
+    ///
+    /// # Errors
+    /// Returns the URL, transport, authentication or decoding error.
+    pub async fn fetch_thread_conversation_page(
+        &self,
+        thread_id: &str,
+        cursor: &str,
+    ) -> Result<OrchestrationV2ThreadHistoryPage, ClientError> {
+        let mut url = build_thread_history_url(&self.http_base_url, thread_id, cursor)?;
+        url.query_pairs_mut().append_pair("view", "messages");
+        self.get_history_json(url).await
+    }
+
+    /// Loads the unfiltered page directly before a cached message. Indexed conversation
+    /// pages locate its neighborhood even when the cache starts on an assistant reply.
+    ///
+    /// # Errors
+    /// Returns a transport or protocol error if the boundary no longer exists.
+    pub async fn fetch_history_before_message(
+        &self,
+        thread: &str,
+        snapshot_cursor: &str,
+        anchor: &str,
+    ) -> Result<OrchestrationV2ThreadHistoryPage, ClientError> {
+        let mut cursor = snapshot_cursor.to_owned();
+        let mut visited = std::collections::HashSet::new();
+        let mut indexed = true;
+        loop {
+            if !visited.insert((indexed, cursor.clone())) {
+                return Err(ClientError::Connection(
+                    "repeated history cursor".to_owned(),
+                ));
+            }
+            let mut page = if indexed {
+                self.fetch_thread_conversation_page(thread, &cursor).await?
+            } else {
+                self.fetch_thread_history_page(thread, &cursor).await?
+            };
+            if let Some(i) = page
+                .items
+                .iter()
+                .position(|row| row.source_item_id == anchor)
+            {
+                if indexed {
+                    indexed = false;
+                    continue;
+                }
+                page.items.truncate(i);
+                return Ok(page);
+            }
+            cursor = page.next_cursor.ok_or_else(|| {
+                ClientError::Connection("cached message is outside server history".to_owned())
+            })?;
+        }
+    }
+
+    /// Fetches the ordered prompt index without downloading transcript bodies.
+    ///
+    /// # Errors
+    /// Returns the transport, authentication or decoding error.
+    pub async fn fetch_thread_outline(
+        &self,
+        thread_id: &str,
+    ) -> Result<conn_contract::ThreadOutline, ClientError> {
+        self.get_history_json(thread_url(&self.http_base_url, thread_id, "outline")?)
+            .await
+    }
+
+    /// Fetches a bounded page containing a visible prompt and its neighbors.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown target, rejected request or invalid response.
+    pub async fn fetch_thread_window(
+        &self,
+        thread_id: &str,
+        entry_id: &str,
+    ) -> Result<OrchestrationV2ThreadHistoryPage, ClientError> {
+        let mut url = thread_url(&self.http_base_url, thread_id, "window")?;
+        url.query_pairs_mut().append_pair("entryId", entry_id);
+        self.get_history_json(url).await
+    }
+
+    async fn get_history_json<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        url: Url,
+    ) -> Result<T, ClientError> {
         let http = self.http.clone();
         let bearer = self.bearer.read().ok().and_then(|g| g.clone());
 

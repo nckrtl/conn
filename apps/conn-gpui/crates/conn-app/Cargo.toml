@@ -13,6 +13,16 @@ name = "conn-app"
 path = "src/main.rs"
 
 [dependencies]
+zed_util = { package = "util", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", features = ["debug-embed"], optional = true }
+zed_editor = { package = "editor", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
+zed_language = { package = "language", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
+zed_settings = { package = "settings", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
+zed_theme_settings = { package = "theme_settings", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
+zed_theme = { package = "theme", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
+zed_text = { package = "text", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
+lsp-types = "0.97"
+conn-cache = { path = "../../../../crates/conn-cache" }
 conn-client.workspace = true
 conn-desktop.workspace = true
 conn-contract.workspace = true
@@ -33,12 +43,19 @@ raw-window-handle.workspace = true
 reqwest.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 serde_json.workspace = true
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 tokio.workspace = true
 url.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Font weight axes and the weights a family has, read from CoreText (`fonts/axes.rs`). Already in
+# the build via GPUI's text system.
+core-foundation = "0.10"
+core-graphics = "0.24"
+core-text = "21.0"
 # Tag each window's CAMetalLayer as sRGB (`colour_space.rs`), matching
 # `.refs/threadbear/desktop/gpui/Cargo.toml`. Already in the build via GPUI.
 objc2 = "0.6"
@@ -55,11 +72,10 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 tokio-tungstenite.workspace = true
 
 [features]
+zed-files = ["dep:zed_util", "dep:zed_editor", "dep:zed_language", "dep:zed_settings", "dep:zed_theme", "dep:zed_theme_settings", "dep:zed_text", "dep:tree-sitter-php"]
 # Scripted UI automation and screenshot capture hook for visual verification in nick-vm
 # (modeled on .refs/threadbear/desktop/gpui/src/automation.rs). Never enabled in release builds.
 automation = ["gpui-kit/test-support"]
-# Embedded Chromium (CEF-on-demand) browser panel support via conn-web.
-cef = ["conn-web/cef"]
 # In-process Rust hot-patching via GPUI's built-in Subsecond integration (`dx serve --hot-patch`).
 hot-reload = ["dep:gpui-pre"]
 

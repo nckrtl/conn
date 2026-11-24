@@ -104,6 +104,12 @@ impl TaskError {
     }
 }
 
+/// An upsert's schedule after decoding: a timed one, or a webhook whose secret is not read yet.
+enum Requested {
+    Schedule(ScheduledTaskSchedule),
+    Webhook(conn_contract::ScheduledTaskUpsertScheduleWebhook),
+}
+
 /// How a call fails: a typed task error, or input the contract's schema refuses (a defect
 /// over RPC, as Effect answers a payload that does not decode).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -222,9 +228,23 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
         task_id: String,
         thread_id: String,
     ) -> BoxFuture<'_, Result<bool, String>>;
-    /// Waits for the run of `message_id` to end, at most [`RUN_OUTCOME_WAIT`]. `Some(error)`
-    /// when it ended without success and still holds the message (`recordRunFailure`).
-    fn run_outcome(&self, thread_id: String, message_id: String) -> BoxFuture<'_, Option<String>>;
+    /// Waits for the run of `message_id` to end, at most [`RUN_OUTCOME_WAIT`]
+    /// (`recordRunOutcome`).
+    fn run_outcome(&self, thread_id: String, message_id: String) -> BoxFuture<'_, RunEnd>;
+    /// `isScratchProject || isNonGitProject`: the project's folder is positively no Git
+    /// repository. An unknown project, or a repository Git cannot read, is `false`.
+    fn is_non_git_project(&self, project_id: String) -> BoxFuture<'_, bool>;
+}
+
+/// How the run of a dispatched message ended, as `recordRunOutcome` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunEnd {
+    /// The run completed.
+    Completed,
+    /// The run ended without success and still holds the message: the error to record.
+    Failed(String),
+    /// No outcome to record: the wait ran out, the run is gone, or a steer took the message.
+    Unknown,
 }
 
 /// What runs a task: the timer, a person, or an agent.
@@ -295,6 +315,9 @@ struct Inner {
     wake: Notify,
     #[cfg(test)]
     timer_pass: watch::Sender<u64>,
+    /// Holds the next store write until the test lets it go.
+    #[cfg(test)]
+    write_gate: StdMutex<Option<tests::WriteGate>>,
     /// Webhook tokens and secrets, rate windows, queue counts and run permits.
     hooks: webhook::State,
     hooks_db: PathBuf,
@@ -437,6 +460,8 @@ impl ScheduledTasks {
                 wake: Notify::new(),
                 #[cfg(test)]
                 timer_pass: watch::channel(0).0,
+                #[cfg(test)]
+                write_gate: StdMutex::new(None),
                 hooks,
                 hooks_db: config.state_dir.join(HOOKS_FILE_NAME),
             }),
@@ -485,7 +510,8 @@ impl ScheduledTasks {
         }
     }
 
-    async fn persist(&self, tasks: &[ScheduledTask]) -> Result<(), String> {
+    /// Writes the store. A failed write is logged with `log`, from the blocking worker.
+    async fn persist(&self, tasks: &[ScheduledTask], log: Option<&str>) -> Result<(), String> {
         let hooks: serde_json::Map<String, Value> = self
             .inner
             .hooks
@@ -500,10 +526,29 @@ impl ScheduledTasks {
             .unwrap_or_default();
         let body = json!({"version": 1, "tasks": tasks, "webhooks": hooks}).to_string();
         let path = self.inner.path.clone();
-        tokio::task::spawn_blocking(move || conn_support::fs::write_private(&path, body.as_bytes()))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        let log = log.map(str::to_owned);
+        #[cfg(test)]
+        {
+            let gate = self
+                .inner
+                .write_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                gate.hold().await;
+            }
+        }
+        tokio::task::spawn_blocking(move || {
+            conn_support::fs::write_private(&path, body.as_bytes()).map_err(|error| {
+                if let Some(message) = log {
+                    eprintln!("scheduled tasks: {message} {error}");
+                }
+                error.to_string()
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// Writes the store, mapping a failure to the task error T3 uses for that write.
@@ -513,10 +558,9 @@ impl ScheduledTasks {
         message: &str,
         task_id: Option<&str>,
     ) -> Result<(), TaskError> {
-        self.persist(tasks).await.map_err(|error| {
-            eprintln!("scheduled tasks: {message} {error}");
-            TaskError::new(message, task_id)
-        })
+        self.persist(tasks, Some(message))
+            .await
+            .map_err(|_| TaskError::new(message, task_id))
     }
 
     /// `list`: newest first by creation, then by id, so toggles and runs never reorder.
@@ -555,7 +599,7 @@ impl ScheduledTasks {
     async fn edit_store(&self, edit: impl FnOnce(&mut Vec<ScheduledTask>)) {
         let mut tasks = self.inner.tasks.lock().await;
         edit(&mut tasks);
-        let _ = self.persist(&tasks).await;
+        let _ = self.persist(&tasks, None).await;
     }
 
     pub async fn find(&self, id: &str) -> Option<ScheduledTask> {
@@ -574,6 +618,35 @@ impl ScheduledTasks {
             .ok_or_else(|| TaskError::new("Schedule task not found.", Some(id)))
     }
 
+    /// A folder that is not a Git repository, Scratch included, cannot hold a worktree: such
+    /// a project's worktree strategy runs in the folder (`upsert`). Runs apply it too, so a
+    /// task saved before the rule, or before its folder lost Git, still starts.
+    async fn workspace_strategy(
+        &self,
+        project_id: &str,
+        strategy: &OrchestrationV2ThreadLaunchWorkspaceStrategy,
+    ) -> OrchestrationV2ThreadLaunchWorkspaceStrategy {
+        use conn_contract::OrchestrationV2RunWorkspacePreparationRoot as Root;
+        let worktree = matches!(
+            strategy,
+            OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)
+        );
+        if worktree
+            && self
+                .inner
+                .runner
+                .is_non_git_project(project_id.to_owned())
+                .await
+        {
+            OrchestrationV2ThreadLaunchWorkspaceStrategy::Root(Root {
+                r#type: conn_contract::lit::Root,
+                branch: None,
+            })
+        } else {
+            strategy.clone()
+        }
+    }
+
     /// `upsert`: creates or edits a task. An edit that leaves the schedule and `enabled` as
     /// they were keeps the next run; a one-time run in the past is refused.
     pub async fn upsert(&self, input: UpsertInput) -> Result<ScheduledTask, Failure> {
@@ -584,8 +657,17 @@ impl ScheduledTasks {
                 "Expected a non-blank string for title and prompt".into(),
             ));
         }
-        let decoded =
-            schedule::decode_upsert_schedule(&input.schedule).map_err(|e| Failure::Invalid(e.0))?;
+        // A webhook schedule decodes here too, so its input errors come before the
+        // destination check and before its secretRef is spent.
+        let decoded = match schedule::decode_upsert_schedule(&input.schedule)
+            .map_err(|e| Failure::Invalid(e.0))?
+        {
+            Some(schedule) => Requested::Schedule(schedule),
+            None => Requested::Webhook(webhook::decode(&input)?),
+        };
+        let workspace_strategy = self
+            .workspace_strategy(&input.project_id, &input.workspace_strategy)
+            .await;
         let now = self.now();
         let id = match (&input.id, &input.command_id) {
             (Some(id), _) => id.clone(),
@@ -604,28 +686,6 @@ impl ScheduledTasks {
             )
             .into());
         }
-        // A webhook schedule keeps the stored token, and the stored secret unless a new one
-        // comes (`upsert`, the `webhook` part).
-        let (schedule, credentials) = match decoded {
-            Some(schedule) => (schedule, None),
-            None => {
-                let stored = self
-                    .inner
-                    .hooks
-                    .credentials
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.get(&id).cloned());
-                let save = webhook::prepare_save(
-                    &input,
-                    &id,
-                    existing.as_ref().map(|e| (e, stored.as_ref())),
-                    self.inner.secret_requests.as_ref(),
-                )
-                .await?;
-                (save.schedule, Some(save.credentials))
-            }
-        };
         let thread_mode = resolve_thread_mode(&input, existing.as_ref());
         let kept_thread = input
             .thread_id
@@ -641,13 +701,36 @@ impl ScheduledTasks {
             kept_thread
         };
         // An unchanged destination is not checked again, so a task on an archived thread
-        // stays editable.
+        // stays editable. Checked before the webhook part spends a one-use secretRef.
         if let Some(thread) = &thread_id
             && Some(thread) != existing.as_ref().and_then(|e| e.thread_id.as_ref())
         {
             self.require_destination(thread, &input.project_id, &id)
                 .await?;
         }
+        // A webhook schedule keeps the stored token, and the stored secret unless a new one
+        // comes (`upsert`, the `webhook` part).
+        let (schedule, credentials, claim) = match decoded {
+            Requested::Schedule(schedule) => (schedule, None, None),
+            Requested::Webhook(webhook_input) => {
+                let stored = self
+                    .inner
+                    .hooks
+                    .credentials
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.get(&id).cloned());
+                let save = webhook::prepare_save(
+                    webhook_input,
+                    &input,
+                    &id,
+                    existing.as_ref().map(|e| (e, stored.as_ref())),
+                    self.inner.secret_requests.as_ref(),
+                )
+                .await?;
+                (save.schedule, Some(save.credentials), save.claim)
+            }
+        };
         let schedule_unchanged = existing.as_ref().is_some_and(|e| {
             e.enabled == input.enabled && is_same_schedule(&e.schedule, &schedule)
         });
@@ -677,7 +760,7 @@ impl ScheduledTasks {
             project_id: input.project_id.clone(),
             thread_id,
             thread_mode: Some(thread_mode),
-            workspace_strategy: input.workspace_strategy.clone(),
+            workspace_strategy,
             model_selection: input.model_selection.clone(),
             runtime_mode: input.runtime_mode,
             interaction_mode: input.interaction_mode,
@@ -716,6 +799,11 @@ impl ScheduledTasks {
         }
         *tasks = next_tasks;
         drop(tasks);
+        // Spent only once the task holds the secret. A failed delete is logged and leaves the
+        // reference usable.
+        if let Some(claim) = claim {
+            let _ = claim.spend().await;
+        }
         self.notify_changed();
         Ok(task)
     }
@@ -894,7 +982,7 @@ impl ScheduledTasks {
         slot.next_run_at = self.next_run_after_run(&source, Some(started_iso), now);
         slot.updated_at = format_iso(now);
         slot.run_count = slot.run_count.saturating_add(1);
-        if self.persist(&next_tasks).await.is_ok() {
+        if self.persist(&next_tasks, None).await.is_ok() {
             *tasks = next_tasks;
             drop(tasks);
             self.notify_changed();
@@ -979,6 +1067,9 @@ impl ScheduledTasks {
         let thread_mode = thread_mode_of(&active);
         let dispatched = match &active.thread_id {
             None => {
+                let strategy = self
+                    .workspace_strategy(&active.project_id, &active.workspace_strategy)
+                    .await;
                 let launched = self
                     .inner
                     .runner
@@ -989,7 +1080,7 @@ impl ScheduledTasks {
                         model_selection: to_json(&active.model_selection),
                         runtime_mode: to_json(&active.runtime_mode),
                         interaction_mode: to_json(&active.interaction_mode),
-                        workspace_strategy: to_json(&active.workspace_strategy),
+                        workspace_strategy: to_json(&strategy),
                         message_id: message_id.clone(),
                         scheduled_task_id: active.id.clone(),
                         text: prompt.clone(),
@@ -1094,13 +1185,12 @@ impl ScheduledTasks {
         task.last_run_at = Some(started_iso.to_owned());
         task.last_run_status = ScheduledTaskRunStatus::Running;
         task.last_run_error = None;
-        if let Err(error) = self.persist(&next_tasks).await {
-            let message = "Could not mark schedule task as running.";
+        let message = "Could not mark schedule task as running.";
+        // The timer logs a scheduled run's failure with its cause, once while it repeats.
+        let log = (!matches!(trigger, Trigger::Scheduled)).then_some(message);
+        if let Err(error) = self.persist(&next_tasks, log).await {
             return Err(match trigger {
-                Trigger::Manual | Trigger::Webhook => {
-                    eprintln!("scheduled tasks: {message} {error}");
-                    TaskError::new(message, Some(id))
-                }
+                Trigger::Manual | Trigger::Webhook => TaskError::new(message, Some(id)),
                 // The timer logs it with its cause, once while it repeats.
                 Trigger::Scheduled => TaskError::new(format!("{message} {error}"), Some(id)),
             });
@@ -1215,37 +1305,27 @@ impl ScheduledTasks {
         }
     }
 
-    /// `recordRunFailure`: the provider can still refuse a turn after its message was
-    /// accepted, so the run is followed and a failure replaces the recorded success.
+    /// `recordRunOutcome` (`ScheduledTaskService.ts:887`): the provider can still refuse a turn
+    /// after its message was accepted, so the run is followed and a failure replaces the
+    /// recorded success. A one-time task whose turn completed at or after its `runAt` is spent
+    /// and removed; its thread stays.
     fn follow_outcome(&self, task_id: &str, started_iso: &str, thread_id: &str, message_id: &str) {
         let service = self.clone();
         let (task_id, started_iso) = (task_id.to_owned(), started_iso.to_owned());
         let (thread_id, message_id) = (thread_id.to_owned(), message_id.to_owned());
         let key = task_id.clone();
         let handle = tokio::spawn(async move {
-            let Some(error) = service
+            match service
                 .inner
                 .runner
                 .run_outcome(thread_id, message_id)
                 .await
-            else {
-                return;
-            };
-            let mut tasks = service.inner.tasks.lock().await;
-            let mut next_tasks = tasks.clone();
-            let Some(slot) = next_tasks.iter_mut().find(|t| {
-                t.id == task_id
-                    && t.last_run_at.as_deref() == Some(started_iso.as_str())
-                    && t.last_run_status == ScheduledTaskRunStatus::Succeeded
-            }) else {
-                return;
-            };
-            slot.last_run_status = ScheduledTaskRunStatus::Failed;
-            slot.last_run_error = Some(error);
-            if service.persist(&next_tasks).await.is_ok() {
-                *tasks = next_tasks;
-                drop(tasks);
-                service.notify_changed();
+            {
+                RunEnd::Completed => service.remove_spent(&task_id, &started_iso).await,
+                RunEnd::Failed(error) => {
+                    service.record_failure(&task_id, &started_iso, error).await
+                }
+                RunEnd::Unknown => {}
             }
         });
         if let Ok(mut followers) = self.inner.followers.lock()
@@ -1253,6 +1333,59 @@ impl ScheduledTasks {
         {
             previous.abort();
         }
+    }
+
+    /// The failure of a run whose message was accepted replaces its recorded success.
+    async fn record_failure(&self, task_id: &str, started_iso: &str, error: String) {
+        let mut tasks = self.inner.tasks.lock().await;
+        let mut next_tasks = tasks.clone();
+        let Some(slot) = next_tasks.iter_mut().find(|t| {
+            t.id == task_id
+                && t.last_run_at.as_deref() == Some(started_iso)
+                && t.last_run_status == ScheduledTaskRunStatus::Succeeded
+        }) else {
+            return;
+        };
+        slot.last_run_status = ScheduledTaskRunStatus::Failed;
+        slot.last_run_error = Some(error);
+        if self.persist(&next_tasks, None).await.is_ok() {
+            *tasks = next_tasks;
+            drop(tasks);
+            self.notify_changed();
+        }
+    }
+
+    /// T3's `DELETE ... WHERE` in `recordRunOutcome`: only the row of this run, recorded as
+    /// succeeded, with no next run, of a one-time schedule run at or after its `runAt`. An
+    /// early run by hand keeps the task.
+    async fn remove_spent(&self, task_id: &str, started_iso: &str) {
+        let mut tasks = self.inner.tasks.lock().await;
+        let spent = tasks.iter().any(|t| {
+            t.id == task_id
+                && t.last_run_at.as_deref() == Some(started_iso)
+                && t.last_run_status == ScheduledTaskRunStatus::Succeeded
+                && t.next_run_at.is_none()
+                && matches!(&t.schedule, ScheduledTaskSchedule::Once(once)
+                    if parse_iso(&once.run_at)
+                        .zip(parse_iso(started_iso))
+                        .is_some_and(|(run_at, ran)| ran >= run_at))
+        });
+        if !spent {
+            return;
+        }
+        let next_tasks: Vec<ScheduledTask> =
+            tasks.iter().filter(|t| t.id != task_id).cloned().collect();
+        if self.persist(&next_tasks, None).await.is_err() {
+            return;
+        }
+        *tasks = next_tasks;
+        drop(tasks);
+        // This runs as the task's follower: drop its entry without aborting itself.
+        if let Ok(mut followers) = self.inner.followers.lock() {
+            followers.remove(task_id);
+        }
+        self.set_credentials(task_id, None);
+        self.notify_changed();
     }
 
     /// `rescheduleMissedRun`: moves a skipped run on, only when the row is still the one the
@@ -1274,7 +1407,7 @@ impl ScheduledTasks {
             slot.last_run_status = ScheduledTaskRunStatus::Failed;
             slot.last_run_error = Some(error.to_owned());
         }
-        if self.persist(&next_tasks).await.is_ok() {
+        if self.persist(&next_tasks, None).await.is_ok() {
             *tasks = next_tasks;
             drop(tasks);
             self.notify_changed();
@@ -1302,9 +1435,9 @@ impl ScheduledTasks {
             task.updated_at = format_iso(now);
             task.run_count = task.run_count.saturating_add(1);
         }
-        if let Err(error) = self.persist(&next_tasks).await {
-            eprintln!("scheduled tasks: could not reset interrupted runs: {error}");
-        }
+        let _ = self
+            .persist(&next_tasks, Some("could not reset interrupted runs:"))
+            .await;
         *tasks = next_tasks;
         drop(tasks);
         self.notify_changed();
@@ -1372,8 +1505,14 @@ impl ScheduledTasks {
         let mut log = TimerLog::default();
         loop {
             let pass = self.run_due().await;
-            for line in log.report(&pass) {
-                eprintln!("scheduled tasks: {line}");
+            let lines = log.report(&pass);
+            if !lines.is_empty() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    for line in lines {
+                        eprintln!("scheduled tasks: {line}");
+                    }
+                })
+                .await;
             }
             let wait = self.next_due().await.map(|at| {
                 let wait = Duration::from_millis(u64::try_from(at - self.now()).unwrap_or(0))

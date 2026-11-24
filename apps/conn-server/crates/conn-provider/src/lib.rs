@@ -17,6 +17,8 @@
 //!
 //! To add a provider: make a crate that depends on this one and implements both traits.
 
+pub mod goal;
+pub mod manifest;
 pub mod mcp_apps;
 mod set;
 pub mod tool_output;
@@ -33,6 +35,7 @@ use conn_contract::{
 };
 
 pub use conn_contract::AppThread as ProviderAppThread;
+pub use manifest::{LiveManifest, StatusNotifier};
 use serde::{Deserialize, Serialize};
 pub use set::ProviderSet;
 use tokio::sync::mpsc;
@@ -89,6 +92,32 @@ pub trait Provider: Send + Sync {
     /// [`Provider::server_provider_entry`] reports it. Providers with a fixed entry do nothing.
     fn refresh_status(&self, _instance: Option<serde_json::Value>) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+
+    /// T3's `ProviderInstance.refreshModels`, for `server.refreshProviders` with
+    /// `refreshModels`: list the models again even when the last check listed them. `None`:
+    /// this provider has no such refresh. An error's `Failed` detail is shown to the user.
+    fn refresh_models(&self) -> Option<BoxFuture<'_, ProviderResult<()>>> {
+        None
+    }
+
+    /// Whether [`Provider::credential_check`] is served: the only in-app sign-in this server
+    /// serves (`provider.auth.start`). Account sign-ins through a browser are not served;
+    /// providers sign in through Orbit's AI router.
+    fn has_credential_check(&self) -> bool {
+        false
+    }
+
+    /// A check of the credentials the instance's settings hold, as T3's Antigravity sign-in
+    /// does without a browser. It reports its steps through `check.on_step`. When
+    /// `check.abort` fires, it stops its process and removes its files before it returns.
+    /// An error's `Failed` detail is shown to the user.
+    fn credential_check(&self, _check: CredentialCheck) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async {
+            Err(ProviderError::Unsupported {
+                operation: "credential_check",
+            })
+        })
     }
 
     /// The periodic probe (`ManagedServerProvider` `refreshOnInterval` with `deferFailure`):
@@ -740,6 +769,9 @@ pub struct SteerInput {
     pub provider_turn_id: ProviderTurnId,
     pub message: TurnMessage,
     pub model_selection: Option<ModelSelection>,
+    /// `appContext`: the thread's MCP app notes; a steer sends those the native thread has
+    /// not seen with their current text.
+    pub app_context: Vec<AppContextEntry>,
 }
 
 /// `ProviderAdapterV2HistoricalContext` for one native thread: the history items as Codex's
@@ -865,6 +897,35 @@ pub struct TurnTerminal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ProviderRetry>,
     pub thread_disposition: ThreadDisposition,
+    /// A failed root whose native children keep running: they settle without it, so the
+    /// run's end leaves them open (`childTurnsContinue`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child_turns_continue: bool,
+    /// What ended the turn. The adapter sets [`TerminalCause::SessionClosed`] on every terminal
+    /// it produces once [`Session::close`] began, so the engine never takes a close's own end
+    /// for a Stop the provider confirmed.
+    #[serde(default, skip_serializing_if = "TerminalCause::is_provider")]
+    pub cause: TerminalCause,
+    /// Why the provider stopped a turn it reports as completed (a Codex hook that stopped
+    /// it); the engine keeps it as a warning on the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What ended a turn: the provider's own report, or the session's close.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalCause {
+    #[default]
+    Provider,
+    /// The session's close ended the turn; the run detaches.
+    SessionClosed,
+}
+
+impl TerminalCause {
+    fn is_provider(&self) -> bool {
+        *self == Self::Provider
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +943,29 @@ pub enum TurnStatus {
 pub enum ThreadDisposition {
     Reusable,
     Broken,
+}
+
+/// The controls of one [`Provider::credential_check`].
+pub struct CredentialCheck {
+    /// Fires to end the check early (cancel, timeout, or the instance went away).
+    pub abort: BoxFuture<'static, ()>,
+    /// Called as the check passes each step, in order.
+    pub on_step: Box<dyn Fn(CheckStep) + Send + Sync>,
+}
+
+impl std::fmt::Debug for CredentialCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialCheck").finish_non_exhaustive()
+    }
+}
+
+/// The steps of T3's `runSignIn` that its auth flow shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckStep {
+    /// The agent answered `initialize`.
+    Initialized,
+    /// The agent signed in and opened a session; the models load next.
+    Verifying,
 }
 
 /// A provider failure, condensed from the `ProviderAdapterV2Error` union.
@@ -943,7 +1027,7 @@ pub mod testing {
             "sessions": {
                 "supportsMultipleProviderThreadsPerSession": false,
                 "supportsModelSwitchInSession": true,
-                "supportsProviderSwitchingViaHandoff": false,
+                "supportsProviderSwitchingViaHandoff": true,
                 "supportsRuntimeModeSwitchInSession": false,
                 "pendingRequestsSurviveRestart": false,
             },
@@ -1009,11 +1093,11 @@ pub mod testing {
             "context": {
                 "acceptsSystemContext": false,
                 "acceptsDeveloperContext": false,
-                "acceptsSyntheticUserContext": false,
+                "acceptsSyntheticUserContext": true,
                 "canGenerateSummaries": false,
-                "canConsumeHandoffSummaries": false,
-                "supportsDeltaHandoff": false,
-                "supportsFullThreadHandoff": false,
+                "canConsumeHandoffSummaries": true,
+                "supportsDeltaHandoff": true,
+                "supportsFullThreadHandoff": true,
                 "maxRecommendedHandoffChars": null,
             },
             "checkpointing": {
@@ -1136,6 +1220,9 @@ mod tests {
                     failure: None,
                     retry: None,
                     thread_disposition: ThreadDisposition::Reusable,
+                    child_turns_continue: false,
+                    cause: TerminalCause::Provider,
+                    reason: None,
                 }))
                 .await
                 .map_err(|_| ProviderError::SessionStopped)

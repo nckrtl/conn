@@ -40,7 +40,7 @@ pub fn non_repo_local() -> VcsStatusLocalResult {
     }
 }
 
-fn is_non_repo_stderr(stderr: &str) -> bool {
+pub(crate) fn is_non_repo_stderr(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
     s.contains("not a git repository") || s.contains("cannot use bare repository")
 }
@@ -162,26 +162,19 @@ async fn local_status_inner(cwd: &Path) -> VcsResult<VcsStatusLocalResult> {
     };
     let numstat = match numstat {
         Ok(out) => review::parse_numstat(&out.stdout_text()),
+        // No commit yet: one net diff against the empty tree, as T3 does. Staged and unstaged
+        // diffs summed would count a line replaced before the first commit twice.
         Err(ProcessError::Exit { stderr, .. }) if is_unborn_stderr(&stderr) => {
-            let staged = git(
+            let empty = repo::empty_tree(cwd).await?;
+            let net = git(
                 "GitVcsDriver.statusDetails.numstat",
                 cwd,
-                ["diff", "--cached", "--numstat", "-z"],
+                ["diff-index", "-M", "--numstat", "-z", empty.as_str(), "--"],
             )
             .max_stdout(METADATA_MAX_BYTES, OnLimit::Fail)
             .text()
             .await?;
-            let unstaged = git(
-                "GitVcsDriver.statusDetails.numstat",
-                cwd,
-                ["diff-files", "--numstat", "-z"],
-            )
-            .max_stdout(METADATA_MAX_BYTES, OnLimit::Fail)
-            .text()
-            .await?;
-            let mut files = review::parse_numstat(&staged);
-            files.extend(review::parse_numstat(&unstaged));
-            files
+            review::parse_numstat(&net)
         }
         Err(e) => return Err(e.into()),
     };
@@ -210,13 +203,12 @@ async fn local_status_inner(cwd: &Path) -> VcsResult<VcsStatusLocalResult> {
         .collect();
     files.sort_by_key(|f| f.path.to_lowercase());
 
-    let default_branch = match &remotes {
-        Ok(remotes) => repo::default_branch_with(cwd, remotes)
-            .await
-            .unwrap_or(None),
-        Err(_) => None,
-    };
-    let is_default_ref = match (&status.ref_name, &default_branch) {
+    // T3 reads only the remote default here: without one, `main` and `master` both count.
+    let default_branch = remotes
+        .as_ref()
+        .ok()
+        .and_then(|r| r.primary_default.as_ref());
+    let is_default_ref = match (&status.ref_name, default_branch) {
         (Some(name), Some(default)) => name == default,
         (Some(name), None) => name == "main" || name == "master",
         (None, _) => false,
@@ -336,8 +328,11 @@ async fn ahead_of_base(cwd: &Path, branch: &str, remotes: Option<&repo::Remotes>
 }
 
 /// Fetches the remote of the current branch's upstream. Quiet, no tags, no auto gc, never
-/// prompts. Failures are the caller's to log.
+/// prompts. Failures are the caller's to log; a missing folder has nothing to fetch.
 pub async fn fetch_upstream_remote(cwd: &Path) -> VcsResult<()> {
+    if !repo::is_dir(cwd).await {
+        return Ok(());
+    }
     let Some(head) = repo::optional_text(git(
         "GitVcsDriver.fetch",
         cwd,
@@ -415,13 +410,11 @@ async fn remote_status_inner(cwd: &Path) -> VcsResult<Option<VcsStatusRemoteResu
             None => (0, 0),
         },
     };
-    let default_branch = match &remotes {
-        Ok(remotes) => repo::default_branch_with(cwd, remotes)
-            .await
-            .unwrap_or(None),
-        Err(_) => None,
-    };
-    let is_default = match (&branch, &default_branch) {
+    let default_branch = remotes
+        .as_ref()
+        .ok()
+        .and_then(|r| r.primary_default.as_ref());
+    let is_default = match (&branch, default_branch) {
         (Some(b), Some(d)) => b == d,
         (Some(b), None) => b == "main" || b == "master",
         _ => false,

@@ -281,18 +281,48 @@ more per `providerInstances` entry with that driver (`supportsMultipleInstances`
   `<agy> --version` (5 s), so it follows the binary Orbit puts on `PATH`; T3 runs no
   `--version` and keeps the last version it saw. `setup.canInstall` is `false`: Orbit
   installs and updates the CLI (Nick, 2026-11-20); T3 says `true` for its managed runtime.
+- **Model refresh** (`server.refreshProviders` with `refreshModels`, T3's `refreshModels`
+  and `publishCatalog`): the throwaway session selects each model, then the original again,
+  and drains the agent's events before it closes; it starts from the agent's own model, not
+  the catalog's default. Each model lists the thinking levels it reported, kept until sign-out
+  as in T3. A selection's reply is
+  dropped when the agent pushed `config_option_update` while it was in flight (T3's
+  `configOptionUpdates` rule). Only the root session's updates reach the entry; metadata
+  sent before `session/new` answered is kept per session and applied for the root (T3's
+  `startupMetadata`); the entry hears it after the session is published, so a retry after a
+  sign-in failure keeps its commands. The 90 s limit stops the agent before the refresh
+  answers, also during `initialize`. An agent that exited is cleaned up without a signal.
+- **Catalog:** the entry applies the accepted model manifest's legacy marks and default
+  (`applyModelCatalog`; bundled: `src/antigravity_catalog.json`, generated), and a selection
+  that asks for the default takes the catalog's default when the agent lists it.
+- **Commands:** `available_commands_update` sets the machine's slash commands and, for a
+  thread's session, its workspace snapshot (at most 32).
+- **Sign-in required:** an error reply that asks for a sign-in (`-32000`, or the native
+  CLI's "No browser is available here"), or a valid Google sign-in URL on stdout (T3's
+  prefix) or stderr (prefix or our browser helper's marker), ends the session. The entry
+  turns `unauthenticated` without models, commands or workspaces, and the config streams
+  hear it, before the error returns; a refresh then fails with T3's sign-in instruction.
+  Health checks start no agent until a session proves the sign-in. A `python-socks` failure
+  keeps T3's diagnostic; other error details never reach the user.
 - **One accepted difference:** `BROWSER` runs this server (`<self> antigravity-browser -- %s`,
   which reports the URL on stderr with T3's marker) where T3 runs its Node with an inline
   script.
-- **Not built:** browser sign-in (`provider.auth.*` answer "no sign-in" for every provider);
+- **Sign-in:** only the credential check (`credential_check`, for `gemini-api-key` and
+  `agent-platform` with a configured key; never Application Default Credentials): a
+  throwaway session that reports T3's steps, stops its agent and removes both temp folders on
+  cancel or failure, and maps known ACP errors to T3's fixed texts. An agent's exit and an
+  explicit stop share one cleanup (`Stopper` in `session.rs`), run once, awaited by both;
+  after a confirmed exit it signals nothing. A finished throwaway session's files (the
+  conversation database, `.meta` and `brain/`) go once the agent has closed, only when the
+  `.meta` names the session's own scratch folder.
+- **Not built:** Google sign-in in the browser (Orbit's AI router signs providers in);
   T3's managed runtime (`localharness_external`) and its install; links to `~/.gemini`
   skills; `AntigravityProtocol` (tool call normalization, read repair, `interaction_*`
   questions, the `allow_always` security warning); audio, text, PDF and video attachments as
   ACP resources (images go as image blocks, every path in the text); background commands,
   child work and subagents (`deferFinalizeForBackgroundWork`, `toolOutlivesPrompt`,
-  `watchPromptOutcome`); the stderr harness-failure and stdout sign-in URL filters; the
-  prompt inactivity timeout; per-turn usage; thinking levels per model; text generation;
-  usage limits; slash commands in the entry.
+  `watchPromptOutcome`); the stderr harness-failure filter; the prompt inactivity timeout;
+  per-turn usage; text generation; usage limits; a per-workspace scan (`snapshotForCwd`).
 
 ## Proofs
 

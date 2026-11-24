@@ -565,23 +565,24 @@ pub(crate) fn timeline_item_within(
     longest_text(&cut_title(title_chars.max(0)))
 }
 
-/// The last assistant answer of a run, or its failure (TS `subagentResultForRun`).
-pub(crate) fn run_result_text(projection: &Value, run_id: &str) -> Option<String> {
-    let items = projection["turnItems"].as_array()?;
-    items
-        .iter()
-        .rev()
-        .filter(|item| item["runId"] == run_id)
-        .find_map(|item| match item["type"].as_str() {
-            Some("assistant_message") => text(&item["text"]).filter(|t| !t.is_empty()),
-            Some("error") => text(&item["failure"]["message"]),
-            _ => None,
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hook_stopped_run_without_an_answer_reports_the_reason() {
+        let run = json!({"id": "run:c:1", "status": "completed"});
+        let notice = json!({"id": conn_engine::provider_stop_reason_id("run:c:1"),
+            "runId": "run:c:1", "type": "system_notice", "message": "hook said stop"});
+        assert_eq!(
+            conn_engine::delegated_task_result(&json!({"turnItems": [notice]}), &run),
+            "Child task completed without an assistant result.\n\nhook said stop"
+        );
+        assert_eq!(
+            conn_engine::delegated_task_result(&json!({"turnItems": []}), &run),
+            "Child task completed without an assistant result."
+        );
+    }
 
     #[test]
     fn secret_request_timeline_text_includes_the_label_and_every_status() {

@@ -127,6 +127,11 @@ pub struct Flavor {
     /// `supportsImagePrompts`: image blocks go even when `promptCapabilities.image` is
     /// false (Grok accepts them).
     pub(crate) supports_image_prompts: bool,
+    /// The error an agent's error reply becomes when the flavor recognises it; `None` keeps
+    /// the generic failure with the reply's message.
+    pub(crate) rpc_failure: fn(&crate::protocol::RpcError) -> Option<conn_provider::ProviderError>,
+    /// A stdout line that ends the connection with a failure (`connection::Signal`).
+    pub(crate) stdout_signal: Option<crate::connection::Signal>,
 }
 
 /// `extractBackgroundTaskId`, `isBackgroundCommandTool`, `extractBackgroundTaskCompletion`,
@@ -198,13 +203,14 @@ pub(crate) fn provider_failure(message: &str, class: &str, code: Option<i64>) ->
     json!({"class": class, "message": message, "code": code, "retryable": null})
 }
 
-/// `AcpProviderCapabilitiesV2` (`packages/provider-acp/src/server/adapter.ts`).
+/// `AcpProviderCapabilitiesV2` (`packages/provider-acp/src/server/adapter.ts`), without the
+/// summaries this server never asks for. Provider switches carry the history inline.
 pub(crate) fn acp_capabilities() -> Value {
     json!({
         "sessions": {
             "supportsMultipleProviderThreadsPerSession": false,
             "supportsModelSwitchInSession": false,
-            "supportsProviderSwitchingViaHandoff": false,
+            "supportsProviderSwitchingViaHandoff": true,
             "supportsRuntimeModeSwitchInSession": false,
             "pendingRequestsSurviveRestart": false,
         },
@@ -270,11 +276,11 @@ pub(crate) fn acp_capabilities() -> Value {
         "context": {
             "acceptsSystemContext": false,
             "acceptsDeveloperContext": false,
-            "acceptsSyntheticUserContext": false,
+            "acceptsSyntheticUserContext": true,
             "canGenerateSummaries": false,
-            "canConsumeHandoffSummaries": false,
-            "supportsDeltaHandoff": false,
-            "supportsFullThreadHandoff": false,
+            "canConsumeHandoffSummaries": true,
+            "supportsDeltaHandoff": true,
+            "supportsFullThreadHandoff": true,
             "maxRecommendedHandoffChars": null,
         },
         "checkpointing": {
@@ -405,6 +411,8 @@ pub static GROK: Flavor = Flavor {
     background: Some(GROK_BACKGROUND),
     mcp_over_http: false,
     supports_image_prompts: true,
+    rpc_failure: |_| None,
+    stdout_signal: None,
 };
 
 /// `grokLaunchRuntimeMode`.

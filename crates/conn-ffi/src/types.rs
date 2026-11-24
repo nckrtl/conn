@@ -469,6 +469,8 @@ pub enum FfiTimelineEntry {
 /// Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiThreadSnapshot {
+    pub history_cursor: Option<String>,
+    pub server_page: bool,
     pub thread_id: String,
     pub title: Option<String>,
     pub branch: Option<String>,
@@ -657,7 +659,12 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
         .top_level_settled_threads()
         .into_iter()
         .map(|thread| map_thread_summary(shell, thread, true));
-    let threads = active.chain(settled).collect();
+    let children = shell
+        .threads
+        .iter()
+        .filter(|t| ShellState::is_subagent(t) && t.deleted_at.is_none())
+        .map(|t| map_thread_summary(shell, t, ShellState::is_settled(t)));
+    let threads = active.chain(settled).chain(children).collect();
 
     FfiShellSnapshot {
         projects,
@@ -900,6 +907,11 @@ pub(crate) fn build_thread_snapshot(
     let work_groups = build_work_groups(thread);
 
     FfiThreadSnapshot {
+        history_cursor: thread
+            .history_cursor
+            .clone()
+            .filter(|_| thread.has_more_history),
+        server_page: false,
         thread_id: thread.thread_id.clone(),
         title: meta.and_then(|m| m.title.clone()),
         branch: meta.and_then(|m| m.branch.clone()),
@@ -1114,7 +1126,7 @@ pub(crate) fn map_timeline_entry_with_context(
             role,
             status,
             summary,
-            remote_label,
+            remote_child,
             created_at,
             started_at,
             completed_at,
@@ -1128,8 +1140,12 @@ pub(crate) fn map_timeline_entry_with_context(
                 status: (*status).into(),
                 status_label: status_label.to_owned(),
                 settled: subagent_settled(*status),
-                summary: summary.clone(),
-                remote_label: remote_label.clone(),
+                // The iPhone card shows one plain line; the model holds the Markdown.
+                summary: summary
+                    .as_deref()
+                    .map(conn_state::plain_subagent_detail)
+                    .filter(|line| !line.is_empty()),
+                remote_label: remote_child.as_ref().map(|remote| remote.label.clone()),
                 created_at: created_at.clone(),
                 started_at: started_at.clone(),
                 completed_at: completed_at.clone(),
@@ -1494,7 +1510,15 @@ mod tests {
             role: "claudeAgent".to_owned(),
             status: OrchestrationV2TurnItemStatus::Completed,
             summary: Some("All clear".to_owned()),
-            remote_label: Some("vps".to_owned()),
+            remote_child: Some(conn_contract::OrchestrationV2RemoteTaskChild {
+                environment_id: "env-vps".to_owned(),
+                thread_id: "child-1".to_owned(),
+                label: "vps".to_owned(),
+                title: None,
+                run_id: None,
+                stopped_there: None,
+                stop_count: None,
+            }),
             created_at: Some("2026-11-22T10:05:00Z".to_owned()),
             started_at: Some("2026-11-22T10:04:30Z".to_owned()),
             completed_at: Some("2026-11-22T10:05:00Z".to_owned()),
@@ -1791,7 +1815,7 @@ mod tests {
             "lineage": {
                 "rootThreadId": root_thread_id,
                 "parentThreadId": parent_thread_id,
-                "relationshipToParent": null
+                "relationshipToParent": parent_thread_id.map(|_| "subagent")
             },
             "forkedFrom": null,
             "activeProviderThreadId": null,
@@ -2036,8 +2060,9 @@ mod tests {
                 "t-archived",
                 "t-settled-new",
                 "t-settled-old",
+                "t-sub",
             ],
-            "active threads newest-first, then settled threads newest-first, excluding subagents"
+            "active and settled threads precede searchable children"
         );
         assert!(!snap.threads[0].settled);
         assert!(!snap.threads[0].pinned);

@@ -131,6 +131,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         engine,
         environment: None,
         cache: TtlCache::new(32),
+        diffs: TtlCache::new(DIFF_CACHE_CAPACITY),
         identities: TtlCache::new(8),
         endpoints: Endpoints {
             github_rest: Some(endpoint.into()),
@@ -139,6 +140,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         child_env: vec![("PATH", path), ("HOME", dir.0.clone().into_os_string())],
         credentials: Mutex::new(VecDeque::new()),
         next_scope: AtomicU64::new(1),
+        readings: Mutex::new(VecDeque::new()),
         refreshes: watch::channel(0).0,
         linked: watch::channel(0).0,
         monitor: OnceCell::new(),
@@ -147,6 +149,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         providers: conn_provider::ProviderSet::default(),
         text_generators: None,
         guide_runs: guide_writer::Runs::default(),
+        agent_ends: agent_ends::AgentEnds::default(),
     })
 }
 async fn call(table: &MethodTable, tag: &str, input: Value) -> Result<Value, Failure> {
@@ -679,6 +682,7 @@ async fn cancelling_a_write_discards_reads_started_while_it_was_in_flight() {
         repo: "a/b".into(),
         number: Some(7),
         input: reference().to_string(),
+        revision: None,
     };
     panel
         .cache
@@ -1140,6 +1144,598 @@ async fn viewed_mutations_only_evict_the_references_viewed_files() {
     task.abort();
 }
 
+/// Holds one host response: the handler signals its arrival, then waits for the test.
+#[derive(Default)]
+struct Gate {
+    armed: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+impl Gate {
+    async fn pass(&self) {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.arrived.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
+/// A GitHub host whose PR #7 moves through revisions 0, 1, 2 and keeps a viewed mark on `a.ts`.
+#[derive(Default)]
+struct ReviewHost {
+    revision: AtomicU64,
+    a_viewed: std::sync::atomic::AtomicBool,
+    viewed_reads: AtomicU64,
+    diff_reads: AtomicU64,
+    other_diff_reads: AtomicU64,
+    pinned_reads: AtomicU64,
+    detail_gate: Gate,
+    diff_gate: Gate,
+    mutation_gate: Gate,
+}
+fn revision_head(revision: u64) -> String {
+    (revision + 1).to_string().repeat(40)
+}
+fn revision_patch(revision: u64) -> String {
+    format!(
+        "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-base\n+revision {revision}\n"
+    )
+}
+async fn review_api(host: Arc<ReviewHost>) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{get, post},
+    };
+    let (graphql, diffs, pinned) = (host.clone(), host.clone(), host);
+    let router = Router::new()
+        .route("/graphql", post(move |Json(body): Json<Value>| {
+            let host = graphql.clone();
+            async move {
+                let query = text(&body, "query");
+                let data = if query.contains("PullRequestFilesViewed") {
+                    host.viewed_reads.fetch_add(1, Ordering::SeqCst);
+                    let a = if host.a_viewed.load(Ordering::SeqCst) { "VIEWED" } else { "UNVIEWED" };
+                    json!({"repository":{"pullRequest":{"files":{"nodes":[{"path":"a.ts","viewerViewedState":a},{"path":"b.ts","viewerViewedState":"UNVIEWED"}],"pageInfo":{"hasNextPage":false}}}}})
+                } else if query.contains("SetFileViewed") {
+                    match body.pointer("/variables/path").and_then(Value::as_str) {
+                        Some("b.ts") => {
+                            return Json(json!({"errors":[{"message":"Second mutation refused"}]}));
+                        }
+                        Some("c.ts") => host.mutation_gate.pass().await,
+                        _ => host.a_viewed.store(
+                            body.pointer("/variables/viewed") == Some(&json!(true)),
+                            Ordering::SeqCst,
+                        ),
+                    }
+                    json!({"markFileAsViewed":{"clientMutationId":null}})
+                } else if query.contains("PullRequestNodeId") {
+                    json!({"repository":{"pullRequest":{"id":"PR7"}}})
+                } else {
+                    let revision = host.revision.load(Ordering::SeqCst);
+                    host.detail_gate.pass().await;
+                    let mut pr: Value = serde_json::from_str(include_str!(
+                        "../../../../conn-source-control/src/pull_requests/sample.json"
+                    ))
+                    .expect("sample");
+                    pr["headRefOid"] = json!(revision_head(revision));
+                    pr["updatedAt"] = json!(format!("2026-11-2{revision}T15:00:00Z"));
+                    json!({"viewer":{"login":"reader"},"repository":{"pullRequest":pr,"viewerPermission":"WRITE"}})
+                };
+                Json(json!({"data":data}))
+            }
+        }))
+        .route("/user", get(|| async { Json(json!({"id":12,"login":"reader"})) }))
+        .route(
+            "/repos/a/b/pulls/{number}",
+            get(move |Path(number): Path<u32>, headers: axum::http::HeaderMap| {
+                let host = diffs.clone();
+                async move {
+                    let accept = headers.get("accept").and_then(|v| v.to_str().ok());
+                    if accept != Some("application/vnd.github.diff") {
+                        let head = revision_head(host.revision.load(Ordering::SeqCst));
+                        return json!({"base":{"sha":"0".repeat(40)},"head":{"sha":head}})
+                            .to_string();
+                    }
+                    if number != 7 {
+                        host.other_diff_reads.fetch_add(1, Ordering::SeqCst);
+                        return revision_patch(80);
+                    }
+                    host.diff_reads.fetch_add(1, Ordering::SeqCst);
+                    let revision = host.revision.load(Ordering::SeqCst);
+                    host.diff_gate.pass().await;
+                    revision_patch(revision)
+                }
+            }),
+        )
+        .route(
+            "/repos/a/b/commits/{sha}",
+            get(move || {
+                pinned.pinned_reads.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Json(json!({"files":[{"filename":"a.ts","status":"modified","patch":"@@ -1 +1 @@\n-base\n+pinned\n"}]}))
+                }
+            }),
+        )
+        .route(
+            "/repos/a/b/pulls/{number}/files",
+            get(|| async { Json(json!([{"filename":"a.ts","status":"modified"}])) }),
+        )
+        .route(
+            "/repos/a/b/contents/{*path}",
+            get(|axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
+                format!("contents at {}", query.unwrap_or_default())
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("stub API");
+    });
+    (base, task)
+}
+fn patch_of(read: Result<Value, Failure>) -> String {
+    text(&read.expect("diff"), "patch").to_owned()
+}
+
+/// Pass 11.1: T3 keys an unpinned diff on the newest `updatedAt` its summary and detail
+/// reads have seen (`readDiff`), so a new head is never answered with the old patch.
+#[tokio::test]
+async fn an_unpinned_diff_follows_the_newest_observed_revision() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut strict = reference();
+    strict["allowStale"] = json!(false);
+    let mut fresh_detail = reference();
+    fresh_detail["method"] = json!("detail");
+    let mut pinned = reference();
+    pinned["commit"] = json!("c".repeat(40));
+    let mut other = reference();
+    other["number"] = json!(8);
+
+    let detail = panel.call("detail", reference()).await.expect("detail A");
+    assert_eq!(detail["headSha"], revision_head(0));
+    for input in [pinned.clone(), other.clone()] {
+        panel.call("diff", input).await.expect("warm diff");
+    }
+    // A diff read and a detail read both reach the host at revision A and are held there.
+    host.diff_gate.armed.store(true, Ordering::SeqCst);
+    let mut late_diff = Box::pin(panel.call("diff", reference()));
+    tokio::select! {
+        () = host.diff_gate.arrived.notified() => {},
+        read = &mut late_diff => panic!("diff ended before the gate: {read:?}"),
+    }
+    host.detail_gate.armed.store(true, Ordering::SeqCst);
+    let mut late_detail = Box::pin(panel.mcp_call("fresh", fresh_detail));
+    tokio::select! {
+        () = host.detail_gate.arrived.notified() => {},
+        read = &mut late_detail => panic!("detail ended before the gate: {read:?}"),
+    }
+
+    host.revision.store(1, Ordering::SeqCst);
+    let detail = panel.call("detail", strict).await.expect("detail B");
+    assert_eq!(detail["headSha"], revision_head(1));
+    host.diff_gate.release.notify_one();
+    assert_eq!(
+        patch_of(late_diff.await),
+        revision_patch(0),
+        "a read that began before B still answers its own caller"
+    );
+    host.detail_gate.release.notify_one();
+    assert_eq!(
+        late_detail.await.expect("late detail")["headSha"],
+        revision_head(0),
+        "the older observation arrives last"
+    );
+
+    let after = patch_of(panel.call("diff", reference()).await);
+    let again = patch_of(panel.call("diff", reference()).await);
+    println!(
+        "pass11.1 after detail B: patch {after:?}, host diff reads {}",
+        host.diff_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        (after, again, host.diff_reads.load(Ordering::SeqCst)),
+        (revision_patch(1), revision_patch(1), 2),
+        "B's patch without invalidation; the late A read and A observation reinstate nothing; \
+         a repeat at B stays warm"
+    );
+    for input in [pinned, other] {
+        panel.call("diff", input).await.expect("warm diff");
+    }
+    assert_eq!(
+        (
+            host.pinned_reads.load(Ordering::SeqCst),
+            host.other_diff_reads.load(Ordering::SeqCst)
+        ),
+        (1, 1),
+        "a pinned commit and another PR keep their diffs"
+    );
+
+    host.revision.store(2, Ordering::SeqCst);
+    let summary = panel.call("summary", reference()).await.expect("summary C");
+    assert_eq!(summary["updatedAt"], "2026-11-22T15:00:00Z");
+    let after = patch_of(panel.call("diff", reference()).await);
+    println!("pass11.1 after summary C: patch {after:?}");
+    assert_eq!(
+        (after, host.diff_reads.load(Ordering::SeqCst)),
+        (revision_patch(2), 3),
+        "a fresh summary moves the diff on too"
+    );
+    task.abort();
+}
+
+/// Expanding a hunk reads the head the PR shows now: T3 never caches `diffFileContents`
+/// (`readDiffFileContents`), so a push cannot pair B's patch with A's contents.
+#[tokio::test]
+async fn unpinned_diff_file_contents_follow_a_push() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut file = reference();
+    file["changeType"] = json!("modified");
+    file["oldPath"] = json!("a.ts");
+    file["newPath"] = json!("a.ts");
+
+    let at_a = panel
+        .call("diffFileContents", file.clone())
+        .await
+        .expect("contents A");
+    assert_eq!(
+        at_a["newContents"],
+        format!("contents at ref={}", revision_head(0))
+    );
+
+    host.revision.store(1, Ordering::SeqCst);
+    let mut strict = reference();
+    strict["allowStale"] = json!(false);
+    let detail = panel.call("detail", strict).await.expect("detail B");
+    assert_eq!(detail["headSha"], revision_head(1));
+    let at_b = panel
+        .call("diffFileContents", file)
+        .await
+        .expect("contents B");
+    assert_eq!(
+        at_b["newContents"],
+        format!("contents at ref={}", revision_head(1)),
+        "expansion reads the head the PR detail reports"
+    );
+    task.abort();
+}
+
+/// Pass 11.1: the guide's detail read records the head it saw, as T3 routes it through the
+/// PR detail service, so the next diff never serves an older head than the guide showed.
+#[tokio::test]
+async fn the_guides_detail_read_moves_the_http_diff_on() {
+    use conn_source_control::http::{self, HttpRequest, Method};
+    let host = Arc::new(ReviewHost::default());
+    let (base, api_task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let engine = shell(&dir.0);
+    let deps = Deps {
+        engine: Some(engine.clone()),
+        ..Deps::default()
+    };
+    assert!(
+        deps.pull_requests.0.set(panel(engine, &dir, &base)).is_ok(),
+        "inject shared service"
+    );
+    let mut table = MethodTable::new();
+    register(&mut table, &deps);
+    let table = Arc::new(table);
+    let auth = crate::auth::AuthStore::in_memory();
+    let session = auth
+        .issue_session(crate::auth::SessionRequest {
+            scopes: vec!["orchestration:read".into()],
+            label: None,
+            subject: None,
+            ttl_ms: crate::auth::SESSION_TTL_MS,
+        })
+        .expect("session");
+    let state = crate::AppState {
+        table: table.clone(),
+        auth,
+        descriptor: crate::environment::fixed_descriptor(json!({})),
+        engine: deps.engine.clone(),
+        deps,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind server");
+    let url = format!(
+        "http://{}/api/pull-requests/diff",
+        listener.local_addr().expect("addr")
+    );
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, crate::http::router(state))
+            .await
+            .expect("server");
+    });
+    let http_patch = || async {
+        let response = http::send(
+            HttpRequest::new(Method::Post, url.clone())
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", session.token))
+                .body(reference().to_string().into_bytes()),
+        )
+        .await
+        .expect("HTTP diff");
+        assert_eq!(response.status, 200, "{}", response.text());
+        text(
+            &serde_json::from_slice::<Value>(&response.body).expect("JSON"),
+            "patch",
+        )
+        .to_owned()
+    };
+
+    let summary = call(&table, "pullRequests.summary", reference())
+        .await
+        .expect("summary A");
+    assert_eq!(summary["updatedAt"], "2026-11-20T15:00:00Z");
+    assert_eq!(http_patch().await, revision_patch(0));
+
+    host.revision.store(1, Ordering::SeqCst);
+    let guide = call(&table, "pullRequests.reviewGuide", reference())
+        .await
+        .expect("guide");
+    assert_eq!(guide["currentHeadSha"], revision_head(1));
+    let after = http_patch().await;
+    println!(
+        "pass11.1 after guide B: patch {after:?}, host diff reads {}",
+        host.diff_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        (after, host.diff_reads.load(Ordering::SeqCst)),
+        (revision_patch(1), 2),
+        "the guide showed head B, so the diff is B's"
+    );
+    server_task.abort();
+    api_task.abort();
+}
+
+/// Pass 11.2: T3 bumps the viewed-files epoch when a write ends, on failure too, so a
+/// partly applied batch shows what the host accepted. Other reads stay cached.
+#[tokio::test]
+async fn a_partly_applied_viewed_batch_shows_the_marks_the_host_accepted() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut other = reference();
+    other["number"] = json!(8);
+    let marks = |read: Result<Value, Failure>| {
+        let read = read.expect("viewed files");
+        (
+            text(&read["files"][0], "state").to_owned(),
+            text(&read["files"][1], "state").to_owned(),
+        )
+    };
+    let unviewed = ("unviewed".to_owned(), "unviewed".to_owned());
+    let a_viewed = ("viewed".to_owned(), "unviewed".to_owned());
+
+    assert_eq!(
+        marks(panel.call("filesViewed", reference()).await),
+        unviewed
+    );
+    panel
+        .call("filesViewed", other.clone())
+        .await
+        .expect("warm");
+    panel.call("diff", reference()).await.expect("warm diff");
+
+    let mut batch = reference();
+    batch["files"] = json!([{"path":"a.ts","viewed":true},{"path":"b.ts","viewed":true}]);
+    let error = panel
+        .call("setFilesViewed", batch)
+        .await
+        .expect_err("the host refuses b.ts");
+    let message = failure_message(&error);
+    assert!(message.contains("Second mutation refused"), "{message}");
+    assert!(
+        host.a_viewed.load(Ordering::SeqCst),
+        "the host accepted a.ts"
+    );
+    let after = marks(panel.call("filesViewed", reference()).await);
+    println!(
+        "pass11.2 after partial write: {after:?}, error {message:?}, host reads {}",
+        host.viewed_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        (after, host.viewed_reads.load(Ordering::SeqCst)),
+        (a_viewed.clone(), 3),
+        "one new host read shows a.ts viewed and b.ts not"
+    );
+    panel.call("filesViewed", other).await.expect("warm");
+    panel.call("diff", reference()).await.expect("warm diff");
+    assert_eq!(
+        (
+            host.viewed_reads.load(Ordering::SeqCst),
+            host.diff_reads.load(Ordering::SeqCst)
+        ),
+        (3, 1),
+        "another PR's marks and the diff stay cached"
+    );
+
+    // Cancel a batch after the host applied its first file.
+    host.mutation_gate.armed.store(true, Ordering::SeqCst);
+    let mut batch = reference();
+    batch["files"] = json!([{"path":"a.ts","viewed":false},{"path":"c.ts","viewed":true}]);
+    let mut write = Box::pin(panel.call("setFilesViewed", batch));
+    tokio::select! {
+        () = host.mutation_gate.arrived.notified() => {},
+        result = &mut write => panic!("write ended before the gate: {result:?}"),
+    }
+    assert!(!host.a_viewed.load(Ordering::SeqCst), "a.ts was unticked");
+    assert_eq!(
+        marks(panel.call("filesViewed", reference()).await),
+        a_viewed,
+        "cached while the write runs"
+    );
+    drop(write);
+    let after = marks(panel.call("filesViewed", reference()).await);
+    println!("pass11.2 after cancellation: {after:?}");
+    assert_eq!(
+        (after, host.viewed_reads.load(Ordering::SeqCst)),
+        (unviewed, 4),
+        "cancellation invalidates the marks too"
+    );
+
+    let mut tick = reference();
+    tick["files"] = json!([{"path":"a.ts","viewed":true}]);
+    panel.call("setFilesViewed", tick).await.expect("tick");
+    assert_eq!(
+        marks(panel.call("filesViewed", reference()).await),
+        a_viewed,
+        "a successful write shows at once"
+    );
+    assert_eq!(
+        host.diff_reads.load(Ordering::SeqCst),
+        1,
+        "viewed writes never evict the diff"
+    );
+    task.abort();
+}
+
+/// Records a fresh summary reading for each PR number, as the panel sees new PRs.
+async fn observe_prs(panel: &Arc<Panel>, numbers: std::ops::RangeInclusive<u32>) {
+    for number in numbers {
+        let mut input = reference();
+        input["method"] = json!("summary");
+        input["number"] = json!(number);
+        panel.mcp_call("fresh", input).await.expect("fresh summary");
+    }
+}
+
+/// T3's pinned diffs carry no revision, so no newly seen PR evicts them (`readDiff`).
+#[tokio::test]
+async fn a_pinned_diff_stays_cached_while_new_prs_are_observed() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut pinned = reference();
+    pinned["commit"] = json!("c".repeat(40));
+
+    panel.call("summary", reference()).await.expect("summary");
+    panel
+        .call("diff", pinned.clone())
+        .await
+        .expect("pinned diff");
+    observe_prs(&panel, 100..=355).await;
+    panel.call("diff", pinned).await.expect("pinned diff");
+    let reads = host.pinned_reads.load(Ordering::SeqCst);
+    println!("round 2 pinned: host reads {reads} after 256 new PRs");
+    assert_eq!(reads, 1, "the second read of the same SHA is cached");
+    task.abort();
+}
+
+/// T3's `lastGoodSummary` makes a recorded reading the most recent entry, so a PR read
+/// again after many others stays held, and a late, older detail read cannot replace it.
+#[tokio::test]
+async fn a_late_older_read_cannot_replace_a_recently_recorded_reading() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut strict = reference();
+    strict["allowStale"] = json!(false);
+    let mut fresh = reference();
+    fresh["method"] = json!("detail");
+
+    // A detail read reaches the host at revision A and is held there.
+    host.detail_gate.armed.store(true, Ordering::SeqCst);
+    let mut late_detail = Box::pin(panel.mcp_call("fresh", fresh.clone()));
+    tokio::select! {
+        () = host.detail_gate.arrived.notified() => {},
+        read = &mut late_detail => panic!("detail ended before the gate: {read:?}"),
+    }
+    host.revision.store(1, Ordering::SeqCst);
+    let detail = panel.call("detail", strict).await.expect("detail B");
+    assert_eq!(detail["headSha"], revision_head(1));
+    assert_eq!(
+        patch_of(panel.call("diff", reference()).await),
+        revision_patch(1)
+    );
+
+    observe_prs(&panel, 100..=354).await;
+    fresh["method"] = json!("summary");
+    panel
+        .mcp_call("fresh", fresh)
+        .await
+        .expect("summary B again");
+    observe_prs(&panel, 355..=355).await;
+    host.detail_gate.release.notify_one();
+    assert_eq!(
+        late_detail.await.expect("late detail")["headSha"],
+        revision_head(0),
+        "the older observation arrives last"
+    );
+
+    let after = patch_of(panel.call("diff", reference()).await);
+    let reads = host.diff_reads.load(Ordering::SeqCst);
+    println!("round 2 late read: patch {after:?}, host diff reads {reads}");
+    assert_eq!(
+        (after, reads),
+        (revision_patch(1), 1),
+        "B stays the held reading, so B's diff stays warm"
+    );
+    task.abort();
+}
+
+/// T3's diff cache keeps the newest patches that fit its 32 MiB UTF-16 budget.
+#[tokio::test]
+async fn the_diff_cache_keeps_the_newest_patches_within_t3s_budget() {
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, "http://127.0.0.1:9");
+    let patch = "x".repeat(6 * 1024 * 1024);
+    let diff = |number| ReadKey {
+        method: "diff".into(),
+        number: Some(number),
+        ..ReadKey::default()
+    };
+    for number in 1..=3 {
+        panel
+            .diffs
+            .get_with(
+                diff(number),
+                |_| Duration::from_secs(60),
+                || async { Ok(json!({"patch": patch})) },
+            )
+            .await
+            .expect("diff");
+        panel
+            .diffs
+            .evict_beyond(DIFF_PATCH_BUDGET_BYTES, patch_weight);
+    }
+    let held = |number| {
+        panel.diffs.get_with(
+            diff(number),
+            |_| Duration::from_secs(60),
+            || async { Ok(json!({"patch": "reread"})) },
+        )
+    };
+    assert_ne!(
+        text(&held(3).await.expect("3"), "patch"),
+        "reread",
+        "newest kept"
+    );
+    assert_ne!(
+        text(&held(2).await.expect("2"), "patch"),
+        "reread",
+        "fits in budget"
+    );
+    assert_eq!(
+        text(&held(1).await.expect("1"), "patch"),
+        "reread",
+        "oldest evicted"
+    );
+}
+
 #[tokio::test]
 async fn list_and_stats_share_reads_until_refresh() {
     let dir = TestDir::new();
@@ -1473,6 +2069,17 @@ fn observed_threads_evict_the_oldest_observation_and_keep_completion_together() 
 
 /// A stub GitHub whose pull request 7 has the checks and comments in `state`.
 async fn watched_api(state: Arc<Mutex<Value>>) -> (String, tokio::task::JoinHandle<()>) {
+    watched_api_held(state, None).await
+}
+
+/// A host read held at `entered` until the semaphore gives a permit.
+type HostHold = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>);
+
+/// [`watched_api`] whose pull request reads wait on `hold`, as a slow host does.
+async fn watched_api_held(
+    state: Arc<Mutex<Value>>,
+    hold: Option<HostHold>,
+) -> (String, tokio::task::JoinHandle<()>) {
     use axum::{Json, Router, routing::get};
     let router = Router::new()
         .route("/user", get(|| async { Json(json!({"id": 12, "login": "nick"})) }))
@@ -1480,13 +2087,29 @@ async fn watched_api(state: Arc<Mutex<Value>>) -> (String, tokio::task::JoinHand
             "/graphql",
             axum::routing::post(move |Json(body): Json<Value>| {
                 let state = state.clone();
+                let hold = hold.clone();
                 async move {
                     let query = text(&body, "query");
+                    if let Some((entered, permits)) = hold
+                        && !query.contains("RoutingIdentityViewer")
+                    {
+                        entered.notify_one();
+                        permits.acquire().await.expect("permit").forget();
+                    }
                     let now = state.lock().expect("state").clone();
                     let mut pr: Value = serde_json::from_str(include_str!(
                         "../../../../conn-source-control/src/pull_requests/sample.json"
                     ))
                     .expect("sample");
+                    if now["merged"] == true {
+                        pr["state"] = json!("MERGED");
+                        pr["mergedAt"] = json!("2026-11-20T12:00:00Z");
+                        pr["mergeCommit"] = json!({"oid": "3b2f958603a51d8c42c4ede02eee7b8cb310b2d9"});
+                        pr["mergedBy"] = json!({"__typename": "User", "login": "octocat"});
+                    }
+                    if now["unavailable"] == true {
+                        return Json(json!({"errors": [{"message": "Something went wrong"}]}));
+                    }
                     pr["headRefOid"] = now["head"].clone();
                     pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"] =
                         json!({"nodes": now["contexts"], "pageInfo": {"hasNextPage": false, "endCursor": null}});
@@ -1544,7 +2167,7 @@ async fn a_watched_pull_request_wakes_its_thread_when_its_checks_or_comments_cha
     };
     shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread(&watch)]);
     let panel = panel(shell.clone(), &dir, &base);
-    let mut watcher = watches::Watcher::new(panel);
+    let mut watcher = watches::Watcher::new(panel.clone());
 
     // The first read is the baseline: the watch remembers the head, nothing wakes.
     watcher.pass(None).await;
@@ -1601,16 +2224,332 @@ async fn a_watched_pull_request_wakes_its_thread_when_its_checks_or_comments_cha
         "a quiet pull request is left alone"
     );
 
-    // A merged pull request ends the watch without a wake.
-    {
-        let mut snapshot = shell.snapshot.lock().expect("snapshot");
-        snapshot["threads"][0]["pullRequests"][0]["snapshot"] = json!({"state": "merged"});
-    }
+    // Someone else merged it: one wake that names the merge, and the watch ends. A new loop,
+    // as a quiet pull request is read again only after `QUIET_REREAD_MS`.
+    state.lock().expect("state")["merged"] = json!(true);
+    let mut watcher = watches::Watcher::new(panel.clone());
     watcher.pass(None).await;
-    let ended = shell.syncs.lock().expect("syncs").pop().expect("end sync");
-    assert_eq!(ended["watch"], Value::Null);
-    assert!(ended.get("wake").is_none());
+    let merged = shell
+        .syncs
+        .lock()
+        .expect("syncs")
+        .pop()
+        .expect("merge sync");
+    assert_eq!(merged["watch"], Value::Null);
+    assert_eq!(
+        merged["wake"]["text"],
+        format!(
+            "Pull request #7 (https://github.com/a/b/pull/7) was merged into {} by octocat as 3b2f958, so Conn stopped watching it.",
+            merged_base().as_str().unwrap_or_default()
+        )
+    );
+    assert_eq!(
+        merged["wake"]["notification"],
+        json!({"source": {"kind": "monitor"}, "outcome": "completed",
+            "summary": "#7: merged, stopped watching"})
+    );
+    // The engine cleared the watch: the next sweep sends nothing more.
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread(&Value::Null)]);
+    watcher.pass(None).await;
+    assert!(shell.syncs.lock().expect("syncs").is_empty());
+
+    // A merged link the host cannot read ends from its snapshot, with the wake.
+    {
+        state.lock().expect("state")["unavailable"] = json!(true);
+        let mut snapshot = shell.snapshot.lock().expect("snapshot");
+        snapshot["threads"] = json!([thread(&woke["watch"])]);
+        snapshot["threads"][0]["pullRequests"][0]["snapshot"] =
+            json!({"state": "merged", "baseBranch": "main"});
+    }
+    let mut cold = watches::Watcher::new(panel.clone());
+    cold.pass(None).await;
+    let from_snapshot = shell
+        .syncs
+        .lock()
+        .expect("syncs")
+        .pop()
+        .expect("snapshot end");
+    assert_eq!(from_snapshot["watch"], Value::Null);
+    assert_eq!(
+        from_snapshot["wake"]["text"],
+        "Pull request #7 (https://github.com/a/b/pull/7) was merged into main, so Conn stopped watching it."
+    );
+    state.lock().expect("state")["unavailable"] = json!(false);
+
+    // The thread's own agent merged it: the read right after its command ends it quietly.
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread(&woke["watch"])]);
+    let closed = || {
+        conn_source_control::close_commands::closed_by("gh pr merge 7 --squash")
+            .expect("a close command")
+    };
+    let ends = &panel.agent_ends;
+    let mut own = watches::Watcher::new(panel.clone());
+    ends.command("t1", "cmd-1", closed(), None, None);
+    ends.command("t1", "cmd-1", closed(), None, Some(true));
+    own.read_after_agents().await;
+    let quiet = shell
+        .syncs
+        .lock()
+        .expect("syncs")
+        .pop()
+        .expect("own merge sync");
+    assert_eq!(quiet["watch"], Value::Null);
+    assert!(quiet.get("wake").is_none(), "{quiet}");
+    // The agent's merge is forgotten once read: a later external end wakes again.
+    own.pass(None).await;
+    assert!(
+        shell
+            .syncs
+            .lock()
+            .expect("syncs")
+            .pop()
+            .is_some_and(|s| s.get("wake").is_some()),
+        "no agent command holds the watch any more"
+    );
+
+    // A merge command that failed ended nothing itself: the merge found after it wakes.
+    let mut failed = watches::Watcher::new(panel.clone());
+    ends.command("t1", "cmd-2", closed(), None, Some(false));
+    failed.read_after_agents().await;
+    let woken = shell
+        .syncs
+        .lock()
+        .expect("syncs")
+        .pop()
+        .expect("failed merge sync");
+    assert!(woken.get("wake").is_some(), "{woken}");
+
+    // Gate finding 3: a merge through the MCP tool is the calling thread's own; an
+    // auto-merge that lands later still wakes.
+    let mcp = |phase: &str| {
+        json!({"threadId": "t1", "itemId": "mcp-merge:1", "host": "github.com",
+            "repository": "a/b", "numbers": [7], "phase": phase})
+    };
+    panel
+        .mcp_call("agentMerge", mcp("running"))
+        .await
+        .expect("running");
+    panel
+        .mcp_call("agentMerge", mcp("merged"))
+        .await
+        .expect("merged");
+    let mut tool = watches::Watcher::new(panel.clone());
+    tool.read_after_agents().await;
+    let quiet = shell
+        .syncs
+        .lock()
+        .expect("syncs")
+        .pop()
+        .expect("tool merge sync");
+    assert!(quiet.get("wake").is_none(), "{quiet}");
+    tool.pass(None).await;
+    assert!(
+        shell
+            .syncs
+            .lock()
+            .expect("syncs")
+            .pop()
+            .is_some_and(|s| s.get("wake").is_some()),
+        "a later merge, as an auto-merge, wakes"
+    );
     task.abort();
+}
+
+/// The engine's command feed reaches the watch loop as T3's reactor reads it: a merge command
+/// owns its pull request while it runs, asks for one read when it ends (a failure reported as
+/// completed counts as failed and drops it), a run's end drops what still runs, and other
+/// commands are skipped.
+#[tokio::test]
+async fn agent_merge_commands_reach_the_watch_loop() {
+    let (feed, events) = tokio::sync::mpsc::channel(16);
+    let ends = agent_ends::AgentEnds::default();
+    let task = tokio::spawn(watches::agent_events(events, ends.clone()));
+    let item = |id: &str, input: &str, status: &str, output: &str| {
+        (
+            "t1".to_owned(),
+            json!({"type": "turn-item.updated", "payload": {"id": id,
+            "type": "command_execution", "input": input, "status": status, "output": output}}),
+        )
+    };
+    for event in [
+        item("ls", "ls -la", "completed", ""),
+        item("m1", "gh pr merge 7 --squash", "running", ""),
+        item("m1", "gh pr merge 7 --squash", "completed", "Merged"),
+        item("m1", "gh pr merge 7 --squash", "completed", "Merged"),
+        item(
+            "m2",
+            "gh pr merge 8",
+            "completed",
+            "not mergeable\n<exited with exit code 1>",
+        ),
+        item("m3", "gh pr close 9", "running", ""),
+        (
+            "t1".to_owned(),
+            json!({"type": "run.updated", "payload": {"status": "completed"}}),
+        ),
+    ] {
+        feed.send(event).await.expect("feed");
+    }
+    drop(feed);
+    task.await.expect("feed task");
+    let reads = ends.take_reads();
+    assert_eq!(
+        reads,
+        [("t1".to_owned(), vec!["m1".to_owned(), "m2".to_owned()])]
+    );
+    let repo = "github.com/a/b";
+    assert!(ends.ends("t1", repo, 7), "m1 waits for its read");
+    assert!(!ends.ends("t1", repo, 8), "a failed merge owns nothing");
+    assert!(
+        !ends.ends("t1", repo, 9),
+        "the run ended while m3 still ran"
+    );
+}
+
+/// Round-2 gate finding 7: the feed never waits on the loop. With no read taken, many ended
+/// merges still let a later command apply.
+#[tokio::test]
+async fn ended_merges_never_block_the_feed() {
+    let (feed, events) = tokio::sync::mpsc::channel(16);
+    let ends = agent_ends::AgentEnds::default();
+    let task = tokio::spawn(watches::agent_events(events, ends.clone()));
+    for i in 0..200 {
+        let event = json!({"type": "turn-item.updated", "payload": {"id": format!("m{i}"),
+            "type": "command_execution", "input": format!("gh pr merge {i}"),
+            "status": "completed", "output": "Merged"}});
+        feed.send(("t1".to_owned(), event)).await.expect("feed");
+    }
+    let running = json!({"type": "turn-item.updated", "payload": {"id": "late",
+        "type": "command_execution", "input": "gh pr merge 300", "status": "running"}});
+    feed.send(("t2".to_owned(), running)).await.expect("feed");
+    drop(feed);
+    task.await.expect("feed task");
+    assert!(ends.ends("t2", "github.com/a/b", 300));
+    assert_eq!(ends.take_reads()[0].1.len(), 200);
+}
+
+/// Pass-4 gate finding 4: the feed remembers every ended command for its whole life, as T3's
+/// `finished`, so a late update of the first of 1,025 merges is not taken for a new merge.
+#[tokio::test]
+async fn an_ended_merge_is_never_claimed_again() {
+    // Room for one event: a send returns once the feed has applied the event before it.
+    let (feed, events) = tokio::sync::mpsc::channel(1);
+    let ends = agent_ends::AgentEnds::default();
+    let task = tokio::spawn(watches::agent_events(events, ends.clone()));
+    let item = |id: String, input: String| {
+        let event = json!({"type": "turn-item.updated", "payload": {"id": id,
+            "type": "command_execution", "input": input, "status": "completed",
+            "output": "Merged"}});
+        ("t1".to_owned(), event)
+    };
+    for i in 0..1025 {
+        feed.send(item(format!("m{i}"), format!("gh pr merge {i}")))
+            .await
+            .expect("feed");
+    }
+    for _ in 0..2 {
+        feed.send(item("ls".into(), "ls".into()))
+            .await
+            .expect("feed");
+    }
+    for (thread, items) in ends.take_reads() {
+        ends.read_done(&thread, &items);
+    }
+    assert!(
+        !ends.ends("t1", "github.com/a/b", 0),
+        "released by its read"
+    );
+    feed.send(item("m0".into(), "gh pr merge 0".into()))
+        .await
+        .expect("feed");
+    drop(feed);
+    task.await.expect("feed task");
+    assert!(
+        !ends.ends("t1", "github.com/a/b", 0),
+        "a late update of an ended merge"
+    );
+    assert!(ends.take_reads().is_empty());
+}
+
+/// Gate finding 1: ownership changes apply while a host read is held, in both orders: an
+/// agent's merge that starts during a slow read keeps the end quiet, and a merge command that
+/// fails during it lets the end wake.
+#[tokio::test]
+async fn agent_merges_apply_during_a_held_host_read() {
+    for failed in [false, true] {
+        let dir = TestDir::new();
+        let shell = shell(&dir.0);
+        let state = Arc::new(Mutex::new(json!({
+            "head": "1111111111111111111111111111111111111111",
+            "contexts": [], "comments": [], "merged": true,
+        })));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let (base, api) = watched_api_held(state, Some((entered.clone(), permits.clone()))).await;
+        let started = "2026-11-16T00:00:00.000Z";
+        shell.snapshot.lock().expect("snapshot")["threads"] = json!([{"id": "t1",
+            "projectId": "p1", "title": "T", "settledAt": null, "settledOverride": null,
+            "lineage": {"relationshipToParent": null},
+            "pullRequests": [{"host": "github.com", "repository": "a/b", "number": 7,
+                "url": "https://github.com/a/b/pull/7", "source": "agent", "linkedAt": started,
+                "snapshot": null, "stack": null,
+                "watch": {"startedAt": started, "headSha": null, "failedChecks": [],
+                    "passed": false, "passedChecks": [], "conflicting": false,
+                    "remarksThrough": started, "remarkIds": [], "wakes": 0}}]}]);
+        let panel = panel(shell.clone(), &dir, &base);
+        let ends = panel.agent_ends.clone();
+        let merge = |status: &str, output: &str| {
+            (
+                "t1".to_owned(),
+                json!({"type": "turn-item.updated", "payload": {"id": "cmd",
+                    "type": "command_execution", "input": "gh pr merge 7", "status": status,
+                    "output": output}}),
+            )
+        };
+        if failed {
+            ends.command(
+                "t1",
+                "cmd",
+                conn_source_control::close_commands::closed_by("gh pr merge 7").expect("close"),
+                None,
+                None,
+            );
+        }
+        let mut watcher = watches::Watcher::new(panel.clone());
+        let sweep = tokio::spawn(async move {
+            watcher.pass(None).await;
+        });
+        entered.notified().await;
+        // The command feed runs while the host read is held.
+        let (feed, events) = tokio::sync::mpsc::channel(4);
+        let applied = tokio::spawn(watches::agent_events(events, ends.clone()));
+        let event = if failed {
+            merge("completed", "<exited with exit code 1>")
+        } else {
+            merge("running", "")
+        };
+        feed.send(event).await.expect("feed");
+        drop(feed);
+        applied.await.expect("feed task");
+        permits.add_permits(8);
+        sweep.await.expect("sweep");
+        let ended = shell.syncs.lock().expect("syncs").pop().expect("end sync");
+        assert_eq!(ended["watch"], Value::Null);
+        assert_eq!(
+            ended.get("wake").is_some(),
+            failed,
+            "failed: {failed}: {ended}"
+        );
+        api.abort();
+    }
+}
+
+fn merged_base() -> Value {
+    let pr: Value = serde_json::from_str(include_str!(
+        "../../../../conn-source-control/src/pull_requests/sample.json"
+    ))
+    .expect("sample");
+    pr["baseRefName"].clone()
 }
 
 /// A stub GitHub for the link sweep. Pull request 7 (`sample.json`, head `feature`) lives in

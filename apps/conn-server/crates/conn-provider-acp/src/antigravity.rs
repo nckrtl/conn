@@ -22,6 +22,16 @@ const DISPLAY_NAME: &str = "Antigravity";
 pub(crate) const DEFAULT_MODEL: &str = "antigravity-default";
 /// `OPEN_MODEL_ACCESS_RELEASE`: from here on the agent offers every model to any client name.
 const OPEN_MODEL_ACCESS_RELEASE: [u64; 3] = [1, 5, 1];
+/// `ANTIGRAVITY_AUTH_STDOUT_PREFIX`: the line `agy` prints with a sign-in URL.
+pub(crate) const AUTH_STDOUT_PREFIX: &str =
+    "Open the following link to authenticate the ACP server: ";
+/// `ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE`: a sign-in URL with no sign-in flow to take it.
+pub(crate) const SIGN_IN_REQUIRED_MESSAGE: &str =
+    "Sign in to Antigravity in Settings before you continue.";
+/// `parseAntigravityAuthorizationUrl`'s failure text.
+const INVALID_AUTH_URL: &str = "Antigravity returned an invalid Google sign-in URL.";
+/// `maxAuthorizationUrlLength`.
+const MAX_AUTH_URL: usize = 16_384;
 /// `ANTIGRAVITY_AUTH_BROWSER_MARKER`: what our browser helper writes to stderr.
 pub const AUTH_BROWSER_MARKER: &str = "__T3_ANTIGRAVITY_AUTH_URL__";
 /// The subcommand of this server that stands in for a browser (`BROWSER`).
@@ -149,11 +159,18 @@ impl AntigravitySettings {
         }
     }
 
-    fn uses_credentials(&self) -> bool {
+    pub(crate) fn uses_credentials(&self) -> bool {
         matches!(
             self.auth_method.as_str(),
             "gemini-api-key" | "agent-platform"
         )
+    }
+
+    /// The in-app sign-in this server serves: a check of a configured key (a Gemini API key,
+    /// or the AI router's key). Agent Platform without a key would sign in with Application
+    /// Default Credentials, outside the key-only rule (Nick, 2026-11-20), so it gets none.
+    pub(crate) fn has_key_sign_in(&self) -> bool {
+        self.uses_credentials() && !self.api_key.trim().is_empty()
     }
 }
 
@@ -162,16 +179,13 @@ impl AntigravitySettings {
 /// `AntigravityInstallation.resolve` for an agent this server did not install: the configured
 /// path, or `agy` on `PATH`. Only the `agy` CLI (1.5.0+, `agy acp`) is supported; T3's managed
 /// runtime with its `localharness_external` sibling is installed by T3 itself, and this
-/// server installs nothing (Nick, 2026-11-14). Blocking: call it off the runtime thread.
+/// server installs nothing (Nick, 2026-11-14). A custom path is looked up as T3's
+/// `resolveProviderCliOnPath` does (`resolveCommandPath`): any executable file, whatever its
+/// name, so a wrapper such as `agy-router` works. Blocking: call it off the runtime thread.
 pub(crate) fn resolve_executable(
     binary_path: &str,
     path_var: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let is_cli = |p: &Path| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| matches!(n.to_ascii_lowercase().as_str(), "agy" | "antigravity"))
-    };
     if !binary_path.is_empty() {
         let candidate = expand_home(binary_path);
         let found = if candidate.components().count() > 1 {
@@ -179,16 +193,154 @@ pub(crate) fn resolve_executable(
         } else {
             search_path(&candidate, path_var)
         };
-        return match found {
-            Some(path) if is_cli(&path) || std::fs::canonicalize(&path).is_ok_and(|r| is_cli(&r)) => {
-                Ok(path)
-            }
-            _ => Err("The custom Antigravity executable is missing or not executable, or it needs a localharness_external sibling. The agy CLI does not.".into()),
-        };
+        return found.ok_or_else(|| CUSTOM_EXECUTABLE_MISSING.into());
     }
-    search_path(Path::new("agy"), path_var).ok_or_else(|| {
-        "Antigravity ACP runtime is not installed. Install it in this environment's provider settings or set a custom ACP executable path. The Antigravity app, IDE, and CLI are separate installations.".into()
-    })
+    search_path(Path::new("agy"), path_var).ok_or_else(|| EXECUTABLE_MISSING.into())
+}
+
+/// `AntigravityDriver.ts` texts for `resolveExecutable` (`tools/check-copies.mjs`).
+const CUSTOM_EXECUTABLE_MISSING: &str =
+    "The custom Antigravity executable is not installed or not executable.";
+const EXECUTABLE_MISSING: &str =
+    "Antigravity (agy) is not installed on this environment's PATH. Orbit installs it.";
+
+// ---- the files of a throwaway session ------------------------------------------------------
+
+/// `removeAntigravitySessionFiles`: once the agent has closed, removes the native session it
+/// opened in `cwd`. The unique temporary `cwd` in the session's `.meta` proves the session is
+/// ours; any other session stays. Blocking: call it off the runtime thread.
+///
+/// Beyond T3: `antigravity-acp` must be a real folder inside the profile, not a symlink; the
+/// `conversations` and `brain` folders are resolved once, before anything is removed, and must
+/// lie inside it; a `.meta` that is a symlink proves nothing; and the files go only while the
+/// checked `.meta` is still the same file in the same folder. Removal stops at the first error, as in
+/// T3, and `.meta` goes last, so an incomplete cleanup keeps its ownership marker.
+pub(crate) fn remove_session_files(profile: &Path, session_id: &str, cwd: &str) {
+    if !is_native_session_id(session_id) {
+        return;
+    }
+    if let Err(error) = remove_owned_session(profile, session_id, cwd) {
+        eprintln!("Could not remove temporary Antigravity session files: {error}");
+    }
+}
+
+fn remove_owned_session(profile: &Path, session_id: &str, cwd: &str) -> std::io::Result<()> {
+    use std::io::ErrorKind::NotFound;
+    let absent_is_done = |result: std::io::Result<()>| match result {
+        Err(error) if error.kind() == NotFound => Ok(()),
+        other => other,
+    };
+    let acp = profile.join("antigravity-acp");
+    match std::fs::symlink_metadata(&acp) {
+        Ok(meta) if meta.is_dir() => {}
+        // A symlink (or anything but a folder) could lead out of the profile.
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let acp = std::fs::canonicalize(acp)?;
+    if !acp.starts_with(std::fs::canonicalize(profile)?) {
+        return Ok(());
+    }
+    let folder = |name: &str| -> std::io::Result<Folder> {
+        match std::fs::canonicalize(acp.join(name)) {
+            Ok(dir) if dir.starts_with(&acp) => Ok(Folder::Inside(dir)),
+            Ok(_) => Ok(Folder::Outside),
+            Err(error) if error.kind() == NotFound => Ok(Folder::Absent),
+            Err(error) => Err(error),
+        }
+    };
+    let (Folder::Inside(conversations), brain) = (folder("conversations")?, folder("brain")?)
+    else {
+        return Ok(());
+    };
+    if brain == Folder::Outside {
+        return Ok(());
+    }
+    let file = |suffix: &str| conversations.join(format!("{session_id}{suffix}"));
+    let meta_path = file(".meta");
+    let checked = match std::fs::symlink_metadata(&meta_path) {
+        Ok(meta) if meta.is_file() => meta,
+        // A symlink (or anything but a file) proves no ownership.
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut opened = std::fs::File::open(&meta_path)?;
+    if !same_file(&opened.metadata()?, &checked) {
+        return Ok(());
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut opened, &mut text)?;
+    let owner = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|meta| meta["cwd"].as_str().map(str::to_owned));
+    if owner.as_deref() != Some(cwd) {
+        return Ok(());
+    }
+    // The checked `.meta` must still be there, in the folder resolved above.
+    let unchanged = std::fs::symlink_metadata(&meta_path)
+        .is_ok_and(|now| same_file(&now, &checked))
+        && folder("conversations")? == Folder::Inside(conversations.clone())
+        && folder("brain")? == brain;
+    if !unchanged {
+        return Ok(());
+    }
+    for suffix in [".db", ".db-wal", ".db-shm", ".db-journal"] {
+        absent_is_done(std::fs::remove_file(file(suffix)))?;
+    }
+    if let Folder::Inside(brain) = brain {
+        absent_is_done(std::fs::remove_dir_all(brain.join(session_id)))?;
+    }
+    absent_is_done(std::fs::remove_file(meta_path))
+}
+
+/// Where a folder of `antigravity-acp` resolves.
+#[derive(Debug, PartialEq, Eq)]
+enum Folder {
+    Inside(PathBuf),
+    Absent,
+    /// It leads out of `antigravity-acp`.
+    Outside,
+}
+
+/// The same file on disk: device and inode on Unix.
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        a.len() == b.len() && a.modified().ok() == b.modified().ok()
+    }
+}
+
+/// The sessions whose `.meta` names `cwd`: what a check left behind when it ended with its
+/// `session/new` sent and unanswered, so no id names the session. Beyond T3, which keeps those
+/// files. Each `.meta` is read, so call it only then.
+pub(crate) fn remove_sessions_in(profile: &Path, cwd: &str) {
+    let conversations = profile.join("antigravity-acp").join("conversations");
+    let Ok(entries) = std::fs::read_dir(&conversations) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if let Some(session_id) = name.to_str().and_then(|n| n.strip_suffix(".meta")) {
+            remove_session_files(profile, session_id, cwd);
+        }
+    }
+}
+
+/// `Schema.isUUID(4)`: a version 4 UUID with the RFC variant, so the id is safe in a path.
+fn is_native_session_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    crate::grok_background::is_uuid(id)
+        && bytes.get(14) == Some(&b'4')
+        && bytes
+            .get(19)
+            .is_some_and(|b| matches!(b.to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b'))
 }
 
 fn expand_home(path: &str) -> PathBuf {
@@ -257,21 +409,32 @@ pub(crate) fn directories(state_dir: &Path, instance_id: &str) -> Directories {
 /// with the sign-in method (never a credential). Blocking. The browser check T3 runs (its
 /// Node helper) is not needed: our helper is this server's own executable.
 /// Not ported: the links to the user's `~/.gemini` skills (`linkAntigravityUserSkills`).
+/// The error is T3's text; T3 raises it as a transport error (`authSupportError`), not a
+/// setup error, so a check shows its own fixed text instead.
 pub(crate) fn prepare_profile(
     dirs: &Directories,
     settings: &AntigravitySettings,
-) -> std::io::Result<()> {
+) -> Result<(), &'static str> {
     let acp = dirs.profile.join("antigravity-acp");
     for dir in [&dirs.profile, &acp, &dirs.runtime_temp] {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(dir).map_err(|_| PROFILE_DIRECTORY_FAILED)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| PROFILE_PERMISSIONS_FAILED)?;
         }
     }
     std::fs::write(acp.join("settings.json"), profile_settings(settings))
+        .map_err(|_| PROFILE_SETTINGS_FAILED)
 }
+
+/// `antigravityAuthSupport.ts` texts for `prepareAntigravityProfile` (`tools/check-copies.mjs`).
+pub(crate) const PROFILE_DIRECTORY_FAILED: &str =
+    "The Antigravity profile directory could not be created.";
+const PROFILE_PERMISSIONS_FAILED: &str =
+    "The Antigravity profile directory permissions could not be set.";
+const PROFILE_SETTINGS_FAILED: &str = "The Antigravity profile settings could not be written.";
 
 /// `antigravityProfileSettings`: `{"auth":{"type":…},"gcp":{…}}` and a newline.
 fn profile_settings(settings: &AntigravitySettings) -> String {
@@ -492,32 +655,48 @@ fn model_options(setup: &Value) -> (Option<String>, Option<String>, Vec<String>)
     )
 }
 
-/// `applyAntigravityAcpModelSelection` with no catalog default: the `model` config option and
-/// value to set, `None` when the session keeps its model, or the refusal T3 gives.
-pub(crate) fn model_switch(setup: &Value, model: &str) -> Result<Option<(String, String)>, String> {
+/// `applyAntigravityAcpModelSelection`: the `model` config option and value to set, `None`
+/// when the session keeps its model, or the refusal T3 gives. A selection that asks for the
+/// default takes the catalog's `default_model` when the agent lists it (or its family), else
+/// keeps the session's own model.
+pub(crate) fn model_switch(
+    setup: &Value,
+    model: &str,
+    default_model: Option<&str>,
+) -> Result<Option<(String, String)>, String> {
     let (config_id, current, options) = model_options(setup);
     let explicit = !model.is_empty() && model != DEFAULT_MODEL;
-    if !explicit {
+    let legacy_family = |model: &str| {
+        options
+            .iter()
+            .any(|family| model.starts_with(&format!("{family}-")))
+    };
+    let resolved = if explicit {
+        Some(model.to_owned())
+    } else {
+        default_model
+            .filter(|d| options.iter().any(|o| o == d) || legacy_family(d))
+            .map(str::to_owned)
+            .or_else(|| current.clone())
+    };
+    let Some(resolved) = resolved else {
         return Ok(None);
-    }
+    };
     let Some(config_id) = config_id else {
         return Ok(None);
     };
-    if current.as_deref() == Some(model) {
+    if current.as_deref() == Some(resolved.as_str()) {
         return Ok(None);
     }
-    if options.iter().any(|o| o == model) {
-        return Ok(Some((config_id, model.to_owned())));
+    if options.contains(&resolved) {
+        return Ok(Some((config_id, resolved)));
     }
     // `legacyAntigravityFamily`: 1.3 ids such as `gemini-3.8-flash-high` still work.
-    if options
-        .iter()
-        .any(|family| model.starts_with(&format!("{family}-")))
-    {
-        return Ok(Some((config_id, model.to_owned())));
+    if legacy_family(&resolved) {
+        return Ok(Some((config_id, resolved)));
     }
     Err(format!(
-        "Antigravity model '{model}' is unavailable for this Google account. Select an available model."
+        "Antigravity model '{resolved}' is unavailable for this Google account. Select an available model."
     ))
 }
 
@@ -599,7 +778,44 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     background: None,
     mcp_over_http: true,
     supports_image_prompts: true,
+    rpc_failure,
+    stdout_signal: Some(stdout_signal),
 };
+
+/// `ProviderError::Failed` operation of an error reply that asks for a Google sign-in.
+pub(crate) const SIGN_IN_REQUIRED: &str = "sign-in-required";
+/// `ProviderError::Failed` operation of an error reply whose details T3 shows.
+pub(crate) const RECEIVE_RESPONSE: &str = "receive-response";
+/// `AntigravityDriver.ts`'s `PYTHON_SOCKS_REQUIRED` (`tools/check-copies.mjs`).
+pub(crate) const PYTHON_SOCKS_REQUIRED: &str = "python-socks is required to use a SOCKS proxy";
+/// `NATIVE_CLI_NO_BROWSER_PREFIX` (`antigravityAuthSupport.ts`).
+const NO_BROWSER_PREFIX: &str = "No browser is available here";
+
+/// `isAntigravitySignInRequiredError` for an error reply (auth required, or the native CLI's
+/// browser sign-in that cannot open), and the `python-socks` details T3 passes on. The other
+/// replies keep the generic failure.
+fn rpc_failure(error: &crate::protocol::RpcError) -> Option<conn_provider::ProviderError> {
+    let detail = conn_provider_support::redact::redact(&error.message);
+    if error.code == -32000
+        || (error.code == -32603 && error.message.starts_with(NO_BROWSER_PREFIX))
+    {
+        return Some(conn_provider::ProviderError::Failed {
+            operation: SIGN_IN_REQUIRED,
+            detail,
+        });
+    }
+    let details = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("details"))
+        .and_then(Value::as_str);
+    details
+        .filter(|details| details.contains(PYTHON_SOCKS_REQUIRED))
+        .map(|_| conn_provider::ProviderError::Failed {
+            operation: RECEIVE_RESPONSE,
+            detail: PYTHON_SOCKS_REQUIRED.to_owned(),
+        })
+}
 
 // ---- the `ServerProvider` entry -----------------------------------------------------------
 
@@ -611,8 +827,212 @@ pub(crate) struct Observed {
     /// `null` until checked; then T3's status of the last check or session.
     pub status: Option<&'static str>,
     pub authenticated: bool,
+    /// The agent asked for a sign-in (`onAuthRequired`): the entry says so, and health checks
+    /// open no session until one proves the sign-in again.
+    pub signed_out: bool,
     pub message: Option<String>,
     pub models: Vec<Value>,
+    /// The thinking option each model reported while selected (T3's `thinkingLevels`);
+    /// `None`: it has none. One entry per listed model at most; cleared on sign-out.
+    pub thinking_levels: std::collections::BTreeMap<String, Option<Value>>,
+    /// The agent's commands (`onAvailableCommands`), machine-wide.
+    pub slash_commands: Vec<Value>,
+    /// What sessions in each workspace reported, at most [`MAX_WORKSPACE_SNAPSHOTS`].
+    pub workspaces: Vec<Value>,
+}
+
+/// `MAX_WORKSPACE_SNAPSHOTS` (`AntigravityProvider.ts`).
+const MAX_WORKSPACE_SNAPSHOTS: usize = 32;
+
+/// The bundled Antigravity catalog (`tools/gen-model-catalog.mjs`).
+const BUNDLED_CATALOG: &str = include_str!("antigravity_catalog.json");
+
+/// The parts of `ModelCatalog.current("antigravity")` this driver reads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Catalog {
+    pub default_model: Option<String>,
+    /// Slugs with their status (`current` or `legacy`).
+    pub models: Vec<(String, String)>,
+}
+
+/// `ModelCatalog.current`: the manifest the server accepted last, else the bundled one. `None`
+/// when the accepted manifest has no valid Antigravity catalog (`resolveProviderCatalog`).
+pub(crate) fn catalog(manifest: &conn_provider::LiveManifest) -> Option<Catalog> {
+    let section = match manifest.provider_catalog(DRIVER) {
+        None => return bundled_catalog().clone(),
+        Some(section) => section?,
+    };
+    catalog_from(&section)
+}
+
+/// The bundled catalog, parsed once.
+fn bundled_catalog() -> &'static Option<Catalog> {
+    static BUNDLED: std::sync::OnceLock<Option<Catalog>> = std::sync::OnceLock::new();
+    BUNDLED.get_or_init(|| {
+        serde_json::from_str::<Value>(BUNDLED_CATALOG)
+            .ok()
+            .and_then(|section| catalog_from(&section))
+    })
+}
+
+/// `resolveProviderCatalog`'s checks on one catalog: unique slugs, known profiles, a listed
+/// default.
+fn catalog_from(section: &Value) -> Option<Catalog> {
+    let default_model = section
+        .get("defaultChatModel")
+        .or_else(|| section.pointer("/defaults/chat"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut models: Vec<(String, String)> = Vec::new();
+    for entry in section.get("models")?.as_array()? {
+        let slug = entry.get("slug")?.as_str()?.to_owned();
+        if models.iter().any(|(s, _)| *s == slug) {
+            return None;
+        }
+        if let Some(profile) = entry.get("profile").and_then(Value::as_str)
+            && section.pointer(&format!("/profiles/{profile}")).is_none()
+            && section.get("defaultChatModel").is_none()
+        {
+            return None;
+        }
+        models.push((
+            slug,
+            entry["status"].as_str().unwrap_or("current").to_owned(),
+        ));
+    }
+    if default_model
+        .as_ref()
+        .is_some_and(|d| !models.iter().any(|(s, _)| s == d))
+    {
+        return None;
+    }
+    Some(Catalog {
+        default_model,
+        models,
+    })
+}
+
+/// `applyModelCatalog` without family matching: the catalog's legacy marks, and its default
+/// takes the default mark and aliases when the agent lists it.
+pub(crate) fn apply_catalog(models: &mut [Value], catalog: Option<&Catalog>) {
+    for model in models.iter_mut() {
+        if model["isCustom"] == true {
+            continue;
+        }
+        let legacy = catalog.is_some_and(|c| {
+            c.models
+                .iter()
+                .any(|(slug, status)| model["slug"] == slug.as_str() && status == "legacy")
+        });
+        if let Some(fields) = model.as_object_mut() {
+            if legacy {
+                fields.insert("isLegacy".into(), json!(true));
+            } else {
+                fields.remove("isLegacy");
+            }
+        }
+    }
+    let Some(requested) = catalog.and_then(|c| c.default_model.as_deref()) else {
+        return;
+    };
+    if !models.iter().any(|m| m["slug"] == requested) {
+        return;
+    }
+    let Some(previous) = models
+        .iter()
+        .find(|m| m["isDefault"] == true && m["slug"] != requested)
+        .cloned()
+    else {
+        return;
+    };
+    let moved = previous["aliases"].as_array().cloned().unwrap_or_default();
+    for model in models.iter_mut() {
+        let Some(fields) = model.as_object_mut() else {
+            continue;
+        };
+        if fields.get("slug") == previous.get("slug") {
+            fields.remove("isDefault");
+            fields.remove("aliases");
+        } else if fields.get("slug").and_then(Value::as_str) == Some(requested) {
+            let mut aliases = fields
+                .get("aliases")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for alias in &moved {
+                if !aliases.contains(alias) {
+                    aliases.push(alias.clone());
+                }
+            }
+            fields.insert("isDefault".into(), json!(true));
+            if !aliases.is_empty() {
+                fields.insert("aliases".into(), Value::Array(aliases));
+            }
+        }
+    }
+}
+
+/// `nativeCommands`: named commands once each, with a trimmed description and input hint.
+fn native_commands(commands: &Value) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for command in commands.as_array().into_iter().flatten() {
+        let Some(name) = command["name"].as_str() else {
+            continue;
+        };
+        if name.trim().is_empty() || !seen.insert(name.to_owned()) {
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".into(), json!(name));
+        let description = command["description"].as_str().unwrap_or("").trim();
+        if !description.is_empty() {
+            entry.insert("description".into(), json!(description));
+        }
+        let hint = command["input"]["hint"].as_str().unwrap_or("").trim();
+        if !hint.is_empty() {
+            entry.insert("input".into(), json!({"hint": hint}));
+        }
+        out.push(Value::Object(entry));
+    }
+    out
+}
+
+/// Puts `snapshot` (for its `cwd`) last, dropping the oldest past the limit.
+fn upsert_workspace(workspaces: &mut Vec<Value>, snapshot: Value) {
+    workspaces.retain(|w| w["cwd"] != snapshot["cwd"]);
+    workspaces.push(snapshot);
+    if workspaces.len() > MAX_WORKSPACE_SNAPSHOTS {
+        let extra = workspaces.len() - MAX_WORKSPACE_SNAPSHOTS;
+        workspaces.drain(..extra);
+    }
+}
+
+/// `onAvailableCommands`: the agent's commands, machine-wide and, for a session's `cwd`, in
+/// that workspace's snapshot. Ignored while signed out.
+pub(crate) fn available_commands(
+    previous: &Observed,
+    commands: &Value,
+    cwd: Option<&str>,
+    now: &str,
+) -> Observed {
+    let mut next = previous.clone();
+    if next.signed_out {
+        return next;
+    }
+    next.slash_commands = native_commands(commands);
+    if let Some(cwd) = cwd {
+        let skills = previous
+            .workspaces
+            .iter()
+            .find(|w| w["cwd"] == cwd)
+            .map_or_else(|| json!([]), |w| w["skills"].clone());
+        upsert_workspace(
+            &mut next.workspaces,
+            json!({"cwd": cwd, "checkedAt": now, "slashCommands": next.slash_commands, "skills": skills}),
+        );
+    }
+    next
 }
 
 /// `buildServerProvider` + `withInstanceIdentity` for Antigravity.
@@ -621,12 +1041,24 @@ pub(crate) fn entry(
     settings: &AntigravitySettings,
     observed: &Observed,
     checked_at: &str,
+    catalog: Option<&Catalog>,
 ) -> Value {
-    let auth = if observed.authenticated {
+    let mut auth = if observed.authenticated {
         json!({"status": "authenticated", "type": settings.auth_method, "label": settings.auth_label()})
+    } else if observed.signed_out {
+        if settings.uses_credentials() {
+            json!({"status": "unauthenticated", "type": settings.auth_method, "label": settings.auth_label()})
+        } else {
+            json!({"status": "unauthenticated"})
+        }
     } else {
         json!({"status": "unknown", "type": settings.auth_method})
     };
+    // T3's sign-out is Google's; credentials leave through the settings. Without this the
+    // clients fall back to `setup.canAuthenticate` and offer a sign-out this server refuses.
+    if settings.uses_credentials() {
+        auth["canLogout"] = json!(false);
+    }
     let status = if !settings.enabled {
         "disabled"
     } else {
@@ -656,18 +1088,29 @@ pub(crate) fn entry(
     if !(observed.authenticated && settings.enabled && observed.status == Some("ready")) {
         entry.insert("message".into(), json!(message));
     }
-    entry.insert("models".into(), Value::Array(observed.models.clone()));
-    entry.insert("slashCommands".into(), json!([]));
+    let mut models = observed.models.clone();
+    apply_catalog(&mut models, catalog);
+    entry.insert("models".into(), Value::Array(models));
+    entry.insert(
+        "slashCommands".into(),
+        Value::Array(observed.slash_commands.clone()),
+    );
     entry.insert("skills".into(), json!([]));
     // Orbit installs and updates every provider CLI and owns `PATH`; this server installs
     // nothing (Nick, 2026-11-20). T3 says `canInstall: true` for its managed runtime.
+    // T3 always says `canAuthenticate: true`. This server serves only the credential check
+    // (an API key or Agent Platform), not Google sign-in: providers sign in through Orbit's
+    // AI router (Nick, 2026-11-20).
     entry.insert(
         "setup".into(),
-        json!({"canAuthenticate": true, "canInstall": false}),
+        json!({"canAuthenticate": settings.has_key_sign_in(), "canInstall": false}),
     );
     entry.insert("supportsConversationRollback".into(), json!(true));
     entry.insert("supportsTextGeneration".into(), json!(false));
-    entry.insert("workspaceSnapshots".into(), json!([]));
+    entry.insert(
+        "workspaceSnapshots".into(),
+        Value::Array(observed.workspaces.clone()),
+    );
     entry.insert("instanceId".into(), json!(instance_id));
     entry.insert("driver".into(), json!(DRIVER));
     if let Some(name) = &settings.display_name {
@@ -705,6 +1148,8 @@ pub(crate) fn check(
     next.installed = !missing;
     if missing {
         next.models.clear();
+        next.slash_commands.clear();
+        next.workspaces.clear();
     }
     next.status = Some(match (&error, next.authenticated) {
         (Some(_), _) => "error",
@@ -713,7 +1158,9 @@ pub(crate) fn check(
     });
     next.message = error.or_else(|| {
         (!next.authenticated).then(|| {
-            if settings.uses_credentials() {
+            if next.signed_out {
+                sign_in_message(settings)
+            } else if settings.uses_credentials() {
                 format!(
                     "Antigravity is installed. Connect with {} to load models.",
                     settings.auth_label()
@@ -729,30 +1176,270 @@ pub(crate) fn check(
 /// Whether a health check should open a throwaway session (`loadModels`): only a session
 /// proves the sign-in and lists the models, so the check opens one while neither is known.
 pub(crate) fn needs_session(observed: &Observed) -> bool {
-    observed.installed && observed.status == Some("warning") && !observed.authenticated
+    observed.installed
+        && observed.status == Some("warning")
+        && !observed.authenticated
+        && !observed.signed_out
+}
+
+/// `AntigravityProvider.ts`'s `SIGN_IN_MESSAGE` (`tools/check-copies.mjs`).
+const SIGN_IN_MESSAGE: &str = "Sign in with Google to use Antigravity.";
+
+/// `signInMessage`.
+fn sign_in_message(settings: &AntigravitySettings) -> String {
+    if settings.uses_credentials() {
+        format!(
+            "Connect with {} to use Antigravity and load models.",
+            settings.auth_label()
+        )
+    } else {
+        SIGN_IN_MESSAGE.to_owned()
+    }
+}
+
+/// `onAuthRequired` (`clearAccountMetadata`): the agent asked for a sign-in, so the entry
+/// shows it and drops the account's models. A disabled instance keeps its entry.
+pub(crate) fn auth_required(settings: &AntigravitySettings, previous: &Observed) -> Observed {
+    if !settings.enabled {
+        return previous.clone();
+    }
+    Observed {
+        installed: previous.installed,
+        version: previous.version.clone(),
+        status: Some("warning"),
+        authenticated: false,
+        signed_out: true,
+        message: Some(sign_in_message(settings)),
+        models: Vec::new(),
+        thinking_levels: Default::default(),
+        slash_commands: Vec::new(),
+        workspaces: Vec::new(),
+    }
+}
+
+/// `observeThinkingLevels`: the thinking option the selected model reports. Levels stay until
+/// sign-out, also for a model the agent no longer lists, as T3 keeps them.
+fn observe_thinking_levels(
+    levels: &mut std::collections::BTreeMap<String, Option<Value>>,
+    options: &Value,
+) {
+    let model = options.as_array().and_then(|options| {
+        options
+            .iter()
+            .find(|o| o["id"] == "model" || o["category"] == "model")
+    });
+    if let Some(model) = model
+        && model["type"] == "select"
+        && let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty())
+    {
+        levels.insert(current.to_owned(), thinking_config(options).cloned());
+    }
+}
+
+/// `onConfigOptionsUpdated`: the selected model's thinking levels are recorded, and the
+/// models are listed again while the account is signed in.
+pub(crate) fn config_options_updated(previous: &Observed, options: &Value) -> Observed {
+    let mut next = previous.clone();
+    observe_thinking_levels(&mut next.thinking_levels, options);
+    if next.authenticated {
+        next.models =
+            models_from_session(&json!({"configOptions": options}), &next.thinking_levels);
+    }
+    next
+}
+
+/// `antigravityThinkingConfig`: the `thought_level` select option.
+pub(crate) fn thinking_config(options: &Value) -> Option<&Value> {
+    options
+        .as_array()?
+        .iter()
+        .find(|o| o["category"] == "thought_level")
+        .filter(|o| o["type"] == "select")
+}
+
+/// The thinking level a selection chose, when the session offers it and has another one
+/// (T3's selection loop over the live config options): `(config id, value)` to write.
+pub(crate) fn thinking_write(options: &Value, selections: &[Value]) -> Option<(String, String)> {
+    let config = thinking_config(options)?;
+    let id = config["id"].as_str()?;
+    let chosen = selections.iter().find(|s| s["id"] == id)?["value"].as_str()?;
+    let value = if chosen == "_t3/empty" { "" } else { chosen };
+    let offered = flatten_choices(&config["options"])
+        .iter()
+        .any(|choice| choice["value"] == value);
+    (offered && config["currentValue"] != value).then(|| (id.to_owned(), value.to_owned()))
+}
+
+/// `antigravityModelOptions`: the values of the `model` option.
+pub(crate) fn model_option_values(options: &Value) -> Vec<String> {
+    let model = options
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["id"] == "model"));
+    let Some(model) = model.filter(|m| m["type"] == "select") else {
+        return Vec::new();
+    };
+    flatten_choices(&model["options"])
+        .into_iter()
+        .filter_map(|entry| entry["value"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `flattenSelectChoices`: grouped choices in order.
+fn flatten_choices(options: &Value) -> Vec<&Value> {
+    options
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| {
+            if entry.get("value").is_some() {
+                vec![entry]
+            } else {
+                entry["options"].as_array().into_iter().flatten().collect()
+            }
+        })
+        .collect()
+}
+
+/// `boundedText`.
+fn bounded_text(value: &Value, max: usize) -> String {
+    value
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// `choiceId`: the empty value as T3's placeholder, else a value without outer spaces.
+fn choice_id(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return Some("_t3/empty".to_owned());
+    }
+    (value == value.trim() && value.chars().count() <= 256).then(|| value.to_owned())
+}
+
+/// `thinkingCapabilities`: the thinking option as a reasoning descriptor
+/// (`acpProviderOptionDescriptors`). A level another model selected is not this model's
+/// default, so an unobserved model gets the levels without the current one.
+fn thinking_capabilities(config: Option<&Value>, observed: bool) -> Value {
+    let empty = json!({"optionDescriptors": []});
+    let Some(config) = config else {
+        return empty;
+    };
+    let Some(id) = config["id"]
+        .as_str()
+        .and_then(choice_id)
+        .filter(|id| id != "_t3/empty")
+    else {
+        return empty;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut choices = Vec::new();
+    for candidate in flatten_choices(&config["options"]) {
+        let Some(choice) = candidate["value"].as_str().and_then(choice_id) else {
+            continue;
+        };
+        if !seen.insert(choice.clone()) {
+            continue;
+        }
+        let label = bounded_text(&candidate["name"], 256);
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(choice));
+        entry.insert(
+            "label".into(),
+            json!(if label.is_empty() {
+                choice.clone()
+            } else {
+                label
+            }),
+        );
+        let description = bounded_text(&candidate["description"], 1024);
+        if !description.is_empty() {
+            entry.insert("description".into(), json!(description));
+        }
+        choices.push(Value::Object(entry));
+        if choices.len() == 64 {
+            break;
+        }
+    }
+    if choices.is_empty() {
+        return empty;
+    }
+    let label = bounded_text(&config["name"], 256);
+    let mut descriptor = serde_json::Map::new();
+    let label = if label.is_empty() { id.clone() } else { label };
+    descriptor.insert("id".into(), json!(id));
+    descriptor.insert("label".into(), json!(label));
+    let description = bounded_text(&config["description"], 1024);
+    if !description.is_empty() {
+        descriptor.insert("description".into(), json!(description));
+    }
+    descriptor.insert("type".into(), json!("select"));
+    let current = config["currentValue"].as_str().and_then(choice_id);
+    if observed
+        && let Some(current) = current
+        && choices.iter().any(|c| c["id"] == current.as_str())
+    {
+        descriptor.insert("currentValue".into(), json!(current));
+    }
+    descriptor.insert("options".into(), Value::Array(choices));
+    descriptor.insert("role".into(), json!("reasoning"));
+    json!({"optionDescriptors": [Value::Object(descriptor)]})
 }
 
 /// `onSessionStarted`: the session proves the sign-in; its models are listed. A version from
 /// a health check's `--version` stays; the session's own counts only before one.
-pub(crate) fn session_started(previous: &Observed, initialize: &Value, setup: &Value) -> Observed {
+pub(crate) fn session_started(
+    previous: &Observed,
+    initialize: &Value,
+    setup: &Value,
+    cwd: Option<(&str, &str)>,
+) -> Observed {
     let session_version = initialize["agentInfo"]["version"]
         .as_str()
         .filter(|v| !v.is_empty())
         .map(str::to_owned);
+    let mut thinking_levels = previous.thinking_levels.clone();
+    observe_thinking_levels(&mut thinking_levels, &setup["configOptions"]);
     Observed {
         installed: true,
         version: previous.version.clone().or(session_version),
         status: Some("ready"),
         authenticated: true,
+        signed_out: false,
         message: None,
-        models: models_from_session(setup),
+        models: models_from_session(setup, &thinking_levels),
+        thinking_levels,
+        slash_commands: previous.slash_commands.clone(),
+        workspaces: {
+            // A session's workspace gets a snapshot: its commands so far, else the machine's.
+            let mut workspaces = previous.workspaces.clone();
+            if let Some((cwd, now)) = cwd {
+                let kept = previous.workspaces.iter().find(|w| w["cwd"] == cwd);
+                let commands = kept.map_or_else(
+                    || Value::Array(previous.slash_commands.clone()),
+                    |w| w["slashCommands"].clone(),
+                );
+                let skills = kept.map_or_else(|| json!([]), |w| w["skills"].clone());
+                upsert_workspace(
+                    &mut workspaces,
+                    json!({"cwd": cwd, "checkedAt": now, "slashCommands": commands, "skills": skills}),
+                );
+            }
+            workspaces
+        },
     }
 }
 
 /// `buildAntigravityModelsFromSession`: the `model` option's values (or the session's
-/// `models`), the current one the default with the `antigravity-default` alias. Thinking
-/// levels are not reported per model here (`capabilities` stay empty).
-pub(crate) fn models_from_session(setup: &Value) -> Vec<Value> {
+/// `models`), the current one the default with the `antigravity-default` alias, each with
+/// the thinking levels it reported while selected.
+pub(crate) fn models_from_session(
+    setup: &Value,
+    thinking_levels: &std::collections::BTreeMap<String, Option<Value>>,
+) -> Vec<Value> {
+    let current_thinking = thinking_config(&setup["configOptions"]);
     let (_, current, _) = model_options(setup);
     let options = setup["configOptions"].as_array();
     let model = options.and_then(|o| {
@@ -814,11 +1501,19 @@ pub(crate) fn models_from_session(setup: &Value) -> Vec<Value> {
             base.clone()
         };
         names.insert(base);
+        let capabilities = if current.as_deref() == Some(value.as_str()) {
+            thinking_capabilities(current_thinking, true)
+        } else {
+            match thinking_levels.get(&value) {
+                Some(observed) => thinking_capabilities(observed.as_ref(), true),
+                None => thinking_capabilities(current_thinking, false),
+            }
+        };
         let mut model = json!({
             "slug": value,
             "name": label,
             "isCustom": false,
-            "capabilities": {"optionDescriptors": []},
+            "capabilities": capabilities,
         });
         if current.as_deref() == Some(value.as_str()) {
             model["isDefault"] = json!(true);
@@ -829,9 +1524,338 @@ pub(crate) fn models_from_session(setup: &Value) -> Vec<Value> {
     out
 }
 
+// ---- sign-in URLs ---------------------------------------------------------------------------
+
+/// `parseAntigravityAuthorizationUrl`: Google's OAuth URL with one `state` (1 to 512
+/// characters, no spaces), one `response_type=code` and one loopback `redirect_uri` on a port
+/// from 1024.
+pub(crate) fn is_authorization_url(url: &str) -> bool {
+    if url.len() > MAX_AUTH_URL || url.chars().any(char::is_whitespace) || url.contains('#') {
+        return false;
+    }
+    let Some(query) = url.strip_prefix("https://accounts.google.com/o/oauth2/v2/auth?") else {
+        return false;
+    };
+    let pairs: Vec<(String, String)> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+        .collect();
+    let one = |key: &str| {
+        let mut found = pairs.iter().filter(|(k, _)| k == key);
+        match (found.next(), found.next()) {
+            (Some((_, value)), None) => Some(value.as_str()),
+            _ => None,
+        }
+    };
+    let state_ok = one("state").is_some_and(|state| {
+        !state.is_empty() && state.chars().count() <= 512 && !state.chars().any(char::is_whitespace)
+    });
+    let redirect_ok = one("redirect_uri").is_some_and(|uri| {
+        uri.strip_prefix("http://127.0.0.1:")
+            .and_then(|rest| rest.strip_suffix('/'))
+            .filter(|port| {
+                !port.is_empty()
+                    && port.len() <= 5
+                    && !port.starts_with('0')
+                    && port.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|port| port.parse::<u32>().ok())
+            .is_some_and(|port| (1024..=65535).contains(&port))
+    });
+    state_ok && redirect_ok && one("response_type") == Some("code")
+}
+
+/// `application/x-www-form-urlencoded` decoding, as `URLSearchParams` reads a query.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&byte) = bytes.get(i) {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        match byte {
+            b'+' => out.push(b' '),
+            b'%' => match (hex(i + 1), hex(i + 2)) {
+                (Some(high), Some(low)) => {
+                    out.push(u8::try_from(high * 16 + low).unwrap_or(b'?'));
+                    i += 2;
+                }
+                _ => out.push(b'%'),
+            },
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `makeAntigravityStdoutTransform` with no sign-in flow (this server has none): a sign-in URL
+/// ends the session with the sign-in instruction; a malformed one fails it.
+pub(crate) fn stdout_signal(line: &str) -> Option<conn_provider::ProviderError> {
+    let url = line
+        .strip_prefix(AUTH_STDOUT_PREFIX)?
+        .trim_end_matches(['\r', '\n']);
+    Some(if is_authorization_url(url) {
+        conn_provider::ProviderError::Failed {
+            operation: SIGN_IN_REQUIRED,
+            detail: SIGN_IN_REQUIRED_MESSAGE.to_owned(),
+        }
+    } else {
+        conn_provider::ProviderError::Failed {
+            operation: "authorization-url",
+            detail: INVALID_AUTH_URL.to_owned(),
+        }
+    })
+}
+
+/// `makeAntigravityStderrHandler`'s sign-in signals: a stderr line with the stdout prefix or
+/// our browser helper's marker (a JSON string) and a valid URL. Returns the stdout line that
+/// carries it to [`stdout_signal`]; other lines, and malformed URLs, give `None`.
+pub(crate) fn stderr_sign_in(line: &str) -> Option<String> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.len() > AUTH_BROWSER_MARKER.len().max(AUTH_STDOUT_PREFIX.len()) + MAX_AUTH_URL + 2 {
+        return None;
+    }
+    let url = if let Some(url) = line.strip_prefix(AUTH_STDOUT_PREFIX) {
+        url.to_owned()
+    } else {
+        serde_json::from_str::<String>(line.strip_prefix(AUTH_BROWSER_MARKER)?).ok()?
+    };
+    is_authorization_url(&url).then(|| format!("{AUTH_STDOUT_PREFIX}{url}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AntigravityTextGeneration.test.ts`'s session-file cases for
+    /// `removeAntigravitySessionFiles`, against a scratch profile.
+    mod session_files {
+        use super::super::remove_session_files;
+        use std::path::{Path, PathBuf};
+
+        const SESSION_ID: &str = "4b6f0f2e-9c1d-4a7b-8e3f-2d5c6b7a8f90";
+
+        struct Profile {
+            root: PathBuf,
+            conversations: PathBuf,
+            brain: PathBuf,
+        }
+
+        impl Profile {
+            fn new(name: &str) -> Self {
+                let root = std::env::temp_dir()
+                    .join(format!("agy-session-files-{}-{name}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&root);
+                let acp = root.join("antigravity-acp");
+                let conversations = acp.join("conversations");
+                let brain = acp.join("brain").join(SESSION_ID);
+                std::fs::create_dir_all(&conversations).unwrap();
+                std::fs::create_dir_all(&brain).unwrap();
+                std::fs::write(conversations.join("user-session.db"), "keep native history")
+                    .unwrap();
+                std::fs::write(brain.join("output.txt"), "helper artifact").unwrap();
+                for suffix in [".db", ".db-wal"] {
+                    std::fs::write(
+                        conversations.join(format!("{SESSION_ID}{suffix}")),
+                        "helper",
+                    )
+                    .unwrap();
+                }
+                Self {
+                    root,
+                    conversations,
+                    brain,
+                }
+            }
+
+            fn file(&self, suffix: &str) -> PathBuf {
+                self.conversations.join(format!("{SESSION_ID}{suffix}"))
+            }
+
+            fn meta(&self, cwd: &str) {
+                std::fs::write(
+                    self.file(".meta"),
+                    serde_json::json!({ "cwd": cwd }).to_string(),
+                )
+                .unwrap();
+            }
+
+            fn profile(&self) -> &Path {
+                &self.root
+            }
+        }
+
+        impl Drop for Profile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        /// "assertCleaned": the session, its journal, its metadata and its brain go; other
+        /// sessions stay.
+        #[test]
+        fn removes_the_session_the_temporary_workspace_owns() {
+            let profile = Profile::new("owned");
+            profile.meta("/tmp/t3-antigravity-setup-1");
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-1");
+            for suffix in [".db", ".db-wal", ".meta"] {
+                assert!(!profile.file(suffix).exists(), "{suffix}");
+            }
+            assert!(!profile.brain.exists());
+            let kept = std::fs::read_to_string(profile.conversations.join("user-session.db"));
+            assert_eq!(kept.unwrap(), "keep native history");
+        }
+
+        /// "refuses unsafe native session IDs without deleting other files".
+        #[test]
+        fn refuses_unsafe_native_session_ids() {
+            let profile = Profile::new("unsafe");
+            remove_session_files(profile.profile(), "../../user-session", "/tmp/w");
+            let kept = std::fs::read_to_string(profile.conversations.join("user-session.db"));
+            assert_eq!(kept.unwrap(), "keep native history");
+            assert!(profile.file(".db").exists());
+        }
+
+        /// "keeps native sessions whose metadata belongs to a different workspace".
+        #[test]
+        fn keeps_native_sessions_of_another_workspace() {
+            let profile = Profile::new("other");
+            profile.meta("/projects/app");
+            remove_session_files(
+                profile.profile(),
+                SESSION_ID,
+                "different-temporary-workspace",
+            );
+            assert!(profile.file(".db").exists());
+            assert!(profile.file(".meta").exists());
+            assert!(profile.brain.exists());
+        }
+
+        /// `AntigravitySessionFiles.ts`: an absent file is removed already (`force`), and any
+        /// other removal error ends the cleanup. `.meta` goes last, after `brain/`, so an
+        /// incomplete cleanup keeps its ownership marker.
+        #[test]
+        fn a_failed_removal_stops_and_keeps_the_ownership_marker() {
+            let profile = Profile::new("stuck");
+            profile.meta("/tmp/t3-antigravity-setup-2");
+            // A folder with content where the journal is: unlinking it fails.
+            std::fs::remove_file(profile.file(".db-wal")).unwrap();
+            std::fs::create_dir_all(profile.file(".db-wal").join("busy")).unwrap();
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-2");
+            assert!(
+                !profile.file(".db").exists(),
+                "the step before the error ran"
+            );
+            assert!(profile.brain.exists(), "brain/ went after the error");
+            assert!(
+                profile.file(".meta").exists(),
+                "the marker went after the error"
+            );
+
+            // Absent files (`.db-shm`, `.db-journal`, and now `.db`) do not stop it.
+            std::fs::remove_dir_all(profile.file(".db-wal")).unwrap();
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-2");
+            assert!(!profile.brain.exists());
+            assert!(!profile.file(".meta").exists());
+        }
+
+        /// A `.meta` that is a symlink proves nothing, even when its target names the cwd.
+        #[cfg(unix)]
+        #[test]
+        fn a_symlinked_meta_proves_nothing() {
+            let profile = Profile::new("meta-link");
+            let elsewhere = profile.root.join("elsewhere.meta");
+            std::fs::write(&elsewhere, r#"{"cwd":"/tmp/t3-antigravity-setup-3"}"#).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, profile.file(".meta")).unwrap();
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-3");
+            assert!(profile.file(".db").exists());
+            assert!(profile.brain.exists());
+        }
+
+        /// The `conversations` folder resolves once and must stay inside the profile: one
+        /// that links elsewhere is not cleaned, even with a matching `.meta` there.
+        #[cfg(unix)]
+        #[test]
+        fn a_conversations_link_out_of_the_profile_is_not_followed() {
+            let profile = Profile::new("dir-link");
+            let outside = profile.root.with_extension("outside");
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::rename(&profile.conversations, &outside).unwrap();
+            std::os::unix::fs::symlink(&outside, &profile.conversations).unwrap();
+            profile.meta("/tmp/t3-antigravity-setup-4");
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-4");
+            let kept = outside.join(format!("{SESSION_ID}.db")).exists();
+            let _ = std::fs::remove_dir_all(&outside);
+            assert!(kept, "a file outside the profile was removed");
+        }
+
+        /// An `antigravity-acp` that links out of the profile is refused, so nothing there
+        /// is removed, even with a matching `.meta`.
+        #[cfg(unix)]
+        #[test]
+        fn an_acp_link_out_of_the_profile_is_refused() {
+            let profile = Profile::new("acp-link");
+            profile.meta("/tmp/t3-antigravity-setup-6");
+            let acp = profile.root.join("antigravity-acp");
+            let outside = profile.root.with_extension("acp-outside");
+            let _ = std::fs::remove_dir_all(&outside);
+            std::fs::rename(&acp, &outside).unwrap();
+            std::os::unix::fs::symlink(&outside, &acp).unwrap();
+            remove_session_files(profile.profile(), SESSION_ID, "/tmp/t3-antigravity-setup-6");
+            let kept: Vec<bool> = [".db", ".db-wal", ".meta"]
+                .iter()
+                .map(|suffix| {
+                    outside
+                        .join("conversations")
+                        .join(format!("{SESSION_ID}{suffix}"))
+                        .exists()
+                })
+                .chain([outside.join("brain").join(SESSION_ID).exists()])
+                .collect();
+            let _ = std::fs::remove_dir_all(&outside);
+            assert_eq!(kept, [true; 4], "a file outside the profile was removed");
+        }
+
+        /// A check that ended before `session/new` answered knows no session id: the sessions
+        /// whose `.meta` names its scratch folder go, and every other one stays.
+        #[test]
+        fn sessions_of_a_scratch_folder_go_without_their_id() {
+            const OTHER: &str = "0e0c4a55-2b3d-4f6e-9a1b-7c8d9e0f1a2b";
+            let profile = Profile::new("by-cwd");
+            profile.meta("/tmp/t3-antigravity-setup-5");
+            let other = profile.conversations.join(format!("{OTHER}.meta"));
+            std::fs::write(&other, r#"{"cwd":"/projects/app"}"#).unwrap();
+            super::super::remove_sessions_in(profile.profile(), "/tmp/t3-antigravity-setup-5");
+            assert!(!profile.file(".db").exists());
+            assert!(!profile.file(".meta").exists());
+            assert!(!profile.brain.exists());
+            assert!(other.exists());
+            assert!(profile.conversations.join("user-session.db").exists());
+        }
+    }
+
+    /// T3's `resolveCommandPath`: a custom path is any executable file, whatever its name, so
+    /// a wrapper such as `agy-router` works by path and on `PATH`.
+    #[cfg(unix)]
+    #[test]
+    fn a_custom_wrapper_with_another_name_resolves() {
+        let root = std::env::temp_dir().join(format!("agy-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let wrapper = root.join("agy-router");
+        conn_support::test_util::executable(&wrapper, "#!/bin/sh\nexec agy \"$@\"\n").unwrap();
+        let by_path = resolve_executable(&wrapper.display().to_string(), None);
+        let on_path = resolve_executable("agy-router", Some(&root.display().to_string()));
+        let missing = resolve_executable(&root.join("agy").display().to_string(), None);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(by_path, Ok(wrapper.clone()));
+        assert_eq!(on_path, Ok(wrapper));
+        assert_eq!(missing, Err(CUSTOM_EXECUTABLE_MISSING.to_owned()));
+    }
 
     fn setup() -> Value {
         json!({"configOptions": [
@@ -848,18 +1872,29 @@ mod tests {
     fn model_switch_follows_t3() {
         let s = setup();
         assert_eq!(
-            model_switch(&s, "gemini-3.8-flash"),
+            model_switch(&s, "gemini-3.8-flash", None),
             Ok(Some(("model".into(), "gemini-3.8-flash".into())))
         );
-        assert_eq!(model_switch(&s, "gemini-3.1-pro"), Ok(None));
-        assert_eq!(model_switch(&s, DEFAULT_MODEL), Ok(None));
-        assert_eq!(model_switch(&s, ""), Ok(None));
+        assert_eq!(model_switch(&s, "gemini-3.1-pro", None), Ok(None));
+        assert_eq!(model_switch(&s, DEFAULT_MODEL, None), Ok(None));
+        assert_eq!(model_switch(&s, "", None), Ok(None));
         // A 1.3 id of a listed family passes through.
         assert_eq!(
-            model_switch(&s, "gemini-3.8-flash-high"),
+            model_switch(&s, "gemini-3.8-flash-high", None),
             Ok(Some(("model".into(), "gemini-3.8-flash-high".into())))
         );
-        assert!(model_switch(&s, "claude-x").is_err());
+        assert!(model_switch(&s, "claude-x", None).is_err());
+        // `resolveAntigravityModel`: the default selection takes the catalog's default when
+        // the agent lists it or its family, else keeps the session's model.
+        assert_eq!(
+            model_switch(&s, DEFAULT_MODEL, Some("gemini-4-argon")),
+            Ok(Some(("model".into(), "gemini-4-argon".into())))
+        );
+        assert_eq!(
+            model_switch(&s, "", Some("gemini-3.8-flash-high")),
+            Ok(Some(("model".into(), "gemini-3.8-flash-high".into())))
+        );
+        assert_eq!(model_switch(&s, "", Some("gemini-9")), Ok(None));
     }
 
     /// The version comes from this check's `--version`, never from an earlier one: a new
@@ -879,9 +1914,39 @@ mod tests {
         let missing = check(&settings, &old, Err("gone".into()), Some("1.5.13".into()));
         assert_eq!(missing.version, None);
         assert_eq!(cli_version("not a version"), None);
-        let entry = entry("antigravity", &settings, &next, "2026-11-20T00:00:00.000Z");
+        let entry = entry(
+            "antigravity",
+            &settings,
+            &next,
+            "2026-11-20T00:00:00.000Z",
+            None,
+        );
         assert_eq!(entry["version"], "1.5.13");
         assert_eq!(entry["setup"]["canInstall"], false);
+        // Google sign-in is not served here (Orbit's AI router); only the credential check.
+        assert_eq!(entry["setup"]["canAuthenticate"], false);
+        assert!(entry["auth"].get("canLogout").is_none());
+        for method in ["gemini-api-key", "agent-platform"] {
+            let settings = AntigravitySettings::from_instance(Some(&json!({
+                "enabled": true, "config": {"authMethod": method, "apiKey": "k"}
+            })));
+            let shown = super::entry(
+                "antigravity",
+                &settings,
+                &next,
+                "2026-11-20T00:00:00.000Z",
+                None,
+            );
+            assert_eq!(shown["setup"]["canAuthenticate"], true, "{method}");
+            assert_eq!(shown["auth"]["canLogout"], false, "{method}");
+        }
+        // Agent Platform with only a GCP project would use Application Default Credentials.
+        let adc = AntigravitySettings::from_instance(Some(&json!({"enabled": true, "config": {
+            "authMethod": "agent-platform", "gcpProject": "p", "gcpLocation": "us-central1"
+        }})));
+        assert!(!adc.has_key_sign_in());
+        let shown = super::entry("antigravity", &adc, &next, "2026-11-20T00:00:00.000Z", None);
+        assert_eq!(shown["setup"]["canAuthenticate"], false);
     }
 
     /// A health check that finds no account opens a session; the session makes the entry
@@ -899,14 +1964,23 @@ mod tests {
         assert!(needs_session(&checked));
         let initialize =
             json!({"agentInfo": {"name": "Antigravity ACP Server", "version": "0.0.0"}});
-        let ready = session_started(&checked, &initialize, &setup());
+        let ready = session_started(&checked, &initialize, &setup(), None);
         assert!(!needs_session(&ready));
-        let entry = entry("antigravity", &settings, &ready, "2026-11-23T00:00:00.000Z");
+        let entry = entry(
+            "antigravity",
+            &settings,
+            &ready,
+            "2026-11-23T00:00:00.000Z",
+            None,
+        );
         assert_eq!(entry["status"], "ready");
         assert_eq!(entry["auth"]["status"], "authenticated");
         assert_eq!(entry["version"], "1.5.14");
         assert!(entry.get("message").is_none());
-        assert_eq!(entry["models"], json!(models_from_session(&setup())));
+        assert_eq!(
+            entry["models"],
+            json!(models_from_session(&setup(), &Default::default()))
+        );
         let again = check(&settings, &ready, agy(), cli_version("1.5.14\n"));
         assert!(!needs_session(&again));
         assert_eq!(again.models, ready.models);
@@ -966,5 +2040,197 @@ mod tests {
             "driver": "antigravity", "enabled": true, "config": {"authMethod": "gemini-api-key"}
         })));
         assert!(none.config_issue().is_some());
+    }
+
+    // ---- ports of `AntigravityProvider.test.ts` ------------------------------------------
+
+    /// T3's `commands` and `expectedCommands`.
+    fn t3_commands() -> (Value, Value) {
+        (
+            json!([{"name": "plan", "description": "Create a plan",
+                    "input": {"type": "text", "hint": "What to plan"}},
+                   {"name": "logout", "description": "Sign out of Google"}]),
+            json!([{"name": "plan", "description": "Create a plan", "input": {"hint": "What to plan"}},
+                   {"name": "logout", "description": "Sign out of Google"}]),
+        )
+    }
+
+    fn signed_in(cwd: &str) -> Observed {
+        let initialize = json!({"agentInfo": {"name": "antigravity-acp", "version": "1.5.14"}});
+        session_started(
+            &Observed::default(),
+            &initialize,
+            &setup(),
+            Some((cwd, "2026-11-23T00:00:00.000Z")),
+        )
+    }
+
+    fn workspace_commands(observed: &Observed, cwd: &str) -> Value {
+        observed
+            .workspaces
+            .iter()
+            .find(|w| w["cwd"] == cwd)
+            .map_or(Value::Null, |w| w["slashCommands"].clone())
+    }
+
+    /// "offers each model the thinking levels it reported when selected".
+    #[test]
+    fn offers_each_model_the_thinking_levels_it_reported_when_selected() {
+        let thinking = |current: &str| {
+            json!({"id": "thinking_level", "name": "Thinking Level", "category": "thought_level",
+                   "type": "select", "currentValue": current,
+                   "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]})
+        };
+        let setup = json!({"configOptions": [
+            {"id": "model", "category": "model", "type": "select", "currentValue": "gemini",
+             "options": [{"value": "gemini", "name": "Gemini"}, {"value": "claude", "name": "Claude"},
+                         {"value": "plain", "name": "Plain"}, {"value": "unseen", "name": "Unseen"}]},
+            thinking("high")
+        ]});
+        let levels = std::collections::BTreeMap::from([
+            ("claude".to_owned(), Some(thinking("low"))),
+            ("plain".to_owned(), None),
+        ]);
+        let models = models_from_session(&setup, &levels);
+        let thinking_of = |slug: &str| {
+            models.iter().find(|m| m["slug"] == slug).unwrap()["capabilities"]["optionDescriptors"]
+                [0]
+            .clone()
+        };
+        assert_eq!(thinking_of("gemini")["id"], "thinking_level");
+        assert_eq!(thinking_of("gemini")["currentValue"], "high");
+        assert_eq!(thinking_of("claude")["currentValue"], "low");
+        assert_eq!(thinking_of("plain"), Value::Null);
+        assert_eq!(thinking_of("unseen")["id"], "thinking_level");
+        assert!(thinking_of("unseen").get("currentValue").is_none());
+    }
+
+    /// "publishes session metadata and native commands without another health probe".
+    #[test]
+    fn publishes_session_metadata_and_native_commands() {
+        let (commands, expected) = t3_commands();
+        let ready = signed_in("/workspace");
+        let next = available_commands(
+            &ready,
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:01.000Z",
+        );
+        assert_eq!(next.status, Some("ready"));
+        assert!(next.authenticated);
+        assert_eq!(Value::Array(next.slash_commands.clone()), expected);
+        assert_eq!(workspace_commands(&next, "/workspace"), expected);
+    }
+
+    /// "keeps a workspace's native commands when the catalog reports its own".
+    #[test]
+    fn keeps_a_workspaces_native_commands_when_the_catalog_reports_its_own() {
+        let (commands, expected) = t3_commands();
+        let ready = signed_in("/workspace");
+        let next = available_commands(
+            &ready,
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:01.000Z",
+        );
+        // The catalog probe runs in a scratch directory and reports no cwd.
+        let rest = json!(commands.as_array().unwrap()[1..]);
+        let next = available_commands(&next, &rest, None, "2026-11-23T00:00:02.000Z");
+        assert_eq!(workspace_commands(&next, "/workspace"), expected);
+        assert_eq!(
+            Value::Array(next.slash_commands),
+            json!(expected.as_array().unwrap()[1..])
+        );
+    }
+
+    /// "clears all account metadata on sign-out and authentication failure", for the
+    /// authentication failure (this server has no sign-out flow).
+    #[test]
+    fn clears_all_account_metadata_on_authentication_failure() {
+        let settings = AntigravitySettings::from_instance(Some(&json!({"enabled": true,
+            "config": {"authMethod": "gemini-api-key", "apiKey": "k"}})));
+        let (commands, _) = t3_commands();
+        let ready = available_commands(
+            &signed_in("/workspace"),
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:01.000Z",
+        );
+        let cleared = auth_required(&settings, &ready);
+        let shown = entry(
+            "antigravity",
+            &settings,
+            &cleared,
+            "2026-11-23T00:00:02.000Z",
+            None,
+        );
+        assert_eq!(shown["installed"], true);
+        assert_eq!(shown["status"], "warning");
+        assert_eq!(
+            shown["auth"],
+            json!({"status": "unauthenticated", "type": "gemini-api-key",
+                "label": "Gemini API key", "canLogout": false})
+        );
+        assert_eq!(
+            shown["message"],
+            "Connect with Gemini API key to use Antigravity and load models."
+        );
+        for key in ["models", "slashCommands", "skills", "workspaceSnapshots"] {
+            assert_eq!(shown[key], json!([]), "{key}");
+        }
+        assert_eq!(shown["supportsTextGeneration"], false);
+        // Later reports from a session do not restore the account's catalog.
+        let after = available_commands(
+            &cleared,
+            &commands,
+            Some("/workspace"),
+            "2026-11-23T00:00:03.000Z",
+        );
+        let after = config_options_updated(&after, &setup()["configOptions"]);
+        assert_eq!(workspace_commands(&after, "/workspace"), Value::Null);
+        assert!(after.models.is_empty());
+        // A health check keeps it signed out and starts no session.
+        let checked = check(
+            &settings,
+            &after,
+            Ok(PathBuf::from("/usr/local/bin/agy")),
+            None,
+        );
+        let rechecked = entry(
+            "antigravity",
+            &settings,
+            &checked,
+            "2026-11-23T00:00:04.000Z",
+            None,
+        );
+        assert_eq!(rechecked["auth"]["status"], "unauthenticated");
+        assert_eq!(
+            rechecked["message"],
+            "Connect with Gemini API key to use Antigravity and load models."
+        );
+        assert!(!needs_session(&checked));
+    }
+
+    /// T3's `observeThinkingLevels` keeps what each model reported until sign-out, also for
+    /// a model a later full model list no longer offers.
+    #[test]
+    fn thinking_levels_stay_until_sign_out() {
+        let mut previous = Observed {
+            authenticated: true,
+            ..Observed::default()
+        };
+        previous
+            .thinking_levels
+            .insert("gemini-retired".into(), None);
+        let options = &setup()["configOptions"];
+        let next = config_options_updated(&previous, options);
+        assert!(next.thinking_levels.contains_key("gemini-retired"));
+        let started = session_started(&previous, &json!({}), &setup(), None);
+        assert!(started.thinking_levels.contains_key("gemini-retired"));
+        let signed_out = auth_required(
+            &AntigravitySettings::from_instance(Some(&json!({"enabled": true}))),
+            &started,
+        );
+        assert!(signed_out.thinking_levels.is_empty());
     }
 }

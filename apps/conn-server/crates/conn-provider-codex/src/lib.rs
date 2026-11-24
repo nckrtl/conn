@@ -30,6 +30,8 @@ pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
 }
 
 #[cfg(test)]
+mod goal_tests;
+#[cfg(test)]
 mod live_tests;
 #[cfg(test)]
 mod replay_tests;
@@ -307,13 +309,14 @@ fn pending_status(
 }
 
 /// `CodexProviderCapabilitiesV2` with what this crate does not do switched off: snapshots,
-/// subagents, handoff context, queued messages, dynamic tool callbacks.
+/// subagents, system, developer and summary context, queued messages, dynamic tool callbacks.
+/// Provider switches carry the history through `thread/inject_items` (`inject_history`).
 pub fn capabilities() -> Value {
     json!({
         "sessions": {
             "supportsMultipleProviderThreadsPerSession": false,
             "supportsModelSwitchInSession": true,
-            "supportsProviderSwitchingViaHandoff": false,
+            "supportsProviderSwitchingViaHandoff": true,
             "supportsRuntimeModeSwitchInSession": true,
             "pendingRequestsSurviveRestart": false,
         },
@@ -378,11 +381,11 @@ pub fn capabilities() -> Value {
         "context": {
             "acceptsSystemContext": false,
             "acceptsDeveloperContext": false,
-            "acceptsSyntheticUserContext": false,
+            "acceptsSyntheticUserContext": true,
             "canGenerateSummaries": false,
-            "canConsumeHandoffSummaries": false,
-            "supportsDeltaHandoff": false,
-            "supportsFullThreadHandoff": false,
+            "canConsumeHandoffSummaries": true,
+            "supportsDeltaHandoff": true,
+            "supportsFullThreadHandoff": true,
             "maxRecommendedHandoffChars": null,
         },
         "checkpointing": {

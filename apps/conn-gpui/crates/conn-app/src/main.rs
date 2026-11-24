@@ -7,6 +7,7 @@ mod automation;
 mod colour_space;
 pub(crate) use conn_client::commands;
 mod drafts;
+mod editor_settings;
 mod file_icons;
 mod fixture;
 mod fonts;
@@ -16,15 +17,19 @@ mod live;
 mod menus;
 mod orbit_sync;
 mod palette;
+mod runtime_warmup;
 mod settings;
 mod shell;
 mod sidebar;
 mod stderr_log;
 mod superhero;
+mod terminal_settings;
 mod theme;
 #[cfg(test)]
 mod ui_tests;
 mod vibrancy;
+mod workspace_editor;
+mod workspace_image;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -179,7 +184,6 @@ mod chat;
 mod panels;
 
 fn main() {
-    #[cfg(feature = "cef")]
     if let Some(code) = conn_web::maybe_run_subprocess() {
         std::process::exit(code);
     }
@@ -208,7 +212,10 @@ fn main() {
     }
     application.run(|cx| {
         gpui_kit::init(cx);
+        #[cfg(feature = "zed-files")]
+        panels::zed_preview::init(cx);
         fonts::register(cx);
+        editor_settings::init(cx);
         colour_space::install(cx);
         vibrancy::install(cx);
         let theme = live::initial_theme();
@@ -217,6 +224,7 @@ fn main() {
         vibrancy::sync_appearance(tokens.appearance);
         let server = live::startup_server();
         app::register_keybindings(cx);
+        terminal_settings::init(cx);
         menus::install(cx);
         app::start_frame_log(cx);
 
@@ -261,6 +269,9 @@ fn main() {
         .expect("failed to open Conn main window");
         // Become the active app with the window in front, as a launched app should.
         cx.activate(true);
+        // Chromium starts in the background once the window has painted, so the Browser tab
+        // finds it running.
+        runtime_warmup::begin_after_launch(cx);
         window
             .update(cx, |_, window, cx| {
                 menus::install_main_window(window, cx);

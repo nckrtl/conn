@@ -18,18 +18,19 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, oneshot};
 
 use super::{
-    Config, Failure, LaunchRequest, ScheduledTasks, SendError, SendRequest, TaskRunner,
+    Config, Failure, LaunchRequest, RunEnd, ScheduledTasks, SendError, SendRequest, TaskRunner,
     ThreadShell, UpsertInput,
     schedule::{format_iso, parse_iso},
 };
-use crate::clock::TestClock;
+use crate::{clock::TestClock, secrets::SecretRequests};
 
 type Launch =
     Box<dyn Fn(LaunchRequest) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
 type SendFn = Box<dyn Fn(SendRequest) -> BoxFuture<'static, Result<(), SendError>> + Send + Sync>;
 type Shell = Box<dyn Fn(String) -> Option<ThreadShell> + Send + Sync>;
 type Queued = Box<dyn Fn(String, String) -> bool + Send + Sync>;
-type Outcome = Box<dyn Fn(String, String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
+type Outcome = Box<dyn Fn(String, String) -> BoxFuture<'static, RunEnd> + Send + Sync>;
+type NonGit = Box<dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync>;
 
 /// `Layer.mock(ThreadLaunchService)` and `Layer.mock(ThreadManagementService)`: each part
 /// answers as the test scripts it; an unscripted call fails as an unimplemented mock does.
@@ -39,6 +40,7 @@ pub(super) struct Fake {
     pub(super) shell: Shell,
     pub(super) queued: Queued,
     pub(super) outcome: Outcome,
+    pub(super) non_git: NonGit,
 }
 
 impl std::fmt::Debug for Fake {
@@ -54,7 +56,8 @@ impl Default for Fake {
             send: Box::new(|_| Box::pin(async { Err(SendError::Other("not scripted".into())) })),
             shell: Box::new(|_| None),
             queued: Box::new(|_, _| false),
-            outcome: Box::new(|_, _| Box::pin(async { None })),
+            outcome: Box::new(|_, _| Box::pin(async { RunEnd::Unknown })),
+            non_git: Box::new(|_| Box::pin(async { false })),
         }
     }
 }
@@ -81,8 +84,11 @@ impl TaskRunner for Fake {
         let queued = (self.queued)(task, thread);
         Box::pin(async move { Ok(queued) })
     }
-    fn run_outcome(&self, thread: String, message: String) -> BoxFuture<'_, Option<String>> {
+    fn run_outcome(&self, thread: String, message: String) -> BoxFuture<'_, RunEnd> {
         (self.outcome)(thread, message)
+    }
+    fn is_non_git_project(&self, project: String) -> BoxFuture<'_, bool> {
+        (self.non_git)(project)
     }
 }
 
@@ -113,12 +119,22 @@ impl Env {
     }
 
     pub(super) async fn start(&self, fake: Fake, zone: &str, timer: bool) -> ScheduledTasks {
+        self.start_with_secrets(fake, zone, timer, None).await
+    }
+
+    pub(super) async fn start_with_secrets(
+        &self,
+        fake: Fake,
+        zone: &str,
+        timer: bool,
+        secret_requests: Option<SecretRequests>,
+    ) -> ScheduledTasks {
         ScheduledTasks::start(Config {
             state_dir: self.dir.clone(),
             clock: Arc::new(self.clock.clone()),
             zone: TimeZone::get(zone).expect("zone"),
             runner: Arc::new(fake),
-            secret_requests: None,
+            secret_requests,
             start_timer: timer,
         })
         .await
@@ -900,7 +916,7 @@ async fn a_run_that_fails_after_its_message_was_accepted_records_it() {
             let e = e.clone();
             Box::pin(async move {
                 e.notified().await;
-                Some("Weekly usage limit reached".to_owned())
+                RunEnd::Failed("Weekly usage limit reached".to_owned())
             })
         }),
         ..Fake::default()
@@ -936,6 +952,163 @@ async fn a_run_that_fails_after_its_message_was_accepted_records_it() {
             break;
         }
     }
+}
+
+/// A fake whose bound sends succeed and whose run ends as `end` once `ended` is notified;
+/// `read` is notified after the outcome was read.
+fn ending_run(end: RunEnd, ended: Arc<Notify>, read: Arc<Notify>) -> Fake {
+    Fake {
+        send: Box::new(|_| Box::pin(async { Ok(()) })),
+        shell: Box::new(|_| shell("project:test")),
+        outcome: Box::new(move |_, _| {
+            let (end, ended, read) = (end.clone(), ended.clone(), read.clone());
+            Box::pin(async move {
+                ended.notified().await;
+                read.notify_one();
+                end
+            })
+        }),
+        ..Fake::default()
+    }
+}
+
+/// `a one-time task is removed once its turn completes` (`ScheduledTaskService.test.ts:512`);
+/// the store keeps it removed after a restart.
+#[tokio::test(start_paused = true)]
+async fn a_one_time_task_is_removed_once_its_turn_completes() {
+    let env = Env::new("once-spent", "2026-11-01T07:00:00.000Z");
+    let (ended, read) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let service = env
+        .start(
+            ending_run(RunEnd::Completed, ended.clone(), read.clone()),
+            "UTC",
+            false,
+        )
+        .await;
+    let task = upsert(
+        &service,
+        json!({"id": "task:once", "projectId": "project:test", "threadId": "thread:once",
+               "schedule": {"type": "once", "runAt": "2026-11-01T07:01:00.000Z"}}),
+    )
+    .await;
+    env.clock.set(ms("2026-11-01T07:02:00.000Z"));
+    let ran = service.run_now(&task.id).await.expect("ran");
+    // The dispatch alone keeps it: the turn can still fail.
+    assert_eq!(ran.task.last_run_status, ScheduledTaskRunStatus::Succeeded);
+    assert_eq!(next(&ran.task), None);
+    assert_eq!(tasks(&service).await.len(), 1, "kept until the turn ends");
+    let mut updates = service.subscribe();
+    ended.notify_one();
+    // The paused clock runs on when nothing is left to do, so a task that stays fails here.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let list = updates.recv().await.expect("update");
+            if list.tasks.iter().flatten().all(|t| t.id != task.id) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the spent task is removed");
+    drop(read);
+    drop(service);
+    let reopened = env.start(Fake::default(), "UTC", false).await;
+    assert!(tasks(&reopened).await.is_empty(), "removed from the store");
+}
+
+/// `a paused one-time task run by hand before its time is kept`
+/// (`ScheduledTaskService.test.ts:583`), and a due run whose turn fails is kept with its error.
+#[tokio::test(start_paused = true)]
+async fn a_one_time_task_run_early_or_failed_is_kept() {
+    let env = Env::new("once-kept", "2026-11-01T07:00:00.000Z");
+    let (ended, read) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let service = env
+        .start(
+            ending_run(RunEnd::Completed, ended.clone(), read.clone()),
+            "UTC",
+            false,
+        )
+        .await;
+    let task = upsert(
+        &service,
+        json!({"id": "task:paused-once", "projectId": "project:test", "threadId": "thread:once",
+               "schedule": {"type": "once", "runAt": "2026-11-01T08:00:00.000Z"}}),
+    )
+    .await;
+    service.set_enabled(&task.id, false).await.expect("pause");
+    service.run_now(&task.id).await.expect("ran");
+    ended.notify_one();
+    read.notified().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let kept = service
+        .find(&task.id)
+        .await
+        .expect("an early run keeps the task");
+    assert_eq!(kept.run_count, 1);
+    drop(service);
+
+    // An edit while the due run is out moves the task on: its completion keeps the new time.
+    let env = Env::new("once-edited", "2026-11-01T07:00:00.000Z");
+    let (ended, read) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let service = env
+        .start(
+            ending_run(RunEnd::Completed, ended.clone(), read.clone()),
+            "UTC",
+            false,
+        )
+        .await;
+    let edit = json!({"id": "task:edited-once", "projectId": "project:test",
+                      "threadId": "thread:once",
+                      "schedule": {"type": "once", "runAt": "2026-11-01T07:01:00.000Z"}});
+    let task = upsert(&service, edit.clone()).await;
+    env.clock.set(ms("2026-11-01T07:02:00.000Z"));
+    service.run_now(&task.id).await.expect("ran");
+    let mut later = edit;
+    later["schedule"]["runAt"] = json!("2026-11-02T07:00:00.000Z");
+    upsert(&service, later).await;
+    ended.notify_one();
+    read.notified().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let kept = service
+        .find(&task.id)
+        .await
+        .expect("an edited task is kept");
+    assert_eq!(next(&kept), Some("2026-11-02T07:00:00.000Z"));
+    drop(service);
+
+    let env = Env::new("once-failed", "2026-11-01T07:00:00.000Z");
+    let (ended, read) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let service = env
+        .start(
+            ending_run(
+                RunEnd::Failed("The run failed.".into()),
+                ended.clone(),
+                read.clone(),
+            ),
+            "UTC",
+            false,
+        )
+        .await;
+    let task = upsert(
+        &service,
+        json!({"id": "task:failed-once", "projectId": "project:test", "threadId": "thread:once",
+               "schedule": {"type": "once", "runAt": "2026-11-01T07:01:00.000Z"}}),
+    )
+    .await;
+    env.clock.set(ms("2026-11-01T07:02:00.000Z"));
+    service.run_now(&task.id).await.expect("ran");
+    let mut updates = service.subscribe();
+    ended.notify_one();
+    let kept = loop {
+        let list = updates.recv().await.expect("update");
+        let current = list.tasks.into_iter().flatten().find(|t| t.id == task.id);
+        let current = current.expect("a failed run keeps the task");
+        if current.last_run_status == ScheduledTaskRunStatus::Failed {
+            break current;
+        }
+    };
+    assert_eq!(kept.last_run_error.as_deref(), Some("The run failed."));
+    drop(read);
 }
 
 /// `a bound run follows its thread when promotion moves it mid-send`.
@@ -1068,6 +1241,7 @@ async fn a_first_run_never_binds_to_a_recreated_or_moved_task() {
 /// `checks a task's destination thread only when the destination changes`.
 #[tokio::test(start_paused = true)]
 async fn the_destination_thread_is_checked_only_when_it_changes() {
+    use std::os::unix::fs::PermissionsExt;
     let env = Env::new("destination", "2026-07-01T09:00:00.000Z");
     let archived = Arc::new(StdMutex::new(false));
     let flag = archived.clone();
@@ -1090,8 +1264,24 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         }),
         ..Fake::default()
     };
-    let service = env.start(fake, "UTC", false).await;
+    let answered =
+        crate::secrets::tests::answered_reference(&env.dir, "project:test", "s3cret").await;
+    let (secrets, reference) = (answered.service.clone(), answered.reference.clone());
+    let service = env
+        .start_with_secrets(fake, "UTC", false, Some(secrets.clone()))
+        .await;
     let save = |thread: &str| json!({"id": "task:destination", "projectId": "project:test", "threadId": thread});
+    let signed = |thread: &str, id: &str| {
+        json!({"id": id, "projectId": "project:test", "threadId": thread,
+               "schedule": {"type": "webhook", "signature": {"header": "x-signature", "encoding": "hex", "prefix": "", "secretRef": reference}}})
+    };
+    let unspent = async || {
+        secrets
+            .saved_ref("thread", "item")
+            .await
+            .expect("read")
+            .is_some()
+    };
     for (thread, message) in [
         ("thread:missing", "That thread no longer exists."),
         ("thread:deleted", "That thread no longer exists."),
@@ -1105,8 +1295,54 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         ),
     ] {
         assert_eq!(failure(&service, save(thread)).await, message, "{thread}");
+        // A rejected save must not burn a one-shot secret.
+        assert_eq!(
+            failure(&service, signed(thread, "task:destination")).await,
+            message,
+            "{thread} with a secretRef"
+        );
+        assert!(unspent().await, "{thread} left the reference usable");
     }
+    // A malformed signature encoding is refused as input before the destination is read.
+    let mut malformed = signed("thread:missing", "task:destination");
+    malformed["schedule"]["signature"]["encoding"] = json!("rot13");
+    assert!(
+        matches!(
+            service.upsert(input(malformed)).await,
+            Err(Failure::Invalid(message)) if message.starts_with("Invalid schedule")
+        ),
+        "the encoding error comes first"
+    );
+    assert!(
+        unspent().await,
+        "a malformed save left the reference usable"
+    );
+    // A blank secretRef is refused as input too (T3's `SecretRef` is trimmed and non-blank).
+    let mut blank = signed("thread:missing", "task:destination");
+    blank["schedule"]["signature"]["secretRef"] = json!(" ");
+    assert!(
+        matches!(
+            service.upsert(input(blank)).await,
+            Err(Failure::Invalid(message)) if message.starts_with("Invalid schedule")
+        ),
+        "a blank secretRef is invalid input"
+    );
+    // A task write that fails puts the spent reference back.
+    std::fs::set_permissions(&env.dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let unwritten = failure(&service, signed("thread:destination", "task:signed")).await;
+    std::fs::set_permissions(&env.dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(unwritten, "Could not save schedule task.");
+    assert!(unspent().await, "a failed write left the reference usable");
     assert!(tasks(&service).await.is_empty());
+    // The retry with a valid destination spends it once.
+    let retried = upsert(&service, signed("thread:destination", "task:signed")).await;
+    assert_eq!(retried.thread_id.as_deref(), Some("thread:destination"));
+    assert!(retried.webhook.as_ref().is_some_and(|w| w.has_secret));
+    assert!(!unspent().await, "spent by the save");
+    assert_eq!(
+        failure(&service, signed("thread:destination", "task:third-use")).await,
+        "That secretRef was already used or does not exist. Ask the user again with request_secret."
+    );
     upsert(&service, save("thread:destination")).await;
     *archived.lock().expect("lock") = true;
     assert_eq!(
@@ -1117,6 +1353,212 @@ async fn the_destination_thread_is_checked_only_when_it_changes() {
         Some("thread:destination"),
         "a thread archived later stays editable"
     );
+    // So does the signed task bound to it, which keeps its stored secret.
+    let mut edited = save("thread:destination");
+    edited["id"] = json!("task:signed");
+    edited["schedule"] = json!({"type": "webhook", "signature": {"header": "x-signature", "encoding": "hex", "prefix": ""}});
+    let edited = upsert(&service, edited).await;
+    assert_eq!(edited.thread_id.as_deref(), Some("thread:destination"));
+    assert!(edited.webhook.as_ref().is_some_and(|w| w.has_secret));
+    let ids: Vec<String> = tasks(&service).await.into_iter().map(|t| t.id).collect();
+    assert_eq!(ids, ["task:destination", "task:signed"]);
+}
+
+/// Holds a store write until the test releases it.
+pub(super) struct WriteGate {
+    reached: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+impl WriteGate {
+    pub(super) async fn hold(self) {
+        let _ = self.reached.send(());
+        let _ = self.release.await;
+    }
+}
+
+/// Pauses the service's next store write: the first receiver fires when the write is
+/// reached, and the sender lets it go on.
+fn pause_next_write(service: &ScheduledTasks) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached, at_write) = oneshot::channel();
+    let (go, release) = oneshot::channel();
+    *service.inner.write_gate.lock().expect("lock") = Some(WriteGate { reached, release });
+    (at_write, go)
+}
+
+fn set_mode(dir: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// A service whose store can resolve `thread:destination`, and a one-use reference to
+/// `s3cret` in `project:test`.
+async fn signed_service(name: &str) -> (Env, ScheduledTasks, crate::secrets::tests::Answered) {
+    let env = Env::new(name, "2026-07-01T09:00:00.000Z");
+    let fake = Fake {
+        shell: Box::new(|thread| {
+            (thread == "thread:destination").then(|| ThreadShell {
+                project_id: "project:test".into(),
+                deleted: false,
+                archived: false,
+            })
+        }),
+        ..Fake::default()
+    };
+    let answered =
+        crate::secrets::tests::answered_reference(&env.dir, "project:test", "s3cret").await;
+    let service = env
+        .start_with_secrets(fake, "UTC", false, Some(answered.service.clone()))
+        .await;
+    (env, service, answered)
+}
+
+fn signed_save(reference: &str, id: &str) -> UpsertInput {
+    input(
+        json!({"id": id, "projectId": "project:test", "threadId": "thread:destination",
+        "schedule": {"type": "webhook", "signature": {"header": "x-signature", "encoding": "hex", "prefix": "", "secretRef": reference}}}),
+    )
+}
+
+/// The reference is usable until a save's task write lands: the retry binds the secret and
+/// spends the reference, once.
+async fn retry_spends_it_once(
+    service: &ScheduledTasks,
+    answered: &crate::secrets::tests::Answered,
+) {
+    let unspent = async || {
+        answered
+            .service
+            .saved_ref("thread", "item")
+            .await
+            .expect("read")
+            .is_some()
+    };
+    assert!(unspent().await, "the reference stays usable");
+    let task = service
+        .upsert(signed_save(&answered.reference, "task:signed"))
+        .await
+        .expect("the retry saves");
+    assert!(task.webhook.as_ref().is_some_and(|w| w.has_secret));
+    assert!(
+        std::fs::read_to_string(service.inner.path.clone())
+            .expect("store")
+            .contains("s3cret"),
+        "the retry bound the saved value"
+    );
+    assert!(!unspent().await, "spent by the retry");
+    assert_eq!(
+        service
+            .upsert(signed_save(&answered.reference, "task:third-use"))
+            .await
+            .map_err(|e| e.to_string()),
+        Err(
+            "That secretRef was already used or does not exist. Ask the user again with request_secret."
+                .to_owned()
+        )
+    );
+}
+
+/// A second answer and a consume of the same reference wait while a save holds it. The
+/// save's write fails, so the reference still holds the value the save read: the racing
+/// consume gets it once, and it never comes back.
+#[tokio::test(start_paused = true)]
+async fn a_second_answer_and_a_consume_wait_for_a_save_of_the_same_reference() {
+    let (env, service, answered) = signed_service("claim-race").await;
+    let answered = Arc::new(answered);
+    let reference = answered.reference.clone();
+    let (at_write, go) = pause_next_write(&service);
+    let saving = tokio::spawn({
+        let service = service.clone();
+        let save = signed_save(&reference, "task:signed");
+        async move { service.upsert(save).await }
+    });
+    at_write.await.expect("the save reached its write");
+    set_mode(&env.dir, 0o555);
+    let mut again = tokio::spawn({
+        let answered = answered.clone();
+        async move { answered.answer_again("second").await }
+    });
+    let mut consumer = tokio::spawn({
+        let (secrets, reference) = (answered.service.clone(), reference.clone());
+        async move { secrets.consume(&reference, "project:test").await }
+    });
+    let waits = Duration::from_secs(60);
+    assert!(
+        tokio::time::timeout(waits, &mut again).await.is_err(),
+        "a second answer waits for the save"
+    );
+    assert!(
+        tokio::time::timeout(waits, &mut consumer).await.is_err(),
+        "a consume waits for the save"
+    );
+    go.send(()).expect("release");
+    let saved = saving.await.expect("join");
+    set_mode(&env.dir, 0o755);
+    assert_eq!(
+        saved.map_err(|e| e.to_string()),
+        Err("Could not save schedule task.".to_owned())
+    );
+    again.await.expect("join").expect("answered");
+    assert_eq!(
+        consumer.await.expect("join").map_err(|e| e.0),
+        Ok("s3cret".to_owned()),
+        "the consume got the value the failed save left"
+    );
+    let drained = answered
+        .service
+        .consume(&reference, "project:test")
+        .await
+        .map_err(|e| e.0);
+    assert_ne!(
+        drained,
+        Ok("s3cret".to_owned()),
+        "a spent value never comes back"
+    );
+}
+
+/// A caller that drops the save while its task write is pending (a WebSocket disconnect)
+/// leaves the reference usable.
+#[tokio::test(start_paused = true)]
+async fn a_save_dropped_during_its_write_leaves_the_reference_usable() {
+    let (_env, service, answered) = signed_service("claim-dropped").await;
+    let (at_write, _go) = pause_next_write(&service);
+    let saving = tokio::spawn({
+        let service = service.clone();
+        let save = signed_save(&answered.reference, "task:signed");
+        async move { service.upsert(save).await }
+    });
+    at_write.await.expect("the save reached its write");
+    saving.abort();
+    assert!(saving.await.is_err_and(|e| e.is_cancelled()));
+    assert!(tasks(&service).await.is_empty());
+    retry_spends_it_once(&service, &answered).await;
+}
+
+/// A task write that fails while the secret store cannot be written either (a full disk)
+/// leaves the reference usable, and the retry spends it once.
+#[tokio::test(start_paused = true)]
+async fn a_failed_write_with_a_read_only_store_leaves_the_reference_usable() {
+    let (env, service, answered) = signed_service("claim-read-only").await;
+    let (at_write, go) = pause_next_write(&service);
+    let saving = tokio::spawn({
+        let service = service.clone();
+        let save = signed_save(&answered.reference, "task:signed");
+        async move { service.upsert(save).await }
+    });
+    at_write.await.expect("the save reached its write");
+    // Read-only without search: nothing below the state folder can be written, the secret
+    // store included.
+    set_mode(&env.dir, 0o444);
+    go.send(()).expect("release");
+    let saved = saving.await.expect("join");
+    set_mode(&env.dir, 0o755);
+    assert_eq!(
+        saved.map_err(|e| e.to_string()),
+        Err("Could not save schedule task.".to_owned())
+    );
+    assert!(tasks(&service).await.is_empty());
+    retry_spends_it_once(&service, &answered).await;
 }
 
 /// `a run interrupted right after it reserves the task does not block the next run`, and
@@ -1695,4 +2137,141 @@ mod clock_jumps {
             Some("2026-07-02T09:00:00.000Z")
         );
     }
+}
+
+/// `upsert`: "A folder that is not a Git repository, Scratch included, cannot hold a
+/// worktree." A run applies the same rule to a task saved while its folder had Git.
+#[tokio::test(start_paused = true)]
+async fn a_worktree_task_in_a_folder_without_git_runs_in_the_folder() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let env = Env::new("non-git", "2026-11-01T07:59:00.000Z");
+    let non_git = Arc::new(AtomicBool::new(false));
+    let launched = Arc::new(StdMutex::new(Vec::new()));
+    let fake = Fake {
+        launch: Box::new({
+            let launched = launched.clone();
+            move |request| {
+                launched
+                    .lock()
+                    .unwrap()
+                    .push(request.workspace_strategy["type"].clone());
+                Box::pin(async { Ok("thread:run".to_owned()) })
+            }
+        }),
+        non_git: Box::new({
+            let non_git = non_git.clone();
+            move |project| {
+                assert_eq!(project, "project-interval-duration");
+                let non_git = non_git.load(Ordering::SeqCst);
+                Box::pin(async move { non_git })
+            }
+        }),
+        ..Fake::default()
+    };
+    let service = env.start(fake, "UTC", false).await;
+    let worktree = json!({"type": "worktree", "baseRef": "main"});
+    let saved =
+        |id: &str| json!({"commandId": id, "workspaceStrategy": worktree, "enabled": false});
+    let in_git = upsert(&service, saved("in-git")).await;
+    assert_eq!(to_json(&in_git.workspace_strategy)["type"], "worktree");
+
+    non_git.store(true, Ordering::SeqCst);
+    let plain = upsert(&service, saved("plain")).await;
+    assert_eq!(to_json(&plain.workspace_strategy), json!({"type": "root"}));
+    for task in [&plain, &in_git] {
+        let run = service.run_now(&task.id).await.expect("run");
+        assert_eq!(
+            run.task.last_run_status,
+            ScheduledTaskRunStatus::Succeeded,
+            "{}",
+            task.id
+        );
+        assert_eq!(run.thread_id.as_deref(), Some("thread:run"));
+    }
+    assert_eq!(*launched.lock().unwrap(), [json!("root"), json!("root")]);
+    let stored = tasks(&service).await;
+    let kept = stored.iter().find(|t| t.id == in_git.id).unwrap();
+    assert_eq!(
+        to_json(&kept.workspace_strategy)["type"],
+        "worktree",
+        "a run does not rewrite the saved task"
+    );
+}
+
+/// `isNonGitProject` reads the folder Git sees. Git resolves a symlinked project folder to its
+/// physical path, so the `.git` walk must too: a link inside a checkout to a plain folder runs
+/// in the folder, and a link from outside into an unreadable repository keeps its worktree.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_project_saves_and_runs_the_strategy_of_the_folder_git_sees() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let env = Env::new("symlinked-root", "2026-11-01T07:59:00.000Z");
+    let fs = env.dir.join("fs");
+    for dir in ["checkout", "plain", "locked/sub", "outside"] {
+        std::fs::create_dir_all(fs.join(dir)).unwrap();
+    }
+    let fs = std::fs::canonicalize(fs).unwrap();
+    for repo in ["checkout", "locked"] {
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(fs.join(repo))
+            .status()
+            .unwrap();
+        assert!(init.success(), "git init {repo}");
+    }
+    let into_plain = fs.join("checkout/link");
+    symlink(fs.join("plain"), &into_plain).unwrap();
+    let into_locked = fs.join("outside/link");
+    symlink(fs.join("locked/sub"), &into_locked).unwrap();
+    let locked_git = fs.join("locked/.git");
+    std::fs::set_permissions(&locked_git, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let launched = Arc::new(StdMutex::new(Vec::new()));
+    let fake = Fake {
+        launch: Box::new({
+            let launched = launched.clone();
+            move |request| {
+                launched
+                    .lock()
+                    .unwrap()
+                    .push(request.workspace_strategy["type"].clone());
+                Box::pin(async { Ok("thread:run".to_owned()) })
+            }
+        }),
+        non_git: Box::new(move |project| {
+            let root = PathBuf::from(project);
+            Box::pin(async move { conn_vcs::repo::is_plain_folder(&root).await })
+        }),
+        ..Fake::default()
+    };
+    let service = env.start(fake, "UTC", false).await;
+    let mut saved = Vec::new();
+    for (id, root) in [("into-plain", &into_plain), ("into-locked", &into_locked)] {
+        let task = upsert(
+            &service,
+            json!({
+                "commandId": id,
+                "projectId": root.to_string_lossy(),
+                "workspaceStrategy": {"type": "worktree", "baseRef": "main"},
+                "enabled": false,
+            }),
+        )
+        .await;
+        service.run_now(&task.id).await.expect("run");
+        saved.push(to_json(&task.workspace_strategy)["type"].clone());
+    }
+    std::fs::set_permissions(&locked_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        saved,
+        [json!("root"), json!("worktree")],
+        "saved: the plain folder behind the link runs in place; the repository keeps its worktree"
+    );
+    assert_eq!(
+        *launched.lock().unwrap(),
+        [json!("root"), json!("worktree")],
+        "run"
+    );
 }

@@ -3,9 +3,13 @@
 
 mod approval_card;
 mod approval_state;
+mod attachment_thumb;
 mod cache;
 mod cards;
+mod child_approvals;
+pub(crate) use self::child_approvals::ChildApprovalCard;
 mod color;
+mod command_label;
 mod composer;
 mod composer_state;
 pub(crate) use self::composer_state::{
@@ -15,6 +19,10 @@ pub(crate) use self::composer_state::{
 };
 mod draft_hero;
 mod icons;
+mod inline_code;
+mod link_menu;
+mod link_preview;
+pub(crate) use self::link_menu::LinkedPullRequest;
 pub(crate) mod markdown;
 mod provider_banner;
 mod question_logic;
@@ -37,11 +45,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FollowMode, FontWeight,
     InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, list, px,
-    relative,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Transformation, Window, div,
+    list, percentage, px, relative,
 };
 
 use self::cache::{CachedRow, RowCache, VirtualItem};
+pub(crate) use self::cache::{ThreadOutline, TocEntry};
 use self::color::{hsla, hsla_alpha, message_highlight, muted_icon, prose_foreground};
 pub(crate) use self::composer::{BranchAction, BranchContext, SendDispatch};
 use self::composer::{Composer, ComposerEvent};
@@ -53,6 +62,8 @@ use crate::panels::chrome::ConnTooltipExt as _;
 const CHAT_CONTENT_MAX_WIDTH_PX: f32 = 736.0;
 /// Horizontal lane padding matching `.chat-composer-lane` / `.messages-timeline-scroll` (`3rem`).
 const CHAT_LANE_PADDING_X_PX: f32 = 48.0;
+/// `expanded_ids` key for the queue's `Show all N queued` toggle.
+const QUEUE_EXPANDED_KEY: &str = "queued-list";
 /// User bubble radius matching Conn's `--radius-bubble: calc(var(--radius) + 6px)` (`8px + 6px`).
 const BUBBLE_RADIUS_PX: f32 = 14.0;
 /// Tight corner radius where consecutive user bubbles meet (`rounded-tr-md` / `rounded-br-md`).
@@ -105,6 +116,8 @@ struct UserBubble<'a> {
     grouped_with_next: bool,
 }
 
+pub(crate) const OFFLINE_PROMPT_NOTICE: &str = "Connect to load this message";
+
 /// Events emitted by [`ChatView`] to the host shell.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ChatEvent {
@@ -128,6 +141,13 @@ pub(crate) enum ChatEvent {
         entry_id: String,
         decision: String,
     },
+    /// Answer a child thread's approval card above the composer; the request belongs to the
+    /// child thread `thread_id`.
+    ChildApproval {
+        thread_id: String,
+        request_id: String,
+        decision: String,
+    },
     ModelSelected {
         instance_id: String,
         model: String,
@@ -141,13 +161,18 @@ pub(crate) enum ChatEvent {
         file_path: Option<String>,
     },
     /// Open another thread (a subagent's child thread).
-    OpenThread(String),
+    OpenThread {
+        thread_id: String,
+        environment_id: Option<String>,
+    },
     /// Fork the thread from a completed assistant response's run (`thread.fork`).
     ForkFromRun {
         run_id: String,
     },
     /// Open a workspace-relative file in the right panel's File preview tab.
-    OpenFile(String),
+    OpenFile(conn_contract::source::SourceLocation),
+    /// Show a web link in the Browser panel (`Open in integrated browser`).
+    OpenInBrowser(String),
     /// Switch the thread's runtime permission mode (`thread.runtime-mode.set`).
     RuntimeModeSelected(String),
     /// Switch the thread's interaction mode (`thread.interaction-mode.set`).
@@ -170,6 +195,8 @@ pub(crate) enum ChatEvent {
     SlashCommand(String),
     /// Request the next older history page for the active bounded thread.
     LoadEarlierHistory,
+    JumpToPrompt(String),
+    ReturnToLatest,
     /// Promote a queued message to steer the active turn (or start it when stopped).
     PromoteQueuedMessage {
         run_id: String,
@@ -217,6 +244,8 @@ pub(crate) struct ChatView {
     /// Thread opened at this instant and not painted yet (`CONN_GPUI_PERF_LOG`).
     perf_open: Option<(String, std::time::Instant)>,
     entry_timings: HashMap<String, EntryTiming>,
+    /// The model of each subagent card, by timeline entry id.
+    subagent_models: HashMap<String, conn_state::SubagentModel>,
     run_timings: HashMap<String, RunTiming>,
     turn_checkpoints: HashMap<String, TurnCheckpointSummary>,
     expanded_ids: HashSet<String>,
@@ -226,6 +255,9 @@ pub(crate) struct ChatView {
     /// Project root; tool row paths under it show relative, as in Conn.
     workspace_root: Option<String>,
     list_state: ListState,
+    whole_outline: Option<std::sync::Arc<ThreadOutline>>,
+    anchored_prompt: Option<String>,
+    pending_prompt: Option<String>,
     toc_hovered_slot: Option<usize>,
     toc_pinned_slot: Option<usize>,
     editing_queued_run_id: Option<String>,
@@ -233,6 +265,29 @@ pub(crate) struct ChatView {
     _input_sub: Subscription,
     /// Live connection for card actions (answers, secrets, omitted tool output).
     connection: Option<conn_client::Connection>,
+    /// The right-click menu of a web link in a message.
+    link_menu: Option<link_menu::LinkMenu>,
+    /// The open link menu takes the keyboard while it is open.
+    link_menu_focus: gpui_kit::FocusHandle,
+    link_menu_focus_pending: bool,
+    /// Pull requests the open thread links, to offer `Unlink from thread` on their links.
+    linked_pull_requests: Vec<link_menu::LinkedPullRequest>,
+    /// The editor picked in the `Open in` card, for `Open in <editor>` on a file link.
+    preferred_editor: Option<crate::header::details_card::EditorTarget>,
+    link_command_seq: u64,
+    /// The thread's project, which routes the reads behind a link's hover card.
+    project_id: Option<String>,
+    /// The hover card of a pull request or issue link in a message.
+    link_preview: link_preview::LinkPreview,
+    /// Height of the composer lane, measured while painting. The timeline scrolls behind the
+    /// composer, so its last row keeps this much room below it.
+    composer_height: Rc<std::cell::Cell<f32>>,
+    /// The `composer_height` the last row was measured with.
+    composer_height_applied: f32,
+    /// Downloaded image attachments of sent messages, by attachment id (filled while rendering).
+    attachment_images: std::cell::RefCell<
+        HashMap<String, (Entity<attachment_thumb::AttachmentImageState>, Subscription)>,
+    >,
     /// The latest run when it was interrupted (`You stopped after ...`).
     interrupted_run_id: Option<String>,
     /// Copy button currently showing its check (`MessageCopyButton`).
@@ -248,6 +303,8 @@ pub(crate) struct ChatView {
     /// typing guard hides any of them.
     incoming_approvals: Vec<conn_state::PendingApproval>,
     incoming_question: Option<(String, String)>,
+    /// Pending approvals of the thread's children, shown above the composer.
+    child_approvals: Vec<ChildApprovalCard>,
     /// Holds requests that arrive while the user types (`useComposerTypingGuard`).
     typing_guard: composer_state::TypingGuard,
     _typing_guard_idle: Option<gpui_kit::Task<()>>,
@@ -271,6 +328,9 @@ pub(crate) struct TimelineMetrics {
     pub(crate) total_entries: usize,
     pub(crate) virtual_items: usize,
     pub(crate) toc_turns: usize,
+    pub(crate) anchor_prompt: Option<String>,
+    pub(crate) top_prompt: Option<String>,
+    pub(crate) jump_error: Option<String>,
     pub(crate) parsed_markdown_rows: usize,
     pub(crate) active_toc_turn: Option<usize>,
     pub(crate) scroll_top_item: usize,
@@ -418,6 +478,7 @@ impl ChatView {
             synced_revision: None,
             perf_open: None,
             entry_timings: HashMap::new(),
+            subagent_models: HashMap::new(),
             run_timings: HashMap::new(),
             turn_checkpoints: HashMap::new(),
             expanded_ids: HashSet::new(),
@@ -426,12 +487,26 @@ impl ChatView {
             model_label: "Default model".to_owned(),
             workspace_root: None,
             list_state,
+            whole_outline: None,
+            anchored_prompt: None,
+            pending_prompt: None,
             toc_hovered_slot: None,
             toc_pinned_slot: None,
             editing_queued_run_id: None,
             composer,
             _input_sub: input_sub,
             connection,
+            link_menu: None,
+            link_menu_focus: cx.focus_handle(),
+            link_menu_focus_pending: false,
+            linked_pull_requests: Vec::new(),
+            preferred_editor: None,
+            link_command_seq: 0,
+            project_id: None,
+            link_preview: link_preview::LinkPreview::default(),
+            composer_height: Rc::new(std::cell::Cell::new(0.0)),
+            composer_height_applied: 0.0,
+            attachment_images: std::cell::RefCell::new(HashMap::new()),
             interrupted_run_id: None,
             copied_message_key: None,
             _copy_reset: None,
@@ -440,6 +515,7 @@ impl ChatView {
             pending_question_id: None,
             incoming_approvals: Vec::new(),
             incoming_question: None,
+            child_approvals: Vec::new(),
             typing_guard: composer_state::TypingGuard::default(),
             _typing_guard_idle: None,
             user_input_cards: HashMap::new(),
@@ -460,13 +536,14 @@ impl ChatView {
     ) {
         self.connected = connection.is_some();
         self.connection = connection.clone();
+        self.attachment_images.borrow_mut().clear();
         self.composer
             .update(cx, |c, cx| c.set_connection(connection, cx));
         cx.notify();
     }
 
-    /// Stages local file paths into the composer attachment strip (used by automation and tests).
-    #[cfg(any(test, feature = "automation"))]
+    /// Stages local file paths into the composer attachment strip (files dropped on a thread row,
+    /// automation and tests).
     pub(crate) fn attach_paths(
         &mut self,
         paths: Vec<std::path::PathBuf>,
@@ -475,6 +552,35 @@ impl ChatView {
     ) {
         self.composer
             .update(cx, |composer, cx| composer.attach_paths(paths, window, cx));
+    }
+
+    pub(crate) fn attach_source(
+        &mut self,
+        source: &conn_contract::source::SourceSelection,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let label = format!(
+            "{}#L{}-L{}",
+            source.path, source.lines.start_line, source.lines.end_line
+        );
+        let content = format!("{label}\n\n{}", source.text);
+        let filename = format!(
+            "{}-L{}-L{}.txt",
+            source.path.rsplit('/').next().unwrap_or("source"),
+            source.lines.start_line,
+            source.lines.end_line
+        );
+        self.composer.update(cx, |c, cx| {
+            c.stage_and_upload_bytes(
+                filename,
+                "text/plain".to_owned(),
+                content.into_bytes(),
+                window,
+                cx,
+            );
+            c.focus_input(window, cx);
+        });
     }
 
     /// Returns the child composer entity for headless GPUI tests.
@@ -503,6 +609,11 @@ impl ChatView {
     }
 
     /// Moves keyboard focus into the composer input.
+    #[cfg(feature = "automation")]
+    pub(crate) fn spike_input_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
+        self.composer.read(cx).spike_input_focused(window, cx)
+    }
+
     pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.composer.update(cx, |c, cx| c.focus_input(window, cx));
     }
@@ -532,6 +643,17 @@ impl ChatView {
     ) {
         self.composer
             .update(cx, |c, cx| c.set_draft_text(text, window, cx));
+    }
+
+    /// Adds a file mention at the end of the composer's draft ("Add to chat").
+    pub(crate) fn insert_mention(
+        &mut self,
+        mention: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.composer
+            .update(cx, |c, cx| c.insert_mention(mention, window, cx));
     }
 
     /// Toggles keeping the `BranchToolbar` context strip visible below the composer on active threads.
@@ -570,6 +692,12 @@ impl ChatView {
             .update(cx, |c, cx| c.set_draft_mode(is_draft, launching, cx));
     }
 
+    pub(crate) fn clear_offline_prompt_notice(&mut self, cx: &mut Context<'_, Self>) {
+        if self.error_banner.as_deref() == Some(OFFLINE_PROMPT_NOTICE) {
+            self.set_error(None, cx);
+        }
+    }
+
     /// Displays (or clears) a dismissible error banner directly above the composer.
     pub(crate) fn set_error(&mut self, error: Option<String>, cx: &mut Context<'_, Self>) {
         if self.error_banner != error {
@@ -606,6 +734,8 @@ impl ChatView {
             self.synced_revision = None;
             self.has_thread = false;
             self.thread_id = None;
+            self.anchored_prompt = None;
+            self.pending_prompt = None;
             self.synchronized = true;
             self.working = false;
             self.has_more_history = false;
@@ -614,6 +744,7 @@ impl ChatView {
             self._working_tick = None;
             self.cache.clear();
             self.entry_timings.clear();
+            self.subagent_models.clear();
             self.run_timings.clear();
             self.turn_checkpoints.clear();
             self.expanded_ids.clear();
@@ -638,6 +769,8 @@ impl ChatView {
 
         let switched_thread = self.thread_id.as_deref() != Some(thread.thread_id.as_str());
         if switched_thread {
+            self.anchored_prompt = None;
+            self.pending_prompt = None;
             self.thread_id = Some(thread.thread_id.clone());
             self.expanded_ids.clear();
             self.wrapped_code_keys.clear();
@@ -701,6 +834,13 @@ impl ChatView {
         self.has_more_history = thread.has_more_history;
         self.loading_earlier = thread.loading_earlier;
         self.entry_timings = thread.entry_timings.clone();
+        self.subagent_models = thread
+            .subagent_of_entry
+            .iter()
+            .filter_map(|(entry, subagent)| {
+                Some((entry.clone(), thread.subagent_models.get(subagent)?.clone()))
+            })
+            .collect();
         self.run_timings = thread.run_timings.clone();
         self.turn_checkpoints = thread.turn_checkpoints.clone();
         self.interrupted_run_id = thread
@@ -749,51 +889,52 @@ impl ChatView {
         self.schedule_typing_guard_idle(cx);
         self.sync_question_panel(thread);
         self.sync_working_timer(cx);
-        let sync_start = std::time::Instant::now();
-        let stats = self.cache.sync(
-            &thread.entries,
-            &self.entry_timings,
-            &self.turn_checkpoints,
-            self.working,
-            self.has_more_history,
-            self.loading_earlier,
-        );
-        if let Some((perf_thread, opened_at)) = &self.perf_open
-            && perf_thread == &thread.thread_id
-        {
-            conn_client::perf_log!(
-                "app.chat_synced thread={perf_thread} entries={} items={} synchronized={} row_cache_ms={:.1} +{:.1}ms",
-                stats.total,
-                stats.new_item_count,
-                thread.synchronized,
-                conn_client::perf::ms_since(sync_start),
-                conn_client::perf::ms_since(*opened_at),
+        if self.anchored_prompt.is_none() {
+            let sync_start = std::time::Instant::now();
+            let stats = self.cache.sync(
+                &thread.entries,
+                &self.entry_timings,
+                &self.turn_checkpoints,
+                self.working,
+                self.has_more_history,
+                self.loading_earlier,
             );
-        }
+            if let Some((perf_thread, opened_at)) = &self.perf_open
+                && perf_thread == &thread.thread_id
+            {
+                conn_client::perf_log!(
+                    "app.chat_synced thread={perf_thread} entries={} items={} synchronized={} row_cache_ms={:.1} +{:.1}ms",
+                    stats.total,
+                    stats.new_item_count,
+                    thread.synchronized,
+                    conn_client::perf::ms_since(sync_start),
+                    conn_client::perf::ms_since(*opened_at),
+                );
+            }
 
-        if switched_thread || stats.old_item_count == 0 {
-            self.list_state.reset(stats.new_item_count);
-            self.list_state.set_follow_mode(FollowMode::Tail);
-            self.list_state.scroll_to_end();
-        } else if stats.splice_start < stats.splice_old_end
-            || stats.splice_start < stats.splice_new_end
-        {
-            self.list_state.splice(
-                stats.splice_start..stats.splice_old_end,
-                stats.splice_new_end - stats.splice_start,
-            );
-            if !was_following_tail && stats.prepended_delta != 0 && stats.new_item_count > 0 {
-                let next_ix = prev_scroll
-                    .item_ix
-                    .saturating_add_signed(stats.prepended_delta)
-                    .min(stats.new_item_count - 1);
-                self.list_state.scroll_to(ListOffset {
-                    item_ix: next_ix,
-                    offset_in_item: prev_scroll.offset_in_item,
-                });
+            if switched_thread || stats.old_item_count == 0 {
+                self.list_state.reset(stats.new_item_count);
+                self.list_state.set_follow_mode(FollowMode::Tail);
+                self.list_state.scroll_to_end();
+            } else if stats.splice_start < stats.splice_old_end
+                || stats.splice_start < stats.splice_new_end
+            {
+                self.list_state.splice(
+                    stats.splice_start..stats.splice_old_end,
+                    stats.splice_new_end - stats.splice_start,
+                );
+                if !was_following_tail && stats.prepended_delta != 0 && stats.new_item_count > 0 {
+                    let next_ix = prev_scroll
+                        .item_ix
+                        .saturating_add_signed(stats.prepended_delta)
+                        .min(stats.new_item_count - 1);
+                    self.list_state.scroll_to(ListOffset {
+                        item_ix: next_ix,
+                        offset_in_item: prev_scroll.offset_in_item,
+                    });
+                }
             }
         }
-
         cx.notify();
         let working = self.working;
         let can_resume = !working && self.interrupted_run_id.is_some();
@@ -845,6 +986,17 @@ impl ChatView {
 
     /// Sets the model display label shown in the composer footer.
     /// Sets the project root used to shorten tool row paths.
+    /// The project whose provider overrides apply to the composer (`projectSettingsOverrides`).
+    pub(crate) fn set_project_id(
+        &mut self,
+        project_id: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.project_id.clone_from(&project_id);
+        self.composer
+            .update(cx, |c, cx| c.set_project_id(project_id, cx));
+    }
+
     pub(crate) fn set_workspace_root(&mut self, root: Option<String>, cx: &mut Context<'_, Self>) {
         if self.workspace_root != root {
             self.composer
@@ -852,6 +1004,14 @@ impl ChatView {
             self.workspace_root = root;
             cx.notify();
         }
+    }
+
+    /// The editor the `Open in` card picked; `None` lets the file menu use the first installed.
+    pub(crate) fn set_preferred_editor(
+        &mut self,
+        editor: Option<crate::header::details_card::EditorTarget>,
+    ) {
+        self.preferred_editor = editor;
     }
 
     /// `Read /private/tmp/x/src/main.rs` → `Read src/main.rs` under root `/tmp/x`.
@@ -969,6 +1129,7 @@ impl ChatView {
         self.changed_files_expanded.clear();
         self.changed_files_dir_overrides.clear();
         self.fetched_details.clear();
+        self.link_preview.hover.dismiss();
     }
 
     /// Markdown options shared by assistant rows and plan cards (copy/wrap code, file links).
@@ -976,6 +1137,8 @@ impl ChatView {
         let entity_copy = cx.entity().downgrade();
         let entity_wrap = cx.entity().downgrade();
         let entity_file = cx.entity().downgrade();
+        let entity_link = cx.entity().downgrade();
+        let entity_hover = cx.entity().downgrade();
         markdown::MarkdownOptions {
             heading_style: markdown::HeadingStyle::Scale,
             copied_code_key: self.copied_code_key.as_deref(),
@@ -991,6 +1154,19 @@ impl ChatView {
                 let _ = entity_file.update(cx, |_view, cx| {
                     cx.emit(ChatEvent::OpenFile(path));
                 });
+            })),
+            on_link_menu: Some(Rc::new(move |target, position, window, cx| {
+                let _ = entity_link.update(cx, |view, cx| match &target {
+                    markdown::LinkMenuTarget::Web(url) => {
+                        view.open_link_menu(url, position, window, cx);
+                    }
+                    markdown::LinkMenuTarget::File(path) => {
+                        view.open_file_menu(path, position, window, cx);
+                    }
+                });
+            })),
+            on_link_hover: Some(Rc::new(move |event, _window, cx| {
+                let _ = entity_hover.update(cx, |view, cx| view.link_hover(event, cx));
             })),
             prose: None,
         }
@@ -1013,6 +1189,17 @@ impl ChatView {
             self.wrapped_code_keys.insert(key.clone());
         }
         self.remeasure_for_id(&key);
+        cx.notify();
+    }
+
+    /// Expands or collapses a subagent card's summary (`chat.subagent.<id>.toggle`) and remeasures
+    /// the card's row, since its height changes.
+    pub(super) fn toggle_subagent_summary(&mut self, entry_id: &str, cx: &mut Context<'_, Self>) {
+        let key = cards::subagent_summary_key(entry_id);
+        if !self.expanded_ids.remove(&key) {
+            self.expanded_ids.insert(key);
+        }
+        self.remeasure_for_id(entry_id);
         cx.notify();
     }
 
@@ -1076,12 +1263,86 @@ impl ChatView {
         }
     }
 
+    pub(crate) fn set_outline(
+        &mut self,
+        outline: Option<std::sync::Arc<ThreadOutline>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let changed = match (&self.whole_outline, &outline) {
+            (Some(a), Some(b)) => !std::sync::Arc::ptr_eq(a, b),
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            self.whole_outline = outline;
+            self.toc_hovered_slot = None;
+            self.toc_pinned_slot = None;
+            cx.notify();
+        }
+    }
+
+    fn toc_entries(&self) -> &[TocEntry] {
+        self.whole_outline
+            .as_ref()
+            .map_or_else(|| self.cache.toc(), |outline| outline.markers.as_slice())
+    }
+
+    fn prompt_index(&self, id: &str) -> Option<usize> {
+        self.cache.items().iter().position(|item|matches!(item, VirtualItem::User { row_idx,.. } if self.cache.rows()[*row_idx].entry.id()==id))
+    }
+
+    pub(super) fn jump_to_prompt(&mut self, id: &str, cx: &mut Context<'_, Self>) -> Option<usize> {
+        self.pending_prompt = None;
+        self.set_error(None, cx);
+        if let Some(index) = self.prompt_index(id) {
+            self.anchored_prompt = Some(id.to_owned());
+            self.jump_to_toc_item(index, cx);
+            Some(index)
+        } else {
+            self.pending_prompt = Some(id.to_owned());
+            cx.emit(ChatEvent::JumpToPrompt(id.to_owned()));
+            None
+        }
+    }
+
+    pub(crate) fn awaiting_prompt(&self, id: &str) -> bool {
+        self.pending_prompt.as_deref() == Some(id)
+    }
+
+    pub(crate) fn show_prompt_window(
+        &mut self,
+        id: &str,
+        entries: &[TimelineEntry],
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.awaiting_prompt(id) {
+            return;
+        }
+        if !entries
+            .iter()
+            .any(|e| matches!(e,TimelineEntry::User{id:target,..} if target==id))
+        {
+            self.set_error(Some("This message is no longer available".to_owned()), cx);
+            return;
+        }
+        let stats = self.cache.sync(
+            entries,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            false,
+            false,
+        );
+        self.list_state.reset(stats.new_item_count);
+        self.jump_to_prompt(id, cx);
+    }
+
     /// Pins or unpins the minimap preview on the active tick (used by automation / inspection).
     #[cfg(feature = "automation")]
     pub(crate) fn set_toc_pinned(&mut self, pinned: bool, cx: &mut Context<'_, Self>) {
         let next = if pinned {
             let active = self.active_toc_index();
-            let sampled = toc::sample_tick_indices(self.cache.toc().len(), active);
+            let sampled = toc::sample_tick_indices(self.toc_entries().len(), active);
             active
                 .and_then(|idx| sampled.iter().position(|&s| s == idx))
                 .or_else(|| (!sampled.is_empty()).then_some(0))
@@ -1113,25 +1374,29 @@ impl ChatView {
         &mut self,
         turn_number: usize,
         cx: &mut Context<'_, Self>,
-    ) -> Result<usize, String> {
+    ) -> Result<Option<usize>, String> {
         let Some(entry) = self
-            .cache
-            .toc()
+            .toc_entries()
             .iter()
             .find(|entry| entry.turn_number == turn_number)
         else {
             return Err(format!(
                 "turn {turn_number} out of range (1..={})",
-                self.cache.toc().len()
+                self.toc_entries().len()
             ));
         };
-        let item_index = entry.item_index;
-        self.jump_to_toc_item(item_index, cx);
-        Ok(item_index)
+        let id = entry.entry_id.clone();
+        Ok(self.jump_to_prompt(&id, cx))
     }
 
     /// Jumps back to the live tail and re-engages bottom auto-follow.
     pub(crate) fn scroll_to_latest(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_prompt = None;
+        if self.anchored_prompt.take().is_some() {
+            self.synced_revision = None;
+            cx.emit(ChatEvent::ReturnToLatest);
+        }
+        self.set_error(None, cx);
         self.list_state.set_follow_mode(FollowMode::Tail);
         self.list_state.scroll_to_end();
         cx.notify();
@@ -1139,7 +1404,7 @@ impl ChatView {
 
     /// Emits [`ChatEvent::LoadEarlierHistory`] once while more history is available and idle.
     fn request_earlier_history(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.has_more_history || self.loading_earlier {
+        if self.anchored_prompt.is_some() || !self.has_more_history || self.loading_earlier {
             return;
         }
         self.loading_earlier = true;
@@ -1171,17 +1436,17 @@ impl ChatView {
             || self.list_state.is_scrolled_to_end() == Some(true)
     }
 
-    /// Index into `self.cache.toc()` for the turn currently visible in the viewport.
+    /// Index into the displayed outline for the turn at the top of the viewport.
     fn active_toc_index(&self) -> Option<usize> {
-        let toc = self.cache.toc();
-        if toc.is_empty() {
-            return None;
+        let entries = self.toc_entries();
+        if self.anchored_prompt.is_none() && self.is_at_bottom() {
+            return entries.len().checked_sub(1);
         }
-        if self.is_at_bottom() {
-            return Some(toc.len() - 1);
+        let top = self.list_state.logical_scroll_top().item_ix;
+        match &self.whole_outline {
+            Some(outline) => self.cache.active_outline_index(top, outline),
+            None => self.cache.active_toc_index(top),
         }
-        let top = self.list_state.logical_scroll_top();
-        self.cache.active_toc_index(top.item_ix)
     }
 
     /// Returns diagnostic metrics for the virtualized timeline & TOC rail.
@@ -1190,12 +1455,15 @@ impl ChatView {
         let top = self.list_state.logical_scroll_top();
         let active_toc_turn = self
             .active_toc_index()
-            .and_then(|idx| self.cache.toc().get(idx))
+            .and_then(|idx| self.toc_entries().get(idx))
             .map(|entry| entry.turn_number);
         TimelineMetrics {
             total_entries: self.cache.rows().len(),
             virtual_items: self.cache.items().len(),
-            toc_turns: self.cache.toc().len(),
+            toc_turns: self.toc_entries().len(),
+            anchor_prompt: self.anchored_prompt.clone(),
+            top_prompt: self.cache.prompt_at(top.item_ix).map(str::to_owned),
+            jump_error: self.error_banner.clone(),
             parsed_markdown_rows: self.cache.parsed_markdown_count(),
             active_toc_turn,
             scroll_top_item: top.item_ix,
@@ -1506,8 +1774,16 @@ impl ChatView {
                     div().into_any_element()
                 }
             }
-            VirtualItem::QueuedUser { row_idx } => {
-                if let TimelineEntry::QueuedUser {
+            VirtualItem::QueuedUser {
+                row_idx,
+                position,
+                total,
+            } => {
+                let collapsed = *total > cache::QUEUE_VISIBLE_ROWS && !self.queue_expanded();
+                if collapsed && *position >= cache::QUEUE_VISIBLE_ROWS - 1 {
+                    // Hidden behind the toggle: a zero-height row keeps the list indices stable.
+                    div().into_any_element()
+                } else if let TimelineEntry::QueuedUser {
                     id,
                     run_id,
                     text,
@@ -1516,11 +1792,27 @@ impl ChatView {
                     ..
                 } = &rows[*row_idx].entry
                 {
-                    self.render_queued_user_row(id, run_id, text, attachments, created_at, cx)
+                    // The toggle sits 8px (`gap-2`) under the last shown row, not 12px.
+                    let last_shown = if collapsed {
+                        *position == cache::QUEUE_VISIBLE_ROWS - 2
+                    } else {
+                        *position + 1 == *total
+                    };
+                    let above_toggle = last_shown && *total > cache::QUEUE_VISIBLE_ROWS;
+                    self.render_queued_user_row(
+                        id,
+                        run_id,
+                        text,
+                        attachments,
+                        created_at,
+                        above_toggle,
+                        cx,
+                    )
                 } else {
                     div().into_any_element()
                 }
             }
+            VirtualItem::QueuedToggle { total } => self.render_queued_toggle(*total, cx),
             VirtualItem::Assistant {
                 row_idx,
                 followed_by_work,
@@ -1636,7 +1928,7 @@ impl ChatView {
             outer = outer.pt(px(16.0));
         }
         if idx + 1 == items.len() {
-            outer = outer.pb(px(16.0));
+            outer = outer.pb(px(16.0 + self.composer_height_applied));
         }
         outer.into_any_element()
     }
@@ -1743,7 +2035,7 @@ impl ChatView {
                 role,
                 status,
                 summary,
-                remote_label,
+                remote_child,
                 started_at,
                 completed_at,
                 ..
@@ -1754,7 +2046,7 @@ impl ChatView {
                 role,
                 *status,
                 summary.as_deref(),
-                remote_label.as_deref(),
+                remote_child.as_ref(),
                 started_at.as_deref(),
                 completed_at.as_deref(),
                 cx,
@@ -1773,6 +2065,7 @@ impl ChatView {
             grouped_with_previous,
             grouped_with_next,
         } = bubble;
+        let text = &*cache::humanize_task_ids(self.cache.rows(), text);
         // Conn `TimelineUserMessageRow`: `max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)!
         // bg-message text-message-foreground px-4 pt-2.5 pb-3 text-sm leading-relaxed`.
         let preview: String = text.chars().take(120).collect();
@@ -1800,7 +2093,8 @@ impl ChatView {
             .line_height(px(BODY_LINE_HEIGHT_PX))
             .text_color(hsla(self.tokens.message_foreground));
         if !attachments.is_empty() {
-            bubble = bubble.child(self.render_attachment_chips(&format!("user-{id}"), attachments));
+            bubble =
+                bubble.child(self.render_attachment_chips(&format!("user-{id}"), attachments, cx));
         }
         if !text.is_empty() {
             bubble = bubble.child(div().min_w_0().child(text.to_owned()));
@@ -1859,6 +2153,10 @@ impl ChatView {
     ///   optional attachment thumbnails/pills, and wrapped prompt text.
     /// - Quiet right-aligned action row below: timestamp, `↑ Send now`, pencil Edit button,
     ///   and `×` Remove button (or `"Editing in the composer"` + `Cancel` while being edited).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "renders one queued message from its fields, plus whether the toggle follows it"
+    )]
     fn render_queued_user_row(
         &self,
         id: &str,
@@ -1866,6 +2164,7 @@ impl ChatView {
         text: &str,
         attachments: &[ChatAttachment],
         created_at: &str,
+        above_toggle: bool,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let is_editing =
@@ -1904,8 +2203,11 @@ impl ChatView {
             .text_color(bubble_fg);
 
         if !attachments.is_empty() {
-            bubble =
-                bubble.child(self.render_attachment_chips(&format!("queued-{id}"), attachments));
+            bubble = bubble.child(self.render_attachment_chips(
+                &format!("queued-{id}"),
+                attachments,
+                cx,
+            ));
         }
 
         if !text.is_empty() {
@@ -2071,9 +2373,74 @@ impl ChatView {
             .items_end()
             .gap(px(4.0))
             .w_full()
-            .pb(px(12.0))
+            .pb(px(if above_toggle { 8.0 } else { 12.0 }))
             .child(bubble)
             .child(actions)
+            .into_any_element()
+    }
+
+    /// Whether a queue longer than `QUEUE_VISIBLE_ROWS` shows every message.
+    fn queue_expanded(&self) -> bool {
+        self.expanded_ids.contains(QUEUE_EXPANDED_KEY)
+    }
+
+    /// Toggles `Show all N queued` / `Show fewer` and remeasures the queue rows.
+    fn toggle_queue_expanded(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.expanded_ids.remove(QUEUE_EXPANDED_KEY) {
+            self.expanded_ids.insert(QUEUE_EXPANDED_KEY.to_owned());
+        }
+        let items = self.cache.items();
+        if let Some(first) = items
+            .iter()
+            .position(|item| matches!(item, VirtualItem::QueuedUser { .. }))
+        {
+            self.list_state.remeasure_items(first..items.len());
+        }
+        cx.notify();
+    }
+
+    /// The web `QueuedRunsControl` toggle: right-aligned `text-xs` muted `InlineButton` with a
+    /// chevron that turns 180° when the whole queue shows.
+    fn render_queued_toggle(&self, total: usize, cx: &mut Context<'_, Self>) -> AnyElement {
+        let expanded = self.queue_expanded();
+        let fg = hsla(self.tokens.foreground);
+        let muted = hsla(self.tokens.muted_foreground);
+        let label = if expanded {
+            "Show fewer".to_owned()
+        } else {
+            format!("Show all {total} queued")
+        };
+        let chevron = icons::icon(icons::CARET_DOWN, 14.0, muted);
+        let chevron = if expanded {
+            chevron.with_transformation(Transformation::rotate(percentage(0.5)))
+        } else {
+            chevron
+        };
+        div()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .w_full()
+            .pr(px(4.0))
+            .pb(px(16.0))
+            .child(
+                div()
+                    .id("chat-queued-toggle")
+                    .a11y_button(SharedString::from("chat.queued.toggle"), label.clone())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(move |s| s.text_color(fg).underline())
+                    .on_click(cx.listener(|view, _, _, cx| view.toggle_queue_expanded(cx)))
+                    .child(label)
+                    .child(chevron),
+            )
             .into_any_element()
     }
 
@@ -2086,6 +2453,7 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let key = format!("agent-msg-{id}");
+        let text = &*cache::humanize_task_ids(self.cache.rows(), text);
         let expanded = self.expanded_ids.contains(&key);
         let toggle_key = key.clone();
         let preview = text
@@ -2285,8 +2653,10 @@ impl ChatView {
             }
             container = container.pb(px(8.0)).child(list);
         } else {
-            // Conn `turn-fold` row spacing: `pb-1.5` (6px).
-            container = container.pb(px(6.0));
+            // Nick (#280, #290): a settled fold's separator needs the same air below as above it.
+            // Above: 8px `pb-2` plus the label's half-leading (~4px), so 12px below.
+            // An active group has no separator, so it keeps Conn's `pb-1.5` (6px).
+            container = container.pb(px(if has_active { 6.0 } else { 12.0 }));
         }
 
         container.into_any_element()
@@ -2401,7 +2771,8 @@ impl ChatView {
                     ..
                 } => {
                     let rel_title = self.relative_title(title);
-                    let ax_label = tool_ax_label(kind, &rel_title, *status);
+                    let shown_title = icons::tool_display_title(kind, &rel_title).into_owned();
+                    let ax_label = tool_ax_label(kind, &shown_title, *status);
                     let failed = matches!(status, ItemStatus::Failed);
                     // Conn `latestToolKeepsActivityLive`: active when running OR succeeded during
                     // an active turn (so shimmer stays alive between consecutive tool calls).
@@ -2417,9 +2788,9 @@ impl ChatView {
                         (icon_muted, muted)
                     };
                     let label_el: AnyElement = if shimmer {
-                        shimmer_text(&rel_title, muted, bright_fg).into_any_element()
+                        shimmer_text(&shown_title, muted, bright_fg).into_any_element()
                     } else {
-                        rel_title.into_any_element()
+                        shown_title.into_any_element()
                     };
                     col = col.child(
                         div()
@@ -2427,7 +2798,7 @@ impl ChatView {
                             .a11y_group(format!("timeline.work.{id}.live"), ax_label)
                             .flex()
                             .flex_row()
-                            .items_center()
+                            .items_start()
                             .gap(px(6.0))
                             .w_full()
                             .min_w_0()
@@ -2446,6 +2817,7 @@ impl ChatView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    .mt(px((24.0 - BODY_LINE_HEIGHT_PX) / 2.0))
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
@@ -2698,10 +3070,11 @@ impl ChatView {
             ItemStatus::Failed => (hsla(self.tokens.destructive), hsla(self.tokens.destructive)),
             ItemStatus::Running | ItemStatus::Completed => (muted_icon(&self.tokens), muted),
         };
+        let shown_title = icons::tool_display_title(kind, title);
         let title_el: AnyElement = if matches!(status, ItemStatus::Running) {
-            shimmer_text(title, muted, bright_fg).into_any_element()
+            shimmer_text(&shown_title, muted, bright_fg).into_any_element()
         } else {
-            title.to_owned().into_any_element()
+            shown_title.to_string().into_any_element()
         };
 
         let leading: AnyElement = match status {
@@ -2714,13 +3087,14 @@ impl ChatView {
         };
 
         let ax_id = format!("timeline.work.{id}");
-        let ax_label = tool_ax_label(kind, title, status);
+        let ax_label = tool_ax_label(kind, &shown_title, status);
         // Conn `WorkLogRow`: `min-h-6` (24px), `gap-1.5` (6px), `px-0.5`, `24px` icon box, `text-sm leading-relaxed`.
         let mut line = div()
             .id(SharedString::from(format!("tool-{id}")))
             .flex()
             .flex_row()
-            .items_center()
+            // Icon sits at the first line, like web's baseline-aligned `WorkLogLine`.
+            .items_start()
             .gap(px(6.0))
             .w_full()
             .min_w_0()
@@ -2742,6 +3116,8 @@ impl ChatView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    // Centres the text line in the 24px icon box, as `items_center` did.
+                    .mt(px((24.0 - BODY_LINE_HEIGHT_PX) / 2.0))
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
@@ -2772,6 +3148,8 @@ impl ChatView {
                         .justify_center()
                         .size(px(16.0))
                         .flex_none()
+                        // Centres the caret in the 24px first line.
+                        .mt(px(4.0))
                         .child(icons::icon(
                             if expanded {
                                 icons::CARET_DOWN
@@ -2894,10 +3272,15 @@ impl ChatView {
                             .flex_row()
                             .items_center()
                             .gap(px(6.0))
-                            .px(px(8.0))
+                            // Web's bordered `TimelineSystemDivider` pill: `rounded-full border
+                            // border-(--shell-divider) px-2.5 py-1`.
+                            .rounded_full()
+                            .border_1()
+                            .border_color(hsla(self.tokens.shell_divider))
+                            .px(px(10.0))
                             .py(px(4.0))
                             .child(icons::icon(
-                                icons::INFO,
+                                notice_icon(text),
                                 12.0,
                                 hsla(self.tokens.muted_foreground),
                             ))
@@ -3056,7 +3439,16 @@ impl Render for ChatView {
                 .child(self.render_draft_hero(&draft, window, cx));
         }
 
-        let timeline: AnyElement = if self.cache.items().is_empty() && !self.synchronized {
+        let composer_height = self.composer_height.get();
+        if (composer_height - self.composer_height_applied).abs() > 0.5 {
+            self.composer_height_applied = composer_height;
+            let count = self.cache.items().len();
+            if count > 0 {
+                self.list_state.remeasure_items(count - 1..count);
+            }
+        }
+        let empty = self.cache.items().is_empty() && self.toc_entries().is_empty();
+        let timeline: AnyElement = if empty && !self.synchronized {
             let muted = hsla(self.tokens.muted_foreground);
             div()
                 .id("chat-timeline-scroll")
@@ -3083,7 +3475,7 @@ impl Render for ChatView {
                         .child("Loading thread…"),
                 )
                 .into_any_element()
-        } else if self.cache.items().is_empty() {
+        } else if empty {
             div()
                 .id("chat-timeline-scroll")
                 .a11y(
@@ -3119,7 +3511,7 @@ impl Render for ChatView {
 
             let active_toc = self.active_toc_index();
             let hovered_slot = self.toc_hovered_slot.or(self.toc_pinned_slot);
-            let show_latest_pill = !self.is_at_bottom();
+            let show_latest_pill = self.anchored_prompt.is_some() || !self.is_at_bottom();
 
             let mut container = div()
                 .id("chat-timeline-scroll")
@@ -3134,7 +3526,14 @@ impl Render for ChatView {
                 .w_full()
                 .min_w_0()
                 .overflow_hidden()
-                .child(virtual_list)
+                .child(virtual_list);
+            // The scrollbar and the jump pill stay above the composer the timeline runs under.
+            let mut above_composer = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom(px(composer_height))
                 .child(
                     div()
                         .absolute()
@@ -3143,7 +3542,7 @@ impl Render for ChatView {
                 );
 
             if let Some(toc_overlay) = toc::render_toc_overlay(
-                self.cache.toc(),
+                self.toc_entries(),
                 active_toc,
                 hovered_slot,
                 &self.tokens,
@@ -3152,22 +3551,43 @@ impl Render for ChatView {
                 container = container.child(toc_overlay);
             }
             if show_latest_pill {
-                container = container.child(toc::render_scroll_to_bottom_pill(&self.tokens, cx));
+                above_composer =
+                    above_composer.child(toc::render_scroll_to_bottom_pill(&self.tokens, cx));
             }
-            container.into_any_element()
+            container.child(above_composer).into_any_element()
         };
 
         let provider_banner = self.render_provider_banner(cx);
         let question_banner = self.render_question_banner(window, cx);
+        let child_approvals = self.render_child_approvals(cx);
         let banner_docked = question_banner.is_some();
         self.composer
             .update(cx, |c, cx| c.set_stash_docked(banner_docked, cx));
 
+        // The lane floats over the timeline's bottom edge; the timeline pads its last row by the
+        // measured height so the final message still scrolls fully above the card.
+        let measured_height = Rc::clone(&self.composer_height);
         let mut composer_lane = div()
-            .flex_none()
-            .w_full()
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
             .px(px(CHAT_LANE_PADDING_X_PX))
-            .pt(px(8.0));
+            .pt(px(8.0))
+            .child(
+                gpui_kit::canvas(
+                    move |bounds, window, _| {
+                        let height = f32::from(bounds.size.height);
+                        if (measured_height.get() - height).abs() > 0.5 {
+                            measured_height.set(height);
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         if let Some(error) = self.error_banner.as_deref() {
             composer_lane = composer_lane.child(self.render_error_banner(error, cx));
         }
@@ -3176,10 +3596,19 @@ impl Render for ChatView {
                 .w_full()
                 .max_w(px(CHAT_CONTENT_MAX_WIDTH_PX))
                 .mx_auto()
+                .when_some(child_approvals, |lane, cards| lane.child(cards))
                 .when_some(question_banner, |lane, banner| lane.child(banner))
                 .child(self.composer.clone()),
         );
 
+        let link_menu = {
+            let tokens = self.tokens.clone();
+            self.render_link_menu(window, &tokens, cx)
+        };
+        let link_preview = {
+            let tokens = self.tokens.clone();
+            self.render_link_preview(window, &tokens, cx)
+        };
         div()
             .flex()
             .flex_col()
@@ -3187,8 +3616,10 @@ impl Render for ChatView {
             .min_h_0()
             .min_w_0()
             .relative()
-            .child(timeline)
+            .child(div().absolute().inset_0().flex().flex_col().child(timeline))
             .child(composer_lane)
+            .when_some(link_menu, |root, menu| root.child(menu))
+            .when_some(link_preview, |root, card| root.child(card))
             .when_some(provider_banner, |root, banner| {
                 root.child(
                     div()
@@ -3239,6 +3670,15 @@ fn now_epoch_ms() -> i64 {
 }
 
 /// First line of `text`, cut at 120 characters, for an AX label.
+/// The notice pill's glyph: web's `Minimize2` for context compaction, else the info glyph.
+fn notice_icon(text: &str) -> &'static str {
+    if text.to_ascii_lowercase().contains("compact") {
+        "superhero/minimize.svg"
+    } else {
+        icons::INFO
+    }
+}
+
 fn ax_snippet(text: &str) -> String {
     const MAX_CHARS: usize = 120;
     let line = text
@@ -3597,5 +4037,20 @@ mod worked_label_tests {
             None,
             "subsequent user turn clears prior plan follow-up"
         );
+    }
+}
+
+#[cfg(test)]
+mod notice_icon_tests {
+    use super::{icons, notice_icon};
+
+    #[test]
+    fn compaction_notices_get_the_minimize_glyph() {
+        assert_eq!(notice_icon("Compacting context"), "superhero/minimize.svg");
+        assert_eq!(
+            notice_icon("Context compacted 120k → 40k tokens"),
+            "superhero/minimize.svg"
+        );
+        assert_eq!(notice_icon("Something else"), icons::INFO);
     }
 }

@@ -16,7 +16,7 @@ enum WorkspaceTab: String, Hashable, CaseIterable {
 }
 
 enum WorkspaceRoute: Hashable {
-    case thread(String)
+    case thread(String, scope: String)
     case newThreadDraft(projectId: String?, title: String)
 }
 
@@ -43,12 +43,12 @@ struct WorkspaceRootView: View {
                             store: store,
                             searchQuery: isSearching ? searchQuery : "",
                             selectedProjectFilter: $selectedProjectFilter,
-                            onSelectThread: { threadId in
+                            onSelectThread: { threadId, scope in
                                 if isSearching {
                                     isSearching = false
                                     searchQuery = ""
                                 }
-                                navigationPath.append(.thread(threadId))
+                                navigationPath.append(.thread(threadId, scope: scope))
                             }
                         )
                     case .tasks:
@@ -113,29 +113,31 @@ struct WorkspaceRootView: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
             .navigationDestination(for: WorkspaceRoute.self) { route in
                 switch route {
-                case let .thread(threadId):
-                    let summary = store.shell?.threads.first(where: { $0.id == threadId })
-                    let projectTitle = summary.flatMap { s in
-                        store.shell?.projects.first(where: { $0.id == s.projectId })?.title
-                    }
-                    ThreadView(
-                        store: store,
-                        threadId: threadId,
-                        initialTitle: summary?.title ?? "Thread",
-                        initialProjectTitle: projectTitle,
-                        initialBranch: summary?.branch,
-                        initialSettled: summary?.settled ?? false,
-                        onOpenThread: { childId in
-                            navigationPath.append(.thread(childId))
+                case let .thread(threadId, scope):
+                    if let owner = scope.isEmpty ? store : store.linked[scope] {
+                        let summary = owner.shell?.threads.first(where: { $0.id == threadId })
+                        let projectTitle = summary.flatMap { s in
+                            owner.shell?.projects.first(where: { $0.id == s.projectId })?.title
                         }
-                    )
+                        ThreadView(
+                            store: owner,
+                            threadId: threadId,
+                            initialTitle: summary?.title ?? "Thread",
+                            initialProjectTitle: projectTitle,
+                            initialBranch: summary?.branch,
+                            initialSettled: summary?.settled ?? false,
+                            onOpenThread: { childId in
+                                navigationPath.append(.thread(childId, scope: scope))
+                            }
+                        )
+                    }
                 case let .newThreadDraft(projectId, title):
                     NewThreadDraftView(
                         store: store,
                         initialProjectId: projectId,
                         initialProjectTitle: title,
                         onCreated: { newThreadId in
-                            navigationPath = [.thread(newThreadId)]
+                            navigationPath = [.thread(newThreadId, scope: "")]
                         }
                     )
                 }
@@ -166,7 +168,8 @@ struct WorkspaceRootView: View {
         isSearching = false
         searchQuery = ""
         selectedTab = .threads
-        navigationPath = [.thread(link.threadId)]
+        let scope = store.linked.first { $0.value.environmentId == link.environmentId }?.key ?? ""
+        navigationPath = [.thread(link.threadId, scope: scope)]
     }
 }
 

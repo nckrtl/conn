@@ -1,5 +1,6 @@
 //! Shared T3 tool-name resolution and bounded result metadata (`packages/shared/src/toolOutput.ts`).
 use serde_json::{Map, Value, json};
+use std::borrow::Cow;
 
 include!("tool-output-constants.rs");
 // packages/shared/src/toolOutput.ts:25-31 (private constants).
@@ -128,7 +129,13 @@ struct Envelope {
     failed: bool,
 }
 
-fn read(value: &Value, budget: &mut Budget, depth: usize) -> Envelope {
+/// `readResult`: the result an envelope carries; `leaf` turns its object into data.
+fn read(
+    value: &Value,
+    budget: &mut Budget,
+    depth: usize,
+    leaf: fn(&Value) -> Map<String, Value>,
+) -> Envelope {
     let empty = || Envelope {
         data: None,
         failed: false,
@@ -147,7 +154,7 @@ fn read(value: &Value, budget: &mut Budget, depth: usize) -> Envelope {
             }
             serde_json::from_str(text)
                 .ok()
-                .map_or_else(empty, |value| read(&value, budget, depth + 1))
+                .map_or_else(empty, |value| read(&value, budget, depth + 1, leaf))
         }
         Value::Array(blocks) => {
             if blocks.len() > MAX_CONTENT_BLOCKS {
@@ -157,7 +164,7 @@ fn read(value: &Value, budget: &mut Budget, depth: usize) -> Envelope {
             let mut result = empty();
             for block in blocks {
                 let text = block.get("text").unwrap_or(&Value::Null);
-                let next = read(text.get("text").unwrap_or(text), budget, depth + 1);
+                let next = read(text.get("text").unwrap_or(text), budget, depth + 1, leaf);
                 result.data = result.data.or(next.data);
                 result.failed |= next.failed;
                 if budget.exceeded {
@@ -171,19 +178,27 @@ fn read(value: &Value, budget: &mut Budget, depth: usize) -> Envelope {
                 || object.get("is_error") == Some(&Value::Bool(true))
                 || object.get("_tag").and_then(Value::as_str) == Some("OrchestratorMcpFailure")
                 || object.get("error").is_some_and(|value| !value.is_null());
+            // Antigravity's `acp-mcp-call` puts the result after a marker in its stdout.
+            let terminal = || {
+                let output = object.get("output")?.as_str()?;
+                let (_, result) = output.split_once(TERMINAL_OUTPUT_MARKER)?;
+                Some(Cow::Owned(Value::String(result.to_owned())))
+            };
             let content = object
                 .get("structuredContent")
                 .filter(|v| !v.is_null())
-                .or_else(|| object.get("content"));
+                .or_else(|| object.get("content").filter(|v| !v.is_null()))
+                .map(Cow::Borrowed)
+                .or_else(terminal);
             if let Some(content) = content {
-                let next = read(content, budget, depth + 1);
+                let next = read(&content, budget, depth + 1, leaf);
                 Envelope {
                     data: next.data,
                     failed: failed || next.failed,
                 }
             } else {
                 Envelope {
-                    data: Some(compact_metadata(value)),
+                    data: Some(leaf(value)),
                     failed,
                 }
             }
@@ -283,7 +298,7 @@ fn compact_metadata(data: &Value) -> Map<String, Value> {
 
 pub fn compact_dynamic_tool_output(value: &Value) -> Option<Map<String, Value>> {
     let mut budget = Budget::default();
-    let result = read(value, &mut budget, 0);
+    let result = read(value, &mut budget, 0, compact_metadata);
     let mut output = if budget.exceeded {
         Map::new()
     } else {
@@ -491,6 +506,22 @@ pub fn html_render_from_tool_item(item: &Value) -> Option<Value> {
     output.remove("htmlRender")
 }
 
+/// `previewRecordingIdFromToolItem`: the thread-owned file `preview_recording_stop` stored
+/// for the agent.
+pub fn preview_recording_id_from_tool_item(item: &Value) -> Option<String> {
+    let name = item.get("toolName")?.as_str()?;
+    if resolve_t3_mcp_tool_id(name) != Some("preview_recording_stop") {
+        return None;
+    }
+    let mut budget = Budget::default();
+    let raw = |value: &Value| value.as_object().cloned().unwrap_or_default();
+    let result = read(item.get("output")?, &mut budget, 0, raw);
+    if result.failed || budget.exceeded {
+        return None;
+    }
+    bounded_id(result.data?.get("id")?).map(str::to_owned)
+}
+
 pub fn mcp_app_from_tool_item(item: &Value) -> Option<Value> {
     let mut output = compact_dynamic_tool_output(item.get("output")?)?;
     let app = output.remove(MCP_APP_OUTPUT_KEY)?;
@@ -544,6 +575,18 @@ mod tests {
                 )
             );
         }
+        // `htmlRender.test.ts`: Antigravity's `acp-mcp-call` wraps the result in its stdout.
+        let terminal = json!({
+            "output": format!(
+                "Created At: 2026-11-19T02:54:02Z\nCommand exited with code 0.\n\nCommand output:\n{}\r\n",
+                json!({"content": [], "structuredContent": output, "isError": false})
+            ),
+            "exit_code": 0,
+        });
+        assert_eq!(
+            html_render_from_tool_item(&json!({"toolName":"conn.html_render","output":terminal})),
+            Some(json!({"attachmentId":"page", "title":"Page", "height":HTML_RENDER_MIN_HEIGHT}))
+        );
         assert!(
             html_render_from_tool_item(&json!({"toolName":"html_preview","output":output}))
                 .is_none()

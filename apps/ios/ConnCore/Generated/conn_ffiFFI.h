@@ -278,13 +278,6 @@ typedef void (*UniffiCallbackInterfaceCoreListenerMethod4)(uint64_t, RustBuffer,
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CORE_LISTENER_METHOD5
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CORE_LISTENER_METHOD5
-typedef void (*UniffiCallbackInterfaceCoreListenerMethod5)(uint64_t, void* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceOrbitListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
@@ -330,7 +323,6 @@ typedef struct UniffiVTableCallbackInterfaceCoreListener {
     UniffiCallbackInterfaceCoreListenerMethod2 _Nonnull onShell;
     UniffiCallbackInterfaceCoreListenerMethod3 _Nonnull onThread;
     UniffiCallbackInterfaceCoreListenerMethod4 _Nonnull onError;
-    UniffiCallbackInterfaceCoreListenerMethod5 _Nonnull onProvidersChanged;
 } UniffiVTableCallbackInterfaceCoreListener;
 
 #endif
@@ -415,11 +407,6 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_launch_thread(uint64_t ptr, RustBuff
 uint64_t uniffi_conn_ffi_fn_method_conncore_mark_thread_unread(uint64_t ptr, RustBuffer thread_id
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_MODEL_PICKER
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_MODEL_PICKER
-uint64_t uniffi_conn_ffi_fn_method_conncore_model_picker(uint64_t ptr, RustBuffer thread_id, RustBuffer query, RustBuffer toggled, RustBuffer pending_instance_id, RustBuffer pending_model
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_OPEN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_OPEN_THREAD
 void uniffi_conn_ffi_fn_method_conncore_open_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
@@ -428,6 +415,11 @@ void uniffi_conn_ffi_fn_method_conncore_open_thread(uint64_t ptr, RustBuffer thr
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_PIN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_PIN_THREAD
 uint64_t uniffi_conn_ffi_fn_method_conncore_pin_thread(uint64_t ptr, RustBuffer thread_id, int8_t pinned
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_PREPARE_OFFLINE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_PREPARE_OFFLINE
+uint64_t uniffi_conn_ffi_fn_method_conncore_prepare_offline(uint64_t ptr, RustBuffer directory
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RECONNECT
@@ -448,16 +440,6 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_respond_approval(uint64_t ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RESPOND_USER_INPUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RESPOND_USER_INPUT
 uint64_t uniffi_conn_ffi_fn_method_conncore_respond_user_input(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id, RustBuffer answers
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SAVE_THREAD_MODEL
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SAVE_THREAD_MODEL
-uint64_t uniffi_conn_ffi_fn_method_conncore_save_thread_model(uint64_t ptr, RustBuffer thread_id, RustBuffer instance_id, RustBuffer model
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
-uint64_t uniffi_conn_ffi_fn_method_conncore_scan_thread_workspace_models(uint64_t ptr, RustBuffer thread_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
@@ -520,9 +502,44 @@ void uniffi_conn_ffi_fn_method_corelistener_on_thread(uint64_t ptr, RustBuffer s
 void uniffi_conn_ffi_fn_method_corelistener_on_error(uint64_t ptr, RustBuffer message, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
-void uniffi_conn_ffi_fn_method_corelistener_on_providers_changed(uint64_t ptr, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_OFFLINEREADER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_OFFLINEREADER
+uint64_t uniffi_conn_ffi_fn_clone_offlinereader(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_OFFLINEREADER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_OFFLINEREADER
+void uniffi_conn_ffi_fn_free_offlinereader(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_BEFORE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_BEFORE
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_before(uint64_t ptr, RustBuffer thread, RustBuffer id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_OUTLINE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_OUTLINE
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_outline(uint64_t ptr, RustBuffer thread, int8_t online
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_PROMPT_WINDOW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_PROMPT_WINDOW
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_prompt_window(uint64_t ptr, RustBuffer thread, RustBuffer id, int8_t online
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_RECENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_RECENT
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_recent(uint64_t ptr, RustBuffer thread
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_SAVED_SHELL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_SAVED_SHELL
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_saved_shell(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_SERVER_BEFORE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_SERVER_BEFORE
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_server_before(uint64_t ptr, RustBuffer thread, RustBuffer anchor, RustBuffer continuation, RustBuffer snapshot_cursor
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_ORBITCORE
@@ -703,11 +720,6 @@ void uniffi_conn_ffi_fn_init_callback_vtable_ffitextfits(const UniffiVTableCallb
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFITEXTFITS_FITS
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFITEXTFITS_FITS
 int8_t uniffi_conn_ffi_fn_method_ffitextfits_fits(uint64_t ptr, RustBuffer text, int8_t with_more, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_COMPOSER_RESTORE_DRAFT
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_COMPOSER_RESTORE_DRAFT
-RustBuffer uniffi_conn_ffi_fn_func_composer_restore_draft(RustBuffer current, RustBuffer sent, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_DERIVE_INSTANCE_NAME
@@ -1031,12 +1043,6 @@ void ffi_conn_ffi_rust_future_free_void(uint64_t handle
 void ffi_conn_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_COMPOSER_RESTORE_DRAFT
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_COMPOSER_RESTORE_DRAFT
-uint16_t uniffi_conn_ffi_checksum_func_composer_restore_draft(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_ORBIT_DERIVE_INSTANCE_NAME
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_ORBIT_DERIVE_INSTANCE_NAME
 uint16_t uniffi_conn_ffi_checksum_func_orbit_derive_instance_name(void
@@ -1163,12 +1169,6 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_mark_thread_unread(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_MODEL_PICKER
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_MODEL_PICKER
-uint16_t uniffi_conn_ffi_checksum_method_conncore_model_picker(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_OPEN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_OPEN_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_open_thread(void
@@ -1178,6 +1178,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_open_thread(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_PIN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_PIN_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_pin_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_PREPARE_OFFLINE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_PREPARE_OFFLINE
+uint16_t uniffi_conn_ffi_checksum_method_conncore_prepare_offline(void
     
 );
 #endif
@@ -1202,18 +1208,6 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_respond_approval(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RESPOND_USER_INPUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RESPOND_USER_INPUT
 uint16_t uniffi_conn_ffi_checksum_method_conncore_respond_user_input(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SAVE_THREAD_MODEL
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SAVE_THREAD_MODEL
-uint16_t uniffi_conn_ffi_checksum_method_conncore_save_thread_model(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
-uint16_t uniffi_conn_ffi_checksum_method_conncore_scan_thread_workspace_models(void
     
 );
 #endif
@@ -1271,9 +1265,39 @@ uint16_t uniffi_conn_ffi_checksum_method_corelistener_on_error(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
-uint16_t uniffi_conn_ffi_checksum_method_corelistener_on_providers_changed(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_BEFORE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_BEFORE
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_before(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_OUTLINE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_OUTLINE
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_outline(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_PROMPT_WINDOW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_PROMPT_WINDOW
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_prompt_window(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_RECENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_RECENT
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_recent(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_SAVED_SHELL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_SAVED_SHELL
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_saved_shell(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_SERVER_BEFORE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_SERVER_BEFORE
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_server_before(void
     
 );
 #endif

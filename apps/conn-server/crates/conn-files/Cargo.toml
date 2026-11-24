@@ -8,6 +8,8 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+url = "2"
+notify = "8.2"
 conn-support.workspace = true
 conn-contract.workspace = true
 serde.workspace = true
@@ -24,6 +26,8 @@ grep-regex = "0.1"
 grep-matcher = "0.1"
 # Fuzzy path ranking (helix's matcher).
 nucleo-matcher = "0.3"
+# Brace alternatives in name globs (`*.{ts,tsx}`); already in the tree through ignore.
+globset = "0.4"
 # Escapes a literal query; already in the tree through grep-regex.
 regex-syntax = { version = "0.8", default-features = false, features = ["std"] }
 

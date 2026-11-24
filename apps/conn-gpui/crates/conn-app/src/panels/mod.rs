@@ -76,7 +76,10 @@ pub(crate) enum RightPanelEvent {
     /// Browser or Device panel emitted a project annotation queue action.
     Annotation(annotations::AnnotationAction),
     /// A surface or a page asked to show `url` in a new browser tab (`openUrlInPreview`).
-    OpenBrowserTab { url: String, background: bool },
+    OpenBrowserTab {
+        url: String,
+        background: bool,
+    },
     /// A browser tab's title changed, so the tab strip shows it.
     BrowserTitleChanged,
 }

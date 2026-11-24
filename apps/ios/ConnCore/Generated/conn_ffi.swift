@@ -1502,6 +1502,13 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func offlineReader()  -> OfflineReader?
     
     /**
+     * Where a link for `environment_id` opens: here only when it is this session's already
+     * known server (trying again if its last attempt failed); otherwise in that environment's
+     * own scope.
+     */
+    func openLink(environmentId: String)  -> FfiLinkRoute
+    
+    /**
      * The user opened this thread (closing the scope's other one); it stays subscribed across
      * this session's connections.
      */
@@ -1515,12 +1522,6 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func restore(saved: FfiSavedSession?) 
     
     func retry() 
-    
-    /**
-     * Where a link for `environment_id` opens: here only when it is this session's already
-     * known server; otherwise in that environment's own scope.
-     */
-    func routeLink(environmentId: String)  -> FfiLinkRoute
     
     func signOut() 
     
@@ -1686,6 +1687,21 @@ open func offlineReader() -> OfflineReader?  {
 }
     
     /**
+     * Where a link for `environment_id` opens: here only when it is this session's already
+     * known server (trying again if its last attempt failed); otherwise in that environment's
+     * own scope.
+     */
+open func openLink(environmentId: String) -> FfiLinkRoute  {
+    return try!  FfiConverterTypeFfiLinkRoute_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_open_link(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(environmentId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The user opened this thread (closing the scope's other one); it stays subscribed across
      * this session's connections.
      */
@@ -1726,20 +1742,6 @@ open func retry()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
-}
-    
-    /**
-     * Where a link for `environment_id` opens: here only when it is this session's already
-     * known server; otherwise in that environment's own scope.
-     */
-open func routeLink(environmentId: String) -> FfiLinkRoute  {
-    return try!  FfiConverterTypeFfiLinkRoute_lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_connsession_route_link(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(environmentId),uniffiCallStatus
-    )
-})
 }
     
 open func signOut()  {try! rustCall() {
@@ -7611,6 +7613,11 @@ public struct FfiSessionState: Equatable, Hashable {
      * The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
      */
     public var offlineReady: Bool
+    /**
+     * This session has had a working connection since launch (or since the user last chose to
+     * connect manually). The app then keeps the workspace up through reconnects and re-pairs.
+     */
+    public var hasConnected: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7623,13 +7630,18 @@ public struct FfiSessionState: Equatable, Hashable {
          */environmentId: String?, 
         /**
          * The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
-         */offlineReady: Bool) {
+         */offlineReady: Bool, 
+        /**
+         * This session has had a working connection since launch (or since the user last chose to
+         * connect manually). The app then keeps the workspace up through reconnects and re-pairs.
+         */hasConnected: Bool) {
         self.revision = revision
         self.connectionId = connectionId
         self.phase = phase
         self.serverUrl = serverUrl
         self.environmentId = environmentId
         self.offlineReady = offlineReady
+        self.hasConnected = hasConnected
     }
 
     
@@ -7653,7 +7665,8 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
                 phase: FfiConverterTypeFfiSessionPhase.read(from: &buf), 
                 serverUrl: FfiConverterOptionString.read(from: &buf), 
                 environmentId: FfiConverterOptionString.read(from: &buf), 
-                offlineReady: FfiConverterBool.read(from: &buf)
+                offlineReady: FfiConverterBool.read(from: &buf), 
+                hasConnected: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7664,6 +7677,7 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.serverUrl, into: &buf)
         FfiConverterOptionString.write(value.environmentId, into: &buf)
         FfiConverterBool.write(value.offlineReady, into: &buf)
+        FfiConverterBool.write(value.hasConnected, into: &buf)
     }
 }
 
@@ -16439,6 +16453,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_offline_reader() != 43115) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_open_link() != 58654) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_open_thread() != 19746) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -16449,9 +16466,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_connsession_route_link() != 53436) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {

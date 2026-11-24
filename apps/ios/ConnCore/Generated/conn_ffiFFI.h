@@ -887,6 +887,11 @@ void uniffi_conn_ffi_fn_method_connsession_launch(uint64_t ptr, RustBuffer saved
 RustBuffer uniffi_conn_ffi_fn_method_connsession_offline_reader(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_OPEN_LINK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_OPEN_LINK
+RustBuffer uniffi_conn_ffi_fn_method_connsession_open_link(uint64_t ptr, RustBuffer environment_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_OPEN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_OPEN_THREAD
 void uniffi_conn_ffi_fn_method_connsession_open_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
@@ -905,11 +910,6 @@ void uniffi_conn_ffi_fn_method_connsession_restore(uint64_t ptr, RustBuffer save
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_RETRY
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_RETRY
 void uniffi_conn_ffi_fn_method_connsession_retry(uint64_t ptr, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_ROUTE_LINK
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_ROUTE_LINK
-RustBuffer uniffi_conn_ffi_fn_method_connsession_route_link(uint64_t ptr, RustBuffer environment_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SIGN_OUT
@@ -1808,6 +1808,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_offline_reader(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_OPEN_LINK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_OPEN_LINK
+uint16_t uniffi_conn_ffi_checksum_method_connsession_open_link(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_OPEN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_OPEN_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_connsession_open_thread(void
@@ -1829,12 +1835,6 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_restore(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_RETRY
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_RETRY
 uint16_t uniffi_conn_ffi_checksum_method_connsession_retry(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_ROUTE_LINK
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_ROUTE_LINK
-uint16_t uniffi_conn_ffi_checksum_method_connsession_route_link(void
     
 );
 #endif

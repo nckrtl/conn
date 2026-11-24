@@ -290,8 +290,8 @@ pub(crate) struct Guards {
     /// Set on every such refusal; read through [`crate::Connection::auth_rejected`].
     pub(crate) auth_seen: Arc<AtomicBool>,
     /// Before each handshake, the server's descriptor must name this environment, or the
-    /// bearer is never sent.
-    pub(crate) expected_environment: Option<String>,
+    /// bearer is never sent. Shared, so it can be set once the environment is learned.
+    pub(crate) expected_environment: Arc<std::sync::Mutex<Option<String>>>,
     /// The environment a server named instead; read through
     /// [`crate::Connection::identity_mismatch`].
     pub(crate) mismatch: Arc<std::sync::Mutex<Option<String>>>,
@@ -306,8 +306,13 @@ pub(crate) const IDENTITY_CHANGED_MESSAGE: &str =
 
 /// Reads the server's environment id (`/.well-known/t3/environment`), without credentials.
 /// `None` when the server can't be reached or doesn't say.
-async fn fetch_environment(http: &reqwest::Client, base: &url::Url) -> Option<String> {
+async fn fetch_environment(base: &url::Url) -> Option<String> {
     let url = base.join(".well-known/t3/environment").ok()?;
+    // No redirects: the answer must come from this host, not one it points to.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
     let response = http
         .get(url)
         .timeout(Duration::from_secs(10))
@@ -369,8 +374,13 @@ pub(crate) async fn run(
             }
         };
 
-        if let Some(expected) = guards.expected_environment.as_deref() {
-            match fetch_environment(&state.http, &state.config.http_base_url).await {
+        let expected = guards
+            .expected_environment
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(expected) = expected.as_deref() {
+            match fetch_environment(&state.config.http_base_url).await {
                 Some(found) if found == expected => {}
                 Some(found) => {
                     warn!("conn-client: {found} answers where {expected} was expected");

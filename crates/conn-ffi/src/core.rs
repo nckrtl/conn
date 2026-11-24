@@ -277,6 +277,12 @@ impl ConnCore {
         self.connection.auth_rejected()
     }
 
+    /// From the next handshake on, sends the bearer only to `environment_id`'s server.
+    pub(crate) fn expect_environment(&self, environment_id: String) {
+        self.connection
+            .set_expected_environment(Some(environment_id));
+    }
+
     /// True when another environment answered at this server's address (the bearer wasn't sent).
     pub(crate) fn identity_changed(&self) -> bool {
         self.connection.identity_mismatch().is_some()

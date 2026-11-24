@@ -84,6 +84,9 @@ pub struct FfiSessionState {
     /// This session has had a working connection since launch (or since the user last chose to
     /// connect manually). The app then keeps the workspace up through reconnects and re-pairs.
     pub has_connected: bool,
+    /// Grows when this scope connects to a different server than before (an Orbit primary
+    /// switch, say): the previous environment's threads are gone.
+    pub identity_epoch: u64,
 }
 
 /// Implemented in Swift. Every method is called with no internal locks held.
@@ -151,6 +154,11 @@ pub(crate) enum Effect<C> {
         core: C,
         thread_id: String,
     },
+    /// From now on, the connection sends its bearer only to this environment.
+    ExpectEnvironment {
+        core: C,
+        environment_id: String,
+    },
     CloseThread {
         core: C,
         thread_id: String,
@@ -188,6 +196,9 @@ pub(crate) struct Machine<C> {
     /// subscribed on every connection this session attaches.
     open_thread: Option<String>,
     has_connected: bool,
+    /// The server identity this scope last connected to, and how often it changed.
+    last_identity: Option<String>,
+    identity_epoch: u64,
 }
 
 impl<C> fmt::Debug for Machine<C> {
@@ -213,6 +224,8 @@ impl<C: SessionCore> Machine<C> {
             environment_id: None,
             open_thread: None,
             has_connected: false,
+            last_identity: None,
+            identity_epoch: 0,
         }
     }
 
@@ -234,6 +247,7 @@ impl<C: SessionCore> Machine<C> {
             environment_id: self.environment_id.clone(),
             offline_ready: self.attempt.as_ref().is_some_and(|a| a.offline_ready),
             has_connected: self.has_connected,
+            identity_epoch: self.identity_epoch,
         }
     }
 
@@ -390,6 +404,7 @@ impl<C: SessionCore> Machine<C> {
         let mut fx = Vec::new();
         self.cancel(&mut fx);
         self.has_connected = false;
+        self.last_identity = None;
         self.rest = FfiSessionPhase::Idle { message: None };
         fx
     }
@@ -497,19 +512,19 @@ impl<C: SessionCore> Machine<C> {
         }
         let manual = environment_id.is_none();
         self.server_url = Some(server_url.clone());
-        let mut fx: Effects<C> = self
-            .open_thread
-            .clone()
-            .map(|thread_id| Effect::OpenThread {
-                core: core.clone(),
-                thread_id,
-            })
-            .into_iter()
-            .collect();
+        // Identify first: another server than before drops the open thread.
+        let mut fx = self.identified(id, environment_id.or(saved_identity));
+        fx.extend(
+            self.open_thread
+                .clone()
+                .map(|thread_id| Effect::OpenThread {
+                    core: core.clone(),
+                    thread_id,
+                }),
+        );
         if manual {
             fx.push(Effect::FetchEnvironment { id, server_url });
         }
-        fx.extend(self.identified(id, environment_id.or(saved_identity)));
         fx
     }
 
@@ -628,6 +643,13 @@ impl<C: SessionCore> Machine<C> {
             Some(_) => self.identity_changed(format!("It now reports environment {env}.")),
             None => {
                 let mut fx = self.identified(id, Some(env.clone()));
+                if let Some(core) = self.core() {
+                    // Reconnects of this pairing now go only to this environment.
+                    fx.push(Effect::ExpectEnvironment {
+                        core,
+                        environment_id: env.clone(),
+                    });
+                }
                 if let Some(saved) = self.saved.as_mut().filter(|s| s.environment_id.is_none()) {
                     saved.environment_id = Some(env);
                     fx.push(Effect::Save(Some(saved.clone())));
@@ -662,13 +684,24 @@ impl<C: SessionCore> Machine<C> {
             return Vec::new();
         };
         attempt.identity = Some(identity.clone());
+        let core = attempt.core.clone();
         self.environment_id = Some(identity.clone());
-        attempt
-            .core
-            .clone()
-            .map(|core| Effect::PrepareOffline { id, core, identity })
-            .into_iter()
-            .collect()
+        let mut fx = Vec::new();
+        if self
+            .last_identity
+            .as_ref()
+            .is_some_and(|last| *last != identity)
+        {
+            // Another server than this scope had: its threads and workspace don't carry over.
+            self.has_connected = false;
+            self.identity_epoch += 1;
+            if let (Some(thread_id), Some(core)) = (self.open_thread.take(), core.clone()) {
+                fx.push(Effect::CloseThread { core, thread_id });
+            }
+        }
+        self.last_identity = Some(identity.clone());
+        fx.extend(core.map(|core| Effect::PrepareOffline { id, core, identity }));
+        fx
     }
 
     pub(crate) fn offline_ready(&mut self, id: u64) -> Effects<C> {
@@ -789,6 +822,10 @@ impl ConnSession {
             }
             Effect::OpenThread { core, thread_id } => core.open_thread(thread_id),
             Effect::CloseThread { core, thread_id } => core.close_thread(thread_id),
+            Effect::ExpectEnvironment {
+                core,
+                environment_id,
+            } => core.expect_environment(environment_id),
             Effect::WipeCache => {
                 *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if let Some(dir) = &self.cache_dir {
@@ -2006,5 +2043,159 @@ mod tests {
             starts(&fx).is_empty(),
             "an attempt in progress is left alone"
         );
+    }
+
+    /// A server that is environment A (descriptor, pairing exchange, WebSocket) until `now_b` is
+    /// set; then B answers at the same address and A's socket closes. Records whether any request
+    /// after the switch carried an `Authorization` header.
+    async fn server_taken_over() -> (
+        String,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let now_b = Arc::new(AtomicBool::new(false));
+        let bearer_to_b = Arc::new(AtomicBool::new(false));
+        let (switched, leaked) = (Arc::clone(&now_b), Arc::clone(&bearer_to_b));
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let (switched, leaked) = (Arc::clone(&switched), Arc::clone(&leaked));
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = tcp.peek(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let b = switched.load(Ordering::SeqCst);
+                    if b && head.contains("\r\nauthorization:") {
+                        leaked.store(true, Ordering::SeqCst);
+                    }
+                    if head.starts_with("get /ws") && !b {
+                        let Ok(_ws) = tokio_tungstenite::accept_async(tcp).await else {
+                            return;
+                        };
+                        // A's socket stays open until B takes over the address.
+                        while !switched.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        return;
+                    }
+                    let _ = tcp.read(&mut buf).await;
+                    let (status, body) = if head.starts_with("get /.well-known/t3/environment") {
+                        let env = if b { "env-b" } else { "env-a" };
+                        ("200 OK", format!(r#"{{"environmentId":"{env}"}}"#))
+                    } else if head.starts_with("post /oauth/token") {
+                        ("200 OK", r#"{"access_token":"paired-bearer"}"#.to_owned())
+                    } else {
+                        ("401 Unauthorized", String::new())
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tcp.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}/"), now_b, bearer_to_b)
+    }
+
+    #[test]
+    fn a_new_pairing_sends_reconnects_only_to_the_environment_it_learned() {
+        use std::sync::atomic::Ordering;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test tokio rt");
+        let (url, now_b, bearer_to_b) = rt.block_on(server_taken_over());
+        let gateway = MockGateway::new(|_| {
+            Err(conn_orbit::gateway::GatewayError::Network(
+                "unused".to_owned(),
+            ))
+        });
+        let recorder = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().expect("cache dir");
+        let session = ConnSession::with_orbit(
+            OrbitCore::with_transport(gateway).expect("orbit"),
+            Some(cache.path().join("thread-cache")),
+            recorder.clone(),
+        );
+        // A fresh pairing: no expected environment yet.
+        session.pair_manual(url, "code".to_owned());
+        assert!(
+            recorder.wait_for(|s| {
+                s.environment_id.as_deref() == Some("env-a")
+                    && matches!(
+                        s.phase,
+                        FfiSessionPhase::Live {
+                            status: FfiConnectionStatus::Connected
+                        }
+                    )
+            }),
+            "the pairing connects and the session learns A"
+        );
+
+        // B takes over the address; A's socket drops and the driver reconnects.
+        now_b.store(true, Ordering::SeqCst);
+        assert!(
+            recorder.wait_for(|s| matches!(
+                &s.phase,
+                FfiSessionPhase::Failed { message, .. } if message == IDENTITY_CHANGED
+            )),
+            "the reconnect finds B and stops"
+        );
+        assert!(
+            !bearer_to_b.load(Ordering::SeqCst),
+            "B never received an Authorization header"
+        );
+    }
+
+    #[test]
+    fn a_switch_to_another_server_drops_the_old_thread_and_workspace() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.attached(
+            1,
+            rejected(),
+            "http://agent-a/".to_owned(),
+            Some("node-a".to_owned()),
+        );
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let _ = m.open_thread("t1".to_owned());
+        assert!(m.state().has_connected, "A connected");
+
+        // A re-pair resolves to another primary Node.
+        let _ = m.status(1, failed(AUTH));
+        let fx = m.attached(
+            2,
+            rejected(),
+            "http://agent-b/".to_owned(),
+            Some("node-b".to_owned()),
+        );
+        assert!(opens(&fx).is_empty(), "A's thread is not subscribed on B");
+        assert_eq!(m.open_thread, None, "the open thread is cleared");
+        let state = m.state();
+        assert!(
+            !state.has_connected,
+            "the connecting screen shows until B connects"
+        );
+        assert_eq!(state.identity_epoch, 1, "the app sees the switch");
+
+        // The same Node again changes nothing.
+        let _ = m.status(2, FfiConnectionStatus::Connected);
+        let _ = m.open_thread("t2".to_owned());
+        let _ = m.status(2, failed(AUTH));
+        let fx = m.attached(
+            3,
+            rejected(),
+            "http://agent-b/".to_owned(),
+            Some("node-b".to_owned()),
+        );
+        assert_eq!(opens(&fx), vec!["t2"], "same server: the thread stays");
+        assert!(m.state().has_connected, "and so does the workspace");
     }
 }

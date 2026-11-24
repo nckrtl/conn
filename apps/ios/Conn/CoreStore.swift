@@ -56,8 +56,13 @@ final class CoreStore {
     /// Rust: this scope has had a working connection this launch.
     var hasConnected: Bool { state?.hasConnected ?? false }
 
-    /// The workspace, rather than the Orbit or pairing screen: connected now, or before.
-    var showsWorkspace: Bool { isPaired || hasConnected }
+    /// Rust: grows when this scope connects to a different server than before.
+    var identityEpoch: UInt64 { state?.identityEpoch ?? 0 }
+
+    /// The workspace, rather than the Orbit or pairing screen: connected before, or connecting to
+    /// this launch's first server (its offline history shows meanwhile). After a switch to
+    /// another server, the connecting screen shows until that one connects.
+    var showsWorkspace: Bool { hasConnected || (isPaired && identityEpoch == 0) }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
     var environmentId: String? { state?.environmentId }
@@ -65,6 +70,7 @@ final class CoreStore {
     var orbitConnect: OrbitConnectState? {
         switch state?.phase {
         case .connecting: .connecting
+        case .live where !hasConnected: .connecting
         case let .failed(message, detail, _): .failed(message: message, detail: detail)
         default: nil
         }
@@ -447,10 +453,15 @@ final class CoreStore {
 
     fileprivate func handleState(_ newState: FfiSessionState) {
         if let state, newState.revision <= state.revision { return }
-        // The open thread stays: the session resubscribes it on the new connection.
+        // The open thread stays: the session resubscribes it on the new connection. Only a switch
+        // to another server drops it, with that server's inbox.
         if newState.connectionId != state?.connectionId {
             shell = nil
             offlineReader = nil
+        }
+        if newState.identityEpoch != state?.identityEpoch ?? 0 {
+            openThread = nil
+            openThreadId = nil
         }
         state = newState
         switch newState.phase {

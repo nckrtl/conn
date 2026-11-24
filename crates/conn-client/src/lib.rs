@@ -207,7 +207,8 @@ pub struct StartOptions {
     pub stop_on_auth_rejection: bool,
     /// Before every handshake, read the server's descriptor and send the bearer only when it
     /// names this environment. Another environment stops the connection with
-    /// [`ConnectionStatus::Failed`]; see [`Connection::identity_mismatch`].
+    /// [`ConnectionStatus::Failed`]; see [`Connection::identity_mismatch`]. Can be set later
+    /// with [`Connection::set_expected_environment`].
     pub expected_environment: Option<String>,
 }
 
@@ -222,6 +223,7 @@ pub struct Connection {
     rt: tokio::runtime::Handle,
     auth_rejected: Arc<AtomicBool>,
     identity_mismatch: Arc<std::sync::Mutex<Option<String>>>,
+    expected_environment: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for Connection {
@@ -261,6 +263,7 @@ impl Connection {
         let http = reqwest::Client::new();
         let auth_rejected = Arc::new(AtomicBool::new(false));
         let identity_mismatch = Arc::new(std::sync::Mutex::new(None));
+        let expected_environment = Arc::new(std::sync::Mutex::new(options.expected_environment));
         rt.spawn(driver::run(
             config,
             Arc::clone(&bearer),
@@ -270,7 +273,7 @@ impl Connection {
             driver::Guards {
                 stop_on_auth_rejection: options.stop_on_auth_rejection,
                 auth_seen: Arc::clone(&auth_rejected),
-                expected_environment: options.expected_environment,
+                expected_environment: Arc::clone(&expected_environment),
                 mismatch: Arc::clone(&identity_mismatch),
             },
         ));
@@ -283,6 +286,7 @@ impl Connection {
             rt: rt.clone(),
             auth_rejected,
             identity_mismatch,
+            expected_environment,
         };
         (conn, events_rx)
     }
@@ -291,6 +295,14 @@ impl Connection {
     #[must_use]
     pub fn auth_rejected(&self) -> bool {
         self.auth_rejected.load(Ordering::Acquire)
+    }
+
+    /// From the next handshake on, send the bearer only to a server whose descriptor names
+    /// `environment` (`None`: no check, the default).
+    pub fn set_expected_environment(&self, environment: Option<String>) {
+        if let Ok(mut slot) = self.expected_environment.lock() {
+            *slot = environment;
+        }
     }
 
     /// The environment that answered instead of [`StartOptions::expected_environment`], if one

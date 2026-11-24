@@ -281,6 +281,69 @@ async fn a_retried_command_returns_its_receipt() {
     );
 }
 
+/// Audit 1.6 and 1.7, T3's receipts (`Orchestrator.ts` `replayCommandReceipt` and
+/// `commitRejectedCommand`, `ProjectionMaintenance.ts`): after the store reopens, a refused id
+/// is refused again though its precondition now holds, and an accepted archive replays as its
+/// receipt after an undo and more than 4,096 later writes. A new id runs normally.
+#[tokio::test(flavor = "current_thread")]
+async fn a_command_id_keeps_its_outcome_across_a_reopen() {
+    let db = TempDb::new("receipt-outcomes");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let refused = |engine: SqliteEngine, command: Value| async move {
+        match engine.dispatch(from_json(command).unwrap()).await {
+            Err(EngineError::Rejected(error)) => (engine, to_json(&error).to_string()),
+            Ok(_) => panic!("expected a refusal, the command was accepted"),
+            Err(_) => panic!("expected a refusal, the store failed"),
+        }
+    };
+    let stale = json!({"type": "thread.metadata.update", "commandId": "stale", "threadId": "t1",
+        "expectedBranch": "topic", "branch": "old-destination"});
+    let (engine, error) = refused(engine, stale.clone()).await;
+    assert!(error.contains("changed before"), "{error}");
+    let archive = json!({"type": "thread.archive", "commandId": "archive", "threadId": "t1"});
+    let archived = dispatch(&engine, archive.clone()).await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.unarchive", "commandId": "undo", "threadId": "t1"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.metadata.update", "commandId": "move", "threadId": "t1",
+            "branch": "topic"}),
+    )
+    .await;
+    dispatch(&engine, create("other", "create-other")).await;
+    for i in 0..4_400 {
+        dispatch(
+            &engine,
+            json!({"type": "thread.metadata.update", "commandId": format!("rename-{i}"),
+                "threadId": "other", "title": format!("Title {i}")}),
+        )
+        .await;
+    }
+    drop(engine);
+
+    let (engine, _) = open(&db);
+    let (engine, error) = refused(engine, stale.clone()).await;
+    assert!(
+        error.contains("Command stale was previously rejected"),
+        "{error}"
+    );
+    assert_eq!(dispatch(&engine, archive).await, archived);
+    let thread = projection(&engine, "t1").await["thread"].clone();
+    assert!(thread["archivedAt"].is_null());
+    assert_eq!(thread["branch"], "topic");
+    let mut fresh = stale;
+    fresh["commandId"] = json!("stale-again");
+    dispatch(&engine, fresh).await;
+    assert_eq!(
+        projection(&engine, "t1").await["thread"]["branch"],
+        "old-destination"
+    );
+}
+
 async fn rejection(engine: &SqliteEngine, command: Value) -> String {
     match engine.dispatch(from_json(command).unwrap()).await {
         Err(EngineError::Rejected(e)) => to_json(&e)["detail"].as_str().unwrap_or("").to_owned(),
@@ -318,109 +381,6 @@ async fn a_fork_receipt_belongs_to_its_target_thread() {
     assert!(engine.thread_snapshot("c".into()).await.unwrap().is_none());
     // The same id for the same target is a replay.
     dispatch(&engine, fork("b")).await;
-}
-
-/// Receipts from before they named an owner: migration 5 names it where the command's events
-/// prove it. A receipt it cannot prove is kept and answers a conflict, so nothing runs twice;
-/// a project's receipt never answers for a thread.
-#[tokio::test(flavor = "current_thread")]
-async fn receipts_from_before_owners_name_them_or_refuse() {
-    let db = TempDb::new("legacy-receipts");
-    {
-        let (engine, _) = open(&db);
-        dispatch(&engine, create("a", "c1")).await;
-        dispatch(&engine, create("b", "c2")).await;
-        // A message main indexed, with accents, for the search after the upgrade.
-        let mut thread = engine
-            .subscribe_thread(from_json(json!({"threadId": "a"})).unwrap())
-            .await
-            .unwrap();
-        next(&mut thread).await;
-        dispatch(&engine, message("a", "m1", "Ångström café citation")).await;
-        until_run_ends(&mut thread).await;
-        dispatch(
-            &engine,
-            json!({"type": "thread.settle", "commandId": "s1", "threadId": "a"}),
-        )
-        .await;
-        // Stop on an idle thread writes no event: nothing proves its thread.
-        dispatch(
-            &engine,
-            json!({"type": "thread.stop", "commandId": "stop-1", "threadId": "a"}),
-        )
-        .await;
-        let added =
-            std::env::temp_dir().join(format!("conn-legacy-project-{}", std::process::id()));
-        std::fs::create_dir_all(&added).unwrap();
-        engine
-            .call(
-                "projects.mutate",
-                json!({"type": "project.create", "commandId": "p1", "projectId": "project:p1",
-                    "title": "P", "workspaceRoot": added.to_string_lossy()}),
-            )
-            .await
-            .unwrap();
-    }
-    downgrade_to_v4(&db);
-    let (engine, _) = open(&db);
-    let settle_b = rejection(
-        &engine,
-        json!({"type": "thread.settle", "commandId": "s1", "threadId": "b"}),
-    )
-    .await;
-    assert!(
-        settle_b
-            .contains("Command s1 was already handled for thread a and cannot be replayed for b."),
-        "{settle_b}"
-    );
-    let b = engine.shell_snapshot().await.unwrap()["threads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["id"] == "b")
-        .cloned()
-        .unwrap();
-    assert_eq!(b["settledOverride"], Value::Null, "b is not settled");
-    // Its own thread replays it.
-    dispatch(
-        &engine,
-        json!({"type": "thread.settle", "commandId": "s1", "threadId": "a"}),
-    )
-    .await;
-    // Unproved: refused, and kept.
-    let stop = rejection(
-        &engine,
-        json!({"type": "thread.stop", "commandId": "stop-1", "threadId": "b"}),
-    )
-    .await;
-    assert!(
-        stop.contains("Command stop-1 was already handled"),
-        "{stop}"
-    );
-    assert!(
-        engine
-            .inner()
-            .db(|s| s.receipt("stop-1"))
-            .await
-            .unwrap()
-            .is_some()
-    );
-    let project = rejection(
-        &engine,
-        json!({"type": "thread.settle", "commandId": "p1", "threadId": "b"}),
-    )
-    .await;
-    assert!(
-        project.contains("Conflicting receipt is not a thread command receipt."),
-        "{project}"
-    );
-    // Main's search index still answers, accents included.
-    let found = engine
-        .inner()
-        .db(|s| s.search_threads(&json!({"query": "Ångström café"})))
-        .await
-        .unwrap();
-    assert!(found.to_string().contains("\"a\""), "{found}");
 }
 
 /// T3's deciders emit their event even when nothing changes: a re-pin records `thread.pinned`
@@ -553,127 +513,80 @@ fn downgrade_to_v4(db: &TempDb) {
     conn.execute_batch("PRAGMA user_version = 4").unwrap();
 }
 
-/// Main kept events but pruned receipts, so an id can have an older execution's events. The
-/// upgrade names an owner only from the event at the receipt's own sequence: B's retry is a
-/// replay, and A does not get B's receipt.
+/// v4 (main) → final: the upgrade adds the receipt columns and names no owner, so a retry of
+/// a command from before it is refused, never run twice; new commands and main's message index
+/// work as before.
 #[tokio::test(flavor = "current_thread")]
-async fn a_reused_id_after_pruning_belongs_to_its_last_execution() {
-    let db = TempDb::new("reused-id");
-    let settle =
-        |thread: &str| json!({"type": "thread.settle", "commandId": "x", "threadId": thread});
+async fn a_v4_store_upgrades_and_refuses_its_old_retries() {
+    let db = TempDb::new("v4-upgrade");
+    let root = std::env::temp_dir().join(format!("conn-v4-project-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let project = json!({"type": "project.create", "commandId": "p1", "projectId": "project:p1",
+        "title": "P", "workspaceRoot": root.to_string_lossy()});
     {
         let (engine, _) = open(&db);
         dispatch(&engine, create("a", "c1")).await;
-        dispatch(&engine, create("b", "c2")).await;
-        dispatch(&engine, settle("a")).await;
-        // Main pruned A's receipt; the id then ran again, for B.
-        engine
-            .inner()
-            .db(|store| {
-                store
-                    .raw()
-                    .execute("DELETE FROM receipts WHERE command_id = 'x'", [])
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap();
-        dispatch(&engine, settle("b")).await;
-    }
-    downgrade_to_v4(&db);
-    let (engine, _) = open(&db);
-    let b_events = engine.inner().db(|s| s.event_count("b")).await;
-    dispatch(&engine, settle("b")).await;
-    assert_eq!(
-        engine.inner().db(|s| s.event_count("b")).await,
-        b_events,
-        "a replay"
-    );
-    let a = rejection(&engine, settle("a")).await;
-    assert!(
-        a.contains("Command x was already handled for thread b and cannot be replayed for a."),
-        "{a}"
-    );
-}
-
-/// A v4 delegation's events end with the child's first message; its receipt still belongs to
-/// the parent, proved by the parent's task row naming the created child.
-#[tokio::test(flavor = "current_thread")]
-async fn a_legacy_delegation_belongs_to_its_parent() {
-    let db = TempDb::new("legacy-delegation");
-    let child = "thread:delegated-task:d1";
-    {
-        let (engine, _) = open(&db);
-        dispatch(&engine, create("t1", "c1")).await;
         let mut thread = engine
-            .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+            .subscribe_thread(from_json(json!({"threadId": "a"})).unwrap())
             .await
             .unwrap();
         next(&mut thread).await;
-        dispatch(&engine, message("t1", "c2", "hang")).await;
-        until_provider_turn(&mut thread).await;
-        dispatch(&engine, delegate("d1", "look around", None)).await;
-        let last = engine
-            .inner()
-            .db(|s| {
-                s.raw()
-                    .query_row(
-                        "SELECT sequence FROM receipts WHERE command_id = 'd1'",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .map_err(|e| e.to_string())
-            })
+        dispatch(&engine, message("a", "m1", "Ångström café citation")).await;
+        until_run_ends(&mut thread).await;
+        dispatch(
+            &engine,
+            json!({"type": "thread.settle", "commandId": "s1", "threadId": "a"}),
+        )
+        .await;
+        engine
+            .call("projects.mutate", project.clone())
             .await
             .unwrap();
-        let on: String = engine
-            .inner()
-            .db(move |s| {
-                s.raw()
-                    .query_row("SELECT thread_id FROM events WHERE seq = ?1", [last], |r| {
-                        r.get(0)
-                    })
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            on, child,
-            "the delegation's last event is the child's first message"
-        );
     }
     downgrade_to_v4(&db);
     let (engine, _) = open(&db);
-    dispatch(&engine, delegate("d1", "look around", None)).await;
-    let wrong = rejection(
+    let old = rejection(
         &engine,
-        json!({"type": "thread.settle", "commandId": "d1", "threadId": child}),
+        json!({"type": "thread.settle", "commandId": "s1", "threadId": "a"}),
     )
     .await;
     assert!(
-        wrong.contains("Command d1 was already handled for thread t1 and cannot be replayed for"),
-        "{wrong}"
+        old.contains("Command s1 was handled before receipts named their owner"),
+        "{old}"
     );
+    let retried = engine.call("projects.mutate", project).await;
+    assert!(
+        format!("{retried:?}").contains("Command p1 was handled before receipts named their owner"),
+        "{retried:?}"
+    );
+    dispatch(
+        &engine,
+        json!({"type": "thread.unsettle", "commandId": "u1", "threadId": "a", "reason": "user"}),
+    )
+    .await;
+    let found = engine
+        .inner()
+        .db(|s| s.search_threads(&json!({"query": "Ångström café"})))
+        .await
+        .unwrap();
+    assert!(found.to_string().contains("\"a\""), "{found}");
 }
 
-/// The upgrade from main's schema commits atomically: a failure leaves schema 4 and no owner,
-/// and the next open finishes it.
+/// The upgrade from main's schema commits atomically: a failure leaves schema 4 and none of
+/// the new columns, and the next open finishes it.
 #[tokio::test(flavor = "current_thread")]
 async fn the_receipt_upgrade_is_all_or_nothing() {
     let db = TempDb::new("upgrade-atomic");
     {
         let (engine, _) = open(&db);
         dispatch(&engine, create("a", "c1")).await;
-        dispatch(&engine, create("b", "c2")).await;
     }
     downgrade_to_v4(&db);
-    {
-        let conn = rusqlite::Connection::open(db.path()).unwrap();
-        conn.execute_batch(
-            "CREATE TRIGGER stop_upgrade BEFORE UPDATE ON receipts WHEN NEW.command_id = 'c2'
-             BEGIN SELECT RAISE(ABORT, 'test: stop the upgrade'); END;",
-        )
+    // A stray column makes the upgrade's last step fail.
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute_batch("ALTER TABLE receipts ADD COLUMN error TEXT")
         .unwrap();
-    }
     let mut config = EngineConfig::new(db.path());
     config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
     assert!(SqliteEngine::open(config).is_err(), "the upgrade fails");
@@ -683,18 +596,245 @@ async fn the_receipt_upgrade_is_all_or_nothing() {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 4);
-        let columns: i64 = conn
+        let added: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('receipts') WHERE name = 'owner_kind'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(columns, 0, "no half-written owners");
-        conn.execute_batch("DROP TRIGGER stop_upgrade").unwrap();
+        assert_eq!(added, 0, "no column of a failed upgrade stays");
+        conn.execute_batch("ALTER TABLE receipts DROP COLUMN error")
+            .unwrap();
     }
     let (engine, _) = open(&db);
-    dispatch(&engine, create("a", "c1")).await;
+    dispatch(&engine, create("b", "c2")).await;
+}
+
+/// A project command's typed refusal from planning is its receipt, as T3's
+/// `commitRejectedProjectCommand`: a retry gets it again even after the conflict is gone. A
+/// refusal before planning (the folder) stays retryable. `project.update` records T3's
+/// `project.meta.update`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_planned_project_refusal_is_replayed() {
+    let db = TempDb::new("project-refusal");
+    let (engine, _) = open(&db);
+    let folder = |name: &str| {
+        std::env::temp_dir()
+            .join(format!(
+                "conn-project-refusal-{}-{name}",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    };
+    let (one, missing) = (folder("one"), folder("missing"));
+    std::fs::create_dir_all(&one).unwrap();
+    let _ = std::fs::remove_dir_all(&missing);
+    let mutate = |command: Value| engine.call("projects.mutate", command);
+    let create_project = |id: &str, project: &str, root: &str| {
+        json!({"type": "project.create", "commandId": id, "projectId": project,
+            "title": "P", "workspaceRoot": root})
+    };
+    let cause = |result: Result<Value, EngineError<Value>>| match result {
+        Err(EngineError::Rejected(e)) => e["cause"].clone(),
+        other => panic!("expected a refusal: {other:?}"),
+    };
+    mutate(create_project("c1", "project:p1", &one))
+        .await
+        .unwrap();
+    let first = cause(mutate(create_project("c2", "project:p2", &one)).await);
+    assert_eq!(first["_tag"], "ProjectConflictError", "{first}");
+    mutate(json!({"type": "project.delete", "commandId": "d1", "projectId": "project:p1"}))
+        .await
+        .unwrap();
+    let again = cause(mutate(create_project("c2", "project:p2", &one)).await);
+    assert_eq!(
+        again, first,
+        "the recorded refusal, though the folder is free now"
+    );
+    // Refused before planning: the same id works once the folder exists.
+    let early = cause(mutate(create_project("c3", "project:p3", &missing)).await);
+    assert_eq!(early["_tag"], "ProjectOperationError", "{early}");
+    std::fs::create_dir_all(&missing).unwrap();
+    mutate(create_project("c3", "project:p3", &missing))
+        .await
+        .unwrap();
+    mutate(
+        json!({"type": "project.update", "commandId": "u1", "projectId": "project:p3",
+        "title": "Renamed"}),
+    )
+    .await
+    .unwrap();
+    let kind: String = engine
+        .inner()
+        .db(|s| {
+            s.raw()
+                .query_row(
+                    "SELECT command_type FROM receipts WHERE command_id = 'u1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(kind, "project.meta.update");
+    // An offline folder another project holds: T3 checks the folder before planning, so the
+    // refusal stays retryable and the id works once the folder is back and free.
+    std::fs::remove_dir_all(&missing).unwrap();
+    let offline = cause(mutate(create_project("c4", "project:p4", &missing)).await);
+    assert_eq!(offline["_tag"], "ProjectOperationError", "{offline}");
+    std::fs::create_dir_all(&missing).unwrap();
+    mutate(json!({"type": "project.delete", "commandId": "d3", "projectId": "project:p3"}))
+        .await
+        .unwrap();
+    mutate(create_project("c4", "project:p4", &missing))
+        .await
+        .unwrap();
+    // A monogram has at most two graphemes (`Intl.Segmenter`), not two chars.
+    let icon = |id: &str, text: &str| {
+        json!({"type": "project.update", "commandId": id, "projectId": "project:p4",
+            "projectIcon": {"kind": "monogram", "text": text}})
+    };
+    let project = mutate(icon("i1", "किका")).await.unwrap();
+    assert_eq!(project["projectIcon"]["text"], "किका");
+    let long = cause(mutate(icon("i2", "abc")).await);
+    assert_eq!(long["_tag"], "ProjectInvalidError", "{long}");
+}
+
+/// T3's `readCommitted`: a replay whose project row is gone is a typed read error, not null.
+#[tokio::test(flavor = "current_thread")]
+async fn a_project_replay_without_its_row_is_a_read_error() {
+    let db = TempDb::new("project-replay-row");
+    let (engine, _) = open(&db);
+    let root = std::env::temp_dir().join(format!("conn-project-row-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let command = json!({"type": "project.create", "commandId": "c1", "projectId": "project:p1",
+        "title": "P", "workspaceRoot": root.to_string_lossy()});
+    engine
+        .call("projects.mutate", command.clone())
+        .await
+        .unwrap();
+    engine
+        .inner()
+        .db(|s| {
+            s.raw()
+                .execute("DELETE FROM projects WHERE id = 'project:p1'", [])
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    match engine.call("projects.mutate", command).await {
+        Err(EngineError::Rejected(e)) => {
+            assert_eq!(e["cause"]["_tag"], "ProjectOperationError", "{e}");
+            assert_eq!(
+                e["cause"]["message"],
+                "The accepted project command did not produce a project row."
+            );
+        }
+        other => panic!("expected a read error: {other:?}"),
+    }
+}
+
+/// T3's queue start (`startNextQueuedRun`) checks and starts the queued run on its effective
+/// selection: a message that follows the thread's selection takes the thread's current one.
+/// An unpinned scheduled send and a delegated-task completion both follow it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_queue_starts_on_the_effective_selection() {
+    queued_run_follows_selection(Queued::Scheduled).await;
+    queued_run_follows_selection(Queued::DelegatedCompletion).await;
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Queued {
+    Scheduled,
+    DelegatedCompletion,
+}
+
+async fn queued_run_follows_selection(queued: Queued) {
+    let db = TempDb::new(&format!("queue-effective-{queued:?}"));
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![
+        Arc::new(FakeProvider::new("claudeAgent")),
+        Arc::new(FakeProvider::new("other")),
+        Arc::new(FakeProvider::new("off")),
+    ];
+    config.host = Some(Arc::new(OneInstanceOff));
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    match queued {
+        // The command the scheduler's `EngineRunner::send` builds: no model selection.
+        Queued::Scheduled => {
+            dispatch(
+                &engine,
+                json!({"type": "message.dispatch", "commandId": "c3", "threadId": "t1",
+                    "messageId": "message:c3", "scheduledTaskId": "scheduled-task:x",
+                    "text": "later", "attachments": [],
+                    "dispatchMode": {"type": "queue_after_active"},
+                    "createdBy": "agent", "creationSource": "server"}),
+            )
+            .await;
+        }
+        // A child's end queues its completion wake (`families::deliver`).
+        Queued::DelegatedCompletion => {
+            dispatch(&engine, delegate("d1", "look", Some("always"))).await;
+            let child = "thread:delegated-task:d1";
+            run_to_end(&engine, child, &format!("run:{child}:1")).await;
+        }
+    }
+    // The turn ends with the message waiting.
+    engine
+        .inner()
+        .db(|store| {
+            let mut tx = store.tx()?;
+            let mut run = tx.entity("t1", "runs", "run:t1:1")?.unwrap();
+            run["status"] = json!("interrupted");
+            tx.append(crate::store::Draft::new("t1", "run.updated", run).run(Some("run:t1:1")))?;
+            tx.commit(None)
+        })
+        .await
+        .unwrap();
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][1]["status"], "queued", "{queued:?}");
+    let select = |id: &str, instance: &str| {
+        json!({"type": "thread.model-selection.set", "commandId": id, "threadId": "t1",
+            "modelSelection": {"instanceId": instance, "model": "m"}})
+    };
+    // The thread is now on a provider the project turned off: the queue holds.
+    dispatch(&engine, select("s1", "off")).await;
+    dispatch(
+        &engine,
+        json!({"type": "queue.resume", "commandId": "r1", "threadId": "t1"}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(
+        p["runs"][1]["status"], "queued",
+        "{queued:?}: held, not started on run:t1:2's own provider"
+    );
+    assert_eq!(p["runs"][1]["queueHeld"], true, "{queued:?}");
+    // On another enabled provider, the run starts there.
+    dispatch(&engine, select("s2", "other")).await;
+    dispatch(
+        &engine,
+        json!({"type": "queue.resume", "commandId": "r2", "threadId": "t1"}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_ne!(p["runs"][1]["status"], "queued", "{queued:?}");
+    assert_eq!(p["runs"][1]["providerInstanceId"], "other", "{queued:?}");
 }
 
 /// A project write reads its receipt in its own transaction, as T3's `commitProjectCommand`:
@@ -936,6 +1076,127 @@ async fn a_settle_for_a_stale_run_is_refused() {
     assert_eq!(shell["threads"][0]["settledOverride"], "settled");
 }
 
+/// T3's settle refuses a thread with a queued user message (`Orchestrator.ts`): a stopped
+/// turn's follow-up must be sent or removed first, so a settle never hides it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_settle_waits_for_a_queued_user_message() {
+    let db = TempDb::new("settle-queued");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "follow-up")).await;
+    dispatch(
+        &engine,
+        json!({"type": "message.dispatch", "commandId": "c5", "threadId": "t1",
+            "messageId": "message:c5", "scheduledTaskId": "scheduled-task:x",
+            "text": "scheduled", "attachments": [],
+            "dispatchMode": {"type": "queue_after_active"},
+            "createdBy": "agent", "creationSource": "server"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.stop", "commandId": "c4", "threadId": "t1"}),
+    )
+    .await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(
+        projection(&engine, "t1").await["runs"][1]["status"],
+        "queued"
+    );
+    let refused = rejection(
+        &engine,
+        json!({"type": "thread.settle", "commandId": "s1", "threadId": "t1"}),
+    )
+    .await;
+    assert!(refused.contains("has a queued message"), "{refused}");
+    let shell = engine.shell_snapshot().await.unwrap();
+    assert_eq!(shell["threads"][0]["settledOverride"], Value::Null);
+    // With the user's message removed, the settle cancels the scheduled run (T3's cohort
+    // cancel), so a later resume never runs it.
+    dispatch(
+        &engine,
+        json!({"type": "queued-run.cancel", "commandId": "x1", "threadId": "t1",
+            "runId": "run:t1:2"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.settle", "commandId": "s2", "threadId": "t1"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "queue.resume", "commandId": "r1", "threadId": "t1"}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["thread"]["settledOverride"], "settled");
+    assert_eq!(p["runs"][2]["status"], "cancelled", "{}", p["runs"][2]);
+}
+
+/// T3's queue start moves the thread to the run's selection (`startNextQueuedRun`): an
+/// unpinned scheduled run queued behind a pinned one starts on the pinned run's model.
+#[tokio::test(flavor = "current_thread")]
+async fn a_queued_run_moves_the_thread_to_its_selection() {
+    let db = TempDb::new("queue-moves-selection");
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![
+        Arc::new(FakeProvider::new("claudeAgent")),
+        Arc::new(FakeProvider::new("other")),
+    ];
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let mut pinned = message("t1", "c3", "pinned");
+    pinned["dispatchMode"] = json!({"type": "queue_after_active"});
+    pinned["modelSelection"] = json!({"instanceId": "other", "model": "m"});
+    dispatch(&engine, pinned).await;
+    dispatch(
+        &engine,
+        json!({"type": "message.dispatch", "commandId": "c4", "threadId": "t1",
+            "messageId": "message:c4", "scheduledTaskId": "scheduled-task:x",
+            "text": "scheduled", "attachments": [],
+            "dispatchMode": {"type": "queue_after_active"},
+            "createdBy": "agent", "creationSource": "server"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.stop", "commandId": "c5", "threadId": "t1"}),
+    )
+    .await;
+    until_run_ends(&mut thread).await;
+    dispatch(
+        &engine,
+        json!({"type": "queue.resume", "commandId": "r1", "threadId": "t1"}),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:3").await;
+    assert_eq!(p["runs"][1]["providerInstanceId"], "other");
+    assert_eq!(p["thread"]["modelSelection"]["instanceId"], "other");
+    assert_eq!(
+        p["runs"][2]["providerInstanceId"], "other",
+        "the scheduled run follows the thread the pinned run moved"
+    );
+}
+
 /// `thread.visit` as T3's: a visit older than the stored one keeps the later time and records
 /// nothing; a newer one records `thread.visit-recorded`, not a copy of the thread.
 #[tokio::test(flavor = "current_thread")]
@@ -1099,7 +1360,6 @@ async fn streams_resume_after_a_sequence() {
     assert_eq!(replayed["kind"], "event");
     assert_eq!(replayed["event"]["type"], "thread.visit-recorded");
     assert_eq!(next(&mut thread).await["kind"], "synchronized");
-
     let mut shell = engine
         .subscribe_shell(
             from_json(json!({"afterSequence": 0, "requestCompletionMarker": true})).unwrap(),
@@ -1124,6 +1384,247 @@ async fn streams_resume_after_a_sequence() {
         .await
         .unwrap();
     assert_eq!(next(&mut shell).await, json!({"kind": "snapshot-required"}));
+
+    // A client that missed the deletion resumes into `thread.deleted`, as on T3.
+    let visited = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "c3",
+        "threadId": "t1", "visitedAt": "2026-11-13T09:01:00.000Z"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.delete", "commandId": "c4", "threadId": "t1"}),
+    )
+    .await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1", "afterSequence": visited, "requestCompletionMarker": true})).unwrap())
+        .await
+        .unwrap();
+    // crates/conn-state/tests/fixtures/thread_deleted_replay.json records this item.
+    assert_eq!(next(&mut thread).await["event"]["type"], "thread.deleted");
+    drop(thread);
+    assert!(
+        engine
+            .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        engine
+            .subscribe_thread(from_json(json!({"threadId": "nope", "afterSequence": 0})).unwrap())
+            .await
+            .is_err()
+    );
+
+    // A replay over 1 MiB stored gets a snapshot (`THREAD_RESUME_MAX_RAW_PAYLOAD_BYTES`).
+    dispatch(&engine, create("t3", "b1")).await;
+    let before = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "b2", "threadId": "t3",
+        "visitedAt": "2026-11-13T09:04:00.000Z"}),
+    )
+    .await;
+    let large = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "b3", "threadId": "t3",
+        "visitedAt": "2026-11-13T09:05:00.000Z"}),
+    )
+    .await;
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute(
+            "UPDATE events SET event = json_set(event, '$.payload.pad', ?1) WHERE seq = ?2",
+            rusqlite::params!["x".repeat(1_100_000), large as i64],
+        )
+        .unwrap();
+    let mut resumed = engine
+        .subscribe_thread(from_json(json!({"threadId": "t3", "afterSequence": before})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut resumed).await["kind"], "snapshot");
+    drop(resumed);
+
+    // A cursor older than the replay bound needs a snapshot, which a deleted thread has not.
+    dispatch(&engine, create("t2", "e1")).await;
+    let early = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "e2", "threadId": "t2",
+        "visitedAt": "2026-11-13T09:02:00.000Z"}),
+    )
+    .await;
+    // Each visit is later, so each moves the read mark and appends an event.
+    for n in 0..130 {
+        dispatch(
+            &engine,
+            json!({"type": "thread.visit", "commandId": format!("e-visit-{n}"),
+            "threadId": "t2", "visitedAt": format!("2026-11-13T09:{:02}:{:02}.000Z", 3 + n / 60, n % 60)}),
+        )
+        .await;
+    }
+    let mut resumed = engine
+        .subscribe_thread(from_json(json!({"threadId": "t2", "afterSequence": early})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut resumed).await["kind"], "snapshot");
+    drop(resumed);
+    dispatch(
+        &engine,
+        json!({"type": "thread.delete", "commandId": "e3", "threadId": "t2"}),
+    )
+    .await;
+    assert!(
+        engine
+            .subscribe_thread(from_json(json!({"threadId": "t2", "afterSequence": early})).unwrap())
+            .await
+            .is_err()
+    );
+
+    // A thread deleted and created again under its ID resumes from a snapshot: the replay
+    // holds `thread.created` and the thread exists (`ws.ts`, `hasCreateEvent`).
+    dispatch(&engine, create("t4", "r1")).await;
+    let seen = dispatch(
+        &engine,
+        json!({"type": "thread.visit", "commandId": "r2", "threadId": "t4",
+        "visitedAt": "2026-11-13T09:06:00.000Z"}),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.delete", "commandId": "r3", "threadId": "t4"}),
+    )
+    .await;
+    dispatch(&engine, create("t4", "r4")).await;
+    let mut resumed = engine
+        .subscribe_thread(from_json(json!({"threadId": "t4", "afterSequence": seen})).unwrap())
+        .await
+        .unwrap();
+    let first = next(&mut resumed).await;
+    assert_eq!(first["kind"], "snapshot", "{first}");
+    assert!(
+        first["projection"]["thread"]["deletedAt"].is_null(),
+        "{first}"
+    );
+}
+
+/// Appends copies of `event` (a stored `message.updated`) with the given text sizes and
+/// streaming flags straight to the store, after its last event. Returns the cursor before them.
+fn append_message_updates(db: &TempDb, event: &Value, copies: &[(usize, bool)]) -> u64 {
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    let last: i64 = conn
+        .query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+        .unwrap();
+    for (n, (size, streaming)) in copies.iter().enumerate() {
+        let seq = last + 1 + n as i64;
+        let mut copy = event.clone();
+        copy["id"] = json!(format!("event:{seq}"));
+        copy["payload"]["text"] = json!("x".repeat(*size));
+        copy["payload"]["streaming"] = json!(streaming);
+        conn.execute(
+            "INSERT INTO events (seq, thread_id, type, streaming, event) VALUES (?1, 't1', 'message.updated', ?2, ?3)",
+            rusqlite::params![seq, streaming, copy.to_string()],
+        )
+        .unwrap();
+    }
+    last as u64
+}
+
+/// T3 bounds a resume's replay twice at 1 MiB (`ws.ts`): the stored payload JSON of the
+/// events after the cursor, then the items it would send once streamed updates of one
+/// message are coalesced (`coalesceLiveUpdatedEvents`).
+#[tokio::test(flavor = "current_thread")]
+async fn a_resume_bounds_stored_payloads_and_coalesced_items_as_t3() {
+    const LIMIT: usize = 1_048_576;
+    let db = TempDb::new("resume-bytes");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t1", "c2", "hello")).await;
+    until_run_ends(&mut stream).await;
+    drop(stream);
+    drop(engine);
+    let event: Value = {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        let text: String = conn
+            .query_row(
+                "SELECT event FROM events WHERE type = 'message.updated'
+                 AND json_extract(event, '$.payload.role') = 'assistant' ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    let sized = |size: usize, streaming: bool| {
+        let mut copy = event.clone();
+        copy["payload"]["text"] = json!("x".repeat(size));
+        copy["payload"]["streaming"] = json!(streaming);
+        copy
+    };
+    // Text size per copy so the payload or the sent item is exactly `bytes` long.
+    let payload_overhead = sized(0, true)["payload"].to_string().len();
+    let item_overhead = |seq: u64| {
+        let mut copy = sized(0, false);
+        copy["id"] = json!(format!("event:{seq}"));
+        json!({"kind": "event", "sequence": seq, "event": copy})
+            .to_string()
+            .len()
+    };
+    let db = &db;
+    let resume = |after: u64| async move {
+        let (engine, _) = open(db);
+        let mut resumed = engine
+            .subscribe_thread(
+                from_json(json!({"threadId": "t1", "afterSequence": after,
+                "requestCompletionMarker": true}))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut items = vec![];
+        loop {
+            let item = next(&mut resumed).await;
+            if item["kind"] == "synchronized" {
+                return items;
+            }
+            items.push(item);
+        }
+    };
+
+    // Eight streamed updates of one message: their payloads are exactly 1 MiB, the items
+    // before coalescing are more, and the one kept after coalescing fits.
+    let each = LIMIT / 8 - payload_overhead;
+    let after = append_message_updates(db, &event, &[(each, true); 8]);
+    let items = resume(after).await;
+    assert_eq!(items.len(), 1, "coalesced to the last update");
+    assert_eq!(items[0]["kind"], "event");
+    assert_eq!(items[0]["sequence"], after + 8);
+
+    // One stored byte more: a snapshot, although the coalesced replay would fit.
+    let mut copies = [(each, true); 8];
+    copies[7].0 += 1;
+    let after = append_message_updates(db, &event, &copies);
+    assert_eq!(resume(after).await[0]["kind"], "snapshot");
+
+    // One final update whose item is exactly 1 MiB replays; one byte more does not.
+    let last = {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.query_row("SELECT MAX(seq) FROM events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap() as u64
+    };
+    let size = LIMIT - item_overhead(last + 1);
+    let after = append_message_updates(db, &event, &[(size, false)]);
+    let items = resume(after).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["kind"], "event");
+    let after = append_message_updates(db, &event, &[(size + 1, false)]);
+    assert_eq!(resume(after).await[0]["kind"], "snapshot");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1226,6 +1727,160 @@ async fn a_failed_turn_shows_its_error() {
     assert_eq!(
         shell["threads"][0]["lastError"],
         "The fake provider failed."
+    );
+}
+
+/// `activeProviderGoalForShell`: the shell shows the goal of the thread's active provider
+/// thread, as the GPUI thread list and the desktop goal banner read it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_shell_shows_the_active_provider_threads_goal() {
+    let db = TempDb::new("goal");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    assert_eq!(
+        engine.shell_snapshot().await.unwrap()["threads"][0]["goal"],
+        Value::Null
+    );
+    dispatch(&engine, message("t1", "c2", "goal")).await;
+    until_run_ends(&mut thread).await;
+    let active = json!({"objective": "Ship the feature", "status": "active", "tokensUsed": 12,
+        "tokenBudget": null, "timeUsedSeconds": 3});
+    let shell = engine.shell_snapshot().await.unwrap();
+    assert_eq!(shell["threads"][0]["goal"], active);
+    // The next ordinary turn's running row keeps the stored goal.
+    dispatch(&engine, message("t1", "c3", "hello")).await;
+    until_run_ends(&mut thread).await;
+    let shell = engine.shell_snapshot().await.unwrap();
+    assert_eq!(shell["threads"][0]["goal"], active);
+}
+
+/// `RunExecutionService`'s provider stop reason: a turn a hook stopped ends completed, with
+/// the hook's reason kept as a "Stopped by the provider" warning on its run. The work log
+/// shows it after a reload; an ordinary completed turn gets none.
+#[tokio::test(flavor = "current_thread")]
+async fn a_provider_stop_reason_stays_on_the_completed_run() {
+    let db = TempDb::new("stop-reason");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hook-stop")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "plain")).await;
+    until_run_ends(&mut thread).await;
+    drop(thread);
+    drop(engine);
+
+    let (engine, _) = open(&db);
+    let p = projection(&engine, "t1").await;
+    let warnings: Vec<(Value, Value, Value, Value)> = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "system_notice")
+        .map(|item| {
+            (
+                item["runId"].clone(),
+                item["title"].clone(),
+                item["level"].clone(),
+                item["message"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        warnings,
+        [(
+            json!("run:t1:1"),
+            json!("Stopped by the provider"),
+            json!("warning"),
+            json!(crate::fake::HOOK_STOP_REASON)
+        )]
+    );
+    assert_eq!(
+        run_statuses(&p),
+        [
+            ("run:t1:1".to_owned(), "completed".to_owned()),
+            ("run:t1:2".to_owned(), "completed".to_owned())
+        ]
+    );
+    // `subagentProjection.ts` finds the notice by `runSignalTurnItem`'s id.
+    let id = conn_support::ids::join_id(
+        "turn-item",
+        &["run", "run:t1:1", "signal", "provider-stop-reason"],
+    );
+    assert_eq!(item_of(&p, &id)["message"], crate::fake::HOOK_STOP_REASON);
+}
+
+/// `RunExecutionService`'s interrupted terminal: the Stop result takes the stored Stop
+/// request's reason, else the provider's stop reason, and never shows a stop-reason warning.
+#[tokio::test(flavor = "current_thread")]
+async fn a_provider_stop_reason_backs_the_stop_result() {
+    let db = TempDb::new("stop-reason-interrupt");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hook-interrupt")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "hook-hang")).await;
+    until_provider_turn(&mut thread).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    dispatch(&engine, stop("t1", "c4")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(
+        item_of(&p, "turn-item:run:t1:1:interrupt-result")["message"],
+        crate::fake::HOOK_STOP_REASON
+    );
+    assert_eq!(
+        item_of(&p, "turn-item:run:t1:2:interrupt-result")["message"],
+        "Stopped by user"
+    );
+    let notices = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "system_notice")
+        .count();
+    assert_eq!(notices, 0, "an interrupted run shows no warning");
+}
+
+/// `subagentResultForRun`: a delegated child a hook stopped before any answer gives its
+/// parent the hook's reason, not an empty result.
+#[tokio::test(flavor = "current_thread")]
+async fn a_hook_stopped_child_gives_its_parent_the_reason() {
+    let db = TempDb::new("stop-reason-child");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(&engine, delegate("d1", "hook-stop", None)).await;
+    let child = "thread:delegated-task:d1";
+    run_to_end(&engine, child, &format!("run:{child}:1")).await;
+    let parent = projection(&engine, "t1").await;
+    let expected = format!(
+        "Child task completed without an assistant result.\n\n{}",
+        crate::fake::HOOK_STOP_REASON
+    );
+    assert_eq!(parent["subagents"][0]["result"], expected.as_str());
+    assert_eq!(
+        item_of(&parent, "turn-item:delegated-task:d1")["result"],
+        expected.as_str()
     );
 }
 
@@ -1526,6 +2181,589 @@ async fn launch_thread_creates_and_starts_in_one_call() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Pauses the command `command_id` inside its transaction, runs `call` until it gets there,
+/// aborts the call (a closed socket aborts its handler), then lets the commit go on.
+async fn abort_inside_commit<T: Send + 'static>(
+    engine: &SqliteEngine,
+    command_id: &str,
+    call: impl std::future::Future<Output = T> + Send + 'static,
+) {
+    let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *crate::lock(&engine.inner().commit_pause) = Some(crate::engine::CommitPause {
+        command_id: command_id.into(),
+        paused: paused_tx,
+        release: release_rx,
+    });
+    let call = tokio::spawn(call);
+    tokio::task::spawn_blocking(move || paused_rx.recv())
+        .await
+        .unwrap()
+        .expect("the commit paused");
+    call.abort();
+    assert!(call.await.is_err_and(|e| e.is_cancelled()));
+    release_tx.send(()).unwrap();
+}
+
+/// A closed socket aborts a launch while its first message commits. The commit goes through,
+/// and so does the provider start it holds: exactly one session opens and the run completes.
+#[tokio::test(flavor = "current_thread")]
+async fn an_aborted_launch_still_starts_its_committed_run() {
+    let db = TempDb::new("launch-aborted");
+    let (engine, provider) = open(&db);
+    let engine = Arc::new(engine);
+    let input = json!({
+        "commandId": "A", "threadId": "t1", "projectId": project_id(), "title": "Launched",
+        "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"},
+        "runtimeMode": "full-access", "interactionMode": "default",
+        "workspaceStrategy": {"type": "root"},
+        "initialMessage": {"messageId": "m-a", "text": "hi", "attachments": []},
+    });
+    let launcher = engine.clone();
+    abort_inside_commit(&engine, "A:initial-message", async move {
+        launcher.launch_thread(input).await
+    })
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(run_of(&p, "run:t1:1")["status"], "completed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+/// The same for a command that is not a launch: an aborted archive still closes the thread
+/// on the host, once.
+#[tokio::test(flavor = "current_thread")]
+async fn an_aborted_archive_still_closes_the_thread() {
+    let db = TempDb::new("archive-aborted");
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.host = Some(host.clone());
+    let engine = Arc::new(SqliteEngine::open(config).unwrap());
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut shell = engine
+        .subscribe_shell(from_json(json!({"requestCompletionMarker": true})).unwrap())
+        .await
+        .unwrap();
+    next(&mut shell).await;
+    next(&mut shell).await;
+    let archiver = engine.clone();
+    abort_inside_commit(&engine, "a1", async move {
+        archiver
+            .dispatch(
+                from_json(json!({"type": "thread.archive", "commandId": "a1", "threadId": "t1"}))
+                    .unwrap(),
+            )
+            .await
+    })
+    .await;
+    // The commit publishes itself: a connected client sees the archive without the caller.
+    let row = next(&mut shell).await;
+    assert_eq!(row["kind"], "thread.updated");
+    assert_eq!(row["location"], "archive");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.closed.lock().unwrap().is_empty() {
+            host.closed_event.notified().await;
+        }
+    })
+    .await
+    .expect("the host hears of the archive");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        *host.closed.lock().unwrap(),
+        [("t1".to_owned(), crate::ThreadClose::Archived)]
+    );
+}
+
+/// Archives `t1` and stops its `thread.closed` effect after it ran, before its settlement.
+/// Returns the release.
+async fn archive_up_to_settlement(engine: &SqliteEngine) -> tokio::sync::oneshot::Sender<()> {
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    crate::lock(&engine.inner().worker_hooks).settle_pause =
+        Some(("thread.closed", paused_tx, release_rx));
+    dispatch(
+        engine,
+        json!({"type": "thread.archive", "commandId": "a1", "threadId": "t1"}),
+    )
+    .await;
+    timeout(Duration::from_secs(5), paused_rx)
+        .await
+        .expect("the archive effect ran")
+        .unwrap();
+    release_tx
+}
+
+/// The status of the thread's `thread.closed` row.
+async fn archive_row(engine: &SqliteEngine) -> (String, Option<String>) {
+    engine
+        .inner()
+        .db(|store| {
+            store.raw().query_row(
+                "SELECT status, last_error FROM effect_outbox WHERE effect_type = 'thread.closed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .await
+        .unwrap()
+}
+
+/// T3's "terminalizes a process-bound claim when success settlement fails"
+/// (`EffectWorker.test.ts`), and the gate's probe: a settlement write that fails once must not
+/// hold the thread. The row ends `failed`, the effect does not run again, and the thread's next
+/// turn starts.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_settlement_frees_the_thread_without_running_the_effect_again() {
+    // One failed write, and (the second gate's probe) two in a row.
+    for faults in [1, 2] {
+        let db = TempDb::new(&format!("settle-fault-{faults}"));
+        let host = Arc::new(RecordingHost::default());
+        let mut config = EngineConfig::new(db.path());
+        config.projects = vec![ProjectConfig {
+            title: "Project".into(),
+            workspace_root: ROOT.into(),
+        }];
+        config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
+        config.host = Some(host.clone());
+        let engine = SqliteEngine::open(config).unwrap();
+        dispatch(&engine, create("t1", "c1")).await;
+        let release = archive_up_to_settlement(&engine).await;
+        engine
+            .inner()
+            .db(move |store| store.settle_faults.set(faults))
+            .await;
+        release.send(()).unwrap();
+        dispatch(&engine, message("t1", "c2", "after")).await;
+        let p = run_to_end(&engine, "t1", "run:t1:1").await;
+        assert_eq!(run_of(&p, "run:t1:1")["status"], "completed");
+        let (status, error) = archive_row(&engine).await;
+        assert_eq!(status, "failed");
+        let error = error.unwrap();
+        assert!(error.contains("after execution started"), "{error}");
+        assert!(error.contains("injected settlement fault"), "{error}");
+        assert_eq!(host.closed.lock().unwrap().len(), 1, "the effect ran once");
+    }
+}
+
+/// The round-3 gate's probe: a settlement that keeps failing (here every write fails) stops
+/// trying once another engine took the store, even though this engine was never dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_settlement_stops_retrying_once_another_engine_owns_the_store() {
+    let db = TempDb::new("settle-owner-changed");
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let release = archive_up_to_settlement(&engine).await;
+    engine
+        .inner()
+        .db(|store| store.settle_faults.set(u32::MAX))
+        .await;
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute(
+            "UPDATE meta SET value = value + 1 WHERE key = 'engine_epoch'",
+            [],
+        )
+        .unwrap();
+    release.send(()).unwrap();
+    let faults = || engine.inner().db(|store| store.settle_faults.get());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let first = faults().await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        faults().await,
+        first,
+        "no settlement after the owner changed"
+    );
+}
+
+/// T3's "keeps requeueing a failed claim while the database is locked" (`retryWhileLocked`),
+/// and the second gate's probe: another connection holds the write lock while the worker
+/// settles. The settlement waits for the lock, then the row succeeds and the next turn starts.
+#[tokio::test(flavor = "current_thread")]
+async fn a_settlement_waits_out_a_locked_store() {
+    let db = TempDb::new("settle-locked");
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let release = archive_up_to_settlement(&engine).await;
+    engine
+        .inner()
+        .db(|store| store.raw().busy_timeout(Duration::from_millis(1)))
+        .await
+        .unwrap();
+    let locker = rusqlite::Connection::open(db.path()).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    crate::lock(&engine.inner().worker_hooks).settle_busy = Some(busy_tx);
+    release.send(()).unwrap();
+    timeout(Duration::from_secs(5), busy_rx)
+        .await
+        .expect("the settlement met the lock")
+        .unwrap();
+    locker.execute_batch("COMMIT").unwrap();
+    engine
+        .inner()
+        .db(|store| store.raw().busy_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap();
+    dispatch(&engine, message("t1", "c2", "after")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(run_of(&p, "run:t1:1")["status"], "completed");
+    assert_eq!(archive_row(&engine).await, ("succeeded".to_owned(), None));
+    assert_eq!(host.closed.lock().unwrap().len(), 1, "the effect ran once");
+}
+
+/// Beside T3's "prunes settled effects past retention in batches and keeps the rest"
+/// (`outbox/tests.rs`): the prune lets the store go between batches, so a read that comes
+/// while it prunes runs before the last batch.
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_gets_in_between_prune_batches() {
+    let db = TempDb::new("prune-batches");
+    let clock = Arc::new(crate::ManualClock::at(1_000_000_000_000));
+    let mut config = EngineConfig::new(db.path());
+    config.clock = clock.clone();
+    // Opened off the runtime, so no worker or prune loop of its own runs beside this one.
+    let engine = std::thread::spawn(move || SqliteEngine::open(config).unwrap())
+        .join()
+        .unwrap();
+    let inner = engine.inner().clone();
+    let total = 2 * crate::outbox::PRUNE_BATCH + 200;
+    let count = || {
+        inner.db(|store| {
+            store
+                .raw()
+                .query_row("SELECT COUNT(*) FROM effect_outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap() as usize
+        })
+    };
+    let settled_at = conn_support::time::iso_from_ms(crate::Clock::now_millis(clock.as_ref()));
+    inner
+        .db(move |store| {
+            store.raw().execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+                 INSERT INTO effect_outbox (thread_id, lane, effect_type, payload, status,
+                   created_at, updated_at, completed_at)
+                 SELECT 't', 'thread', 'thread.closed', '{}', 'succeeded', ?2, ?2, ?2 FROM n",
+                rusqlite::params![total as i64, settled_at],
+            )
+        })
+        .await
+        .unwrap();
+    // The rows age past retention.
+    clock.advance(Duration::from_millis(
+        crate::outbox::SETTLED_RETENTION_MS + 60_000,
+    ));
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    crate::lock(&inner.worker_hooks).prune_pause = Some((paused_tx, release_rx));
+    let prune = tokio::spawn({
+        let inner = inner.clone();
+        async move { inner.prune_settled_effects().await }
+    });
+    timeout(Duration::from_secs(5), paused_rx)
+        .await
+        .expect("the prune paused between batches")
+        .unwrap();
+    assert_eq!(count().await, total - crate::outbox::PRUNE_BATCH);
+    release_tx.send(()).unwrap();
+    assert_eq!(prune.await.unwrap().unwrap(), total);
+    assert_eq!(count().await, 0);
+}
+
+/// The gate's probe: opening the engine reads and migrates the store, and waits on its write
+/// lock. On the server's one runtime thread that blocks every task, so the open runs on the
+/// blocking pool: another task keeps running while it waits.
+#[tokio::test(flavor = "current_thread")]
+async fn opening_the_engine_does_not_block_the_runtime() {
+    let db = TempDb::new("open-blocking");
+    drop(SqliteEngine::open(EngineConfig::new(db.path())).unwrap());
+    let locker = rusqlite::Connection::open(db.path()).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = ticks.clone();
+        async move {
+            loop {
+                ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    });
+    let unlock = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        locker.execute_batch("COMMIT").unwrap();
+    });
+    let before = ticks.load(std::sync::atomic::Ordering::SeqCst);
+    let engine = SqliteEngine::start(EngineConfig::new(db.path()))
+        .await
+        .unwrap();
+    let during = ticks.load(std::sync::atomic::Ordering::SeqCst) - before;
+    unlock.join().unwrap();
+    ticker.abort();
+    drop(engine);
+    assert!(
+        during >= 5,
+        "the runtime ran {during} ticks while the engine opened"
+    );
+}
+
+/// The round-3 gate's probe: a start the server gave up on (its future dropped) still runs on
+/// the blocking pool. When it gets to the lease after a newer engine opened, it must not take
+/// the store from that engine.
+#[tokio::test(flavor = "current_thread")]
+async fn an_abandoned_start_never_takes_the_lease_of_a_newer_engine() {
+    let db = TempDb::new("abandoned-start");
+    drop(open(&db));
+    let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let mut config = EngineConfig::new(db.path());
+    config.open_pause = Some(crate::engine::OpenPause {
+        paused: paused_tx,
+        release: release_rx,
+        finished: finished_tx,
+    });
+    let abandoned = tokio::spawn(SqliteEngine::start(config));
+    tokio::task::spawn_blocking(move || paused_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    abandoned.abort();
+    assert!(abandoned.await.is_err_and(|e| e.is_cancelled()));
+    let (engine, _) = open(&db);
+    release_tx.send(()).unwrap();
+    tokio::task::spawn_blocking(move || finished_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // The newer engine still owns the store: its commands commit.
+    dispatch(&engine, create("t1", "c1")).await;
+}
+
+/// One engine per store: a second open while the first lives gets "store in use" and changes
+/// nothing; the first goes on as before.
+#[tokio::test(flavor = "current_thread")]
+async fn a_second_engine_on_a_live_store_is_refused() {
+    let db = TempDb::new("store-lock");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let epoch = || -> i64 {
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'engine_epoch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let before = (epoch(), engine.test_events("t1").await.len());
+    let Err(error) = SqliteEngine::start(EngineConfig::new(db.path())).await else {
+        panic!("a second engine opened the store");
+    };
+    assert_eq!(error, crate::STORE_IN_USE);
+    assert_eq!((epoch(), engine.test_events("t1").await.len()), before);
+    dispatch(&engine, message("t1", "c2", "still here")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(run_of(&p, "run:t1:1")["status"], "completed");
+}
+
+/// The lock follows the database file, not its spelling: an open through a symlink to a live
+/// store, and the reverse, is refused and leaves the live engine's lease alone.
+#[tokio::test(flavor = "current_thread")]
+async fn a_store_opened_through_a_symlink_is_refused() {
+    let db = TempDb::new("store-lock-symlink");
+    let link = db.0.join("link.sqlite");
+    std::os::unix::fs::symlink(db.path(), &link).unwrap();
+    let epoch = || -> i64 {
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'engine_epoch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    // The first open creates the file: its lock must already be the one the target takes.
+    for (first, second) in [(link.clone(), db.path()), (db.path(), link.clone())] {
+        let engine = SqliteEngine::open(EngineConfig::new(&first)).unwrap();
+        let before = epoch();
+        let Err(error) = SqliteEngine::start(EngineConfig::new(&second)).await else {
+            panic!(
+                "{} opened the store {} holds",
+                second.display(),
+                first.display()
+            );
+        };
+        assert_eq!(error, crate::STORE_IN_USE);
+        assert_eq!(epoch(), before);
+        drop(engine);
+        std::fs::remove_file(db.path()).unwrap();
+    }
+}
+
+/// Once the engine is dropped, its store opens again, and the new engine recovers what the
+/// first left: its cut turn is continued.
+#[tokio::test(flavor = "current_thread")]
+async fn a_store_opens_again_after_its_engine_drops_and_recovers() {
+    let db = TempDb::new("store-lock-reopen");
+    die_during_a_turn(&db, "c2").await;
+    let (engine, _) = open(&db);
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(run_of(&p, "run:t1:1")["status"], "cancelled");
+    assert_eq!(run_of(&p, "run:t1:2")["status"], "completed");
+}
+
+/// A row a previous process left running does not hold its thread after a restart: the start
+/// cancels it, and the next command's effects run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_row_left_running_does_not_hold_its_thread_after_a_restart() {
+    let db = TempDb::new("outbox-restart");
+    {
+        let (engine, _) = open(&db);
+        dispatch(&engine, create("t1", "c1")).await;
+        engine.test_hold_lane("t1").await;
+    }
+    let (engine, _) = open(&db);
+    dispatch(&engine, message("t1", "c2", "after")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(run_of(&p, "run:t1:1")["status"], "completed");
+}
+
+/// A title generator that answers only when the test lets it.
+#[derive(Default)]
+struct HeldTitles {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl crate::TitleGenerator for HeldTitles {
+    fn generate(&self, _: crate::TitleRequest) -> crate::BoxFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok("Held title".to_owned())
+        })
+    }
+}
+
+fn title_config(db: &TempDb, titles: Option<Arc<HeldTitles>>) -> EngineConfig {
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
+    // The engine that holds a title is the one the test drops: its idle sessions close soon,
+    // so its tasks end and the test can wait for them. The next engine keeps the default.
+    if titles.is_some() {
+        config.idle_session = Some(Duration::from_millis(20));
+    }
+    config.title_generator = titles.map(|t| t as Arc<dyn crate::TitleGenerator>);
+    config
+}
+
+/// Creates thread `t1` and asks for a title, which the held generator now holds. Returns a
+/// handle on the engine's state that lives as long as one of its tasks.
+async fn hold_a_title(
+    engine: &SqliteEngine,
+    titles: &HeldTitles,
+) -> std::sync::Weak<crate::engine::Inner> {
+    dispatch(engine, create("t1", "c1")).await;
+    dispatch(engine, message("t1", "c2", "fonts")).await;
+    run_to_end(engine, "t1", "run:t1:1").await;
+    dispatch(
+        engine,
+        json!({"type": "thread.metadata.update", "commandId": "r1", "threadId": "t1", "regenerateTitle": true}),
+    )
+    .await;
+    timeout(Duration::from_secs(5), titles.entered.notified())
+        .await
+        .expect("the title effect runs");
+    Arc::downgrade(engine.inner())
+}
+
+/// The thread's title events, oldest first.
+async fn title_events(engine: &SqliteEngine) -> Vec<(String, Value)> {
+    let mut events = engine.test_events("t1").await;
+    events.retain(|(kind, _)| kind.contains("title"));
+    events
+}
+
+/// Waits until no task of a dropped engine is left.
+async fn old_tasks_end(old: std::sync::Weak<crate::engine::Inner>) {
+    timeout(Duration::from_secs(5), async {
+        while old.strong_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the dropped engine's tasks end");
+}
+
+/// A dropped engine's running effect never writes, even with no newer engine on the store.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dropped_engine_s_running_effect_writes_nothing() {
+    let db = TempDb::new("fence-drop");
+    let titles = Arc::new(HeldTitles::default());
+    let engine = SqliteEngine::open(title_config(&db, Some(titles.clone()))).unwrap();
+    let old = hold_a_title(&engine, &titles).await;
+    let before = title_events(&engine).await;
+    drop(engine);
+    titles.release.notify_one();
+    old_tasks_end(old).await;
+    let engine = SqliteEngine::open(title_config(&db, None)).unwrap();
+    assert_eq!(title_events(&engine).await, before);
+    assert_eq!(
+        projection(&engine, "t1").await["thread"]["title"],
+        "New thread"
+    );
+}
+
+/// T3's "does not reclaim a running effect after its process-local lease expires", for a
+/// newer engine, and the gate's probe: an engine replaced while its effect runs must not write
+/// into the new engine's store. Before the fence, the old task committed its title with a stale sequence
+/// and the new engine's next command failed on `events.seq`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_replaced_engine_s_running_effect_writes_nothing() {
+    let db = TempDb::new("fence-replace");
+    let titles = Arc::new(HeldTitles::default());
+    let engine = SqliteEngine::open(title_config(&db, Some(titles.clone()))).unwrap();
+    let old = hold_a_title(&engine, &titles).await;
+    drop(engine);
+    let engine = SqliteEngine::open(title_config(&db, None)).unwrap();
+    titles.release.notify_one();
+    old_tasks_end(old).await;
+    dispatch(&engine, message("t1", "c3", "after")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(run_of(&p, "run:t1:2")["status"], "completed");
+    assert_eq!(p["thread"]["title"], "New thread");
 }
 
 /// `ThreadLaunchService.launch` for a scheduled run: the first message carries the task id
@@ -1852,6 +3090,349 @@ async fn a_steer_reaches_the_running_turn() {
     assert_eq!(p["messages"][1]["runId"], "run:t1:1");
 }
 
+/// `dispatchMessage` and `goalCommandStopsActiveRun`: a native `/goal` never joins a running
+/// turn. One that changes no running goal waits in the queue; one that starts goal work
+/// stops the run and goes first.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_command_never_steers_a_running_turn() {
+    let db = TempDb::new("goal-steer");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let steer = json!({"type": "steer_active", "targetRunId": "run:t1:1"});
+    dispatch(
+        &engine,
+        message_with("t1", "c3", "/goal clear", steer.clone(), None),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(
+        run_statuses(&p),
+        [
+            ("run:t1:1".to_owned(), "running".to_owned()),
+            ("run:t1:2".to_owned(), "queued".to_owned())
+        ]
+    );
+    assert!(
+        !local_item_texts(&p).iter().any(|t| t.contains("steer")),
+        "{:?}",
+        local_item_texts(&p)
+    );
+    // A queued goal stays its own run: it never becomes a steer once the turn runs.
+    assert!(
+        p["runs"][1]["steerWhenReadyRunId"].is_null(),
+        "{}",
+        p["runs"][1]
+    );
+    dispatch(
+        &engine,
+        message_with("t1", "c4", "/goal Ship the feature", steer, None),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let goal_run = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["userMessageId"] == "message:c4")
+        .unwrap()
+        .clone();
+    assert_eq!(goal_run["queuePosition"], 1, "{goal_run}");
+    // The goal stops the run it replaces.
+    loop {
+        let item = next(&mut thread).await;
+        let run = &item["event"]["payload"];
+        if item["event"]["type"] == "run.updated" && run["id"] == "run:t1:1" {
+            if run["status"] == "interrupted" {
+                break;
+            }
+            assert_eq!(run["status"], "running", "{run}");
+        }
+    }
+}
+
+/// Waits on the thread stream until `run` ends, and returns its final status.
+async fn until_run_status<E: serde::Serialize>(
+    stream: &mut Subscription<conn_contract::ThreadStreamItem, E>,
+    run: &str,
+) -> String {
+    loop {
+        let item = next(stream).await;
+        let payload = &item["event"]["payload"];
+        if item["event"]["type"] == "run.updated"
+            && payload["id"] == run
+            && ["completed", "interrupted", "failed", "cancelled"]
+                .contains(&payload["status"].as_str().unwrap_or_default())
+        {
+            return payload["status"].as_str().unwrap_or_default().to_owned();
+        }
+    }
+}
+
+/// `isNativeMaintenanceCommand` is only `/compact` and `/logout`: a running `/goal` turn is goal
+/// work, so a Clear sent into it while its goal is active stops it and goes first.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_clear_stops_the_running_goal_turn() {
+    let db = TempDb::new("goal-clear-running");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "/goal Ship the feature")).await;
+    until_provider_turn(&mut thread).await;
+    // The goal row is stored before the Clear is decided.
+    loop {
+        let item = next(&mut thread).await;
+        if item["event"]["type"] == "provider-thread.updated"
+            && item["event"]["payload"]["goal"]["status"] == "active"
+        {
+            break;
+        }
+    }
+    dispatch(
+        &engine,
+        message_with(
+            "t1",
+            "c3",
+            "/goal clear",
+            json!({"type": "start_immediately"}),
+            Some("auto"),
+        ),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][1]["queuePosition"], 1, "{}", p["runs"][1]);
+    assert_eq!(
+        until_run_status(&mut thread, "run:t1:1").await,
+        "interrupted"
+    );
+}
+
+/// `promotes a queued goal by stopping the running turn` (`SteeringCompletion`): the goal
+/// keeps its own run, goes first and stops the turn; it is never steered in as chat.
+#[tokio::test(flavor = "current_thread")]
+async fn promoting_a_queued_goal_stops_the_running_turn() {
+    let db = TempDb::new("goal-promote");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let queue = json!({"type": "queue_after_active"});
+    dispatch(
+        &engine,
+        message_with("t1", "c3", "queued", queue.clone(), None),
+    )
+    .await;
+    dispatch(
+        &engine,
+        message_with("t1", "c4", "/goal ship it", queue, None),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "queued-message.promote-to-steer", "commandId": "promote",
+            "threadId": "t1", "queuedRunId": "run:t1:3", "targetRunId": "run:t1:1"}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert!(
+        !local_item_texts(&p).iter().any(|t| t.contains("steer")),
+        "{:?}",
+        local_item_texts(&p)
+    );
+    assert_eq!(
+        until_run_status(&mut thread, "run:t1:1").await,
+        "interrupted"
+    );
+    // The goal starts next; the other queued message still waits.
+    loop {
+        let item = next(&mut thread).await;
+        let run = &item["event"]["payload"];
+        if item["event"]["type"] == "run.updated" && run["id"] == "run:t1:3" {
+            assert_ne!(run["status"], "cancelled", "{run}");
+            if run["status"] == "running" {
+                break;
+            }
+        }
+    }
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][1]["status"], "queued", "{}", p["runs"][1]);
+}
+
+/// `providerTurnOrdinal`: a run's first provider turn follows the highest ordinal on its
+/// provider thread. A goal run Codex continued has two turns, so the next run's turn is the
+/// third, and a rollback to the goal's checkpoint counts it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_run_after_a_continued_goal_run_gets_the_next_turn_ordinal() {
+    let db = TempDb::new("goal-ordinals");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "goal-continued")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, message("t1", "c3", "hello")).await;
+    until_run_ends(&mut thread).await;
+    let p = projection(&engine, "t1").await;
+    let mut ordinals: Vec<(String, Value)> = p["providerTurns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["id"].as_str().unwrap().to_owned(), t["ordinal"].clone()))
+        .collect();
+    ordinals.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        ordinals,
+        [
+            ("turn:run:t1:1".to_owned(), json!(1)),
+            ("turn:run:t1:1:2".to_owned(), json!(2)),
+            ("turn:run:t1:2".to_owned(), json!(3)),
+        ]
+    );
+}
+
+/// `runningProviderThread`: the turn gets the provider thread row the engine stores, goal and
+/// all. Codex shows a goal change only against that row, so a Clear after a Pause clears it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_clear_after_a_pause_clears_the_goal_row() {
+    let db = TempDb::new("goal-pause-clear");
+    let (engine, _) = open_with(&db, FakeProvider::new("codex").with_driver("codex"));
+    let mut create = create("t1", "c1");
+    create["modelSelection"] = json!({"instanceId": "codex", "model": "gpt-5"});
+    dispatch(&engine, create).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "goal")).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(shell_goal_status(&engine).await, "active");
+    dispatch(&engine, message("t1", "c3", "/goal pause")).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(shell_goal_status(&engine).await, "paused");
+    dispatch(&engine, message("t1", "c4", "/goal clear")).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(shell_goal_status(&engine).await, Value::Null);
+}
+
+async fn shell_goal_status(engine: &SqliteEngine) -> Value {
+    engine.shell_snapshot().await.unwrap()["threads"][0]["goal"]["status"].clone()
+}
+
+/// An engine with a running `hang` turn on t1, on the instance `instance`.
+async fn hanging_turn(
+    db: &TempDb,
+    providers: Vec<FakeProvider>,
+    instance: &str,
+) -> (
+    SqliteEngine,
+    Subscription<conn_contract::ThreadStreamItem, conn_contract::GetThreadProjectionError>,
+) {
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = providers
+        .into_iter()
+        .map(|p| Arc::new(p) as Arc<dyn conn_provider::Provider>)
+        .collect();
+    let engine = SqliteEngine::open(config).unwrap();
+    let mut create = create("t1", "c1");
+    create["modelSelection"] = json!({"instanceId": instance, "model": "m"});
+    dispatch(&engine, create).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    (engine, thread)
+}
+
+/// `goalDriverFor(command, modelSelection.instanceId)`: the message's own provider decides
+/// whether `/goal` is a goal. A Codex goal sent into another provider's turn stops it and goes
+/// first; it never steers in as chat.
+#[tokio::test(flavor = "current_thread")]
+async fn a_codex_goal_into_another_providers_turn_stops_it() {
+    let db = TempDb::new("goal-other-provider");
+    let (engine, mut thread) = hanging_turn(
+        &db,
+        vec![
+            FakeProvider::new("grok").with_driver("grok"),
+            FakeProvider::new("codex").with_driver("codex"),
+        ],
+        "grok",
+    )
+    .await;
+    let mut goal = message_with(
+        "t1",
+        "c3",
+        "/goal Ship the feature",
+        json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+        None,
+    );
+    goal["modelSelection"] = json!({"instanceId": "codex", "model": "gpt-5"});
+    dispatch(&engine, goal).await;
+    let p = projection(&engine, "t1").await;
+    assert!(
+        !local_item_texts(&p).iter().any(|t| t.contains("steer")),
+        "{:?}",
+        local_item_texts(&p)
+    );
+    assert_eq!(p["runs"][1]["queuePosition"], 1, "{}", p["runs"]);
+    assert_eq!(
+        until_run_status(&mut thread, "run:t1:1").await,
+        "interrupted"
+    );
+}
+
+/// `ensureGoalCommandSupported`: Claude goals cannot be paused or resumed. The send is refused
+/// before it can stop the running turn.
+#[tokio::test(flavor = "current_thread")]
+async fn a_claude_goal_resume_is_refused_before_it_stops_work() {
+    let db = TempDb::new("goal-claude-resume");
+    let (engine, _thread) =
+        hanging_turn(&db, vec![FakeProvider::new("claudeAgent")], "claudeAgent").await;
+    for (command, text) in [("c3", "/goal resume"), ("c4", "/goal pause")] {
+        let message = message_with(
+            "t1",
+            command,
+            text,
+            json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+            None,
+        );
+        assert_eq!(
+            refused(&engine, message).await,
+            "Claude goals cannot be paused or resumed. Send /goal clear to remove the goal."
+        );
+    }
+    let p = projection(&engine, "t1").await;
+    assert_eq!(
+        run_statuses(&p),
+        [("run:t1:1".to_owned(), "running".to_owned())]
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_declined_steer_waits_first_in_the_queue() {
     let db = TempDb::new("steer-declined");
@@ -2025,7 +3606,7 @@ async fn clients_add_rename_and_remove_projects() {
     let renamed = call(
         &engine,
         "projects.mutate",
-        json!({"type": "project.update", "commandId": "p3", "projectId": "project:new",
+        json!({"type": "project.update", "commandId": "p3-rename", "projectId": "project:new",
                "title": "Renamed", "pinned": true}),
     )
     .await
@@ -3214,7 +4795,14 @@ async fn older_settled_threads_page_and_trim() {
     let (engine, _) = open(&db);
     for n in 0..30 {
         let id = format!("s{n:02}");
-        dispatch(&engine, create(&id, &format!("c{id}"))).await;
+        let mut command = create(&id, &format!("c{id}"));
+        // One older settled thread and one in the shell share a title word.
+        match n {
+            3 => command["title"] = json!("Osprey release notes"),
+            27 => command["title"] = json!("Osprey launch"),
+            _ => {}
+        }
+        dispatch(&engine, command).await;
         dispatch(
             &engine,
             json!({"type": "thread.settle", "commandId": format!("x{id}"), "threadId": id,
@@ -3236,6 +4824,37 @@ async fn older_settled_threads_page_and_trim() {
         "2026-01-01T00:00:05.000Z"
     );
     assert_eq!(snapshot["olderSettled"]["counts"][0]["count"], 5);
+
+    // The phone's HTTP reload trims as the socket does, and a current cursor keeps its rows.
+    let query = |omit: bool, resume_from: Option<u64>| crate::HttpShellQuery {
+        omit_idle_subagents: omit,
+        omit_older_settled: omit,
+        resume_from,
+    };
+    let http = engine.http_shell_snapshot(query(true, None)).await.unwrap();
+    assert_eq!(http, Some(snapshot.clone()));
+    let full = engine
+        .http_shell_snapshot(query(false, None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(full["threads"].as_array().unwrap().len(), 30);
+    assert!(full.get("olderSettled").is_none());
+    let sequence = snapshot["snapshotSequence"].as_u64().unwrap();
+    assert_eq!(
+        engine
+            .http_shell_snapshot(query(true, Some(sequence)))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        engine
+            .http_shell_snapshot(query(true, Some(sequence + 1)))
+            .await
+            .unwrap(),
+        Some(snapshot.clone())
+    );
 
     let page = call(
         &engine,
@@ -3259,6 +4878,268 @@ async fn older_settled_threads_page_and_trim() {
     .await
     .unwrap();
     assert_eq!(counts["counts"][0]["count"], 5);
+
+    // The scheduled-task picker searches the omitted thread by title (`searchOlderSettled`):
+    // only older settled rows come back, in the requested projects.
+    let search = |query: &str, projects: Value, titles_only: bool| {
+        let engine = &engine;
+        let query = query.to_owned();
+        async move {
+            call(
+                engine,
+                "orchestration.searchThreads",
+                json!({"query": query, "titlesOnly": titles_only, "projectIds": projects,
+                       "olderSettledBefore": "2026-01-01T00:00:05.000Z"}),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let ids = |found: &Value| -> Vec<Value> {
+        found["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].clone())
+            .collect()
+    };
+    let found = search("osprey release", json!([project_id()]), true).await;
+    assert_eq!(ids(&found), [json!("s03")]);
+    assert_eq!(found["matches"], json!([]));
+    assert!(found["snapshotSequence"].as_u64().is_some());
+    assert_eq!(
+        ids(&search("Osprey", json!([project_id()]), true).await),
+        [json!("s03")]
+    );
+    assert!(ids(&search("osprey", json!(["another-project"]), true).await).is_empty());
+    // A mixed query still searches messages; without the cutoff no rows come back.
+    let mixed = search("osprey notes", json!([project_id()]), false).await;
+    assert_eq!(ids(&mixed), [json!("s03")]);
+    let plain = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "osprey"}),
+    )
+    .await
+    .unwrap();
+    assert!(plain.get("threads").is_none());
+}
+
+async fn settle_threads(engine: &SqliteEngine, ids: impl IntoIterator<Item = String>) {
+    for (n, id) in ids.into_iter().enumerate() {
+        dispatch(engine, create(&id, &format!("c{id}"))).await;
+        dispatch(
+            engine,
+            json!({"type": "thread.settle", "commandId": format!("x{id}"), "threadId": id,
+                   "settledAt": format!("2026-01-01T00:00:{n:02}.000Z")}),
+        )
+        .await;
+    }
+}
+
+fn trimmed_query(resume_from: Option<u64>) -> crate::HttpShellQuery {
+    crate::HttpShellQuery {
+        omit_idle_subagents: true,
+        omit_older_settled: true,
+        resume_from,
+    }
+}
+
+/// The trimmed shell over the socket, which the HTTP route must match.
+async fn trimmed_shell(engine: &SqliteEngine) -> Value {
+    let mut shell = engine
+        .subscribe_shell(
+            from_json(json!({"omitOlderSettled": true, "omitIdleSubagents": true})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let snapshot = next(&mut shell).await["snapshot"].clone();
+    let http = engine
+        .http_shell_snapshot(trimmed_query(None))
+        .await
+        .unwrap();
+    assert_eq!(http, Some(snapshot.clone()), "HTTP and the socket agree");
+    snapshot
+}
+
+fn shell_ids(snapshot: &Value) -> Vec<String> {
+    snapshot["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// `shellTrimFacts`: with fewer than 25 settled threads the oldest is the cut, so none is older.
+#[tokio::test(flavor = "current_thread")]
+async fn a_small_project_keeps_every_settled_thread() {
+    for (settled, shown, older) in [(1, 1, 0), (24, 24, 0), (25, 25, 0), (26, 25, 1)] {
+        let db = TempDb::new(&format!("settled-small-{settled}"));
+        let (engine, _) = open(&db);
+        settle_threads(&engine, (0..settled).map(|n| format!("s{n:02}"))).await;
+        let snapshot = trimmed_shell(&engine).await;
+        assert_eq!(shell_ids(&snapshot).len(), shown, "{settled} settled");
+        let counted: u64 = snapshot["olderSettled"]["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["count"].as_u64())
+            .sum();
+        assert_eq!(counted, older, "{settled} settled");
+        let oldest_kept = 0.max(settled as i64 - 25);
+        assert_eq!(
+            snapshot["olderSettled"]["before"],
+            format!("2026-01-01T00:00:{oldest_kept:02}.000Z"),
+            "{settled} settled"
+        );
+    }
+}
+
+/// `remoteTaskParentIds`: the owner of a task in a linked environment stays in a trimmed shell,
+/// an idle subagent or an older settled thread alike.
+#[tokio::test(flavor = "current_thread")]
+async fn the_owner_of_a_remote_task_stays_in_a_trimmed_shell() {
+    let db = TempDb::new("settled-remote");
+    let (engine, _) = open(&db);
+    settle_threads(&engine, (0..26).map(|n| format!("s{n:02}"))).await;
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(&engine, delegate("d1", "look around", None)).await;
+    let child = "thread:delegated-task:d1";
+    run_to_end(&engine, child, &format!("run:{child}:1")).await;
+    let before = shell_ids(&trimmed_shell(&engine).await);
+    assert!(!before.contains(&"s00".to_owned()));
+    assert!(!before.contains(&child.to_owned()));
+    for owner in ["s00", child] {
+        let row = json!({"id": format!("node:remote:{owner}"), "threadId": owner,
+            "origin": "app_owned", "childThreadId": null, "status": "running",
+            "remoteChild": {"environmentId": "env:b", "threadId": "thread:b", "label": "B"}});
+        let inner = engine.inner().clone();
+        let owner = owner.to_owned();
+        inner
+            .write(move |tx| {
+                tx.append(crate::store::Draft::new(&owner, "subagent.updated", row))
+                    .map(|_| ())
+            })
+            .await
+            .unwrap();
+    }
+    let after = shell_ids(&trimmed_shell(&engine).await);
+    assert!(after.contains(&"s00".to_owned()), "{after:?}");
+    assert!(after.contains(&child.to_owned()), "{after:?}");
+}
+
+async fn head_sequence(engine: &SqliteEngine) -> u64 {
+    engine.shell_snapshot().await.unwrap()["snapshotSequence"]
+        .as_u64()
+        .unwrap()
+}
+
+/// `canResumeShellFrom`: at most 1,000 events and 8 MiB of them behind, for the socket and
+/// the HTTP route alike.
+#[tokio::test(flavor = "current_thread")]
+async fn a_shell_resumes_at_most_a_thousand_events_back() {
+    let db = TempDb::new("shell-resume-cap");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let append = |count: usize, output: String| {
+        let inner = engine.inner().clone();
+        async move {
+            inner
+                .write(move |tx| {
+                    for n in 0..count {
+                        let item = json!({"id": format!("turn-item:x{n}"), "threadId": "t1",
+                            "runId": null, "nodeId": null, "providerThreadId": null,
+                            "providerTurnId": null, "nativeItemRef": null, "parentItemId": null,
+                            "ordinal": n, "status": "completed", "title": null, "startedAt": null,
+                            "completedAt": null, "updatedAt": "2026-01-01T00:00:00.000Z",
+                            "type": "command_execution", "input": "ls", "output": output});
+                        tx.append(crate::store::Draft::new("t1", "turn-item.updated", item))?;
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let resumes = |after: u64| {
+        let engine = &engine;
+        async move {
+            let http = engine
+                .http_shell_snapshot(trimmed_query(Some(after)))
+                .await
+                .unwrap()
+                .is_none();
+            let mut shell = engine
+                .subscribe_shell(
+                    from_json(json!({"afterSequence": after, "httpSnapshotFallback": true,
+                        "requestCompletionMarker": true}))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let socket = next(&mut shell).await["kind"] != "snapshot-required";
+            assert_eq!(http, socket, "HTTP and the socket agree at {after}");
+            http
+        }
+    };
+    let start = head_sequence(&engine).await;
+    append(1001, String::new()).await;
+    let head = head_sequence(&engine).await;
+    assert_eq!(head - start, 1001);
+    assert!(resumes(head).await);
+    assert!(resumes(head - 1000).await);
+    assert!(!resumes(head - 1001).await);
+    // Nine events of 1 MiB each are past the budget.
+    append(9, "x".repeat(1024 * 1024)).await;
+    let big = head_sequence(&engine).await;
+    assert!(resumes(big - 7).await);
+    assert!(!resumes(big - 9).await);
+}
+
+/// `searchOlderSettled`: message hits outside the older settled rows do not use up its five.
+#[tokio::test(flavor = "current_thread")]
+async fn older_settled_search_skips_ineligible_message_hits() {
+    let db = TempDb::new("settled-search-eligible");
+    let (engine, _) = open(&db);
+    let ids: Vec<String> = (0..30).map(|n| format!("s{n:02}")).collect();
+    for id in &ids {
+        dispatch(&engine, create(id, &format!("c{id}"))).await;
+    }
+    // Oldest first: the older settled thread's hit ranks below five newer ones.
+    for id in ["s00", "s25", "s26", "s27", "s28", "s29"] {
+        dispatch(&engine, message(id, &format!("m{id}"), "zebrafish")).await;
+        run_to_end(&engine, id, &format!("run:{id}:1")).await;
+    }
+    for (n, id) in ids.iter().enumerate() {
+        dispatch(
+            &engine,
+            json!({"type": "thread.settle", "commandId": format!("x{id}"), "threadId": id,
+                   "settledAt": format!("2026-01-01T00:00:{n:02}.000Z")}),
+        )
+        .await;
+    }
+    let found = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "zebrafish", "olderSettledBefore": "2026-01-01T00:00:05.000Z"}),
+    )
+    .await
+    .unwrap();
+    let threads: Vec<_> = found["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].clone())
+        .collect();
+    assert_eq!(threads, [json!("s00")], "{}", found["matches"]);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -4218,6 +6099,8 @@ async fn the_host_grants_tools_claims_attachments_and_hears_closes() {
     }];
     config.providers = vec![provider.clone()];
     config.host = Some(host.clone());
+    let clock = Arc::new(crate::ManualClock::at(1_800_000_000_000));
+    config.clock = clock.clone();
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
     let image = json!({"type": "image", "id": "pending-1", "name": "a.png",
@@ -4244,6 +6127,41 @@ async fn the_host_grants_tools_claims_attachments_and_hears_closes() {
         tx.append(crate::store::Draft::new("t1", "turn-item.updated", json!({"id":"page", "type":"dynamic_tool", "toolName":"html_render", "output":{"htmlRender":{"attachmentId":"t1-00000000-0000-4000-8000-000000000001-html", "title":"Page", "height":100}}})))?;
         tx.commit(None)
     }).await.unwrap();
+    // Each settle names its settlement by the committed `settledAt`: a repeat keeps it, and
+    // a settlement after an unsettle is a new one.
+    for (command, kind) in [
+        ("s1", "thread.settle"),
+        ("s2", "thread.settle"),
+        ("s3", "thread.unsettle"),
+        ("s4", "thread.settle"),
+    ] {
+        clock.advance(Duration::from_secs(1));
+        dispatch(
+            &engine,
+            json!({"type": kind, "commandId": command, "threadId": "t1", "reason": "user"}),
+        )
+        .await;
+    }
+    while host.closed.lock().unwrap().len() < 3 {
+        host.closed_event.notified().await;
+    }
+    let settled: Vec<_> = host
+        .closed
+        .lock()
+        .unwrap()
+        .drain(..)
+        .map(|(_, c)| c)
+        .collect();
+    let at =
+        |seconds: i64| conn_support::time::iso_from_millis(1_800_000_000_000 + seconds * 1_000);
+    assert_eq!(
+        settled,
+        [
+            crate::ThreadClose::Settled { settled_at: at(1) },
+            crate::ThreadClose::SettledAgain { settled_at: at(1) },
+            crate::ThreadClose::Settled { settled_at: at(4) },
+        ]
+    );
     dispatch(
         &engine,
         json!({"type": "thread.archive", "commandId": "c4", "threadId": "t1"}),
@@ -4743,6 +6661,275 @@ async fn search(engine: &SqliteEngine, query: &str) -> Vec<String> {
         .collect()
 }
 
+/// T3 "ThreadSearch short words outside ASCII: finds them in any case or accent", plus the
+/// ordinary message of audit 9.5: a query without accents finds an accented message, on a
+/// store indexed before folding (after the migration) and for a message sent after it.
+#[tokio::test(flavor = "current_thread")]
+async fn search_folds_case_and_accents_before_and_after_the_upgrade() {
+    let db = TempDb::new("search-accents");
+    let (engine, _) = open(&db);
+    for (thread, texts) in [
+        ("russian", &["В логах ошибка"][..]),
+        (
+            "french",
+            &[
+                "École fermée à Lyon. Scope ordinary beacon.",
+                "Météo école",
+                "Școala închisă",
+                "Hồ Chí Minh",
+            ][..],
+        ),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c0"))).await;
+        for (n, text) in texts.iter().enumerate() {
+            let n = n + 1;
+            dispatch(&engine, message(thread, &format!("{thread}:c{n}"), text)).await;
+            run_to_end(&engine, thread, &format!("run:{thread}:{n}")).await;
+        }
+    }
+    engine.shutdown().await;
+    drop(engine);
+    // The index as a store written before folding had it: original text, no fold mark.
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "UPDATE message_search SET text = (
+           SELECT COALESCE(json_extract(e.body, '$.text'), '') FROM message_keys k
+           JOIN entities e ON e.thread_id = k.thread_id AND e.kind = 'messages'
+             AND e.id = k.message_id
+           WHERE k.id = message_search.rowid);
+         DELETE FROM meta WHERE key = 'message_search_folded';",
+    )
+    .unwrap();
+    let stored: String = conn
+        .query_row(
+            "SELECT text FROM message_search WHERE text LIKE '%Lyon%' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.starts_with("École"), "{stored}");
+    drop(conn);
+
+    let (engine, _) = open(&db);
+    let hits = |query: &'static str| {
+        let engine = &engine;
+        async move {
+            call(
+                engine,
+                "orchestration.searchThreads",
+                json!({"query": query}),
+            )
+            .await
+            .unwrap()["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| (m["threadId"].as_str().unwrap().to_owned(), m.clone()))
+                .collect::<Vec<_>>()
+        }
+    };
+    let ids = |found: &[(String, Value)]| found.iter().map(|f| f.0.clone()).collect::<Vec<_>>();
+    let french = hits("École fermée").await;
+    assert_eq!(ids(&french), ["french"]);
+    let message_id = french[0].1["messageId"].clone();
+    for query in ["ecole fermee", "ecole fermée", "fermée éc", "ECOLE FERMEE"] {
+        let found = hits(query).await;
+        assert_eq!(ids(&found), ["french"], "{query}");
+        assert_eq!(found[0].1["messageId"], message_id, "{query}");
+        assert!(
+            found[0].1["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("École fermée à Lyon"),
+            "the snippet keeps the original text: {query}"
+        );
+    }
+    assert_eq!(ids(&hits("ошибка в").await), ["russian"]);
+    assert_eq!(ids(&hits("école me").await), ["french"]);
+    assert_eq!(ids(&hits("închisă sc").await), ["french"]);
+    assert_eq!(ids(&hits("chí ho").await), ["french"]);
+    // Short words still narrow, and an absent word finds nothing.
+    assert_eq!(ids(&hits("ошибка я").await), Vec::<String>::new());
+    assert_eq!(ids(&hits("fermée ce").await), Vec::<String>::new());
+    assert_eq!(ids(&hits("totallyabsent").await), Vec::<String>::new());
+
+    // A message sent after the upgrade is indexed folded too.
+    dispatch(&engine, create("later", "later:c1")).await;
+    dispatch(&engine, message("later", "later:c2", "Crème brûlée recipe")).await;
+    run_to_end(&engine, "later", "run:later:1").await;
+    let later = hits("creme brulee").await;
+    assert_eq!(ids(&later), ["later"]);
+    assert!(
+        later[0].1["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("Crème brûlée")
+    );
+    engine.shutdown().await;
+}
+
+/// The index folds as T3's `trigram remove_diacritics 1` and the query is NFC, as
+/// `messageSearchTokens`: Latin accents fold, other scripts' marks and other letters stay apart.
+/// A store folded by the first, wider fold (mark 1) is folded again once, from the messages.
+#[tokio::test(flavor = "current_thread")]
+async fn search_folds_latin_accents_only_and_normalizes_the_query() {
+    let db = TempDb::new("search-scripts");
+    let (engine, _) = open(&db);
+    for (thread, text) in [
+        ("kana", "かがく の じっけん"),
+        ("hangul", "한글 문서 작성"),
+        ("french", "Le garçon était déjà prêt"),
+        ("letters", "Straße ørsted ﬁle"),
+        ("georgian", "თბილისი"),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
+        dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
+        run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
+    }
+    let none = Vec::<String>::new();
+    assert_eq!(search(&engine, "かがく").await, ["kana"]);
+    assert_eq!(
+        search(&engine, "かかく").await,
+        none,
+        "dakuten tells か from が"
+    );
+    // "한글" typed as decomposed jamo finds the composed syllables.
+    let decomposed = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
+    assert_eq!(search(&engine, decomposed).await, ["hangul"]);
+    assert_eq!(search(&engine, "한글").await, ["hangul"]);
+    assert_eq!(search(&engine, "garcon etait deja pret").await, ["french"]);
+    assert_eq!(search(&engine, "GARÇON déjà").await, ["french"]);
+    for query in ["straße", "ørsted", "ﬁle"] {
+        assert_eq!(search(&engine, query).await, ["letters"], "{query}");
+    }
+    for query in ["strasse", "orsted", "file"] {
+        assert_eq!(search(&engine, query).await, none, "{query}");
+    }
+    // The query is lowercased before the index fold, which leaves Mtavruli capitals alone.
+    assert_eq!(search(&engine, "ᲗᲑᲘᲚᲘᲡᲘ").await, ["georgian"]);
+    engine.shutdown().await;
+    drop(engine);
+
+    // The first fold took dakuten off ("かかく の しっけん") and marked the store 1.
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "UPDATE message_search SET text = 'かかく の しっけん' WHERE text LIKE 'かがく%';
+         UPDATE meta SET value = 1 WHERE key = 'message_search_folded';",
+    )
+    .unwrap();
+    drop(conn);
+    let (engine, _) = open(&db);
+    assert_eq!(search(&engine, "かかく").await, none);
+    assert_eq!(search(&engine, "かがく").await, ["kana"]);
+    assert_eq!(search(&engine, "じっけん").await, ["kana"]);
+    engine.shutdown().await;
+}
+
+/// `messageMatcher` in `paletteSearch.ts`: a word shorter than four characters must start a
+/// word in the message, so "me" does not find "fermé" and "fts" does not find "drafts". A
+/// symbol starts a word only where a letter would (`startsWordAt`): "☀ab" is inside "x☀ab". T3
+/// reads an emoji above U+FFFF as two UTF-16 units, so "🚀cd" brings its own boundary.
+#[tokio::test(flavor = "current_thread")]
+async fn search_short_words_must_start_a_word() {
+    let db = TempDb::new("search-word-starts");
+    let (engine, _) = open(&db);
+    for (thread, text) in [
+        ("closed", "marker fermé"),
+        ("drafts", "marker drafts"),
+        ("sun", "marker x☀ab y🚀cd"),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
+        dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
+        run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
+    }
+    let none = Vec::<String>::new();
+    assert_eq!(search(&engine, "marker").await.len(), 3);
+    assert_eq!(search(&engine, "marker me").await, none);
+    assert_eq!(search(&engine, "marker ☀ab").await, none);
+    assert_eq!(search(&engine, "marker 🚀cd").await, ["sun"]);
+    assert_eq!(search(&engine, "marker ke").await, none);
+    assert_eq!(search(&engine, "marker fe").await, ["closed"]);
+    assert_eq!(search(&engine, "fts").await, none);
+    assert_eq!(search(&engine, "dra").await, ["drafts"]);
+    assert_eq!(
+        search(&engine, "afts").await,
+        ["drafts"],
+        "four letters match inside a word"
+    );
+    engine.shutdown().await;
+}
+
+/// `messageMatcher` counts a word's length before the index folds it, and skips hits inside a
+/// hex id (`findMessageToken`). "İce" is four characters once lowercased, so it may sit inside
+/// "service"; "abc" is not a word of "42abc12".
+#[tokio::test(flavor = "current_thread")]
+async fn search_word_length_and_hex_ids_as_message_matcher() {
+    let db = TempDb::new("search-length-hex");
+    let (engine, _) = open(&db);
+    for (thread, text) in [
+        ("service", "the service runs"),
+        ("hex", "commit 42abc12 landed"),
+        ("word", "the abc rule"),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
+        dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
+        run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
+    }
+    assert_eq!(search(&engine, "İce").await, ["service"]);
+    assert_eq!(search(&engine, "abc").await, ["word"]);
+    assert_eq!(
+        search(&engine, "42abc12").await,
+        ["hex"],
+        "a pasted id still matches"
+    );
+    engine.shutdown().await;
+}
+
+/// The snippet shows the occurrence that qualified the message: "fts" only counts where it
+/// starts a word, not inside "drafts" 320 characters earlier.
+#[tokio::test(flavor = "current_thread")]
+async fn search_snippet_shows_the_accepted_occurrence() {
+    let db = TempDb::new("search-snippet-at");
+    let (engine, _) = open(&db);
+    let text = format!("drafts {} fts ready", "z".repeat(320));
+    dispatch(&engine, create("t", "t:c1")).await;
+    dispatch(&engine, message("t", "t:c2", &text)).await;
+    run_to_end(&engine, "t", "run:t:1").await;
+    let found = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "fts ready"}),
+    )
+    .await
+    .unwrap();
+    let snippet = found["matches"][0]["snippet"].as_str().unwrap_or_default();
+    assert!(snippet.contains("fts ready"), "{snippet}");
+    engine.shutdown().await;
+}
+
+/// `ThreadSearch.ts` matches a message as it reads (`MARKDOWN_LINK`): a link shows only its label,
+/// so its address finds nothing and the snippet shows the label.
+#[tokio::test(flavor = "current_thread")]
+async fn search_reads_a_markdown_link_as_its_label() {
+    let db = TempDb::new("search-link-label");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t", "t:c1")).await;
+    let text = "See [release notes](https://docs.example/quartz/changelog).";
+    dispatch(&engine, message("t", "t:c2", text)).await;
+    run_to_end(&engine, "t", "run:t:1").await;
+    assert_eq!(search(&engine, "quartz").await, Vec::<String>::new());
+    let found = call(
+        &engine,
+        "orchestration.searchThreads",
+        json!({"query": "release notes"}),
+    )
+    .await
+    .unwrap();
+    // The fake provider echoes the message, and its reply is the newest hit.
+    assert_eq!(found["matches"][0]["snippet"], "echo: See release notes.");
+    engine.shutdown().await;
+}
+
 /// Search follows `ThreadSearch.ts`: every long word must match, `%` and `_` are plain
 /// characters, short words narrow, two CJK characters count as a word, and deleted or
 /// archived threads drop out in SQL.
@@ -4861,6 +7048,59 @@ async fn live_command_output_reaches_subscribers() {
         0,
         "the hub drops a thread's commands when its run ends"
     );
+}
+
+/// `CommandOutputHub.test.ts` "an interrupted command ends the stream with the output it
+/// printed": the live tail goes before the settled item, which has no `output`.
+#[tokio::test(flavor = "current_thread")]
+async fn an_interrupted_command_ends_on_the_output_it_printed() {
+    let db = TempDb::new("output-interrupted");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let item = |status: &str| {
+        json!({"id": "turn-item:cmd", "threadId": "t1", "runId": "run:t1:1", "nodeId": "node:run:t1:1:root",
+            "providerThreadId": null, "providerTurnId": null, "nativeItemRef": null, "parentItemId": null,
+            "ordinal": 0, "status": status, "title": null, "startedAt": "2026-01-01T00:00:00.000Z",
+            "completedAt": null, "updatedAt": "2026-01-01T00:00:00.000Z", "type": "command_execution",
+            "input": "serve"})
+    };
+    let write = |value: Value| {
+        let inner = engine.inner().clone();
+        async move {
+            inner
+                .write(move |tx| {
+                    tx.append(crate::store::Draft::new("t1", "turn-item.updated", value))
+                        .map(|_| ())
+                })
+                .await
+                .unwrap()
+        }
+    };
+    write(item("running")).await;
+    let hub = &engine.inner().command_output;
+    hub.append("t1", "turn-item:cmd", "waiting for server\n");
+    let mut output = engine
+        .open_stream(
+            "orchestration.subscribeCommandOutput",
+            json!({"threadId": "t1", "itemId": "turn-item:cmd"}),
+        )
+        .await
+        .unwrap();
+    frame(&mut output).await;
+    hub.finish("t1", "turn-item:cmd");
+    write(item("interrupted")).await;
+    assert_eq!(
+        frame(&mut output).await,
+        json!({"kind": "replace", "text": "waiting for server\n", "truncated": false, "running": false})
+    );
+    assert!(output.recv().await.is_none());
 }
 
 fn snooze(command: &str, thread: &str, until: &str) -> Value {
@@ -5116,6 +7356,175 @@ async fn a_scheduled_fresh_run_is_a_side_conversation() {
     assert_eq!(
         provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
         3
+    );
+    // A fresh scheduled run delegates: the result wakes the conversation that asked for it
+    // (`dispatchProviderThread`), not the thread's own.
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(
+        &engine,
+        fresh_message(
+            "t1",
+            "c5",
+            "hang",
+            json!({"scheduledTaskId": "task:triage", "dispatchMode": {"type": "queue_after_active"}}),
+        ),
+    )
+    .await;
+    until_provider_turn(&mut stream).await;
+    let mut ask = delegate("d1", "look", Some("always"));
+    ask["parentRunId"] = json!("run:t1:4");
+    ask["parentNodeId"] = json!("node:run:t1:4:root");
+    dispatch(&engine, ask).await;
+    let child = "thread:delegated-task:d1";
+    run_to_end(&engine, child, &format!("run:{child}:1")).await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.stop", "commandId": "c6", "threadId": "t1"}),
+    )
+    .await;
+    until_run_ends(&mut stream).await;
+    dispatch(
+        &engine,
+        json!({"type": "queue.resume", "commandId": "r1", "threadId": "t1"}),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:5").await;
+    let wake = p["runs"][4]["userMessageId"].as_str().unwrap();
+    assert!(wake.starts_with("message:delegated-completion:"), "{wake}");
+    assert_eq!(
+        p["runs"][4]["providerThreadId"], p["runs"][3]["providerThreadId"],
+        "the result goes to the fresh run's conversation"
+    );
+}
+
+/// `ProviderSwitch.integration.test.ts` "starts a scheduled fresh run while the previous run's
+/// session still has background work": the busy session stays open and the second fire
+/// starts its own native thread in a new session.
+#[tokio::test(flavor = "current_thread")]
+async fn a_scheduled_fresh_run_keeps_a_busy_session_open() {
+    let db = TempDb::new("fresh-scheduled-busy");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let fire = |command: &str, text: &str| {
+        fresh_message(
+            "t1",
+            command,
+            text,
+            json!({"scheduledTaskId": "task:busy", "dispatchMode": {"type": "queue_after_active"}}),
+        )
+    };
+    dispatch(&engine, fire("c2", "background-hold")).await;
+    run_to_end(&engine, "t1", "run:t1:1").await;
+    dispatch(&engine, fire("c3", "second")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    let native = |run: usize| {
+        let id = &p["runs"][run]["providerThreadId"];
+        p["providerThreads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| &t["id"] == id)
+            .map(|t| t["nativeThreadRef"].clone())
+            .unwrap()
+    };
+    assert!(!native(1).is_null());
+    assert_ne!(native(1), native(0));
+    assert_eq!(
+        count(&provider.closed),
+        0,
+        "closing the busy session would end its work"
+    );
+    assert_eq!(count(&provider.sessions), 2);
+}
+
+/// Force stop ends every session of the thread: the current one and one a fresh schedule
+/// moved aside while it still ran background work.
+#[tokio::test(flavor = "current_thread")]
+async fn force_stop_closes_a_detached_busy_session() {
+    let db = TempDb::new("fresh-scheduled-force-stop");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    let fire = |command: &str, text: &str| {
+        fresh_message(
+            "t1",
+            command,
+            text,
+            json!({"scheduledTaskId": "task:busy", "dispatchMode": {"type": "queue_after_active"}}),
+        )
+    };
+    dispatch(&engine, fire("c2", "background-hold")).await;
+    until_run_ends(&mut thread).await;
+    dispatch(&engine, fire("c3", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    assert_eq!(count(&provider.sessions), 2);
+    assert_eq!(count(&provider.closed), 0);
+    let stopped = call(
+        &engine,
+        "orchestration.forceStopThread",
+        json!({"threadId": "t1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stopped["outcome"], "killed");
+    assert_eq!(
+        count(&provider.closed),
+        2,
+        "the detached session closes too"
+    );
+}
+
+/// `ThreadFork.execution.test.ts` "a fresh send in a fork that has not run yet starts without
+/// the fork's context": a schedule's fresh send is refused, the user's supersedes the fork.
+#[tokio::test(flavor = "current_thread")]
+async fn a_user_fresh_send_in_a_fork_supersedes_the_fork() {
+    let db = TempDb::new("fresh-fork");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    dispatch(&engine, message("t1", "c2", "work")).await;
+    run_to_end(&engine, "t1", "run:t1:1").await;
+    dispatch(
+        &engine,
+        json!({
+            "type": "thread.fork", "commandId": "f1", "sourceThreadId": "t1",
+            "targetThreadId": "t2", "sourcePoint": {"type": "run", "runId": "run:t1:1"},
+            "createdBy": "user", "creationSource": "web",
+        }),
+    )
+    .await;
+    let scheduled = refused(
+        &engine,
+        fresh_message(
+            "t2",
+            "c3",
+            "scheduled",
+            json!({"scheduledTaskId": "task:fork"}),
+        ),
+    )
+    .await;
+    assert!(scheduled.contains("still being applied"), "{scheduled}");
+    dispatch(&engine, fresh_message("t2", "c4", "start over", json!({}))).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["freshContext"], true);
+    let forks: Vec<_> = p["contextTransfers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["type"] == "fork")
+        .map(|t| t["status"].clone())
+        .collect();
+    assert_eq!(forks, [json!("superseded")]);
+    assert!(
+        provider.forks.lock().unwrap().is_empty(),
+        "nothing forks natively"
     );
 }
 
@@ -5484,33 +7893,57 @@ async fn a_late_start_failure_after_force_stop_does_not_hold_the_queue() {
     }
 }
 
-/// A thread's effects run in the order their lane slots were taken, not the order they were
-/// started (review finding 2.1: dispatch takes the slot inside the store closure, so lane order
-/// is commit order). A slot given up without running (its commit failed) keeps that order.
+/// A thread's effects run in the order their writes committed (T3's outbox claims by row
+/// order). A write that rolled back leaves no row and holds nothing.
 #[tokio::test(flavor = "current_thread")]
-async fn lane_order_is_reservation_order() {
-    let db = TempDb::new("lane-reserve");
+async fn lane_order_is_commit_order() {
+    let db = TempDb::new("lane-commit");
     let host = Arc::new(RecordingHost::default());
     let mut config = EngineConfig::new(db.path());
     config.host = Some(host.clone());
     let engine = SqliteEngine::open(config).unwrap();
-    let inner = engine.inner();
     let close = |reason| crate::commands::Effect::ThreadClosed {
         thread_id: "t1".into(),
         reason,
     };
-    let first = inner.reserve_effect(close(crate::ThreadClose::Archived));
-    let given_up = inner.reserve_effect(close(crate::ThreadClose::Settled));
-    let last = inner.reserve_effect(close(crate::ThreadClose::Deleted));
-    drop(given_up);
-    last.start();
+    let hold = engine.test_hold_lane("t1").await;
+    let inner = engine.inner().clone();
+    let effects = [
+        (close(crate::ThreadClose::Archived), true),
+        (
+            close(crate::ThreadClose::Settled {
+                settled_at: String::new(),
+            }),
+            false,
+        ),
+        (close(crate::ThreadClose::Deleted), true),
+    ];
+    for (effect, commits) in effects {
+        inner
+            .db(move |store| {
+                let mut tx = store.tx().unwrap();
+                tx.enqueue(None, &[effect]).unwrap();
+                if commits {
+                    tx.commit(None).unwrap();
+                } else {
+                    tx.rollback();
+                }
+            })
+            .await;
+    }
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
         host.closed.lock().unwrap().is_empty(),
-        "waits for the first"
+        "waits for the running row"
     );
-    first.start();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    engine.test_release_lane(hold).await;
+    timeout(Duration::from_secs(5), async {
+        while host.closed.lock().unwrap().len() < 2 {
+            host.closed_event.notified().await;
+        }
+    })
+    .await
+    .expect("both rows ran");
     assert_eq!(
         *host.closed.lock().unwrap(),
         [
@@ -5673,11 +8106,7 @@ async fn stop_before_the_start_runs_never_starts_the_provider() {
     dispatch(&engine, create("t1", "c1")).await;
     dispatch(&engine, message("t1", "c2", "hello")).await;
     run_to_end(&engine, "t1", "run:t1:1").await;
-    let inner = engine.inner();
-    let blocker = inner.reserve_effect(crate::commands::Effect::ThreadClosed {
-        thread_id: "t1".into(),
-        reason: crate::ThreadClose::Settled,
-    });
+    let blocker = engine.test_hold_lane("t1").await;
     dispatch(&engine, message("t1", "c3", "hello again")).await;
     dispatch(&engine, stop("t1", "c4")).await;
     let p = projection(&engine, "t1").await;
@@ -5686,7 +8115,7 @@ async fn stop_before_the_start_runs_never_starts_the_provider() {
         item_of(&p, "turn-item:run:t1:2:interrupt-result")["message"],
         "Run interrupted before provider start"
     );
-    blocker.start();
+    engine.test_release_lane(blocker).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let calls = crate::lock(&provider.calls).clone();
     assert!(!calls.iter().any(|c| c == "start run:t1:2"), "{calls:?}");

@@ -59,6 +59,9 @@ WHERE kind = 'turnItems';
 -- The runs with a Stop request, for the visibility rule.
 CREATE INDEX IF NOT EXISTS turn_item_interrupts ON entities(thread_id, json_extract(body, '$.runId'))
 WHERE kind = 'turnItems' AND json_extract(body, '$.type') = 'run_interrupt_request';
+-- Threads that own a task in a linked environment (`has_remote_tasks`), for the shell trim.
+CREATE INDEX IF NOT EXISTS remote_task_owners ON entities(thread_id)
+WHERE kind = 'subagents' AND json_type(body, '$.remoteChild') = 'object';
 CREATE TABLE IF NOT EXISTS projects (
   id             TEXT PRIMARY KEY,
   workspace_root TEXT NOT NULL UNIQUE,
@@ -68,8 +71,9 @@ CREATE TABLE IF NOT EXISTS shell_changes (
   seq  INTEGER PRIMARY KEY,
   item TEXT NOT NULL
 );
--- Final message texts for `searchThreads`. Trigram tokens make LIKE '%q%' an index lookup
--- for queries of three or more characters. `message_keys` gives each message a stable rowid.
+-- Final message texts for `searchThreads`, case and accents folded (`fold.rs`). Trigram tokens
+-- make LIKE '%q%' an index lookup for queries of three or more characters. `message_keys`
+-- gives each message a stable rowid.
 CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(text, tokenize = 'trigram');
 CREATE TABLE IF NOT EXISTS message_keys (
   id         INTEGER PRIMARY KEY,
@@ -222,6 +226,10 @@ pub(crate) type StoreResult<T> = Result<T, String>;
 
 /// Shell changes kept for resuming streams. An older cursor gets a fresh snapshot instead.
 pub(crate) const SHELL_CHANGES_KEEP: i64 = 1024;
+/// `SHELL_RESUME_MAX_GAP`: past this many events a snapshot is cheaper than the replay.
+const SHELL_RESUME_MAX_GAP: u64 = 1_000;
+/// `SHELL_REPLAY_PAYLOAD_BUDGET_BYTES`: raw event bytes a shell resume may replay.
+const SHELL_REPLAY_BUDGET_BYTES: i64 = 8 * 1024 * 1024;
 /// Retention runs when the sequence crosses a multiple of this, not on every commit.
 const PRUNE_EVERY: u64 = 256;
 
@@ -250,6 +258,25 @@ fn keyed_rows(
     .collect()
 }
 
+/// [`Tx::checkpoint_capture_folder`].
+pub(crate) enum CaptureFolder {
+    /// No capture event: the checkpoint came from the T3 server's import.
+    Imported,
+    /// Captured here, before any event recorded the scope's folder.
+    Unknown,
+    Known(String),
+}
+
+/// [`Store::thread_replay_stats`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReplayStats {
+    pub(crate) events: u64,
+    /// The bytes of the events' payload JSON.
+    pub(crate) payload_bytes: u64,
+    /// Whether one of them is `thread.created`.
+    pub(crate) has_create: bool,
+}
+
 pub(crate) struct Store {
     conn: Connection,
     next_seq: u64,
@@ -263,11 +290,103 @@ pub(crate) struct Store {
     pub(crate) host: Option<std::sync::Arc<dyn crate::EngineHost>>,
     /// A title generator is configured, so commands may ask for titles.
     pub(crate) generates_titles: bool,
+    /// The provider instances, so a command can tell an instance's driver ([`Tx::driver`]).
+    pub(crate) providers: conn_provider::ProviderSet,
     /// Which runs' provider starts were accepted or abandoned. In memory: a restart starts
     /// every active run again, so nothing here outlives the process.
     starts: StartLedger,
     /// Set when attention events are on (`attention.rs`); raised after a commit that wrote one.
     pub(crate) attention: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Raised after a commit that wrote outbox rows (`outbox.rs`): the effect worker wakes.
+    pub(crate) effects_wake: std::sync::Arc<tokio::sync::Notify>,
+    /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
+    /// after its transaction), so a caller that goes away cannot keep clients from seeing it.
+    pub(crate) published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    /// The engine that may write here ([`Store::take_ownership`]); `None` for a store opened
+    /// without an engine.
+    owner: Option<Owner>,
+    /// Test hook: the next settlements fail with an I/O error.
+    #[cfg(test)]
+    pub(crate) settle_faults: std::cell::Cell<u32>,
+}
+
+/// An engine's lease on the store: the `engine_epoch` it took at open, and the flag its drop
+/// raises. Every write checks both in its own transaction, so a dropped or replaced engine
+/// never writes again (T3 scopes its workers to the runtime that owns the database).
+#[derive(Clone)]
+pub(crate) struct Owner {
+    epoch: i64,
+    released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Owner {
+    pub(crate) fn epoch(&self) -> Option<i64> {
+        (!self.released.load(std::sync::atomic::Ordering::SeqCst)).then_some(self.epoch)
+    }
+}
+
+/// The last sequence the database holds.
+fn stored_high(conn: &Connection) -> StoreResult<u64> {
+    let high: i64 = conn
+        .query_row(
+            "SELECT MAX(COALESCE((SELECT MAX(seq) FROM events), 0),
+                        COALESCE((SELECT MAX(seq) FROM shell_changes), 0),
+                        COALESCE((SELECT MAX(sequence) FROM receipts), 0),
+                        COALESCE((SELECT value FROM meta WHERE key = 'imported_through'), 0))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(err)?;
+    Ok(high.max(0) as u64)
+}
+
+/// Whether a single-statement write may go ahead ([`Store::lease`]).
+pub(crate) enum Lease {
+    /// No engine took the store: write freely.
+    Unowned,
+    /// The statement checks this epoch against `meta.engine_epoch` itself.
+    Held(i64),
+    /// This engine was dropped: write nothing.
+    Released,
+}
+
+impl Lease {
+    /// The epoch a statement's [`lease_guard`] binds; `None` for a store no engine owns.
+    pub(crate) fn guard(&self) -> Option<i64> {
+        match self {
+            Self::Held(epoch) => Some(*epoch),
+            Self::Unowned | Self::Released => None,
+        }
+    }
+}
+
+/// The guard a single statement adds, with its epoch bound to `?{n}`.
+pub(crate) fn lease_guard(n: usize) -> String {
+    format!("(?{n} IS NULL OR ?{n} = (SELECT value FROM meta WHERE key = 'engine_epoch'))")
+}
+
+/// A start its caller gave up on before it took the store.
+pub(crate) const ABANDONED: &str =
+    "store: the engine's start was abandoned before it took the store";
+
+/// A write by an engine that no longer owns the store.
+pub(crate) const NOT_OWNER: &str = "store: this engine no longer owns the database";
+
+/// Whether `owner` still holds the store, read in `conn`'s open transaction.
+pub(crate) fn owns(conn: &Connection, owner: Option<&Owner>) -> StoreResult<bool> {
+    let Some(owner) = owner else { return Ok(true) };
+    let Some(epoch) = owner.epoch() else {
+        return Ok(false);
+    };
+    let current: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'engine_epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(err)?;
+    Ok(current == Some(epoch))
 }
 
 /// The turn starts a Stop must know about, kept beside the store so a command decides under
@@ -301,17 +420,9 @@ impl Store {
         .map_err(err)?;
         conn.execute_batch(SCHEMA).map_err(err)?;
         conn.execute_batch(crate::attention::SCHEMA).map_err(err)?;
+        conn.execute_batch(crate::outbox::SCHEMA).map_err(err)?;
         migrate(&conn)?;
-        let high: i64 = conn
-            .query_row(
-                "SELECT MAX(COALESCE((SELECT MAX(seq) FROM events), 0),
-                            COALESCE((SELECT MAX(seq) FROM shell_changes), 0),
-                            COALESCE((SELECT MAX(sequence) FROM receipts), 0),
-                            COALESCE((SELECT value FROM meta WHERE key = 'imported_through'), 0))",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(err)?;
+        let high = stored_high(&conn)?;
         let imported_through: i64 = conn
             .query_row(
                 "SELECT COALESCE((SELECT value FROM meta WHERE key = 'imported_through'), 0)",
@@ -322,14 +433,75 @@ impl Store {
         Ok(Self {
             conn,
             imported_through: imported_through.max(0) as u64,
-            next_seq: high as u64 + 1,
+            next_seq: high + 1,
             clock: std::sync::Arc::new(crate::clock::SystemClock),
             zone: jiff::tz::TimeZone::UTC,
             host: None,
             generates_titles: false,
+            providers: conn_provider::ProviderSet::default(),
             starts: StartLedger::default(),
             attention: None,
+            effects_wake: std::sync::Arc::default(),
+            published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
+            owner: None,
+            #[cfg(test)]
+            settle_faults: std::cell::Cell::new(0),
         })
+    }
+
+    /// Makes this store's engine the one that may write: a newer epoch fences every engine
+    /// that opened the database before. Returns the flag that releases the lease on drop.
+    ///
+    /// `abandoned` is read under the lease's write lock: a start its caller gave up on before
+    /// that takes nothing, so it cannot fence an engine that opened after it.
+    pub(crate) fn take_ownership(
+        &mut self,
+        abandoned: Option<&std::sync::atomic::AtomicBool>,
+    ) -> StoreResult<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(err)?;
+        if abandoned.is_some_and(|a| a.load(std::sync::atomic::Ordering::SeqCst)) {
+            return Err(ABANDONED.into());
+        }
+        let epoch: i64 = tx
+            .query_row(
+                "INSERT INTO meta (key, value) VALUES ('engine_epoch', 1)
+                 ON CONFLICT (key) DO UPDATE SET value = value + 1
+                 RETURNING value",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        // An older engine may have committed since `open` read the sequence; none can now.
+        let high = stored_high(&tx)?;
+        tx.commit().map_err(err)?;
+        self.next_seq = high + 1;
+        self.published.send_replace(high);
+        let released = std::sync::Arc::default();
+        self.owner = Some(Owner {
+            epoch,
+            released: std::sync::Arc::clone(&released),
+        });
+        Ok(released)
+    }
+
+    pub(crate) fn owner(&self) -> Option<&Owner> {
+        self.owner.as_ref()
+    }
+
+    /// Whether this engine still holds the store, by the durable epoch and its drop flag.
+    pub(crate) fn owns_store(&self) -> StoreResult<bool> {
+        owns(&self.conn, self.owner())
+    }
+
+    /// What a write outside [`Tx`] must check (`Owner`).
+    pub(crate) fn lease(&self) -> Lease {
+        match &self.owner {
+            None => Lease::Unowned,
+            Some(owner) => owner.epoch().map_or(Lease::Released, Lease::Held),
+        }
     }
 
     /// `EXPLAIN QUERY PLAN` details, one per step, for tests that prove an index is used.
@@ -376,10 +548,16 @@ impl Store {
         Ok(Tx {
             zone: self.zone.clone(),
             host: self.host.clone(),
+            reserved: None,
             attention: self.attention.clone(),
             attention_written: false,
+            effects_wake: self.effects_wake.clone(),
+            effects_written: false,
+            published: self.published.clone(),
+            owner: self.owner.clone(),
             now_ms,
             generates_titles,
+            providers: &self.providers,
             starts: &mut self.starts,
             starts_changed: None,
             tx: self.conn.transaction().map_err(err)?,
@@ -398,49 +576,13 @@ impl Store {
 
     /// What a handled command's receipt recorded (`CommandReceiptStore.ts`).
     pub(crate) fn outcome(&self, command_id: &str) -> StoreResult<Option<Receipt>> {
-        self.conn
-            .query_row(
-                "SELECT sequence, owner_kind, owner_id, error, command_type FROM receipts
-                 WHERE command_id = ?1",
-                [command_id],
-                |row| {
-                    let kind: Option<String> = row.get(1)?;
-                    let id: Option<String> = row.get(2)?;
-                    Ok(Receipt {
-                        sequence: row.get::<_, i64>(0)? as u64,
-                        owner: match (kind.as_deref(), id) {
-                            (Some("thread"), Some(id)) => Some(StoredOwner::Thread(id)),
-                            (Some("project"), id) => Some(StoredOwner::Project(id)),
-                            _ => None,
-                        },
-                        refusal: row.get(3)?,
-                        command_type: row.get(4)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(err)
+        receipt_of(&self.conn, command_id)
     }
 
     /// Records a refused command, as T3's `commitRejectedCommand`, so a retry gets the same
     /// answer. A receipt already there stays.
     pub(crate) fn record_refusal(&self, key: &ReceiptKey<'_>, refusal: &str) -> StoreResult<()> {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO receipts
-                   (command_id, command_type, sequence, owner_kind, owner_id, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    key.command_id,
-                    key.command_type,
-                    latest_sequence(&self.conn, key.owner)? as i64,
-                    key.owner.kind(),
-                    key.owner.id(),
-                    refusal
-                ],
-            )
-            .map(|_| ())
-            .map_err(err)
+        refuse(&self.conn, key, refusal)
     }
 
     pub(crate) fn created_run_status(&self, command_id: &str) -> StoreResult<Option<String>> {
@@ -462,6 +604,17 @@ impl Store {
 
     pub(crate) fn thread_exists(&self, thread_id: &str) -> StoreResult<bool> {
         thread(&self.conn, thread_id).map(|t| t.is_some())
+    }
+
+    /// Whether the thread was ever created here, deleted or not.
+    pub(crate) fn thread_known(&self, thread_id: &str) -> StoreResult<bool> {
+        self.conn
+            .query_row("SELECT 1 FROM threads WHERE id = ?1", [thread_id], |_| {
+                Ok(())
+            })
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(err)
     }
 
     /// `OrchestrationV2ShellSnapshot` as of [`Self::high_water`].
@@ -580,6 +733,23 @@ impl Store {
         Ok(projects)
     }
 
+    /// The threads that own a task in a linked environment, which a trimmed shell keeps.
+    pub(crate) fn remote_task_owners(&self) -> StoreResult<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT thread_id FROM entities
+                 WHERE kind = 'subagents' AND json_type(body, '$.remoteChild') = 'object'
+                   AND json_extract(body, '$.origin') = 'app_owned'
+                   AND json_type(body, '$.childThreadId') IS NOT 'text'",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(err)?;
+        rows.map(|row| row.map_err(err)).collect()
+    }
+
     /// Shell changes after `after`, or `None` when retention already dropped some of them.
     pub(crate) fn shell_changes_since(&self, after: u64) -> StoreResult<Option<Vec<Value>>> {
         let pruned: i64 = self
@@ -595,6 +765,43 @@ impl Store {
             return Ok(None);
         }
         self.shell_changes_after(after).map(Some)
+    }
+
+    /// Whether a shell stream resumes from `after` with changes rather than a snapshot
+    /// (`canResumeShellFrom`), for the socket's `afterSequence` and the HTTP `resumeFrom`: at
+    /// most [`SHELL_RESUME_MAX_GAP`] events and [`SHELL_REPLAY_BUDGET_BYTES`] of them behind.
+    pub(crate) fn shell_resumable(&self, after: u64) -> StoreResult<bool> {
+        let high = self.high_water();
+        if !crate::streams::can_replay(after, high, self.imported_through()) {
+            return Ok(false);
+        }
+        if after == high {
+            return Ok(true);
+        }
+        if high - after > SHELL_RESUME_MAX_GAP {
+            return Ok(false);
+        }
+        let bytes: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(length(CAST(event AS BLOB))), 0) FROM events
+                 WHERE seq > ?1 AND seq <= ?2",
+                params![after as i64, high as i64],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        if bytes > SHELL_REPLAY_BUDGET_BYTES {
+            return Ok(false);
+        }
+        let pruned: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM meta WHERE key = 'shell_pruned_through'), 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        Ok(i64::try_from(after).is_ok_and(|after| after >= pruned))
     }
 
     pub(crate) fn shell_changes_after(&self, after: u64) -> StoreResult<Vec<Value>> {
@@ -981,6 +1188,33 @@ impl Store {
         Ok(rows)
     }
 
+    /// What a resume from `after` would replay (`getAgentReplayStats`), read from at most the
+    /// first `limit` events of the thread after it, in sequence order, without decoding them.
+    pub(crate) fn thread_replay_stats(
+        &self,
+        thread_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> StoreResult<ReplayStats> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(LENGTH(CAST(json_extract(event, '$.payload') AS BLOB))), 0),
+                        COALESCE(MAX(type = 'thread.created'), 0)
+                 FROM (SELECT event, type FROM events WHERE thread_id = ?1 AND seq > ?2
+                       ORDER BY seq LIMIT ?3)",
+                params![thread_id, after as i64, limit as i64],
+                |row| {
+                    Ok(ReplayStats {
+                        events: row.get::<_, i64>(0)? as u64,
+                        payload_bytes: row.get::<_, i64>(1)? as u64,
+                        has_create: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(err)
+    }
+
     /// Stored events of one thread after `after`, at most `limit`, as `(sequence, event)`.
     pub(crate) fn thread_events_after(
         &self,
@@ -1113,19 +1347,37 @@ impl Store {
         .collect()
     }
 
-    /// Moves a pending rollback to `phase`, with the provider's answer for `provider_done`.
-    pub(crate) fn set_rollback_phase(
+    /// Moves a pending rollback from phase `from` to `to`, with the provider's answer for
+    /// `provider_done`, in one write that also checks the engine's lease. `false` when nothing
+    /// moved: another engine owns the store, or the rollback is not in `from`. A caller then
+    /// must not contact the provider.
+    pub(crate) fn advance_rollback(
         &self,
         command_id: &str,
-        phase: &str,
+        from: &str,
+        to: &str,
         snapshot: Option<&Value>,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<bool> {
+        let lease = self.lease();
+        if matches!(lease, Lease::Released) {
+            return Ok(false);
+        }
         self.conn
             .execute(
-                "UPDATE pending_rollbacks SET phase = ?2, snapshot = ?3 WHERE command_id = ?1",
-                rusqlite::params![command_id, phase, snapshot.map(Value::to_string)],
+                &format!(
+                    "UPDATE pending_rollbacks SET phase = ?3, snapshot = ?4
+                     WHERE command_id = ?1 AND phase = ?2 AND {}",
+                    lease_guard(5)
+                ),
+                rusqlite::params![
+                    command_id,
+                    from,
+                    to,
+                    snapshot.map(Value::to_string),
+                    lease.guard()
+                ],
             )
-            .map(drop)
+            .map(|changed| changed == 1)
             .map_err(err)
     }
 
@@ -1171,18 +1423,35 @@ pub(crate) struct Tx<'a> {
     /// Threads whose shell row may have changed, with the last sequence that touched them.
     touched: Vec<(String, u64)>,
     pub(crate) generates_titles: bool,
+    providers: &'a conn_provider::ProviderSet,
     starts: &'a mut StartLedger,
     /// The ledger as this write changed it; it replaces the store's on commit only.
     starts_changed: Option<StartLedger>,
     /// See [`Store::attention`].
     attention: Option<std::sync::Arc<tokio::sync::Notify>>,
     attention_written: bool,
+    effects_wake: std::sync::Arc<tokio::sync::Notify>,
+    effects_written: bool,
+    published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    owner: Option<Owner>,
     now_ms: u64,
     zone: jiff::tz::TimeZone,
     host: Option<std::sync::Arc<dyn crate::EngineHost>>,
+    /// The command id [`Tx::reserve`] took, whose receipt the commit completes.
+    reserved: Option<String>,
 }
 
 impl Tx<'_> {
+    /// The open transaction, for a module that keeps its own tables (`outbox.rs`).
+    pub(crate) fn sql(&self) -> &Connection {
+        &self.tx
+    }
+
+    /// Outbox rows were written: the commit wakes the effect worker.
+    pub(crate) fn mark_effects_written(&mut self) {
+        self.effects_written = true;
+    }
+
     fn starts(&self) -> &StartLedger {
         self.starts_changed.as_ref().unwrap_or(self.starts)
     }
@@ -1263,17 +1532,52 @@ impl Tx<'_> {
         Ok(status.is_some_and(|s| crate::shell::ACTIVE_RUN_STATUSES.contains(&s.as_str())))
     }
 
-    /// Whether `instance` may start work in `project` (the server's settings; all, without a
-    /// host).
-    pub(crate) fn provider_enabled(&self, project: Option<&str>, instance: &str) -> bool {
+    /// What `command_id`'s receipt recorded, read inside this write.
+    pub(crate) fn outcome(&self, command_id: &str) -> StoreResult<Option<Receipt>> {
+        receipt_of(&self.tx, command_id)
+    }
+
+    /// Takes the command's id for this write, as T3's `insertIfAbsent`: `false` when another
+    /// command holds it. The commit then fills in the sequence.
+    pub(crate) fn reserve(&mut self, key: &ReceiptKey<'_>) -> StoreResult<bool> {
+        let taken = self
+            .tx
+            .execute(
+                "INSERT INTO receipts (command_id, command_type, sequence, owner_kind, owner_id)
+                 VALUES (?1, ?2, 0, ?3, ?4) ON CONFLICT(command_id) DO NOTHING",
+                params![
+                    key.command_id,
+                    key.command_type,
+                    key.owner.kind(),
+                    key.owner.id()
+                ],
+            )
+            .map_err(err)?
+            == 1;
+        if taken {
+            self.reserved = Some(key.command_id.to_owned());
+        }
+        Ok(taken)
+    }
+
+    /// Whether a queued run may start on `instance` in `project`, by T3's queue rule (the
+    /// server's settings; all, without a host).
+    pub(crate) fn queue_enabled(&self, project: Option<&str>, instance: &str) -> bool {
         self.host
             .as_ref()
-            .is_none_or(|host| host.provider_instance_enabled(project, instance))
+            .is_none_or(|host| host.queue_instance_enabled(project, instance))
     }
 
     /// Milliseconds since the epoch of a command's time string, as T3's `DateTime.make`.
     pub(crate) fn date_input_millis(&self, text: &str) -> Option<i64> {
         crate::time::date_input_millis(text, &self.zone)
+    }
+
+    /// The driver of a provider instance, found as a turn start finds the instance.
+    pub(crate) fn driver(&self, instance: &str) -> Option<String> {
+        self.providers
+            .resolve(instance)
+            .map(|provider| provider.driver().to_owned())
     }
 
     pub(crate) fn now(&self) -> &str {
@@ -1521,6 +1825,55 @@ impl Tx<'_> {
 
     pub(crate) fn thread(&self, thread_id: &str) -> StoreResult<Option<Value>> {
         thread(&self.tx, thread_id)
+    }
+
+    /// Where the checkpoint was captured, by the log: the `cwd` of the last
+    /// `checkpoint-scope.created` before its last capture that did not mark it `stale`.
+    pub(crate) fn checkpoint_capture_folder(
+        &self,
+        thread_id: &str,
+        checkpoint_id: &str,
+    ) -> StoreResult<CaptureFolder> {
+        let captured: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT MAX(seq) FROM events
+                 WHERE thread_id = ?1 AND type = 'checkpoint.captured'
+                   AND json_extract(event, '$.payload.id') = ?2
+                   AND json_extract(event, '$.payload.status') <> 'stale'",
+                [thread_id, checkpoint_id],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        let Some(captured) = captured else {
+            return Ok(CaptureFolder::Imported);
+        };
+        let cwd: Option<String> = self
+            .tx
+            .query_row(
+                "SELECT json_extract(event, '$.payload.cwd') FROM events
+                 WHERE thread_id = ?1 AND type = 'checkpoint-scope.created' AND seq < ?2
+                 ORDER BY seq DESC LIMIT 1",
+                params![thread_id, captured],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(err)?
+            .flatten();
+        Ok(cwd.map_or(CaptureFolder::Unknown, CaptureFolder::Known))
+    }
+
+    /// Whether the thread's log holds a `checkpoint-scope.created`. A scope imported from the
+    /// T3 server has its row but none.
+    pub(crate) fn has_scope_event(&self, thread_id: &str) -> StoreResult<bool> {
+        self.tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events
+                 WHERE thread_id = ?1 AND type = 'checkpoint-scope.created')",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .map_err(err)
     }
 
     /// Whether a thread with this ID was ever deleted. Its rows stay under the ID, so a
@@ -1940,30 +2293,55 @@ impl Tx<'_> {
             if self.next_seq == self.start {
                 answer = latest_sequence(&self.tx, key.owner)?;
             }
-            self.tx
-                .execute(
-                    "INSERT OR REPLACE INTO receipts
-                       (command_id, command_type, sequence, owner_kind, owner_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        key.command_id,
-                        key.command_type,
-                        answer as i64,
-                        key.owner.kind(),
-                        key.owner.id()
-                    ],
-                )
-                .map_err(err)?;
+            // A receipt is never replaced: one another command holds fails this write.
+            if self.reserved.as_deref() == Some(key.command_id) {
+                self.tx
+                    .execute(
+                        "UPDATE receipts SET sequence = ?2 WHERE command_id = ?1",
+                        params![key.command_id, answer as i64],
+                    )
+                    .map_err(err)?;
+            } else {
+                self.tx
+                    .execute(
+                        "INSERT INTO receipts
+                           (command_id, command_type, sequence, owner_kind, owner_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            key.command_id,
+                            key.command_type,
+                            answer as i64,
+                            key.owner.kind(),
+                            key.owner.id()
+                        ],
+                    )
+                    .map_err(err)?;
+            }
         }
         if high / PRUNE_EVERY != (self.start.saturating_sub(1)) / PRUNE_EVERY {
             prune(&self.tx)?;
         }
+        // Last, after every write: the write lock is held, so no newer engine can take the
+        // store between this check and the commit.
+        if !owns(&self.tx, self.owner.as_ref())? {
+            return Err(NOT_OWNER.into());
+        }
         self.tx.commit().map_err(err)?;
         *self.store_seq = self.next_seq;
+        self.published.send_if_modified(|published| {
+            let newer = high > *published;
+            if newer {
+                *published = high;
+            }
+            newer
+        });
         if self.attention_written
             && let Some(attention) = &self.attention
         {
             attention.notify_one();
+        }
+        if self.effects_written {
+            self.effects_wake.notify_one();
         }
         if let Some(starts) = self.starts_changed.take() {
             *self.starts = starts;
@@ -2134,137 +2512,25 @@ fn migrate(conn: &Connection) -> StoreResult<()> {
     }
     if version < 5 {
         // 5: a receipt names what it answers for and records a refusal (T3's
-        // `CommandReceiptV2`). Older receipts get their owner where their own events prove it.
-        // One transaction: the columns, the owners and the version land together or not at all.
+        // `CommandReceiptV2`). A receipt from before names no owner, so a retry of it is
+        // refused rather than replayed for a thread nothing proves. One transaction: the
+        // columns and the version land together or not at all.
         let tx = conn.unchecked_transaction().map_err(err)?;
-        for column in ["owner_kind", "owner_id", "error"] {
-            let present: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('receipts') WHERE name = ?1)",
-                    [column],
-                    |row| row.get(0),
-                )
-                .map_err(err)?;
-            if !present {
-                tx.execute_batch(&format!("ALTER TABLE receipts ADD COLUMN {column} TEXT"))
-                    .map_err(err)?;
-            }
-        }
-        name_receipt_owners(&tx)?;
-        tx.execute_batch("PRAGMA user_version = 5").map_err(err)?;
+        tx.execute_batch(
+            "ALTER TABLE receipts ADD COLUMN owner_kind TEXT;
+             ALTER TABLE receipts ADD COLUMN owner_id TEXT;
+             ALTER TABLE receipts ADD COLUMN error TEXT;
+             PRAGMA user_version = 5;",
+        )
+        .map_err(err)?;
         tx.commit().map_err(err)?;
     }
+    // The index holds folded text, so a search without accents finds an accented message
+    // written before the upgrade (T3 indexes with `remove_diacritics`).
+    refold_message_search_once(conn, &mut |event| {
+        eprintln!("conn-engine: {}", event.line())
+    })?;
     Ok(())
-}
-
-/// Receipts read per page while naming owners, so memory stays bounded on any store.
-const OWNER_PAGE: i64 = 256;
-
-/// Commands whose receipt belongs to the parent thread (T3's `commandThreadId`).
-const PARENT_OWNED: [&str; 8] = [
-    "delegated_task.request",
-    "delegated_task.remote.request",
-    "delegated_task.remote.complete",
-    "delegated_task.remote.stop",
-    "delegated_task.wake-policy",
-    "delegated_task.completion-delivery.acknowledge",
-    "delegated_task.completion-delivery.dispose",
-    "thread.created.record",
-];
-
-/// Names the owner of receipts written before receipts had one: a project command's is a
-/// project's, a thread command's the one its own execution proves. A receipt nothing proves
-/// keeps no owner, so a retry of it is refused rather than run twice or answered for the
-/// wrong thread.
-fn name_receipt_owners(conn: &Connection) -> StoreResult<()> {
-    conn.execute(
-        "UPDATE receipts SET owner_kind = 'project' WHERE owner_kind IS NULL AND command_type = 'project'",
-        [],
-    )
-    .map_err(err)?;
-    let mut after = String::new();
-    loop {
-        let page: Vec<(String, String, i64)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT command_id, command_type, sequence FROM receipts
-                     WHERE owner_kind IS NULL AND command_id > ?1 ORDER BY command_id LIMIT ?2",
-                )
-                .map_err(err)?;
-            stmt.query_map(params![after, OWNER_PAGE], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .map_err(err)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(err)?
-        };
-        let Some((last, _, _)) = page.last() else {
-            break;
-        };
-        after = last.clone();
-        for (command_id, command_type, sequence) in &page {
-            if let Some(owner) = proved_owner(conn, command_id, command_type, *sequence)? {
-                conn.execute(
-                    "UPDATE receipts SET owner_kind = 'thread', owner_id = ?2 WHERE command_id = ?1",
-                    params![command_id, owner],
-                )
-                .map_err(err)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The thread a receipt's own execution proves. A receipt's sequence is the last event its
-/// commit wrote, so that event must carry the receipt's command id; an older execution of a
-/// reused id (main pruned receipts, not events) never sits there. A delegation's last event
-/// can be its child's first message: the parent is then the thread whose task row, written by
-/// the same command, names that created child.
-fn proved_owner(
-    conn: &Connection,
-    command_id: &str,
-    command_type: &str,
-    sequence: i64,
-) -> StoreResult<Option<String>> {
-    let last: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT thread_id, command_id FROM events WHERE seq = ?1",
-            [sequence],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(err)?;
-    let Some((thread, Some(tagged))) = last else {
-        return Ok(None);
-    };
-    if tagged != command_id {
-        return Ok(None);
-    }
-    if !PARENT_OWNED.contains(&command_type) {
-        return Ok(Some(thread));
-    }
-    let event_of = |thread_id: &str, event_type: &str| -> StoreResult<Option<Value>> {
-        conn.query_row(
-            "SELECT event FROM events WHERE thread_id = ?1 AND type = ?2 AND command_id = ?3
-               AND seq <= ?4 ORDER BY seq DESC LIMIT 1",
-            params![thread_id, event_type, command_id, sequence],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(err)?
-        .map(parse)
-        .transpose()
-    };
-    let Some(created) = event_of(&thread, "thread.created")? else {
-        return Ok(Some(thread));
-    };
-    let Some(parent) = created["payload"]["lineage"]["parentThreadId"].as_str() else {
-        return Ok(None);
-    };
-    let task = event_of(parent, "subagent.updated")?;
-    Ok(task
-        .filter(|task| task["payload"]["childThreadId"] == thread.as_str())
-        .map(|_| parent.to_owned()))
 }
 
 /// Puts the final text of one message into `message_search`, replacing an older version.
@@ -2290,10 +2556,161 @@ fn index_message(
         .map_err(err)?;
     conn.execute(
         "INSERT INTO message_search (rowid, text) VALUES (?1, ?2)",
-        params![id, text],
+        params![id, crate::fold::fold(text)],
     )
     .map_err(err)?;
     Ok(())
+}
+
+/// The fold the search index holds, in the `meta` row `message_search_folded`: 1 was the first
+/// fold, which also took marks off other scripts' letters; 2 lowercased as Rust does; 3 folds
+/// with SQLite's own table, as T3's index (`fold.rs`). A `meta` mark, not a schema version, so
+/// this step composes with versioned steps in any order.
+const MESSAGE_SEARCH_FOLD: i64 = 3;
+/// Messages between two progress lines of a refold.
+const REFOLD_REPORT_EVERY: u64 = 10_000;
+/// The most text a refold batch holds before it writes, with `REFOLD_BATCH_ROWS` rows at most.
+/// A row larger than this is folded alone.
+const REFOLD_BATCH_BYTES: usize = 4 << 20;
+const REFOLD_BATCH_ROWS: usize = 500;
+
+/// What a refold of the search index reports. Its lines carry T3's migration messages, which the
+/// desktop reads in the server's output: while a refold runs, it waits past its readiness limit
+/// instead of reporting a failed start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refold {
+    Started { messages: u64 },
+    Progress { done: u64, messages: u64 },
+    Finished,
+}
+
+impl Refold {
+    pub(crate) fn line(self) -> String {
+        use conn_contract::{
+            DATABASE_MIGRATION_PROGRESS_MESSAGE, DATABASE_MIGRATIONS_FINISHED_MESSAGE,
+            DATABASE_MIGRATIONS_STARTED_MESSAGE,
+        };
+        match self {
+            Self::Started { messages } => format!(
+                "{DATABASE_MIGRATIONS_STARTED_MESSAGE} to fold the message search index \
+                 ({messages} messages, once)"
+            ),
+            Self::Progress { done, messages } => format!(
+                "{DATABASE_MIGRATION_PROGRESS_MESSAGE}: message search index, {done} of \
+                 {messages} messages"
+            ),
+            Self::Finished => {
+                format!("{DATABASE_MIGRATIONS_FINISHED_MESSAGE} (message search index folded)")
+            }
+        }
+    }
+}
+
+/// Folds the search index again from the messages when it holds an older fold, in one
+/// transaction, and marks it done. Reports only when there is a message to fold.
+pub(crate) fn refold_message_search_once(
+    conn: &Connection,
+    report: &mut dyn FnMut(Refold),
+) -> StoreResult<()> {
+    let folded: i64 = conn
+        .query_row(
+            "SELECT COALESCE((SELECT value FROM meta WHERE key = 'message_search_folded'), 0)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(err)?;
+    if folded >= MESSAGE_SEARCH_FOLD {
+        return Ok(());
+    }
+    let messages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM message_keys", [], |row| row.get(0))
+        .map_err(err)?;
+    let messages = u64::try_from(messages).unwrap_or(0);
+    if messages > 0 {
+        report(Refold::Started { messages });
+    }
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    let mut reported = 0;
+    refold_message_search(&tx, &mut |done| {
+        if done / REFOLD_REPORT_EVERY > reported / REFOLD_REPORT_EVERY {
+            reported = done;
+            report(Refold::Progress { done, messages });
+        }
+    })?;
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('message_search_folded', ?1)",
+        [MESSAGE_SEARCH_FOLD],
+    )
+    .map_err(err)?;
+    tx.commit().map_err(err)?;
+    if messages > 0 {
+        report(Refold::Finished);
+    }
+    Ok(())
+}
+
+/// The index rows after `?1` with their message texts, read in id order without a sort, so a
+/// batch reads only the rows it holds.
+const REFOLD_ROWS_SQL: &str = "SELECT k.id, s.text, COALESCE(json_extract(e.body, '$.text'), '')
+     FROM message_keys k
+     CROSS JOIN message_search s ON s.rowid = k.id
+     CROSS JOIN entities e ON e.thread_id = k.thread_id
+       AND e.kind = 'messages' AND e.id = k.message_id
+     WHERE k.id > ?1 ORDER BY k.id";
+
+/// Folds every `message_search` text again from its message's text, so an older fold is
+/// rebuilt. It reads rows in id order while their texts fit [`REFOLD_BATCH_BYTES`] and the row
+/// cap, so a store of large messages never holds more than the budget at once. `progress` hears
+/// the messages read so far after each batch. A row whose message is gone keeps its text.
+pub(crate) fn refold_message_search(
+    conn: &Connection,
+    progress: &mut dyn FnMut(u64),
+) -> StoreResult<()> {
+    let mut stmt = conn.prepare(REFOLD_ROWS_SQL).map_err(err)?;
+    let mut after = i64::MIN;
+    let mut done = 0;
+    loop {
+        let mut batch: Vec<(i64, String, String)> = Vec::new();
+        let mut bytes = 0;
+        {
+            let mut rows = stmt.query([after]).map_err(err)?;
+            while batch.len() < REFOLD_BATCH_ROWS
+                && let Some(row) = rows.next().map_err(err)?
+            {
+                let row: (i64, String, String) = (
+                    row.get(0).map_err(err)?,
+                    row.get(1).map_err(err)?,
+                    row.get(2).map_err(err)?,
+                );
+                let size = row.1.len() + row.2.len();
+                // A row that would pass the budget is read again as the next batch's first.
+                if !batch.is_empty() && bytes + size > REFOLD_BATCH_BYTES {
+                    break;
+                }
+                bytes += size;
+                batch.push(row);
+                if bytes >= REFOLD_BATCH_BYTES {
+                    break;
+                }
+            }
+        }
+        let Some(&(last, ..)) = batch.last() else {
+            return Ok(());
+        };
+        done += batch.len() as u64;
+        for (rowid, stored, text) in batch {
+            let folded = crate::fold::fold(&text);
+            if folded != stored {
+                conn.execute(
+                    "UPDATE message_search SET text = ?2 WHERE rowid = ?1",
+                    params![rowid, folded],
+                )
+                .map_err(err)?;
+            }
+        }
+        progress(done);
+        after = last;
+    }
 }
 
 /// Bounds the tables that only serve resumes and retries. Events and projections stay: they
@@ -2361,6 +2778,50 @@ pub(crate) enum StoredOwner {
     Thread(String),
     /// `None` on a project receipt from before receipts named their project.
     Project(Option<String>),
+}
+
+/// A command's receipt, read on any connection or write.
+fn receipt_of(conn: &Connection, command_id: &str) -> StoreResult<Option<Receipt>> {
+    conn.query_row(
+        "SELECT sequence, owner_kind, owner_id, error, command_type FROM receipts
+         WHERE command_id = ?1",
+        [command_id],
+        |row| {
+            let kind: Option<String> = row.get(1)?;
+            let id: Option<String> = row.get(2)?;
+            Ok(Receipt {
+                sequence: row.get::<_, i64>(0)? as u64,
+                owner: match (kind.as_deref(), id) {
+                    (Some("thread"), Some(id)) => Some(StoredOwner::Thread(id)),
+                    (Some("project"), id) => Some(StoredOwner::Project(id)),
+                    _ => None,
+                },
+                refusal: row.get(3)?,
+                command_type: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(err)
+}
+
+/// Records a refusal under the command's id, unless the id already has a receipt.
+fn refuse(conn: &Connection, key: &ReceiptKey<'_>, refusal: &str) -> StoreResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO receipts
+           (command_id, command_type, sequence, owner_kind, owner_id, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            key.command_id,
+            key.command_type,
+            latest_sequence(conn, key.owner)? as i64,
+            key.owner.kind(),
+            key.owner.id(),
+            refusal
+        ],
+    )
+    .map(|_| ())
+    .map_err(err)
 }
 
 /// The sequence a command that wrote nothing answers: its thread's latest event.
@@ -2549,6 +3010,43 @@ mod tests {
         assert_eq!(order, ["u1", "a1", "u2", "a2", "wake"]);
     }
 
+    /// T3's `getAgentReplayStats`: the first 129 events after the cursor, in sequence order,
+    /// and their payload JSON bytes; later events are never read.
+    #[test]
+    fn replay_stats_read_at_most_129_events() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-replay-stats", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let payload = json!({"n": "x".repeat(10)}).to_string();
+        for seq in 1..=300_i64 {
+            // Events past the bound are larger, so reading them would change the sum.
+            let payload = if seq > 129 {
+                json!({"n": "y".repeat(1000)}).to_string()
+            } else {
+                payload.clone()
+            };
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events (seq, thread_id, type, event) VALUES (?1, 't1', 'thread.visited', ?2)",
+                    params![seq, format!(r#"{{"type":"thread.visited","payload":{payload}}}"#)],
+                )
+                .unwrap();
+        }
+        let stats = store.thread_replay_stats("t1", 0, 129).unwrap();
+        assert_eq!(
+            stats,
+            ReplayStats {
+                events: 129,
+                payload_bytes: 129 * payload.len() as u64,
+                has_create: false,
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A row the engine cannot read fails the read; it never turns into `null` or vanishes.
     #[test]
     fn a_broken_stored_row_is_an_error() {
@@ -2577,6 +3075,36 @@ mod tests {
         assert_eq!(tx.entity("t1", "runs", "r1").unwrap().unwrap()["id"], "r1");
         tx.rollback();
         assert!(store.query_json("SELECT body FROM entities", []).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A receipt is reserved, never replaced: a commit whose id another command already holds
+    /// fails and leaves that receipt as it was (T3's `insertIfAbsent`).
+    #[test]
+    fn a_receipt_is_never_replaced() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-receipt-kept", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let thread = ReceiptKey {
+            command_id: "x",
+            command_type: "thread.archive",
+            owner: ReceiptOwner::Thread("t1"),
+        };
+        store
+            .record_refusal(&thread, "Thread t1 does not exist.")
+            .unwrap();
+        let project = ReceiptKey {
+            command_id: "x",
+            command_type: "project.create",
+            owner: ReceiptOwner::Project("project:p1"),
+        };
+        let tx = store.tx().unwrap();
+        assert!(tx.commit(Some(&project)).is_err(), "the id is taken");
+        let kept = store.outcome("x").unwrap().unwrap();
+        assert_eq!(kept.owner, Some(StoredOwner::Thread("t1".into())));
+        assert_eq!(kept.refusal.as_deref(), Some("Thread t1 does not exist."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2784,6 +3312,9 @@ mod tests {
                     "DELETE FROM events WHERE thread_id = 't1' AND streaming = 1;
                      DROP TABLE turn_item_positions;
                      CREATE INDEX IF NOT EXISTS events_streaming ON events(thread_id) WHERE streaming = 1;
+                     ALTER TABLE receipts DROP COLUMN owner_kind;
+                     ALTER TABLE receipts DROP COLUMN owner_id;
+                     ALTER TABLE receipts DROP COLUMN error;
                      PRAGMA user_version = 2;",
                 )
                 .unwrap();
@@ -2902,6 +3433,9 @@ mod tests {
                 .conn
                 .execute_batch(
                     "UPDATE threads SET shell = json_remove(shell, '$.subagentCount') WHERE id = 'parent';
+                     ALTER TABLE receipts DROP COLUMN owner_kind;
+                     ALTER TABLE receipts DROP COLUMN owner_id;
+                     ALTER TABLE receipts DROP COLUMN error;
                      PRAGMA user_version = 3;",
                 )
                 .unwrap();
@@ -2918,6 +3452,143 @@ mod tests {
         let solo = threads.iter().find(|t| t["id"] == "solo").unwrap();
         assert_eq!(parent["subagentCount"], json!(2));
         assert!(solo.get("subagentCount").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refold of a large index runs inside the engine's open, before the server listens, so
+    /// it tells the desktop with T3's migration lines (`databaseMigrationLog.ts`): started, a
+    /// progress line every 10,000 messages, finished. It folds from the message text and runs
+    /// once.
+    #[test]
+    fn a_refold_reports_its_start_progress_and_end_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "conn-engine-{}-refold-progress",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10001)
+                 INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
+                   SELECT 't1', 'messages', 'm' || i, i, i, NULL,
+                          json_object('id', 'm' || i, 'text', 'École ' || i) FROM n;
+                 INSERT INTO message_keys (thread_id, message_id)
+                   SELECT thread_id, id FROM entities WHERE kind = 'messages';
+                 INSERT INTO message_search (rowid, text) SELECT id, 'ecole' FROM message_keys;
+                 UPDATE meta SET value = 2 WHERE key = 'message_search_folded';",
+            )
+            .unwrap();
+        let mut events = vec![];
+        refold_message_search_once(&store.conn, &mut |event| events.push(event)).unwrap();
+        assert_eq!(
+            events,
+            [
+                Refold::Started { messages: 10_001 },
+                Refold::Progress {
+                    done: 10_000,
+                    messages: 10_001
+                },
+                Refold::Finished,
+            ]
+        );
+        let text: String = store
+            .conn
+            .query_row(
+                "SELECT text FROM message_search
+                 WHERE rowid = (SELECT id FROM message_keys WHERE message_id = 'm10001')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "ecole 10001", "folded again from the message");
+        let lines: Vec<String> = events.iter().map(|event| event.line()).collect();
+        assert!(
+            lines[0].starts_with("Running database migrations"),
+            "{lines:?}"
+        );
+        assert!(lines[1].starts_with("Upgrading database"), "{lines:?}");
+        assert!(
+            lines[2].starts_with("Migrations ran successfully"),
+            "{lines:?}"
+        );
+
+        events.clear();
+        refold_message_search_once(&store.conn, &mut |event| events.push(event)).unwrap();
+        assert_eq!(events, [], "the mark holds");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refold reads its rows a byte budget at a time, so a store of large messages never
+    /// holds more than the budget: a row that would pass it starts the next batch, and a row
+    /// larger than the budget is folded alone.
+    #[test]
+    fn a_refold_batch_stays_within_its_byte_budget() {
+        const MIB: usize = 1 << 20;
+        // Message text in MiB per row; each index row adds its one-byte stale fold.
+        const SIZES: [usize; 8] = [3, 2, 5, 1, 1, 1, 1, 1];
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-refold-budget", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        for (i, mib) in SIZES.iter().enumerate() {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
+                     VALUES ('t1', 'messages', ?1, ?2, ?2, NULL, json_object('id', ?1,
+                       'text', replace(printf('%.*c', ?3, 'x'), 'x', 'É')))",
+                    params![format!("m{i}"), i as i64 + 1, (mib * MIB / 2) as i64],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO message_keys (thread_id, message_id)
+                   SELECT thread_id, id FROM entities WHERE kind = 'messages' ORDER BY seq;
+                 INSERT INTO message_search (rowid, text) SELECT id, 'x' FROM message_keys;",
+            )
+            .unwrap();
+        let mut batches: Vec<usize> = vec![];
+        let mut read = 0;
+        refold_message_search(&store.conn, &mut |done| {
+            let rows = SIZES.get(read as usize..done as usize).unwrap_or_default();
+            batches.push(rows.iter().map(|mib| mib * MIB + 1).sum());
+            read = done;
+        })
+        .unwrap();
+        assert_eq!(read, SIZES.len() as u64);
+        assert_eq!(
+            batches,
+            [
+                3 * MIB + 1,
+                2 * MIB + 1,
+                5 * MIB + 1,
+                3 * MIB + 3,
+                2 * MIB + 2
+            ],
+            "bytes per batch, budget {REFOLD_BATCH_BYTES}"
+        );
+        let plan = store.query_plan(REFOLD_ROWS_SQL, [0]);
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+        let folded: String = store
+            .conn
+            .query_row(
+                "SELECT text FROM message_search ORDER BY rowid LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(folded, "e".repeat(SIZES[0] * MIB / 2));
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,109 +2,84 @@
 //! effects to run after the commit. To support a new command, add one function and one line
 //! in [`handler`].
 
-use serde::Deserialize;
+use conn_provider::goal::GoalCommand;
+use conn_support::ids::join_id;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::shell::{ACTIVE_RUN_STATUSES, LIVE_RUN_STATUSES};
 use crate::store::{Draft, StoreResult, Tx};
 
-/// Work that touches a provider. Runs after the command's events are committed.
-#[derive(Debug)]
+/// Work that touches a provider. Runs after the command's events are committed. Stored as an
+/// outbox row (`outbox.rs`); the tag is the row's `effect_type`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all_fields = "camelCase")]
 pub(crate) enum Effect {
     /// Rolls a thread back to a checkpoint (`provider-thread.rollback`).
+    #[serde(rename = "provider-thread.rollback")]
     Rollback(crate::rollback::RollbackRequest),
     /// Captures a run's checkpoint and finishes it (`checkpoint.capture`).
-    CaptureCheckpoint {
-        thread_id: String,
-        run_id: String,
-    },
-    StartTurn {
-        thread_id: String,
-        run_id: String,
-    },
+    #[serde(rename = "checkpoint.capture")]
+    CaptureCheckpoint { thread_id: String, run_id: String },
+    #[serde(rename = "provider-turn.start")]
+    StartTurn { thread_id: String, run_id: String },
     /// Adds a message to a running turn. Falls back to the queue when the provider declines.
+    #[serde(rename = "provider-turn.steer")]
     Steer {
         thread_id: String,
         run_id: String,
         message_id: String,
     },
-    Interrupt {
-        thread_id: String,
-        run_id: String,
-    },
+    #[serde(rename = "provider-turn.interrupt")]
+    Interrupt { thread_id: String, run_id: String },
     /// Stop ended the run before the provider accepted its turn: the start still in flight is
     /// abandoned (T3 cancels `provider-turn.start`). Runs at once, outside the lane.
-    AbandonStart {
-        thread_id: String,
-        run_id: String,
-    },
+    #[serde(rename = "provider-turn.abandon-start")]
+    AbandonStart { thread_id: String, run_id: String },
     /// Stop on a thread whose latest run settled while its background work still runs: the
     /// provider gets `interruptTurn` with `requestRuntimeRestart` for that settled turn.
-    StopBackgroundWork {
-        thread_id: String,
-        run_id: String,
-    },
-    Respond {
-        thread_id: String,
-        request: Value,
-    },
+    #[serde(rename = "provider-turn.stop-background-work")]
+    StopBackgroundWork { thread_id: String, run_id: String },
+    #[serde(rename = "runtime-request.respond")]
+    Respond { thread_id: String, request: Value },
     /// Ends the provider session; a workspace move does this too. Its MCP credential is
     /// revoked when the process ends, and kept for the thread's next session while a shared
     /// process (Codex's `app-server`) still runs, as T3 does.
-    CloseSession {
-        thread_id: String,
-    },
+    #[serde(rename = "provider-session.detach")]
+    CloseSession { thread_id: String },
+    /// Ends every provider session of a deleted thread, the ones a fresh run moved aside too.
+    #[serde(rename = "provider-session.detach-thread")]
+    CloseThreadSessions { thread_id: String },
     /// Sends a model selection to the thread's running provider turn
     /// (`provider-session.apply-model-selection`). The provider applies what it can live; the
     /// rest waits for the next turn.
-    ApplyModelSelection {
-        thread_id: String,
-        selection: Value,
-    },
+    #[serde(rename = "provider-session.apply-model-selection")]
+    ApplyModelSelection { thread_id: String, selection: Value },
+    /// Its outbox row outlives a server update, so each field a later build adds takes
+    /// `#[serde(default)]`: a row stored before the field existed still decodes.
+    #[serde(rename = "attachment.cleanup")]
     CleanupHtmlAttachments {
         thread_id: String,
+        #[serde(default)]
         ids: Vec<(String, String)>,
     },
     /// Tells the host a remote task of `thread_id` now owes its thread there a stop, so its
     /// follower runs again (T3's `RemoteDelegation.start` stream of `subagent.updated`).
-    RemoteTaskChanged {
-        thread_id: String,
-        task_id: String,
-    },
+    #[serde(rename = "delegated-task.remote-changed")]
+    RemoteTaskChanged { thread_id: String, task_id: String },
     /// Tells the host a thread was archived, deleted or settled (its terminals close).
+    #[serde(rename = "thread.closed")]
     ThreadClosed {
         thread_id: String,
         reason: crate::ThreadClose,
     },
     /// Asks the title generator; answers with `thread.title.regeneration.complete`.
+    #[serde(rename = "thread-title.generate")]
     GenerateTitle {
         thread_id: String,
         request_id: String,
         regenerate: bool,
     },
-}
-
-impl Effect {
-    /// The thread whose effect lane this effect waits in; `None` runs at once (title
-    /// generation, which T3 keeps out of a thread's lane).
-    pub(crate) fn lane(&self) -> Option<&str> {
-        match self {
-            Self::Rollback(request) => Some(&request.thread_id),
-            Self::CaptureCheckpoint { thread_id, .. }
-            | Self::StartTurn { thread_id, .. }
-            | Self::Steer { thread_id, .. }
-            | Self::Interrupt { thread_id, .. }
-            | Self::StopBackgroundWork { thread_id, .. }
-            | Self::Respond { thread_id, .. }
-            | Self::CloseSession { thread_id }
-            | Self::ApplyModelSelection { thread_id, .. }
-            | Self::CleanupHtmlAttachments { thread_id, .. }
-            | Self::ThreadClosed { thread_id, .. } => Some(thread_id),
-            Self::GenerateTitle { .. }
-            | Self::AbandonStart { .. }
-            | Self::RemoteTaskChanged { .. } => None,
-        }
-    }
 }
 
 pub(crate) enum CommandError {
@@ -375,7 +350,11 @@ enum Delivery {
 
 /// `resolveDeliveryIntent` in `CommandPolicy.ts`, for one provider that may or may not steer:
 /// we steer into a running provider turn and let the provider decline (then it queues).
-fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>), CommandError> {
+fn delivery(
+    tx: &Tx<'_>,
+    c: &mut MessageDispatch,
+    goal: Option<&GoalCommand>,
+) -> Result<(Delivery, Option<Value>), CommandError> {
     let active = active_run(tx, &c.thread_id)?;
     let Some(active) = active else {
         return Ok((Delivery::Start, None));
@@ -408,11 +387,30 @@ fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>
             }
         }
         "start_immediately" => match c.delivery_intent.as_deref() {
-            Some("steer" | "restart" | "auto") => Some(active),
+            Some("steer" | "restart" | "auto") => Some(active.clone()),
             _ => None,
         },
         _ => None,
     };
+    if let Some(goal) = goal {
+        let target = match c.dispatch_mode.kind.as_str() {
+            "queue_after_active" if c.delivery_intent.is_some() => Some(active),
+            _ => steer_target.clone(),
+        };
+        if let Some(target) = target {
+            let stops = goal_stops_run(tx, &c.thread_id, goal, &target)?;
+            // A goal stays its own run: never a steer, now or once the turn runs.
+            c.dispatch_mode = DispatchMode {
+                kind: "queue_after_active".into(),
+                target_run_id: None,
+            };
+            return Ok(if stops {
+                (Delivery::Queue { first: true }, Some(target))
+            } else {
+                (Delivery::Queue { first: false }, None)
+            });
+        }
+    }
     let restart =
         c.dispatch_mode.kind == "restart_active" || c.delivery_intent.as_deref() == Some("restart");
     Ok(match steer_target {
@@ -421,6 +419,64 @@ fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>
         Some(target) if turn_running(&target)? => (Delivery::Steer(target), None),
         _ => (Delivery::Queue { first: false }, None),
     })
+}
+
+/// `isNativeMaintenanceCommand`: compaction and sign-out, which take no steering input.
+fn is_native_maintenance(message: &Value) -> bool {
+    let text =
+        conn_support::text::js_trim(message["text"].as_str().unwrap_or_default()).to_lowercase();
+    message["attachments"].as_array().is_none_or(Vec::is_empty)
+        && matches!(text.as_str(), "/compact" | "/logout")
+}
+
+/// `goalDriverFor` and `ensureGoalCommandSupported`: the `/goal` in a message sent to
+/// `instance`, when that provider runs native goals. A control it cannot run is refused.
+fn native_goal(
+    tx: &Tx<'_>,
+    text: &str,
+    has_attachments: bool,
+    instance: &str,
+) -> Result<Option<GoalCommand>, CommandError> {
+    let Some(goal) = conn_provider::goal::parse_command(text, has_attachments) else {
+        return Ok(None);
+    };
+    match tx.driver(instance).as_deref() {
+        Some("claudeAgent") if matches!(goal, GoalCommand::Pause | GoalCommand::Resume) => {
+            reject("Claude goals cannot be paused or resumed. Send /goal clear to remove the goal.")
+        }
+        Some("codex" | "claudeAgent") => Ok(Some(goal)),
+        _ => Ok(None),
+    }
+}
+
+/// The goal rule of `dispatchMessage` and `promoteQueuedMessageToSteer` for a native `/goal`
+/// aimed at `target`: whether it stops the run (`goalCommandStopsActiveRun`), from the goal on
+/// the run's provider thread. A run that is only finishing is never stopped, nor a compaction
+/// or sign-out.
+fn goal_stops_run(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    goal: &GoalCommand,
+    target: &Value,
+) -> Result<bool, CommandError> {
+    let provider_thread = match target["providerThreadId"].as_str() {
+        Some(id) => tx.entity(thread_id, "providerThreads", id)?,
+        None => None,
+    };
+    let live = matches!(
+        target["status"].as_str(),
+        Some("preparing" | "starting" | "running")
+    );
+    let goal_status = provider_thread
+        .as_ref()
+        .and_then(|pt| pt["goal"]["status"].as_str());
+    let maintenance = match target["userMessageId"].as_str() {
+        Some(id) => tx
+            .entity(thread_id, "messages", id)?
+            .is_some_and(|m| is_native_maintenance(&m)),
+        None => false,
+    };
+    Ok(live && goal.stops_active_run(goal_status) && !maintenance)
 }
 
 pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
@@ -439,6 +495,17 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
                 target_run_id: None,
             };
         }
+    }
+    // A user's fresh send supersedes a pending fork, or the next send would bring the
+    // parent's context back; a schedule's is a side conversation and was refused above.
+    if fresh && let Some(mut transfer) = crate::fork::pending_fork(tx, &c.thread_id)? {
+        transfer["status"] = json!("superseded");
+        transfer["error"] = json!("Superseded by a fresh session.");
+        transfer["updatedAt"] = json!(tx.now());
+        tx.append(
+            Draft::new(&c.thread_id, "context-transfer.updated", transfer)
+                .command(Some(&c.command_id)),
+        )?;
     }
     crate::fork::ensure_native_fork(
         tx,
@@ -475,7 +542,16 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
     {
         return Ok(vec![]);
     }
-    let (delivery, interrupt) = delivery(tx, &c)?;
+    let instance = normalize_model_selection(
+        c.model_selection
+            .as_ref()
+            .unwrap_or(&thread["modelSelection"]),
+    )["instanceId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let goal = native_goal(tx, &c.text, !c.attachments.is_empty(), &instance)?;
+    let (delivery, interrupt) = delivery(tx, &mut c, goal.as_ref())?;
     if let Delivery::Steer(target) = delivery {
         return steer_into(tx, &c, &target);
     }
@@ -642,6 +718,10 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
     // A scheduled run's message names its task; the client's timeline marks it.
     if let Some(task) = &c.scheduled_task_id {
         message["scheduledTaskId"] = json!(task);
+        // An unpinned scheduled run follows the thread's selection (`Orchestrator.ts`).
+        if c.model_selection.is_none() {
+            message["followsThreadSelection"] = json!(true);
+        }
     }
     if let Some(sender) = &c.sender_thread_id {
         message["senderThreadId"] = json!(sender);
@@ -802,8 +882,8 @@ fn queued_provider_thread(run: &Value, thread: &Value) -> Value {
     }
 }
 
-/// T3's refusals of a fresh start (`dispatchMessage`): not while a fork is still being
-/// applied, and not while the current session runs background work that a new session would
+/// T3's refusals of a fresh start (`dispatchMessage`): not a schedule's while a fork is still
+/// being applied (a user's supersedes the fork), and not while the current session runs background work that a new session would
 /// end, unless a schedule sent it (nobody is there to wait or press Stop).
 fn fresh_context_allowed(
     tx: &Tx<'_>,
@@ -813,7 +893,7 @@ fn fresh_context_allowed(
     if !crate::merge_back::pending(tx, &c.thread_id)?.is_empty() {
         return reject("Send a message without /clear to apply the merged context first.");
     }
-    if crate::fork::pending_fork(tx, &c.thread_id)?.is_some() {
+    if c.scheduled_task_id.is_some() && crate::fork::pending_fork(tx, &c.thread_id)?.is_some() {
         return reject("A fresh session can't start while a fork or merge is still being applied.");
     }
     if c.scheduled_task_id.is_some() {
@@ -976,12 +1056,39 @@ pub(crate) fn start_next_queued(
         }
         break run;
     };
-    // T3's `startNextQueuedRun`: a provider turned off for the project holds the queue for
-    // the user instead of starting the run.
+    // T3's `startNextQueuedRun`: the run starts on its effective selection (a message that
+    // follows the conversation takes the thread's current one), and a provider turned off for
+    // the project holds the queue for the user instead of starting it.
+    let queued_message = run["userMessageId"]
+        .as_str()
+        .map(|id| tx.entity(thread_id, "messages", id))
+        .transpose()?
+        .flatten();
+    if queued_message
+        .as_ref()
+        .is_some_and(follows_current_conversation)
+    {
+        run["modelSelection"] = thread["modelSelection"].clone();
+        run["providerInstanceId"] = thread["modelSelection"]["instanceId"].clone();
+    }
     let instance = run["providerInstanceId"].as_str().unwrap_or_default();
-    if !tx.provider_enabled(thread["projectId"].as_str(), instance) {
+    if !tx.queue_enabled(thread["projectId"].as_str(), instance) {
         hold_queue(tx, thread_id)?;
         return Ok(None);
+    }
+    // The thread moves to the run's selection as it starts, so a run queued behind it that
+    // follows the thread takes the same one (`startNextQueuedRun`).
+    if run["modelSelection"] != thread["modelSelection"] {
+        let event = if run["providerInstanceId"] == thread["providerInstanceId"] {
+            "thread.model-selection-updated"
+        } else {
+            "thread.provider-switched"
+        };
+        let mut moved = thread.clone();
+        moved["providerInstanceId"] = run["providerInstanceId"].clone();
+        moved["modelSelection"] = run["modelSelection"].clone();
+        moved["updatedAt"] = json!(tx.now());
+        tx.append(Draft::new(thread_id, event, moved).payload_instance())?;
     }
     let run_id = run["id"].as_str().unwrap_or_default().to_owned();
     let root = run["rootNodeId"].as_str().unwrap_or_default().to_owned();
@@ -1199,6 +1306,29 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let Some(message) = tx.entity(&c.thread_id, "messages", &message_id)? else {
         return reject(format!("Message {message_id} does not exist."));
     };
+    let has_attachments = message["attachments"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty());
+    // A queued message goes to the provider its run selected (`queuedRunModelSelection`).
+    let instance = normalize_model_selection(&queued["modelSelection"])["instanceId"]
+        .as_str()
+        .or_else(|| queued["providerInstanceId"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(goal) = native_goal(
+        tx,
+        message["text"].as_str().unwrap_or_default(),
+        has_attachments,
+        &instance,
+    )? {
+        // A goal keeps its own run, first in the queue, and stops the turn it ends or replaces.
+        queue_first(tx, &c.thread_id, &queued)?;
+        return Ok(if goal_stops_run(tx, &c.thread_id, &goal, &target)? {
+            stop_run(tx, &c.thread_id, &target, None, false)?
+        } else {
+            vec![]
+        });
+    }
     finish_run(tx, &c.thread_id, &c.queued_run_id, "cancelled", None)?;
     let dispatch = MessageDispatch {
         command_id: String::new(),
@@ -1242,6 +1372,23 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }
     effects.truncate(1);
     Ok(effects)
+}
+
+/// Moves a queued run to the front; the others follow in their order (`stopRunForQueuedCommand`).
+fn queue_first(tx: &mut Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<()> {
+    let others = queued_runs(tx, thread_id)?
+        .into_iter()
+        .filter(|r| r["id"] != run["id"]);
+    let positions = std::iter::once(run.clone()).chain(others).zip(1_u64..);
+    for (mut run, position) in positions {
+        if run["queuePosition"] == position {
+            continue;
+        }
+        run["queuePosition"] = json!(position);
+        let id = run["id"].as_str().unwrap_or_default().to_owned();
+        tx.append(Draft::new(thread_id, "run.updated", run).run(Some(&id)))?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1527,13 +1674,77 @@ pub(crate) fn mark_stop_unresponsive(
     Ok(())
 }
 
+/// The id of a run's provider stop reason notice (T3's `runSignalTurnItem`).
+pub fn provider_stop_reason_id(run_id: &str) -> String {
+    join_id(
+        "turn-item",
+        &["run", run_id, "signal", "provider-stop-reason"],
+    )
+}
+
+/// `subagentResultForRun`'s result for a completed child with no answer, with the hook's
+/// reason when a hook stopped it.
+pub fn completed_without_result(stop_reason: Option<&str>) -> String {
+    let text = "Child task completed without an assistant result.";
+    stop_reason.map_or_else(|| text.to_owned(), |reason| format!("{text}\n\n{reason}"))
+}
+
+/// `PROVIDER_STOP_REASON_SIGNAL`: Codex reports a turn a hook stopped as completed; the run
+/// keeps the hook's reason as a warning (`RunExecutionService`). Its id is T3's
+/// `runSignalTurnItem`, which `subagentProjection.ts` looks up.
+pub(crate) fn write_provider_stop_reason(
+    tx: &mut Tx<'_>,
+    thread_id: &str,
+    run_id: &str,
+    reason: &str,
+) -> StoreResult<()> {
+    let Some(run) = tx.entity(thread_id, "runs", run_id)? else {
+        return Ok(());
+    };
+    let Some(root) = run["rootNodeId"].as_str() else {
+        return Ok(());
+    };
+    let provider_turn = tx
+        .entity(thread_id, "nodes", root)?
+        .map(|node| node["providerTurnId"].clone())
+        .unwrap_or(Value::Null);
+    let now = tx.now().to_owned();
+    let item = json!({
+        "id": provider_stop_reason_id(run_id),
+        "threadId": thread_id,
+        "runId": run_id,
+        "nodeId": root,
+        "providerThreadId": run["providerThreadId"],
+        "providerTurnId": provider_turn,
+        "nativeItemRef": null,
+        "parentItemId": null,
+        "ordinal": run["ordinal"].as_u64().unwrap_or(0) * 100 + 98,
+        "status": "completed",
+        "title": "Stopped by the provider",
+        "startedAt": now,
+        "completedAt": now,
+        "updatedAt": now,
+        "type": "system_notice",
+        "level": "warning",
+        "message": reason,
+    });
+    tx.append(
+        Draft::new(thread_id, "turn-item.updated", item)
+            .run(Some(run_id))
+            .node(Some(root)),
+    )?;
+    Ok(())
+}
+
 /// `makeInterruptResultTurnItem`: the Stop result of a run that ended interrupted. Its message
-/// is `reason`, else the Stop request's, else "Stopped by the provider". Written once.
+/// is `reason` (Force stop), else the Stop request's, else the provider's `fallback`, else
+/// "Stopped by the provider" (`RunExecutionService`). Written once.
 pub(crate) fn write_interrupt_result(
     tx: &mut Tx<'_>,
     thread_id: &str,
     run: &Value,
     reason: Option<&str>,
+    fallback: Option<&str>,
 ) -> StoreResult<()> {
     let (Some(run_id), Some(root)) = (run["id"].as_str(), run["rootNodeId"].as_str()) else {
         return Ok(());
@@ -1550,6 +1761,7 @@ pub(crate) fn write_interrupt_result(
                 .as_ref()
                 .and_then(|r| r["message"].as_str().map(str::to_owned))
         })
+        .or_else(|| fallback.map(str::to_owned))
         .unwrap_or_else(|| "Stopped by the provider".to_owned());
     let provider_turn = tx
         .entity(thread_id, "nodes", root)?
@@ -1779,7 +1991,7 @@ fn thread_delete(tx: &mut Tx<'_>, command: Value) -> Outcome {
         let run_id = run["id"].as_str().unwrap_or_default();
         finish_run(tx, &c.thread_id, run_id, "cancelled", None)?;
     }
-    effects.push(Effect::CloseSession {
+    effects.push(Effect::CloseThreadSessions {
         thread_id: c.thread_id.clone(),
     });
     patch_thread(tx, &c.thread_id, "thread.deleted", true, |t, now| {
@@ -2125,6 +2337,7 @@ pub(crate) fn finish_run(
         status,
         status,
         failure,
+        None,
         IdleWrite::WhileActive,
     )
     .map(drop)
@@ -2143,8 +2356,13 @@ pub(crate) enum IdleWrite {
 
 /// Ends a run's items with `status`, and the run and its root node with `persisted`: a
 /// completed provider turn whose checkpoint is still to be taken persists `waiting`, with no
-/// `completedAt` (`RunExecutionService.ts`). Returns whether it ended the run: `false` when
-/// the run is gone or already ended.
+/// `completedAt` (`RunExecutionService.ts`). An interrupted run's Stop result falls back to the
+/// provider's `stop_reason`. Returns whether it ended the run: `false` when the run is gone or
+/// already ended.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "T3's turn terminal (status, failure, reason) plus how the run persists"
+)]
 pub(crate) fn finish_run_as(
     tx: &mut Tx<'_>,
     thread_id: &str,
@@ -2152,6 +2370,7 @@ pub(crate) fn finish_run_as(
     status: &str,
     persisted: &str,
     failure: Option<Value>,
+    stop_reason: Option<&str>,
     idle: IdleWrite,
 ) -> StoreResult<bool> {
     let Some(mut run) = tx.entity(thread_id, "runs", run_id)? else {
@@ -2162,7 +2381,7 @@ pub(crate) fn finish_run_as(
     }
     crate::secret_requests::cancel_pending(tx, thread_id, run_id)?;
     if status == "interrupted" {
-        write_interrupt_result(tx, thread_id, &run, None)?;
+        write_interrupt_result(tx, thread_id, &run, None, stop_reason)?;
     }
     let now = tx.now().to_owned();
     let root = run["rootNodeId"].as_str().map(str::to_owned);
@@ -2384,7 +2603,30 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
             "Thread {thread_id} is still running and cannot be settled."
         ));
     }
+    // T3 settles past a queued message the server or a schedule sent, never a user's own, and
+    // cancels those automatic runs so a later resume never starts them.
+    let mut automatic_runs = vec![];
+    for run in queued_runs(tx, &thread_id)? {
+        let message_id = run["userMessageId"].as_str().unwrap_or_default();
+        let message = tx.entity(&thread_id, "messages", message_id)?;
+        let automatic = message.as_ref().is_some_and(|m| {
+            m["createdBy"] != "user" || !is_null(m, "scheduledTaskId") || is_automatic(m)
+        });
+        if !automatic {
+            return reject(format!(
+                "Thread {thread_id} has a queued message. Send it or remove it from the queue before settling."
+            ));
+        }
+        automatic_runs.push(run["id"].as_str().unwrap_or_default().to_owned());
+    }
+    for run_id in automatic_runs {
+        finish_run(tx, &thread_id, &run_id, "cancelled", None)?;
+    }
     let settled_at = command["settledAt"].clone();
+    let current = live_thread(tx, &thread_id)?;
+    let again = current["settledOverride"] == "settled"
+        && !is_null(&current, "settledAt")
+        && is_null(&current, "pinnedAt");
     thread_patch(tx, &command, "thread.settled", |t, now| {
         let already =
             t["settledOverride"] == "settled" && !is_null(t, "settledAt") && is_null(t, "pinnedAt");
@@ -2414,9 +2656,17 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
         }
         Ok(())
     })?;
+    let settled_at = live_thread(tx, &thread_id)?["settledAt"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     Ok(vec![Effect::ThreadClosed {
         thread_id,
-        reason: crate::ThreadClose::Settled,
+        reason: if again {
+            crate::ThreadClose::SettledAgain { settled_at }
+        } else {
+            crate::ThreadClose::Settled { settled_at }
+        },
     }])
 }
 
@@ -2500,14 +2750,30 @@ fn thread_snooze(tx: &mut Tx<'_>, command: Value) -> Outcome {
     })
 }
 
-/// A message the server queued by itself: a notification or a delegated-task completion. This
-/// engine marks its completion wakes by their id (`families::deliver`).
-fn is_automatic(message: &Value) -> bool {
-    !is_null(message, "notification")
-        || !is_null(message, "delegatedCompletion")
+/// T3's `followsCurrentConversation`: a queued message that runs on the thread's current
+/// selection, not the one it was queued with.
+fn follows_current_conversation(message: &Value) -> bool {
+    let buffered = message["createdBy"] == "agent"
+        && message["creationSource"] == "provider"
+        && !is_null(message, "notification")
+        && !is_delegated_completion(message);
+    is_delegated_completion(message)
+        || message["followsThreadSelection"] == true
+        || (message["notification"]["source"]["kind"] == "monitor" && !buffered)
+}
+
+/// A delegated-task completion. This engine marks its completion wakes by their id
+/// (`families::deliver`).
+pub(crate) fn is_delegated_completion(message: &Value) -> bool {
+    !is_null(message, "delegatedCompletion")
         || message["id"]
             .as_str()
             .is_some_and(|id| id.starts_with("message:delegated-completion:"))
+}
+
+/// A message the server queued by itself: a notification or a delegated-task completion.
+fn is_automatic(message: &Value) -> bool {
+    !is_null(message, "notification") || is_delegated_completion(message)
 }
 
 fn thread_unsnooze(tx: &mut Tx<'_>, command: Value) -> Outcome {

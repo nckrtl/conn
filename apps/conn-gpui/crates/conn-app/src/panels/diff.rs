@@ -262,6 +262,16 @@ fn turn_scope(to: i64, available_turns: &[i64]) -> DiffScope {
     DiffScope::Turn { from, to }
 }
 
+/// The scope a load runs with once it has the thread's refreshed checkpoints. A turn diffs
+/// against the checkpoint before it in that list (web's `fromTurnCount`), never against the
+/// panel's cached one, which misses turns that finished since the panel last loaded.
+fn request_scope(scope: &DiffScope, fresh_turns: &[i64]) -> DiffScope {
+    match scope {
+        DiffScope::Turn { to, .. } if !fresh_turns.is_empty() => turn_scope(*to, fresh_turns),
+        other => other.clone(),
+    }
+}
+
 /// Index of the file a chat path points at. The path is workspace-relative, but one that
 /// carries a leading `./` or extra directories still matches by its trailing segments.
 fn find_file_for_path(files: &[DiffFile], path: &str) -> Option<usize> {
@@ -269,17 +279,22 @@ fn find_file_for_path(files: &[DiffFile], path: &str) -> Option<usize> {
     if wanted.is_empty() {
         return None;
     }
-    let same = |candidate: &str| {
-        candidate == wanted
-            || candidate.ends_with(&format!("/{wanted}"))
-            || wanted.ends_with(&format!("/{candidate}"))
-    };
-    files.iter().position(|file| {
+    fn paths(file: &DiffFile) -> impl Iterator<Item = &str> {
         [file.new_path.as_deref(), file.old_path.as_deref()]
             .into_iter()
             .flatten()
-            .any(same)
-            || file.display_path == wanted
+    }
+    // An exact path wins: `package.json` is the root file even after `apps/web/package.json`.
+    let exact = files.iter().position(|file| {
+        paths(file).any(|candidate| candidate == wanted) || file.display_path == wanted
+    });
+    exact.or_else(|| {
+        files.iter().position(|file| {
+            paths(file).any(|candidate| {
+                candidate.ends_with(&format!("/{wanted}"))
+                    || wanted.ends_with(&format!("/{candidate}"))
+            })
+        })
     })
 }
 
@@ -296,6 +311,8 @@ fn viewed_scope_key(scope: &DiffScope, base_ref: Option<&str>) -> String {
 fn file_fingerprint(file: &DiffFile) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     file.is_binary.hash(&mut hasher);
+    // The blob hashes change with the content, also where no line does (binaries, mode-only).
+    file.index.hash(&mut hasher);
     for hunk in &file.hunks {
         hunk.header.hash(&mut hasher);
         for line in &hunk.lines {
@@ -810,16 +827,13 @@ impl DiffPanel {
         } else {
             self.scope.clone()
         };
-        let scope_key = viewed_scope_key(&scope, base_ref.as_deref());
-        // A refresh of the same scope keeps the reader on the same file.
-        let keep_selected = (self.loaded_scope_key == scope_key)
-            .then(|| match &self.state {
-                DiffLoadState::Loaded(files) => files
-                    .get(self.selected_index)
-                    .map(|file| file.display_path.clone()),
-                _ => None,
-            })
-            .flatten();
+        let loaded_scope_key = self.loaded_scope_key.clone();
+        let selected_path = match &self.state {
+            DiffLoadState::Loaded(files) => files
+                .get(self.selected_index)
+                .map(|file| file.display_path.clone()),
+            _ => None,
+        };
         self.state = DiffLoadState::Loading;
         cx.notify();
 
@@ -829,6 +843,11 @@ impl DiffPanel {
                 None => Ok(Vec::new()),
             };
             let turns_for_ui = discovered_turns.as_ref().cloned().unwrap_or_default();
+            let requested = scope;
+            let scope = request_scope(&requested, &turns_for_ui);
+            let scope_key = viewed_scope_key(&scope, base_ref.as_deref());
+            // A refresh of the same scope keeps the reader on the same file.
+            let keep_selected = selected_path.filter(|_| loaded_scope_key == scope_key);
 
             let commits_for_ui = match &workspace_root {
                 Some(cwd) => {
@@ -963,6 +982,9 @@ impl DiffPanel {
                 }
                 if !turns_for_ui.is_empty() {
                     panel.available_turns = turns_for_ui;
+                }
+                if panel.scope == requested {
+                    panel.scope = scope.clone();
                 }
                 panel.branch_commits = commits_for_ui;
                 panel.resolved_base_ref = resolved_base;
@@ -2601,6 +2623,97 @@ diff --git a/c.rs b/c.rs
         assert_eq!(
             panel.read_with(cx, |panel, _| panel.focus_state()),
             ("All turns".to_owned(), None)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn turn_card_diffs_only_its_own_turn_after_later_turns_complete(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let panel = test_panel(cx);
+        // Diff was opened after turn 1, so the panel's cached checkpoints stop there.
+        panel.update(cx, |panel, cx| {
+            panel.set_thread(Some("thread-1".to_owned()), cx);
+            panel.available_turns = vec![1];
+        });
+        // Turns 2 and 3 complete; then the reader opens turn 3's card.
+        panel.update(cx, |panel, cx| panel.open_turn_diff(Some(3), None, cx));
+        let scope = panel.read_with(cx, |panel, _| panel.scope.clone());
+        assert_eq!(
+            request_scope(&scope, &[1, 2, 3]),
+            DiffScope::Turn { from: 2, to: 3 },
+            "turn 3's card compares checkpoint 2 with checkpoint 3, not 1 with 3"
+        );
+        // Other scopes load as they are.
+        assert_eq!(
+            request_scope(&DiffScope::AllChanges, &[1, 2, 3]),
+            DiffScope::AllChanges
+        );
+        assert_eq!(
+            request_scope(&DiffScope::Turn { from: 1, to: 3 }, &[]),
+            DiffScope::Turn { from: 1, to: 3 },
+            "without fresh checkpoints the request keeps its range"
+        );
+    }
+
+    #[test]
+    fn an_exact_path_wins_over_a_suffix_match() {
+        let files = parse_unified_diff(
+            "\
+diff --git a/apps/web/package.json b/apps/web/package.json
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -1,1 +1,1 @@
+-a
++b
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1,1 +1,1 @@
+-c
++d
+",
+        );
+        assert_eq!(find_file_for_path(&files, "package.json"), Some(1));
+        assert_eq!(find_file_for_path(&files, "./package.json"), Some(1));
+        assert_eq!(find_file_for_path(&files, "web/package.json"), Some(0));
+        assert_eq!(
+            find_file_for_path(&files, "/repo/apps/web/package.json"),
+            Some(0)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_replaced_binary_loses_its_viewed_mark(cx: &mut gpui_kit::TestAppContext) {
+        let binary = |hashes: &str| {
+            parse_unified_diff(&format!(
+                "diff --git a/img.png b/img.png\nindex {hashes} 100644\nBinary files a/img.png and b/img.png differ\n"
+            ))
+        };
+        let panel = test_panel(cx);
+        panel.update(cx, |panel, _| {
+            panel.install_files(binary("1111111..2222222"), "turn".to_owned(), None);
+            panel.toggle_viewed(0);
+        });
+        let viewed = |panel: &DiffPanel| {
+            let DiffLoadState::Loaded(files) = &panel.state else {
+                panic!("files are loaded");
+            };
+            panel.is_viewed(0, &files[0])
+        };
+        assert!(panel.read_with(cx, |panel, _| viewed(panel)));
+        // The same scope refreshes with the same bytes: the mark stays.
+        panel.update(cx, |panel, _| {
+            panel.install_files(binary("1111111..2222222"), "turn".to_owned(), None);
+        });
+        assert!(panel.read_with(cx, |panel, _| viewed(panel)));
+        // The agent replaces the image: the diff is again "Binary files differ", with new blobs.
+        panel.update(cx, |panel, _| {
+            panel.install_files(binary("1111111..3333333"), "turn".to_owned(), None);
+        });
+        assert!(
+            !panel.read_with(cx, |panel, _| viewed(panel)),
+            "a binary with new content is not viewed"
         );
     }
 

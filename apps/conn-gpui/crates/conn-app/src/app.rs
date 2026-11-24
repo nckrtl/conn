@@ -189,6 +189,16 @@ fn draft_workspace_strategy(draft: &DraftThreadState) -> serde_json::Value {
     }
 }
 
+/// Why an agent's panel request reached Conn before the primary server said who it is.
+pub(crate) const PRIMARY_NOT_READY: &str =
+    "Conn is still connecting to this server, so it did not open the panel. Try again in a moment.";
+
+/// The connection an agent's panel request came from.
+pub(super) enum PanelOrigin {
+    Primary,
+    Linked(String),
+}
+
 /// Where an agent's panel request is answered.
 pub(super) enum PanelReply {
     /// `panels.respond` on the connection it came from.
@@ -305,10 +315,12 @@ pub(crate) struct ConnApp {
     thread_panels: ThreadPanels,
     /// Where every thread's panel is saved, and its pending and last writes.
     panel_saves: thread_panels::PanelSaves,
-    /// The primary server's environment id, once its config snapshot names it; panel owners
-    /// on the primary use it. Until then they use `provisional_panel_session`.
+    /// The primary server's environment id: the one saved with the layout at launch, then the
+    /// one its config snapshot names. Panel owners on the primary use it.
     primary_environment: Option<String>,
-    provisional_panel_session: String,
+    /// The connected primary confirmed `primary_environment` since it (re)connected. Until
+    /// then an agent's panel request is refused: its thread could be another server's.
+    primary_confirmed: bool,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -734,7 +746,7 @@ impl ConnApp {
             thread_panels: ThreadPanels::default(),
             panel_saves: thread_panels::PanelSaves::new(thread_panels::thread_panels_file_path()),
             primary_environment: None,
-            provisional_panel_session: crate::commands::new_thread_id(),
+            primary_confirmed: false,
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -788,16 +800,9 @@ impl ConnApp {
         app.expire_offline(cx);
         app.restore_saved_drafts(cx);
         app.restore_thread_panels(cx);
-        // A save still waiting for its delay is written before the app quits.
-        cx.on_app_quit(|app, cx| {
-            let write = app.flush_thread_panels(cx);
-            async move {
-                if let Some(write) = write {
-                    write.await;
-                }
-            }
-        })
-        .detach();
+        // The write in flight finishes, and the latest layout follows if it differs.
+        cx.on_app_quit(|app, cx| app.thread_panels_on_quit(cx))
+            .detach();
         app.sync_chat(cx);
         app.start_sidebar_clock(cx);
         if crate::orbit_sync::orbit_sync_enabled_by_env() {
@@ -1448,7 +1453,13 @@ impl ConnApp {
                 }
                 if matches!(status, ConnectionStatus::Connected) {
                     self.orbit.connecting_server_id = None;
-                } else if let Some(env) = self.server_url.as_deref() {
+                } else {
+                    // A reconnect may reach another server: its next snapshot confirms who.
+                    self.primary_confirmed = false;
+                }
+                if !matches!(status, ConnectionStatus::Connected)
+                    && let Some(env) = self.server_url.as_deref()
+                {
                     self.offline.disconnected(env);
                 }
                 self.status = Some(status);
@@ -1545,10 +1556,9 @@ impl ConnApp {
             ClientEvent::ServerConfig(event) => self.apply_server_config_event(*event, cx),
             ClientEvent::PanelRequest(request) => {
                 if let Some(connection) = self.connection.clone() {
-                    let environment = self.primary_panel_environment();
                     self.dispatch_agent_panel_request(
                         request,
-                        environment,
+                        PanelOrigin::Primary,
                         PanelReply::Server(connection),
                         cx,
                     );
@@ -3948,14 +3958,6 @@ impl ConnApp {
             }
             (None, None) => None,
         };
-        if let Some(owner) = &owner {
-            self.import_live_layout(owner);
-        }
-        self.switch_panel_owner(owner)
-    }
-
-    /// Shows `owner`'s panel in place of the one showing. `true` when the owner changed.
-    fn switch_panel_owner(&mut self, owner: Option<PanelOwner>) -> bool {
         let mut panel = ThreadPanel {
             tabs: std::mem::take(&mut self.right_panel_tabs),
             open: self.layout.right_panel_open,
@@ -4022,6 +4024,19 @@ impl ConnApp {
         );
         self.save_thread_panels(cx);
         error
+    }
+
+    /// Whose panel an agent's request for `thread` from `origin` reaches. The primary's needs
+    /// its environment id confirmed by the server since it last connected: a request that
+    /// arrives before is refused, never filed under a guessed id.
+    fn request_owner(&self, origin: &PanelOrigin, thread: &str) -> Result<PanelOwner, String> {
+        match origin {
+            PanelOrigin::Linked(environment) => Ok(PanelOwner::new(environment.clone(), thread)),
+            PanelOrigin::Primary => match (&self.primary_environment, self.primary_confirmed) {
+                (Some(environment), true) => Ok(PanelOwner::new(environment.clone(), thread)),
+                _ => Err(PRIMARY_NOT_READY.to_owned()),
+            },
+        }
     }
 
     /// Whose right panel thread `thread` shows: the thread on its own environment.
@@ -4117,13 +4132,13 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) -> tokio::sync::oneshot::Receiver<conn_contract::source::DesktopPanelResponse> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let environment =
-            environment.map_or_else(|| self.primary_panel_environment(), str::to_owned);
+        let origin =
+            environment.map_or(PanelOrigin::Primary, |e| PanelOrigin::Linked(e.to_owned()));
         let request = conn_contract::source::DesktopPanelRequest {
             panel: request,
             files_action: None,
         };
-        self.dispatch_agent_panel_request(request, environment, PanelReply::Test(tx), cx);
+        self.dispatch_agent_panel_request(request, origin, PanelReply::Test(tx), cx);
         rx
     }
 
@@ -6357,21 +6372,44 @@ impl ConnApp {
     /// `panels.requests` stream (`panel_open`, `database_query`, `mcp_connect`, `mcp_call`) and
     /// replies via `panels.respond`.
     ///
-    /// `environment` is the environment the request came from. It reaches only the panel whose
-    /// owner is that environment's `request.thread_id`: a thread id another environment also
-    /// holds is a different thread.
+    /// `origin` is the connection the request came from. It reaches only the panel whose owner
+    /// is that environment's `request.thread_id`, resolved when the request is handled: a
+    /// thread id another environment also holds is a different thread.
     pub(super) fn dispatch_agent_panel_request(
         &self,
         request: conn_contract::source::DesktopPanelRequest,
-        environment: String,
+        origin: PanelOrigin,
         reply: PanelReply,
         cx: &mut Context<'_, Self>,
     ) {
         const NOT_ON_THREAD: &str = "The user is looking at another thread, so Conn did not run this. Ask them to open your thread, then try again.";
 
         let device_name = self.device_name();
-        let owner = PanelOwner::new(environment, request.panel.thread_id.clone());
         cx.spawn(async move |this, cx| {
+            let thread = request.panel.thread_id.clone();
+            let owner = this
+                .read_with(cx, |app, _| app.request_owner(&origin, &thread))
+                .map_err(|_| "Conn window closed.".to_owned())
+                .and_then(|owner| owner);
+            let owner = match owner {
+                Ok(owner) => owner,
+                Err(error) => {
+                    let response = conn_contract::source::DesktopPanelResponse {
+                        panel: conn_contract::AgentPanelResponse {
+                            request_id: request.panel.request_id,
+                            ok: false,
+                            device_name: Some(device_name),
+                            error: Some(error),
+                            database: None,
+                            mcp: None,
+                            mcp_call: None,
+                        },
+                        selection: None,
+                    };
+                    reply.send(response).await;
+                    return;
+                }
+            };
             let response = if let Some(action) = request.files_action {
                 Self::handle_files_action(this, request.panel, owner, action, device_name, cx).await
             } else {
@@ -6864,7 +6902,7 @@ impl ConnApp {
     /// Right-panel tabs stay: they are not the server's, and the thread may come back.
     fn reset_environment_state(&mut self) {
         self.offline = offline::Offline::new();
-        self.forget_primary_environment();
+        self.primary_confirmed = false;
         self.reset_linked_environments();
         self.shell = ShellState::default();
         self.server_config = std::sync::Arc::default();

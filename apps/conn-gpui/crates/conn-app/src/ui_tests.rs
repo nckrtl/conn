@@ -4347,6 +4347,7 @@ fn a_linked_agent_never_drives_the_primary_thread_with_the_same_id(cx: &mut Test
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.add_linked_shell_for_test("mini", "mini", mini, cx);
+            app.learn_primary_environment_for_test("nick", cx);
             app.select_thread("thread-selected", cx);
         })
     });
@@ -4445,7 +4446,12 @@ fn a_linked_agent_never_drives_the_primary_thread_with_the_same_id(cx: &mut Test
 #[gpui_kit::test]
 fn the_thirty_third_waiting_query_is_refused_and_the_first_kept(cx: &mut TestAppContext) {
     let (window, app) = mount_two_thread_app(cx);
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("nick", cx);
+            app.select_thread("thread-selected", cx)
+        })
+    });
     render_frames(cx, window);
     let ask = |thread: String| {
         panel_request(json!({
@@ -4572,11 +4578,11 @@ fn a_browser_tab_reopens_on_the_page_it_navigated_to(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Panels on the primary belong to the environment id its server reports, not its address.
-/// Those made before the server said who it is move to that id; the same environment reached
-/// through another host and port restores them; another server at the same address gets none.
+/// The primary's panels are keyed by the environment id it reported last, saved with the
+/// layout. At launch that id keys them at once; the same id confirmed changes nothing, another
+/// id is another server that starts fresh while the old one's panels stay saved.
 #[gpui_kit::test]
-fn the_primary_keeps_its_panels_by_environment_id_not_address(cx: &mut TestAppContext) {
+fn the_primary_keeps_its_panels_by_its_last_environment_id(cx: &mut TestAppContext) {
     let dir = std::env::temp_dir().join(format!(
         "conn-thread-panels-{}",
         crate::commands::new_thread_id()
@@ -4587,132 +4593,209 @@ fn the_primary_keeps_its_panels_by_environment_id_not_address(cx: &mut TestAppCo
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.learn_primary_environment_for_test("env-a", cx);
             app.select_thread("thread-selected", cx);
             app.add_right_panel_tab(conn_state::RightPanelTab::Diff, cx);
             app.save_thread_panels_for_test(cx);
         })
     });
     cx.run_until_parked();
-    assert!(
-        std::fs::read_to_string(&path).map_or(true, |saved| !saved.contains("thread-selected")),
-        "nothing is saved for a server that has not said who it is"
-    );
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.learn_primary_environment_for_test("env-a", cx)
-        })
-    });
-    render_frames(cx, window);
-    cx.update(|cx| {
-        app.update(cx, |app, _| {
-            assert_eq!(
-                app.right_panel_tabs().active(),
-                Some(&diff),
-                "the panel moved"
-            );
-            // The address the server is reached through is not part of the key. (Read without
-            // a sync: a real address would start the offline cache's writer.)
-            for url in ["http://127.0.0.1:3773/", "http://mac.tailnet.example:4000/"] {
-                app.set_server_url_for_test(Some(url));
-                assert_eq!(
-                    app.panel_owner_for_test("thread-selected"),
-                    conn_state::PanelOwner::new("env-a", "thread-selected")
-                );
-            }
-            app.set_server_url_for_test(None);
-        })
-    });
-    cx.update(|cx| app.update(cx, |app, cx| app.save_thread_panels_for_test(cx)));
-    cx.run_until_parked();
 
-    // Another launch, reached however; what it restores depends only on the id its server
-    // reports.
-    let reopen = |cx: &mut TestAppContext, environment: &str| {
+    // A relaunch: the panels show from the saved id before any snapshot.
+    let relaunch = |cx: &mut TestAppContext| {
         let (window, app) = mount_two_thread_app(cx);
         cx.update(|cx| {
             app.update(cx, |app, cx| {
                 app.set_thread_panels_path_for_test(path.clone(), cx);
                 app.select_thread("thread-selected", cx);
-                app.learn_primary_environment_for_test(environment, cx);
             })
         });
         render_frames(cx, window);
+        app
+    };
+    let tabs = |cx: &mut TestAppContext, app: &Entity<ConnApp>| {
         cx.update(|cx| app.read(cx).right_panel_tabs().tabs().to_vec())
     };
+    let same = relaunch(cx);
     assert_eq!(
-        reopen(cx, "env-a"),
-        [diff],
-        "the same environment, reached however"
+        tabs(cx, &same),
+        std::slice::from_ref(&diff),
+        "from the saved id"
+    );
+    cx.update(|cx| {
+        same.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("env-a", cx)
+        })
+    });
+    assert_eq!(
+        tabs(cx, &same),
+        std::slice::from_ref(&diff),
+        "confirming it changes nothing"
+    );
+
+    let other = relaunch(cx);
+    cx.update(|cx| {
+        other.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("env-b", cx);
+            app.save_thread_panels_for_test(cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(tabs(cx, &other).is_empty(), "another server starts fresh");
+    let saved = std::fs::read_to_string(&path).expect("saved");
+    assert!(
+        saved.contains("\"primaryEnvironment\":\"env-b\""),
+        "{saved}"
     );
     assert!(
-        reopen(cx, "env-b").is_empty(),
-        "another server at the same address"
+        saved.contains("\"environment\":\"env-a\""),
+        "the old server's panels stay saved under its id: {saved}"
+    );
+    let _ = window;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An agent's request for the primary is refused, with a reason to retry, until the server
+/// confirmed its environment id on this connection: before the first snapshot, and again after
+/// a reconnect until the next one. It is never filed under the id from before.
+#[gpui_kit::test]
+fn the_primarys_agent_requests_wait_for_the_server_to_say_who_it_is(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    let ask = |id: &str| {
+        panel_request(json!({
+            "requestId": id,
+            "threadId": "thread-other",
+            "panel": "database",
+            "sql": "select 1",
+            "focusWindow": false,
+        }))
+    };
+    let send = |cx: &mut TestAppContext, id: &str| {
+        let mut rx = cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.dispatch_agent_panel_request_for_test(ask(id), None, cx)
+            })
+        });
+        render_frames(cx, window);
+        rx.try_recv().expect("answered").panel
+    };
+    let database = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .database_for_test()
+    });
+    let waiting = |cx: &mut TestAppContext, environment: &str| {
+        cx.update(|cx| {
+            database
+                .read(cx)
+                .pending_sql_for_test(&conn_state::PanelOwner::new(environment, "thread-other"))
+        })
+    };
+
+    let early = send(cx, "before-snapshot");
+    assert!(!early.ok);
+    assert_eq!(early.error.as_deref(), Some(crate::app::PRIMARY_NOT_READY));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("env-a", cx)
+        })
+    });
+    assert!(send(cx, "confirmed").ok);
+    assert_eq!(waiting(cx, "env-a").as_deref(), Some("select 1"));
+
+    // A reconnect reaches server B; until B's snapshot, nothing is filed under A.
+    cx.update(|cx| app.update(cx, |app, cx| app.primary_disconnected_for_test(cx)));
+    let after = send(cx, "after-reconnect");
+    assert_eq!(after.error.as_deref(), Some(crate::app::PRIMARY_NOT_READY));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("env-b", cx)
+        })
+    });
+    let filed = send(cx, "on-b");
+    assert!(filed.ok);
+    assert_eq!(waiting(cx, "env-b").as_deref(), Some("select 1"));
+    cx.update(|cx| {
+        assert_eq!(
+            app.read(cx).panel_owner_for_test("thread-other"),
+            conn_state::PanelOwner::new("env-b", "thread-other")
+        );
+    });
+}
+
+/// A `thread-panels.json` of another format (an earlier build's) is set aside once as `.bak`,
+/// and the panels start empty.
+#[gpui_kit::test]
+fn an_old_layout_file_is_set_aside_and_panels_start_empty(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!(
+        "conn-thread-panels-{}",
+        crate::commands::new_thread_id()
+    ));
+    std::fs::create_dir_all(&dir).expect("a temp folder");
+    let path = dir.join("thread-panels.json");
+    let old = r#"{"threads":[{"owner":"thread-selected","open":true,"tabs":[{"kind":"panel","tab":"files"}],"active":0}]}"#;
+    std::fs::write(&path, old).expect("the old file");
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, window);
+    assert!(cx.update(|cx| app.read(cx).right_panel_tabs().tabs().is_empty()));
+    assert!(!path.exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("thread-panels.json.bak"))
+            .as_deref()
+            .ok(),
+        Some(old)
     );
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The files earlier versions wrote still load: the previous head's `thread-panels.json`
-/// (owners as bare thread ids) and the live tree's `thread-panels/<hash>.json`. A rewrite keeps
-/// every entry, including one this version cannot read.
+/// Quitting while a write is in flight loses nothing: the write finishes, and the layout
+/// changed since is written after it.
 #[gpui_kit::test]
-fn earlier_layout_files_restore_their_panels(cx: &mut TestAppContext) {
+fn quitting_during_a_write_leaves_the_final_layout_on_disk(cx: &mut TestAppContext) {
     let dir = std::env::temp_dir().join(format!(
         "conn-thread-panels-{}",
         crate::commands::new_thread_id()
     ));
     let path = dir.join("thread-panels.json");
-    std::fs::create_dir_all(dir.join("thread-panels")).expect("a temp folder");
-    // Head e07e15698f's format, plus an entry from a newer version.
-    std::fs::write(
-        &path,
-        r#"{"threads":[{"owner":"thread-selected","open":true,"maximized":false,"terminalOpen":false,"width":700.0,"tabs":[{"kind":"panel","tab":"files"}],"active":0},{"owner":{"environment":"env-a","thread":"t-future"},"tabs":[{"kind":"hologram"}]}]}"#,
-    )
-    .expect("the fixture");
-    // The live tree named each file by a hash of `<len>:<environment><thread>`.
-    let stem = conn_desktop::control::short_state_hash("7:primarythread-other");
-    std::fs::write(
-        dir.join("thread-panels").join(format!("{stem}.json")),
-        r#"{"open":true,"tabs":[{"Kind":"Diff"}],"selected":{"Kind":"Diff"},"maximized":false}"#,
-    )
-    .expect("the live fixture");
-
     let (window, app) = mount_two_thread_app(cx);
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_thread_panels_path_for_test(path.clone(), cx);
             app.learn_primary_environment_for_test("env-a", cx);
             app.select_thread("thread-selected", cx);
+            app.add_right_panel_tab(conn_state::RightPanelTab::Diff, cx);
+            app.save_thread_panels_for_test(cx);
+            assert!(app.thread_panel_write_in_flight_for_test());
+            // A change lands while that write runs.
+            app.add_right_panel_tab(conn_state::RightPanelTab::Files, cx);
         })
     });
-    render_frames(cx, window);
-    cx.update(|cx| {
-        let app = app.read(cx);
-        assert!(app.layout().right_panel_open);
-        assert_eq!(
-            app.right_panel_tabs().tabs(),
-            [conn_state::PanelSurface::Kind(
-                conn_state::RightPanelTab::Files
-            )],
-            "the previous head's Files panel"
-        );
-    });
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
-    render_frames(cx, window);
-    cx.update(|cx| {
-        assert_eq!(
-            app.read(cx).right_panel_tabs().tabs(),
-            [conn_state::PanelSurface::Kind(
-                conn_state::RightPanelTab::Diff
-            )],
-            "the live tree's layout"
-        );
-    });
-    cx.update(|cx| app.update(cx, |app, cx| app.save_thread_panels_for_test(cx)));
-    cx.run_until_parked();
-    let saved = std::fs::read_to_string(&path).expect("rewritten");
-    for kept in ["thread-selected", "thread-other", "hologram"] {
-        assert!(saved.contains(kept), "{kept} is kept: {saved}");
-    }
+    let _ = window;
+    cx.quit();
+    let saved = std::fs::read_to_string(&path).expect("written before quitting");
+    let saved = conn_state::SavedThreadPanels::from_json(&saved).expect("this format");
+    let tabs: Vec<_> = saved.threads[0].tabs.clone();
+    assert_eq!(
+        tabs,
+        [
+            conn_state::SavedSurface::Panel {
+                tab: conn_state::RightPanelTab::Diff
+            },
+            conn_state::SavedSurface::Panel {
+                tab: conn_state::RightPanelTab::Files
+            },
+        ],
+        "the final layout"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

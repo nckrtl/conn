@@ -598,12 +598,6 @@ impl RightPanel {
         self.database.update(cx, |p, _| p.set_owner(owner));
     }
 
-    /// The primary connection said its environment id: waiting queries keyed before move to it.
-    pub fn migrate_environment(&mut self, from: &str, to: &str, cx: &mut Context<'_, Self>) {
-        self.database
-            .update(cx, |panel, _| panel.migrate_environment(from, to));
-    }
-
     /// A deleted thread's waiting Database query goes with it.
     pub fn forget_owner(&mut self, owner: &conn_state::PanelOwner, cx: &mut Context<'_, Self>) {
         self.database

@@ -1397,7 +1397,7 @@ impl ConnApp {
                 if let Some(origin) = self.linked_connection(&environment_id) {
                     self.dispatch_agent_panel_request(
                         request,
-                        environment_id,
+                        super::PanelOrigin::Linked(environment_id),
                         super::PanelReply::Server(origin),
                         cx,
                     );

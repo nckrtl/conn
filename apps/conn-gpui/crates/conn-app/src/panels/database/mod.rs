@@ -238,16 +238,6 @@ impl DatabasePanel {
         Ok(())
     }
 
-    /// Moves the queries waiting on environment `from` to `to`.
-    pub(crate) fn migrate_environment(&mut self, from: &str, to: &str) {
-        self.pending.migrate_environment(from, to);
-        if let Some(owner) = self.owner.as_mut()
-            && owner.environment == from
-        {
-            owner.environment = to.to_owned();
-        }
-    }
-
     /// Drops a deleted thread's waiting query.
     pub(crate) fn forget_owner(&mut self, owner: &conn_state::PanelOwner) {
         self.pending.forget(owner);

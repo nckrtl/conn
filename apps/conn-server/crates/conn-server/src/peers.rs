@@ -1260,6 +1260,8 @@ impl PeerLinks {
         let links = self.clone();
         tokio::spawn(async move {
             let mut every_day = tokio::time::interval(UPKEEP_INTERVAL);
+            // A paused container must not run a burst of missed passes on resume.
+            every_day.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 every_day.tick().await;
                 links.extend_links().await;
@@ -1352,6 +1354,9 @@ async fn extend_at(url: &str, token: &str) -> Result<u64, String> {
     )
     .await
     .map_err(|e| format!("/health: {e}"))?;
+    if health.status != 200 {
+        return Err(format!("/health answered {}", health.status));
+    }
     let health: Value = serde_json::from_slice(&health.body).unwrap_or_default();
     let supported = health["version"]
         .as_str()
@@ -2093,7 +2098,8 @@ mod tests {
     }
 
     /// `fake_peer`, with `reply` building the whole `tools/call` answer from the tool name.
-    /// `GET /health` answers `reply("health")`. `POST /api/auth/clients/extend` calls
+    /// `GET /health` answers `reply("health")`, with the HTTP status in its `_status` field
+    /// (default 200). `POST /api/auth/clients/extend` calls
     /// `reply("extend")`; it answers 401 without `Authorization: Bearer token` and the body
     /// `{"sessionTtl":"until-revoked"}`, then that reply, or 500 for `null`.
     async fn fake_peer_with(
@@ -2135,7 +2141,9 @@ mod tests {
                         }
                     };
                     let (status, content_type, extra, reply) = if head.starts_with("GET /health ") {
-                        (200, "application/json", "", reply("health").to_string())
+                        let health = reply("health");
+                        let status = health["_status"].as_u64().map_or(200, |s| s as u16);
+                        (status, "application/json", "", health.to_string())
                     } else if head.starts_with("GET ") {
                         let n = counted.fetch_add(1, Ordering::SeqCst);
                         let (status, body) = descriptors[n.min(descriptors.len() - 1)].clone();
@@ -2309,6 +2317,7 @@ mod tests {
             version: &'static str,
             extend: Value,
             bearer: &'static [u8],
+            health_status: u16,
             far: bool,
             extends: bool,
         }
@@ -2319,6 +2328,7 @@ mod tests {
             version,
             extend: good.clone(),
             bearer: b"token",
+            health_status: 200,
             far: false,
             extends,
         };
@@ -2353,6 +2363,10 @@ mod tests {
                 ..case("elsewhere", "0.5.1", false)
             },
             Case {
+                health_status: 503,
+                ..case("unhealthy", "0.5.1", false)
+            },
+            Case {
                 far: true,
                 ..case("far", "0.5.1", false)
             },
@@ -2362,7 +2376,8 @@ mod tests {
         for case in cases {
             let posts = Arc::new(AtomicUsize::new(0));
             let (health, extend, counted) = (
-                json!({"status": "ok", "server": case.server, "version": case.version}),
+                json!({"status": "ok", "server": case.server, "version": case.version,
+                    "_status": case.health_status}),
                 case.extend,
                 posts.clone(),
             );
@@ -2423,7 +2438,7 @@ mod tests {
         for (id, ends, posts) in expected {
             let row = rows.iter().find(|r| r.environment_id == id).unwrap();
             assert_eq!(row.expires_at_ms, ends, "{id}");
-            if id == "environment:elsewhere" {
+            if id == "environment:elsewhere" || id == "environment:unhealthy" {
                 assert_eq!(posts.load(Ordering::SeqCst), 0, "the bearer left for {id}");
             }
         }

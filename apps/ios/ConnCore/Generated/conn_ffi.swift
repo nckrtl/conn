@@ -779,6 +779,28 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func respondUserInput(threadId: String, requestId: String, answers: [FfiUserInputSubmission]) async throws 
     
     /**
+     * Save in the thread settings sheet: switches `thread_id` to `model` on provider
+     * `instance_id` (`thread.model-selection.set`) only while the thread's catalog still offers
+     * it (`commitPendingModel`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func saveThreadModel(threadId: String, instanceId: String, model: String) async throws  -> FfiModelSave
+    
+    /**
+     * Asks the server to scan the thread's provider in the thread's cwd once, so models that only
+     * the project's own provider config lists reach the picker (`ProviderWorkspaceSnapshotScan`).
+     * Does nothing when that cwd was scanned already.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func scanThreadWorkspaceModels(threadId: String) async throws 
+    
+    /**
      * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
      *
      * Mirrors desktop `SendDispatch`: when the thread is idle, starts immediately; while working,
@@ -795,15 +817,6 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns the normalized HTTP base URL this connection targets.
      */
     func serverUrl()  -> String
-    
-    /**
-     * Switches `thread_id` to `model` on provider `instance_id` (`thread.model-selection.set`).
-     *
-     * # Errors
-     *
-     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-     */
-    func setThreadModel(threadId: String, instanceId: String, model: String) async throws 
     
     /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
@@ -1233,6 +1246,56 @@ open func respondUserInput(threadId: String, requestId: String, answers: [FfiUse
 }
     
     /**
+     * Save in the thread settings sheet: switches `thread_id` to `model` on provider
+     * `instance_id` (`thread.model-selection.set`) only while the thread's catalog still offers
+     * it (`commitPendingModel`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func saveThreadModel(threadId: String, instanceId: String, model: String)async throws  -> FfiModelSave  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_save_thread_model(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(instanceId),FfiConverterString.lower(model)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiModelSave_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Asks the server to scan the thread's provider in the thread's cwd once, so models that only
+     * the project's own provider config lists reach the picker (`ProviderWorkspaceSnapshotScan`).
+     * Does nothing when that cwd was scanned already.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func scanThreadWorkspaceModels(threadId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_scan_thread_workspace_models(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
      *
      * Mirrors desktop `SendDispatch`: when the thread is idle, starts immediately; while working,
@@ -1269,29 +1332,6 @@ open func serverUrl() -> String  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
-}
-    
-    /**
-     * Switches `thread_id` to `model` on provider `instance_id` (`thread.model-selection.set`).
-     *
-     * # Errors
-     *
-     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-     */
-open func setThreadModel(threadId: String, instanceId: String, model: String)async throws   {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_conncore_set_thread_model(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(instanceId),FfiConverterString.lower(model)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_void,
-            completeFunc: ffi_conn_ffi_rust_future_complete_void,
-            freeFunc: ffi_conn_ffi_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: FfiConverterTypeFfiError_lift
-        )
 }
     
     /**
@@ -9773,6 +9813,91 @@ public func FfiConverterTypeFfiItemStatus_lower(_ value: FfiItemStatus) -> RustB
 
 
 /**
+ * What Save did (`commitPendingModel`).
+ */
+
+public enum FfiModelSave: Equatable, Hashable {
+    
+    /**
+     * The thread switched to the picked model.
+     */
+    case saved
+    /**
+     * The pick is the thread's model already; nothing was sent.
+     */
+    case unchanged
+    /**
+     * The catalog no longer offers the pick; nothing was sent and the sheet stays open.
+     */
+    case unavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiModelSave: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiModelSave: FfiConverterRustBuffer {
+    typealias SwiftType = FfiModelSave
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiModelSave {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .saved
+        
+        case 2: return .unchanged
+        
+        case 3: return .unavailable
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiModelSave, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .saved:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .unchanged:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unavailable:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiModelSave_lift(_ buf: RustBuffer) throws -> FfiModelSave {
+    return try FfiConverterTypeFfiModelSave.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiModelSave_lower(_ value: FfiModelSave) -> RustBuffer {
+    return FfiConverterTypeFfiModelSave.lower(value)
+}
+
+
+
+/**
  * Overall appearance mode preference synced in the Orbit profile.
  */
 
@@ -14116,13 +14241,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_respond_user_input() != 18282) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_save_thread_model() != 11309) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_scan_thread_workspace_models() != 37806) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 39835) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_server_url() != 43789) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_conncore_set_thread_model() != 11425) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_settle_thread() != 64028) {

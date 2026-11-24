@@ -450,6 +450,16 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_respond_approval(uint64_t ptr, RustB
 uint64_t uniffi_conn_ffi_fn_method_conncore_respond_user_input(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id, RustBuffer answers
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SAVE_THREAD_MODEL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SAVE_THREAD_MODEL
+uint64_t uniffi_conn_ffi_fn_method_conncore_save_thread_model(uint64_t ptr, RustBuffer thread_id, RustBuffer instance_id, RustBuffer model
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
+uint64_t uniffi_conn_ffi_fn_method_conncore_scan_thread_workspace_models(uint64_t ptr, RustBuffer thread_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 uint64_t uniffi_conn_ffi_fn_method_conncore_send_message(uint64_t ptr, RustBuffer thread_id, RustBuffer text, RustBuffer mode
@@ -458,11 +468,6 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_send_message(uint64_t ptr, RustBuffe
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SERVER_URL
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SERVER_URL
 RustBuffer uniffi_conn_ffi_fn_method_conncore_server_url(uint64_t ptr, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SET_THREAD_MODEL
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SET_THREAD_MODEL
-uint64_t uniffi_conn_ffi_fn_method_conncore_set_thread_model(uint64_t ptr, RustBuffer thread_id, RustBuffer instance_id, RustBuffer model
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SETTLE_THREAD
@@ -1200,6 +1205,18 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_respond_user_input(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SAVE_THREAD_MODEL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SAVE_THREAD_MODEL
+uint16_t uniffi_conn_ffi_checksum_method_conncore_save_thread_model(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SCAN_THREAD_WORKSPACE_MODELS
+uint16_t uniffi_conn_ffi_checksum_method_conncore_scan_thread_workspace_models(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_MESSAGE
 uint16_t uniffi_conn_ffi_checksum_method_conncore_send_message(void
@@ -1209,12 +1226,6 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_send_message(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SERVER_URL
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SERVER_URL
 uint16_t uniffi_conn_ffi_checksum_method_conncore_server_url(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SET_THREAD_MODEL
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SET_THREAD_MODEL
-uint16_t uniffi_conn_ffi_checksum_method_conncore_set_thread_model(void
     
 );
 #endif

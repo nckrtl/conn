@@ -1321,12 +1321,41 @@ impl Inner {
             .await
             .map_err(DispatchError::Rejected)?;
         let copies = new_copies(&attachments, &claimed);
-        if kind == "thread.create" {
-            command["initialMessage"]["attachments"] = claimed;
+        let message = if kind == "thread.create" {
+            &mut command["initialMessage"]
         } else {
-            command["attachments"] = claimed;
-        }
+            &mut command
+        };
+        remap_context(&mut message["context"], &attachments, &claimed);
+        message["attachments"] = claimed;
         Ok((command, some_copies(copies)))
+    }
+
+    /// `attachment.cleanup` with `skipReferenced`: removes the files no message, answer or
+    /// waiting guest message of the thread names when the effect runs. Another row may share a
+    /// file, or a later edit may have taken it back.
+    async fn cleanup_attachments(
+        &self,
+        host: &dyn EngineHost,
+        thread_id: String,
+        attachment_ids: Vec<String>,
+    ) {
+        let read = self
+            .db(move |store| -> StoreResult<Vec<String>> {
+                let tx = store.tx()?;
+                let referenced = crate::commands::referenced_attachment_ids(&tx, &thread_id)?;
+                tx.rollback();
+                Ok(attachment_ids
+                    .into_iter()
+                    .filter(|id| !referenced.contains(id))
+                    .collect())
+            })
+            .await;
+        match read {
+            Ok(unused) if !unused.is_empty() => host.delete_attachments(unused).await,
+            Ok(_) => {}
+            Err(error) => eprintln!("conn-engine: attachment cleanup: {error}"),
+        }
     }
 
     async fn dispatch_claimed(
@@ -1535,9 +1564,19 @@ impl Inner {
                 thread_id,
                 selection,
             } => self.apply_model_selection(&thread_id, selection).await,
-            Effect::CleanupHtmlAttachments { ids, .. } => {
+            Effect::CleanupAttachments {
+                thread_id,
+                ids,
+                attachment_ids,
+            } => {
                 if let Some(host) = &self.host {
-                    host.cleanup_html_attachments(ids).await;
+                    if !ids.is_empty() {
+                        host.cleanup_html_attachments(ids).await;
+                    }
+                    if !attachment_ids.is_empty() {
+                        self.cleanup_attachments(host.as_ref(), thread_id, attachment_ids)
+                            .await;
+                    }
                 }
             }
             Effect::RemoteTaskChanged { thread_id, task_id } => {
@@ -2929,6 +2968,32 @@ fn new_copies(before: &Value, claimed: &Value) -> Value {
     )
 }
 
+/// `remapComposerContextAttachments`: an inline file chip names the claimed file in place of
+/// its upload, matched by position, so the client can pair the chip with its attachment.
+fn remap_context(context: &mut Value, before: &Value, after: &Value) {
+    let (Some(before), Some(after)) = (before.as_array(), after.as_array()) else {
+        return;
+    };
+    let Some(records) = context.get_mut("records").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for record in records {
+        if record["kind"] != "image" && record["kind"] != "file" {
+            continue;
+        }
+        let Some(id) = record.get("attachmentId").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(target) = before
+            .iter()
+            .position(|a| a["id"] == id)
+            .and_then(|index| after.get(index))
+        {
+            record["attachmentId"] = target["id"].clone();
+        }
+    }
+}
+
 /// The copies to release on a refusal, or none when the claim made none.
 fn some_copies(copies: Value) -> Option<Value> {
     copies
@@ -2937,9 +3002,11 @@ fn some_copies(copies: Value) -> Option<Value> {
         .then_some(copies)
 }
 
-/// `runtime-request.respond` in `ThreadMessageIntake`: each question's uploads are claimed for
-/// the thread, and its answer gains one line per file with the file's readable path
-/// (`appendUserInputAttachmentPaths`), so the provider's answer protocol stays as it is.
+/// `runtime-request.respond` in `ThreadMessageIntake`: the response's uploads are claimed for
+/// the thread in one claim, so the file count and image budget hold for the whole response
+/// before any copy (`validateAttachmentLimits`). Each answer gains one line per file of its
+/// question with the file's readable path (`appendUserInputAttachmentPaths`), so the
+/// provider's answer protocol stays as it is.
 async fn claim_answer_attachments(
     host: &dyn EngineHost,
     thread_id: String,
@@ -2949,25 +3016,28 @@ async fn claim_answer_attachments(
         .as_object()
         .cloned()
         .unwrap_or_default();
+    let mut counts = Vec::with_capacity(by_question.len());
+    let mut all = Vec::new();
+    for (question, attachments) in &by_question {
+        let list = attachments.as_array().cloned().unwrap_or_default();
+        counts.push((question.clone(), list.len()));
+        all.extend(list);
+    }
+    let all = Value::Array(all);
+    let claimed = host
+        .claim_attachments(thread_id, all.clone())
+        .await
+        .map_err(DispatchError::Rejected)?;
+    let copies = new_copies(&all, &claimed);
+    let mut claimed = claimed.as_array().cloned().unwrap_or_default().into_iter();
     let mut answers = command["answers"].as_object().cloned().unwrap_or_default();
     let mut claimed_by_question = serde_json::Map::new();
-    let mut copies = Vec::new();
-    for (question, attachments) in by_question {
-        let prepared = async {
-            let claimed = host
-                .claim_attachments(thread_id.clone(), attachments.clone())
-                .await?;
-            if let Value::Array(made) = new_copies(&attachments, &claimed) {
-                copies.extend(made);
-            }
-            let references = host.attachment_references(claimed.clone()).await?;
-            Ok::<_, String>((claimed, references))
-        }
-        .await;
-        let (claimed, references) = match prepared {
-            Ok(prepared) => prepared,
+    for (question, count) in counts {
+        let files = Value::Array(claimed.by_ref().take(count).collect());
+        let references = match host.attachment_references(files.clone()).await {
+            Ok(references) => references,
             Err(error) => {
-                host.release_attachments(Value::Array(copies)).await;
+                host.release_attachments(copies).await;
                 return Err(DispatchError::Rejected(error));
             }
         };
@@ -2978,26 +3048,20 @@ async fn claim_answer_attachments(
                 with_references(answer, &references.join("\n")),
             );
         }
-        claimed_by_question.insert(question, claimed);
+        claimed_by_question.insert(question, files);
     }
     command["attachmentsByQuestionId"] = Value::Object(claimed_by_question);
     command["answers"] = Value::Object(answers);
-    Ok((command, some_copies(Value::Array(copies))))
+    Ok((command, some_copies(copies)))
 }
 
 /// An answer with `text` after it: one more entry of a list, a new paragraph of a text, or
-/// the whole answer when there was none.
+/// `text` alone for any other answer, a wrapped one too, as T3 makes it.
 fn with_references(answer: Option<Value>, text: &str) -> Value {
     match answer {
         Some(Value::Array(mut list)) => {
             list.push(json!(text));
             Value::Array(list)
-        }
-        Some(Value::Object(mut wrapped)) if wrapped.get("answers").is_some_and(Value::is_array) => {
-            if let Some(Value::Array(list)) = wrapped.get_mut("answers") {
-                list.push(json!(text));
-            }
-            Value::Object(wrapped)
         }
         Some(Value::String(answer)) if !answer.is_empty() => json!(format!("{answer}\n\n{text}")),
         _ => json!(text),

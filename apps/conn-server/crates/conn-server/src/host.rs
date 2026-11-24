@@ -437,6 +437,16 @@ impl EngineHost for Host {
         })
     }
 
+    fn delete_attachments(&self, ids: Vec<String>) -> BoxFuture<'_, ()> {
+        let files = self.files.clone();
+        Box::pin(async move {
+            let Some(files) = files else {
+                return;
+            };
+            let _ = tokio::task::spawn_blocking(move || files.attachments.delete(&ids)).await;
+        })
+    }
+
     fn current_branch(&self, cwd: &str) -> BoxFuture<'_, Option<String>> {
         let cwd = PathBuf::from(cwd);
         Box::pin(async move { conn_vcs::repo::current_branch(&cwd).await.ok().flatten() })

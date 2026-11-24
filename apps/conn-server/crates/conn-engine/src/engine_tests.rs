@@ -9328,6 +9328,9 @@ struct RecordingHost {
     released: Mutex<Vec<Value>>,
     /// Attachments each claim was asked for, in order.
     claims: Mutex<Vec<Value>>,
+    /// Ids each attachment cleanup removed, in order.
+    deleted: Mutex<Vec<Vec<String>>>,
+    deleted_event: tokio::sync::Notify,
     closed: Mutex<Vec<(String, crate::ThreadClose)>>,
     html_cleanup: Mutex<Vec<(String, String)>>,
     closed_event: tokio::sync::Notify,
@@ -9383,6 +9386,11 @@ impl crate::EngineHost for RecordingHost {
     }
     fn release_attachments(&self, attachments: Value) -> crate::BoxFuture<'_, ()> {
         self.released.lock().unwrap().push(attachments);
+        Box::pin(async {})
+    }
+    fn delete_attachments(&self, ids: Vec<String>) -> crate::BoxFuture<'_, ()> {
+        self.deleted.lock().unwrap().push(ids);
+        self.deleted_event.notify_one();
         Box::pin(async {})
     }
     /// A saved file whose id starts with `gone` was removed.
@@ -14956,6 +14964,18 @@ async fn an_idle_compaction_waits_for_an_undelivered_delegated_result() {
     );
 }
 
+/// A composer context with one inline file chip per id.
+fn chips(ids: &[&str]) -> Value {
+    let records: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!({"kind": "file", "label": "notes.txt", "attachmentId": id, "name": "notes.txt",
+                "mimeType": "text/plain", "sizeBytes": 3})
+        })
+        .collect();
+    json!({"version": 1, "records": records})
+}
+
 fn text_file(id: &str) -> Value {
     json!({"type": "file", "id": id, "name": "notes.txt", "mimeType": "text/plain",
         "sizeBytes": 3})
@@ -14993,10 +15013,12 @@ async fn a_queued_edit_claims_its_new_upload_once() {
         None,
     );
     later["attachments"] = json!([text_file("pending-1")]);
+    later["context"] = chips(&["pending-1"]);
     dispatch(&engine, later).await;
     let edit = json!({"type": "queued-run.edit", "commandId": "c4", "threadId": "t1",
         "runId": "run:t1:2", "text": "edited",
-        "attachments": [text_file("t1-1"), text_file("pending-2")]});
+        "attachments": [text_file("t1-1"), text_file("pending-2")],
+        "context": chips(&["t1-1", "pending-2"])});
     dispatch(&engine, edit.clone()).await;
     let ids = |p: &Value| -> Vec<Value> {
         p["messages"]
@@ -15015,6 +15037,20 @@ async fn a_queued_edit_claims_its_new_upload_once() {
         ids(&projection(&engine, "t1").await),
         [json!("t1-1"), json!("t1-2")]
     );
+    // The inline chips name the claimed files, so the client can match them
+    // (`remapComposerContextAttachments`).
+    let chip_ids: Vec<Value> = projection(&engine, "t1").await["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "message:c3")
+        .unwrap()["context"]["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["attachmentId"].clone())
+        .collect();
+    assert_eq!(chip_ids, [json!("t1-1"), json!("t1-2")]);
     // A retry replays its receipt before any file is looked up or claimed again.
     let claims = host.claims.lock().unwrap().len();
     dispatch(&engine, edit).await;
@@ -15036,6 +15072,58 @@ async fn a_queued_edit_claims_its_new_upload_once() {
         host.released.lock().unwrap().last().unwrap(),
         &json!([text_file("t1-3")])
     );
+}
+
+/// `Orchestrator.ts`, `queued-run.edit`: a file an edit drops is removed after the edit commits
+/// (`attachment.cleanup` with `skipReferenced`), unless another message of the thread still
+/// names it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_queued_edit_removes_the_files_it_drops() {
+    let db = TempDb::new("edit-drop");
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let queue = json!({"type": "queue_after_active"});
+    let mut first = message_with("t1", "c3", "first", queue.clone(), None);
+    first["attachments"] = json!([text_file("pending-1")]);
+    dispatch(&engine, first).await;
+    let mut second = message_with("t1", "c4", "second", queue, None);
+    second["attachments"] = json!([text_file("t1-1")]);
+    dispatch(&engine, second).await;
+    // The second message still names the file: it stays.
+    let edit = |command: &str, run: &str, attachments: Value| {
+        json!({"type": "queued-run.edit", "commandId": command, "threadId": "t1", "runId": run,
+            "text": "edited", "attachments": attachments})
+    };
+    dispatch(&engine, edit("c5", "run:t1:2", json!([]))).await;
+    // Now nothing names it: it goes. The new upload stays.
+    dispatch(
+        &engine,
+        edit("c6", "run:t1:3", json!([text_file("pending-2")])),
+    )
+    .await;
+    timeout(Duration::from_secs(5), async {
+        while host.deleted.lock().unwrap().is_empty() {
+            host.deleted_event.notified().await;
+        }
+    })
+    .await
+    .expect("the dropped file is cleaned up");
+    assert_eq!(*host.deleted.lock().unwrap(), [vec!["t1-1".to_owned()]]);
 }
 
 /// `ThreadMessageIntake.test.ts`, "claims question uploads and passes readable paths": each
@@ -15077,7 +15165,8 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
                 "id": "question-item", "threadId": "t1", "runId": "run:t1:1",
                 "nodeId": request["nodeId"], "type": "user_input_request", "ordinal": 1,
                 "status": "running", "requestId": "question:run:t1:1",
-                "questions": [{"id": "q", "question": "Which file?"}, {"id": "r", "question": "Other?"}],
+                "questions": [{"id": "q", "question": "Which file?"}, {"id": "r", "question": "Other?"},
+                    {"id": "s", "question": "Wrapped?"}],
             })))?;
             tx.commit(None)
         })
@@ -15085,15 +15174,30 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
         .unwrap();
     let answer = json!({"type": "runtime-request.respond", "commandId": "c3", "threadId": "t1",
         "requestId": "question:run:t1:1",
-        "answers": {"q": ["See file"], "r": "Other"},
-        "attachmentsByQuestionId": {"q": [text_file("pending-a")], "r": [text_file("pending-b")]}});
+        "answers": {"q": ["See file"], "r": "Other", "s": {"answers": ["A"]}},
+        "attachmentsByQuestionId": {"q": [text_file("pending-a")], "r": [text_file("pending-b")],
+            "s": [text_file("pending-c")]}});
+    let before = host.claims.lock().unwrap().len();
     dispatch(&engine, answer.clone()).await;
+    // The limits see the whole response: one claim holds every question's files
+    // (`validateAttachmentLimits` before any copy).
+    assert_eq!(
+        host.claims.lock().unwrap()[before..],
+        [json!([
+            text_file("pending-a"),
+            text_file("pending-b"),
+            text_file("pending-c")
+        ])]
+    );
     until_run_ends(&mut thread).await;
+    // A wrapped answer becomes the paths alone, as T3's `appendUserInputAttachmentPaths`
+    // makes it: every adapter reads a text.
     assert_eq!(
         *provider.answers.lock().unwrap(),
         [json!({
             "q": ["See file", "saved at /files/t1-a"],
             "r": "Other\n\nsaved at /files/t1-b",
+            "s": "saved at /files/t1-c",
         })]
     );
     let p = projection(&engine, "t1").await;
@@ -15106,7 +15210,7 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
         .clone();
     assert_eq!(
         item["questionAnswer"]["attachmentsByQuestionId"],
-        json!({"q": [text_file("t1-a")], "r": [text_file("t1-b")]})
+        json!({"q": [text_file("t1-a")], "r": [text_file("t1-b")], "s": [text_file("t1-c")]})
     );
     let claims = host.claims.lock().unwrap().len();
     dispatch(&engine, answer).await;

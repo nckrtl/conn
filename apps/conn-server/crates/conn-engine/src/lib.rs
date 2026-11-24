@@ -240,6 +240,11 @@ pub trait EngineHost: Send + Sync {
         Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
+    /// Removes thread files no message or answer names any more (`attachment.cleanup`).
+    fn delete_attachments(&self, _ids: Vec<String>) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
     /// Stores a bounded, sandboxed MCP App document as a thread attachment.
     fn snapshot_mcp_app(
         &self,

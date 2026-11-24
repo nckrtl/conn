@@ -1213,6 +1213,43 @@ fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn artifact_template_message_copy_writes_the_rendered_label(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let mut thread = ThreadState::new("thread-selected".to_owned());
+    thread.entries.push(TimelineEntry::Assistant {
+        id: "template-message".to_owned(),
+        markdown: r#"Before
+
+::artifact-template{artifact_kind="document" display_name="Q&amp;A notes" skill_directory="/skills/artifact-template-report" skill_name="artifact-template-report"}
+
+After"#.to_owned(),
+        streaming: false,
+        created_at: None,
+        run_id: None,
+        status: ItemStatus::Completed,
+    });
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), thread, cx);
+        });
+    });
+    cx.update_window(window, |_, window, cx| {
+        let button = center_by_label(window, cx, "Copy message");
+        window.pointer_move(button, None, cx);
+        window.render_frame(cx);
+        window.pointer_down(button, MouseButton::Left, cx);
+        window.pointer_up(button, MouseButton::Left, cx);
+    })
+    .unwrap();
+    let copied = cx.read(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(
+        copied.as_deref(),
+        Some("Before\n\nQ&A notes (Document template)\n\nAfter")
+    );
+}
+
+#[gpui_kit::test]
 fn a_virtualized_sent_gallery_ends_three_pixels_above_the_bubble_edge(cx: &mut TestAppContext) {
     let (window, app) = mount_app(cx);
     let mut thread = kitchen_sink_thread();

@@ -171,6 +171,16 @@ impl ChatView {
         text: String,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        self.render_copy_action(key, label, move || text.clone(), cx)
+    }
+
+    fn render_copy_action(
+        &self,
+        key: &str,
+        label: &'static str,
+        copy_text: impl Fn() -> String + 'static,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let copied = self.copied_message_key.as_deref() == Some(key);
         let fg = hsla(self.tokens.foreground);
         let muted = hsla(self.tokens.muted_foreground);
@@ -181,7 +191,7 @@ impl ChatView {
             muted
         };
         let key_owned = key.to_owned();
-        div()
+        let button = div()
             .id(SharedString::from(format!("copy-{key}")))
             .a11y_button(SharedString::from(format!("chat.copy.{key}")), label)
             .flex()
@@ -192,15 +202,17 @@ impl ChatView {
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg).text_color(fg))
             .on_click(cx.listener(move |view, _, _, cx| {
-                view.copy_with_confirmation(key_owned.clone(), text.clone(), cx);
+                view.copy_with_confirmation(key_owned.clone(), copy_text(), cx);
             }))
             .conn_tooltip(if copied { "Copied" } else { label }, &self.tokens)
             .child(icons::icon(
                 if copied { icons::CHECK } else { icons::COPY },
                 CARD_ACTION_ICON_PX,
                 icon_color,
-            ))
-            .into_any_element()
+            ));
+        #[cfg(test)]
+        let button = gpui_kit::TestSupportExt::test_support(button);
+        button.into_any_element()
     }
 
     /// The hover timestamp, 13px muted like the card text, with the full time as its tooltip.
@@ -991,10 +1003,11 @@ impl ChatView {
             );
         }
         if !markdown.trim().is_empty() {
-            meta = meta.child(self.render_copy_button(
+            let markdown = markdown.to_owned();
+            meta = meta.child(self.render_copy_action(
                 &format!("assistant-{id}"),
                 "Copy message",
-                markdown.to_owned(),
+                move || super::artifact_template::message_copy_text(&markdown),
                 cx,
             ));
         }

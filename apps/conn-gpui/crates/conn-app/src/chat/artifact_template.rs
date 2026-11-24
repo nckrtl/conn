@@ -323,8 +323,7 @@ fn parse_value(scan: &mut Scan<'_>) -> Option<String> {
     }
 }
 
-/// Decodes numeric references and the common named ones (`&amp;` `&lt;` `&gt;` `&quot;`
-/// `&apos;` `&nbsp;`), as micromark does for attribute values. Other names stay as written.
+/// Decode CommonMark character references in directive attributes.
 fn decode_references(value: &str) -> String {
     if !value.contains('&') {
         return value.to_owned();
@@ -335,7 +334,7 @@ fn decode_references(value: &str) -> String {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
         if let Some((decoded, len)) = decode_reference(rest) {
-            out.push(decoded);
+            out.push_str(&decoded);
             rest = &rest[len..];
         } else {
             out.push('&');
@@ -346,34 +345,24 @@ fn decode_references(value: &str) -> String {
     out
 }
 
-/// The character a reference at the start of `text` stands for, and its length in bytes.
-fn decode_reference(text: &str) -> Option<(char, usize)> {
-    let end = text.find(';')?;
+/// A reference including its semicolon, bounded by CommonMark's longest entity name.
+fn decode_reference(text: &str) -> Option<(String, usize)> {
+    let end = text.bytes().take(33).position(|byte| byte == b';')?;
     let body = &text[1..end];
     let decoded = if let Some(number) = body.strip_prefix('#') {
-        let code = match number.strip_prefix(['x', 'X']) {
-            Some(hex) if !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                u32::from_str_radix(hex, 16).ok()?
+        if let Some(hex) = number.strip_prefix(['x', 'X']) {
+            if !(1..=6).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
             }
-            Some(_) => return None,
-            None if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) => {
-                number.parse().ok()?
+            markdown::decode_numeric(hex, 16)
+        } else {
+            if !(1..=7).contains(&number.len()) || !number.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
             }
-            None => return None,
-        };
-        char::from_u32(code)
-            .filter(|c| *c != '\0')
-            .unwrap_or(char::REPLACEMENT_CHARACTER)
-    } else {
-        match body {
-            "amp" => '&',
-            "lt" => '<',
-            "gt" => '>',
-            "quot" => '"',
-            "apos" => '\'',
-            "nbsp" => '\u{a0}',
-            _ => return None,
+            markdown::decode_numeric(number, 10)
         }
+    } else {
+        markdown::decode_named(body, true)?
     };
     Some((decoded, end + 1))
 }
@@ -481,6 +470,24 @@ pub(super) fn split_segments(src: &str) -> Vec<Segment<'_>> {
         segments.push(Segment::Markdown(&src[cursor..]));
     }
     segments
+}
+
+/// Copy the labels of rendered template cards and preserve all surrounding Markdown.
+pub(super) fn message_copy_text(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut cursor = 0;
+    for candidate in top_level_directives(src) {
+        if let Some(template) = resolve(&candidate.attributes) {
+            out.push_str(&src[cursor..candidate.text_start]);
+            out.push_str(&template.display_name);
+            out.push_str(" (");
+            out.push_str(template.kind.label());
+            out.push(')');
+            cursor = candidate.text_end;
+        }
+    }
+    out.push_str(&src[cursor..]);
+    out
 }
 
 /// The directive lines that stand on their own at the top level of `src`: not in a code or HTML
@@ -673,6 +680,18 @@ mod tests {
     use crate::chat::markdown::{MarkdownBlock, parse_markdown};
 
     const VALID: &str = r#"::artifact-template{artifact_kind="document" display_name="Weekly report" skill_directory="/Users/me/.codex/skills/artifact-template-report" skill_name="artifact-template-report"}"#;
+
+    #[test]
+    fn clipboard_replaces_only_rendered_templates_and_preserves_line_endings() {
+        let second = VALID.replace("Weekly report", "Q&amp;A &copy; &NotEqualTilde; &unknown;");
+        let invalid = VALID.replace("document", "invalid");
+        let input =
+            format!("Before\r\n{VALID}\r\n{second}\r\n{invalid}\r\n```\n{VALID}\n```\nAfter");
+        let expected = format!(
+            "Before\r\nWeekly report (Document template)\r\nQ&A © ≂\u{338} &unknown; (Document template)\r\n{invalid}\r\n```\n{VALID}\n```\nAfter"
+        );
+        assert_eq!(super::message_copy_text(&input), expected);
+    }
 
     fn weekly_report() -> ArtifactTemplate {
         ArtifactTemplate {

@@ -575,9 +575,35 @@ impl RightPanel {
         self.sync_surface_visibility(cx);
     }
 
-    pub fn set_database_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) {
+    /// Hands `sql` to `thread`'s Database editor. It waits there until that thread shows with
+    /// its project's connections loaded (`openDatabaseQuery`).
+    pub fn set_database_sql(&mut self, thread: &str, sql: String, cx: &mut Context<'_, Self>) {
         self.database
-            .update(cx, |panel, cx| panel.set_agent_sql(sql, cx));
+            .update(cx, |panel, cx| panel.queue_sql(thread, sql, cx));
+    }
+
+    /// A deleted thread's waiting Database query goes with it.
+    pub fn forget_thread(&mut self, thread: &str, cx: &mut Context<'_, Self>) {
+        self.database
+            .update(cx, |panel, _| panel.forget_thread(thread));
+    }
+
+    /// The address browser tab `id` shows or will load, for saving the thread's layout.
+    pub fn browser_address(&self, id: BrowserTabId, cx: &App) -> Option<String> {
+        let url = match self.browser(id) {
+            Some(browser) => browser.read(cx).page_url(),
+            None => self
+                .pending_browser_urls
+                .iter()
+                .find(|(tab, _)| *tab == id)
+                .map(|(_, url)| url.clone())?,
+        };
+        (!url.is_empty()).then_some(url)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn database_for_test(&self) -> Entity<DatabasePanel> {
+        self.database.clone()
     }
 
     /// Runs an agent's read-only SQL query in the Database panel and resolves with its result.
@@ -719,6 +745,10 @@ impl RightPanel {
         thread_shell: Option<&conn_state::ThreadShell>,
         cx: &mut Context<'_, Self>,
     ) {
+        // Before the project changes, so a waiting query never lands in another project.
+        let database_thread = thread_id.clone();
+        self.database
+            .update(cx, |p, _| p.set_thread(database_thread));
         if self.project_id != project_id || self.workspace_root != workspace_root {
             let key = project_id.clone();
             self.api.update(cx, |p, cx| p.set_project(key.clone(), cx));
@@ -745,6 +775,7 @@ impl RightPanel {
         }
         let root = self.workspace_root.clone();
         for_each_thread_panel(self, root, thread_id, thread_shell, cx);
+        self.database.update(cx, |p, cx| p.deliver_pending(cx));
         cx.notify();
     }
 

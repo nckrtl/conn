@@ -4052,32 +4052,282 @@ fn parked_browsers_beyond_the_cap_close_least_recently_shown_first(cx: &mut Test
     assert!(pages[2..].iter().all(|(_, page)| page.upgrade().is_some()));
 }
 
-/// An agent's query for a thread the user is not looking at does not run and leaves nothing
-/// behind: it hears that it is not on its thread (`preparePanel`'s Database case).
+fn panel_request(value: serde_json::Value) -> conn_contract::AgentPanelRequest {
+    match from_json(value) {
+        Ok(request) => request,
+        Err(err) => panic!("AgentPanelRequest failed: {err}"),
+    }
+}
+
+/// A database the test never reaches: a SQLite file that does not exist.
+fn unreachable_database() -> conn_desktop::database::api::PanelConnection {
+    let mut connection = conn_desktop::database::api::new_connection(None);
+    connection.name = "test".to_owned();
+    connection.connection.driver = conn_desktop::database::DatabaseDriver::Sqlite;
+    connection.connection.database = "/nonexistent/conn-thread-panel-test.sqlite".to_owned();
+    connection
+}
+
+/// An agent's query for a thread the user is not looking at waits in that thread's Database
+/// editor (`openDatabaseQuery`). It lands only once that thread shows, its project's
+/// connections have loaded and one is chosen; an older Vault load answering late does not
+/// count. Running it needs the panel on screen, so the agent hears where the query is.
 #[gpui_kit::test]
-fn a_background_database_query_is_refused(cx: &mut TestAppContext) {
+fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut TestAppContext) {
     let (window, app) = mount_two_thread_app(cx);
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
     render_frames(cx, window);
-    let request: conn_contract::AgentPanelRequest = match from_json(json!({
-        "requestId": "req-sql",
-        "threadId": "thread-other",
-        "panel": "database",
-        "sql": "select 2",
-        "focusWindow": false,
-    })) {
-        Ok(request) => request,
-        Err(err) => panic!("AgentPanelRequest failed: {err}"),
+    let ask = |run: bool| {
+        panel_request(json!({
+            "requestId": "req-sql",
+            "threadId": "thread-other",
+            "panel": "database",
+            "sql": "select 2",
+            "run": run,
+            "focusWindow": true,
+        }))
     };
-    let error =
-        cx.update(|cx| app.update(cx, |app, _| app.prepare_background_panel_for_test(&request)));
-    assert_eq!(error.as_deref(), Some("not on thread"));
+    let shown = cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.prepare_background_panel_for_test(&ask(false), cx)
+        })
+    });
+    assert_eq!(shown, None);
+    let ran = cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.prepare_background_panel_for_test(&ask(true), cx)
+        })
+    });
+    assert_eq!(
+        ran.as_deref(),
+        Some("not on thread The query is in its Database panel.")
+    );
+    let database = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .database_for_test()
+    });
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.layout().selected_thread_id.as_deref(),
+            Some("thread-selected"),
+            "an agent never switches threads"
+        );
+        assert!(app.right_panel_tabs().tabs().is_empty());
+        assert_eq!(
+            database
+                .read(cx)
+                .pending_sql_for_test("thread-other")
+                .as_deref(),
+            Some("select 2")
+        );
+    });
+
+    // Two Vault loads overlap, as a Refresh while the first still runs.
+    let (first, second) = cx.update(|cx| {
+        database.update(cx, |db, _| {
+            (
+                db.begin_vault_load_for_test(),
+                db.begin_vault_load_for_test(),
+            )
+        })
+    });
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
     render_frames(cx, window);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(app.layout().right_panel_open);
+        assert_eq!(
+            app.right_panel_tabs().active(),
+            Some(&conn_state::PanelSurface::Kind(
+                conn_state::RightPanelTab::Database
+            ))
+        );
+    });
+    let waiting = |cx: &mut TestAppContext| {
+        cx.update(|cx| database.read(cx).pending_sql_for_test("thread-other"))
+    };
+    assert!(waiting(cx).is_some(), "the connections are still loading");
+    cx.update(|cx| {
+        database.update(cx, |db, cx| {
+            db.finish_vault_load_for_test(first, vec![unreachable_database()], cx)
+        })
+    });
     assert!(
-        cx.update(|cx| app.read(cx).right_panel_tabs().tabs().is_empty()),
-        "no Database tab waits for it"
+        waiting(cx).is_some(),
+        "the older load's answer does not count"
     );
+    cx.update(|cx| {
+        database.update(cx, |db, cx| {
+            db.finish_vault_load_for_test(second, vec![unreachable_database()], cx)
+        })
+    });
+    assert_eq!(waiting(cx), None);
+    assert_eq!(
+        cx.update(|cx| database.read(cx).sql_for_test()).as_deref(),
+        Some("select 2"),
+        "the query is in the chosen connection's editor"
+    );
+}
+
+/// Each thread keeps its own right panel: tabs, open state, maximize, terminal drawer and
+/// width. They survive switching threads, and a restart through the saved file.
+#[gpui_kit::test]
+fn each_thread_keeps_its_whole_right_panel_across_switches_and_restarts(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!(
+        "conn-thread-panels-{}",
+        crate::commands::new_thread_id()
+    ));
+    let path = dir.join("thread-panels.json");
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.select_thread("thread-selected", cx);
+            app.add_right_panel_tab(conn_state::RightPanelTab::Diff, cx);
+            app.toggle_right_panel_maximized(cx);
+            app.set_drawer_and_width_for_test(true, 820.0);
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(!app.layout().right_panel_open && app.right_panel_tabs().tabs().is_empty());
+        assert_eq!(
+            app.right_panel_state_for_test(),
+            (false, false, 820.0),
+            "a thread never shown takes the width it finds"
+        );
+    });
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(conn_state::RightPanelTab::Files, cx);
+            app.set_drawer_and_width_for_test(false, 640.0);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    let diff = conn_state::PanelSurface::Kind(conn_state::RightPanelTab::Diff);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(app.layout().right_panel_open);
+        assert_eq!(app.right_panel_tabs().active(), Some(&diff));
+        assert_eq!(app.right_panel_state_for_test(), (true, true, 820.0));
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.save_thread_panels_for_test(cx)));
+    assert!(path.exists());
+
+    // A restart: a new window reads the file.
+    let (_, restarted) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        restarted.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.select_thread("thread-other", cx);
+        })
+    });
+    cx.update(|cx| {
+        let app = restarted.read(cx);
+        assert!(app.layout().right_panel_open);
+        assert_eq!(
+            app.right_panel_tabs().tabs(),
+            [conn_state::PanelSurface::Kind(
+                conn_state::RightPanelTab::Files
+            )]
+        );
+        assert_eq!(app.right_panel_state_for_test(), (false, false, 640.0));
+    });
+    cx.update(|cx| restarted.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    cx.update(|cx| {
+        let app = restarted.read(cx);
+        assert_eq!(app.right_panel_tabs().active(), Some(&diff));
+        assert_eq!(app.right_panel_state_for_test(), (true, true, 820.0));
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An agent on a linked environment reaches its own thread's panel (linked connections now
+/// deliver every panel request): on the thread the user is looking at it opens there; on
+/// another thread it waits there. Neither switches threads.
+#[gpui_kit::test]
+fn a_linked_environments_agent_drives_its_own_threads_panel(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test(
+                "mini",
+                "mini",
+                linked_mini_shell("/work/mini", "Mini diagnostics"),
+                cx,
+            );
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, window);
+    let linked_thread = cx.update(|cx| {
+        app.read(cx)
+            .shell()
+            .threads
+            .iter()
+            .find(|t| t.title == "Mini diagnostics")
+            .map(|t| t.id.clone())
+            .expect("the linked thread is listed")
+    });
+    let request = |panel: &str| {
+        panel_request(json!({
+            "requestId": format!("req-{panel}"),
+            "threadId": linked_thread,
+            "panel": panel,
+            "focusWindow": true,
+        }))
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.agent_panel_request_for_test(request("diff"), cx)
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.layout().selected_thread_id.as_deref(),
+            Some("thread-selected")
+        );
+        assert!(
+            app.right_panel_tabs().tabs().is_empty(),
+            "the shown thread's panel is untouched"
+        );
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread(linked_thread.clone(), cx)));
+    render_frames(cx, window);
+    let files = conn_state::PanelSurface::Kind(conn_state::RightPanelTab::Files);
+    let diff = conn_state::PanelSurface::Kind(conn_state::RightPanelTab::Diff);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(app.layout().right_panel_open);
+        assert_eq!(
+            app.right_panel_tabs().tabs(),
+            std::slice::from_ref(&diff),
+            "it waited here"
+        );
+    });
+    // On the shown linked thread it opens at once.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.agent_panel_request_for_test(request("files"), cx)
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(app.right_panel_tabs().active(), Some(&files));
+        assert_eq!(
+            app.layout().selected_thread_id.as_deref(),
+            Some(linked_thread.as_str())
+        );
+    });
 }
 
 /// Switching to a thread whose panel is closed, with its browser tab selected, runs no

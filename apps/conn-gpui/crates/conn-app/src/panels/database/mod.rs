@@ -3,6 +3,7 @@
 //! read-only SQL executed natively via [`conn_desktop::database::DatabaseRunner`].
 
 mod form;
+mod pending;
 mod store;
 mod views;
 
@@ -23,6 +24,7 @@ use gpui_kit::{
 };
 
 use self::form::{ConnectionFormState, outline_sm_button};
+use self::pending::PendingQueries;
 use self::store::{
     DatabaseStore, active_connection, filter_tables, finalize_draft, format_result_summary,
     load_env_connection, load_store, project_connections, save_store,
@@ -76,6 +78,9 @@ pub(crate) struct DatabasePanel {
     tokens: Tokens,
     project_key: Option<String>,
     workspace_root: Option<String>,
+    /// The shown thread: a query handed to it waits in `pending` until it can land.
+    thread_id: Option<String>,
+    pending: PendingQueries,
     store: DatabaseStore,
     runner: DatabaseRunner,
     env_connection: Option<PanelConnection>,
@@ -150,6 +155,8 @@ impl DatabasePanel {
             tokens,
             project_key: None,
             workspace_root: None,
+            thread_id: None,
+            pending: PendingQueries::default(),
             store: load_store(),
             runner: DatabaseRunner::new(),
             env_connection: None,
@@ -205,6 +212,89 @@ impl DatabasePanel {
         self.columns_load = None;
         self.load_vault_databases(false, cx);
         self.ensure_tables_loaded(cx);
+        self.deliver_pending(cx);
+        cx.notify();
+    }
+
+    /// The shown thread. Its waiting query lands on the next [`Self::deliver_pending`], once the
+    /// caller has also set that thread's project.
+    pub(crate) fn set_thread(&mut self, thread_id: Option<String>) {
+        self.thread_id = thread_id;
+    }
+
+    /// Queues `sql` for `thread`'s editor (`openDatabaseQuery`). It lands when that thread shows
+    /// with its project's connections loaded and one chosen, on whichever path gets there first.
+    pub(crate) fn queue_sql(&mut self, thread: &str, sql: String, cx: &mut Context<'_, Self>) {
+        self.pending.queue(thread, sql);
+        self.deliver_pending(cx);
+    }
+
+    /// Drops a deleted thread's waiting query.
+    pub(crate) fn forget_thread(&mut self, thread: &str) {
+        self.pending.forget(thread);
+    }
+
+    /// Puts the shown thread's waiting query in the editor of the chosen connection, if the
+    /// connections have loaded and one is chosen (`takePending`).
+    pub(crate) fn deliver_pending(&mut self, cx: &mut Context<'_, Self>) {
+        let has_connection = self.project_key.is_some() && self.selected_connection().is_some();
+        if let Some(sql) = self.pending.take(self.thread_id.as_deref(), has_connection) {
+            self.set_agent_sql(sql, cx);
+        }
+    }
+
+    /// The editor's SQL for the chosen connection, if one is chosen.
+    #[cfg(test)]
+    pub(crate) fn sql_for_test(&self) -> Option<String> {
+        self.selected_connection()
+            .map(|connection| self.current_sql(&connection.id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_sql_for_test(&self, thread: &str) -> Option<String> {
+        self.pending.waiting(thread).map(str::to_owned)
+    }
+
+    /// A Vault load that tests answer with [`Self::finish_vault_load_for_test`].
+    #[cfg(test)]
+    pub(crate) fn begin_vault_load_for_test(&mut self) -> u64 {
+        self.pending.begin_vault_load()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_vault_load_for_test(
+        &mut self,
+        token: u64,
+        connections: Vec<PanelConnection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.apply_vault_outcome(token, Ok(connections), cx);
+    }
+
+    /// The answer of Vault load `token`; an older load's answer is dropped.
+    fn apply_vault_outcome(
+        &mut self,
+        token: u64,
+        outcome: Result<Vec<PanelConnection>, (VaultErrorKind, String)>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.pending.finish_vault_load(token) {
+            return;
+        }
+        match outcome {
+            Ok(connections) => {
+                self.vault_connections = connections;
+                self.vault_status = None;
+                self.vault_error = None;
+            }
+            Err((kind, message)) => {
+                self.vault_connections.clear();
+                self.vault_status = Some(kind);
+                self.vault_error = Some(message);
+            }
+        }
+        self.ensure_tables_loaded(cx);
+        self.deliver_pending(cx);
         cx.notify();
     }
 
@@ -214,35 +304,23 @@ impl DatabasePanel {
         }
         let vault = self.runner.vault().clone();
         if !vault.is_installed() {
+            self.pending.end_vault_loads();
             self.vault_connections.clear();
             self.vault_status = Some(VaultErrorKind::Unavailable);
             self.vault_error = None;
+            self.deliver_pending(cx);
             return;
         }
+        let token = self.pending.begin_vault_load();
         let task = crate::live::RT.spawn(async move { vault.list_databases(allow_unlock).await });
         cx.spawn(async move |this, cx| {
-            let outcome = task.await;
+            let outcome = match task.await {
+                Ok(Ok(dbs)) => Ok(dbs.iter().map(panel_connection_from_vault).collect()),
+                Ok(Err(err)) => Err((err.kind, err.message)),
+                Err(join_err) => Err((VaultErrorKind::Error, join_err.to_string())),
+            };
             let _ = this.update(cx, |panel, cx| {
-                match outcome {
-                    Ok(Ok(dbs)) => {
-                        panel.vault_connections =
-                            dbs.iter().map(panel_connection_from_vault).collect();
-                        panel.vault_status = None;
-                        panel.vault_error = None;
-                    }
-                    Ok(Err(err)) => {
-                        panel.vault_connections.clear();
-                        panel.vault_status = Some(err.kind);
-                        panel.vault_error = Some(err.message);
-                    }
-                    Err(join_err) => {
-                        panel.vault_connections.clear();
-                        panel.vault_status = Some(VaultErrorKind::Error);
-                        panel.vault_error = Some(join_err.to_string());
-                    }
-                }
-                panel.ensure_tables_loaded(cx);
-                cx.notify();
+                panel.apply_vault_outcome(token, outcome, cx)
             });
         })
         .detach();
@@ -692,6 +770,7 @@ impl DatabasePanel {
         self.allow_unlock_next = id.starts_with("vault:");
         self.synced_sql = None;
         self.ensure_tables_loaded(cx);
+        self.deliver_pending(cx);
         cx.notify();
     }
 
@@ -762,6 +841,7 @@ impl DatabasePanel {
             save_store(&self.store);
         }
         self.synced_sql = None;
+        self.deliver_pending(cx);
         self.sync_inputs(window, cx);
         self.ensure_tables_loaded(cx);
         cx.notify();
@@ -786,6 +866,7 @@ impl DatabasePanel {
                 self.ensure_columns_loaded(&connection, &table, cx);
             }
         }
+        self.deliver_pending(cx);
         cx.notify();
     }
 

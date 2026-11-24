@@ -1221,12 +1221,16 @@ impl ConnApp {
             .urls
             .insert(environment_id.clone(), config.http_base_url.to_string());
         self.linked.shells.ensure(&environment_id, &label);
+        let device_name = self.device_name();
         if let Some(set) = self.linked.set.as_mut() {
+            // Its threads' agents drive their panels here too (`startAgentPanelRequests`
+            // follows every connected environment).
             set.connect(EnvironmentTarget {
                 environment_id,
                 label,
                 config,
-            });
+            })
+            .subscribe_panel_requests(Some(device_name));
         }
     }
 
@@ -1390,9 +1394,7 @@ impl ConnApp {
                 false
             }
             ClientEvent::PanelRequest(request) => {
-                if request.files_action.is_some()
-                    && let Some(origin) = self.linked_connection(&environment_id)
-                {
+                if let Some(origin) = self.linked_connection(&environment_id) {
                     self.dispatch_agent_panel_request(request, origin, cx);
                 }
                 false

@@ -131,6 +131,25 @@ async fn unborn_head_counts_net_changes_from_the_empty_tree() {
     );
 }
 
+/// T3's `isMissingGitCwdError`: a removed worktree reads as no repository. No git starts in
+/// it, so nothing fails with "failed to start".
+#[tokio::test]
+async fn a_missing_folder_reads_as_no_repository() {
+    let fx = Fixture::new("missing-cwd");
+    let gone = fx.work.join("removed-worktree");
+    let local = status::local_status(&gone).await.unwrap();
+    assert!(!local.is_repo, "local status");
+    assert!(status::remote_status(&gone).await.unwrap().is_none());
+    status::fetch_upstream_remote(&gone)
+        .await
+        .expect("a fetch in a missing folder is skipped");
+    assert!(
+        !conn_vcs::checkpoint::is_repository(&gone)
+            .await
+            .expect("the checkpoint probe reads a missing folder as no repository"),
+    );
+}
+
 #[tokio::test]
 async fn remote_status_reads_divergence_after_fetch() {
     let fx = Fixture::new("remote");

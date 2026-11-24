@@ -5438,6 +5438,7 @@ async fn a_reused_thread_runs_in_the_launch_checkout() {
     let db = TempDb::new("launch-reuse-checkout");
     let (engine, _) = open(&db);
     let (a, b) = (db.0.join("checkout-a"), db.0.join("checkout-b"));
+    std::fs::create_dir_all(&b).unwrap();
     let mut thread = create("t-ck", "c-ck");
     thread["worktreePath"] = json!(a.to_string_lossy());
     dispatch(&engine, thread).await;
@@ -7821,10 +7822,12 @@ async fn stream_items(engine: &SqliteEngine, method: &str, input: Value, n: usiz
 async fn orchestration_reads_answer_from_the_store() {
     let db = TempDb::new("reads");
     let (engine, _) = open(&db);
+    let wt = db.0.join("wt").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&wt).unwrap();
     for (thread, title) in [("t1", "Fix the login bug"), ("t2", "Write docs")] {
         let mut c = create(thread, &format!("create-{thread}"));
         c["title"] = json!(title);
-        c["worktreePath"] = json!("/tmp/wt");
+        c["worktreePath"] = json!(wt);
         dispatch(&engine, c).await;
     }
     let mut thread = engine
@@ -7879,7 +7882,7 @@ async fn orchestration_reads_answer_from_the_store() {
     let ids = call(
         &engine,
         "orchestration.getWorktreeThreadIds",
-        json!({"worktreePath": "/tmp/wt"}),
+        json!({"worktreePath": wt}),
     )
     .await
     .unwrap();
@@ -9482,6 +9485,8 @@ async fn the_host_grants_tools_claims_attachments_and_hears_closes() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_workspace_handoff_revokes_the_old_session_tools() {
     let db = TempDb::new("handoff-revokes");
+    let worktree = db.0.join("handoff-worktree").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&worktree).unwrap();
     let provider = Arc::new(FakeProvider::new("claudeAgent"));
     let host = Arc::new(RecordingHost::default());
     let mut config = EngineConfig::new(db.path());
@@ -9505,7 +9510,7 @@ async fn a_workspace_handoff_revokes_the_old_session_tools() {
     dispatch(
         &engine,
         json!({"type": "thread.metadata.update", "commandId": "c3", "threadId": "t1",
-               "worktreePath": "/tmp/handoff-worktree", "expectedWorktreePath": null,
+               "worktreePath": worktree, "expectedWorktreePath": null,
                "continuation": {"messageId": "m-next", "text": "hang"}}),
     )
     .await;
@@ -9525,6 +9530,8 @@ async fn a_workspace_handoff_revokes_the_old_session_tools() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_handoff_on_a_shared_process_keeps_and_reuses_the_tools() {
     let db = TempDb::new("handoff-shared");
+    let worktree = db.0.join("handoff-worktree").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&worktree).unwrap();
     let provider = Arc::new(FakeProvider::new("claudeAgent").with_shared_runtime());
     let host = Arc::new(RecordingHost::default());
     let mut config = EngineConfig::new(db.path());
@@ -9554,7 +9561,7 @@ async fn a_handoff_on_a_shared_process_keeps_and_reuses_the_tools() {
     dispatch(
         &engine,
         json!({"type": "thread.metadata.update", "commandId": "c3", "threadId": "t1",
-               "worktreePath": "/tmp/handoff-worktree", "expectedWorktreePath": null,
+               "worktreePath": worktree, "expectedWorktreePath": null,
                "continuation": {"messageId": "m-next", "text": "go on"}}),
     )
     .await;

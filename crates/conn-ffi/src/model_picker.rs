@@ -105,7 +105,7 @@ pub(crate) fn build_model_picker(
             }
             let default_expanded = PRIMARY_DRIVERS.contains(&group.driver.as_str())
                 || group.models.iter().any(applied);
-            let overridden = input.toggled.iter().any(|key| *key == group.instance_id);
+            let overridden = input.toggled.contains(&group.instance_id);
             let collapsed = !narrowed && (default_expanded == overridden);
             Some(FfiModelPickerSection {
                 instance_id: group.instance_id.clone(),

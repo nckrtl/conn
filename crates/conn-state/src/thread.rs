@@ -580,8 +580,8 @@ impl ThreadState {
         self.approval_details.get(entry_id)
     }
 
-    /// The thread's current record (model, provider, project, worktree), once a projection
-    /// arrived. Thread-level events keep it current.
+    /// The thread's record once a projection arrived. Only model, provider, project and worktree
+    /// are kept current by events; visit counts and pull-request links may be stale.
     #[must_use]
     pub fn thread(&self) -> Option<&conn_contract::OrchestrationV2AppThread> {
         self.thread.as_deref()

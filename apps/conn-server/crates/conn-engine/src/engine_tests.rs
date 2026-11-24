@@ -15087,6 +15087,8 @@ async fn a_queued_edit_claims_its_new_upload_once() {
     );
 }
 
+const RECORDING: &str = "t1-0b9f6c1e-3c1d-4f7a-9d2e-5a6b7c8d9e0f-webm";
+
 /// `Orchestrator.ts`, `queued-run.edit`: a file an edit drops is removed after the edit commits
 /// (`attachment.cleanup` with `skipReferenced`), unless another message of the thread still
 /// names it.
@@ -15121,18 +15123,30 @@ async fn a_queued_edit_removes_the_files_it_drops() {
                 "toolName": "html_render", "status": "completed", "ordinal": 1,
                 "output": {"htmlRender": {"attachmentId": page, "title": "Page", "height": 100}},
             })))?;
+            // `TurnStartReads.test.ts`: a `preview_recording_stop` result names its WebM.
+            tx.append(crate::store::Draft::new("t1", "turn-item.updated", json!({
+                "id": "recording", "threadId": "t1", "runId": "run:t1:1", "type": "dynamic_tool",
+                "toolName": "mcp__conn__preview_recording_stop", "status": "completed",
+                "ordinal": 2, "input": {},
+                "output": [{"type": "text", "text": json!({"id": RECORDING, "mimeType": "video/webm"}).to_string()}],
+            })))?;
             tx.commit(None)
         })
         .await
         .unwrap();
     let queue = json!({"type": "queue_after_active"});
     let mut first = message_with("t1", "c3", "first", queue.clone(), None);
-    first["attachments"] = json!([text_file("pending-1"), text_file(page)]);
+    first["attachments"] = json!([
+        text_file("pending-1"),
+        text_file(page),
+        text_file(RECORDING)
+    ]);
     dispatch(&engine, first).await;
     let mut second = message_with("t1", "c4", "second", queue, None);
     second["attachments"] = json!([text_file("t1-1")]);
     dispatch(&engine, second).await;
-    // The second message still names the file, and the timeline shows the page: both stay.
+    // The second message still names the file, and the timeline shows the page and the
+    // recording: all stay.
     let edit = |command: &str, run: &str, attachments: Value| {
         json!({"type": "queued-run.edit", "commandId": command, "threadId": "t1", "runId": run,
             "text": "edited", "attachments": attachments})
@@ -15226,6 +15240,89 @@ async fn editing_a_declined_steer_updates_its_timeline_item() {
     assert_eq!(ids(message), [json!("t1-b")]);
     assert_eq!(ids(item), [json!("t1-b")]);
     assert_eq!(item["text"], "steered");
+}
+
+/// `Orchestrator.ts`, `queued-run.edit` and the queued run's start: a queued message's
+/// `user_message` item is the one with its `messageId`, whatever its id. A thread imported from
+/// the TypeScript server keeps that server's item ids.
+#[tokio::test(flavor = "current_thread")]
+async fn an_imported_queued_items_edit_and_start_find_it_by_message() {
+    let db = TempDb::new("edit-imported-item");
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let mut queued = message_with(
+        "t1",
+        "c3",
+        "later",
+        json!({"type": "queue_after_active"}),
+        None,
+    );
+    queued["attachments"] = json!([text_file("pending-a")]);
+    dispatch(&engine, queued).await;
+    // The item as the importer keeps it, under the TypeScript server's id.
+    let imported = "turn-item:message:imported-c3";
+    engine
+        .inner()
+        .db(move |store| {
+            let mut tx = store.tx()?;
+            tx.append(crate::store::Draft::new(
+                "t1",
+                "turn-item.updated",
+                json!({
+                    "id": imported, "threadId": "t1", "runId": "run:t1:2", "type": "user_message",
+                    "messageId": "message:c3", "text": "later", "ordinal": 0, "status": "completed",
+                    "attachments": [text_file("t1-a")],
+                }),
+            ))?;
+            tx.commit(None)
+        })
+        .await
+        .unwrap();
+    dispatch(
+        &engine,
+        json!({"type": "queued-run.edit", "commandId": "c4", "threadId": "t1",
+            "runId": "run:t1:2", "text": "edited", "attachments": [text_file("pending-b")]}),
+    )
+    .await;
+    let items = |p: &Value| -> Vec<(Value, Value)> {
+        p["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["type"] == "user_message" && i["messageId"] == "message:c3")
+            .map(|i| (i["id"].clone(), i["attachments"][0]["id"].clone()))
+            .collect()
+    };
+    let p = projection(&engine, "t1").await;
+    assert_eq!(items(&p), [(json!(imported), json!("t1-b"))]);
+    // The run starts with that same item, not a second one under the Conn Server's id.
+    dispatch(
+        &engine,
+        json!({"type": "run.interrupt", "commandId": "c5", "threadId": "t1", "runId": "run:t1:1"}),
+    )
+    .await;
+    for _ in 0..2 {
+        until_run_ends(&mut thread).await;
+    }
+    assert_eq!(
+        items(&projection(&engine, "t1").await),
+        [(json!(imported), json!("t1-b"))]
+    );
 }
 
 /// `ThreadMessageIntake.test.ts`, "claims question uploads and passes readable paths": each

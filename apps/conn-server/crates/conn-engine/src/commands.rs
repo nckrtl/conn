@@ -1805,26 +1805,24 @@ fn start_next_queued_as(
     }
     if let Some(message) = message {
         let item_id = format!("turn-item:{message_id}");
-        let mut item = tx
-            .entity(thread_id, "turnItems", &item_id)?
-            .unwrap_or_else(|| {
-                json!({
-                    "id": item_id,
-                    "threadId": thread_id,
-                    "providerTurnId": null,
-                    "nativeItemRef": null,
-                    "parentItemId": null,
-                    "ordinal": 0,
-                    "title": null,
-                    "startedAt": now,
-                    "createdBy": message["createdBy"],
-                    "creationSource": message["creationSource"],
-                    "type": "user_message",
-                    "messageId": message_id,
-                    "text": message["text"],
-                    "attachments": message["attachments"],
-                })
-            });
+        let mut item = message_turn_item(tx, thread_id, &message_id)?.unwrap_or_else(|| {
+            json!({
+                "id": item_id,
+                "threadId": thread_id,
+                "providerTurnId": null,
+                "nativeItemRef": null,
+                "parentItemId": null,
+                "ordinal": 0,
+                "title": null,
+                "startedAt": now,
+                "createdBy": message["createdBy"],
+                "creationSource": message["creationSource"],
+                "type": "user_message",
+                "messageId": message_id,
+                "text": message["text"],
+                "attachments": message["attachments"],
+            })
+        });
         if message["context"].is_object() {
             item["context"] = message["context"].clone();
         }
@@ -2012,11 +2010,7 @@ fn queued_run_edit(tx: &mut Tx<'_>, command: Value) -> Outcome {
     message["updatedAt"] = json!(tx.now());
     let kept = ids(&message["attachments"]);
     // A declined steer already has its timeline item; the run reuses it when it starts.
-    let item_id = format!("turn-item:{message_id}");
-    if let Some(mut item) = tx
-        .entity(&c.thread_id, "turnItems", &item_id)?
-        .filter(|item| item["type"] == "user_message")
-    {
+    if let Some(mut item) = message_turn_item(tx, &c.thread_id, message_id)? {
         item["text"] = message["text"].clone();
         item["attachments"] = message["attachments"].clone();
         if message["context"].is_object() {
@@ -2037,8 +2031,18 @@ fn queued_run_edit(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }])
 }
 
+/// A message's `user_message` timeline item, found by its `messageId` as T3 finds it: a
+/// thread imported from the TypeScript server keeps that server's item ids.
+fn message_turn_item(tx: &Tx<'_>, thread_id: &str, message_id: &str) -> StoreResult<Option<Value>> {
+    Ok(tx
+        .entities_where(thread_id, "turnItems", "messageId", message_id)?
+        .into_iter()
+        .find(|item| item["type"] == "user_message"))
+}
+
 /// `getThreadAttachmentIds` with `includeShownByLiveFork`: every file a message, a question's
-/// answer, a tool result (an `html_render` page, an MCP App snapshot) or a waiting guest
+/// answer, a tool result (an `html_render` page, an MCP App snapshot, a preview recording) or a
+/// waiting guest
 /// message of the thread names.
 pub(crate) fn referenced_attachment_ids(
     tx: &Tx<'_>,
@@ -2050,6 +2054,9 @@ pub(crate) fn referenced_attachment_ids(
             .or_else(|| crate::tool_output::mcp_app_from_tool_item(&item));
         if let Some(id) = shown.as_ref().and_then(|r| r["attachmentId"].as_str()) {
             referenced.insert(id.to_owned());
+        }
+        if let Some(id) = crate::tool_output::preview_recording_id_from_tool_item(&item) {
+            referenced.insert(id);
         }
     }
     let mut add = |list: &Value| {

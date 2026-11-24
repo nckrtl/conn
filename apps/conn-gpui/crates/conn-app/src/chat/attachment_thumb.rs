@@ -2,20 +2,21 @@
 //!
 //! Web Conn shows the image itself (`ComposerAttachmentStrip.tsx`, `TimelineUserMessageRow.tsx`:
 //! `object-cover` in a rounded, bordered cell). A staged file already has its bytes; a sent
-//! message holds only the attachment id, so [`AttachmentImageState`] downloads it through
-//! `assets.createUrl` and a signed `GET` (`Connection::fetch_attachment_bytes`).
+//! message holds only the attachment id, so the chat downloads it through `assets.createUrl`
+//! and a signed `GET` (`Connection::fetch_attachment_bytes`) and keeps a thumbnail decoded at
+//! tile size ([`super::thumb_cache`]).
 
 use std::sync::Arc;
 
-use conn_client::Connection;
 use conn_theme::Tokens;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, Image, ImageFormat, ImageSource, InteractiveElement as _,
-    IntoElement as _, ObjectFit, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Window, div, img, px,
+    AnyElement, App, ClickEvent, Image, ImageFormat, ImageSource, InteractiveElement as _,
+    IntoElement as _, ObjectFit, ParentElement as _, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
 };
 
 use super::icons;
+use super::thumb_cache::{TargetPx, decode_thumbnail, grid_tile_px, thumbnail_supported};
 use crate::a11y::ConnA11yExt as _;
 use crate::theme::{hsla, hsla_alpha};
 
@@ -65,47 +66,87 @@ fn box_height(width: f32, aspect: Option<f32>) -> f32 {
 /// The box of a single image until its own ratio is known.
 const LOADING_ASPECT: f32 = 4.0 / 3.0;
 
-/// Where one downloaded attachment image stands.
-#[derive(Clone)]
-pub(super) enum AttachmentImageLoad {
-    Loading,
-    /// The picture and its width over height, when the header told.
-    Ready(Arc<Image>, Option<f32>),
+/// A sent image in the chat's thumbnail cache.
+pub(super) enum SentImage {
+    /// The download or decode with this request number is running.
+    Loading(u64),
+    /// Pixels decoded at tile size, and the picture's width over height.
+    Ready(Arc<RenderImage>, Option<f32>),
+    /// A format the chat does not thumbnail (GIF, SVG, BMP, TIFF): GPUI decodes the original.
+    Original(Arc<Image>, Option<f32>),
     Failed,
 }
 
-/// Holds the download of one attachment image. The chat observes it and repaints when it ends.
-pub(super) struct AttachmentImageState {
-    pub(super) load: AttachmentImageLoad,
+impl SentImage {
+    /// What to paint, once there is something.
+    pub(super) fn source(&self) -> Option<(ImageSource, Option<f32>)> {
+        match self {
+            Self::Ready(image, aspect) => Some((ImageSource::Render(image.clone()), *aspect)),
+            Self::Original(image, aspect) => Some((ImageSource::Image(image.clone()), *aspect)),
+            Self::Loading(_) | Self::Failed => None,
+        }
+    }
+
+    /// Frees the GPU texture or GPUI's decoded copy once the cache let this go. Deferred, so
+    /// a window that is painting right now is back in the app and loses its texture too.
+    pub(super) fn release(self, cx: &mut App) {
+        match self {
+            Self::Ready(image, _) => cx.defer(move |cx| cx.drop_image(image, None)),
+            Self::Original(image, _) => {
+                cx.defer(move |cx| ImageSource::Image(image).remove_asset(cx));
+            }
+            Self::Loading(_) | Self::Failed => {}
+        }
+    }
 }
 
-impl AttachmentImageState {
-    pub(super) fn fetch(
-        connection: Connection,
-        attachment_id: String,
-        mime_type: String,
-        cx: &mut Context<'_, Self>,
-    ) -> Self {
-        cx.spawn(async move |this, cx| {
-            let result = connection.fetch_attachment_bytes(&attachment_id).await;
-            let load = match result {
-                Ok(bytes) => {
-                    let aspect = image_aspect_ratio(&bytes);
-                    preview_image(&mime_type, bytes).map_or(AttachmentImageLoad::Failed, |image| {
-                        AttachmentImageLoad::Ready(image, aspect)
-                    })
-                }
-                Err(_) => AttachmentImageLoad::Failed,
-            };
-            let _ = this.update(cx, |state, cx| {
-                state.load = load;
-                cx.notify();
-            });
-        })
-        .detach();
-        Self {
-            load: AttachmentImageLoad::Loading,
-        }
+/// Turns downloaded `bytes` into a cache entry and its cost in bytes. Slow: run it off the UI
+/// thread.
+pub(super) fn load_sent_image(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    target: TargetPx,
+) -> (SentImage, usize) {
+    if thumbnail_supported(mime_type) {
+        return match decode_thumbnail(&bytes, target) {
+            Some(thumb) => {
+                let cost = thumb.byte_len();
+                let image = RenderImage::new(vec![image::Frame::new(thumb.pixels)]);
+                (SentImage::Ready(Arc::new(image), thumb.aspect), cost)
+            }
+            None => (SentImage::Failed, 0),
+        };
+    }
+    let aspect = image_aspect_ratio(&bytes);
+    let cost = bytes.len();
+    match preview_image(mime_type, bytes) {
+        Some(image) => (SentImage::Original(image, aspect), cost),
+        None => (SentImage::Failed, 0),
+    }
+}
+
+/// The widest a sent bubble gets: 80% of the capped chat column. Thumbnails decode for this
+/// width, so resizing the window never decodes again.
+const BUBBLE_MAX_PX: f32 = super::CHAT_CONTENT_MAX_WIDTH_PX * 0.8;
+
+/// The pixel size to decode a gallery tile at, in a gallery of `columns` at `scale`.
+pub(super) fn gallery_tile_target(columns: usize, scale: f32) -> TargetPx {
+    let (width, height) = grid_tile_px(
+        BUBBLE_MAX_PX,
+        GALLERY_INSET_PX,
+        columns,
+        GALLERY_TILE_ASPECT,
+    );
+    TargetPx::from_logical(width, height, scale)
+}
+
+/// The pixel size to decode a queued or file bubble's image at: one image takes the bubble's
+/// width, several take `cell` logical px each.
+pub(super) fn chip_target(single: bool, cell: (f32, f32), scale: f32) -> TargetPx {
+    if single {
+        TargetPx::from_logical(BUBBLE_MAX_PX, 0.0, scale)
+    } else {
+        TargetPx::from_logical(cell.0, cell.1, scale)
     }
 }
 
@@ -123,7 +164,7 @@ pub(super) enum ThumbFit {
 /// own `radius`: GPUI's `overflow_hidden` clips to the rectangle, not to rounded corners (#342).
 /// The parent sets border and `overflow_hidden`, and the size for [`ThumbFit::Cover`].
 pub(super) fn thumbnail(
-    image: Option<Arc<Image>>,
+    image: Option<ImageSource>,
     tokens: &Tokens,
     radius: f32,
     fit: ThumbFit,
@@ -139,7 +180,7 @@ pub(super) fn thumbnail(
             .into_any_element()
     };
     match (image, fit) {
-        (Some(image), ThumbFit::Cover) => img(ImageSource::Image(image))
+        (Some(image), ThumbFit::Cover) => img(image)
             .size_full()
             .rounded(px(radius))
             .object_fit(ObjectFit::Cover)
@@ -152,7 +193,7 @@ pub(super) fn thumbnail(
             .w_full()
             .aspect_ratio(aspect)
             .child(
-                img(ImageSource::Image(image))
+                img(image)
                     .size_full()
                     .rounded(px(radius))
                     .object_fit(ObjectFit::Contain)
@@ -160,7 +201,7 @@ pub(super) fn thumbnail(
             )
             .into_any_element(),
         // A format whose size we cannot read: the picture's own layout.
-        (Some(image), ThumbFit::FullWidth(None)) => img(ImageSource::Image(image))
+        (Some(image), ThumbFit::FullWidth(None)) => img(image)
             .w_full()
             .rounded(px(radius))
             .object_fit(ObjectFit::Contain)
@@ -258,7 +299,7 @@ pub(super) fn runs_by<T>(
 /// round corners. The tile paints no border, and the picture is absolutely placed so its
 /// natural size never feeds the grid row height.
 pub(super) fn gallery_tile(
-    image: Option<Arc<Image>>,
+    image: Option<ImageSource>,
     tokens: &Tokens,
     radii: TileRadii,
 ) -> AnyElement {
@@ -279,7 +320,7 @@ pub(super) fn gallery_tile(
             .into_any_element()
     };
     match image {
-        Some(image) => img(ImageSource::Image(image))
+        Some(image) => img(image)
             .absolute()
             .inset_0()
             .size_full()
@@ -340,7 +381,12 @@ pub(super) fn staged_image_chip(
             hsla_alpha(tokens.border, 0.80)
         })
         // 8px outer radius, so the picture inside the 1px border takes 7px.
-        .child(thumbnail(Some(image), tokens, 7.0, ThumbFit::Cover));
+        .child(thumbnail(
+            Some(ImageSource::Image(image)),
+            tokens,
+            7.0,
+            ThumbFit::Cover,
+        ));
     if uploading || failed {
         chip = chip.child(
             div()

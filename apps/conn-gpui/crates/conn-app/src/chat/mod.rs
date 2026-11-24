@@ -28,6 +28,7 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod spinner;
+mod thumb_cache;
 mod toc;
 
 use std::collections::{HashMap, HashSet};
@@ -284,10 +285,15 @@ pub(crate) struct ChatView {
     composer_height: Rc<std::cell::Cell<f32>>,
     /// The `composer_height` the last row was measured with.
     composer_height_applied: f32,
-    /// Downloaded image attachments of sent messages, by attachment id (filled while rendering).
-    attachment_images: std::cell::RefCell<
-        HashMap<String, (Entity<attachment_thumb::AttachmentImageState>, Subscription)>,
+    /// Thumbnails of sent image attachments, by attachment id and decode size (filled while
+    /// rendering, bounded by [`thumb_cache::THUMB_BUDGET_BYTES`]).
+    attachment_thumbs: std::cell::RefCell<
+        thumb_cache::ByteLru<(String, thumb_cache::TargetPx), attachment_thumb::SentImage>,
     >,
+    /// Number of the next thumbnail load, so a stale load never fills a newer entry.
+    next_thumb_request: std::cell::Cell<u64>,
+    /// The window's scale factor while timeline rows render; thumbnails decode at it.
+    thumb_scale: f32,
     /// The latest run when it was interrupted (`You stopped after ...`).
     interrupted_run_id: Option<String>,
     /// Copy button currently showing its check (`MessageCopyButton`).
@@ -506,7 +512,11 @@ impl ChatView {
             link_preview: link_preview::LinkPreview::default(),
             composer_height: Rc::new(std::cell::Cell::new(0.0)),
             composer_height_applied: 0.0,
-            attachment_images: std::cell::RefCell::new(HashMap::new()),
+            attachment_thumbs: std::cell::RefCell::new(thumb_cache::ByteLru::new(
+                thumb_cache::THUMB_BUDGET_BYTES,
+            )),
+            next_thumb_request: std::cell::Cell::new(0),
+            thumb_scale: 1.0,
             interrupted_run_id: None,
             copied_message_key: None,
             _copy_reset: None,
@@ -536,7 +546,9 @@ impl ChatView {
     ) {
         self.connected = connection.is_some();
         self.connection = connection.clone();
-        self.attachment_images.borrow_mut().clear();
+        for image in self.attachment_thumbs.get_mut().clear() {
+            image.release(cx);
+        }
         self.composer
             .update(cx, |c, cx| c.set_connection(connection, cx));
         cx.notify();
@@ -3538,7 +3550,10 @@ impl Render for ChatView {
             let list_state = self.list_state.clone();
             let virtual_list = list(
                 list_state.clone(),
-                cx.processor(|this, ix: usize, _window, cx| this.render_virtual_item(ix, cx)),
+                cx.processor(|this, ix: usize, window, cx| {
+                    this.thumb_scale = window.scale_factor();
+                    this.render_virtual_item(ix, cx)
+                }),
             )
             .size_full()
             .min_h_0();

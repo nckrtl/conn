@@ -261,33 +261,61 @@ impl ChatView {
         )
     }
 
-    /// The downloaded image of a sent attachment, once it arrived. The first call starts the
-    /// download; the chat repaints when it ends.
+    /// The thumbnail of a sent attachment at `target` px, once it is decoded. The first call
+    /// downloads and decodes it off the UI thread; the chat repaints when it ends.
     fn attachment_image(
         &self,
         image: &conn_contract::ChatImageAttachment,
+        target: super::thumb_cache::TargetPx,
         cx: &mut Context<'_, Self>,
-    ) -> Option<(std::sync::Arc<gpui_kit::Image>, Option<f32>)> {
-        let connection = self.connection.clone()?;
-        let mut images = self.attachment_images.borrow_mut();
-        let (state, _) = images.entry(image.id.clone()).or_insert_with(|| {
-            let state = cx.new(|cx| {
-                super::attachment_thumb::AttachmentImageState::fetch(
-                    connection,
-                    image.id.clone(),
-                    image.mime_type.clone(),
-                    cx,
-                )
-            });
-            let subscription = cx.observe(&state, |_, _, cx| cx.notify());
-            (state, subscription)
-        });
-        match &state.read(cx).load {
-            super::attachment_thumb::AttachmentImageLoad::Ready(image, aspect) => {
-                Some((image.clone(), *aspect))
-            }
-            _ => None,
+    ) -> Option<(gpui_kit::ImageSource, Option<f32>)> {
+        use super::attachment_thumb::{SentImage, load_sent_image};
+        let key = (image.id.clone(), target);
+        let mut thumbs = self.attachment_thumbs.borrow_mut();
+        if let Some(entry) = thumbs.get(&key) {
+            return entry.source();
         }
+        let connection = self.connection.clone()?;
+        let request = self.next_thumb_request.get();
+        self.next_thumb_request.set(request + 1);
+        for old in thumbs.insert(key.clone(), SentImage::Loading(request), 0) {
+            old.release(cx);
+        }
+        drop(thumbs);
+        let (id, mime_type) = (image.id.clone(), image.mime_type.clone());
+        cx.spawn(async move |this, cx| {
+            let loaded = match connection.fetch_attachment_bytes(&id).await {
+                Ok(bytes) => {
+                    cx.background_executor()
+                        .spawn(async move { load_sent_image(&mime_type, bytes, target) })
+                        .await
+                }
+                Err(_) => (SentImage::Failed, 0),
+            };
+            let _ = this.update(cx, |view, cx| view.finish_thumb(key, request, loaded, cx));
+        })
+        .detach();
+        None
+    }
+
+    /// Stores a finished thumbnail load, unless a newer load or a reconnect replaced it.
+    fn finish_thumb(
+        &mut self,
+        key: (String, super::thumb_cache::TargetPx),
+        request: u64,
+        (image, cost): (super::attachment_thumb::SentImage, usize),
+        cx: &mut Context<'_, Self>,
+    ) {
+        use super::attachment_thumb::SentImage;
+        let thumbs = self.attachment_thumbs.get_mut();
+        if !matches!(thumbs.peek(&key), Some(SentImage::Loading(current)) if *current == request) {
+            image.release(cx);
+            return;
+        }
+        for old in thumbs.insert(key, image, cost) {
+            old.release(cx);
+        }
+        cx.notify();
     }
 
     /// Attachment chips/thumbnails shown in queued bubbles and in sent bubbles with files only
@@ -319,8 +347,10 @@ impl ChatView {
             let chip_id = (SharedString::from(format!("att-{key}")), idx);
             let chip = match att {
                 conn_contract::ChatAttachment::Image(img) => {
-                    use super::attachment_thumb::{ThumbFit, thumbnail};
-                    let (loaded, aspect) = match self.attachment_image(img, cx) {
+                    use super::attachment_thumb::{ThumbFit, chip_target, thumbnail};
+                    let target =
+                        chip_target(image_count == 1, (image_w, image_h), self.thumb_scale);
+                    let (loaded, aspect) = match self.attachment_image(img, target, cx) {
                         Some((image, aspect)) => (Some(image), aspect),
                         None => (None, None),
                     };
@@ -453,7 +483,10 @@ impl ChatView {
         columns: usize,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        use super::attachment_thumb::{GALLERY_INSET_PX, gallery_cell, gallery_tile, tile_radii};
+        use super::attachment_thumb::{
+            GALLERY_INSET_PX, gallery_cell, gallery_tile, gallery_tile_target, tile_radii,
+        };
+        let target = gallery_tile_target(columns, self.thumb_scale);
         let mut grid = div()
             .grid()
             .grid_cols(columns as u16)
@@ -465,7 +498,9 @@ impl ChatView {
                 continue;
             };
             let idx = start + offset;
-            let loaded = self.attachment_image(image, cx).map(|(image, _)| image);
+            let loaded = self
+                .attachment_image(image, target, cx)
+                .map(|(image, _)| image);
             let radii = tile_radii(offset, run.len(), columns);
             let cell = gallery_cell((SharedString::from(format!("att-{key}")), idx))
                 .conn_tooltip(image.name.clone(), &self.tokens)

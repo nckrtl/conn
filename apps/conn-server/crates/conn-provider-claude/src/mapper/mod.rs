@@ -10,7 +10,7 @@ mod presentation;
 mod roster;
 mod subagents;
 pub(crate) use subagents::transcript_answers;
-pub use subagents::{MemberAnswers, MemberTranscript};
+pub use subagents::{MemberAnswers, MemberTranscript, TranscriptCursor};
 mod wakes;
 mod workflows;
 

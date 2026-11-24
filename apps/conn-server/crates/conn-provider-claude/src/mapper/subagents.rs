@@ -1231,9 +1231,12 @@ fn child_message(
     }
 }
 
-/// Transcript answers one member import shows at most. With the excerpt, the ordinals it
-/// reserves.
-const MEMBER_TRANSCRIPT_MESSAGES: u32 = 64;
+/// `WORKFLOW_MEMBER_TRANSCRIPT_FLUSH_MS`: how long Claude may take to flush a settled member's
+/// last transcript line.
+const MEMBER_TRANSCRIPT_FLUSH_MS: i64 = 500;
+
+/// `transcriptReadAttempts`: reads of one settled attempt while its coordinator still runs.
+const MEMBER_TRANSCRIPT_LIVE_READS: u64 = 3;
 
 /// `AGENT_ID_PATTERN` in `workflowAgentTranscript.ts`.
 fn valid_agent_id(id: &str) -> bool {
@@ -1243,33 +1246,49 @@ fn valid_agent_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// `WorkflowAgentTranscriptCursor`: the offset after the last whole line read, and the file's
+/// identity (`dev`, `ino`). A replaced or shorter file is read from its start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptCursor {
+    pub offset: u64,
+    pub identity: Option<(u64, u64)>,
+}
+
 /// A settled workflow member whose transcript the session reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberTranscript {
     pub dir: std::path::PathBuf,
     pub agent_id: String,
+    /// Where this attempt's last read stopped.
+    pub cursor: TranscriptCursor,
+    /// The session waits this long before it reads: the rest of the flush window.
+    pub delay: Option<std::time::Duration>,
     task_id: String,
     index: u64,
     attempt: u64,
     child: String,
     root: String,
-    first_ordinal: u32,
+    coordinator_ended: bool,
+    /// What is left of the flush window after the member settled.
+    flush_left_ms: u64,
     /// The progress excerpt's item id and text.
     excerpt: Option<(String, String)>,
 }
 
-/// A member transcript's answers, parsed off the runtime thread.
+/// The lines a member transcript gained since its cursor, parsed off the runtime thread.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemberAnswers {
-    /// The last assistant answers (line uuid, text), oldest first.
+    /// The assistant answers (line uuid, text), oldest first.
     answers: Vec<(String, String)>,
-    /// The byte cap or the answer cap left earlier lines out.
-    incomplete: bool,
+    /// `isClaudeTranscriptTurnEnd` of the last conversation line, if one was read.
+    turn_ended: Option<bool>,
+    cursor: TranscriptCursor,
 }
 
 impl<E: Env> Mapper<E> {
-    /// Shows a settled member's transcript answers. The progress excerpt comes first when the
-    /// transcript showed nothing (`None`: it could not be read) or only part of itself.
+    /// Shows what a settled member's transcript gained. The progress excerpt shows once, and
+    /// only when the attempt showed no transcript text: the transcript could not be read
+    /// (`None`), or the flush window passed without an answer.
     pub fn member_transcript(
         &mut self,
         member: MemberTranscript,
@@ -1277,72 +1296,115 @@ impl<E: Env> Mapper<E> {
     ) -> Vec<Out> {
         let now = self.env.now();
         let mut out = Vec::new();
-        let read = read.unwrap_or_default();
-        let excerpt = member
-            .excerpt
-            .filter(|_| read.answers.is_empty() || read.incomplete);
-        let shown = excerpt.is_some() || !read.answers.is_empty();
-        let mut ordinals = member.first_ordinal..;
-        if let Some((item, result)) = excerpt {
+        let Some(state) = self
+            .subagents
+            .by_task
+            .get_mut(&member.task_id)
+            .and_then(|sub| sub.members.get_mut(&member.index))
+            .filter(|state| state["attempt"].as_u64() == Some(member.attempt))
+        else {
+            return out;
+        };
+        let mut ordinal = state["nextOrdinal"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(100);
+        let read_ok = read.is_some();
+        if let Some(read) = read {
+            // `nativeItemId: line.uuid`: a retry that reads the same lines updates them.
+            for (uuid, text) in &read.answers {
+                ordinal = ordinal.saturating_add(1);
+                child_message(
+                    &member.child,
+                    &member.root,
+                    uuid,
+                    "assistant",
+                    text,
+                    ordinal,
+                    None,
+                    None,
+                    &now,
+                    &mut out,
+                );
+                state["textShown"] = json!(true);
+            }
+            if let Some(ended) = read.turn_ended {
+                state["turnEnded"] = json!(ended);
+            }
+            state["cursor"] = json!(read.cursor);
+        }
+        state["nextOrdinal"] = json!(ordinal);
+        let text_shown = state["textShown"] == true;
+        let result_shown = state["resultShown"] == true;
+        let awaiting_reply = read_ok && state["turnEnded"] != true && !result_shown;
+        // The coordinator sends no more frames: wait out the flush once before the excerpt.
+        if member.coordinator_ended
+            && awaiting_reply
+            && member.excerpt.is_some()
+            && member.flush_left_ms > 0
+        {
+            let cursor = serde_json::from_value(state["cursor"].clone()).unwrap_or_default();
+            out.push(Out::ReadMemberTranscript(MemberTranscript {
+                cursor,
+                delay: Some(std::time::Duration::from_millis(member.flush_left_ms)),
+                flush_left_ms: 0,
+                ..member
+            }));
+            return out;
+        }
+        if !text_shown
+            && !result_shown
+            && (!read_ok || member.flush_left_ms == 0)
+            && let Some((item, result)) = &member.excerpt
+        {
+            ordinal = ordinal.saturating_add(1);
             child_message(
                 &member.child,
                 &member.root,
-                &item,
+                item,
                 "assistant",
                 &format!("Partial answer from workflow progress:\n\n{result}"),
-                ordinals.next().unwrap_or(member.first_ordinal),
-                None,
-                None,
-                &now,
-                &mut out,
-            );
-        }
-        // `nativeItemId: line.uuid`: a retry that reads the same lines updates them.
-        for ((uuid, text), ordinal) in read.answers.iter().zip(ordinals) {
-            child_message(
-                &member.child,
-                &member.root,
-                uuid,
-                "assistant",
-                text,
                 ordinal,
                 None,
                 None,
                 &now,
                 &mut out,
             );
+            state["nextOrdinal"] = json!(ordinal);
+            state["resultShown"] = json!(true);
         }
-        if shown
-            && let Some(state) = self
-                .subagents
-                .by_task
-                .get_mut(&member.task_id)
-                .and_then(|sub| sub.members.get_mut(&member.index))
-                .filter(|state| state["attempt"].as_u64() == Some(member.attempt))
-        {
-            state["answerShown"] = json!(true);
+        if read_ok && text_shown && member.coordinator_ended {
+            state["finalRead"] = json!(true);
         }
         out
     }
 }
 
-/// The assistant answers in a member transcript's JSON lines, one per line with text
-/// (`projectSubagentTranscriptLine`: assistant lines with a `uuid`, not `isMeta`, their text
-/// blocks joined). Keeps the last [`MEMBER_TRANSCRIPT_MESSAGES`], so the final answer stays.
-/// `truncated`: the read started past the file's start.
-pub(crate) fn transcript_answers(contents: &str, truncated: bool) -> MemberAnswers {
-    let mut answers = std::collections::VecDeque::new();
-    let mut incomplete = truncated;
+/// The lines of a member transcript read from `cursor`: its assistant answers, one per line
+/// with text (`projectSubagentTranscriptLine`: lines with a `uuid`, not `isMeta`, their text
+/// blocks joined), and whether its last conversation line ended the turn.
+pub(crate) fn transcript_answers(contents: &str, cursor: TranscriptCursor) -> MemberAnswers {
+    let mut read = MemberAnswers {
+        cursor,
+        ..MemberAnswers::default()
+    };
     for line in contents.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let Some(uuid) = entry["uuid"].as_str() else {
-            continue;
-        };
-        if entry["type"] != "assistant" || entry["isMeta"] == true {
+        if entry["uuid"].as_str().is_none()
+            || entry["isMeta"] == true
+            || !matches!(entry["type"].as_str(), Some("assistant" | "user"))
+        {
             continue;
         }
+        let assistant = entry["type"] == "assistant";
+        read.turn_ended = Some(
+            assistant
+                && entry["message"]["stop_reason"]
+                    .as_str()
+                    .is_some_and(|r| r != "tool_use"),
+        );
         let text: String = entry["message"]["content"]
             .as_array()
             .into_iter()
@@ -1350,19 +1412,14 @@ pub(crate) fn transcript_answers(contents: &str, truncated: bool) -> MemberAnswe
             .filter(|b| b["type"] == "text")
             .filter_map(|b| b["text"].as_str())
             .collect();
-        if text.is_empty() {
-            continue;
+        if assistant
+            && !text.is_empty()
+            && let Some(uuid) = entry["uuid"].as_str()
+        {
+            read.answers.push((uuid.to_owned(), text));
         }
-        if answers.len() == MEMBER_TRANSCRIPT_MESSAGES as usize {
-            answers.pop_front();
-            incomplete = true;
-        }
-        answers.push_back((uuid.to_owned(), text));
     }
-    MemberAnswers {
-        answers: answers.into(),
-        incomplete,
-    }
+    read
 }
 
 fn project_workflow_members(sub: &mut Sub, coordinator: &Value, now: &str, out: &mut Vec<Out>) {
@@ -1457,10 +1514,39 @@ fn project_workflow_members(sub: &mut Sub, coordinator: &Value, now: &str, out: 
             .and_then(|p| p["nextOrdinal"].as_u64())
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(100);
-        // Whether this attempt's child shows an answer: its transcript's or the excerpt.
-        let answer_shown = !restarted && previous.is_some_and(|p| p["answerShown"] == true);
-        let mut state = json!({"status":status,"attempt":attempt,"prompt":prompt,"label":agent["label"],"model":model,"result":agent["result"],"startedAt":started,"completedAt":completed,"createdAt":created,"nextOrdinal":next_ordinal,"answerShown":answer_shown});
-        if previous == Some(&state) {
+        // This attempt's transcript reads: a restart starts them over, and a new agent id
+        // starts its cursor over.
+        let carried = |field: &str| {
+            (!restarted)
+                .then(|| previous.map(|p| p[field].clone()))
+                .flatten()
+                .unwrap_or(Value::Null)
+        };
+        let cursor = if previous.is_some_and(|p| p["agentId"] != agent["agentId"]) {
+            Value::Null
+        } else {
+            carried("cursor")
+        };
+        let flag = |field: &str| carried(field) == true;
+        let reads = carried("reads").as_u64().unwrap_or(0);
+        let (text_shown, result_shown) = (flag("textShown"), flag("resultShown"));
+        let mut state = json!({"status":status,"attempt":attempt,"prompt":prompt,"label":agent["label"],"model":model,"result":agent["result"],"startedAt":started,"completedAt":completed,"createdAt":created,"nextOrdinal":next_ordinal,"agentId":agent["agentId"],"cursor":cursor,"reads":reads,"textShown":text_shown,"resultShown":result_shown,"turnEnded":flag("turnEnded"),"finalRead":flag("finalRead")});
+        let changed = previous != Some(&state);
+        let transcript = coordinator["workflow"]["runHandles"]["transcriptDir"]
+            .as_str()
+            .filter(|dir| std::path::Path::new(dir).is_absolute())
+            .zip(agent["agentId"].as_str())
+            .filter(|(_, id)| valid_agent_id(id));
+        let coordinator_running = coordinator["status"] == "running";
+        // `readTranscript`: a few reads while the coordinator runs, then until a final one.
+        let read = settled
+            && transcript.is_some()
+            && if coordinator_running {
+                reads < MEMBER_TRANSCRIPT_LIVE_READS
+            } else {
+                !flag("finalRead")
+            };
+        if !changed && !read {
             continue;
         }
         if previous.is_none_or(|p| p["label"] != agent["label"] || p["model"] != model) {
@@ -1495,56 +1581,61 @@ fn project_workflow_members(sub: &mut Sub, coordinator: &Value, now: &str, out: 
             );
         }
         let task = json!({"id":node,"threadId":sub.child_thread_id,"runId":null,"parentNodeId":sub.child_root,"origin":"provider_native","createdBy":"agent","driver":DRIVER,"providerInstanceId":sub.parent.instance_id,"providerThreadId":null,"childThreadId":child,"nativeTaskRef":{"driver":DRIVER,"nativeId":key,"strength":"strong"},"prompt":prompt,"title":agent["label"],"model":model,"status":status,"result":agent["result"],"startedAt":started,"completedAt":completed,"updatedAt":now});
-        for (id, thread, parent, kind) in [
-            (
-                &node,
-                sub.child_thread_id.as_str(),
-                json!(sub.child_root),
-                "subagent",
-            ),
-            (&root, child, Value::Null, "root_turn"),
-        ] {
+        if changed {
+            for (id, thread, parent, kind) in [
+                (
+                    &node,
+                    sub.child_thread_id.as_str(),
+                    json!(sub.child_root),
+                    "subagent",
+                ),
+                (&root, child, Value::Null, "root_turn"),
+            ] {
+                emit(
+                    out,
+                    |node| ProviderEvent::NodeUpdated { node },
+                    json!({"id":id,"threadId":thread,"runId":null,"parentNodeId":parent,"rootNodeId":if kind=="subagent" {&sub.child_root} else {&root},"kind":kind,"status":status,"countsForRun":false,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":task["nativeTaskRef"],"runtimeRequestId":null,"checkpointScopeId":null,"startedAt":started,"completedAt":completed}),
+                );
+            }
             emit(
                 out,
-                |node| ProviderEvent::NodeUpdated { node },
-                json!({"id":id,"threadId":thread,"runId":null,"parentNodeId":parent,"rootNodeId":if kind=="subagent" {&sub.child_root} else {&root},"kind":kind,"status":status,"countsForRun":false,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":task["nativeTaskRef"],"runtimeRequestId":null,"checkpointScopeId":null,"startedAt":started,"completedAt":completed}),
+                |subagent| ProviderEvent::SubagentUpdated { subagent },
+                task,
             );
         }
-        emit(
-            out,
-            |subagent| ProviderEvent::SubagentUpdated { subagent },
-            task,
-        );
         // `ClaudeAdapterV2` reads a settled member's own transcript; the progress excerpt is
-        // the fallback, shown once when no answer was.
-        let transcript = coordinator["workflow"]["runHandles"]["transcriptDir"]
-            .as_str()
-            .filter(|dir| std::path::Path::new(dir).is_absolute())
-            .zip(agent["agentId"].as_str())
-            .filter(|(_, id)| valid_agent_id(id));
-        let first_settle = settled
-            && previous.is_none_or(|p| {
-                restarted || matches!(p["status"].as_str(), Some("pending" | "running"))
-            });
+        // the fallback, shown once when no transcript text was.
         let excerpt = agent["result"]
             .as_str()
             .map(|r| (format!("{key}:result:{attempt}"), r.to_owned()));
         match (transcript, excerpt) {
-            (Some((dir, agent_id)), excerpt) if first_settle => {
+            (Some((dir, agent_id)), excerpt) if read => {
+                let elapsed = completed
+                    .as_str()
+                    .and_then(conn_support::time::millis_from_iso)
+                    .zip(conn_support::time::millis_from_iso(now))
+                    .map(|(done, at)| at.saturating_sub(done));
+                let flush_left_ms = elapsed
+                    .map_or(0, |e| MEMBER_TRANSCRIPT_FLUSH_MS.saturating_sub(e))
+                    .try_into()
+                    .unwrap_or(0);
                 out.push(Out::ReadMemberTranscript(MemberTranscript {
                     dir: dir.into(),
                     agent_id: agent_id.to_owned(),
+                    cursor: serde_json::from_value(state["cursor"].clone()).unwrap_or_default(),
+                    delay: None,
                     task_id: task_id.clone(),
                     index,
                     attempt,
                     child: child.to_owned(),
                     root: root.clone(),
-                    first_ordinal: next_ordinal.saturating_add(1),
+                    coordinator_ended: !coordinator_running,
+                    flush_left_ms,
                     excerpt,
                 }));
-                next_ordinal = next_ordinal.saturating_add(MEMBER_TRANSCRIPT_MESSAGES + 1);
+                state["reads"] = json!(reads + 1);
             }
-            (_, Some((item, result))) if settled && !answer_shown => {
+            (_, Some((item, result))) if settled && !text_shown && !result_shown => {
                 next_ordinal = next_ordinal.saturating_add(1);
                 child_message(
                     child,
@@ -1558,7 +1649,7 @@ fn project_workflow_members(sub: &mut Sub, coordinator: &Value, now: &str, out: 
                     now,
                     out,
                 );
-                state["answerShown"] = json!(true);
+                state["resultShown"] = json!(true);
             }
             _ => {}
         }
@@ -1603,15 +1694,22 @@ mod tests {
             ("a2", "Second part."),
             ("a4", "Done."),
         ]);
+        let cursor = TranscriptCursor::default();
         assert_eq!(
-            transcript_answers(&contents, false),
+            transcript_answers(&contents, cursor),
             MemberAnswers {
                 answers: all,
-                incomplete: false
+                // a4 has no `stop_reason`.
+                turn_ended: Some(false),
+                cursor,
             }
         );
-        // A read that started past the file's start is incomplete.
-        assert!(transcript_answers(&contents, true).incomplete);
+        let end = json!({"type":"assistant","uuid":"a5","message":{"stop_reason":"end_turn","content":[]}});
+        assert_eq!(
+            transcript_answers(&format!("{end}\n"), cursor).turn_ended,
+            Some(true)
+        );
+        assert_eq!(transcript_answers("", cursor).turn_ended, None);
     }
 
     #[test]

@@ -1241,8 +1241,8 @@ async fn a_late_excerpt_is_shown_once() {
 }
 
 /// `ClaudeAdapterV2.test.ts` "reads a settled workflow member's transcript to its end past the
-/// read cap": 80 long early messages, then `FINAL ANSWER`. The bounded import keeps the end,
-/// and the excerpt stays because the import is incomplete.
+/// read cap": 80 long early messages, then `FINAL ANSWER`. All 81 show, in order, and no
+/// excerpt.
 #[tokio::test(flavor = "current_thread")]
 async fn a_long_transcript_keeps_its_final_answer() {
     if !node_available() {
@@ -1265,13 +1265,9 @@ async fn a_long_transcript_keeps_its_final_answer() {
         &settles_once(),
     )
     .await;
-    let shown = texts(shown);
-    assert_eq!(shown.last().map(String::as_str), Some("FINAL ANSWER"));
-    assert_eq!(
-        shown.first().map(String::as_str),
-        Some("Partial answer from workflow progress:\n\nLooks good")
-    );
-    assert!(shown.len() > 2, "{}", shown.len());
+    let mut expected: Vec<String> = (0..80).map(|n| format!("{n} {filler}")).collect();
+    expected.push("FINAL ANSWER".to_owned());
+    assert_eq!(texts(shown), expected);
 }
 
 /// Transcript lines keep their item ids across attempts (`nativeItemId: line.uuid`): a retry

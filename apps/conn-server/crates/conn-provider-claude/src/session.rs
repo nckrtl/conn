@@ -309,18 +309,17 @@ impl Inner {
                         .live
                         .as_ref()
                         .map(|l| l.workflow_files_root.clone());
-                    let file = member.dir.join(format!("agent-{}.jsonl", member.agent_id));
+                    if let Some(delay) = member.delay {
+                        tokio::time::sleep(delay).await;
+                    }
                     let answers = match root {
-                        Some(root) => tokio::task::spawn_blocking(move || {
-                            read_contained_tail(&root, &file, MEMBER_TRANSCRIPT_BYTE_CAP).map(
-                                |(text, truncated)| {
-                                    crate::mapper::transcript_answers(&text, truncated)
-                                },
-                            )
-                        })
-                        .await
-                        .ok()
-                        .flatten(),
+                        Some(root) => {
+                            let job = member.clone();
+                            tokio::task::spawn_blocking(move || read_member_transcript(&job, &root))
+                                .await
+                                .ok()
+                                .flatten()
+                        }
                         None => None,
                     };
                     let outs = self.lock().mapper.member_transcript(member, answers);
@@ -505,17 +504,29 @@ fn callback_request(kind: &str, args: &Value) -> Option<ControlRequest> {
     }
 }
 
-/// `TRANSCRIPT_READ_BYTE_CAP` times the reads T3 drains for one settled member.
+/// The bytes one member transcript read takes at most (T3 drains 512 KiB reads unbounded).
 const MEMBER_TRANSCRIPT_BYTE_CAP: u64 = 8 * 1024 * 1024;
 
-/// `readContainedWorkflowFile` with `tail`: the last `cap` bytes of an absolute `.jsonl` file
-/// whose real path stays inside `root`, cut to whole lines, and whether the start was cut off.
-/// `None` when the file is missing, outside `root`, or not a regular file.
+/// Reads a settled member's transcript under `root`.
+pub(crate) fn read_member_transcript(
+    member: &crate::mapper::MemberTranscript,
+    root: &std::path::Path,
+) -> Option<crate::mapper::MemberAnswers> {
+    let file = member.dir.join(format!("agent-{}.jsonl", member.agent_id));
+    read_contained_tail(root, &file, MEMBER_TRANSCRIPT_BYTE_CAP, member.cursor)
+        .map(|(text, cursor)| crate::mapper::transcript_answers(&text, cursor))
+}
+
+/// `readContainedWorkflowFile` with `fromOffset`: the whole lines an absolute `.jsonl` file
+/// gained since `cursor`, whose real path stays inside `root`, and the cursor after them. Past
+/// `cap` bytes the read keeps the last whole lines, so the final answer stays. `None` when the
+/// file is missing, outside `root`, or not a regular file.
 fn read_contained_tail(
     root: &std::path::Path,
     file: &std::path::Path,
     cap: u64,
-) -> Option<(String, bool)> {
+    cursor: crate::mapper::TranscriptCursor,
+) -> Option<(String, crate::mapper::TranscriptCursor)> {
     use std::io::{Read, Seek, SeekFrom};
     if !file.is_absolute() || file.extension()? != "jsonl" {
         return None;
@@ -540,11 +551,23 @@ fn read_contained_tail(
     if !meta.is_file() {
         return None;
     }
-    let start = meta.len().saturating_sub(cap);
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let identity = None;
+    let base = if identity.is_some() && cursor.identity == identity && cursor.offset <= meta.len() {
+        cursor.offset
+    } else {
+        0
+    };
+    let start = base.max(meta.len().saturating_sub(cap));
     handle.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
     handle.take(cap).read_to_end(&mut bytes).ok()?;
-    let first = if start > 0 {
+    let first = if start > base {
         bytes
             .iter()
             .position(|b| *b == b'\n')
@@ -558,7 +581,11 @@ fn read_contained_tail(
         .map_or(0, |at| at + 1)
         .max(first);
     let lines = bytes.get(first..end).unwrap_or_default();
-    Some((String::from_utf8_lossy(lines).into_owned(), start > 0))
+    let offset = start.saturating_add(u64::try_from(end).ok()?);
+    Some((
+        String::from_utf8_lossy(lines).into_owned(),
+        crate::mapper::TranscriptCursor { offset, identity },
+    ))
 }
 
 /// The driver: one per query, ends after the query's `End`.
@@ -2464,34 +2491,50 @@ mod tests {
     /// regular file, and with a cap the whole lines at the end.
     #[test]
     fn member_transcripts_are_read_from_their_tail_inside_the_root() {
+        use crate::mapper::TranscriptCursor;
         let dir = std::env::temp_dir().join(format!("conn-claude-tail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("projects");
         std::fs::create_dir_all(root.join("dir.jsonl")).unwrap();
         let file = root.join("agent-a1.jsonl");
         std::fs::write(&file, "first\nsecond\nthird\npartial").unwrap();
-        assert_eq!(
-            read_contained_tail(&root, &file, 1024),
-            Some(("first\nsecond\nthird\n".to_owned(), false))
-        );
+        let start = TranscriptCursor::default();
+        let text = |read: Option<(String, TranscriptCursor)>| read.map(|(text, _)| text);
+        let (whole, cursor) = read_contained_tail(&root, &file, 1024, start).unwrap();
+        assert_eq!(whole, "first\nsecond\nthird\n");
         // The cap cuts into "second": the read starts at the next whole line.
         assert_eq!(
-            read_contained_tail(&root, &file, 18),
-            Some(("third\n".to_owned(), true))
+            text(read_contained_tail(&root, &file, 18, start)),
+            Some("third\n".to_owned())
+        );
+        // From the cursor: only what was flushed since, and the partial line once it is whole.
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 1024, cursor)),
+            Some(String::new())
+        );
+        std::fs::write(&file, "first\nsecond\nthird\npartial\nmore\n").unwrap();
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 1024, cursor)),
+            Some("partial\nmore\n".to_owned())
         );
         assert_eq!(
-            read_contained_tail(&root, std::path::Path::new("projects/agent-a1.jsonl"), 1024),
+            read_contained_tail(
+                &root,
+                std::path::Path::new("projects/agent-a1.jsonl"),
+                1024,
+                start
+            ),
             None
         );
         assert_eq!(
-            read_contained_tail(&root, &root.join("dir.jsonl"), 1024),
+            read_contained_tail(&root, &root.join("dir.jsonl"), 1024, start),
             None
         );
         let outside = dir.join("outside.jsonl");
         std::fs::write(&outside, "secret\n").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link.jsonl")).unwrap();
         assert_eq!(
-            read_contained_tail(&root, &root.join("link.jsonl"), 1024),
+            read_contained_tail(&root, &root.join("link.jsonl"), 1024, start),
             None
         );
         std::fs::remove_dir_all(&dir).unwrap();

@@ -1730,6 +1730,7 @@ dependencies = [
  "syntect",
  "text",
  "theme",
+ "theme_settings",
  "tokio",
  "tokio-tungstenite",
  "tree-sitter-php",

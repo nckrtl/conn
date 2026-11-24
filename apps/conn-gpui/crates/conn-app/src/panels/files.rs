@@ -1640,6 +1640,7 @@ impl FilesPanel {
                 }
                 body.child(
                     Editor::new(editor)
+                        .font_family(crate::editor_settings::family(cx))
                         .appearance(false)
                         .bordered(false)
                         .readonly(true)

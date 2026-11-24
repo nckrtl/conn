@@ -1,5 +1,5 @@
 //! Local Files experiment. The workspace and selection still belong to Conn.
-use gpui_kit::{App, AppContext, Context, Entity, Window};
+use gpui_kit::{App, AppContext, BorrowAppContext, Context, Entity, Window};
 use std::{ops::Range, sync::Arc};
 use zed_editor::{Editor, MultiBufferOffset, RowHighlightOptions, ToOffset};
 use zed_language::{Buffer, Language, LanguageConfig};
@@ -11,11 +11,39 @@ pub(crate) fn enabled() -> bool {
 
 pub(crate) fn init(cx: &mut App) {
     if enabled() {
-        let defaults = zed_settings::default_settings().replace("\".ZedMono\"", "\"Menlo\"");
+        let defaults = zed_settings::default_settings();
         let settings = zed_settings::SettingsStore::new(cx, &defaults);
         cx.set_global(settings);
         zed_theme::init(zed_theme::LoadThemes::JustBase, cx);
+        let themes = zed_theme::ThemeRegistry::global(cx);
+        for palette in crate::editor_settings::Palette::ALL {
+            zed_theme_settings::load_user_theme(&themes, palette.bytes())
+                .expect("bundled Zed theme");
+        }
     }
+}
+
+pub(crate) fn apply(name: &str, tokens: &conn_theme::Tokens, cx: &mut App) {
+    if !enabled() || cx.try_global::<zed_theme::GlobalTheme>().is_none() {
+        return;
+    }
+    let Ok(palette) = zed_theme::ThemeRegistry::global(cx).get(name) else {
+        return;
+    };
+    let mut theme = (*palette).clone();
+    let bg = crate::theme::hsla(tokens.shell_card);
+    theme.styles.colors.editor_background = bg;
+    theme.styles.colors.editor_active_line_background = bg;
+    theme.styles.colors.editor_gutter_background = bg;
+    theme.styles.colors.editor_foreground = crate::theme::hsla(tokens.foreground);
+    theme.styles.colors.editor_line_number = crate::theme::hsla(tokens.muted_foreground);
+    let font = crate::editor_settings::family(cx).to_string();
+    cx.update_global::<zed_settings::SettingsStore, _>(|settings, cx| {
+        settings.update_default_settings(cx, |settings| {
+            settings.theme.buffer_font_family = Some(font.into())
+        });
+    });
+    zed_theme::GlobalTheme::update_theme(cx, Arc::new(theme));
 }
 
 pub(super) fn open(source: &str, wrap: bool, window: &mut Window, cx: &mut App) -> Entity<Editor> {
@@ -30,11 +58,16 @@ pub(super) fn open(source: &str, wrap: bool, window: &mut Window, cx: &mut App) 
     let language = Arc::new(php);
     let buffer = cx.new(|cx| {
         let mut buffer = Buffer::local(source, cx);
-        buffer.set_language(Some(language), cx);
+        buffer.set_language(Some(language.clone()), cx);
         buffer.set_capability(zed_language::Capability::ReadOnly, cx);
         buffer
     });
     cx.new(|cx| {
+        cx.observe_global::<zed_theme::GlobalTheme>(move |_, cx| {
+            language.set_theme(cx.theme().syntax());
+            cx.notify();
+        })
+        .detach();
         let mut editor = Editor::for_buffer(buffer, None, window, cx);
         editor.set_read_only(true);
         set_wrap(&mut editor, wrap, cx);

@@ -23,6 +23,7 @@ mod sidebar;
 mod stderr_log;
 mod superhero;
 mod terminal_settings;
+mod editor_settings;
 mod theme;
 #[cfg(test)]
 mod ui_tests;
@@ -214,6 +215,7 @@ fn main() {
         #[cfg(feature = "zed-files")]
         panels::zed_preview::init(cx);
         fonts::register(cx);
+        editor_settings::init(cx);
         colour_space::install(cx);
         vibrancy::install(cx);
         let theme = live::initial_theme();

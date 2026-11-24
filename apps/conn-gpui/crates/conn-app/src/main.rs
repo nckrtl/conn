@@ -7,6 +7,7 @@ mod automation;
 mod colour_space;
 pub(crate) use conn_client::commands;
 mod drafts;
+mod editor_settings;
 mod file_icons;
 mod fixture;
 mod fonts;
@@ -23,7 +24,6 @@ mod sidebar;
 mod stderr_log;
 mod superhero;
 mod terminal_settings;
-mod editor_settings;
 mod theme;
 #[cfg(test)]
 mod ui_tests;

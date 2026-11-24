@@ -2926,7 +2926,9 @@ async fn panel_open_delivers_each_panel_to_the_callers_desktop_and_stays_hidden(
         );
     }
     not_offered(&mut swamp, "files_selection", json!({})).await;
-    let mut files = broker.subscribe_for(0, Some(thread.clone())).unwrap();
+    let mut files = broker
+        .subscribe_for(0, Some(thread.clone()), false)
+        .unwrap();
     let (result, ()) = tokio::join!(agent.ok("files_selection", json!({})), async {
         let request = files.recv().await.unwrap();
         assert_eq!(

@@ -176,6 +176,12 @@ fn draft_workspace_strategy(draft: &DraftThreadState) -> serde_json::Value {
     }
 }
 
+struct FilesSubscription {
+    thread: String,
+    connection: Connection,
+    linked: bool,
+}
+
 /// Root view of the Conn native desktop shell.
 pub(crate) struct ConnApp {
     tokens: Tokens,
@@ -325,7 +331,7 @@ pub(crate) struct ConnApp {
     perf_open_pending_chat: bool,
     /// Project id currently subscribed to `annotations.subscribe` on `self.connection`.
     subscribed_annotation_project: Option<String>,
-    files_thread: Option<String>,
+    files_subscription: Option<FilesSubscription>,
     /// Live annotations queue for `subscribed_annotation_project`.
     annotations: Vec<conn_state::AnnotationRecord>,
     /// Threads with automatic annotation Watch enabled.
@@ -701,7 +707,7 @@ impl ConnApp {
             perf_open: None,
             perf_open_pending_chat: false,
             subscribed_annotation_project: None,
-            files_thread: None,
+            files_subscription: None,
             annotations: Vec::new(),
             annotation_watching_threads: HashSet::new(),
             annotation_last_sent: HashMap::new(),
@@ -1070,21 +1076,52 @@ impl ConnApp {
             .update(cx, |panel, cx| panel.set_surface_visible(visible, cx));
     }
 
+    fn sync_files_subscription(&mut self) {
+        let next = self
+            .layout
+            .selected_thread_id
+            .as_ref()
+            .filter(|_| self.draft.is_none())
+            .and_then(|thread| {
+                Some(FilesSubscription {
+                    connection: self.connection_for_thread(thread)?,
+                    linked: self.linked_environment_of_thread(thread).is_some(),
+                    thread: thread.clone(),
+                })
+            });
+        if let (Some(old), Some(next)) = (&self.files_subscription, &next)
+            && next.connection.same_connection(&old.connection)
+            && next.thread == old.thread
+        {
+            return;
+        }
+        if let Some(old) = self.files_subscription.take()
+            && !next
+                .as_ref()
+                .is_some_and(|new| new.connection.same_connection(&old.connection))
+        {
+            if old.linked {
+                old.connection.unsubscribe_panel_requests();
+            } else {
+                old.connection
+                    .subscribe_panel_requests(Some(self.device_name()));
+            }
+        }
+        if let Some(next) = &next {
+            next.connection.subscribe_files_thread(
+                Some(self.device_name()),
+                Some(next.thread.clone()),
+                next.linked,
+            );
+        }
+        self.files_subscription = next;
+    }
+
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
-        let thread = self
-            .layout
-            .selected_thread_id
-            .as_ref()
-            .filter(|_| self.draft.is_none());
-        if self.files_thread.as_ref() != thread {
-            self.files_thread = thread.cloned();
-            if let Some(conn) = &self.connection {
-                conn.subscribe_files_thread(self.device_name(), self.files_thread.clone());
-            }
-        }
+        self.sync_files_subscription();
         let selected = self.layout.selected_thread_id.as_deref();
         let shell_thread = selected.and_then(|id| self.shell.find_thread(id));
         let draft_view = self.draft.as_ref().map(|draft| {
@@ -1392,7 +1429,9 @@ impl ConnApp {
             }
             ClientEvent::ServerConfig(event) => self.apply_server_config_event(*event, cx),
             ClientEvent::PanelRequest(request) => {
-                self.dispatch_agent_panel_request(request, cx);
+                if let Some(connection) = self.connection.clone() {
+                    self.dispatch_agent_panel_request(request, connection, cx);
+                }
             }
             ClientEvent::Annotations {
                 project_id,
@@ -5796,17 +5835,16 @@ impl ConnApp {
     fn dispatch_agent_panel_request(
         &self,
         request: conn_contract::source::DesktopPanelRequest,
+        conn_reply: Connection,
         cx: &mut Context<'_, Self>,
     ) {
         const NOT_ON_THREAD: &str = "The user is looking at another thread, so Conn did not run this. Ask them to open your thread, then try again.";
 
-        let Some(conn_reply) = self.connection.clone() else {
-            return;
-        };
         let device_name = self.device_name();
         cx.spawn(async move |this, cx| {
             let response = if let Some(action) = request.files_action {
-                Self::handle_files_action(this, request.panel, action, device_name, cx).await
+                Self::handle_files_action(this, request.panel, action, device_name, &conn_reply, cx)
+                    .await
             } else {
                 let panel = Self::handle_agent_panel_request(
                     this,
@@ -5840,6 +5878,7 @@ impl ConnApp {
         request: conn_contract::AgentPanelRequest,
         action: conn_contract::source::FilesAction,
         device: String,
+        origin: &Connection,
         cx: &mut gpui_kit::AsyncApp,
     ) -> conn_contract::source::DesktopPanelResponse {
         use conn_contract::source::FilesAction;
@@ -5847,6 +5886,9 @@ impl ConnApp {
         let result = async {
             let valid = |app: &Self| {
                 app.draft.is_none()
+                    && app
+                        .context_connection()
+                        .is_some_and(|c| c.same_connection(origin))
                     && app.layout.selected_thread_id.as_deref() == Some(request.thread_id.as_str())
             };
             match action {
@@ -6348,7 +6390,7 @@ impl ConnApp {
         self.subscribed_thread_id = None;
         self.reset_child_approvals();
         self.subscribed_annotation_project = None;
-        self.files_thread = None;
+        self.files_subscription = None;
         self.annotations.clear();
         self.annotation_last_sent.clear();
         self.layout.selected_thread_id = None;

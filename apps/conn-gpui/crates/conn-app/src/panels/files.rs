@@ -36,7 +36,9 @@ use super::header::superhero_icon;
 use super::tree::FileTreeState;
 use crate::header::details_card::EditorTarget;
 use conn_contract::source::{SourceLines, SourceSelection};
-use gpui_kit::component::input::{Editor, EditorState, RangeDecoration, RangeDecorationStyle, RopeExt as _};
+use gpui_kit::component::input::{
+    Editor, EditorState, RangeDecoration, RangeDecorationStyle, RopeExt as _,
+};
 
 /// Pierre tree compact row height (`FileBrowserPanel.tsx`: `itemHeight: 28`).
 /// Space above the first source line in the preview.
@@ -2135,7 +2137,12 @@ impl Render for FilesPanel {
                 .size_full()
                 .child(self.render_preview_subheader(cx))
                 .child(
-                    v_flex().relative().flex_1().min_h_0().w_full().overflow_hidden()
+                    v_flex()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
                         .child(self.render_preview_column(window, cx))
                         .children(self.render_preview_actions(cx)),
                 )
@@ -2485,11 +2492,58 @@ fn muted_message(text: &str, color: gpui_kit::Hsla) -> impl IntoElement {
         .child(text.to_owned())
 }
 
+fn mono_font_family(cx: &App) -> SharedString {
+    use gpui_kit::component::ActiveTheme as _;
+    cx.theme().mono_font_family.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui_kit::TestAppContext;
     use gpui_kit::test::TestWindowExt as _;
+
+    #[cfg(feature = "zed-files")]
+    #[gpui_kit::test]
+    fn php_preview_opens_in_zed_and_reveals_the_requested_line(cx: &mut TestAppContext) {
+        if !crate::panels::zed_preview::enabled() {
+            return;
+        }
+        let (done, mut reply) = tokio::sync::oneshot::channel();
+        let (window, files) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::panels::zed_preview::init(cx);
+            let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut files = FilesPanel::new(tokens, None, window, cx);
+                    files.showing_preview = true;
+                    files.preview = PreviewState::Loaded {
+                        path: "routes/web.php".into(),
+                        raw_contents: "<?php\nclass Example {}\n".into(),
+                        truncated: false,
+                    };
+                    files.reveal = Some(PendingReveal {
+                        lines: SourceLines {
+                            start_line: 2,
+                            end_line: 2,
+                        },
+                        excerpt: Some("class Example {}".into()),
+                        done,
+                    });
+                    files
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(files.read(cx).zed.is_some());
+            assert!(reply.try_recv().unwrap().is_ok());
+            assert!(files.read(cx).selected_source(cx).is_none());
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn walkthrough_highlight_preserves_selection_and_rejects_stale_lines(cx: &mut TestAppContext) {
@@ -2501,7 +2555,7 @@ mod tests {
                     let mut files = FilesPanel::new(tokens, None, window, cx);
                     files.showing_preview = true;
                     files.preview = PreviewState::Loaded {
-                        path: "routes/web.php".into(),
+                        path: "docs/first.txt".into(),
                         raw_contents: "first\nsecond\nthird".into(),
                         truncated: false,
                     };
@@ -2538,7 +2592,7 @@ mod tests {
             );
             let (done, mut reply) = tokio::sync::oneshot::channel();
             files.update(cx, |p, cx| {
-                p.pending_path = Some("routes/other.php".into());
+                p.pending_path = Some("docs/other.txt".into());
                 p.reveal = Some(PendingReveal {
                     lines: SourceLines {
                         start_line: 2,
@@ -2554,10 +2608,10 @@ mod tests {
                 reply.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty)
             ));
-            assert_eq!(files.read(cx).held_file(), Some("routes/web.php"));
+            assert_eq!(files.read(cx).held_file(), Some("docs/first.txt"));
             assert_eq!(
                 files.read(cx).selected_source(cx).unwrap().path,
-                "routes/web.php"
+                "docs/first.txt"
             );
             files.update(cx, |p, cx| {
                 let path = p.pending_path.take().unwrap();
@@ -2580,9 +2634,4 @@ mod tests {
         })
         .unwrap();
     }
-}
-
-fn mono_font_family(cx: &App) -> SharedString {
-    use gpui_kit::component::ActiveTheme as _;
-    cx.theme().mono_font_family.clone()
 }

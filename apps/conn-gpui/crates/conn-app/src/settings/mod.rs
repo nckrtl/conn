@@ -1013,7 +1013,9 @@ impl SettingsModal {
         }
 
         if "editor font family font size line height syntax theme jetbrains mono".contains(needle)
-            || crate::editor_settings::Palette::ALL.iter().any(|palette| palette.label().to_lowercase().contains(needle))
+            || crate::editor_settings::Palette::ALL
+                .iter()
+                .any(|palette| palette.label().to_lowercase().contains(needle))
         {
             sections.push(self.render_editor_page(cx));
         }

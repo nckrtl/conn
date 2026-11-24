@@ -1386,10 +1386,12 @@ fn menu_targets(
         .map(|(range, target)| {
             let target = match target {
                 ClickTarget::Url(url) => LinkMenuTarget::Web(url.clone()),
-                ClickTarget::WorkspaceFile(location) => LinkMenuTarget::File(match location.lines {
-                    Some(lines) => format!("{}:{}", location.path, lines.start_line),
-                    None => location.path.clone(),
-                }),
+                ClickTarget::WorkspaceFile(location) => {
+                    LinkMenuTarget::File(match location.lines {
+                        Some(lines) => format!("{}:{}", location.path, lines.start_line),
+                        None => location.path.clone(),
+                    })
+                }
             };
             (range.clone(), target)
         })

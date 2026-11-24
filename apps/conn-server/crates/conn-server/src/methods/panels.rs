@@ -16,7 +16,7 @@ pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
     table.stream("panels.requests", move |ctx, input: DesktopPanelSubscription| {
         let broker = broker.clone();
         async move {
-            let mut requests = broker.subscribe_for(ctx.connection_id, input.files_thread).map_err(|e| Failure::die(e.message))?;
+            let mut requests = broker.subscribe_for(ctx.connection_id, input.files_thread, input.files_only).map_err(|e| Failure::die(e.message))?;
             let (tx, rx) = mpsc::channel(1);
             tokio::spawn(async move {
                 loop { tokio::select! {
@@ -66,7 +66,7 @@ mod tests {
             ..Default::default()
         };
         let mut legacy = subscribe(session(1), json!({})).await.unwrap();
-        let mut mac = subscribe(session(2), json!({"filesThread":"t"}))
+        let mut mac = subscribe(session(2), json!({"filesThread":"t","filesOnly":true}))
             .await
             .unwrap();
         let request = || {
@@ -92,6 +92,20 @@ mod tests {
         let DesktopPanelResponse { selection, .. } = answer.unwrap();
         assert_eq!(selection.unwrap().text, "right");
         assert!(legacy.try_recv().is_err());
+        let (ordinary, ()) = tokio::join!(broker.show(request(), Duration::from_secs(2)), async {
+            let shown = legacy.recv().await.unwrap().unwrap();
+            respond(
+                session(1),
+                json!({"ok":true,"requestId":shown["requestId"]}),
+            )
+            .await
+            .unwrap();
+        });
+        assert!(ordinary.unwrap().ok);
+        assert!(
+            mac.try_recv().is_err(),
+            "linked Files subscription received a general panel request"
+        );
         let _duplicate = subscribe(session(3), json!({"filesThread":"t"}))
             .await
             .unwrap();

@@ -39,13 +39,13 @@ impl Palette {
     pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
             Self::One => {
-                include_bytes!("../../../.refs/zed-files-spike/assets/themes/one/one.json")
+                include_bytes!("../assets/themes/one/one.json")
             }
             Self::Ayu => {
-                include_bytes!("../../../.refs/zed-files-spike/assets/themes/ayu/ayu.json")
+                include_bytes!("../assets/themes/ayu/ayu.json")
             }
             Self::Gruvbox => {
-                include_bytes!("../../../.refs/zed-files-spike/assets/themes/gruvbox/gruvbox.json")
+                include_bytes!("../assets/themes/gruvbox/gruvbox.json")
             }
             Self::TokyoNight => include_bytes!("../assets/themes/tokyo-night/tokyo-night.json"),
             Self::Catppuccin => include_bytes!("../assets/themes/catppuccin/catppuccin-mauve.json"),
@@ -176,11 +176,14 @@ pub(crate) fn apply(tokens: &Tokens, cx: &mut App) {
     static THEMES: LazyLock<Vec<HighlightTheme>> = LazyLock::new(|| {
         Palette::ALL
             .into_iter()
-            .flat_map(|p| {
+            .filter_map(|p| {
                 serde_json::from_slice::<Family>(p.bytes())
-                    .expect("bundled editor theme")
-                    .themes
+                    .inspect_err(|error| {
+                        eprintln!("Could not load {} editor theme: {error}", p.label())
+                    })
+                    .ok()
             })
+            .flat_map(|family| family.themes)
             .collect()
     });
     let name = current(cx).palette.name(tokens.appearance);

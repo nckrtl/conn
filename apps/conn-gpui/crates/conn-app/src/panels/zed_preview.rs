@@ -1,4 +1,4 @@
-//! Local Files experiment. The workspace and selection still belong to Conn.
+//! Read-only PHP previews backed by Zed. Conn owns the workspace and selection.
 use gpui_kit::{App, AppContext, BorrowAppContext, Context, Entity, Window};
 use std::{ops::Range, sync::Arc};
 use zed_editor::{Editor, MultiBufferOffset, RowHighlightOptions, ToOffset};
@@ -9,6 +9,10 @@ use zed_theme::ActiveTheme as _;
 struct PhpGrammar(Arc<std::sync::OnceLock<Arc<Language>>>);
 impl gpui_kit::Global for PhpGrammar {}
 
+#[expect(
+    clippy::expect_used,
+    reason = "the grammar and highlight query ship in the same crate"
+)]
 fn php_grammar() -> Arc<Language> {
     let config = LanguageConfig {
         name: "PHP".into(),
@@ -21,7 +25,7 @@ fn php_grammar() -> Arc<Language> {
 }
 
 pub(crate) fn enabled() -> bool {
-    std::env::var("CONN_FILES_EDITOR").as_deref() == Ok("zed")
+    std::env::var("CONN_FILES_EDITOR").as_deref() != Ok("kit")
 }
 
 pub(crate) fn init(cx: &mut App) {
@@ -39,8 +43,9 @@ pub(crate) fn init(cx: &mut App) {
         zed_theme_settings::init(zed_theme::LoadThemes::JustBase, cx);
         let themes = zed_theme::ThemeRegistry::global(cx);
         for palette in crate::editor_settings::Palette::ALL {
-            zed_theme_settings::load_user_theme(&themes, palette.bytes())
-                .expect("bundled Zed theme");
+            if let Err(error) = zed_theme_settings::load_user_theme(&themes, palette.bytes()) {
+                eprintln!("Could not load {} editor theme: {error}", palette.label());
+            }
         }
     }
 }

@@ -127,7 +127,6 @@ gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # faces are untouched.
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 
-cpal = { git = "https://github.com/RustAudio/cpal", rev = "e1612d5d98152f8dc2a62e1b51ef7cbf4f7f26b7" }
 # Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and
 # the git tree-sitter above; two instances of the crate would make grammar
 # constants type-incompatible with `tree_sitter::Language`.
@@ -136,39 +135,25 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
-livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "fbda05eb278b4a7c5be8fc9b2a92e9b62e732236" }
-libwebrtc = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "fbda05eb278b4a7c5be8fc9b2a92e9b62e732236" }
 notify = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
 notify-types = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
-webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "fbda05eb278b4a7c5be8fc9b2a92e9b62e732236" }
 # Avoid panicking when a failed EGL call reports EGL_SUCCESS.
 # https://github.com/timothee-haudebourg/khronos-egl/pull/37
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
-# Includes https://github.com/rust-minidump/minidump-writer/pull/249 to fix crashes on `cmd-q` (https://github.com/zed-industries/zed/issues/57664)
-crash-context = { git = "https://github.com/rust-minidump/minidump-writer", rev = "911b04e09b79b736cc15cbe712e83e2d3f348bb9" }
 
-# corgi runs build.rs/proc-macros in a sandbox with no write access outside the
-# action's own OUT_DIR. Upstream `scratch` bakes its build-time OUT_DIR in via
-# `env!` and hands every crate one shared directory, which the sandbox can't
-# grant and a content-addressed build can't share. This patch reads OUT_DIR at
-# runtime, so each build script gets a private, writable dir in its own entry —
-# where cxx-build writes its shared cxxbridge headers. Kept local rather than a
-# cxx git fork so Windows cargo builds are unaffected (a git checkout of cxx
-# needs symlink support that Windows CI lacks). webrtc-sys is self-contained, so
-# per-crate scratch dirs are sufficient. Upstream issue:
-# https://github.com/dtolnay/cxx/issues/1752
-scratch = { path = ".refs/zed-files-spike/tooling/corgi/patches/scratch" }
+# Zed and GPUI Kit must use the same Window, App and shared-string types.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "vendor/zed-compat/gpui" }
+gpui_shared_string = { path = "vendor/zed-compat/gpui_shared_string" }
+refineable = { path = "vendor/zed-compat/refineable" }
+http_client = { path = "vendor/zed-compat/http_client" }
+path = { path = "vendor/zed-compat/path" }
 
+# macOS rustc needs the unstripped sqlez procedural macro when loading the editor dependency.
+[profile.release.package.sqlez_macros]
+strip = "none"
+debug = 1
 
-[profile.spike]
-inherits = "dev"
-debug = 0
-incremental = false
-
-[profile.spike.package."*"]
-opt-level = 0
-debug = 0
-
-[profile.spike.package.sqlez_macros]
+[profile.dev.package.sqlez_macros]
 strip = "none"
 debug = 1

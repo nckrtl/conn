@@ -600,16 +600,27 @@ impl Connection {
     /// calls (`panel_open`, `database_query`, `mcp_connect`, `mcp_call`) resume immediately on
     /// WebSocket reconnect with zero retry gap.
     pub fn subscribe_panel_requests(&self, device_name: Option<String>) {
-        let _ = self
-            .cmd_tx
-            .send(Command::SubscribePanelRequests(device_name, None));
+        self.subscribe_files_thread(device_name, None, false);
     }
 
-    pub fn subscribe_files_thread(&self, device_name: String, thread: Option<String>) {
-        let _ = self
-            .cmd_tx
-            .send(Command::SubscribePanelRequests(Some(device_name), thread));
+    pub fn subscribe_files_thread(
+        &self,
+        device_name: Option<String>,
+        files_thread: Option<String>,
+        files_only: bool,
+    ) {
+        let input = conn_contract::source::DesktopPanelSubscription {
+            panel: conn_contract::AgentPanelSubscribeInput { device_name },
+            files_thread,
+            files_only,
+        };
+        let _ = self.cmd_tx.send(Command::SubscribePanelRequests(input));
     }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.cmd_tx.same_channel(&other.cmd_tx)
+    }
+
     /// Stops listening to `panels.requests`.
     pub fn unsubscribe_panel_requests(&self) {
         let _ = self.cmd_tx.send(Command::UnsubscribePanelRequests);

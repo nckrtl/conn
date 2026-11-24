@@ -21,6 +21,8 @@ mod tests {
                 .reason,
             "no_desktop"
         );
+        let _linked = broker.subscribe_for(1, Some("t".into()), true).unwrap();
+        assert!(!broker.has_desktop());
         let rx = broker.subscribe().unwrap();
         assert!(broker.has_desktop());
         drop(rx);
@@ -158,6 +160,7 @@ struct Pending {
 struct Subscriber {
     connection: u64,
     files_thread: Option<String>,
+    files_only: bool,
     tx: mpsc::Sender<DesktopPanelRequest>,
 }
 
@@ -188,12 +191,13 @@ impl PanelBroker {
     }
 
     pub fn subscribe(&self) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
-        self.subscribe_for(0, None)
+        self.subscribe_for(0, None, false)
     }
     pub fn subscribe_for(
         &self,
         connection: u64,
         files_thread: Option<String>,
+        files_only: bool,
     ) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
         let mut state = self.state();
         state.subscribers.retain(|tx| !tx.tx.is_closed());
@@ -208,12 +212,16 @@ impl PanelBroker {
             tx,
             connection,
             files_thread,
+            files_only,
         });
         Ok(rx)
     }
 
     pub fn has_desktop(&self) -> bool {
-        self.state().subscribers.iter().any(|tx| !tx.tx.is_closed())
+        self.state()
+            .subscribers
+            .iter()
+            .any(|s| !s.files_only && !s.tx.is_closed())
     }
 
     pub fn respond(&self, response: AgentPanelResponse) {
@@ -261,7 +269,9 @@ impl PanelBroker {
         let (answer, guard) = {
             let mut state = self.state();
             state.subscribers.retain(|tx| !tx.tx.is_closed());
-            if state.subscribers.is_empty() {
+            if state.subscribers.is_empty()
+                || (files_action.is_none() && state.subscribers.iter().all(|s| s.files_only))
+            {
                 return Err(PanelError { reason:"no_desktop", message:"No Conn desktop app is connected to this server, so nothing can show the panel. Ask the user to open Conn on their Mac.".into() });
             }
             if state.pending.len() >= MAX_PENDING {
@@ -277,7 +287,11 @@ impl PanelBroker {
                 .subscribers
                 .iter()
                 .filter(|s| {
-                    files_action.is_none() || s.files_thread.as_deref() == Some(&request.thread_id)
+                    if files_action.is_some() {
+                        s.files_thread.as_deref() == Some(&request.thread_id)
+                    } else {
+                        !s.files_only
+                    }
                 })
                 .collect();
             if files_action.is_some() && targets.len() != 1 {

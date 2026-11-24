@@ -133,6 +133,8 @@ pub struct DesktopPanelSubscription {
     pub panel: crate::AgentPanelSubscribeInput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files_thread: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub files_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -21,6 +21,10 @@ final class CoreStore {
     var isInboxVisible = false
     /// Bumped whenever the server's provider list changes; model pickers re-read on it.
     private(set) var providersRevision = 0
+    /// Each thread's unsent composer text, by thread id (mobile's composer drafts by thread key).
+    /// It lives here, not in the view, so a failed send restores into the thread's draft even
+    /// after the user left the thread.
+    var drafts: [String: String] = [:]
 
     @ObservationIgnored private var core: ConnCore?
     @ObservationIgnored private var activeGeneration: UInt64 = 0
@@ -96,13 +100,34 @@ final class CoreStore {
         )
     }
 
-    func setThreadModel(threadId: String, instanceId: String, model: String) async {
-        guard let core else { return }
+    /// Save in the thread settings sheet. `.unavailable` means the catalog dropped the pick and
+    /// nothing was sent; `nil` means the send failed (see `lastError`).
+    func saveThreadModel(threadId: String, instanceId: String, model: String) async -> FfiModelSave? {
+        guard let core else { return nil }
         do {
-            try await core.setThreadModel(threadId: threadId, instanceId: instanceId, model: model)
+            return try await core.saveThreadModel(threadId: threadId, instanceId: instanceId, model: model)
         } catch {
             lastError = error.localizedDescription
+            return nil
         }
+    }
+
+    /// Asks the server once for the models of the thread's provider in the thread's cwd.
+    func scanThreadWorkspaceModels(threadId: String) async {
+        try? await core?.scanThreadWorkspaceModels(threadId: threadId)
+    }
+
+    /// Sends the thread's draft. Like mobile, the draft clears as the message goes out; a failed
+    /// send merges the sent text back into that thread's draft, wherever the user is by then.
+    func sendDraft(threadId: String) async -> Bool {
+        let message = drafts[threadId] ?? ""
+        drafts[threadId] = nil
+        let sent = await sendMessage(threadId: threadId, text: message, mode: .auto)
+        if !sent {
+            let restored = composerRestoreDraft(current: drafts[threadId] ?? "", sent: message)
+            drafts[threadId] = restored.isEmpty ? nil : restored
+        }
+        return sent
     }
 
     func stopThread(threadId: String) async {

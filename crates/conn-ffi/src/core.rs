@@ -19,7 +19,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use crate::coalesce::SnapshotCoalescer;
-use crate::model_picker::{FfiModelPicker, PickerInput, PickerThread, build_model_picker};
+use crate::model_picker::{
+    FfiModelPicker, FfiModelSave, PickerInput, PickerThread, SaveDecision, build_model_picker,
+    catalog_for_cwd, model_to_save, workspace_scan_target,
+};
 use crate::types::{
     FfiApprovalDecision, FfiConnectionStatus, FfiCredential, FfiError, FfiSendMode,
     FfiShellSnapshot, FfiThreadSnapshot, FfiUserInputSubmission, ThreadSnapshotMeta,
@@ -30,6 +33,7 @@ const TAG_SUBSCRIBE_SHELL: &str = "orchestration.subscribeShell";
 const TAG_SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
 const TAG_LAUNCH_THREAD: &str = "orchestration.launchThread";
 const TAG_ENSURE_SCRATCH: &str = "projects.ensureScratch";
+const TAG_REFRESH_PROVIDERS: &str = "server.refreshProviders";
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -79,6 +83,16 @@ enum PumpControl {
         toggled: Vec<String>,
         pending: Option<(String, String)>,
         reply: oneshot::Sender<FfiModelPicker>,
+    },
+    ModelSave {
+        thread_id: String,
+        instance_id: String,
+        model: String,
+        reply: oneshot::Sender<SaveDecision>,
+    },
+    WorkspaceScanTarget {
+        thread_id: String,
+        reply: oneshot::Sender<Option<(String, String)>>,
     },
     Shutdown,
 }
@@ -462,21 +476,71 @@ impl ConnCore {
         rx.await.unwrap_or(empty)
     }
 
-    /// Switches `thread_id` to `model` on provider `instance_id` (`thread.model-selection.set`).
+    /// Save in the thread settings sheet: switches `thread_id` to `model` on provider
+    /// `instance_id` (`thread.model-selection.set`) only while the thread's catalog still offers
+    /// it (`commitPendingModel`).
     ///
     /// # Errors
     ///
     /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-    pub async fn set_thread_model(
+    pub async fn save_thread_model(
         &self,
         thread_id: String,
         instance_id: String,
         model: String,
-    ) -> Result<(), FfiError> {
-        let command =
-            conn_client::commands::set_model_selection(&thread_id, &instance_id, &model, None)
+    ) -> Result<FfiModelSave, FfiError> {
+        self.ensure_connected()?;
+        let (reply, rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::ModelSave {
+                thread_id: thread_id.clone(),
+                instance_id,
+                model,
+                reply,
+            })
+            .map_err(|_| FfiError::Closed)?;
+        match rx.await.map_err(|_| FfiError::Closed)? {
+            SaveDecision::Unchanged => Ok(FfiModelSave::Unchanged),
+            SaveDecision::Unavailable => Ok(FfiModelSave::Unavailable),
+            SaveDecision::Send { instance_id, model } => {
+                let command = conn_client::commands::set_model_selection(
+                    &thread_id,
+                    &instance_id,
+                    &model,
+                    None,
+                )
                 .map_err(|err| map_build_error("thread.model-selection.set", err))?;
-        self.dispatch_command(command).await
+                self.dispatch_command(command).await?;
+                Ok(FfiModelSave::Saved)
+            }
+        }
+    }
+
+    /// Asks the server to scan the thread's provider in the thread's cwd once, so models that only
+    /// the project's own provider config lists reach the picker (`ProviderWorkspaceSnapshotScan`).
+    /// Does nothing when that cwd was scanned already.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn scan_thread_workspace_models(&self, thread_id: String) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let (reply, rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::WorkspaceScanTarget { thread_id, reply })
+            .map_err(|_| FfiError::Closed)?;
+        let Some((instance_id, cwd)) = rx.await.map_err(|_| FfiError::Closed)? else {
+            return Ok(());
+        };
+        let payload = json!({
+            "instanceId": instance_id,
+            "cwd": cwd,
+            "workspaceSnapshotsOnDemand": true,
+            "omitProviders": true,
+        });
+        self.call_json(TAG_REFRESH_PROVIDERS, payload)
+            .await
+            .map(|_| ())
     }
 
     /// Stops the running turn on `thread_id` (`thread.stop`).
@@ -712,11 +776,35 @@ impl PumpState {
             .as_str()
             .map(str::to_owned)
             .filter(|m| !m.is_empty());
+        let cwd = thread
+            .worktree_path
+            .clone()
+            .or_else(|| {
+                self.shell
+                    .project(&thread.project_id)
+                    .map(|project| project.workspace_root.clone())
+            })
+            .filter(|cwd| !cwd.is_empty());
         PickerThread {
             instance_id,
             model,
             started: thread.latest_run_id.is_some(),
+            cwd,
         }
+    }
+
+    /// The server's providers as it sent them, in its order.
+    fn server_providers(&self) -> impl Iterator<Item = &conn_contract::ServerProvidersItemItem> {
+        self.server_config
+            .catalog()
+            .instances
+            .iter()
+            .filter_map(|info| self.server_config.provider(&info.instance_id))
+    }
+
+    /// The catalog for the thread's cwd (`serverConfigForCwd`).
+    fn catalog_for(&self, thread: &PickerThread) -> conn_state::providers::ModelCatalog {
+        catalog_for_cwd(self.server_providers(), thread.cwd.as_deref())
     }
 
     fn resolve_launch_defaults(&self, project_id: &str) -> LaunchDefaults {
@@ -859,18 +947,31 @@ impl PumpState {
                 reply,
             } => {
                 let thread = self.picker_thread(&thread_id);
+                let catalog = self.catalog_for(&thread);
                 let input = PickerInput {
                     query: &query,
                     toggled: &toggled,
                     pending: pending.as_ref().map(|(i, m)| (i.as_str(), m.as_str())),
                 };
-                let picker = build_model_picker(
-                    self.server_config.catalog(),
-                    self.server_config.is_loaded(),
-                    &thread,
-                    &input,
-                );
+                let picker =
+                    build_model_picker(&catalog, self.server_config.is_loaded(), &thread, &input);
                 let _ = reply.send(picker);
+                true
+            }
+            PumpControl::ModelSave {
+                thread_id,
+                instance_id,
+                model,
+                reply,
+            } => {
+                let thread = self.picker_thread(&thread_id);
+                let catalog = self.catalog_for(&thread);
+                let _ = reply.send(model_to_save(&catalog, &thread, &instance_id, &model));
+                true
+            }
+            PumpControl::WorkspaceScanTarget { thread_id, reply } => {
+                let thread = self.picker_thread(&thread_id);
+                let _ = reply.send(workspace_scan_target(self.server_providers(), &thread));
                 true
             }
             PumpControl::Shutdown => false,

@@ -15,6 +15,8 @@ struct ModelPickerSheet: View {
     @State private var toggled: [String] = []
     @State private var pending: (instanceId: String, model: String)?
     @State private var picker: FfiModelPicker?
+    @State private var saving = false
+    @State private var showingUnavailable = false
 
     private var reloadKey: String {
         let pick = pending.map { "\($0.instanceId):\($0.model)" } ?? ""
@@ -58,10 +60,18 @@ struct ModelPickerSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(picker?.hasPending == true ? "Save" : "Done") { commitAndClose() }
                         .fontWeight(.semibold)
+                        .disabled(saving)
                         .accessibilityIdentifier("modelPicker.confirm")
                 }
             }
         }
+        .alert("Model unavailable", isPresented: $showingUnavailable) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Set up this provider on web or desktop, or select another model.")
+        }
+        // `ProviderWorkspaceSnapshotScan`: models only the project's own config lists.
+        .task { await store.scanThreadWorkspaceModels(threadId: threadId) }
         .task(id: reloadKey) {
             picker = await store.modelPicker(
                 threadId: threadId,
@@ -72,17 +82,27 @@ struct ModelPickerSheet: View {
         }
     }
 
+    /// `commitPendingModel`: the core sends the pick only while the catalog still offers it;
+    /// otherwise the sheet stays open with mobile's "Model unavailable" alert.
     private func commitAndClose() {
-        if let pending, picker?.hasPending == true {
-            Task {
-                await store.setThreadModel(
-                    threadId: threadId,
-                    instanceId: pending.instanceId,
-                    model: pending.model
-                )
+        guard let pending, picker?.hasPending == true else {
+            dismiss()
+            return
+        }
+        saving = true
+        Task {
+            let result = await store.saveThreadModel(
+                threadId: threadId,
+                instanceId: pending.instanceId,
+                model: pending.model
+            )
+            saving = false
+            switch result {
+            case .saved?, .unchanged?: dismiss()
+            case .unavailable?: showingUnavailable = true
+            case nil: break
             }
         }
-        dismiss()
     }
 
     private func notice(_ text: String) -> some View {

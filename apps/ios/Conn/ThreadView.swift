@@ -12,7 +12,6 @@ struct ThreadView: View {
     let onOpenThread: (String) -> Void
 
     @Environment(\.connTheme) private var theme
-    @State private var draft = ""
     @State private var stickToBottom = true
     @State private var settled: Bool
     @State private var showingRename = false
@@ -29,6 +28,16 @@ struct ThreadView: View {
     @State private var advancingStep: Int?
     @State private var advanceTask: Task<Void, Never>?
     @State private var viewHeight: CGFloat = 800
+
+    /// This thread's composer text, kept in the store by thread id.
+    private var draft: String {
+        get { store.drafts[threadId] ?? "" }
+        nonmutating set { store.drafts[threadId] = newValue.isEmpty ? nil : newValue }
+    }
+
+    private var draftBinding: Binding<String> {
+        Binding(get: { draft }, set: { draft = $0 })
+    }
     /// The chip's provider and the sheet; `model_picker` in conn-ffi builds both.
     @State private var modelPicker: FfiModelPicker?
     @State private var showingModelPicker = false
@@ -350,7 +359,7 @@ struct ThreadView: View {
                     ConnComposerPill(
                         placeholder: questionPanelModel?.composerPlaceholder
                             ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
-                        text: $draft,
+                        text: draftBinding,
                         isBusy: isWorking && !hasDraft && questionPanelModel == nil,
                         canSend: composerCanSend,
                         onSend: {
@@ -489,20 +498,14 @@ struct ThreadView: View {
         }
     }
 
-    /// Mobile clears the draft as it sends (`use-thread-composer-state.ts`), so what the user types
-    /// during a slow send stays; a failed send puts the sent text back (`composerRestoreDraft`).
+    /// `CoreStore.sendDraft` clears the thread's draft as it sends and restores it on failure.
     private func sendDraft(scrollProxy: ScrollViewProxy) {
-        let message = draft
-        draft = ""
         stickToBottom = true
         Task {
-            let sent = await store.sendMessage(threadId: threadId, text: message, mode: .auto)
-            if sent {
+            if await store.sendDraft(threadId: threadId) {
                 withAnimation(Kit.Motion.fast) {
                     scrollProxy.scrollTo("timeline-bottom", anchor: .bottom)
                 }
-            } else {
-                draft = composerRestoreDraft(current: draft, sent: message)
             }
         }
     }

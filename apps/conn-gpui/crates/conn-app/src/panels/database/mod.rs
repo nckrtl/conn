@@ -6,6 +6,8 @@ mod form;
 mod store;
 mod views;
 
+use std::collections::HashMap;
+
 use conn_desktop::database::api::{
     CallOptions, ConnectionSource, DatabaseQueryResult, PanelConnection, browse_table_sql,
     connection_key, connection_target, describe_database_table, list_database_tables,
@@ -82,6 +84,15 @@ pub(crate) struct DatabasePanel {
     vault_connections: Vec<PanelConnection>,
     vault_status: Option<VaultErrorKind>,
     vault_error: Option<String>,
+    /// The Vault list is loading, so the remembered connection may not be known yet
+    /// (`connectionsLoaded` is false).
+    vault_loading: bool,
+    /// SQL an agent sent for a thread the user was not looking at, by project, until that
+    /// project's connections have loaded (`databaseStore.pending`).
+    pending_agent_sql: HashMap<String, String>,
+    /// Agent SQL written into the editor: project, connection, SQL.
+    #[cfg(test)]
+    agent_sql_writes: Vec<(String, String, String)>,
     allow_unlock_next: bool,
     pub(super) editing: Option<ConnectionFormState>,
     menu_open: bool,
@@ -156,6 +167,10 @@ impl DatabasePanel {
             vault_connections: Vec::new(),
             vault_status: None,
             vault_error: None,
+            vault_loading: false,
+            pending_agent_sql: HashMap::new(),
+            #[cfg(test)]
+            agent_sql_writes: Vec::new(),
             allow_unlock_next: false,
             editing: None,
             menu_open: false,
@@ -205,11 +220,14 @@ impl DatabasePanel {
         self.columns_load = None;
         self.load_vault_databases(false, cx);
         self.ensure_tables_loaded(cx);
+        self.take_pending_agent_sql(cx);
         cx.notify();
     }
 
     pub(super) fn load_vault_databases(&mut self, allow_unlock: bool, cx: &mut Context<'_, Self>) {
         if cfg!(test) {
+            // Tests finish the load with `finish_vault_load_for_test`.
+            self.vault_loading = true;
             return;
         }
         let vault = self.runner.vault().clone();
@@ -217,8 +235,10 @@ impl DatabasePanel {
             self.vault_connections.clear();
             self.vault_status = Some(VaultErrorKind::Unavailable);
             self.vault_error = None;
+            self.vault_loading = false;
             return;
         }
+        self.vault_loading = true;
         let task = crate::live::RT.spawn(async move { vault.list_databases(allow_unlock).await });
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
@@ -241,11 +261,82 @@ impl DatabasePanel {
                         panel.vault_error = Some(join_err.to_string());
                     }
                 }
+                panel.vault_loading = false;
                 panel.ensure_tables_loaded(cx);
+                panel.take_pending_agent_sql(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Hands SQL an agent sent while `project_key`'s thread was hidden to the editor. It lands
+    /// once that project shows here with its connections loaded, in the connection the editor
+    /// picks then; with no connection it waits for one (`takePending`).
+    pub(crate) fn hand_pending_agent_sql(
+        &mut self,
+        project_key: String,
+        sql: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_agent_sql.insert(project_key, sql);
+        self.take_pending_agent_sql(cx);
+    }
+
+    fn take_pending_agent_sql(&mut self, cx: &mut Context<'_, Self>) {
+        if self.vault_loading {
+            return;
+        }
+        let Some(project_key) = self.project_key.clone() else {
+            return;
+        };
+        if !self.pending_agent_sql.contains_key(&project_key) {
+            return;
+        }
+        let Some(connection) = self.selected_connection() else {
+            return;
+        };
+        let Some(sql) = self.pending_agent_sql.remove(&project_key) else {
+            return;
+        };
+        #[cfg(test)]
+        self.agent_sql_writes
+            .push((project_key.clone(), connection.id.clone(), sql.clone()));
+        self.store.set_sql(&project_key, &connection.id, sql);
+        save_store(&self.store);
+        self.synced_sql = None;
+        self.tab = "rows";
+        cx.notify();
+    }
+
+    /// Lists the project's saved connection and remembers `remembered`, as a user's earlier
+    /// session would have left them.
+    #[cfg(test)]
+    pub(crate) fn seed_connections_for_test(
+        &mut self,
+        project_key: &str,
+        saved: PanelConnection,
+        remembered: &str,
+    ) {
+        self.store.save_connection(project_key, saved);
+        self.store.set_connection(project_key, remembered);
+    }
+
+    /// Ends the Vault load the way a finished `list_databases` does.
+    #[cfg(test)]
+    pub(crate) fn finish_vault_load_for_test(
+        &mut self,
+        connections: Vec<PanelConnection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.vault_connections = connections;
+        self.vault_loading = false;
+        self.take_pending_agent_sql(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_sql_writes(&self) -> &[(String, String, String)] {
+        &self.agent_sql_writes
     }
 
     fn connections(&self) -> Vec<PanelConnection> {
@@ -762,6 +853,7 @@ impl DatabasePanel {
             save_store(&self.store);
         }
         self.synced_sql = None;
+        self.take_pending_agent_sql(cx);
         self.sync_inputs(window, cx);
         self.ensure_tables_loaded(cx);
         cx.notify();

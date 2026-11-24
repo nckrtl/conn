@@ -2,7 +2,7 @@
 //! the one that shows. Browser tabs are peers in that list (`browser:<tabId>`), so any number
 //! of them can be open; every other kind opens once.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::layout::{BrowserTabId, PanelSurface, RightPanelTab};
 
@@ -155,6 +155,18 @@ pub struct ThreadPanels {
     owner: Option<String>,
     parked: HashMap<String, ThreadPanel>,
     next_browser: BrowserTabId,
+    /// Owners the shell has listed. Only these can be gone from it: a draft never lists, and
+    /// a thread just launched from one is not listed yet.
+    listed: HashSet<String>,
+}
+
+/// Where the shell lists a panel's owner, for [`ThreadPanels::reconcile`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellListing {
+    Active,
+    Archived,
+    /// Not in the shell: deleted, if it was listed before; else a draft or a new thread.
+    Unlisted,
 }
 
 impl ThreadPanels {
@@ -221,9 +233,33 @@ impl ThreadPanels {
         }
     }
 
-    /// Drops a deleted thread's parked panel and returns its browser tabs, whose browsers the
-    /// caller closes. A shown thread moves on before it is deleted, so it is parked by then.
+    /// Compares every panel with the shell (`removeThread`). A parked panel whose thread was
+    /// listed and is now gone, or is archived, is dropped; its browser tabs come back for the
+    /// caller to close. The shown owner is never dropped here: once the user leaves it, it is
+    /// parked, and the next reconcile decides.
+    pub fn reconcile(&mut self, listing: impl Fn(&str) -> ShellListing) -> Vec<BrowserTabId> {
+        if let Some(owner) = &self.owner
+            && listing(owner) != ShellListing::Unlisted
+        {
+            self.listed.insert(owner.clone());
+        }
+        let mut gone = Vec::new();
+        for owner in self.parked.keys() {
+            match listing(owner) {
+                ShellListing::Active => {
+                    self.listed.insert(owner.clone());
+                }
+                ShellListing::Archived => gone.push(owner.clone()),
+                ShellListing::Unlisted if self.listed.contains(owner) => gone.push(owner.clone()),
+                ShellListing::Unlisted => {}
+            }
+        }
+        gone.iter().flat_map(|owner| self.forget(owner)).collect()
+    }
+
+    /// Drops a parked panel and returns its browser tabs, whose browsers the caller closes.
     pub fn forget(&mut self, owner: &str) -> Vec<BrowserTabId> {
+        self.listed.remove(owner);
         self.parked
             .remove(owner)
             .map(|panel| panel.tabs.browser_ids().collect())
@@ -400,6 +436,41 @@ mod tests {
             .collect();
         assert_eq!(forgotten, [b1]);
         assert!(panels.forget("env:b").is_empty());
+    }
+
+    #[test]
+    fn reconcile_drops_panels_of_threads_the_shell_no_longer_lists() {
+        use ShellListing::{Active, Archived, Unlisted};
+        let mut panels = ThreadPanels::default();
+        let mut shown = ThreadPanel::default();
+        let park = |panels: &mut ThreadPanels, shown: &mut ThreadPanel, owner: &str| {
+            panels.switch(Some(owner.into()), shown);
+            let PanelSurface::Browser(id) = shown.tabs.add(RightPanelTab::Browser) else {
+                panic!("the add menu opens browser tabs")
+            };
+            id
+        };
+        let deleted = park(&mut panels, &mut shown, "deleted");
+        let archived = park(&mut panels, &mut shown, "archived");
+        park(&mut panels, &mut shown, "kept");
+        park(&mut panels, &mut shown, "draft");
+        let shown_id = park(&mut panels, &mut shown, "shown");
+        let all_listed = |id: &str| if id == "draft" { Unlisted } else { Active };
+        assert!(panels.reconcile(all_listed).is_empty());
+
+        // A snapshot without "deleted", "archived" in the archive, and the shown thread gone.
+        let after = |id: &str| match id {
+            "deleted" | "shown" | "draft" => Unlisted,
+            "archived" => Archived,
+            _ => Active,
+        };
+        let mut released = panels.reconcile(after);
+        released.sort_unstable();
+        assert_eq!(released, [deleted, archived], "a draft never listed stays");
+        // Leaving the gone shown thread parks it; the next reconcile drops it.
+        panels.switch(Some("kept".into()), &mut shown);
+        assert_eq!(panels.reconcile(after), [shown_id]);
+        assert!(panels.reconcile(after).is_empty());
     }
 
     #[test]

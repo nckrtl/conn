@@ -3657,6 +3657,7 @@ fn mount_two_thread_app(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Con
         settled_at: None,
         pending_kind: None,
     }));
+    shell.synchronized = true;
     cx.update(|cx| app.update(cx, |app, cx| app.set_shell(shell, cx)));
     (window, app)
 }
@@ -3743,6 +3744,131 @@ fn shell_events_release_deleted_and_archived_threads_browsers(cx: &mut TestAppCo
     );
 }
 
+/// A linked environment deletes the thread the user has open. Its panel stays while it shows,
+/// and goes once the user switches away.
+#[gpui_kit::test]
+fn a_linked_delete_of_the_open_thread_releases_its_panel_after_leaving(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test(
+                "mini",
+                "mini",
+                linked_mini_shell("/work/mini", "Mini"),
+                cx,
+            );
+        })
+    });
+    let (_, page) = open_thread_browser(cx, window, &app, "thread-mini");
+    let removed = match thread_removed("thread-mini") {
+        ClientEvent::Shell(item) => item,
+        _ => unreachable!("thread_removed is a shell event"),
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.apply_linked_shell_event_for_test("mini", removed, cx)
+        })
+    });
+    render_frames(cx, window);
+    assert!(
+        page.upgrade().is_some(),
+        "the thread on screen keeps its page"
+    );
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    assert!(
+        page.upgrade().is_none(),
+        "leaving the deleted thread releases its panel"
+    );
+}
+
+/// A delete missed while disconnected: the next snapshot replaces the shell without the thread,
+/// and its panel goes.
+#[gpui_kit::test]
+fn a_snapshot_without_a_thread_releases_its_panel(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let (_, missed) = open_thread_browser(cx, window, &app, "thread-pinned");
+    let (_, kept) = open_thread_browser(cx, window, &app, "thread-other");
+    let snapshot = cx.update(|cx| {
+        let shell = app.read(cx).shell();
+        let threads: Vec<_> = shell
+            .threads
+            .iter()
+            .filter(|t| t.id != "thread-pinned")
+            .cloned()
+            .collect();
+        json!({
+            "kind": "snapshot",
+            "snapshot": {
+                "schemaVersion": 1,
+                "snapshotSequence": 20_000,
+                "threads": threads,
+                "archivedThreads": [],
+                "projects": shell.projects,
+            },
+        })
+    });
+    let snapshot = match from_json(snapshot) {
+        Ok(item) => ClientEvent::Shell(item),
+        Err(err) => panic!("snapshot failed: {err}"),
+    };
+    let synchronized = match from_json(json!({ "kind": "synchronized" })) {
+        Ok(item) => ClientEvent::Shell(item),
+        Err(err) => panic!("synchronized failed: {err}"),
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.apply_event_for_test(snapshot, cx);
+            app.apply_event_for_test(synchronized, cx);
+        })
+    });
+    render_frames(cx, window);
+    assert!(
+        missed.upgrade().is_none(),
+        "the thread the snapshot dropped loses its panel"
+    );
+    assert!(kept.upgrade().is_some());
+}
+
+/// Switching to a thread whose panel is closed, with its browser tab selected, runs no
+/// annotation script in that browser, even when Watch changed meanwhile.
+#[gpui_kit::test]
+fn a_closed_panels_browser_gets_no_annotation_script(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let (_, page_b) = open_thread_browser(cx, window, &app, "thread-other");
+    cx.update(|cx| app.update(cx, |app, cx| app.toggle_right_panel(cx)));
+    let (_, _page_a) = open_thread_browser(cx, window, &app, "thread-selected");
+    let scripts = |cx: &mut TestAppContext| {
+        cx.update(|cx| page_b.upgrade().map(|p| p.read(cx).annotation_scripts()))
+            .expect("B's page is alive")
+    };
+    let before = scripts(cx);
+    // Watch changes while A shows.
+    cx.update(|cx| {
+        let panel = app.read(cx).right_panel_for_test().clone();
+        panel.update(cx, |p, cx| p.set_annotations(Vec::new(), true, true, cx));
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    assert!(!cx.update(|cx| app.read(cx).layout().right_panel_open));
+    assert_eq!(
+        scripts(cx),
+        before,
+        "a closed panel's browser runs no script"
+    );
+    cx.update(|cx| {
+        let panel = app.read(cx).right_panel_for_test().clone();
+        panel.update(cx, |p, cx| p.set_annotations(Vec::new(), false, false, cx));
+    });
+    assert_eq!(scripts(cx), before, "nor while its panel stays closed");
+
+    cx.update(|cx| app.update(cx, |app, cx| app.toggle_right_panel(cx)));
+    render_frames(cx, window);
+    let visible = cx.update(|cx| page_b.upgrade().map(|p| p.read(cx).visible_for_test()));
+    assert_eq!(visible, Some(true), "opening the panel shows B's page");
+}
+
 /// Annotation and project syncs reach only the browser on screen, and only when they changed.
 /// A hidden thread's page keeps its own project and catches up when it shows.
 #[gpui_kit::test]
@@ -3811,49 +3937,87 @@ fn hidden_browsers_get_no_annotation_scripts(cx: &mut TestAppContext) {
     assert_eq!(project(cx, &other).as_deref(), Some("proj-other"));
 }
 
-/// An agent in thread B sends SQL while the user looks at thread A's Database panel: A's query
-/// stays as it was, and B's Database tab gets the SQL in B's project (`openDatabaseQuery`).
-#[gpui_kit::test]
-fn background_database_sql_waits_for_its_own_thread(cx: &mut TestAppContext) {
-    let (window, app) = mount_two_thread_app(cx);
-    let writes = |cx: &mut TestAppContext| {
-        cx.update(|cx| {
-            app.read(cx)
-                .right_panel_for_test()
-                .read(cx)
-                .database_sql_writes()
-                .to_vec()
-        })
-    };
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.select_thread("thread-selected", cx);
-            app.select_right_panel_tab(conn_state::RightPanelTab::Database, cx);
-        })
-    });
-    render_frames(cx, window);
-    let request: conn_contract::AgentPanelRequest = match from_json(json!({
-        "requestId": "req-sql",
-        "threadId": "thread-other",
+/// A connection the Database panel lists, by id and source.
+fn db_connection(
+    id: &str,
+    source: conn_desktop::database::api::ConnectionSource,
+) -> conn_desktop::database::api::PanelConnection {
+    let mut connection = conn_desktop::database::api::new_connection(None);
+    connection.id = id.to_owned();
+    connection.name = id.to_owned();
+    connection.source = source;
+    connection
+}
+
+fn background_sql_request(thread: &str, sql: &str) -> conn_contract::AgentPanelRequest {
+    match from_json(json!({
+        "requestId": format!("req-{thread}"),
+        "threadId": thread,
         "panel": "database",
-        "sql": "select 2",
+        "sql": sql,
         "run": true,
         "focusWindow": false,
     })) {
         Ok(request) => request,
         Err(err) => panic!("AgentPanelRequest failed: {err}"),
+    }
+}
+
+/// An agent in thread B sends SQL while the user looks at thread A's Database panel. A's editor
+/// gets nothing. B's SQL waits until B shows and B's project has loaded its connections, then
+/// lands in the connection B's editor picks: the remembered Vault one, not the saved one that
+/// is listed before the Vault list arrives (`DatabasePanel` `takePending`). With no connection
+/// at all it keeps waiting.
+#[gpui_kit::test]
+fn background_database_sql_waits_for_its_own_thread(cx: &mut TestAppContext) {
+    use conn_desktop::database::api::ConnectionSource;
+    let (window, app) = mount_two_thread_app(cx);
+    let database = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .database_for_test()
+            .clone()
+    });
+    let writes =
+        |cx: &mut TestAppContext| cx.update(|cx| database.read(cx).agent_sql_writes().to_vec());
+    let finish_load = |cx: &mut TestAppContext, connections| {
+        cx.update(|cx| {
+            database.update(cx, |db, cx| db.finish_vault_load_for_test(connections, cx));
+        });
     };
-    let error =
-        cx.update(|cx| app.update(cx, |app, _| app.prepare_background_panel_for_test(&request)));
+    cx.update(|cx| {
+        database.update(cx, |db, _| {
+            db.seed_connections_for_test(
+                "proj-other",
+                db_connection("saved-1", ConnectionSource::Manual),
+                "vault:db-1",
+            );
+        });
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.select_right_panel_tab(conn_state::RightPanelTab::Database, cx);
+        });
+    });
+    render_frames(cx, window);
+    finish_load(cx, Vec::new());
+    let error = cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.prepare_background_panel_for_test(&background_sql_request(
+                "thread-other",
+                "select 2",
+            ))
+        })
+    });
     assert!(error.is_some(), "a query for another thread does not run");
     render_frames(cx, window);
-    assert!(writes(cx).is_empty(), "A's Database panel is untouched");
+    assert!(writes(cx).is_empty(), "A's Database editor is untouched");
 
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
     render_frames(cx, window);
-    assert_eq!(
-        writes(cx),
-        [(Some("proj-other".to_owned()), "select 2".to_owned())]
+    assert!(
+        writes(cx).is_empty(),
+        "the SQL waits while B's Vault list loads"
     );
     assert_eq!(
         cx.update(|cx| app.read(cx).right_panel_tabs().active().cloned()),
@@ -3861,9 +4025,45 @@ fn background_database_sql_waits_for_its_own_thread(cx: &mut TestAppContext) {
             conn_state::RightPanelTab::Database
         ))
     );
+    finish_load(
+        cx,
+        vec![db_connection("vault:db-1", ConnectionSource::Vault)],
+    );
+    assert_eq!(
+        writes(cx),
+        [(
+            "proj-other".to_owned(),
+            "vault:db-1".to_owned(),
+            "select 2".to_owned()
+        )],
+        "the remembered Vault connection gets the SQL once it has loaded"
+    );
+
+    // Thread A's project has no connection: its SQL keeps waiting rather than going anywhere.
+    let _ = cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.prepare_background_panel_for_test(&background_sql_request(
+                "thread-selected",
+                "select 3",
+            ))
+        })
+    });
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
     render_frames(cx, window);
-    assert_eq!(writes(cx).len(), 1, "the SQL lands once");
+    finish_load(cx, Vec::new());
+    assert_eq!(writes(cx).len(), 1, "no connection, no write");
+    finish_load(
+        cx,
+        vec![db_connection("vault:db-a", ConnectionSource::Vault)],
+    );
+    assert_eq!(
+        writes(cx).last().cloned(),
+        Some((
+            "proj-parity".to_owned(),
+            "vault:db-a".to_owned(),
+            "select 3".to_owned()
+        ))
+    );
 }
 
 /// A thread with no tabs shows the launcher, never another thread's browser.

@@ -117,9 +117,6 @@ pub struct RightPanel {
     active_browser: Option<BrowserTabId>,
     /// Addresses asked for before a tab's browser exists; it loads them when made.
     pending_browser_urls: Vec<(BrowserTabId, String)>,
-    /// Each agent SQL handed to the Database editor, with the project it went to.
-    #[cfg(test)]
-    database_sql_writes: Vec<(Option<String>, String)>,
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
@@ -256,8 +253,6 @@ impl RightPanel {
             browsers: Vec::new(),
             active_browser: None,
             pending_browser_urls: Vec::new(),
-            #[cfg(test)]
-            database_sql_writes: Vec::new(),
             connection,
             environment_id: None,
             annotations: None,
@@ -307,8 +302,8 @@ impl RightPanel {
     }
 
     #[cfg(test)]
-    pub(crate) fn database_sql_writes(&self) -> &[(Option<String>, String)] {
-        &self.database_sql_writes
+    pub(crate) fn database_for_test(&self) -> &Entity<DatabasePanel> {
+        &self.database
     }
 
     #[cfg(test)]
@@ -476,10 +471,31 @@ impl RightPanel {
     }
 
     /// Places an agent-provided SQL query in the Database editor without executing it.
+    /// SQL an agent sent while the shown thread was hidden: it waits for this project's
+    /// connections to load, then lands in the connection the editor picks.
+    pub fn hand_pending_database_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) {
+        let Some(project) = self.project_id.clone() else {
+            return;
+        };
+        self.database.update(cx, |panel, cx| {
+            panel.hand_pending_agent_sql(project, sql, cx)
+        });
+    }
+
+    /// Shows `surface` with the panel visible or not, in that order: the surface it leaves and
+    /// the one it picks see the new visibility, so a closed panel's browser runs no script.
+    pub fn show_surface(
+        &mut self,
+        surface: &PanelSurface,
+        visible: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.surface_visible = visible;
+        self.set_surface(surface, cx);
+        self.sync_surface_visibility(cx);
+    }
+
     pub fn set_database_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) {
-        #[cfg(test)]
-        self.database_sql_writes
-            .push((self.project_id.clone(), sql.clone()));
         self.database
             .update(cx, |panel, cx| panel.set_agent_sql(sql, cx));
     }

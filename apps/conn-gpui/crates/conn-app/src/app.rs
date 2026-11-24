@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use conn_client::{ClientEvent, Connection, ConnectionStatus, ServerConfig};
 use conn_state::{
-    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellState, ThreadPanel,
-    ThreadPanels, ThreadState,
+    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellListing, ShellState,
+    ThreadPanel, ThreadPanels, ThreadState,
 };
 use conn_theme::{ShellGeometry, Tokens};
 use gpui_kit::{
@@ -274,8 +274,6 @@ pub(crate) struct ConnApp {
     thread_panels: ThreadPanels,
     /// The shown thread's [`ThreadPanel::pending_sql`].
     pending_database_sql: Option<String>,
-    /// Threads linked shells changed since their last merge, for [`Self::release_gone_thread_panels`].
-    linked_changed_threads: Vec<String>,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -696,7 +694,6 @@ impl ConnApp {
             right_panel_tabs: RightPanelTabs::default(),
             thread_panels: ThreadPanels::default(),
             pending_database_sql: None,
-            linked_changed_threads: Vec::new(),
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -1156,7 +1153,8 @@ impl ConnApp {
 
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
-        self.sync_panel_owner(cx);
+        self.sync_panel_owner();
+        self.reconcile_thread_panels(cx);
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
@@ -1228,13 +1226,12 @@ impl ConnApp {
         self.right_panel.update(cx, |panel, cx| {
             panel.set_environment(environment_id, cx);
             panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
-            panel.set_surface(&surface, cx);
-            panel.set_surface_visible(surface_visible, cx);
+            panel.show_surface(&surface, surface_visible, cx);
         });
-        // SQL an agent sent while this thread was hidden reaches its own project's panel now.
+        // SQL an agent sent while this thread was hidden goes to its own project's editor now.
         if let Some(sql) = self.pending_database_sql.take() {
             self.right_panel
-                .update(cx, |panel, cx| panel.set_database_sql(sql, cx));
+                .update(cx, |panel, cx| panel.hand_pending_database_sql(sql, cx));
         }
         let (
             model_instance,
@@ -1445,7 +1442,6 @@ impl ConnApp {
                     self.layout.selected_thread_id = None;
                 }
                 self.release_settled_drop();
-                self.release_gone_thread_panels(&change.threads_changed, cx);
                 if change.snapshot_required || !change.threads_changed.is_empty() {
                     self.drive_older_pages(cx);
                 }
@@ -3856,8 +3852,7 @@ impl ConnApp {
     /// Puts the shown thread's (or draft's) right panel in place. Panels are keyed by thread or
     /// draft id alone: both are UUIDs, and a linked thread's environment can be learnt late. The panel it leaves keeps
     /// its tabs, and its browsers keep their pages, until the thread shows again.
-    fn sync_panel_owner(&mut self, cx: &mut Context<'_, Self>) {
-        let left = self.thread_panels.owner().map(str::to_owned);
+    fn sync_panel_owner(&mut self) {
         let owner = self
             .layout
             .selected_thread_id
@@ -3869,8 +3864,7 @@ impl ConnApp {
             open: self.layout.right_panel_open,
             pending_sql: self.pending_database_sql.take(),
         };
-        let switched = self.thread_panels.switch(owner, &mut panel);
-        if switched {
+        if self.thread_panels.switch(owner, &mut panel) {
             self.right_panel_add_menu_open = false;
             self.layout.right_panel_tab = panel
                 .tabs
@@ -3880,33 +3874,31 @@ impl ConnApp {
         self.right_panel_tabs = panel.tabs;
         self.layout.right_panel_open = panel.open;
         self.pending_database_sql = panel.pending_sql;
-        // An archived thread the user stayed on lets its panel go once they leave it.
-        if switched
-            && let Some(left) = left
-            && self.thread_is_archived(&left)
-        {
-            self.forget_thread_panel(&left, cx);
+    }
+
+    /// Compares the parked panels with the shell, primary and linked merged, after every change
+    /// (`removeThread`): a thread deleted or archived anywhere, by any client, and one a
+    /// snapshot no longer lists, takes its panel and browsers with it. The shown thread goes
+    /// once the user leaves it. Drafts never list, so their launch, discard and Undo decide.
+    fn reconcile_thread_panels(&mut self, cx: &mut Context<'_, Self>) {
+        // A reset or reconnecting shell lists nothing yet; that is not a delete.
+        if !self.shell.synchronized {
+            return;
         }
-    }
-
-    fn thread_is_archived(&self, id: &str) -> bool {
-        self.shell.archived_threads.iter().any(|t| t.id == id)
-    }
-
-    /// Shell events changed `ids`: a thread deleted or archived anywhere, by this client or
-    /// another, takes its panel and browsers with it (`removeThread`). A shown thread that went
-    /// is parked first, and an archived one the user still looks at goes when they leave it.
-    pub(crate) fn release_gone_thread_panels(
-        &mut self,
-        ids: &[String],
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.sync_panel_owner(cx);
-        for id in ids {
-            let gone = self.shell.find_thread(id).is_none() || self.thread_is_archived(id);
-            if gone && self.thread_panels.owner() != Some(id.as_str()) {
-                self.forget_thread_panel(id, cx);
+        let shell = &self.shell;
+        let released = self.thread_panels.reconcile(|id| {
+            if shell.archived_threads.iter().any(|t| t.id == id) {
+                ShellListing::Archived
+            } else if shell.find_thread(id).is_some() {
+                ShellListing::Active
+            } else {
+                ShellListing::Unlisted
             }
+        });
+        for id in released {
+            self.right_panel.update(cx, |panel, cx| {
+                panel.close_surface(&PanelSurface::Browser(id), cx);
+            });
         }
     }
 

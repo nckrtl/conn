@@ -805,6 +805,21 @@ impl ConnApp {
         cx.notify();
     }
 
+    /// Test helper: one shell event of linked environment `environment_id`, merged and synced
+    /// as the linked batch loop does.
+    #[cfg(test)]
+    pub(crate) fn apply_linked_shell_event_for_test(
+        &mut self,
+        environment_id: &str,
+        item: conn_contract::OrchestrationV2ShellStreamItem,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let _ = self.linked.shells.apply(environment_id, item);
+        self.remerge_linked_shells();
+        self.sync_chat(cx);
+        cx.notify();
+    }
+
     /// Test helper: the scratch workspace root a linked environment reported.
     #[cfg(test)]
     pub(crate) fn set_linked_scratch_root_for_test(&mut self, environment_id: &str, root: &str) {
@@ -1248,8 +1263,6 @@ impl ConnApp {
                     }
                     if shells_changed {
                         app.remerge_linked_shells();
-                        let changed = std::mem::take(&mut app.linked_changed_threads);
-                        app.release_gone_thread_panels(&changed, cx);
                         app.expire_offline(cx);
                         app.reconcile_offline(cx);
                         app.drive_older_pages(cx);
@@ -1340,7 +1353,6 @@ impl ConnApp {
                     self.resubscribe_ended_threads();
                 }
                 let changed = change.projects_changed || !change.threads_changed.is_empty();
-                self.linked_changed_threads.extend(change.threads_changed);
                 if changed {
                     self.linked.dirty.insert(environment_id);
                 }

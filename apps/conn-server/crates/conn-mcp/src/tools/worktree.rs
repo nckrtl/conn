@@ -332,9 +332,7 @@ pub(crate) async fn setup(
     project: &Value,
     path: &str,
 ) -> Result<Value, String> {
-    Ok(start_setup(config, thread, project, path, false)
-        .await?
-        .status)
+    run_project_script(config, thread, project, path, ScriptTrigger::Setup).await
 }
 
 /// A started setup script. `completion` is set for a script T3 waits for (`async: false`):
@@ -344,14 +342,51 @@ pub(crate) struct SetupStarted {
     pub(crate) completion: Option<tokio::sync::oneshot::Receiver<Option<i64>>>,
 }
 
-/// `ProjectSetupScriptRunner.runForThread`. With `observe`, a script marked `async: false`
-/// is wrapped so its end can be seen (T3's `observeCompletion`).
+/// The setup script. With `observe`, a script marked `async: false` is followed to its end
+/// (T3's `observeCompletion`).
 pub(crate) async fn start_setup(
     config: &WorktreeConfig,
     thread: &str,
     project: &Value,
     path: &str,
     observe: bool,
+) -> Result<SetupStarted, String> {
+    start_project_script(config, thread, project, path, ScriptTrigger::Setup, observe).await
+}
+
+/// Which project script a run picks (`runForThread`'s `trigger`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptTrigger {
+    /// `setupProjectScript`: `runOnWorktreeCreate`, in terminal `setup-<id>`.
+    Setup,
+    /// `settleProjectScript`: `runOnSettle`, in a fresh `settle-<id>-<8 hex>` terminal, so a
+    /// resumed settle is never typed into an earlier settle shell still at work.
+    Settle,
+}
+
+/// `ProjectSetupScriptRunner.runForThread` (`ProjectSetupScriptRunner.ts:458`): the trigger's
+/// script, typed into a thread terminal in `path` with the project's environment.
+pub(crate) async fn run_project_script(
+    config: &WorktreeConfig,
+    thread: &str,
+    project: &Value,
+    path: &str,
+    trigger: ScriptTrigger,
+) -> Result<Value, String> {
+    Ok(
+        start_project_script(config, thread, project, path, trigger, false)
+            .await?
+            .status,
+    )
+}
+
+async fn start_project_script(
+    config: &WorktreeConfig,
+    thread: &str,
+    project: &Value,
+    path: &str,
+    trigger: ScriptTrigger,
+    observe_setup: bool,
 ) -> Result<SetupStarted, String> {
     let settings = (config.settings)();
     let project_id = project["id"].as_str().unwrap_or_default();
@@ -384,7 +419,10 @@ pub(crate) async fn start_setup(
         .as_array()
         .into_iter()
         .flatten()
-        .find(|s| s["runOnWorktreeCreate"] == true)
+        .find(|s| match trigger {
+            ScriptTrigger::Setup => s["runOnWorktreeCreate"] == true,
+            ScriptTrigger::Settle => s["runOnSettle"] == true,
+        })
     else {
         return Ok(SetupStarted {
             status: json!({"status":"no-script"}),
@@ -395,28 +433,13 @@ pub(crate) async fn start_setup(
         .terminals
         .clone()
         .ok_or("Terminal service unavailable")?;
-    let terminal = format!("setup-{}", script["id"].as_str().unwrap_or_default());
-    let command = script["command"].as_str().unwrap_or_default();
-    let observed = if observe && script["async"] == false {
-        // Random per-run tokens keep script output from faking the end.
-        let sentinel = format!(
-            "{SENTINEL_PREFIX}_{}:",
-            conn_support::uuid_v4().replace('-', "")
-        );
-        let shell = terminals
-            .shells()
-            .iter()
-            .find(|s| std::path::Path::new(s).exists())
-            .cloned()
-            .unwrap_or_default();
-        let line = wrap_for_completion(command, &shell, &sentinel).ok_or_else(|| {
-            format!(
-                "Conn Server cannot wait for a setup script in {shell}; use a POSIX shell or fish."
-            )
-        })?;
-        Some((sentinel, line))
-    } else {
-        None
+    let id = script["id"].as_str().unwrap_or_default();
+    let terminal = match trigger {
+        ScriptTrigger::Setup => format!("setup-{id}"),
+        ScriptTrigger::Settle => {
+            let suffix: String = conn_support::uuid_v4().chars().take(8).collect();
+            format!("settle-{id}-{suffix}")
+        }
     };
     let input = from_json(json!({"threadId":thread,"terminalId":terminal,"cwd":path,"worktreePath":path,
         "stopOnSettle":script["stopOnSettle"].as_bool().unwrap_or(false),
@@ -424,149 +447,75 @@ pub(crate) async fn start_setup(
     let manager = terminals.clone();
     let mut readiness = tokio::task::spawn_blocking(move ||manager.open_observed(input))
         .await.map_err(|e|e.to_string())?.map_err(|_|format!("Project setup script operation 'openTerminal' failed for thread '{thread}' in '{path}'."))?;
-    let line = observed.as_ref().map_or(command, |(_, line)| line.as_str());
-    let input =
-        from_json(json!({"threadId":thread,"terminalId":terminal,"data":format!(" {line}\r")}))
-            .map_err(|e| e.to_string())?;
-    let (done, completion) = match observed {
-        Some((sentinel, _)) => {
-            let (done, completion) = tokio::sync::oneshot::channel();
-            (Some((done, sentinel)), Some(completion))
-        }
+    let command = script["command"].as_str().unwrap_or_default();
+    // A settle script is followed to its end (`observeCompletion`); after exit 0 its terminal
+    // closes when idle, as T3's settle cleanup does. A waited-for setup reports its exit code.
+    let settle = trigger == ScriptTrigger::Settle;
+    let observe = settle || (observe_setup && script["async"] == false);
+    let sentinel = super::script_completion::sentinel(&conn_support::uuid_v4().replace('-', ""));
+    let shell = terminals
+        .shell(thread, &terminal)
+        .map(|shell| super::script_completion::completion_shell(&shell));
+    let (kind, line) = match shell {
+        // The shell already ended: nothing is typed (`commandLine === null`).
         None => (None, None),
+        Some(None) if observe => {
+            terminals.close_idle(thread, Some(&terminal)).await;
+            return Err(
+                "Project script completion is not supported in cmd.exe. Install PowerShell and retry."
+                    .to_owned(),
+            );
+        }
+        Some(kind) => {
+            let line = match kind {
+                Some(kind) if observe => super::script_completion::wrap(command, kind, &sentinel),
+                _ => command.to_owned(),
+            };
+            (kind, Some(line))
+        }
     };
+    // Dropping `done` before a code is sent reports that the shell ended first.
+    let (done, completion) = if observe && !settle {
+        let (done, completion) = tokio::sync::oneshot::channel();
+        (Some(done), Some(completion))
+    } else {
+        (None, None)
+    };
+    let (thread_owned, terminal_owned) = (thread.to_owned(), terminal.clone());
     tokio::spawn(async move {
-        if !shell_ready(&mut readiness).await {
-            if let Some((done, _)) = done {
-                let _ = done.send(None);
-            }
+        let Some(line) = line else {
+            return;
+        };
+        // PowerShell and cmd have no line-editor signal.
+        let ready = matches!(
+            kind,
+            Some(super::script_completion::CompletionShell::PowerShell) | None
+        ) || shell_ready(&mut readiness).await;
+        if !ready {
             return;
         }
-        let _ = terminals.write(input, None).await;
-        if let Some((done, sentinel)) = done {
-            let _ = done.send(await_sentinel(&mut readiness, &sentinel).await);
+        let Ok(input) = from_json(
+            json!({"threadId":thread_owned,"terminalId":terminal_owned,"data":format!(" {line}\r")}),
+        ) else {
+            return;
+        };
+        if terminals.write(input, None).await.is_err() || !observe {
+            return;
+        }
+        let code = super::script_completion::completion(&mut readiness, &sentinel).await;
+        if settle && code == Some(0) {
+            terminals
+                .close_idle(&thread_owned, Some(&terminal_owned))
+                .await;
+        }
+        if let Some(done) = done {
+            let _ = done.send(code);
         }
     });
     Ok(SetupStarted {
         status: json!({"status":"started","scriptName":script["name"],"terminalId":terminal}),
         completion,
     })
-}
-
-const SENTINEL_PREFIX: &str = "__T3_SETUP_DONE__";
-const POSIX_MAX_LINE_BYTES: usize = 1_023;
-const POSIX_APPEND: &str = "__t3_command=\"$__t3_command\"";
-const PARTIAL_LINE_MAX_LENGTH: usize = 4_096;
-
-/// T3's `encodePosixScript`: quotes, backslashes and control characters as `printf %b` octal.
-fn encode_posix(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        let code = u32::from(c);
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else if c == '\\' || code <= 0x1f || code == 0x7f {
-            out.push_str(&format!("\\0{code:03o}"));
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// T3's `wrapPosixCommand`: every submitted line is a whole command, so a long script is
-/// assembled in chunks; the subshell contains exits and syntax errors.
-fn wrap_posix(command: &str, sentinel: &str) -> String {
-    let normalized = command.replace("\r\n", "\n");
-    let evaluate = |payload: &str| {
-        format!(
-            "( __t3_command=$(printf '%b_' {payload}); eval \"${{__t3_command%_}}\" ); printf '\\n{sentinel}%s\\n' \"$?\""
-        )
-    };
-    let inline = evaluate(&format!("'{}'", encode_posix(&normalized)));
-    if inline.len() + 2 <= POSIX_MAX_LINE_BYTES {
-        return inline;
-    }
-    let max_chunk = POSIX_MAX_LINE_BYTES - format!(" {POSIX_APPEND}''\r").len();
-    let mut lines = vec![];
-    let mut prefix = "__t3_command=";
-    let mut chunk = String::new();
-    for c in normalized.chars() {
-        let encoded = encode_posix(&c.to_string());
-        if chunk.len() + encoded.len() > max_chunk {
-            lines.push(format!("{prefix}'{chunk}'"));
-            prefix = POSIX_APPEND;
-            chunk.clear();
-        }
-        chunk.push_str(&encoded);
-    }
-    lines.push(format!("{prefix}'{chunk}'"));
-    lines.push(format!(
-        "{}; unset __t3_command",
-        evaluate("\"$__t3_command\"")
-    ));
-    lines.join("\r ")
-}
-
-/// T3's `resolveCompletionShell` and `wrapCommandForCompletion`. Any shell T3 does not name is
-/// POSIX. `None` for cmd, and for PowerShell and Nushell, whose wrappers are not ported.
-fn wrap_for_completion(command: &str, shell: &str, sentinel: &str) -> Option<String> {
-    let name = shell
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(shell)
-        .to_lowercase();
-    match name.strip_suffix(".exe").unwrap_or(&name) {
-        "cmd" | "nu" | "pwsh" | "powershell" => None,
-        "fish" => {
-            let body = command.replace("\r\n", "\r").replace('\n', "\r");
-            Some(format!(
-                "begin\r{body}\rend; printf '\\n{sentinel}%s\\n' $status"
-            ))
-        }
-        _ => Some(wrap_posix(command, sentinel)),
-    }
-}
-
-/// The exit code the wrapper prints after the sentinel, or `None` when the shell ends first.
-async fn await_sentinel(stream: &mut conn_terminal::Subscription, sentinel: &str) -> Option<i64> {
-    use conn_contract::TerminalAttachStreamEvent as Event;
-    let mut buffer = String::new();
-    loop {
-        match stream.next().await {
-            Event::Output(output) => {
-                buffer.push_str(&output.data);
-                let lines: Vec<String> = buffer.split(['\r', '\n']).map(str::to_owned).collect();
-                let (complete, rest) = lines.split_at(lines.len().saturating_sub(1));
-                for line in complete {
-                    if let Some(code) = sentinel_code(line, sentinel) {
-                        return Some(code);
-                    }
-                }
-                buffer = rest.first().cloned().unwrap_or_default();
-                if buffer.len() > PARTIAL_LINE_MAX_LENGTH {
-                    let cut = buffer.len() - PARTIAL_LINE_MAX_LENGTH;
-                    let cut = (cut..buffer.len())
-                        .find(|i| buffer.is_char_boundary(*i))
-                        .unwrap_or(buffer.len());
-                    buffer = buffer.split_off(cut);
-                }
-            }
-            Event::Exited(_) | Event::Closed(_) => return None,
-            _ => {}
-        }
-    }
-}
-
-/// T3's `completionSentinelPattern`: the sentinel, then an integer. The echoed wrapper holds
-/// `%s` there, so it never matches.
-fn sentinel_code(line: &str, sentinel: &str) -> Option<i64> {
-    let (_, after) = line.split_once(sentinel)?;
-    let end = after
-        .char_indices()
-        .find(|(i, c)| !(c.is_ascii_digit() || (*i == 0 && *c == '-')))
-        .map_or(after.len(), |(i, _)| i);
-    after.get(..end)?.parse().ok()
 }
 
 // RC-file prompts may consume early input. Match T3's line-editor signal or quiet fallback.

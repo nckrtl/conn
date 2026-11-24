@@ -34,6 +34,7 @@ pub mod table;
 pub mod text_generation;
 pub mod trace_diagnostics;
 mod workflow_script;
+pub mod worktree_cleanup;
 
 pub use http::{AppState, router};
 use table::MethodTable;

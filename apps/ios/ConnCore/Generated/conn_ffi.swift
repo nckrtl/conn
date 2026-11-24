@@ -747,8 +747,10 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     
     /**
      * Opens this pairing's cache on the connection runtime.
+     * `identity` names the server the cache belongs to (its Orbit server id or environment id),
+     * not its URL: another server at the same URL must not read this one's cache.
      */
-    func prepareOffline(directory: String) async throws  -> OfflineReader
+    func prepareOffline(directory: String, identity: String) async throws  -> OfflineReader
     
     /**
      * Drops the active socket or reconnect backoff and reconnects immediately (e.g. when the
@@ -1174,13 +1176,15 @@ open func pinThread(threadId: String, pinned: Bool)async throws   {
     
     /**
      * Opens this pairing's cache on the connection runtime.
+     * `identity` names the server the cache belongs to (its Orbit server id or environment id),
+     * not its URL: another server at the same URL must not read this one's cache.
      */
-open func prepareOffline(directory: String)async throws  -> OfflineReader  {
+open func prepareOffline(directory: String, identity: String)async throws  -> OfflineReader  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_conncore_prepare_offline(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(directory)
+                        self.uniffiCloneHandle(),FfiConverterString.lower(directory),FfiConverterString.lower(identity)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_u64,
@@ -1466,6 +1470,8 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
  */
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
+    func closeThread(threadId: String) 
+    
     func connectManually() 
     
     func connectPrimaryAgent() 
@@ -1488,6 +1494,11 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func offlineReader()  -> OfflineReader?
     
     func openLink(environmentId: String, threadId: String) 
+    
+    /**
+     * The user opened this thread; it stays subscribed across this session's connections.
+     */
+    func openThread(threadId: String) 
     
     func pairManual(serverUrl: String, pairingCode: String) 
     
@@ -1582,6 +1593,15 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
     
 
     
+open func closeThread(threadId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_close_thread(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(threadId),uniffiCallStatus
+    )
+}
+}
+    
 open func connectManually()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_conn_ffi_fn_method_connsession_connect_manually(
@@ -1647,6 +1667,18 @@ open func openLink(environmentId: String, threadId: String)  {try! rustCall() {
     uniffi_conn_ffi_fn_method_connsession_open_link(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(environmentId),
+        FfiConverterString.lower(threadId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The user opened this thread; it stays subscribed across this session's connections.
+     */
+open func openThread(threadId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_open_thread(
+            self.uniffiCloneHandle(),
         FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
@@ -3888,6 +3920,11 @@ public protocol SessionListener: AnyObject, Sendable {
      */
     func onThreadDeleted(connectionId: UInt64, threadId: String) 
     
+    /**
+     * A link for another environment: open it in that environment's own store and session.
+     */
+    func onOpenElsewhere(environmentId: String, threadId: String) 
+    
 }
 /**
  * Implemented in Swift. Every method is called with no internal locks held.
@@ -4011,6 +4048,19 @@ open func onThreadDeleted(connectionId: UInt64, threadId: String)  {try! rustCal
     uniffi_conn_ffi_fn_method_sessionlistener_on_thread_deleted(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(connectionId),
+        FfiConverterString.lower(threadId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * A link for another environment: open it in that environment's own store and session.
+     */
+open func onOpenElsewhere(environmentId: String, threadId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_sessionlistener_on_open_elsewhere(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(environmentId),
         FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
@@ -4204,6 +4254,32 @@ fileprivate struct UniffiCallbackInterfaceSessionListener {
                 }
                 return uniffiObj.onThreadDeleted(
                      connectionId: try FfiConverterUInt64.lift(connectionId),
+                     threadId: try FfiConverterString.lift(threadId)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onOpenElsewhere: { (
+            uniffiHandle: UInt64,
+            environmentId: RustBuffer,
+            threadId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeSessionListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onOpenElsewhere(
+                     environmentId: try FfiConverterString.lift(environmentId),
                      threadId: try FfiConverterString.lift(threadId)
                 )
             }
@@ -7474,16 +7550,26 @@ public struct FfiSavedSession: Equatable, Hashable {
      * The Orbit environment, or `None` for a manually paired server.
      */
     public var orbitServerId: String?
+    /**
+     * Which server this is: the Orbit server id, or a manual server's environment id once
+     * known. The offline cache belongs to it.
+     */
+    public var environmentId: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(serverUrl: String, bearer: String, 
         /**
          * The Orbit environment, or `None` for a manually paired server.
-         */orbitServerId: String?) {
+         */orbitServerId: String?, 
+        /**
+         * Which server this is: the Orbit server id, or a manual server's environment id once
+         * known. The offline cache belongs to it.
+         */environmentId: String?) {
         self.serverUrl = serverUrl
         self.bearer = bearer
         self.orbitServerId = orbitServerId
+        self.environmentId = environmentId
     }
 
     
@@ -7504,7 +7590,8 @@ public struct FfiConverterTypeFfiSavedSession: FfiConverterRustBuffer {
             try FfiSavedSession(
                 serverUrl: FfiConverterString.read(from: &buf), 
                 bearer: FfiConverterString.read(from: &buf), 
-                orbitServerId: FfiConverterOptionString.read(from: &buf)
+                orbitServerId: FfiConverterOptionString.read(from: &buf), 
+                environmentId: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -7512,6 +7599,7 @@ public struct FfiConverterTypeFfiSavedSession: FfiConverterRustBuffer {
         FfiConverterString.write(value.serverUrl, into: &buf)
         FfiConverterString.write(value.bearer, into: &buf)
         FfiConverterOptionString.write(value.orbitServerId, into: &buf)
+        FfiConverterOptionString.write(value.environmentId, into: &buf)
     }
 }
 
@@ -16136,7 +16224,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_pin_thread() != 33458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_conncore_prepare_offline() != 62782) {
+    if (uniffi_conn_ffi_checksum_method_conncore_prepare_offline() != 26956) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_reconnect() != 9304) {
@@ -16292,6 +16380,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 21335) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_connect_manually() != 23016) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -16311,6 +16402,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_open_link() != 14813) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_open_thread() != 10089) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_pair_manual() != 12047) {
@@ -16350,6 +16444,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_thread_deleted() != 52403) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_sessionlistener_on_open_elsewhere() != 64596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_constructor_conncore_connect() != 19757) {

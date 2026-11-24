@@ -2449,6 +2449,8 @@ mod tests {
         fn on_error(&self, _message: String) {}
 
         fn on_providers_changed(&self) {}
+
+        fn on_thread_deleted(&self, _thread_id: String) {}
     }
 
     /// Minimal in-process HTTP + WebSocket mock `conn-server` supporting:

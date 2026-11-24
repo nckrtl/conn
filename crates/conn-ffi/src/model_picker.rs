@@ -4,6 +4,8 @@
 //! (`ServerConfigState::thread_catalog`) so the SwiftUI views only draw. Which models a thread
 //! may pick is conn-state's call; this module only lays them out.
 
+use conn_contract::{ModelSelection, OrchestrationV2AppThread};
+use conn_state::ThreadShell;
 use conn_state::providers::{ModelCatalog, ModelOption};
 use conn_state::thread_models::ThreadModelScope;
 
@@ -82,6 +84,65 @@ pub(crate) struct PickerThread {
 }
 
 impl PickerThread {
+    /// From the thread's shell row. `cwd` is the worktree; [`Self::or_project_root`] fills it.
+    pub(crate) fn from_shell(thread: &ThreadShell) -> Self {
+        Self::from_parts(
+            &thread.model_selection,
+            &thread.provider_instance_id,
+            &thread.project_id,
+            thread.worktree_path.as_deref(),
+            thread.latest_run_id.is_some(),
+        )
+    }
+
+    /// From the thread's detail projection, for a thread the shell does not list (opened by link,
+    /// or an older settled one): it carries the project and worktree, so the project's provider
+    /// switches still apply.
+    pub(crate) fn from_projection(thread: &OrchestrationV2AppThread, started: bool) -> Self {
+        Self::from_parts(
+            &thread.model_selection,
+            &thread.provider_instance_id,
+            &thread.project_id,
+            thread.worktree_path.as_deref(),
+            started,
+        )
+    }
+
+    fn from_parts(
+        selection: &ModelSelection,
+        provider_instance_id: &str,
+        project_id: &str,
+        worktree_path: Option<&str>,
+        started: bool,
+    ) -> Self {
+        let non_empty = |value: &str| Some(value.to_owned()).filter(|value| !value.is_empty());
+        Self {
+            instance_id: selection
+                .instance_id
+                .clone()
+                .flatten()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .or_else(|| non_empty(provider_instance_id))
+                .filter(|id| !id.is_empty()),
+            model: selection.model.as_str().and_then(non_empty),
+            started,
+            project_id: non_empty(project_id),
+            cwd: worktree_path.and_then(non_empty),
+        }
+    }
+
+    /// Without a worktree the thread runs in its project's root.
+    pub(crate) fn or_project_root(mut self, root: impl FnOnce(&str) -> Option<String>) -> Self {
+        if self.cwd.is_none() {
+            self.cwd = self
+                .project_id
+                .as_deref()
+                .and_then(root)
+                .filter(|root| !root.is_empty());
+        }
+        self
+    }
+
     /// The scope conn-state narrows the catalog to.
     pub(crate) fn scope(&self) -> ThreadModelScope<'_> {
         ThreadModelScope {

@@ -30,7 +30,7 @@ use crate::types::{
 };
 use conn_state::thread_models::{
     WORKSPACE_SCAN_RETRY_COOLDOWN_MS, WorkspaceScanState, fail_workspace_scan, plan_workspace_scan,
-    workspace_scan_refreshed, workspace_snapshot,
+    workspace_scan_refreshed, workspace_snapshot, workspace_snapshot_pending,
 };
 
 const TAG_SUBSCRIBE_SHELL: &str = "orchestration.subscribeShell";
@@ -52,8 +52,10 @@ pub trait CoreListener: Send + Sync {
     fn on_shell(&self, snapshot: FfiShellSnapshot);
     fn on_thread(&self, snapshot: FfiThreadSnapshot);
     fn on_error(&self, message: String);
-    /// The server's provider list changed; re-read [`ConnCore::model_picker`].
+    /// The server's providers or settings changed; re-read [`ConnCore::model_picker`].
     fn on_providers_changed(&self);
+    /// The thread's stream reported `thread.deleted`; its composer draft can go.
+    fn on_thread_deleted(&self, thread_id: String);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -126,6 +128,8 @@ enum PumpControl {
     },
     FinishWorkspaceScan {
         scan: WorkspaceScanRequest,
+        /// When to plan again while the server still discovers.
+        reply: oneshot::Sender<Option<i64>>,
         /// The provider as the server's reply lists it; `None` when the scan failed.
         after: Option<Box<conn_contract::ServerProvidersItemItem>>,
         now_ms: i64,
@@ -623,14 +627,20 @@ impl ConnCore {
                     .find(|provider| provider.instance_id == scan.instance_id)
             })
             .map(Box::new);
+        let finished_at = now_epoch_ms();
+        let (reply, rx) = oneshot::channel();
         self.ctrl_tx
             .send(PumpControl::FinishWorkspaceScan {
                 scan,
+                reply,
                 after,
-                now_ms: now_epoch_ms(),
+                now_ms: finished_at,
             })
             .map_err(|_| FfiError::Closed)?;
-        Ok(recheck)
+        // The deadline after the reply and its cooldown, so a scan that came back pending is
+        // asked again.
+        let recheck_at = rx.await.map_err(|_| FfiError::Closed)?;
+        Ok(recheck_at.map(|at| u64::try_from(at.saturating_sub(finished_at)).unwrap_or(0)))
     }
 
     /// Stops the running turn on `thread_id` (`thread.stop`).
@@ -834,6 +844,9 @@ struct PumpState {
     workspace_scans: HashMap<(String, String), WorkspaceScanState>,
     threads: HashMap<String, ThreadState>,
     thread_projection_meta: HashMap<String, ThreadSnapshotMeta>,
+    /// Each opened thread's provider, project and worktree from its detail projection, for the
+    /// model picker of a thread the shell does not list.
+    thread_projection_picker: HashMap<String, PickerThread>,
     open_threads: HashSet<String>,
     ended_threads: HashSet<String>,
     shell_snapshot_required: bool,
@@ -852,39 +865,19 @@ impl PumpState {
     }
 
     /// The thread's provider and model for the model picker, from its shell row.
+    /// The thread a model picker serves: its shell row, else its detail projection.
     fn picker_thread(&self, thread_id: &str) -> PickerThread {
-        let Some(thread) = self.shell.find_thread(thread_id) else {
-            return PickerThread::default();
-        };
-        let selection = &thread.model_selection;
-        let instance_id = selection
-            .instance_id
-            .clone()
-            .flatten()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .or_else(|| Some(thread.provider_instance_id.clone()))
-            .filter(|id| !id.is_empty());
-        let model = selection
-            .model
-            .as_str()
-            .map(str::to_owned)
-            .filter(|m| !m.is_empty());
-        let cwd = thread
-            .worktree_path
-            .clone()
-            .or_else(|| {
-                self.shell
-                    .project(&thread.project_id)
-                    .map(|project| project.workspace_root.clone())
-            })
-            .filter(|cwd| !cwd.is_empty());
-        PickerThread {
-            instance_id,
-            model,
-            started: thread.latest_run_id.is_some(),
-            project_id: Some(thread.project_id.clone()).filter(|id| !id.is_empty()),
-            cwd,
-        }
+        let thread = self
+            .shell
+            .find_thread(thread_id)
+            .map(PickerThread::from_shell)
+            .or_else(|| self.thread_projection_picker.get(thread_id).cloned())
+            .unwrap_or_default();
+        thread.or_project_root(|project_id| {
+            self.shell
+                .project(project_id)
+                .map(|project| project.workspace_root.clone())
+        })
     }
 
     /// The catalog of what the thread may pick (conn-state's `thread_catalog`).
@@ -930,19 +923,14 @@ impl PumpState {
         scan: &WorkspaceScanRequest,
         after: Option<&conn_contract::ServerProvidersItemItem>,
         now_ms: i64,
-    ) {
+    ) -> Option<i64> {
         let key = (scan.instance_id.clone(), scan.cwd.clone());
-        let Some(state) = self.workspace_scans.get(&key).copied() else {
-            return;
-        };
+        let state = self.workspace_scans.get(&key).copied()?;
         let refreshed = workspace_scan_refreshed(scan.before.as_deref(), after, &scan.cwd, now_ms);
-        let held_complete = self
-            .server_config
-            .provider(&scan.instance_id)
+        let held = self.server_config.provider(&scan.instance_id);
+        let held_complete = held
             .and_then(|provider| workspace_snapshot(provider, &scan.cwd))
-            .is_some_and(|snapshot| {
-                !conn_state::thread_models::workspace_snapshot_pending(snapshot)
-            });
+            .is_some_and(|snapshot| !workspace_snapshot_pending(snapshot));
         let next = if !refreshed {
             fail_workspace_scan(
                 state,
@@ -956,6 +944,17 @@ impl PumpState {
             state
         };
         self.workspace_scans.insert(key, next);
+        // What the next plan would say: a scan the server still runs looks again after its
+        // cooldown (`recheckAt`).
+        let pending = after
+            .or(held)
+            .and_then(|provider| workspace_snapshot(provider, &scan.cwd))
+            .is_some_and(workspace_snapshot_pending);
+        if pending {
+            next.retry_not_before_ms
+        } else {
+            None
+        }
     }
 
     fn resolve_launch_defaults(&self, project_id: &str) -> LaunchDefaults {
@@ -1095,6 +1094,13 @@ impl PumpState {
                         thread_id.clone(),
                         ThreadSnapshotMeta::from_app_thread(&projection.thread),
                     );
+                    self.thread_projection_picker.insert(
+                        thread_id.clone(),
+                        PickerThread::from_projection(
+                            &projection.thread,
+                            !projection.runs.is_empty(),
+                        ),
+                    );
                     let mut state = ThreadState::new(thread_id.clone());
                     state.apply_projection(projection, sequence);
                     self.update_thread_run_meta(&thread_id, &state);
@@ -1157,10 +1163,11 @@ impl PumpState {
             }
             PumpControl::FinishWorkspaceScan {
                 scan,
+                reply,
                 after,
                 now_ms,
             } => {
-                self.finish_workspace_scan(&scan, after.as_deref(), now_ms);
+                let _ = reply.send(self.finish_workspace_scan(&scan, after.as_deref(), now_ms));
                 true
             }
             PumpControl::Shutdown => false,
@@ -1219,6 +1226,13 @@ impl PumpState {
                         thread_id.clone(),
                         ThreadSnapshotMeta::from_app_thread(&snap.projection.thread),
                     );
+                    self.thread_projection_picker.insert(
+                        thread_id.clone(),
+                        PickerThread::from_projection(
+                            &snap.projection.thread,
+                            !snap.projection.runs.is_empty(),
+                        ),
+                    );
                 }
                 let meta = self.resolve_thread_meta(&thread_id);
                 let state = self
@@ -1229,12 +1243,15 @@ impl PumpState {
                     OrchestrationV2ThreadStreamItem::Snapshot(s) => Some(s.snapshot_sequence),
                     _ => None,
                 };
+                let was_deleted = state.deleted;
                 let changed = state.apply(item);
+                let deleted_now = state.deleted && !was_deleted;
                 if changed && let Some(sync) = &mut self.offline {
                     sync.thread(state, snapshot_sequence);
                 }
                 let working = state.working;
                 let active_run_id = state.active_run_id().map(str::to_owned);
+                let thread_id_for_delete = thread_id.clone();
                 let snapshot = if self.open_threads.contains(&thread_id) && (changed || force_emit)
                 {
                     Some(build_thread_snapshot(state, meta.as_ref()))
@@ -1252,6 +1269,9 @@ impl PumpState {
                 }
                 if let Some(snapshot) = snapshot {
                     self.emit_or_buffer_thread(snapshot);
+                }
+                if deleted_now {
+                    self.listener.on_thread_deleted(thread_id_for_delete);
                 }
             }
             ClientEvent::StreamEnded { tag, key, error } => {
@@ -1272,7 +1292,9 @@ impl PumpState {
                 }
             }
             ClientEvent::ServerConfig(event) => {
-                if self.server_config.apply(*event).providers_changed {
+                let change = self.server_config.apply(*event);
+                // Project-only enablement arrives as `settingsUpdated`; the open picker reloads too.
+                if change.providers_changed || change.settings_changed {
                     self.listener.on_providers_changed();
                 }
             }
@@ -1338,6 +1360,7 @@ async fn run_pump(
         workspace_scans: HashMap::new(),
         threads: HashMap::new(),
         thread_projection_meta: HashMap::new(),
+        thread_projection_picker: HashMap::new(),
         open_threads: HashSet::new(),
         ended_threads: HashSet::new(),
         shell_snapshot_required: false,
@@ -1412,6 +1435,8 @@ mod tests {
         shells: Vec<FfiShellSnapshot>,
         threads: Vec<FfiThreadSnapshot>,
         errors: Vec<String>,
+        providers_changed: u32,
+        deleted: Vec<String>,
     }
 
     #[derive(Default)]
@@ -1475,7 +1500,17 @@ mod tests {
             self.notify.notify_all();
         }
 
-        fn on_providers_changed(&self) {}
+        fn on_providers_changed(&self) {
+            let mut guard = self.inner.lock().expect("listener mutex not poisoned");
+            guard.providers_changed += 1;
+            self.notify.notify_all();
+        }
+
+        fn on_thread_deleted(&self, thread_id: String) {
+            let mut guard = self.inner.lock().expect("listener mutex not poisoned");
+            guard.deleted.push(thread_id);
+            self.notify.notify_all();
+        }
     }
 
     #[test]
@@ -1924,6 +1959,306 @@ mod tests {
 
         core.close_thread("thread-1".to_owned());
         core.close_thread(launched_id);
+        core.disconnect();
+        let _ = stop_tx.send(());
+        let _ = server_thread.join();
+        Ok(())
+    }
+    fn provider_json(id: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut value = json!({
+            "instanceId": id,
+            "driver": "codex",
+            "displayName": id,
+            "enabled": true,
+            "installed": true,
+            "status": "ready",
+            "auth": { "status": "authenticated" },
+            "checkedAt": "2026-11-24T00:00:00Z",
+            "models": [{ "slug": "model-a", "name": "Model A", "isCustom": false }],
+        });
+        if let (Some(target), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+            for (key, field) in extra {
+                target.insert(key.clone(), field.clone());
+            }
+        }
+        value
+    }
+
+    /// Settings where project `p1` turns `codex_work` `on` or off; the machine enables both.
+    fn picker_settings(base: &serde_json::Value, codex_work_in_p1: bool) -> serde_json::Value {
+        let mut settings = base.clone();
+        settings["providerInstances"] = json!({
+            "codex": { "driver": "codex", "enabled": true },
+            "codex_work": { "driver": "codex", "enabled": true },
+        });
+        settings["projectSettingsOverrides"] = json!({
+            "p1": { "providerInstances": { "codex_work": { "enabled": codex_work_in_p1 } } },
+        });
+        settings
+    }
+
+    /// A thread opened by link (no shell row) keeps its project's provider switches; a scan that
+    /// comes back pending returns its cooldown deadline; a project-only enablement change and a
+    /// `thread.deleted` reach the listener.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    fn picker_follows_the_projection_scan_deadline_and_settings_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let mut config: serde_json::Value = serde_json::from_str(include_str!(
+            "../../conn-state/tests/fixtures/server-config-snapshot.json"
+        ))?;
+        let base_settings = config["config"]["settings"].clone();
+        config["config"]["providers"] = json!([
+            provider_json("codex", json!({})),
+            provider_json("codex_work", json!({}))
+        ]);
+        config["config"]["settings"] = picker_settings(&base_settings, false);
+        let settings_updated = json!({
+            "version": 1,
+            "type": "settingsUpdated",
+            "payload": { "settings": picker_settings(&base_settings, true) },
+        });
+        let mut thread_snapshot: serde_json::Value =
+            serde_json::from_str(&conn_state::testkit::synthetic_thread_snapshot_json(
+                conn_state::testkit::SyntheticThread {
+                    turns: 1,
+                    commands_per_turn: 1,
+                    command_output_bytes: 8,
+                    assistant_bytes: 8,
+                },
+            ))?;
+        thread_snapshot["projection"]["thread"]["projectId"] = json!("p1");
+        thread_snapshot["projection"]["thread"]["providerInstanceId"] = json!("codex");
+        thread_snapshot["projection"]["thread"]["modelSelection"] =
+            json!({ "instanceId": "codex", "model": "model-a" });
+        thread_snapshot["projection"]["thread"]["worktreePath"] = serde_json::Value::Null;
+        let mut deleted: serde_json::Value = serde_json::from_str(include_str!(
+            "../../conn-state/tests/fixtures/thread_deleted_replay.json"
+        ))?;
+        deleted["item"]["sequence"] = json!(1_000_000);
+        deleted["item"]["event"]["payload"]["id"] = json!("t-del");
+        let deleted_item = deleted["item"].clone();
+        let pending_reply = json!({ "providers": [provider_json("codex", json!({
+            "workspaceSnapshots": [{
+                "cwd": "/tmp/demo",
+                "checkedAt": "2026-11-24T00:00:00Z",
+                "slashCommands": [],
+                "skills": [],
+                "modelsPending": true,
+            }],
+        }))] });
+
+        let (addr, calls_rx) = server_rt.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            let (calls_tx, calls_rx) = mpsc::unbounded_channel::<MockRpcCall>();
+            tokio::spawn(async move {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                let mut config_request = None;
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let Ok(frames) = conn_wire::decode_client_message(&text) else {
+                        continue;
+                    };
+                    for frame in frames {
+                        let FromClient::Request(req) = frame else {
+                            continue;
+                        };
+                        let mut send = Vec::new();
+                        match req.tag.as_str() {
+                            "orchestration.subscribeShell" => send.push(FromServer::Chunk {
+                                request_id: req.id,
+                                values: vec![
+                                    json!({ "kind": "snapshot", "snapshot": {
+                                        "schemaVersion": 1,
+                                        "snapshotSequence": 1,
+                                        "projects": [{
+                                            "id": "p1",
+                                            "title": "Demo",
+                                            "workspaceRoot": "/tmp/demo",
+                                            "scripts": [],
+                                            "createdAt": "2026-11-22T10:00:00Z",
+                                            "updatedAt": "2026-11-22T10:00:00Z",
+                                            "archivedAt": null
+                                        }],
+                                        "threads": [],
+                                        "archivedThreads": []
+                                    }}),
+                                    json!({ "kind": "synchronized" }),
+                                ],
+                            }),
+                            "subscribeServerConfig" => {
+                                config_request = Some(req.id.clone());
+                                send.push(FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![config.clone()],
+                                });
+                            }
+                            "orchestration.subscribeThread" => {
+                                let thread_id = req.payload["threadId"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let mut snap = thread_snapshot.clone();
+                                snap["projection"]["thread"]["id"] = json!(thread_id);
+                                let mut values = vec![snap, json!({ "kind": "synchronized" })];
+                                if thread_id == "t-del" {
+                                    values.push(deleted_item.clone());
+                                    // The project turns `codex_work` back on, and nothing else.
+                                    if let Some(config_id) = config_request.clone() {
+                                        send.push(FromServer::Chunk {
+                                            request_id: config_id,
+                                            values: vec![settings_updated.clone()],
+                                        });
+                                    }
+                                }
+                                send.insert(
+                                    0,
+                                    FromServer::Chunk {
+                                        request_id: req.id,
+                                        values,
+                                    },
+                                );
+                            }
+                            "server.refreshProviders" | "orchestration.dispatchCommand" => {
+                                let _ = calls_tx.send(MockRpcCall {
+                                    tag: req.tag.clone(),
+                                    payload: req.payload.clone(),
+                                });
+                                let value = if req.tag == "server.refreshProviders" {
+                                    pending_reply.clone()
+                                } else {
+                                    json!({ "ok": true })
+                                };
+                                send.push(FromServer::Exit {
+                                    request_id: req.id,
+                                    exit: Exit::success(value),
+                                });
+                            }
+                            _ => {}
+                        }
+                        for frame in send {
+                            let _ = ws
+                                .send(Message::Text(encode_server_frame(&frame).into()))
+                                .await;
+                        }
+                    }
+                }
+            });
+            Ok::<_, std::io::Error>((addr, calls_rx))
+        })?;
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_thread = std::thread::spawn(move || {
+            server_rt.block_on(async {
+                let _ = stop_rx.await;
+            });
+        });
+
+        let listener = Arc::new(RecordingListener::default());
+        let core = ConnCore::connect(
+            format!("http://{addr}"),
+            FfiCredential::Bearer {
+                token: "test-bearer".to_owned(),
+            },
+            listener.clone(),
+        )?;
+        assert!(
+            listener.wait_for(Duration::from_secs(5), |s| {
+                s.providers_changed >= 1 && s.shells.last().is_some_and(|sh| sh.synchronized)
+            }),
+            "the provider list and shell arrive"
+        );
+
+        core.open_thread("t-link".to_owned());
+        assert!(
+            listener.wait_for(Duration::from_secs(5), |s| {
+                s.threads.iter().any(|th| th.thread_id == "t-link")
+            }),
+            "the linked thread's projection arrives"
+        );
+        let offered = |core: &ConnCore| -> Vec<String> {
+            futures::executor::block_on(core.model_picker(
+                "t-link".to_owned(),
+                String::new(),
+                vec!["codex_work".to_owned()],
+                None,
+                None,
+            ))
+            .sections
+            .into_iter()
+            .map(|section| section.instance_id)
+            .collect()
+        };
+        assert_eq!(
+            offered(&core),
+            ["codex"],
+            "the project keeps codex_work out without a shell row"
+        );
+        let save = futures::executor::block_on(core.save_thread_model(
+            "t-link".to_owned(),
+            "codex_work".to_owned(),
+            "model-a".to_owned(),
+        ))?;
+        assert_eq!(
+            save,
+            FfiModelSave::Unavailable,
+            "Save refuses the project-disabled model"
+        );
+
+        let recheck =
+            futures::executor::block_on(core.scan_thread_workspace_models("t-link".to_owned()))?;
+        assert_eq!(
+            recheck,
+            Some(u64::try_from(WORKSPACE_SCAN_RETRY_COOLDOWN_MS)?),
+            "a scan that comes back pending returns its cooldown deadline"
+        );
+        let mut calls_rx = calls_rx;
+        let scan = calls_rx.try_recv().expect("the scan reached the server");
+        assert_eq!(
+            scan.tag, "server.refreshProviders",
+            "the scan asks for a refresh"
+        );
+        assert_eq!(
+            (
+                scan.payload["instanceId"].as_str(),
+                scan.payload["cwd"].as_str()
+            ),
+            (Some("codex"), Some("/tmp/demo")),
+            "for the thread's provider in its project's root"
+        );
+        assert!(
+            calls_rx.try_recv().is_err(),
+            "the refused Save sent nothing"
+        );
+
+        let before = listener
+            .inner
+            .lock()
+            .expect("listener lock")
+            .providers_changed;
+        core.open_thread("t-del".to_owned());
+        assert!(
+            listener.wait_for(Duration::from_secs(5), |s| {
+                s.providers_changed > before && s.deleted.iter().any(|id| id == "t-del")
+            }),
+            "a project-only settings change and a thread.deleted reach the listener"
+        );
+        assert_eq!(
+            offered(&core),
+            ["codex", "codex_work"],
+            "the reloaded picker follows the project"
+        );
+
         core.disconnect();
         let _ = stop_tx.send(());
         let _ = server_thread.join();

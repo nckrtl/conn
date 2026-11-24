@@ -576,16 +576,14 @@ final class CoreStore {
     fileprivate func handleShell(_ snapshot: FfiShellSnapshot, generation: UInt64) {
         guard generation == activeGeneration else { return }
         if snapshot.synchronized || shell == nil { shell = snapshot }
-        if snapshot.synchronized { pruneDrafts(keeping: snapshot) }
     }
 
-    /// Drops drafts of threads the synchronized shell no longer lists (deleted elsewhere), except
-    /// the open thread's.
-    private func pruneDrafts(keeping snapshot: FfiShellSnapshot) {
-        guard !drafts.isEmpty else { return }
-        let listed = Set(snapshot.threads.map(\.id))
-        let kept = drafts.filter { listed.contains($0.key) || $0.key == openThreadId }
-        if kept.count != drafts.count { drafts = kept }
+    /// The thread's stream reported `thread.deleted`. A thread missing from the shell is not
+    /// deleted (older settled threads are left out), so only this and a successful delete clear
+    /// a draft.
+    fileprivate func handleThreadDeleted(_ threadId: String, generation: UInt64) {
+        guard generation == activeGeneration else { return }
+        drafts[threadId] = nil
     }
 
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, generation: UInt64) {
@@ -647,6 +645,13 @@ private final class ListenerBridge: CoreListener, @unchecked Sendable {
         let generation = self.generation
         Task { @MainActor [weak store] in
             store?.handleError(message, generation: generation)
+        }
+    }
+
+    func onThreadDeleted(threadId: String) {
+        let generation = self.generation
+        Task { @MainActor [weak store] in
+            store?.handleThreadDeleted(threadId, generation: generation)
         }
     }
 

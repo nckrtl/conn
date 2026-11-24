@@ -976,6 +976,7 @@ impl<E: Env> Mapper<E> {
             running_compactions: Vec::new(),
             latest_failure: None,
             continues: Vec::new(),
+            hook_stop_reason: None,
         };
         let task_ref = sub.task["nativeTaskRef"].clone();
         let mut provider_thread = sub.provider_thread.clone();

@@ -375,3 +375,64 @@ async fn search_finds_a_thread_by_its_linked_pull_request() {
     }
     f.service.config.engine.shutdown().await;
 }
+
+/// `searchThreads` ranks before its limit (`rankSearchItems`): a thread titled as the query
+/// stays ahead of a newer one that only links a PR of that title.
+#[tokio::test(flavor = "current_thread")]
+async fn search_ranks_an_exact_title_above_a_newer_pull_request_title() {
+    let f = with_host(fixture("pr-search-rank"), "open");
+    let mut swamp = Client::open(&f.service, client(true)).await;
+    let titled = launch_as_swamp(
+        &mut swamp,
+        "Session cleanup",
+        "hang",
+        "full-access",
+        "default",
+    )
+    .await;
+    let linked = launch_as_swamp(
+        &mut swamp,
+        "Spring maintenance",
+        "hang",
+        "full-access",
+        "default",
+    )
+    .await;
+    let url = "https://github.com/example/fixture/pull/7483";
+    swamp
+        .ok("link_pull_request", json!({"threadId": linked, "url": url}))
+        .await;
+    dispatch(
+        &f,
+        json!({"type": "thread.pull-request-link.sync", "commandId": "pr-search-rank-sync",
+            "threadId": linked, "host": "github.com", "repository": "example/fixture",
+            "number": 7483, "stack": null,
+            "snapshot": {"state": "open", "title": "Session cleanup", "headBranch": "cleanup",
+                "baseBranch": "main", "isDraft": false, "updatedAt": "2026-11-19T08:00:00Z",
+                "syncedAt": "2026-11-19T09:00:00.000Z", "closedAt": null, "mergedAt": null,
+                "checksState": null, "reviewDecision": null}}),
+    )
+    .await;
+    let both = swamp
+        .ok(
+            "conn_thread_search",
+            json!({"projectId": project_id(), "query": "Session cleanup"}),
+        )
+        .await;
+    let ids: Vec<&Value> = both["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| &hit["threadId"])
+        .collect();
+    assert_eq!(ids, [&json!(titled), &json!(linked)]);
+    let one = swamp
+        .ok(
+            "conn_thread_search",
+            json!({"projectId": project_id(), "query": "Session cleanup", "limit": 1}),
+        )
+        .await;
+    assert_eq!(one["matches"][0]["threadId"], titled);
+    assert_eq!(one["matches"].as_array().map(Vec::len), Some(1));
+    f.service.config.engine.shutdown().await;
+}

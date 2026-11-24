@@ -323,16 +323,22 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
             .to_owned()
     };
     candidates.sort_by_cached_key(|t| std::cmp::Reverse(activity(t)));
-    let title_hits: Vec<&Value> = candidates
+    let mut ranked: Vec<(TitleRank, &Value)> = candidates
         .iter()
-        .copied()
-        .filter(|thread| {
+        .filter_map(|thread| {
             let project = live_projects
                 .iter()
                 .find(|(id, _)| *id == &thread["projectId"])
                 .map_or("", |(_, title)| *title);
-            thread_hit(&query, thread, project)
+            Some((thread_hit(&query, thread, project)?, *thread))
         })
+        .collect();
+    // `rankSearchItems` ranks every hit before the limit; the sort is stable, so recency
+    // breaks ties within a rank.
+    ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+    let title_hits: Vec<&Value> = ranked
+        .into_iter()
+        .map(|(_, thread)| thread)
         .take(limit)
         .collect();
     let shown: Vec<&Value> = title_hits.iter().map(|t| &t["id"]).collect();
@@ -419,7 +425,7 @@ fn search_pull_requests(thread: &Value) -> Vec<(&Value, Option<&str>)> {
 /// several, one field must explain the words left after the project's name (`matchHint`):
 /// "lakebed #7483" finds a thread of project Lakebed linked to #7483. Else the whole query may
 /// name the thread or a PR (`matchReference`).
-fn thread_hit(query: &str, thread: &Value, project_title: &str) -> bool {
+fn thread_hit(query: &str, thread: &Value, project_title: &str) -> Option<TitleRank> {
     let pull_requests = search_pull_requests(thread);
     let field_query = thread_field_query(query);
     let branch = searchable_branch(thread["branch"].as_str().unwrap_or_default());
@@ -433,10 +439,18 @@ fn thread_hit(query: &str, thread: &Value, project_title: &str) -> bool {
     others.push(conn_engine::SearchField::new(branch));
     others.push(conn_engine::SearchField::new(project_title));
     let Some(in_title) = conn_engine::match_fields(&field_query, &title, &others) else {
-        return reference_hit(query, thread, &pull_requests);
+        return reference_hit(query, thread, &pull_requests).then_some(TitleRank::Elsewhere);
     };
-    if in_title || !field_query.contains(' ') {
-        return true;
+    if in_title {
+        // `matchSearchFields` lifts a title that is the whole query to `WHOLE_NAME`.
+        return Some(if title.is(&field_query) {
+            TitleRank::WholeTitle
+        } else {
+            TitleRank::Title
+        });
+    }
+    if !field_query.contains(' ') {
+        return Some(TitleRank::Elsewhere);
     }
     let hints: Vec<String> = pull_requests
         .iter()
@@ -455,14 +469,23 @@ fn thread_hit(query: &str, thread: &Value, project_title: &str) -> bool {
             .any(|hint| conn_engine::field_holds_words(hint, words))
     };
     if explained(&field_query) {
-        return true;
+        return Some(TitleRank::Elsewhere);
     }
     let rest = field_query
         .split(' ')
         .filter(|word| !conn_engine::field_holds_words(project_title, word))
         .collect::<Vec<_>>()
         .join(" ");
-    !rest.is_empty() && rest != field_query && explained(&rest)
+    (!rest.is_empty() && rest != field_query && explained(&rest)).then_some(TitleRank::Elsewhere)
+}
+
+/// How a title hit ranks, worst first: a match outside the title (a PR, the branch, the
+/// project or a reference) weighs less than one the title shows (`rankSearchGroups`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TitleRank {
+    Elsewhere,
+    Title,
+    WholeTitle,
 }
 
 /// `threadFieldQuery`: a `pr`, `pull` or `pull request` before a number goes, then a `#`, and the
@@ -1235,8 +1258,9 @@ mod tests {
             "pullRequests": [{"number": 7483, "repository": "example/fixture",
                 "url": "https://github.com/example/fixture/pull/7483", "source": "manual",
                 "snapshot": {"title": "Résumé indexing"}}]});
-        let hit =
-            |query: &str| thread_hit(&conn_engine::fold_search_query(query), &thread, "Lakebed");
+        let hit = |query: &str| {
+            thread_hit(&conn_engine::fold_search_query(query), &thread, "Lakebed").is_some()
+        };
         for query in [
             "lakebed #7483",
             "lakebed resume",
@@ -1264,8 +1288,9 @@ mod tests {
             "pullRequests": [{"number": 12, "repository": "example/fixture",
                 "url": "https://github.com/example/fixture/pull/12", "source": "manual",
                 "snapshot": {"title": "fix⚙ settings"}}]});
-        let hit =
-            |query: &str| thread_hit(&conn_engine::fold_search_query(query), &gear, "Lakebed");
+        let hit = |query: &str| {
+            thread_hit(&conn_engine::fold_search_query(query), &gear, "Lakebed").is_some()
+        };
         assert!(hit("lakebed settings"));
         assert!(!hit("lakebed ⚙"));
     }

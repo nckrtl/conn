@@ -157,6 +157,11 @@ impl SearchField {
     pub fn new(text: &str) -> Self {
         Self(Folded::new(text, push_field))
     }
+
+    /// Whether the folded field is the whole folded query.
+    pub fn is(&self, query: &str) -> bool {
+        self.0.text == query
+    }
 }
 
 /// `matchSearchFields` in `paletteSearch.ts`, without typos or joined words: `Some` when every

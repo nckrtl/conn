@@ -48,6 +48,8 @@ use self::browser::{BrowserPanel, BrowserTabEvent};
 use self::color::to_hsla;
 use self::database::DatabasePanel;
 #[cfg(test)]
+pub(crate) use self::database::NO_LINKED_CONNECTION;
+#[cfg(test)]
 pub(crate) use self::database::TOO_MANY_PENDING_QUERIES;
 use self::device::DevicePanel;
 use self::diff::DiffPanel;
@@ -596,6 +598,17 @@ impl RightPanel {
     /// before [`Self::set_context`], so a waiting query never lands in another project.
     pub fn set_owner(&mut self, owner: Option<conn_state::PanelOwner>, cx: &mut Context<'_, Self>) {
         self.database.update(cx, |p, _| p.set_owner(owner));
+    }
+
+    /// The shown thread's linked environment (`None`: the primary), before its project is set,
+    /// so a linked thread never gets this Mac's `.env` database.
+    pub fn set_linked_environment(
+        &mut self,
+        environment: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.database
+            .update(cx, |p, _| p.set_linked_environment(environment));
     }
 
     /// A deleted thread's waiting Database query goes with it.

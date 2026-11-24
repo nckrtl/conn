@@ -1277,9 +1277,11 @@ impl ConnApp {
         let panel_root = root.clone();
         let environment_id = self.environment_id();
         let panel_owner = self.thread_panels.owner().cloned();
+        let linked_environment = self.context_environment();
         self.right_panel.update(cx, |panel, cx| {
             panel.set_environment(environment_id, cx);
             panel.set_owner(panel_owner, cx);
+            panel.set_linked_environment(linked_environment, cx);
             panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
             panel.show_surface(&surface, surface_visible, cx);
         });

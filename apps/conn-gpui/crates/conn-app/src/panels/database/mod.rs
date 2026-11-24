@@ -52,6 +52,9 @@ const SQL_EDITOR_MIN_HEIGHT_PX: f32 = 96.0;
 /// Placeholder shown in the SQL editor (`DatabasePanel.tsx`).
 const SQL_PLACEHOLDER: &str = "select * from users limit 100";
 const PILL_RADIUS_PX: f32 = 9999.0;
+/// An agent on a linked thread asked for SQL with no connection chosen for that environment.
+pub(crate) const NO_LINKED_CONNECTION: &str =
+    "No database connection for this environment; pick one in the Database panel.";
 
 #[derive(Debug, Clone)]
 struct KeyedLoad<T> {
@@ -79,6 +82,10 @@ struct PickedTable {
 pub(crate) struct DatabasePanel {
     tokens: Tokens,
     project_key: Option<String>,
+    /// The linked environment the shown thread runs on; `None` for the primary. A linked
+    /// thread's project is on another machine: this Mac's `.env` at the same path is not its
+    /// database, so it gets no `.env` default, only a connection chosen for it.
+    linked_environment: Option<String>,
     workspace_root: Option<String>,
     /// The shown thread's panel: a query handed to it waits in `pending` until it can land.
     owner: Option<conn_state::PanelOwner>,
@@ -156,6 +163,7 @@ impl DatabasePanel {
         Self {
             tokens,
             project_key: None,
+            linked_environment: None,
             workspace_root: None,
             owner: None,
             pending: PendingQueries::default(),
@@ -197,12 +205,17 @@ impl DatabasePanel {
         workspace_root: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
+        // A linked project keeps its connections apart from a primary one with the same id.
+        let project_key = project_key.map(|key| match &self.linked_environment {
+            Some(environment) => format!("{environment}/{key}"),
+            None => key,
+        });
         if self.project_key == project_key && self.workspace_root == workspace_root {
             return;
         }
         self.project_key = project_key;
         self.workspace_root = workspace_root;
-        self.env_connection = load_env_connection(self.workspace_root.as_deref());
+        self.env_connection = self.local_env_connection();
         self.editing = None;
         self.menu_open = false;
         self.filter.clear();
@@ -351,7 +364,32 @@ impl DatabasePanel {
             .project_key
             .as_deref()
             .and_then(|key| self.store.remembered_connection(key));
+        if self.linked_environment.is_some() {
+            // No default for a linked thread: only the connection picked for it.
+            return remembered.and_then(|id| connections.iter().find(|c| c.id == id).cloned());
+        }
         active_connection(&connections, remembered)
+    }
+
+    /// The project's `.env` connection, read from this Mac's checkout: only for the primary.
+    fn local_env_connection(&self) -> Option<PanelConnection> {
+        if self.linked_environment.is_some() {
+            return None;
+        }
+        load_env_connection(self.workspace_root.as_deref())
+    }
+
+    /// The shown thread's linked environment (`None`: the primary). Set before the project.
+    pub(crate) fn set_linked_environment(&mut self, environment: Option<String>) {
+        self.linked_environment = environment;
+    }
+
+    /// Whether the panel offers a connection from this Mac's `.env`.
+    #[cfg(test)]
+    pub(crate) fn offers_env_connection_for_test(&self) -> bool {
+        self.connections()
+            .iter()
+            .any(|c| c.source == ConnectionSource::Env)
     }
 
     fn current_sql(&self, connection_id: &str) -> String {
@@ -581,6 +619,7 @@ impl DatabasePanel {
                 Some(name) => {
                     format!("No database connection named \"{name}\". Connections: {names}.")
                 }
+                None if self.linked_environment.is_some() => NO_LINKED_CONNECTION.to_owned(),
                 None => format!(
                     "No database connection configured for this project. Connections: {names}."
                 ),
@@ -858,7 +897,7 @@ impl DatabasePanel {
 
     fn refresh(&mut self, cx: &mut Context<'_, Self>) {
         self.reconnect_next = true;
-        self.env_connection = load_env_connection(self.workspace_root.as_deref());
+        self.env_connection = self.local_env_connection();
         self.load_vault_databases(false, cx);
         self.refresh_nonce = self.refresh_nonce.wrapping_add(1);
         self.tables_load = None;

@@ -4799,6 +4799,87 @@ fn quitting_during_a_write_leaves_the_final_layout_on_disk(cx: &mut TestAppConte
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A linked thread's project is on another machine. When this Mac has a checkout with a
+/// `.env` at the same path, that is not the thread's database: the panel offers no `.env`
+/// connection for it, and an agent's SQL with no connection chosen for that environment is
+/// refused, never run against the local database.
+#[gpui_kit::test]
+fn a_linked_threads_sql_never_uses_this_macs_env(cx: &mut TestAppContext) {
+    let root = std::env::temp_dir().join(format!(
+        "conn-linked-env-{}",
+        crate::commands::new_thread_id()
+    ));
+    std::fs::create_dir_all(&root).expect("a temp checkout");
+    std::fs::write(
+        root.join(".env"),
+        "DB_CONNECTION=sqlite\nDB_DATABASE=/nonexistent/local-only.sqlite\n",
+    )
+    .expect("a local .env");
+    let root_text = root.to_string_lossy().into_owned();
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test(
+                "mini",
+                "mini",
+                linked_mini_shell(&root_text, "Mini database work"),
+                cx,
+            );
+            app.select_thread("thread-mini", cx);
+        })
+    });
+    render_frames(cx, window);
+    let database = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .database_for_test()
+    });
+    assert!(
+        !cx.update(|cx| database.read(cx).offers_env_connection_for_test()),
+        "no connection from this Mac's .env"
+    );
+    let mut answer = cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.dispatch_agent_panel_request_for_test(
+                panel_request(json!({
+                    "requestId": "linked-sql",
+                    "threadId": "thread-mini",
+                    "panel": "database",
+                    "sql": "select * from users",
+                    "run": true,
+                    "focusWindow": false,
+                })),
+                Some("mini"),
+                cx,
+            )
+        })
+    });
+    render_frames(cx, window);
+    let response = answer.try_recv().expect("answered").panel;
+    assert!(!response.ok);
+    assert!(response.database.is_none(), "nothing ran");
+    assert_eq!(
+        response.error.as_deref(),
+        Some(crate::panels::NO_LINKED_CONNECTION)
+    );
+    assert_eq!(
+        cx.update(|cx| database.read(cx).sql_for_test()),
+        None,
+        "no connection is chosen"
+    );
+
+    // The same checkout for a thread on this Mac offers its .env, so the fixture is a real one.
+    cx.update(|cx| {
+        database.update(cx, |db, cx| {
+            db.set_linked_environment(None);
+            db.set_project(Some("proj-mini".into()), Some(root_text.clone()), cx);
+        })
+    });
+    assert!(cx.update(|cx| database.read(cx).offers_env_connection_for_test()));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Switching to a thread whose panel is closed, with its browser tab selected, runs no
 /// annotation script in that browser, even when Watch changed meanwhile.
 #[gpui_kit::test]

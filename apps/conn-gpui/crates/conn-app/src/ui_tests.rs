@@ -3525,6 +3525,90 @@ fn closing_the_opener_keeps_a_background_tabs_link(cx: &mut TestAppContext) {
     assert_eq!(target.as_deref(), Some(LINK));
 }
 
+/// Each thread has its own browser tabs (`rightPanelStore.byThreadKey`). A tab that does not
+/// show keeps its browser, so its page (scroll, form values) is still there when it shows
+/// again, after a thread switch or a sibling tab's close. A deleted thread's browsers go.
+#[gpui_kit::test]
+fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
+    use conn_state::PanelSurface;
+    const ONE: &str = "https://one.example/";
+    const TWO: &str = "https://two.example/";
+    let (window, app) = mount_app(cx);
+    let frames = |cx: &mut TestAppContext| {
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+            cx.run_until_parked();
+        }
+    };
+    let tabs =
+        |cx: &mut TestAppContext| cx.update(|cx| app.read(cx).right_panel_tabs().tabs().to_vec());
+    let browser_id = |surface: &PanelSurface| match surface {
+        PanelSurface::Browser(id) => *id,
+        other => panic!("{other:?} is not a browser tab"),
+    };
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-a", cx)));
+    for url in [ONE, TWO] {
+        cx.update(|cx| app.update(cx, |app, cx| app.open_browser_tab(url.into(), false, cx)));
+        frames(cx);
+    }
+    let a_tabs = tabs(cx);
+    let [one, two] = [browser_id(&a_tabs[0]), browser_id(&a_tabs[1])];
+    let page_one = cx
+        .update(|cx| app.read(cx).browser_weak_for_test(one, cx))
+        .expect("the first tab was shown, so it has a browser");
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-b", cx)));
+    frames(cx);
+    assert!(tabs(cx).is_empty(), "another thread starts with no tabs");
+    assert!(!cx.update(|cx| app.read(cx).layout().right_panel_open));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(conn_state::RightPanelTab::Browser, cx)
+        })
+    });
+    frames(cx);
+    let b_tab = browser_id(&tabs(cx)[0]);
+    assert!(
+        ![one, two].contains(&b_tab),
+        "browser ids differ across threads"
+    );
+    let page_b = cx
+        .update(|cx| app.read(cx).browser_weak_for_test(b_tab, cx))
+        .expect("the shown tab has a browser");
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-a", cx)));
+    frames(cx);
+    assert_eq!(tabs(cx), a_tabs, "thread A gets its tabs back");
+    assert!(cx.update(|cx| app.read(cx).layout().right_panel_open));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.close_right_panel_tab(&PanelSurface::Browser(two), cx)
+        })
+    });
+    frames(cx);
+    assert_eq!(
+        cx.update(|cx| app.read(cx).browser_weak_for_test(one, cx))
+            .and_then(|weak| weak.upgrade())
+            .map(|page| page.entity_id()),
+        page_one.upgrade().map(|page| page.entity_id()),
+        "the first page is the same browser after the switch and the close"
+    );
+    assert_eq!(
+        cx.update(|cx| app.read(cx).browser_target_for_test(one, cx))
+            .as_deref(),
+        Some(ONE)
+    );
+    assert!(page_b.upgrade().is_some(), "a hidden thread keeps its page");
+
+    cx.update(|cx| app.update(cx, |app, cx| app.forget_thread_panel("thread-b", cx)));
+    frames(cx);
+    assert!(
+        page_b.upgrade().is_none(),
+        "a deleted thread's browser is released"
+    );
+}
+
 // ---- the workspace rail: drag to reorder, right-click menu, remove ----
 
 fn rail_workspace(id: &str, name: &str) -> conn_desktop::orbit::OrbitWorkspace {

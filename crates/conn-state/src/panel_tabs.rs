@@ -2,6 +2,8 @@
 //! the one that shows. Browser tabs are peers in that list (`browser:<tabId>`), so any number
 //! of them can be open; every other kind opens once.
 
+use std::collections::HashMap;
+
 use crate::layout::{BrowserTabId, PanelSurface, RightPanelTab};
 
 /// The right panel's open tabs and the active one.
@@ -134,6 +136,88 @@ impl RightPanelTabs {
     }
 }
 
+/// One thread's right panel: its tabs and whether it shows (`ThreadRightPanelState` and
+/// `ThreadPanelVisibility.inlineOpen`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThreadPanel {
+    pub tabs: RightPanelTabs,
+    pub open: bool,
+}
+
+/// Every thread's right panel, as `rightPanelStore.byThreadKey`. The shown thread's panel lives
+/// with the caller; the others wait here. Browser tab ids are unique across threads, so one
+/// browser per id can stay alive, page state and all, while its thread is not shown.
+#[derive(Clone, Debug, Default)]
+pub struct ThreadPanels {
+    owner: Option<String>,
+    parked: HashMap<String, ThreadPanel>,
+    next_browser: BrowserTabId,
+}
+
+impl ThreadPanels {
+    /// The thread whose panel the caller holds.
+    #[must_use]
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
+    /// Makes `owner` the shown thread: parks `current` for the old owner and puts the new
+    /// owner's panel in its place. `false` when `owner` already shows.
+    pub fn switch(&mut self, owner: Option<String>, current: &mut ThreadPanel) -> bool {
+        if self.owner == owner {
+            return false;
+        }
+        let next = owner
+            .as_ref()
+            .and_then(|key| self.parked.remove(key))
+            .unwrap_or_default();
+        let old = std::mem::replace(current, next);
+        self.next_browser = self.next_browser.max(old.tabs.next_browser);
+        if let Some(key) = self.owner.take()
+            && (old.open || !old.tabs.tabs().is_empty())
+        {
+            self.parked.insert(key, old);
+        }
+        current.tabs.next_browser = self.next_browser;
+        self.owner = owner;
+        true
+    }
+
+    /// Opens a tab of kind `tab` on a thread that is not shown, so it is there when the thread
+    /// shows (`preparePanel`). `shown` is the shown thread's tabs, which share the id range.
+    pub fn prepare(&mut self, owner: &str, tab: RightPanelTab, shown: &mut RightPanelTabs) {
+        debug_assert_ne!(
+            self.owner.as_deref(),
+            Some(owner),
+            "the caller opens tabs on the shown thread itself"
+        );
+        let panel = self.parked.entry(owner.to_owned()).or_default();
+        panel.tabs.next_browser = self.next_browser.max(shown.next_browser);
+        panel.tabs.open(tab);
+        panel.open = true;
+        self.next_browser = panel.tabs.next_browser;
+        shown.next_browser = self.next_browser;
+    }
+
+    /// A draft became thread `new`: its panel goes with it.
+    pub fn rename(&mut self, old: &str, new: String) {
+        if self.owner.as_deref() == Some(old) {
+            self.owner = Some(new);
+        } else if let Some(panel) = self.parked.remove(old) {
+            self.parked.insert(new, panel);
+        }
+    }
+
+    /// Drops a deleted thread's parked panel and returns its browser tabs, whose browsers the
+    /// caller closes. A shown thread moves on before it is deleted, so it is parked by then.
+    pub fn forget(&mut self, owner: &str) -> Vec<BrowserTabId> {
+        self.parked
+            .remove(owner)
+            .map(|panel| panel.tabs.browser_ids().collect())
+            .unwrap_or_default()
+    }
+}
+
 /// A browser tab's title (`surfaceTitle`): the page title, else the page's host, else Browser.
 /// Chromium reports the URL as the title of a page without one; that counts as none.
 #[must_use]
@@ -244,6 +328,70 @@ mod tests {
         let first = tabs.add(RightPanelTab::Browser);
         tabs.close(&first);
         assert_ne!(tabs.add(RightPanelTab::Browser), first);
+    }
+
+    #[test]
+    fn each_thread_keeps_its_own_tabs_and_browser_ids_stay_unique() {
+        let mut panels = ThreadPanels::default();
+        let mut shown = ThreadPanel::default();
+        assert!(panels.switch(Some("env:a".into()), &mut shown));
+        let a1 = shown.tabs.add(RightPanelTab::Browser);
+        let a2 = shown.tabs.add(RightPanelTab::Browser);
+        shown.open = true;
+        let a = shown.clone();
+        // An agent opens a tab on a thread the user is not looking at.
+        panels.prepare("env:c", RightPanelTab::Browser, &mut shown.tabs);
+
+        assert!(panels.switch(Some("env:b".into()), &mut shown));
+        assert!(
+            shown.tabs.tabs().is_empty() && !shown.open,
+            "a new thread starts closed and empty"
+        );
+        let b1 = shown.tabs.add(RightPanelTab::Browser);
+        assert!(
+            ![&a1, &a2].contains(&&b1),
+            "ids never repeat across threads"
+        );
+
+        assert!(panels.switch(Some("env:a".into()), &mut shown));
+        assert_eq!((shown.tabs.tabs(), shown.open), (a.tabs.tabs(), a.open));
+        assert!(!panels.switch(Some("env:a".into()), &mut shown));
+
+        // The prepared tab waits for its thread to show.
+        panels.switch(Some("env:c".into()), &mut shown);
+        assert!(shown.open);
+        let [c1] = shown.tabs.tabs() else {
+            panic!("one prepared tab")
+        };
+        assert!(![&a1, &a2, &b1].contains(&c1));
+
+        // Deleting a thread hands back its browsers to close.
+        let forgotten: Vec<_> = panels
+            .forget("env:b")
+            .into_iter()
+            .map(PanelSurface::Browser)
+            .collect();
+        assert_eq!(forgotten, [b1]);
+        assert!(panels.forget("env:b").is_empty());
+    }
+
+    #[test]
+    fn a_draft_keeps_its_panel_when_it_becomes_a_thread() {
+        let mut panels = ThreadPanels::default();
+        let mut shown = ThreadPanel::default();
+        panels.switch(Some("env:draft".into()), &mut shown);
+        shown.tabs.add(RightPanelTab::Files);
+        panels.rename("env:draft", "env:thread".into());
+        assert_eq!(panels.owner(), Some("env:thread"));
+        assert!(!panels.switch(Some("env:thread".into()), &mut shown));
+        assert_eq!(shown.tabs.tabs(), [FILES]);
+        // A parked draft moves too.
+        panels.switch(Some("env:draft2".into()), &mut shown);
+        shown.tabs.add(RightPanelTab::Diff);
+        panels.switch(Some("env:thread".into()), &mut shown);
+        panels.rename("env:draft2", "env:thread2".into());
+        panels.switch(Some("env:thread2".into()), &mut shown);
+        assert_eq!(shown.tabs.tabs(), [PanelSurface::Kind(RightPanelTab::Diff)]);
     }
 
     #[test]

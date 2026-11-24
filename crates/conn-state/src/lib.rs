@@ -90,7 +90,9 @@ pub use crate::order_keys::{
     OrderAssignment, order_key_between, plan_reorder, sort_active, sort_pinned, spread_order_keys,
     top_of_pinned_run_key,
 };
-pub use crate::panel_tabs::{ClosedTab, RightPanelTabs, browser_tab_title};
+pub use crate::panel_tabs::{
+    ClosedTab, RightPanelTabs, ThreadPanel, ThreadPanels, browser_tab_title,
+};
 pub use crate::question::{
     clamp_context, markdown_preview_text, seed_user_input_drafts, split_recommended_label,
 };

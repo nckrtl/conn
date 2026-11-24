@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use conn_client::{ClientEvent, Connection, ConnectionStatus, ServerConfig};
 use conn_state::{
-    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellState, ThreadState,
+    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellState, ThreadPanel,
+    ThreadPanels, ThreadState,
 };
 use conn_theme::{ShellGeometry, Tokens};
 use gpui_kit::{
@@ -268,6 +269,9 @@ pub(crate) struct ConnApp {
     /// Right panel tabs the user has open, in order, and the active one (Conn's
     /// `rightPanelStore`). Any number of browser tabs; one of every other kind.
     right_panel_tabs: RightPanelTabs,
+    /// The other threads' right panels; `right_panel_tabs` and `layout.right_panel_open` hold
+    /// the shown thread's (`rightPanelStore.byThreadKey`).
+    thread_panels: ThreadPanels,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -686,6 +690,7 @@ impl ConnApp {
             responding_approvals: HashSet::new(),
             // No tab until one is picked: opening the panel shows the surface launcher.
             right_panel_tabs: RightPanelTabs::default(),
+            thread_panels: ThreadPanels::default(),
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -1144,6 +1149,7 @@ impl ConnApp {
 
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync_panel_owner();
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
@@ -2752,6 +2758,7 @@ impl ConnApp {
                             app.drafts.set_frozen_active(None);
                         }
                         app.drafts.forget(&draft_id);
+                        app.thread_panels.rename(&draft_id, final_thread_id.clone());
                         if was_open {
                             app.layout.selected_project_id = Some(project_id.clone());
                             app.layout.selected_thread_id = Some(final_thread_id.clone());
@@ -3833,6 +3840,40 @@ impl ConnApp {
             .shows_surface_launcher(self.right_panel_tabs.tabs().len())
     }
 
+    /// Puts the shown thread's (or draft's) right panel in place. Panels are keyed by thread or
+    /// draft id alone: both are UUIDs, and a linked thread's environment can be learnt late. The panel it leaves keeps
+    /// its tabs, and its browsers keep their pages, until the thread shows again.
+    fn sync_panel_owner(&mut self) {
+        let owner = self
+            .layout
+            .selected_thread_id
+            .as_deref()
+            .or_else(|| self.draft.as_ref().map(|d| d.draft_id.as_str()))
+            .map(str::to_owned);
+        let mut panel = ThreadPanel {
+            tabs: std::mem::take(&mut self.right_panel_tabs),
+            open: self.layout.right_panel_open,
+        };
+        if self.thread_panels.switch(owner, &mut panel) {
+            self.right_panel_add_menu_open = false;
+            self.layout.right_panel_tab = panel
+                .tabs
+                .active()
+                .map_or(RightPanelTab::Files, PanelSurface::kind);
+        }
+        self.right_panel_tabs = panel.tabs;
+        self.layout.right_panel_open = panel.open;
+    }
+
+    /// A deleted thread's right panel goes with it, and so do its browsers.
+    pub(crate) fn forget_thread_panel(&mut self, owner: &str, cx: &mut Context<'_, Self>) {
+        for id in self.thread_panels.forget(owner) {
+            self.right_panel.update(cx, |panel, cx| {
+                panel.close_surface(&PanelSurface::Browser(id), cx);
+            });
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn right_panel_tabs(&self) -> &RightPanelTabs {
         &self.right_panel_tabs
@@ -4860,7 +4901,10 @@ impl ConnApp {
             "delete thread",
             crate::commands::delete_thread(thread_id),
             cx,
-            move |app, cx| app.forget_thread_draft(&deleted, cx),
+            move |app, cx| {
+                app.forget_thread_draft(&deleted, cx);
+                app.forget_thread_panel(&deleted, cx);
+            },
         );
     }
 
@@ -6154,6 +6198,15 @@ impl ConnApp {
             .unwrap_or(false);
 
         if !on_thread {
+            let acts_on_mcp = request.panel == AgentPanelKind::Mcp
+                && (request.mcp_server.is_some() || request.mcp_call.is_some());
+            if !acts_on_mcp {
+                let tab = agent_panel_tab(request.panel);
+                let _ = this.update(cx, |app, _| {
+                    app.thread_panels
+                        .prepare(&request.thread_id, tab, &mut app.right_panel_tabs);
+                });
+            }
             if request.panel == AgentPanelKind::Database
                 && let Some(sql) = request.sql.clone()
             {
@@ -6179,13 +6232,7 @@ impl ConnApp {
             return resp;
         }
 
-        let target_tab = match request.panel {
-            AgentPanelKind::Browser => RightPanelTab::Browser,
-            AgentPanelKind::Database => RightPanelTab::Database,
-            AgentPanelKind::Mcp => RightPanelTab::Mcp,
-            AgentPanelKind::Diff => RightPanelTab::Diff,
-            AgentPanelKind::Files => RightPanelTab::Files,
-        };
+        let target_tab = agent_panel_tab(request.panel);
 
         let _ = this.update(cx, |app, cx| {
             app.select_right_panel_tab(target_tab, cx);
@@ -7152,6 +7199,18 @@ pub(crate) fn start_frame_log(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// The right-panel tab an agent's `panel_open` request shows.
+fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
+    use conn_contract::AgentPanelKind;
+    match panel {
+        AgentPanelKind::Browser => RightPanelTab::Browser,
+        AgentPanelKind::Database => RightPanelTab::Database,
+        AgentPanelKind::Mcp => RightPanelTab::Mcp,
+        AgentPanelKind::Diff => RightPanelTab::Diff,
+        AgentPanelKind::Files => RightPanelTab::Files,
+    }
 }
 
 impl Render for ConnApp {

@@ -1170,7 +1170,8 @@ impl BrowserPanel {
         // Defer BrowserView creation until after GPUI finishes the current frame.
         cx.defer(move |cx| {
             creating_flag.set(false);
-            if view_slot.borrow().is_some() {
+            // A tab closed or hidden since the frame gets no Chromium view: nothing would close it.
+            if view_slot.borrow().is_some() || entity.upgrade().is_none() || !visible.get() {
                 return;
             }
             let rect = last_bounds.get().unwrap_or(bounds);

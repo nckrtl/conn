@@ -70,6 +70,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/pairing-links/revoke", post(revoke_pairing_link))
         .route("/api/auth/clients", get(clients))
         .route("/api/auth/clients/revoke", post(revoke_client))
+        .route("/api/auth/clients/extend", post(extend_client))
+        .route("/api/auth/logout", post(logout))
         .route(
             "/api/auth/clients/revoke-others",
             post(revoke_other_clients),
@@ -299,13 +301,25 @@ fn issue_ticket(state: &AppState, headers: &HeaderMap, route: Option<&str>) -> R
     }
 }
 
-/// `AuthCreatePairingCredentialInput`.
+/// `AuthCreatePairingCredentialInput`, plus Conn's `sessionTtl` for the session the code grants.
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct PairingTokenRequest {
     label: Option<String>,
     scopes: Option<Vec<String>>,
     access: Option<String>,
     purpose: Option<String>,
+    session_ttl: Option<String>,
+}
+
+/// A `sessionTtl` other than `until-revoked`: 400.
+fn invalid_session_ttl() -> Response {
+    error(
+        StatusCode::BAD_REQUEST,
+        "EnvironmentRequestInvalidError",
+        "invalid_request",
+        "invalid_session_ttl",
+    )
 }
 
 /// The bearer session behind a request, or the 401 refusing it.
@@ -379,6 +393,13 @@ fn pairing_token_blocking(
         Ok(principal) => principal,
         Err(response) => return *response,
     };
+    let session_ttl_ms = match request.session_ttl.as_deref() {
+        None => None,
+        Some(ttl) => match auth::parse_session_ttl(ttl) {
+            Some(ms) => Some(ms),
+            None => return invalid_session_ttl(),
+        },
+    };
     // A peer-link code (`peerLinkPairingCodes`): the scopes its access needs, spent only by a link.
     if let (Some(access), Some("peer-link")) =
         (request.access.as_deref(), request.purpose.as_deref())
@@ -391,7 +412,10 @@ fn pairing_token_blocking(
             return scope_required(missing);
         }
         let label = request.label.filter(|l| !l.trim().is_empty());
-        let issued = match state.auth.issue_peer_link_pairing(access, label) {
+        let issued = match state
+            .auth
+            .issue_peer_link_pairing(access, label, session_ttl_ms)
+        {
             Ok(issued) => issued,
             Err(e) => return internal("pairing_credential_issuance_failed", e),
         };
@@ -446,6 +470,7 @@ fn pairing_token_blocking(
         scopes,
         label,
         ttl_ms: auth::PAIRING_CODE_TTL_MS,
+        session_ttl_ms,
     }) {
         Ok(issued) => issued,
         Err(e) => return internal("pairing_credential_issuance_failed", e),
@@ -519,6 +544,81 @@ async fn revoke_client(
         }))
         .with_status(StatusCode::FORBIDDEN),
         Err(e) => internal("client_session_revoke_failed", e),
+    }
+}
+
+/// `POST /api/auth/logout` (Conn only): ends the caller's own session, which
+/// `/api/auth/clients/revoke` refuses. Any session may call it. A repeat gets the usual 401,
+/// which a caller counts as done. Sessions here are bearer tokens, so no cookie to clear.
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    tokio::task::spawn_blocking(move || {
+        let principal = match authenticated(&state, &headers) {
+            Ok(principal) => principal,
+            Err(response) => return *response,
+        };
+        match state.auth.end_session(&principal.session_id) {
+            Ok(revoked) => no_store(
+                Json(json!({ "sessionId": principal.session_id, "revoked": revoked }))
+                    .into_response(),
+            ),
+            Err(e) => internal("client_session_revoke_failed", e),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtendRequest {
+    session_id: Option<String>,
+    session_ttl: String,
+}
+
+/// `POST /api/auth/clients/extend` (Conn only): moves a session's end out, the caller's own
+/// without `sessionId`. Orbit upgrades held sessions here instead of pairing again.
+async fn extend_client(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ExtendRequest>,
+) -> Response {
+    tokio::task::spawn_blocking(move || extend_client_blocking(&state, &headers, request))
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn extend_client_blocking(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ExtendRequest,
+) -> Response {
+    let principal = match require_scope(state, headers, "access:write") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let Some(ttl_ms) = auth::parse_session_ttl(&request.session_ttl) else {
+        return invalid_session_ttl();
+    };
+    let id = request.session_id.unwrap_or(principal.session_id);
+    match state.auth.extend_session(&id, ttl_ms) {
+        Ok(Ok(expires_at_ms)) => Json(json!({
+            "sessionId": id,
+            "expiresAt": iso_from_ms(expires_at_ms),
+        }))
+        .into_response(),
+        Ok(Err(auth::ExtendError::NotFound)) => error(
+            StatusCode::NOT_FOUND,
+            "EnvironmentRequestInvalidError",
+            "invalid_request",
+            "client_session_not_found",
+        ),
+        Ok(Err(auth::ExtendError::CarriedFromT3)) => error(
+            StatusCode::CONFLICT,
+            "EnvironmentOperationForbiddenError",
+            "operation_forbidden",
+            "t3_session_extend_not_allowed",
+        ),
+        Err(e) => internal("client_session_extend_failed", e),
     }
 }
 
@@ -1610,6 +1710,32 @@ mod tests {
             assert!(!reply.contains(r#""credential""#), "{body}: {reply}");
         }
         assert_eq!(auth.pairing_links().len(), links_before);
+        // `sessionTtl` takes only `until-revoked`, on plain and peer-link codes.
+        for body in [
+            r#"{"sessionTtl":"30d"}"#,
+            r#"{"access":"auto","purpose":"peer-link","sessionTtl":"forever"}"#,
+        ] {
+            let (status, reply) = post("/api/auth/pairing-token", body).await;
+            assert_eq!(status, 400, "{body}: {reply}");
+            assert!(reply.contains("invalid_session_ttl"), "{reply}");
+        }
+        let (status, body) = post(
+            "/api/auth/pairing-token",
+            r#"{"scopes":["access:read"],"sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let long: Value = serde_json::from_str(&body).unwrap();
+        let held = auth
+            .exchange(
+                long["credential"].as_str().unwrap(),
+                None,
+                ClientInfo::default(),
+            )
+            .unwrap();
+        assert!(
+            held.principal.expires_at_ms > admin.principal.expires_at_ms + auth::SESSION_TTL_MS
+        );
 
         let device = auth
             .exchange(
@@ -1626,12 +1752,44 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         let clients: Vec<Value> = serde_json::from_str(&body).unwrap();
-        assert_eq!(clients.len(), 2);
+        assert_eq!(clients.len(), 3);
         assert!(
             clients
                 .iter()
                 .any(|c| c["current"] == true && c["client"]["label"] == "Orbit Gateway")
         );
+
+        // `extend`: the caller's own session without `sessionId`, another's with it.
+        let (status, body) = post(
+            "/api/auth/clients/extend",
+            r#"{"sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let extended: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(extended["sessionId"], admin.principal.session_id.as_str());
+        let device_ttl = |ttl: &str| {
+            format!(
+                r#"{{"sessionId":"{}","sessionTtl":"{ttl}"}}"#,
+                device.principal.session_id
+            )
+        };
+        let (status, _) = post("/api/auth/clients/extend", &device_ttl("1h")).await;
+        assert_eq!(status, 400);
+        let (status, body) = post("/api/auth/clients/extend", &device_ttl("until-revoked")).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            auth.authenticate_bearer(&device.token)
+                .unwrap()
+                .expires_at_ms
+                > admin.principal.expires_at_ms + auth::SESSION_TTL_MS
+        );
+        let (status, _) = post(
+            "/api/auth/clients/extend",
+            r#"{"sessionId":"no-such-session","sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 404);
 
         let mine = format!(r#"{{"sessionId":"{}"}}"#, admin.principal.session_id);
         let (status, body) = post("/api/auth/clients/revoke", &mine).await;
@@ -1654,6 +1812,31 @@ mod tests {
         )
         .await;
         assert_eq!(body, r#"{"revoked":true}"#);
+        // `logout` ends the caller's own until-revoked session at once, with no access:write,
+        // and announces it so its sockets close. A repeat is the normal 401.
+        let mut changes = auth.subscribe();
+        let held_bearer = format!("authorization: Bearer {}", held.token);
+        let logout = format!("POST /api/auth/logout HTTP/1.1\r\n{held_bearer}");
+        let (status, body) = call(addr, &logout, "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"sessionId": held.principal.session_id, "revoked": true})
+        );
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            AccessChange::ClientRemoved(held.principal.session_id.clone())
+        );
+        assert!(auth.authenticate_bearer(&held.token).is_none());
+        let (status, _) = call(addr, &logout, "").await;
+        assert_eq!(status, 401);
+        let (status, _) = call(
+            addr,
+            &format!("GET /api/auth/clients HTTP/1.1\r\n{held_bearer}"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 401);
         let (_, body) = post("/api/auth/clients/revoke-others", "").await;
         assert_eq!(body, r#"{"revokedCount":0}"#);
         // Without access:read the list is refused.

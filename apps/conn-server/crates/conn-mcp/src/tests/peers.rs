@@ -46,7 +46,6 @@ impl Peers for StandIn {
             Ok(known.then(|| LinkInfo {
                 label: "Peer".into(),
                 access: "auto".into(),
-                expired: false,
             }))
         })
     }

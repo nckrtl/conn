@@ -131,7 +131,6 @@ pub struct PeerFailure {
 pub struct LinkInfo {
     pub label: String,
     pub access: String,
-    pub expired: bool,
 }
 
 /// An agent's `conn_environment_link` call, checked here.
@@ -357,7 +356,6 @@ impl Cx<'_> {
                 .get(&target)
                 .await
                 .map_err(|message| fail("orchestration_error", message))?
-            && !link.expired
             && link.access != "read-only"
             && runtime_rank(requested) > runtime_rank(&link.access)
         {

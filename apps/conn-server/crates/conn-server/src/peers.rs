@@ -94,16 +94,14 @@ struct Row {
     urls: Vec<String>,
     access: String,
     linked_at_ms: u64,
+    /// When the peer said the session ends. Display only: a link ends when the peer answers
+    /// 401, not on this date.
     expires_at_ms: u64,
     last_reached_at_ms: Option<u64>,
     last_error: Option<String>,
 }
 
 impl Row {
-    fn expired(&self, now: u64) -> bool {
-        self.expires_at_ms <= now
-    }
-
     fn to_link(&self) -> Value {
         json!({
             "environmentId": self.environment_id,
@@ -721,7 +719,6 @@ impl PeerLinks {
         // An address alone renews a link only where the link already reaches it.
         if input.expected_environment_id.is_none()
             && let Some(existing) = self.read_row(&peer_id).await?
-            && !existing.expired(now_ms())
             && !existing.urls.contains(&primary)
         {
             return Err(PeerLinkError::new(
@@ -836,26 +833,23 @@ impl PeerLinks {
             (a.label.as_str(), a.environment_id.as_str())
                 .cmp(&(b.label.as_str(), b.environment_id.as_str()))
         });
-        let now = now_ms();
+        // The tool's `expired` status stays in the shared catalog but is never sent: only the
+        // peer decides when a link ends.
         let mut set = JoinSet::new();
         for (index, row) in rows.into_iter().enumerate() {
             let this = self.clone();
             set.spawn(async move {
                 let mut row = row;
-                let status = if row.expired(now) {
-                    "expired"
-                } else {
-                    match this
-                        .race_answers(&row.urls, &row.environment_id, Some(LIST_PROBE_TIMEOUT))
-                        .await
-                    {
-                        Some((_, peer)) => {
-                            let label = peer["label"].as_str().unwrap_or_default().to_owned();
-                            this.with_label(&mut row, &label).await;
-                            "reachable"
-                        }
-                        None => "unreachable",
+                let status = match this
+                    .race_answers(&row.urls, &row.environment_id, Some(LIST_PROBE_TIMEOUT))
+                    .await
+                {
+                    Some((_, peer)) => {
+                        let label = peer["label"].as_str().unwrap_or_default().to_owned();
+                        this.with_label(&mut row, &label).await;
+                        "reachable"
                     }
+                    None => "unreachable",
                 };
                 let mut link = row.to_link();
                 link["status"] = json!(status);
@@ -914,15 +908,6 @@ impl PeerLinks {
         let Some(mut row) = self.read_row(environment_id).await? else {
             return Err(not_linked());
         };
-        if row.expired(now_ms()) {
-            return Err(PeerLinkError::new(
-                "expired",
-                format!(
-                    "The link to {} expired. Link it again with a new pairing code from {}.",
-                    row.label, row.label
-                ),
-            ));
-        }
         let secret = row.secret_name.clone();
         let stored = self
             .blocking(move |_, dir| {
@@ -1094,7 +1079,7 @@ impl PeerLinks {
         let resolved = self.resolve(&call.environment_id).await.map_err(|error| {
             let code = match error.reason {
                 "unknown_link" => "invalid_request",
-                "expired" | "incompatible" => "capability_denied",
+                "incompatible" => "capability_denied",
                 _ => "orchestration_error",
             };
             Answered::Failed(failure(code, error.message))
@@ -1245,14 +1230,6 @@ impl PeerLinks {
     /// The stored link, without asking the peer.
     async fn get(&self, environment_id: &str) -> Result<Option<Row>, PeerLinkError> {
         self.read_row(environment_id).await
-    }
-
-    /// A stored link that has not expired.
-    async fn usable_link(&self, environment_id: &str) -> Result<Option<Row>, PeerLinkError> {
-        Ok(self
-            .read_row(environment_id)
-            .await?
-            .filter(|r| !r.expired(now_ms())))
     }
 }
 
@@ -1589,7 +1566,7 @@ impl PeerLinks {
         }
         if let Some(environment) = arg("environmentId")
             && let Some(link) = self
-                .usable_link(&environment)
+                .read_row(&environment)
                 .await
                 .map_err(|e| failure("orchestration_error", e.message))?
         {
@@ -1740,10 +1717,10 @@ impl PeerLinks {
             match answer["type"].as_str() {
                 Some("use-existing") => {
                     let id = answer["environmentId"].as_str().unwrap_or_default();
-                    match self.usable_link(id).await {
+                    match self.read_row(id).await {
                         Ok(Some(link)) => linked_outcome(&link),
                         Ok(None) => failed_outcome(
-                            "That environment is no longer linked here, or its link expired. Link it again.",
+                            "That environment is no longer linked here. Link it again.",
                         ),
                         Err(error) => failed_outcome(&error.message),
                     }
@@ -1827,7 +1804,6 @@ impl Peers for McpPeers {
         Box::pin(async move {
             let row = self.0.get(&id).await.map_err(|e| e.message)?;
             Ok(row.map(|r| LinkInfo {
-                expired: r.expired(now_ms()),
                 label: r.label,
                 access: r.access,
             }))
@@ -2119,6 +2095,54 @@ mod tests {
                 "conn_thread_send",
                 "t3_thread_send"
             ]
+        );
+    }
+
+    /// The stored `expiresAt` is display only: a link past it still lists as reachable and
+    /// still calls the peer. Only the peer's 401 ends a link.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_link_past_its_stored_date_still_reaches_the_peer() {
+        let (peers, _) = links_with_a_running_thread("past-date").await;
+        let (url, _) = fake_peer(vec![(200, good_descriptor().to_string())], "{}").await;
+        let now = now_ms();
+        peers
+            .change(move |rows| {
+                rows.push(Row {
+                    environment_id: "environment:peer".into(),
+                    secret_name: "peer-link-test".into(),
+                    label: "Peer".into(),
+                    urls: vec![url],
+                    access: "auto".into(),
+                    linked_at_ms: now - 120_000,
+                    expires_at_ms: now - 60_000,
+                    last_reached_at_ms: None,
+                    last_error: None,
+                })
+            })
+            .await
+            .unwrap();
+        conn_support::secret_store::write(&peers.secrets_dir, "peer-link-test", b"token").unwrap();
+        let listed = peers.list().await.unwrap();
+        assert_eq!(listed[0]["status"], "reachable");
+        let refused = peers
+            .call(PeerCall {
+                environment_id: "environment:peer".into(),
+                tool: "conn_thread_launch".into(),
+                arguments: Map::new(),
+                limits: conn_mcp::PeerLimits {
+                    runtime_mode: "full-access".into(),
+                    interaction_mode: "default".into(),
+                },
+                sender: None,
+            })
+            .await
+            .unwrap_err();
+        // The peer answered; nothing refused the call here.
+        assert_eq!(refused.code, "orchestration_error");
+        assert!(
+            refused.message.contains("did not match"),
+            "{}",
+            refused.message
         );
     }
 

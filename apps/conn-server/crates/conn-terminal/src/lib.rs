@@ -567,11 +567,15 @@ impl TerminalManager {
             let idle = state.sessions.get(&key).is_some_and(|s| {
                 s.activity_mark() == mark
                     && s.proc.as_ref().is_some_and(|p| {
-                        !table.has_running_subprocess(
-                            p.pid,
-                            s.shell.as_deref(),
-                            pty::foreground_group(&p.control),
-                        )
+                        // A job that started after the table was read holds the terminal now,
+                        // and output not yet read would be lost with it.
+                        pty::foreground_job(&p.control, p.pid).is_none()
+                            && !pty::output_pending(&p.control)
+                            && !table.has_running_subprocess(
+                                p.pid,
+                                s.shell.as_deref(),
+                                pty::foreground_group(&p.control),
+                            )
                     })
             });
             if idle {

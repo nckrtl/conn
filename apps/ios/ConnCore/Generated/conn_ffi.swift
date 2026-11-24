@@ -1470,7 +1470,15 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
  */
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
+    /**
+     * The user left this thread: unsubscribe it.
+     */
     func closeThread(threadId: String) 
+    
+    /**
+     * A linked scope's session connects to its Orbit environment.
+     */
+    func connectEnvironment(environmentId: String) 
     
     func connectManually() 
     
@@ -1493,10 +1501,9 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
      */
     func offlineReader()  -> OfflineReader?
     
-    func openLink(environmentId: String, threadId: String) 
-    
     /**
-     * The user opened this thread; it stays subscribed across this session's connections.
+     * The user opened this thread (closing the scope's other one); it stays subscribed across
+     * this session's connections.
      */
     func openThread(threadId: String) 
     
@@ -1509,14 +1516,15 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     func retry() 
     
+    /**
+     * Where a link for `environment_id` opens: here only when it is this session's already
+     * known server; otherwise in that environment's own scope.
+     */
+    func routeLink(environmentId: String)  -> FfiLinkRoute
+    
     func signOut() 
     
     func state()  -> FfiSessionState
-    
-    /**
-     * The thread a link asked to show, once.
-     */
-    func takePendingThread()  -> String?
     
 }
 /**
@@ -1593,11 +1601,26 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
     
 
     
+    /**
+     * The user left this thread: unsubscribe it.
+     */
 open func closeThread(threadId: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_conn_ffi_fn_method_connsession_close_thread(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(threadId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * A linked scope's session connects to its Orbit environment.
+     */
+open func connectEnvironment(environmentId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_connect_environment(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(environmentId),uniffiCallStatus
     )
 }
 }
@@ -1662,18 +1685,9 @@ open func offlineReader() -> OfflineReader?  {
 })
 }
     
-open func openLink(environmentId: String, threadId: String)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_connsession_open_link(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(environmentId),
-        FfiConverterString.lower(threadId),uniffiCallStatus
-    )
-}
-}
-    
     /**
-     * The user opened this thread; it stays subscribed across this session's connections.
+     * The user opened this thread (closing the scope's other one); it stays subscribed across
+     * this session's connections.
      */
 open func openThread(threadId: String)  {try! rustCall() {
         uniffiCallStatus in
@@ -1714,6 +1728,20 @@ open func retry()  {try! rustCall() {
 }
 }
     
+    /**
+     * Where a link for `environment_id` opens: here only when it is this session's already
+     * known server; otherwise in that environment's own scope.
+     */
+open func routeLink(environmentId: String) -> FfiLinkRoute  {
+    return try!  FfiConverterTypeFfiLinkRoute_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_route_link(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(environmentId),uniffiCallStatus
+    )
+})
+}
+    
 open func signOut()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_conn_ffi_fn_method_connsession_sign_out(
@@ -1726,18 +1754,6 @@ open func state() -> FfiSessionState  {
     return try!  FfiConverterTypeFfiSessionState_lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_conn_ffi_fn_method_connsession_state(
-            self.uniffiCloneHandle(),uniffiCallStatus
-    )
-})
-}
-    
-    /**
-     * The thread a link asked to show, once.
-     */
-open func takePendingThread() -> String?  {
-    return try!  FfiConverterOptionString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_connsession_take_pending_thread(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -3920,11 +3936,6 @@ public protocol SessionListener: AnyObject, Sendable {
      */
     func onThreadDeleted(connectionId: UInt64, threadId: String) 
     
-    /**
-     * A link for another environment: open it in that environment's own store and session.
-     */
-    func onOpenElsewhere(environmentId: String, threadId: String) 
-    
 }
 /**
  * Implemented in Swift. Every method is called with no internal locks held.
@@ -4048,19 +4059,6 @@ open func onThreadDeleted(connectionId: UInt64, threadId: String)  {try! rustCal
     uniffi_conn_ffi_fn_method_sessionlistener_on_thread_deleted(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(connectionId),
-        FfiConverterString.lower(threadId),uniffiCallStatus
-    )
-}
-}
-    
-    /**
-     * A link for another environment: open it in that environment's own store and session.
-     */
-open func onOpenElsewhere(environmentId: String, threadId: String)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_sessionlistener_on_open_elsewhere(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(environmentId),
         FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
@@ -4254,32 +4252,6 @@ fileprivate struct UniffiCallbackInterfaceSessionListener {
                 }
                 return uniffiObj.onThreadDeleted(
                      connectionId: try FfiConverterUInt64.lift(connectionId),
-                     threadId: try FfiConverterString.lift(threadId)
-                )
-            }
-
-            
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onOpenElsewhere: { (
-            uniffiHandle: UInt64,
-            environmentId: RustBuffer,
-            threadId: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeSessionListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onOpenElsewhere(
-                     environmentId: try FfiConverterString.lift(environmentId),
                      threadId: try FfiConverterString.lift(threadId)
                 )
             }
@@ -7626,7 +7598,7 @@ public func FfiConverterTypeFfiSavedSession_lower(_ value: FfiSavedSession) -> R
 public struct FfiSessionState: Equatable, Hashable {
     public var revision: UInt64
     /**
-     * The current attempt; snapshots carry it, and a change means the old data is gone.
+     * The current attempt; snapshots carry it.
      */
     public var connectionId: UInt64
     public var phase: FfiSessionPhase
@@ -7636,10 +7608,6 @@ public struct FfiSessionState: Equatable, Hashable {
      */
     public var environmentId: String?
     /**
-     * A thread a link asked to show; take it with [`ConnSession::take_pending_thread`].
-     */
-    public var pendingThreadId: String?
-    /**
      * The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
      */
     public var offlineReady: Bool
@@ -7648,14 +7616,11 @@ public struct FfiSessionState: Equatable, Hashable {
     // declare one manually.
     public init(revision: UInt64, 
         /**
-         * The current attempt; snapshots carry it, and a change means the old data is gone.
+         * The current attempt; snapshots carry it.
          */connectionId: UInt64, phase: FfiSessionPhase, serverUrl: String?, 
         /**
          * The connected server's Conn environment id, once known.
          */environmentId: String?, 
-        /**
-         * A thread a link asked to show; take it with [`ConnSession::take_pending_thread`].
-         */pendingThreadId: String?, 
         /**
          * The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
          */offlineReady: Bool) {
@@ -7664,7 +7629,6 @@ public struct FfiSessionState: Equatable, Hashable {
         self.phase = phase
         self.serverUrl = serverUrl
         self.environmentId = environmentId
-        self.pendingThreadId = pendingThreadId
         self.offlineReady = offlineReady
     }
 
@@ -7689,7 +7653,6 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
                 phase: FfiConverterTypeFfiSessionPhase.read(from: &buf), 
                 serverUrl: FfiConverterOptionString.read(from: &buf), 
                 environmentId: FfiConverterOptionString.read(from: &buf), 
-                pendingThreadId: FfiConverterOptionString.read(from: &buf), 
                 offlineReady: FfiConverterBool.read(from: &buf)
         )
     }
@@ -7700,7 +7663,6 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
         FfiConverterTypeFfiSessionPhase.write(value.phase, into: &buf)
         FfiConverterOptionString.write(value.serverUrl, into: &buf)
         FfiConverterOptionString.write(value.environmentId, into: &buf)
-        FfiConverterOptionString.write(value.pendingThreadId, into: &buf)
         FfiConverterBool.write(value.offlineReady, into: &buf)
     }
 }
@@ -11269,6 +11231,81 @@ public func FfiConverterTypeFfiItemStatus_lower(_ value: FfiItemStatus) -> RustB
 
 
 /**
+ * Where a thread link opens.
+ */
+
+public enum FfiLinkRoute: Equatable, Hashable {
+    
+    /**
+     * In this session: the link's environment is this session's known identity.
+     */
+    case here
+    /**
+     * In the link environment's own scope.
+     */
+    case elsewhere
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiLinkRoute: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLinkRoute: FfiConverterRustBuffer {
+    typealias SwiftType = FfiLinkRoute
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLinkRoute {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .here
+        
+        case 2: return .elsewhere
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiLinkRoute, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .here:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .elsewhere:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkRoute_lift(_ buf: RustBuffer) throws -> FfiLinkRoute {
+    return try FfiConverterTypeFfiLinkRoute.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkRoute_lower(_ value: FfiLinkRoute) -> RustBuffer {
+    return FfiConverterTypeFfiLinkRoute.lower(value)
+}
+
+
+
+/**
  * What Save did (`commitPendingModel`).
  */
 
@@ -12763,10 +12800,9 @@ public enum FfiSessionTarget: Equatable, Hashable {
      */
     case primaryAgent
     /**
-     * An Orbit environment, from a thread link or push (`thread_id`) or a saved linked
-     * environment.
+     * One Orbit environment (a linked scope).
      */
-    case environment(environmentId: String, threadId: String?
+    case environment(environmentId: String
     )
     /**
      * A server paired by URL.
@@ -12796,7 +12832,7 @@ public struct FfiConverterTypeFfiSessionTarget: FfiConverterRustBuffer {
         
         case 1: return .primaryAgent
         
-        case 2: return .environment(environmentId: try FfiConverterString.read(from: &buf), threadId: try FfiConverterOptionString.read(from: &buf)
+        case 2: return .environment(environmentId: try FfiConverterString.read(from: &buf)
         )
         
         case 3: return .manual(serverUrl: try FfiConverterString.read(from: &buf)
@@ -12814,10 +12850,9 @@ public struct FfiConverterTypeFfiSessionTarget: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case let .environment(environmentId,threadId):
+        case let .environment(environmentId):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(environmentId, into: &buf)
-            FfiConverterOptionString.write(threadId, into: &buf)
             
         
         case let .manual(serverUrl):
@@ -16380,7 +16415,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 21335) {
+    if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 18448) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_connect_environment() != 29138) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_connect_manually() != 23016) {
@@ -16401,10 +16439,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_offline_reader() != 43115) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_connsession_open_link() != 14813) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_connsession_open_thread() != 10089) {
+    if (uniffi_conn_ffi_checksum_method_connsession_open_thread() != 19746) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_pair_manual() != 12047) {
@@ -16416,13 +16451,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_route_link() != 53436) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_state() != 16395) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_connsession_take_pending_thread() != 51998) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_state() != 42113) {
@@ -16444,9 +16479,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_thread_deleted() != 52403) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_sessionlistener_on_open_elsewhere() != 64596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_constructor_conncore_connect() != 19757) {

@@ -285,6 +285,13 @@ typedef void (*UniffiCallbackInterfaceCoreListenerMethod5)(uint64_t, void* _Nonn
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CORE_LISTENER_METHOD6
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CORE_LISTENER_METHOD6
+typedef void (*UniffiCallbackInterfaceCoreListenerMethod6)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceOrbitListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
@@ -331,6 +338,7 @@ typedef struct UniffiVTableCallbackInterfaceCoreListener {
     UniffiCallbackInterfaceCoreListenerMethod3 _Nonnull onThread;
     UniffiCallbackInterfaceCoreListenerMethod4 _Nonnull onError;
     UniffiCallbackInterfaceCoreListenerMethod5 _Nonnull onProvidersChanged;
+    UniffiCallbackInterfaceCoreListenerMethod6 _Nonnull onThreadDeleted;
 } UniffiVTableCallbackInterfaceCoreListener;
 
 #endif
@@ -528,6 +536,11 @@ void uniffi_conn_ffi_fn_method_corelistener_on_error(uint64_t ptr, RustBuffer me
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
 void uniffi_conn_ffi_fn_method_corelistener_on_providers_changed(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_THREAD_DELETED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_THREAD_DELETED
+void uniffi_conn_ffi_fn_method_corelistener_on_thread_deleted(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_OFFLINEREADER
@@ -1325,6 +1338,12 @@ uint16_t uniffi_conn_ffi_checksum_method_corelistener_on_error(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CORELISTENER_ON_PROVIDERS_CHANGED
 uint16_t uniffi_conn_ffi_checksum_method_corelistener_on_providers_changed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CORELISTENER_ON_THREAD_DELETED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CORELISTENER_ON_THREAD_DELETED
+uint16_t uniffi_conn_ffi_checksum_method_corelistener_on_thread_deleted(void
     
 );
 #endif

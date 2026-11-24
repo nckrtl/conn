@@ -1480,9 +1480,14 @@ public protocol CoreListener: AnyObject, Sendable {
     func onError(message: String) 
     
     /**
-     * The server's provider list changed; re-read [`ConnCore::model_picker`].
+     * The server's providers or settings changed; re-read [`ConnCore::model_picker`].
      */
     func onProvidersChanged() 
+    
+    /**
+     * The thread's stream reported `thread.deleted`; its composer draft can go.
+     */
+    func onThreadDeleted(threadId: String) 
     
 }
 /**
@@ -1590,12 +1595,24 @@ open func onError(message: String)  {try! rustCall() {
 }
     
     /**
-     * The server's provider list changed; re-read [`ConnCore::model_picker`].
+     * The server's providers or settings changed; re-read [`ConnCore::model_picker`].
      */
 open func onProvidersChanged()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_conn_ffi_fn_method_corelistener_on_providers_changed(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The thread's stream reported `thread.deleted`; its composer draft can go.
+     */
+open func onThreadDeleted(threadId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_corelistener_on_thread_deleted(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
 }
@@ -1759,6 +1776,30 @@ fileprivate struct UniffiCallbackInterfaceCoreListener {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return uniffiObj.onProvidersChanged(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onThreadDeleted: { (
+            uniffiHandle: UInt64,
+            threadId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeCoreListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onThreadDeleted(
+                     threadId: try FfiConverterString.lift(threadId)
                 )
             }
 
@@ -14649,7 +14690,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_corelistener_on_error() != 59631) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_corelistener_on_providers_changed() != 51608) {
+    if (uniffi_conn_ffi_checksum_method_corelistener_on_providers_changed() != 9164) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_corelistener_on_thread_deleted() != 57694) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_before() != 42718) {

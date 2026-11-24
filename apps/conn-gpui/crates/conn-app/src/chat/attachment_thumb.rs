@@ -12,11 +12,12 @@ use conn_theme::Tokens;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Image, ImageFormat, ImageSource, InteractiveElement as _,
     IntoElement as _, ObjectFit, ParentElement as _, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, SvgRenderer, Window, div, img,
+    px,
 };
 
 use super::icons;
-use super::thumb_cache::{TargetPx, decode_thumbnail, grid_tile_px, thumbnail_supported};
+use super::thumb_cache::{TargetPx, decode_thumbnail, fit_frames, grid_tile_px};
 use crate::a11y::ConnA11yExt as _;
 use crate::theme::{hsla, hsla_alpha};
 
@@ -42,6 +43,7 @@ pub(super) fn preview_image(mime_type: &str, bytes: Vec<u8>) -> Option<Arc<Image
 
 /// Width over height of an image, from the header of `bytes` (no pixel decode). `None` when
 /// the format is not one the `image` crate reads (SVG, BMP, TIFF) or the header is bad.
+#[cfg(test)]
 pub(super) fn image_aspect_ratio(bytes: &[u8]) -> Option<f32> {
     let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -52,6 +54,7 @@ pub(super) fn image_aspect_ratio(bytes: &[u8]) -> Option<f32> {
 }
 
 /// Width over height, or `None` for a zero side.
+#[cfg(test)]
 fn aspect_ratio(width: u32, height: u32) -> Option<f32> {
     (width > 0 && height > 0).then(|| width as f32 / height as f32)
 }
@@ -68,12 +71,10 @@ const LOADING_ASPECT: f32 = 4.0 / 3.0;
 
 /// A sent image in the chat's thumbnail cache.
 pub(super) enum SentImage {
-    /// The download or decode with this request number is running.
+    /// The download or decode with this request number is waiting or running.
     Loading(u64),
     /// Pixels decoded at tile size, and the picture's width over height.
     Ready(Arc<RenderImage>, Option<f32>),
-    /// A format the chat does not thumbnail (GIF, SVG, BMP, TIFF): GPUI decodes the original.
-    Original(Arc<Image>, Option<f32>),
     Failed,
 }
 
@@ -82,45 +83,57 @@ impl SentImage {
     pub(super) fn source(&self) -> Option<(ImageSource, Option<f32>)> {
         match self {
             Self::Ready(image, aspect) => Some((ImageSource::Render(image.clone()), *aspect)),
-            Self::Original(image, aspect) => Some((ImageSource::Image(image.clone()), *aspect)),
             Self::Loading(_) | Self::Failed => None,
         }
     }
 
-    /// Frees the GPU texture or GPUI's decoded copy once the cache let this go. Deferred, so
-    /// a window that is painting right now is back in the app and loses its texture too.
+    /// Frees the window textures once the cache let this go. Deferred, so a window that is
+    /// painting right now is back in the app and loses its texture too.
     pub(super) fn release(self, cx: &mut App) {
-        match self {
-            Self::Ready(image, _) => cx.defer(move |cx| cx.drop_image(image, None)),
-            Self::Original(image, _) => {
-                cx.defer(move |cx| ImageSource::Image(image).remove_asset(cx));
-            }
-            Self::Loading(_) | Self::Failed => {}
+        if let Self::Ready(image, _) = self {
+            cx.defer(move |cx| cx.drop_image(image, None));
         }
     }
 }
 
-/// Turns downloaded `bytes` into a cache entry and its cost in bytes. Slow: run it off the UI
-/// thread.
+/// One thumbnail load: what to download and the request it fills.
+pub(super) struct ThumbJob {
+    pub(super) attachment_id: String,
+    pub(super) mime_type: String,
+    pub(super) request: u64,
+}
+
+/// Turns downloaded `bytes` into a cache entry and its cost in decoded bytes. PNG, JPEG, WebP
+/// and GIF decode here; SVG, BMP and TIFF go through GPUI's own decoder, then the same crop and
+/// scale, so every entry is a texture the chat owns and frees. Slow: run it off the UI thread.
 pub(super) fn load_sent_image(
     mime_type: &str,
     bytes: Vec<u8>,
     target: TargetPx,
+    svg_renderer: SvgRenderer,
 ) -> (SentImage, usize) {
-    if thumbnail_supported(mime_type) {
-        return match decode_thumbnail(&bytes, target) {
-            Some(thumb) => {
-                let cost = thumb.byte_len();
-                let image = RenderImage::new(vec![image::Frame::new(thumb.pixels)]);
-                (SentImage::Ready(Arc::new(image), thumb.aspect), cost)
-            }
-            None => (SentImage::Failed, 0),
-        };
-    }
-    let aspect = image_aspect_ratio(&bytes);
-    let cost = bytes.len();
-    match preview_image(mime_type, bytes) {
-        Some(image) => (SentImage::Original(image, aspect), cost),
+    let thumb = decode_thumbnail(&bytes, target).or_else(|| {
+        let format = image_format_for_mime(mime_type)?;
+        let decoded = Image::from_bytes(format, bytes)
+            .to_image_data(svg_renderer)
+            .ok()?;
+        let frames = (0..decoded.frame_count()).filter_map(|index| {
+            let size = decoded.size(index);
+            let pixels = image::RgbaImage::from_raw(
+                u32::try_from(size.width.0).ok()?,
+                u32::try_from(size.height.0).ok()?,
+                decoded.as_bytes(index)?.to_vec(),
+            )?;
+            Some(image::Frame::from_parts(pixels, 0, 0, decoded.delay(index)))
+        });
+        fit_frames(frames, target, false)
+    });
+    match thumb {
+        Some(thumb) => {
+            let cost = thumb.byte_len();
+            let image = RenderImage::new(thumb.frames);
+            (SentImage::Ready(Arc::new(image), thumb.aspect), cost)
+        }
         None => (SentImage::Failed, 0),
     }
 }

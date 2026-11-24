@@ -29,6 +29,9 @@ mod question_logic;
 mod question_panel;
 mod spinner;
 mod thumb_cache;
+
+/// A sent image thumbnail: attachment id and decode size.
+type ThumbKey = (String, thumb_cache::TargetPx);
 mod toc;
 
 use std::collections::{HashMap, HashSet};
@@ -287,9 +290,12 @@ pub(crate) struct ChatView {
     composer_height_applied: f32,
     /// Thumbnails of sent image attachments, by attachment id and decode size (filled while
     /// rendering, bounded by [`thumb_cache::THUMB_BUDGET_BYTES`]).
-    attachment_thumbs: std::cell::RefCell<
-        thumb_cache::ByteLru<(String, thumb_cache::TargetPx), attachment_thumb::SentImage>,
-    >,
+    attachment_thumbs:
+        std::cell::RefCell<thumb_cache::ByteLru<ThumbKey, attachment_thumb::SentImage>>,
+    /// Thumbnail loads waiting or running, at most [`thumb_cache::LOAD_CONCURRENCY`] at once.
+    thumb_loads: std::cell::RefCell<thumb_cache::LoadQueue<ThumbKey, attachment_thumb::ThumbJob>>,
+    /// The tasks of running thumbnail loads; dropping one cancels it.
+    thumb_tasks: std::cell::RefCell<HashMap<ThumbKey, gpui_kit::Task<()>>>,
     /// Number of the next thumbnail load, so a stale load never fills a newer entry.
     next_thumb_request: std::cell::Cell<u64>,
     /// The window's scale factor while timeline rows render; thumbnails decode at it.
@@ -515,6 +521,10 @@ impl ChatView {
             attachment_thumbs: std::cell::RefCell::new(thumb_cache::ByteLru::new(
                 thumb_cache::THUMB_BUDGET_BYTES,
             )),
+            thumb_loads: std::cell::RefCell::new(thumb_cache::LoadQueue::new(
+                thumb_cache::LOAD_CONCURRENCY,
+            )),
+            thumb_tasks: std::cell::RefCell::new(HashMap::new()),
             next_thumb_request: std::cell::Cell::new(0),
             thumb_scale: 1.0,
             interrupted_run_id: None,
@@ -546,6 +556,8 @@ impl ChatView {
     ) {
         self.connected = connection.is_some();
         self.connection = connection.clone();
+        self.thumb_loads.get_mut().clear();
+        self.thumb_tasks.get_mut().clear();
         for image in self.attachment_thumbs.get_mut().clear() {
             image.release(cx);
         }
@@ -3439,6 +3451,7 @@ impl ChatView {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.log_first_paint();
+        self.sweep_thumb_loads(cx);
         if !self.pending_card_ids.is_empty()
             || !self.user_input_cards.is_empty()
             || !self.secret_forms.is_empty()

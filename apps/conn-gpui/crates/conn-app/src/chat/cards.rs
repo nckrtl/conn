@@ -262,60 +262,118 @@ impl ChatView {
     }
 
     /// The thumbnail of a sent attachment at `target` px, once it is decoded. The first call
-    /// downloads and decodes it off the UI thread; the chat repaints when it ends.
+    /// queues its download and decode; the chat repaints when it ends.
     fn attachment_image(
         &self,
         image: &conn_contract::ChatImageAttachment,
         target: super::thumb_cache::TargetPx,
         cx: &mut Context<'_, Self>,
     ) -> Option<(gpui_kit::ImageSource, Option<f32>)> {
-        use super::attachment_thumb::{SentImage, load_sent_image};
+        use super::attachment_thumb::{SentImage, ThumbJob};
+        self.connection.as_ref()?;
         let key = (image.id.clone(), target);
         let mut thumbs = self.attachment_thumbs.borrow_mut();
         if let Some(entry) = thumbs.get(&key) {
+            if matches!(entry, SentImage::Loading(_)) {
+                self.thumb_loads.borrow_mut().touch(&key);
+            }
             return entry.source();
         }
-        let connection = self.connection.clone()?;
         let request = self.next_thumb_request.get();
         self.next_thumb_request.set(request + 1);
         for old in thumbs.insert(key.clone(), SentImage::Loading(request), 0) {
             old.release(cx);
         }
         drop(thumbs);
-        let (id, mime_type) = (image.id.clone(), image.mime_type.clone());
-        cx.spawn(async move |this, cx| {
-            let loaded = match connection.fetch_attachment_bytes(&id).await {
+        let job = ThumbJob {
+            attachment_id: image.id.clone(),
+            mime_type: image.mime_type.clone(),
+            request,
+        };
+        let start = self.thumb_loads.borrow_mut().request(key, job);
+        if let Some((key, job)) = start {
+            self.start_thumb(key, job, cx);
+        }
+        None
+    }
+
+    /// Downloads and decodes one thumbnail; its slot in [`Self::thumb_loads`] is already taken.
+    pub(super) fn start_thumb(
+        &self,
+        key: super::ThumbKey,
+        job: super::attachment_thumb::ThumbJob,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use super::attachment_thumb::{SentImage, load_sent_image};
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        let svg_renderer = cx.svg_renderer();
+        let target = key.1;
+        let task_key = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let loaded = match connection.fetch_attachment_bytes(&job.attachment_id).await {
                 Ok(bytes) => {
                     cx.background_executor()
-                        .spawn(async move { load_sent_image(&mime_type, bytes, target) })
+                        .spawn(async move {
+                            load_sent_image(&job.mime_type, bytes, target, svg_renderer)
+                        })
                         .await
                 }
                 Err(_) => (SentImage::Failed, 0),
             };
-            let _ = this.update(cx, |view, cx| view.finish_thumb(key, request, loaded, cx));
-        })
-        .detach();
-        None
+            let _ = this.update(cx, |view, cx| {
+                view.finish_thumb(key, job.request, loaded, cx);
+            });
+        });
+        self.thumb_tasks.borrow_mut().insert(task_key, task);
     }
 
-    /// Stores a finished thumbnail load, unless a newer load or a reconnect replaced it.
+    /// Stores a finished thumbnail load, unless a newer load or a reconnect replaced it, and
+    /// starts the next waiting load.
     fn finish_thumb(
         &mut self,
-        key: (String, super::thumb_cache::TargetPx),
+        key: super::ThumbKey,
         request: u64,
         (image, cost): (super::attachment_thumb::SentImage, usize),
         cx: &mut Context<'_, Self>,
     ) {
         use super::attachment_thumb::SentImage;
-        let thumbs = self.attachment_thumbs.get_mut();
-        if !matches!(thumbs.peek(&key), Some(SentImage::Loading(current)) if *current == request) {
+        let current = matches!(
+            self.attachment_thumbs.get_mut().peek(&key),
+            Some(SentImage::Loading(waiting)) if *waiting == request
+        );
+        if current {
+            // This runs inside the task, so detach its handle instead of dropping it.
+            if let Some(task) = self.thumb_tasks.get_mut().remove(&key) {
+                task.detach();
+            }
+            let started = self.thumb_loads.get_mut().finish(&key);
+            for (key, job) in started {
+                self.start_thumb(key, job, cx);
+            }
+            for old in self.attachment_thumbs.get_mut().insert(key, image, cost) {
+                old.release(cx);
+            }
+            cx.notify();
+        } else {
             image.release(cx);
-            return;
         }
-        for old in thumbs.insert(key, image, cost) {
-            old.release(cx);
+    }
+
+    /// Cancels thumbnail loads of tiles not drawn since the last call, and starts waiting ones
+    /// in the freed slots. Runs once per chat render, before the timeline lays out its rows.
+    pub(super) fn sweep_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
+        let (cancelled, started) = self.thumb_loads.get_mut().sweep();
+        for key in cancelled {
+            self.thumb_tasks.get_mut().remove(&key);
+            if let Some(entry) = self.attachment_thumbs.get_mut().remove(&key) {
+                entry.release(cx);
+            }
         }
-        cx.notify();
+        for (key, job) in started {
+            self.start_thumb(key, job, cx);
+        }
     }
 
     /// Attachment chips/thumbnails shown in queued bubbles and in sent bubbles with files only

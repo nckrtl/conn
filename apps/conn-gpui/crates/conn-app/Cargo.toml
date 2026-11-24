@@ -22,6 +22,7 @@ zed_theme = { package = "theme", git = "https://github.com/zed-industries/zed", 
 zed_text = { package = "text", git = "https://github.com/zed-industries/zed", rev = "f816e1f9263e3a8ef63c4baaa02e1441ce1c6038", optional = true }
 tree-sitter-php = { version = "0.24", optional = true }
 lsp-types = "0.97"
+conn-cache = { path = "../../../../crates/conn-cache" }
 conn-client.workspace = true
 conn-desktop.workspace = true
 conn-contract.workspace = true
@@ -42,6 +43,8 @@ raw-window-handle.workspace = true
 reqwest.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 serde_json.workspace = true
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 tokio.workspace = true

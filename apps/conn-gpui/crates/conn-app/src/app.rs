@@ -34,6 +34,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
 mod linked;
+mod offline;
 mod rail_workspaces;
 mod sidebar_keys;
 mod sidebar_more;
@@ -186,6 +187,7 @@ struct FilesSubscription {
 pub(crate) struct ConnApp {
     tokens: Tokens,
     geometry: ShellGeometry,
+    offline: offline::Offline,
     shell: ShellState,
     layout: LayoutState,
     active_workspace: Option<String>,
@@ -524,6 +526,11 @@ impl ConnApp {
                 crate::chat::ChatEvent::SlashCommand(command) => {
                     app.handle_slash_command(command, cx);
                 }
+                crate::chat::ChatEvent::JumpToPrompt(id) => app.resolve_prompt(id, cx),
+                crate::chat::ChatEvent::ReturnToLatest => {
+                    app.sync_chat(cx);
+                    app.chat.update(cx, |chat, cx| chat.scroll_to_latest(cx));
+                }
                 crate::chat::ChatEvent::LoadEarlierHistory => {
                     app.load_earlier_history(cx);
                 }
@@ -622,6 +629,11 @@ impl ConnApp {
         let keystroke_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let _ = this.update(cx, |app, cx| app.intercept_keystroke(event, window, cx));
         });
+        let offline = if connection.is_some() {
+            offline::Offline::new()
+        } else {
+            offline::Offline::default()
+        };
         let mut app = Self {
             tokens,
             geometry: ShellGeometry::default(),
@@ -698,6 +710,7 @@ impl ConnApp {
             connection_gen: 1,
             orbit,
             pending_open_thread: None,
+            offline,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
             _control_server: None,
@@ -712,6 +725,8 @@ impl ConnApp {
             annotation_watching_threads: HashSet::new(),
             annotation_last_sent: HashMap::new(),
         };
+        app.restore_offline_shell();
+        app.expire_offline(cx);
         app.restore_saved_drafts(cx);
         app.sync_chat(cx);
         app.start_sidebar_clock(cx);
@@ -1119,6 +1134,7 @@ impl ConnApp {
 
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
+        self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
         self.sync_files_subscription();
@@ -1173,6 +1189,8 @@ impl ConnApp {
                     .and_then(|d| self.shell.project(&d.project_id))
                     .map(|p| p.workspace_root.clone())
             });
+        let thread_connected = selected.is_some_and(|id| self.thread_connected(id));
+        let outline = selected.and_then(|id| self.cached_outline(id));
         let timeline = selected.and_then(|id| self.threads.get(id));
         let fallback = selected.map(conn_state::ThreadState::new);
         let thread = timeline.or(fallback.as_ref());
@@ -1276,6 +1294,10 @@ impl ConnApp {
             chat.set_thread(thread, title, cx);
             chat.set_linked_pull_requests(linked_pull_requests, cx);
             chat.set_preferred_editor(preferred_editor);
+            chat.set_outline(outline, cx);
+            if thread_connected {
+                chat.clear_offline_prompt_notice(cx);
+            }
             chat.set_child_approvals(child_approvals, cx);
             chat.set_branch_context(branch_context, cx);
             chat.set_thread_context(branch, worktree_active, runtime_mode, interaction_mode, cx);
@@ -1305,6 +1327,7 @@ impl ConnApp {
                             return false;
                         }
                         let mut status_changed = false;
+                        let mut shell_changed = false;
                         for event in batch {
                             if matches!(
                                 event,
@@ -1312,8 +1335,14 @@ impl ConnApp {
                             ) {
                                 status_changed = true;
                             }
+                            shell_changed |= matches!(event, ClientEvent::Shell(_));
                             app.apply_event(event, orbit_server_id.as_deref(), cx);
                         }
+                        if shell_changed {
+                            app.expire_offline(cx);
+                            app.reconcile_offline(cx);
+                        }
+                        app.schedule_offline_save(cx);
                         if status_changed {
                             app.refresh_settings_orbit_info(cx);
                         }
@@ -1349,6 +1378,8 @@ impl ConnApp {
                 }
                 if matches!(status, ConnectionStatus::Connected) {
                     self.orbit.connecting_server_id = None;
+                } else if let Some(env) = self.server_url.as_deref() {
+                    self.offline.disconnected(env);
                 }
                 self.status = Some(status);
             }
@@ -1374,6 +1405,17 @@ impl ConnApp {
             ClientEvent::Shell(item) => {
                 let change = self.shell.apply(item);
                 self.remerge_linked_shells();
+                self.offline.shell_changed();
+                if self.shell.synchronized
+                    && self
+                        .layout
+                        .selected_thread_id
+                        .as_deref()
+                        .is_some_and(|id| self.shell.find_thread(id).is_none())
+                {
+                    self.unsubscribe_open_thread();
+                    self.layout.selected_thread_id = None;
+                }
                 self.release_settled_drop();
                 if change.snapshot_required || !change.threads_changed.is_empty() {
                     self.drive_older_pages(cx);
@@ -1384,7 +1426,7 @@ impl ConnApp {
                 if change.snapshot_required
                     && let Some(connection) = &self.connection
                 {
-                    connection.subscribe_shell();
+                    connection.subscribe_shell_with_idle_subagents();
                 }
                 if let Some(pending_id) = self.pending_open_thread.clone()
                     && self.shell.find_thread(&pending_id).is_some()
@@ -1411,17 +1453,20 @@ impl ConnApp {
                     .filter(|(id, _)| *id == thread_id)
                     .map(|(_, opened_at)| (thread_stream_item_kind(&item), *opened_at));
                 let apply_start = std::time::Instant::now();
-                let state = self
-                    .threads
-                    .entry(thread_id.clone())
-                    .or_insert_with(|| ThreadState::new(thread_id.clone()));
-                state.apply(item);
+                if let Some(env) = self.server_url.clone() {
+                    self.apply_cache_stream(&env, &thread_id, item);
+                } else {
+                    self.threads
+                        .entry(thread_id.clone())
+                        .or_insert_with(|| ThreadState::new(&thread_id))
+                        .apply(item);
+                }
                 if let Some((kind, opened_at)) = perf_kind
                     && kind != "event"
                 {
                     conn_client::perf_log!(
                         "app.applied thread={thread_id} kind={kind} entries={} apply_ms={:.1} +{:.1}ms",
-                        state.entries.len(),
+                        self.threads.get(&thread_id).map_or(0, |t| t.entries.len()),
                         conn_client::perf::ms_since(apply_start),
                         conn_client::perf::ms_since(opened_at),
                     );
@@ -1546,6 +1591,7 @@ impl ConnApp {
 
     /// Selects `thread_id` and subscribes to its timeline once.
     fn open_thread(&mut self, thread_id: String) {
+        self.restore_offline_chat(&thread_id);
         self.park_active_draft();
         if conn_client::perf::enabled()
             && self.layout.selected_thread_id.as_deref() != Some(thread_id.as_str())
@@ -1566,39 +1612,62 @@ impl ConnApp {
     /// Fetches the next older history page for the currently selected bounded thread and prepends
     /// its entries into [`ThreadState`] without losing the user's scroll position.
     fn load_earlier_history(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(connection) = self.context_connection() else {
-            self.sync_chat(cx);
-            return;
-        };
         let Some(thread_id) = self.layout.selected_thread_id.clone() else {
             return;
         };
-        let cursor = {
+        if self.load_cached_page(&thread_id) {
+            self.sync_chat(cx);
+            return;
+        }
+        let Some(connection) = self
+            .connection_for_thread(&thread_id)
+            .filter(|_| self.thread_connected(&thread_id))
+        else {
+            if let Some(thread) = self.threads.get_mut(&thread_id) {
+                thread.has_more_history = false;
+            }
+            self.sync_chat(cx);
+            return;
+        };
+        let env = self.cache_env(&thread_id).map(str::to_owned);
+        let snapshot_cursor = self.offline.snapshot_cursor(env.as_deref(), &thread_id);
+        let (cursor, anchor) = {
             let Some(thread) = self.threads.get_mut(&thread_id) else {
                 return;
             };
             if !thread.has_more_history || thread.loading_earlier {
                 return;
             }
-            let Some(cursor) = thread.history_cursor.clone() else {
-                thread.has_more_history = false;
-                self.sync_chat(cx);
+            let Some(first) = thread.entries.first() else {
                 return;
             };
             thread.loading_earlier = true;
-            cursor
+            (thread.history_cursor.clone(), first.id().to_owned())
         };
         self.sync_chat(cx);
 
         let generation = self.connection_gen;
+        let serial = self.offline.snapshot_serial(env.as_deref(), &thread_id);
+        let expected_anchor = anchor.clone();
         let expected_cursor = cursor.clone();
         let req_thread_id = thread_id.clone();
 
         cx.spawn(async move |this, cx| {
             let task = crate::live::RT.spawn(async move {
-                connection
-                    .fetch_thread_history_page(&req_thread_id, &cursor)
-                    .await
+                if let Some(cursor) = cursor {
+                    connection
+                        .fetch_thread_history_page(&req_thread_id, &cursor)
+                        .await
+                } else {
+                    let cursor = snapshot_cursor.ok_or_else(|| {
+                        conn_client::ClientError::Connection(
+                            "waiting for the bounded thread snapshot".to_owned(),
+                        )
+                    })?;
+                    connection
+                        .fetch_history_before_message(&req_thread_id, &cursor, &anchor)
+                        .await
+                }
             });
             let result = match task.await {
                 Ok(res) => res,
@@ -1607,11 +1676,19 @@ impl ConnApp {
                 ))),
             };
             let _ = this.update(cx, |app, cx| {
-                if app.connection_gen != generation {
+                if app.connection_gen != generation
+                    || app.cache_env(&thread_id) != env.as_deref()
+                    || app.offline.snapshot_serial(env.as_deref(), &thread_id) != serial
+                {
                     return;
                 }
                 if let Some(thread) = app.threads.get_mut(&thread_id) {
-                    if thread.history_cursor.as_deref() == Some(expected_cursor.as_str()) {
+                    if thread.history_cursor == expected_cursor
+                        && thread
+                            .entries
+                            .first()
+                            .is_some_and(|entry| entry.id() == expected_anchor)
+                    {
                         match result {
                             Ok(page) => {
                                 thread.prepend_history_page(page);
@@ -3365,6 +3442,7 @@ impl ConnApp {
                 "working": t.working,
                 "synchronized": t.synchronized,
                 "entryCount": t.entries.len(),
+                "messageIds": t.entries.iter().filter(|entry|matches!(entry,conn_state::TimelineEntry::User{..}|conn_state::TimelineEntry::Assistant{..})).map(conn_state::TimelineEntry::id).collect::<Vec<_>>(),
                 "entries": t.entries.iter().take(20).map(|e| format!("{e:?}").chars().take(120).collect::<String>()).collect::<Vec<_>>(),
             })
         });
@@ -4729,6 +4807,9 @@ impl ConnApp {
                         app.settle_drafts(cx);
                     }
                     let minute = now / 60;
+                    if minute != last_minute {
+                        app.expire_offline(cx);
+                    }
                     if live || app.thread_details.open || minute != last_minute {
                         last_minute = minute;
                         cx.notify();
@@ -6358,7 +6439,7 @@ impl ConnApp {
         device_name: String,
     ) -> (Connection, tokio::sync::mpsc::Receiver<ClientEvent>) {
         let (connection, events) = Connection::start(config, crate::live::RT.handle());
-        connection.subscribe_shell();
+        connection.subscribe_shell_with_idle_subagents();
         connection.subscribe_server_config();
         connection.subscribe_panel_requests(Some(device_name));
         (connection, events)
@@ -6382,6 +6463,7 @@ impl ConnApp {
         self.orbit.connecting_server_id = orbit_server_id.clone();
         self.orbit.notice = None;
 
+        self.offline = offline::Offline::new();
         self.reset_linked_environments();
         self.shell = ShellState::default();
         self.server_config = std::sync::Arc::default();
@@ -6403,6 +6485,7 @@ impl ConnApp {
         Self::pump_events(generation, orbit_server_id, events, cx);
 
         self.connection = Some(connection.clone());
+        self.restore_offline_shell();
         let environment_key = self.server_url.clone();
         self.chat.update(cx, |chat, cx| {
             chat.set_error(None, cx);

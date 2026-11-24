@@ -92,7 +92,7 @@ pub use crate::order_keys::{
     top_of_pinned_run_key,
 };
 pub use crate::panel_tabs::{
-    ClosedTab, MAX_SAVED_THREAD_PANELS, RightPanelTabs, SavedSurface, SavedThreadPanel,
+    ClosedTab, MAX_SAVED_THREAD_PANELS, PanelOwner, RightPanelTabs, SavedSurface, SavedThreadPanel,
     SavedThreadPanels, ThreadPanel, ThreadPanels, browser_tab_title,
 };
 pub use crate::question::{

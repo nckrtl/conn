@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::layout::{BrowserTabId, PanelSurface, RightPanelTab};
+use crate::layout::{BrowserTabId, PanelSurface, RIGHT_PANEL_DEFAULT_WIDTH, RightPanelTab};
 
 /// The right panel's open tabs and the active one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -174,9 +174,35 @@ pub struct ThreadPanel {
 }
 
 impl ThreadPanel {
-    /// Something here differs from a thread that never touched its panel.
+    /// Something here differs from a thread that never touched its panel. A width the user
+    /// dragged to counts, so closing the last tab does not lose it.
     fn worth_keeping(&self) -> bool {
-        self.open || self.maximized || self.terminal_open || !self.tabs.tabs().is_empty()
+        self.open
+            || self.maximized
+            || self.terminal_open
+            || !self.tabs.tabs().is_empty()
+            || self
+                .width
+                .is_some_and(|width| width != RIGHT_PANEL_DEFAULT_WIDTH)
+    }
+}
+
+/// Whose right panel: a thread or draft id on the environment it lives on. Two environments
+/// can hold the same thread id; their panels are separate, and a panel request reaches only the
+/// panel whose owner matches both.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PanelOwner {
+    pub environment: String,
+    pub thread: String,
+}
+
+impl PanelOwner {
+    #[must_use]
+    pub fn new(environment: impl Into<String>, thread: impl Into<String>) -> Self {
+        Self {
+            environment: environment.into(),
+            thread: thread.into(),
+        }
     }
 }
 
@@ -188,23 +214,23 @@ impl ThreadPanel {
 /// panel. What is written to disk is bounded by [`MAX_SAVED_THREAD_PANELS`].
 #[derive(Clone, Debug, Default)]
 pub struct ThreadPanels {
-    owner: Option<String>,
-    parked: HashMap<String, ThreadPanel>,
-    /// Threads by when they last showed or were prepared, oldest first.
-    recency: Vec<String>,
+    owner: Option<PanelOwner>,
+    parked: HashMap<PanelOwner, ThreadPanel>,
+    /// Owners by when they last showed or were prepared, oldest first.
+    recency: Vec<PanelOwner>,
     next_browser: BrowserTabId,
 }
 
 impl ThreadPanels {
     /// The thread whose panel the caller holds.
     #[must_use]
-    pub fn owner(&self) -> Option<&str> {
-        self.owner.as_deref()
+    pub fn owner(&self) -> Option<&PanelOwner> {
+        self.owner.as_ref()
     }
 
     /// Makes `owner` the shown thread: parks `current` for the old owner and puts the new
     /// owner's panel in its place. `false` when `owner` already shows.
-    pub fn switch(&mut self, owner: Option<String>, current: &mut ThreadPanel) -> bool {
+    pub fn switch(&mut self, owner: Option<PanelOwner>, current: &mut ThreadPanel) -> bool {
         if self.owner == owner {
             return false;
         }
@@ -229,13 +255,13 @@ impl ThreadPanels {
 
     /// Opens a tab of kind `tab` on a thread that is not shown, so it is there when the thread
     /// shows (`preparePanel`). `shown` is the shown thread's tabs, which share the id range.
-    pub fn prepare(&mut self, owner: &str, tab: RightPanelTab, shown: &mut RightPanelTabs) {
+    pub fn prepare(&mut self, owner: &PanelOwner, tab: RightPanelTab, shown: &mut RightPanelTabs) {
         debug_assert_ne!(
-            self.owner.as_deref(),
+            self.owner.as_ref(),
             Some(owner),
             "the caller opens tabs on the shown thread itself"
         );
-        let panel = self.parked.entry(owner.to_owned()).or_default();
+        let panel = self.parked.entry(owner.clone()).or_default();
         panel.tabs.next_browser = self.next_browser.max(shown.next_browser);
         panel.tabs.open(tab);
         panel.open = true;
@@ -244,12 +270,13 @@ impl ThreadPanels {
         self.touch(owner);
     }
 
-    /// A draft became thread `new`: its panel goes with it.
-    pub fn rename(&mut self, old: &str, new: String) {
+    /// A draft became thread `thread` on the same environment: its panel goes with it.
+    pub fn rename(&mut self, old: &PanelOwner, thread: String) {
+        let new = PanelOwner::new(old.environment.clone(), thread);
         if let Some(entry) = self.recency.iter_mut().find(|key| *key == old) {
             entry.clone_from(&new);
         }
-        if self.owner.as_deref() == Some(old) {
+        if self.owner.as_ref() == Some(old) {
             self.owner = Some(new);
         } else if let Some(panel) = self.parked.remove(old) {
             self.parked.insert(new, panel);
@@ -258,7 +285,7 @@ impl ThreadPanels {
 
     /// Drops a deleted thread's or expired draft's parked panel and returns its browser tabs,
     /// whose browsers the caller closes.
-    pub fn forget(&mut self, owner: &str) -> Vec<BrowserTabId> {
+    pub fn forget(&mut self, owner: &PanelOwner) -> Vec<BrowserTabId> {
         self.recency.retain(|key| key != owner);
         self.parked
             .remove(owner)
@@ -279,7 +306,7 @@ impl ThreadPanels {
             .iter()
             .rev()
             .filter_map(|key| {
-                let panel = if self.owner.as_deref() == Some(key.as_str()) {
+                let panel = if self.owner.as_ref() == Some(key) {
                     shown
                 } else {
                     self.parked.get(key)?
@@ -299,9 +326,7 @@ impl ThreadPanels {
         let mut addresses = Vec::new();
         // Saved newest first; recency is oldest first.
         for thread in saved.threads.into_iter().rev() {
-            if self.owner.as_deref() == Some(thread.owner.as_str())
-                || self.recency.contains(&thread.owner)
-            {
+            if self.owner.as_ref() == Some(&thread.owner) || self.recency.contains(&thread.owner) {
                 continue;
             }
             let mut tabs = Vec::with_capacity(thread.tabs.len());
@@ -339,9 +364,9 @@ impl ThreadPanels {
         addresses
     }
 
-    fn touch(&mut self, owner: &str) {
+    fn touch(&mut self, owner: &PanelOwner) {
         self.recency.retain(|key| key != owner);
-        self.recency.push(owner.to_owned());
+        self.recency.push(owner.clone());
     }
 }
 
@@ -383,7 +408,7 @@ impl SavedThreadPanels {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedThreadPanel {
-    pub owner: String,
+    pub owner: PanelOwner,
     #[serde(default)]
     pub open: bool,
     #[serde(default)]
@@ -401,13 +426,13 @@ pub struct SavedThreadPanel {
 
 impl SavedThreadPanel {
     fn new(
-        owner: &str,
+        owner: &PanelOwner,
         panel: &ThreadPanel,
         url: &impl Fn(BrowserTabId) -> Option<String>,
     ) -> Self {
         let tabs = panel.tabs.tabs();
         Self {
-            owner: owner.to_owned(),
+            owner: owner.clone(),
             open: panel.open,
             maximized: panel.maximized,
             terminal_open: panel.terminal_open,
@@ -466,6 +491,13 @@ fn url_host(url: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owners on one environment, by thread id.
+    impl From<&str> for PanelOwner {
+        fn from(thread: &str) -> Self {
+            Self::new("env", thread.trim_start_matches("env:"))
+        }
+    }
 
     const FILES: PanelSurface = PanelSurface::Kind(RightPanelTab::Files);
 
@@ -586,7 +618,7 @@ mod tests {
         shown.open = true;
         let a = shown.clone();
         // An agent opens a tab on a thread the user is not looking at.
-        panels.prepare("env:c", RightPanelTab::Browser, &mut shown.tabs);
+        panels.prepare(&"env:c".into(), RightPanelTab::Browser, &mut shown.tabs);
 
         assert!(panels.switch(Some("env:b".into()), &mut shown));
         assert!(
@@ -613,12 +645,12 @@ mod tests {
 
         // Deleting a thread hands back its browsers to close.
         let forgotten: Vec<_> = panels
-            .forget("env:b")
+            .forget(&"env:b".into())
             .into_iter()
             .map(PanelSurface::Browser)
             .collect();
         assert_eq!(forgotten, [b1]);
-        assert!(panels.forget("env:b").is_empty());
+        assert!(panels.forget(&"env:b".into()).is_empty());
     }
 
     #[test]
@@ -627,15 +659,15 @@ mod tests {
         let mut shown = ThreadPanel::default();
         panels.switch(Some("env:draft".into()), &mut shown);
         shown.tabs.add(RightPanelTab::Files);
-        panels.rename("env:draft", "env:thread".into());
-        assert_eq!(panels.owner(), Some("env:thread"));
+        panels.rename(&"env:draft".into(), "thread".into());
+        assert_eq!(panels.owner(), Some(&"thread".into()));
         assert!(!panels.switch(Some("env:thread".into()), &mut shown));
         assert_eq!(shown.tabs.tabs(), [FILES]);
         // A parked draft moves too.
         panels.switch(Some("env:draft2".into()), &mut shown);
         shown.tabs.add(RightPanelTab::Diff);
         panels.switch(Some("env:thread".into()), &mut shown);
-        panels.rename("env:draft2", "env:thread2".into());
+        panels.rename(&"env:draft2".into(), "thread2".into());
         panels.switch(Some("env:thread2".into()), &mut shown);
         assert_eq!(shown.tabs.tabs(), [PanelSurface::Kind(RightPanelTab::Diff)]);
     }
@@ -670,6 +702,78 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_last_tab_keeps_the_width_maximize_and_drawer() {
+        let mut panels = ThreadPanels::default();
+        let mut shown = ThreadPanel::default();
+        panels.switch(Some("a".into()), &mut shown);
+        let files = shown.tabs.add(RightPanelTab::Files);
+        shown.open = true;
+        shown.width = Some(900.0);
+        // The last tab closes, and so does the panel.
+        shown.tabs.close(&files);
+        shown.open = false;
+        panels.switch(Some("b".into()), &mut shown);
+        shown.width = Some(RIGHT_PANEL_DEFAULT_WIDTH);
+        panels.switch(Some("a".into()), &mut shown);
+        assert_eq!(shown.width, Some(900.0), "a dragged width is kept");
+        assert_eq!(
+            panels
+                .save(&shown, |_| None)
+                .threads
+                .iter()
+                .map(|t| t.owner.thread.as_str())
+                .collect::<Vec<_>>(),
+            ["a"],
+            "and saved; b at the default width is not"
+        );
+        // Each of maximize and the drawer alone keeps the panel too.
+        for (maximized, terminal_open) in [(true, false), (false, true)] {
+            shown = ThreadPanel {
+                maximized,
+                terminal_open,
+                ..ThreadPanel::default()
+            };
+            panels.switch(Some("c".into()), &mut shown);
+            panels.switch(Some("a".into()), &mut shown);
+            assert_eq!(
+                (shown.maximized, shown.terminal_open),
+                (maximized, terminal_open)
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_thread_id_on_two_environments_owns_two_panels() {
+        let primary = PanelOwner::new("nick", "t");
+        let linked = PanelOwner::new("mini", "t");
+        let mut panels = ThreadPanels::default();
+        let mut shown = ThreadPanel::default();
+        panels.switch(Some(primary.clone()), &mut shown);
+        shown.tabs.add(RightPanelTab::Files);
+        panels.prepare(&linked, RightPanelTab::Database, &mut shown.tabs);
+        assert_eq!(
+            shown.tabs.tabs(),
+            [PanelSurface::Kind(RightPanelTab::Files)],
+            "the linked request left the primary panel alone"
+        );
+        let json = panels.save(&shown, |_| None).to_json();
+        panels.switch(Some(linked.clone()), &mut shown);
+        assert_eq!(
+            shown.tabs.tabs(),
+            [PanelSurface::Kind(RightPanelTab::Database)]
+        );
+        assert!(panels.forget(&primary).is_empty());
+        let mut fresh = ThreadPanels::default();
+        fresh.restore(SavedThreadPanels::from_json(&json));
+        let mut restored = ThreadPanel::default();
+        fresh.switch(Some(primary), &mut restored);
+        assert_eq!(
+            restored.tabs.tabs(),
+            [PanelSurface::Kind(RightPanelTab::Files)]
+        );
+    }
+
+    #[test]
     fn saved_panels_come_back_after_a_restart() {
         let mut panels = ThreadPanels::default();
         let mut shown = ThreadPanel::default();
@@ -681,7 +785,7 @@ mod tests {
         shown.open = true;
         shown.width = Some(700.0);
         // A background agent prepared c; b was only looked at.
-        panels.prepare("c", RightPanelTab::Database, &mut shown.tabs);
+        panels.prepare(&"c".into(), RightPanelTab::Database, &mut shown.tabs);
         panels.switch(Some("b".into()), &mut shown);
         panels.switch(Some("a".into()), &mut shown);
         let PanelSurface::Browser(page_id) = page else {
@@ -698,7 +802,7 @@ mod tests {
             saved
                 .threads
                 .iter()
-                .map(|t| t.owner.as_str())
+                .map(|t| t.owner.thread.as_str())
                 .collect::<Vec<_>>(),
             ["a", "c"],
             "newest first; an untouched thread is not written"
@@ -743,34 +847,34 @@ mod tests {
         let mut panels = ThreadPanels::default();
         let mut shown = ThreadPanel::default();
         for index in 0..=MAX_SAVED_THREAD_PANELS {
-            panels.switch(Some(format!("t{index}")), &mut shown);
+            panels.switch(Some(format!("t{index}").as_str().into()), &mut shown);
             shown.open = true;
         }
         let saved = panels.save(&shown, |_| None);
         assert_eq!(saved.threads.len(), MAX_SAVED_THREAD_PANELS);
         assert_eq!(
-            saved.threads[0].owner,
+            saved.threads[0].owner.thread,
             format!("t{MAX_SAVED_THREAD_PANELS}")
         );
         assert!(
-            saved.threads.iter().all(|t| t.owner != "t0"),
+            saved.threads.iter().all(|t| t.owner.thread != "t0"),
             "oldest drops"
         );
-        panels.forget("t1");
+        panels.forget(&"t1".into());
         assert!(
             panels
                 .save(&shown, |_| None)
                 .threads
                 .iter()
-                .all(|t| t.owner != "t1")
+                .all(|t| t.owner.thread != "t1")
         );
     }
 
     #[test]
     fn a_saved_file_with_an_unknown_entry_keeps_the_rest() {
         let json = r#"{"threads":[
-            {"owner":"a","open":true,"tabs":[{"kind":"panel","tab":"files"}],"active":0},
-            {"owner":"b","tabs":[{"kind":"hologram"}]}
+            {"owner":{"environment":"env","thread":"a"},"open":true,"tabs":[{"kind":"panel","tab":"files"}],"active":0},
+            {"owner":{"environment":"env","thread":"b"},"tabs":[{"kind":"hologram"}]}
         ]}"#;
         let saved = SavedThreadPanels::from_json(json);
         assert_eq!(saved.threads.len(), 1);

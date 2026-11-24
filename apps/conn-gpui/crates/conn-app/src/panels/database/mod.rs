@@ -25,6 +25,8 @@ use gpui_kit::{
 
 use self::form::{ConnectionFormState, outline_sm_button};
 use self::pending::PendingQueries;
+#[cfg(test)]
+pub(crate) use self::pending::TOO_MANY_PENDING as TOO_MANY_PENDING_QUERIES;
 use self::store::{
     DatabaseStore, active_connection, filter_tables, finalize_draft, format_result_summary,
     load_env_connection, load_store, project_connections, save_store,
@@ -78,8 +80,8 @@ pub(crate) struct DatabasePanel {
     tokens: Tokens,
     project_key: Option<String>,
     workspace_root: Option<String>,
-    /// The shown thread: a query handed to it waits in `pending` until it can land.
-    thread_id: Option<String>,
+    /// The shown thread's panel: a query handed to it waits in `pending` until it can land.
+    owner: Option<conn_state::PanelOwner>,
     pending: PendingQueries,
     store: DatabaseStore,
     runner: DatabaseRunner,
@@ -155,7 +157,7 @@ impl DatabasePanel {
             tokens,
             project_key: None,
             workspace_root: None,
-            thread_id: None,
+            owner: None,
             pending: PendingQueries::default(),
             store: load_store(),
             runner: DatabaseRunner::new(),
@@ -216,29 +218,36 @@ impl DatabasePanel {
         cx.notify();
     }
 
-    /// The shown thread. Its waiting query lands on the next [`Self::deliver_pending`], once the
-    /// caller has also set that thread's project.
-    pub(crate) fn set_thread(&mut self, thread_id: Option<String>) {
-        self.thread_id = thread_id;
+    /// The shown thread's panel. Its waiting query lands on the next [`Self::deliver_pending`],
+    /// once the caller has also set that thread's project.
+    pub(crate) fn set_owner(&mut self, owner: Option<conn_state::PanelOwner>) {
+        self.owner = owner;
     }
 
-    /// Queues `sql` for `thread`'s editor (`openDatabaseQuery`). It lands when that thread shows
+    /// Queues `sql` for `owner`'s editor (`openDatabaseQuery`). It lands when that thread shows
     /// with its project's connections loaded and one chosen, on whichever path gets there first.
-    pub(crate) fn queue_sql(&mut self, thread: &str, sql: String, cx: &mut Context<'_, Self>) {
-        self.pending.queue(thread, sql);
+    /// Refused, with the reason, when too many threads already have one waiting.
+    pub(crate) fn queue_sql(
+        &mut self,
+        owner: &conn_state::PanelOwner,
+        sql: String,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), String> {
+        self.pending.queue(owner, sql).map_err(str::to_owned)?;
         self.deliver_pending(cx);
+        Ok(())
     }
 
     /// Drops a deleted thread's waiting query.
-    pub(crate) fn forget_thread(&mut self, thread: &str) {
-        self.pending.forget(thread);
+    pub(crate) fn forget_owner(&mut self, owner: &conn_state::PanelOwner) {
+        self.pending.forget(owner);
     }
 
     /// Puts the shown thread's waiting query in the editor of the chosen connection, if the
     /// connections have loaded and one is chosen (`takePending`).
     pub(crate) fn deliver_pending(&mut self, cx: &mut Context<'_, Self>) {
         let has_connection = self.project_key.is_some() && self.selected_connection().is_some();
-        if let Some(sql) = self.pending.take(self.thread_id.as_deref(), has_connection) {
+        if let Some(sql) = self.pending.take(self.owner.as_ref(), has_connection) {
             self.set_agent_sql(sql, cx);
         }
     }
@@ -251,8 +260,8 @@ impl DatabasePanel {
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_sql_for_test(&self, thread: &str) -> Option<String> {
-        self.pending.waiting(thread).map(str::to_owned)
+    pub(crate) fn pending_sql_for_test(&self, owner: &conn_state::PanelOwner) -> Option<String> {
+        self.pending.waiting(owner).map(str::to_owned)
     }
 
     /// A Vault load that tests answer with [`Self::finish_vault_load_for_test`].

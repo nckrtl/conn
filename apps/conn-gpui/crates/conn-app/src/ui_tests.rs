@@ -3602,7 +3602,12 @@ fn browser_tabs_keep_their_pages_per_thread(cx: &mut TestAppContext) {
     assert!(page_b.upgrade().is_some(), "a hidden thread keeps its page");
 
     // What a delete made here does once the server took it.
-    cx.update(|cx| app.update(cx, |app, cx| app.release_thread_panel("thread-other", cx)));
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            let owner = app.panel_owner_for_test("thread-other");
+            app.release_thread_panel(&owner, cx)
+        })
+    });
     frames(cx);
     assert!(
         page_b.upgrade().is_none(),
@@ -4108,6 +4113,7 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
             .read(cx)
             .database_for_test()
     });
+    let other = cx.update(|cx| app.read(cx).panel_owner_for_test("thread-other"));
     cx.update(|cx| {
         let app = app.read(cx);
         assert_eq!(
@@ -4117,10 +4123,7 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
         );
         assert!(app.right_panel_tabs().tabs().is_empty());
         assert_eq!(
-            database
-                .read(cx)
-                .pending_sql_for_test("thread-other")
-                .as_deref(),
+            database.read(cx).pending_sql_for_test(&other).as_deref(),
             Some("select 2")
         );
     });
@@ -4146,9 +4149,8 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
             ))
         );
     });
-    let waiting = |cx: &mut TestAppContext| {
-        cx.update(|cx| database.read(cx).pending_sql_for_test("thread-other"))
-    };
+    let waiting =
+        |cx: &mut TestAppContext| cx.update(|cx| database.read(cx).pending_sql_for_test(&other));
     assert!(waiting(cx).is_some(), "the connections are still loading");
     cx.update(|cx| {
         database.update(cx, |db, cx| {
@@ -4249,8 +4251,8 @@ fn each_thread_keeps_its_whole_right_panel_across_switches_and_restarts(cx: &mut
 }
 
 /// An agent on a linked environment reaches its own thread's panel (linked connections now
-/// deliver every panel request): on the thread the user is looking at it opens there; on
-/// another thread it waits there. Neither switches threads.
+/// deliver every panel request) through the dispatch every request takes: on the thread the
+/// user is looking at it opens there; on another thread it waits there. Neither switches.
 #[gpui_kit::test]
 fn a_linked_environments_agent_drives_its_own_threads_panel(cx: &mut TestAppContext) {
     let (window, app) = mount_two_thread_app(cx);
@@ -4285,7 +4287,7 @@ fn a_linked_environments_agent_drives_its_own_threads_panel(cx: &mut TestAppCont
     };
     cx.update(|cx| {
         app.update(cx, |app, cx| {
-            app.agent_panel_request_for_test(request("diff"), cx)
+            drop(app.dispatch_agent_panel_request_for_test(request("diff"), Some("mini"), cx))
         })
     });
     render_frames(cx, window);
@@ -4316,7 +4318,7 @@ fn a_linked_environments_agent_drives_its_own_threads_panel(cx: &mut TestAppCont
     // On the shown linked thread it opens at once.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
-            app.agent_panel_request_for_test(request("files"), cx)
+            drop(app.dispatch_agent_panel_request_for_test(request("files"), Some("mini"), cx))
         })
     });
     render_frames(cx, window);
@@ -4328,6 +4330,225 @@ fn a_linked_environments_agent_drives_its_own_threads_panel(cx: &mut TestAppCont
             Some(linked_thread.as_str())
         );
     });
+}
+
+/// Two environments hold thread id `T` (`a_thread_id_two_environments_hold_belongs_to_the_first`
+/// in conn-state's `environments.rs`): the sidebar lists the primary's `T`. A linked agent's
+/// request for its own `T`, even `run: true` SQL while the primary `T` shows, never reaches the
+/// primary `T`'s panel or its Database editor; the same request from the primary does.
+#[gpui_kit::test]
+fn a_linked_agent_never_drives_the_primary_thread_with_the_same_id(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    let mut mini = linked_mini_shell("/work/mini", "Mini's copy");
+    mini.threads[0].id = "thread-selected".to_owned();
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test("mini", "mini", mini, cx);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, window);
+    let primary = cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.shell()
+                .threads
+                .iter()
+                .filter(|t| t.id == "thread-selected")
+                .map(|t| t.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Selected kitchen-sink thread"],
+            "the primary's T is the one listed"
+        );
+        app.panel_owner_for_test("thread-selected")
+    });
+    let linked = conn_state::PanelOwner::new("mini", "thread-selected");
+    assert_ne!(primary, linked);
+    let database = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .database_for_test()
+    });
+    let ask = |id: &str| {
+        panel_request(json!({
+            "requestId": id,
+            "threadId": "thread-selected",
+            "panel": "database",
+            "sql": "select secret",
+            "run": true,
+            "focusWindow": true,
+        }))
+    };
+    let mut answer = cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.dispatch_agent_panel_request_for_test(ask("from-mini"), Some("mini"), cx)
+        })
+    });
+    render_frames(cx, window);
+    let response = answer.try_recv().expect("the dispatch answered");
+    assert!(!response.panel.ok);
+    assert!(response.panel.database.is_none(), "nothing ran");
+    assert!(
+        response
+            .panel
+            .error
+            .as_deref()
+            .is_some_and(|e| e.ends_with("The query is in its Database panel.")),
+        "{:?}",
+        response.panel.error
+    );
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert!(
+            app.right_panel_tabs().tabs().is_empty() && !app.layout().right_panel_open,
+            "the primary T's panel is untouched"
+        );
+        let db = database.read(cx);
+        assert_eq!(db.pending_sql_for_test(&primary), None);
+        assert_eq!(
+            db.pending_sql_for_test(&linked).as_deref(),
+            Some("select secret"),
+            "it waits in the linked T's own editor"
+        );
+    });
+
+    // The primary's agent drives its own T at once.
+    let request = panel_request(json!({
+        "requestId": "from-primary",
+        "threadId": "thread-selected",
+        "panel": "diff",
+        "focusWindow": true,
+    }));
+    let mut answer = cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.dispatch_agent_panel_request_for_test(request, None, cx)
+        })
+    });
+    render_frames(cx, window);
+    assert!(answer.try_recv().expect("answered").panel.ok);
+    cx.update(|cx| {
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&conn_state::PanelSurface::Kind(
+                conn_state::RightPanelTab::Diff
+            ))
+        );
+    });
+}
+
+/// Past the cap of waiting queries, a new thread's query is refused with a reason; the queries
+/// already accepted all stay.
+#[gpui_kit::test]
+fn the_thirty_third_waiting_query_is_refused_and_the_first_kept(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    let ask = |thread: String| {
+        panel_request(json!({
+            "requestId": format!("req-{thread}"),
+            "threadId": thread,
+            "panel": "database",
+            "sql": format!("select '{thread}'"),
+            "focusWindow": false,
+        }))
+    };
+    let mut answers = Vec::new();
+    for index in 0..33 {
+        let rx = cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.dispatch_agent_panel_request_for_test(ask(format!("t{index}")), None, cx)
+            })
+        });
+        render_frames(cx, window);
+        answers.push(rx);
+    }
+    let outcomes: Vec<_> = answers
+        .iter_mut()
+        .map(|rx| rx.try_recv().expect("answered").panel)
+        .collect();
+    assert!(outcomes[..32].iter().all(|panel| panel.ok));
+    let refused = &outcomes[32];
+    assert!(!refused.ok);
+    assert_eq!(
+        refused.error.as_deref(),
+        Some(crate::panels::TOO_MANY_PENDING_QUERIES)
+    );
+    let (first, last) = cx.update(|cx| {
+        let app = app.read(cx);
+        (
+            app.panel_owner_for_test("t0"),
+            app.panel_owner_for_test("t32"),
+        )
+    });
+    cx.update(|cx| {
+        let database = app
+            .read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .database_for_test();
+        let db = database.read(cx);
+        assert_eq!(
+            db.pending_sql_for_test(&first).as_deref(),
+            Some("select 't0'")
+        );
+        assert_eq!(db.pending_sql_for_test(&last), None);
+    });
+}
+
+/// A browser tab's address is saved when its page navigates, not only on panel actions, so a
+/// restart reopens the page the tab was on.
+#[gpui_kit::test]
+fn a_browser_tab_reopens_on_the_page_it_navigated_to(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!(
+        "conn-thread-panels-{}",
+        crate::commands::new_thread_id()
+    ));
+    let path = dir.join("thread-panels.json");
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.select_thread("thread-selected", cx);
+            app.open_browser_tab("https://first.example/".into(), false, cx);
+        })
+    });
+    render_frames(cx, window);
+    let id = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_tabs()
+            .last_browser()
+            .expect("a browser tab")
+    });
+    let page = cx
+        .update(|cx| app.read(cx).browser_weak_for_test(id, cx))
+        .and_then(|page| page.upgrade())
+        .expect("the tab's page");
+    // A link, a redirect or the address bar commits a new page; no panel action follows.
+    cx.update(|cx| {
+        page.update(cx, |page, cx| {
+            page.commit_url_for_test("https://second.example/next", cx)
+        })
+    });
+    cx.run_until_parked();
+    let saved = std::fs::read_to_string(&path).expect("the layout was saved");
+    assert!(saved.contains("https://second.example/next"), "{saved}");
+
+    let (restart_window, restarted) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        restarted.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, restart_window);
+    let target = cx.update(|cx| {
+        let app = restarted.read(cx);
+        let id = app.right_panel_tabs().last_browser().expect("restored tab");
+        app.browser_target_for_test(id, cx)
+    });
+    assert_eq!(target.as_deref(), Some("https://second.example/next"));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Switching to a thread whose panel is closed, with its browser tab selected, runs no

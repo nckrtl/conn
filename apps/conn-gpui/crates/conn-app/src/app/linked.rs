@@ -1395,7 +1395,12 @@ impl ConnApp {
             }
             ClientEvent::PanelRequest(request) => {
                 if let Some(origin) = self.linked_connection(&environment_id) {
-                    self.dispatch_agent_panel_request(request, origin, cx);
+                    self.dispatch_agent_panel_request(
+                        request,
+                        environment_id,
+                        super::PanelReply::Server(origin),
+                        cx,
+                    );
                 }
                 false
             }

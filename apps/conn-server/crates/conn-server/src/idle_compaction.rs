@@ -280,11 +280,20 @@ impl IdleCompaction {
                 run_id = latest["id"].as_str().unwrap_or_default().to_owned();
                 continue;
             }
-            let pending = match self.engine.thread_shell(thread_id.to_owned()).await {
+            // The shell adds the thread's pull request watches; T3's window passes no links
+            // to `derivePendingBackgroundWork` (`IdleCompaction.ts:75`), so they do not count.
+            let pending: Vec<Value> = match self.engine.thread_shell(thread_id.to_owned()).await {
                 Ok(Some(shell)) => shell["pendingBackgroundTasks"]
                     .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|task| {
+                        !task["taskId"].as_str().is_some_and(|id| {
+                            id.starts_with(crate::settlement::PULL_REQUEST_WATCH_TASK_ID)
+                        })
+                    })
                     .cloned()
-                    .unwrap_or_default(),
+                    .collect(),
                 _ => return,
             };
             let now = i64::try_from(self.engine.now_millis()).unwrap_or(i64::MAX);

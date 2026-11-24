@@ -338,11 +338,43 @@ fn expires_at(minutes: u64) -> String {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn an_idle_large_context_compacts_before_its_cache_expires() {
     let h = harness("compacts");
+    // A pull request watch is not work the next turn waits for: T3's window passes no links to
+    // `derivePendingBackgroundWork` (`IdleCompaction.ts:75`), so this thread compacts too.
+    h.send("watched", "hello").await;
+    h.engine
+        .dispatch(
+            conn_contract::from_json(json!({"type": "thread.pull-request.watch",
+                "commandId": "watch", "threadId": "watched", "host": "github.com",
+                "repository": "o/r", "number": 7, "watching": true,
+                "link": {"url": "https://github.com/o/r/pull/7", "source": "manual"}}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let watched = h
+        .send("watched", &format!("large-context:{}", expires_at(10)))
+        .await;
+    let shell = h
+        .engine
+        .thread_shell("watched".into())
+        .await
+        .unwrap()
+        .unwrap();
+    let tasks = shell["pendingBackgroundTasks"].as_array().unwrap();
+    assert!(
+        tasks.len() == 1
+            && tasks[0]["taskId"]
+                .as_str()
+                .unwrap()
+                .starts_with("pull-request-watch:"),
+        "the watch is the thread's only background task: {tasks:?}"
+    );
     let run = h
         .send("thread", &format!("large-context:{}", expires_at(10)))
         .await;
     let service = IdleCompaction::new(h.engine.clone(), h.environment.clone());
     service.run_completed("thread", &run);
+    service.run_completed("watched", &watched);
 
     h.advance(Duration::from_secs(7 * 60)).await;
     assert!(service.waiting("thread"), "still before the window");
@@ -361,6 +393,8 @@ async fn an_idle_large_context_compacts_before_its_cache_expires() {
         .unwrap();
     assert_eq!(sent["text"], "/compact");
     assert_eq!(sent["idleCompaction"], "beforeCacheExpires");
+    h.until_completed("watched", &format!("idle-compact:watched:{watched}"))
+        .await;
     assert!(
         p["messages"]
             .as_array()

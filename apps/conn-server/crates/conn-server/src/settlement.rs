@@ -26,7 +26,7 @@ const QUEUED_TURN_START_GRACE_MS: i64 = 2 * 60 * 1_000;
 /// `Schedule.spaced("1 minute")`.
 const SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// `isPullRequestWatchTask`.
-const PULL_REQUEST_WATCH_TASK_ID: &str = "pull-request-watch:";
+pub(crate) const PULL_REQUEST_WATCH_TASK_ID: &str = "pull-request-watch:";
 
 fn ms(value: &Value) -> Option<i64> {
     value.as_str().and_then(conn_support::time::millis_from_iso)

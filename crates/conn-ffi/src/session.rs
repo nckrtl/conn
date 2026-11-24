@@ -20,9 +20,8 @@ use crate::types::{
     FfiThreadSnapshot,
 };
 
-/// Files in the cache directory: the server it belongs to, and that server's environment id.
-const SERVER_FILE: &str = "server";
-const ENVIRONMENT_FILE: &str = "environment";
+/// The cache directory's record of which server (identity) its contents belong to.
+const IDENTITY_FILE: &str = "identity";
 
 /// How long a thread link keeps trying a woken Instance: 12 tries, 5 s apart.
 const LINK_TRIES: u32 = 12;
@@ -89,6 +88,8 @@ pub trait SessionListener: Send + Sync {
     fn on_providers_changed(&self);
     /// The thread's stream reported `thread.deleted` on this connection.
     fn on_thread_deleted(&self, connection_id: u64, thread_id: String);
+    /// A link for another environment: open it in that environment's own store and session.
+    fn on_open_elsewhere(&self, environment_id: String, thread_id: String);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,13 +127,24 @@ pub(crate) enum Effect<C> {
         id: u64,
         server_url: String,
     },
-    /// Open the connection's offline thread cache.
+    /// Open the offline thread cache of the server identified by `identity`.
     PrepareOffline {
         id: u64,
         core: C,
+        identity: String,
     },
     /// Delete the offline thread cache: its server is no longer this session's.
     WipeCache,
+    /// Subscribe to the thread the user has open.
+    OpenThread {
+        core: C,
+        thread_id: String,
+    },
+    /// A link for another environment: the app opens it in that environment's own scope.
+    OpenElsewhere {
+        environment_id: String,
+        thread_id: String,
+    },
 }
 
 struct Attempt<C> {
@@ -147,6 +159,9 @@ struct Attempt<C> {
     /// A rejected bearer may re-pair through Orbit. False for a re-pair attempt until it
     /// connects, so a fresh pairing that is rejected too can't loop.
     may_recover: bool,
+    /// Which server this is (Orbit server id, or a manual server's environment id). The offline
+    /// cache opens only once it is known, and belongs to it.
+    identity: Option<String>,
     offline_ready: bool,
 }
 
@@ -160,8 +175,10 @@ pub(crate) struct Machine<C> {
     server_url: Option<String>,
     environment_id: Option<String>,
     pending_thread: Option<String>,
-    /// A link that came while the current server's environment was still unknown.
-    deferred_link: Option<(String, String)>,
+    /// Links that came while this session's environment was still unknown, oldest first.
+    held_links: Vec<(String, String)>,
+    /// The thread the user has open; subscribed on every connection this session attaches.
+    open_thread: Option<String>,
 }
 
 impl<C> fmt::Debug for Machine<C> {
@@ -186,7 +203,8 @@ impl<C: SessionCore> Machine<C> {
             server_url: None,
             environment_id: None,
             pending_thread: None,
-            deferred_link: None,
+            held_links: Vec::new(),
+            open_thread: None,
         }
     }
 
@@ -246,6 +264,7 @@ impl<C: SessionCore> Machine<C> {
             early_failure: None,
             connected_once: false,
             may_recover: may_recover == Recover::Allowed,
+            identity: None,
             offline_ready: false,
         });
         fx.push(Effect::Start {
@@ -319,7 +338,7 @@ impl<C: SessionCore> Machine<C> {
     pub(crate) fn connect_manually(&mut self) -> Effects<C> {
         let mut fx = Vec::new();
         self.cancel(&mut fx);
-        self.deferred_link = None;
+        self.held_links.clear();
         self.rest = FfiSessionPhase::Idle { message: None };
         fx
     }
@@ -327,6 +346,7 @@ impl<C: SessionCore> Machine<C> {
     pub(crate) fn sign_out(&mut self) -> Effects<C> {
         let mut fx = self.connect_manually();
         self.saved = None;
+        self.open_thread = None;
         fx.push(Effect::Save(None));
         fx.push(Effect::WipeCache);
         fx
@@ -348,29 +368,61 @@ impl<C: SessionCore> Machine<C> {
         self.retry()
     }
 
+    /// The user opened a thread: subscribe now if connected, and on every later connection.
+    pub(crate) fn open_thread(&mut self, thread_id: String) -> Effects<C> {
+        self.open_thread = Some(thread_id.clone());
+        self.attempt
+            .as_ref()
+            .and_then(|a| a.core.clone())
+            .map(|core| Effect::OpenThread { core, thread_id })
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn close_thread(&mut self, thread_id: &str) -> Effects<C> {
+        if self.open_thread.as_deref() == Some(thread_id) {
+            self.open_thread = None;
+        }
+        Vec::new()
+    }
+
+    /// A thread link. This session takes it only for its own environment. While that is still
+    /// unknown the link waits; a link for another environment opens elsewhere.
     pub(crate) fn open_link(&mut self, environment_id: String, thread_id: String) -> Effects<C> {
-        if self.environment_id.as_deref() == Some(environment_id.as_str())
-            && self.attempt.as_ref().is_some_and(|a| a.core.is_some())
-        {
-            self.pending_thread = Some(thread_id);
-            return Vec::new();
+        let Some(attempt) = &self.attempt else {
+            // Nothing here yet: the link's environment becomes this session's.
+            return self.begin_link(environment_id, thread_id);
+        };
+        let own = match &attempt.target {
+            FfiSessionTarget::Environment {
+                environment_id: env,
+                ..
+            } => Some(env.clone()),
+            _ => self.environment_id.clone(),
+        };
+        match own {
+            None => {
+                self.held_links.push((environment_id, thread_id));
+                Vec::new()
+            }
+            Some(own) => self.route(own, environment_id, thread_id),
         }
-        // An attempt whose environment isn't known yet decides once it is, unless it is
-        // already a link to another environment.
-        let wait = self.environment_id.is_none()
-            && self
-                .attempt
-                .as_ref()
-                .is_some_and(|a| !matches!(&a.target, FfiSessionTarget::Environment { .. }));
-        if wait {
-            self.deferred_link = Some((environment_id, thread_id));
-            return Vec::new();
+    }
+
+    /// Sends a link to this session when it is its environment, else elsewhere.
+    fn route(&mut self, own: String, environment_id: String, thread_id: String) -> Effects<C> {
+        if own != environment_id {
+            return vec![Effect::OpenElsewhere {
+                environment_id,
+                thread_id,
+            }];
         }
-        self.begin_link(environment_id, thread_id)
+        self.pending_thread = Some(thread_id.clone());
+        self.open_thread(thread_id)
     }
 
     fn begin_link(&mut self, environment_id: String, thread_id: String) -> Effects<C> {
-        self.deferred_link = None;
+        self.open_thread = Some(thread_id.clone());
         self.begin(
             FfiSessionTarget::Environment {
                 environment_id,
@@ -387,7 +439,8 @@ impl<C: SessionCore> Machine<C> {
 
     // -- events -------------------------------------------------------------
 
-    /// The attempt's connection exists. `environment_id` is known for Orbit targets.
+    /// The attempt's connection exists. `environment_id` is the Orbit server id for Orbit
+    /// targets; a manual server's comes from its saved session, then from the server.
     pub(crate) fn attached(
         &mut self,
         id: u64,
@@ -398,46 +451,41 @@ impl<C: SessionCore> Machine<C> {
         if !self.is_current(id) {
             return vec![Effect::Disconnect(core)];
         }
+        let saved_identity = self
+            .saved
+            .as_ref()
+            .filter(|s| s.server_url == server_url)
+            .and_then(|s| s.environment_id.clone());
         let Some(attempt) = self.attempt.as_mut() else {
             return Vec::new();
         };
-        attempt.core = Some(core);
-        let early = attempt.early_failure.take();
+        attempt.core = Some(core.clone());
+        if let Some(message) = attempt.early_failure.take() {
+            return self.failed(id, message);
+        }
         let link_thread = match &attempt.target {
             FfiSessionTarget::Environment { thread_id, .. } => thread_id.clone(),
             _ => None,
         };
-        let core = attempt.core.clone();
-        if let Some(message) = early {
-            return self.failed(id, message);
-        }
+        let manual = environment_id.is_none();
         self.server_url = Some(server_url.clone());
         if link_thread.is_some() {
             self.pending_thread = link_thread;
         }
-        let mut fx = match environment_id {
-            Some(env) => self.environment(id, Some(env)),
-            None => vec![Effect::FetchEnvironment { id, server_url }],
-        };
-        if let Some(core) = core {
-            fx.push(Effect::PrepareOffline { id, core });
+        let mut fx: Effects<C> = self
+            .open_thread
+            .clone()
+            .map(|thread_id| Effect::OpenThread {
+                core: core.clone(),
+                thread_id,
+            })
+            .into_iter()
+            .collect();
+        if manual {
+            fx.push(Effect::FetchEnvironment { id, server_url });
         }
+        fx.extend(self.identified(id, environment_id.or(saved_identity)));
         fx
-    }
-
-    /// The offline cache remembered this server's environment; use it until the server says.
-    pub(crate) fn cached_environment(&mut self, id: u64, environment_id: String) -> Effects<C> {
-        if !self.is_current(id) || self.environment_id.is_some() {
-            return Vec::new();
-        }
-        self.environment(id, Some(environment_id))
-    }
-
-    pub(crate) fn offline_ready(&mut self, id: u64) -> Effects<C> {
-        if let Some(attempt) = self.attempt.as_mut().filter(|a| a.id == id) {
-            attempt.offline_ready = true;
-        }
-        Vec::new()
     }
 
     /// The attempt could not produce a connection.
@@ -453,8 +501,14 @@ impl<C: SessionCore> Machine<C> {
         let mut fx = Vec::new();
         let target = self.attempt.as_ref().map(|a| a.target.clone());
         self.cancel(&mut fx);
-        if let Some((env, thread)) = self.deferred_link.take() {
+        let mut held = std::mem::take(&mut self.held_links).into_iter();
+        if let Some((env, thread)) = held.next() {
+            // This session never learned its environment; the first link's becomes its own,
+            // and the rest are routed against it.
             fx.extend(self.begin_link(env, thread));
+            for (env, thread) in held {
+                fx.extend(self.open_link(env, thread));
+            }
             return fx;
         }
         self.rest = match target {
@@ -527,27 +581,90 @@ impl<C: SessionCore> Machine<C> {
         self.start_failed(id, message, detail)
     }
 
-    pub(crate) fn bearer(&mut self, id: u64, session: FfiSavedSession) -> Effects<C> {
+    pub(crate) fn bearer(&mut self, id: u64, mut session: FfiSavedSession) -> Effects<C> {
         if !self.is_current(id) {
             return Vec::new();
+        }
+        if session.environment_id.is_none() {
+            session.environment_id = self.attempt.as_ref().and_then(|a| a.identity.clone());
         }
         self.saved = Some(session.clone());
         vec![Effect::Save(Some(session))]
     }
 
+    /// A manual server named its environment (`None`: it couldn't be asked).
     pub(crate) fn environment(&mut self, id: u64, environment_id: Option<String>) -> Effects<C> {
         if !self.is_current(id) {
             return Vec::new();
         }
-        self.environment_id = environment_id;
-        match self.deferred_link.take() {
-            Some((env, thread)) if self.environment_id.as_deref() == Some(env.as_str()) => {
-                self.pending_thread = Some(thread);
-                Vec::new()
+        let Some(env) = environment_id else {
+            return Vec::new();
+        };
+        let known = self.attempt.as_ref().and_then(|a| a.identity.clone());
+        match known {
+            Some(known) if known == env => Vec::new(),
+            // Another server now answers at this URL: start over so nothing of the old one's
+            // cache carries over.
+            Some(_) => self.restart_as(env),
+            None => {
+                let mut fx = self.identified(id, Some(env.clone()));
+                if let Some(saved) = self.saved.as_mut().filter(|s| s.environment_id.is_none()) {
+                    saved.environment_id = Some(env);
+                    fx.push(Effect::Save(Some(saved.clone())));
+                }
+                fx
             }
-            Some((env, thread)) => self.begin_link(env, thread),
-            None => Vec::new(),
         }
+    }
+
+    fn restart_as(&mut self, env: String) -> Effects<C> {
+        let Some(saved) = self.saved.as_mut() else {
+            return Vec::new();
+        };
+        saved.environment_id = Some(env);
+        let saved = saved.clone();
+        let mut fx = vec![Effect::Save(Some(saved.clone()))];
+        fx.extend(self.begin(
+            FfiSessionTarget::Manual {
+                server_url: saved.server_url,
+            },
+            Some(FfiCredential::Bearer {
+                token: saved.bearer,
+            }),
+            Recover::Allowed,
+        ));
+        fx
+    }
+
+    /// The attempt's server is now known: open its cache and route a held link.
+    fn identified(&mut self, id: u64, identity: Option<String>) -> Effects<C> {
+        let Some(identity) = identity else {
+            return Vec::new();
+        };
+        let Some(attempt) = self.attempt.as_mut().filter(|a| a.id == id) else {
+            return Vec::new();
+        };
+        attempt.identity = Some(identity.clone());
+        let mut fx = Vec::new();
+        if let Some(core) = attempt.core.clone() {
+            fx.push(Effect::PrepareOffline {
+                id,
+                core,
+                identity: identity.clone(),
+            });
+        }
+        self.environment_id = Some(identity.clone());
+        for (env, thread) in std::mem::take(&mut self.held_links) {
+            fx.extend(self.route(identity.clone(), env, thread));
+        }
+        fx
+    }
+
+    pub(crate) fn offline_ready(&mut self, id: u64) -> Effects<C> {
+        if let Some(attempt) = self.attempt.as_mut().filter(|a| a.id == id) {
+            attempt.offline_ready = true;
+        }
+        Vec::new()
     }
 
     fn bump(&mut self) {
@@ -644,23 +761,26 @@ impl ConnSession {
                     return;
                 };
                 self.orbit.handle().spawn(async move {
-                    // Offline, the cache's remembered environment stands in.
-                    if let Some(env) = fetch_environment_id(&server_url).await {
-                        if let Some(dir) = &this.cache_dir {
-                            let _ = std::fs::write(dir.join(ENVIRONMENT_FILE), &env);
-                        }
-                        this.step(|m| m.environment(id, Some(env)));
-                    }
+                    let env = fetch_environment_id(&server_url).await;
+                    this.step(|m| m.environment(id, env));
                 });
             }
-            Effect::PrepareOffline { id, core } => {
+            Effect::PrepareOffline { id, core, identity } => {
                 let (Some(this), Some(dir)) = (self.this.upgrade(), self.cache_dir.clone()) else {
                     return;
                 };
-                self.orbit
-                    .handle()
-                    .spawn(async move { this.prepare_offline(id, &core, dir).await });
+                if !self.claim_cache(id, &dir, &identity) {
+                    return;
+                }
+                self.orbit.handle().spawn(async move {
+                    this.open_offline(id, &core, dir, identity).await;
+                });
             }
+            Effect::OpenThread { core, thread_id } => core.open_thread(thread_id),
+            Effect::OpenElsewhere {
+                environment_id,
+                thread_id,
+            } => self.listener.on_open_elsewhere(environment_id, thread_id),
             Effect::WipeCache => {
                 *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if let Some(dir) = &self.cache_dir {
@@ -670,21 +790,19 @@ impl ConnSession {
         }
     }
 
-    /// Opens the cache for this connection's server, starting it afresh when the server changed.
-    async fn prepare_offline(&self, id: u64, core: &ConnCore, dir: PathBuf) {
-        let server_url = core.server_url();
-        let marker = dir.join(SERVER_FILE);
-        if std::fs::read_to_string(&marker).ok().as_deref() != Some(server_url.as_str()) {
-            let _ = std::fs::remove_dir_all(&dir);
+    /// Makes the cache directory this attempt's server's, emptying it when it held another
+    /// server's. Runs under the machine lock, so only the current attempt writes it.
+    fn claim_cache(&self, id: u64, dir: &std::path::Path, identity: &str) -> bool {
+        let machine = self.machine.lock().unwrap_or_else(|e| e.into_inner());
+        if !machine.is_current(id) {
+            return false;
         }
-        if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&marker, &server_url).is_err() {
-            return;
-        }
-        if let Ok(env) = std::fs::read_to_string(dir.join(ENVIRONMENT_FILE)) {
-            self.step(|m| m.cached_environment(id, env));
-        }
+        claim_cache_dir(dir, identity).is_ok()
+    }
+
+    async fn open_offline(&self, id: u64, core: &ConnCore, dir: PathBuf, identity: String) {
         match core
-            .prepare_offline(dir.to_string_lossy().into_owned())
+            .prepare_offline(dir.to_string_lossy().into_owned(), identity)
             .await
         {
             Ok(reader) if self.is_current(id) => {
@@ -911,6 +1029,18 @@ impl ConnSession {
         self.step(|m| m.open_link(environment_id, thread_id));
     }
 
+    /// The user opened this thread; it stays subscribed across this session's connections.
+    pub fn open_thread(&self, thread_id: String) {
+        self.step(|m| m.open_thread(thread_id));
+    }
+
+    pub fn close_thread(&self, thread_id: String) {
+        if let Some(core) = self.core() {
+            core.close_thread(thread_id.clone());
+        }
+        self.step(|m| m.close_thread(&thread_id));
+    }
+
     /// The thread a link asked to show, once.
     pub fn take_pending_thread(&self) -> Option<String> {
         let mut taken = None;
@@ -998,6 +1128,16 @@ impl CoreListener for AttemptListener {
     }
 }
 
+/// Empties `dir` unless it already belongs to `identity`, then marks it as `identity`'s.
+fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<()> {
+    let marker = dir.join(IDENTITY_FILE);
+    if std::fs::read_to_string(&marker).ok().as_deref() != Some(identity) && dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(marker, identity)
+}
+
 /// Reads a server's Conn environment id (`/.well-known/t3/environment`).
 async fn fetch_environment_id(server_url: &str) -> Option<String> {
     let url = url::Url::parse(server_url)
@@ -1020,7 +1160,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::orbit::tests::{MockGateway, spawn_rejecting_server};
+    use crate::orbit::tests::{MockGateway, spawn_mock_conn_server, spawn_rejecting_server};
 
     const AUTH: &str = "The server rejected this device's sign-in.";
 
@@ -1144,6 +1284,7 @@ mod tests {
             server_url: "http://inst/".to_owned(),
             bearer: "late".to_owned(),
             orbit_server_id: Some("inst-7".to_owned()),
+            environment_id: Some("inst-7".to_owned()),
         };
         assert!(
             m.bearer(1, session).is_empty(),
@@ -1286,6 +1427,7 @@ mod tests {
                 .expect("deleted")
                 .push((connection_id, thread_id));
         }
+        fn on_open_elsewhere(&self, _environment_id: String, _thread_id: String) {}
     }
 
     #[test]
@@ -1296,9 +1438,10 @@ mod tests {
             ))
         });
         let recorder = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().expect("cache dir");
         let session = ConnSession::with_orbit(
             OrbitCore::with_transport(gateway).expect("orbit"),
-            None,
+            Some(cache.path().join("thread-cache")),
             recorder.clone(),
         );
         session.pair_manual("http://127.0.0.1:9".to_owned(), "old".to_owned());
@@ -1331,6 +1474,7 @@ mod tests {
             server_url: "http://inst/".to_owned(),
             bearer: "b".to_owned(),
             orbit_server_id: Some("inst-7".to_owned()),
+            environment_id: Some("inst-7".to_owned()),
         };
         assert_eq!(
             starts(&m.restore(Some(saved))),
@@ -1375,9 +1519,10 @@ mod tests {
             })
         });
         let recorder = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().expect("cache dir");
         let session = ConnSession::with_orbit(
             OrbitCore::with_transport(gateway).expect("orbit"),
-            None,
+            Some(cache.path().join("thread-cache")),
             recorder.clone(),
         );
         session.connect_primary_agent();
@@ -1397,5 +1542,209 @@ mod tests {
             "and stays failed, with Try again: {last:?}"
         );
         assert!(session.core().is_none(), "no connection is left behind");
+    }
+
+    fn has_open_thread(fx: &[Effect<FakeCore>], thread: &str) -> bool {
+        fx.iter()
+            .any(|e| matches!(e, Effect::OpenThread { thread_id, .. } if thread_id == thread))
+    }
+
+    #[test]
+    fn a_link_for_another_environment_before_this_one_is_known_opens_elsewhere() {
+        let mut m = Machine::<FakeCore>::new();
+        let saved = FfiSavedSession {
+            server_url: "http://agent/".to_owned(),
+            bearer: "a-bearer".to_owned(),
+            orbit_server_id: Some("node-a".to_owned()),
+            environment_id: Some("node-a".to_owned()),
+        };
+        let _ = m.launch(Some(saved.clone()));
+        assert!(
+            m.open_link("env-b".to_owned(), "thread-b".to_owned())
+                .is_empty(),
+            "the link waits while this session doesn't know its environment"
+        );
+        let _ = m.open_link("node-a".to_owned(), "thread-a".to_owned());
+        let fx = m.attached(
+            1,
+            rejected(),
+            "http://agent/".to_owned(),
+            Some("node-a".to_owned()),
+        );
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::OpenElsewhere { environment_id, .. } if environment_id == "env-b"
+            )),
+            "the held link for B goes to B's scope"
+        );
+        assert!(
+            starts(&fx).is_empty(),
+            "the main session doesn't reconnect elsewhere"
+        );
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::Save(_))),
+            "A's bearer stays as it is"
+        );
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::PrepareOffline { identity, .. } if identity == "node-a"
+            )),
+            "A's cache stays A's"
+        );
+        assert_eq!(
+            m.take_pending_thread().as_deref(),
+            Some("thread-a"),
+            "a link for A opens in A"
+        );
+
+        // Now known: a link for B goes to B's own scope.
+        let fx = m.open_link("env-b".to_owned(), "thread-b".to_owned());
+        assert!(
+            matches!(
+                fx.as_slice(),
+                [Effect::OpenElsewhere { environment_id, thread_id }]
+                    if environment_id == "env-b" && thread_id == "thread-b"
+            ),
+            "a link for B opens in its own scope: {fx:?}"
+        );
+        assert_eq!(m.state().connection_id, 1, "A's connection stays current");
+
+        // B held before A was known is routed elsewhere once A is.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved));
+        let _ = m.open_link("env-b".to_owned(), "thread-b".to_owned());
+        let fx = m.attached(
+            1,
+            rejected(),
+            "http://agent/".to_owned(),
+            Some("node-a".to_owned()),
+        );
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::OpenElsewhere { environment_id, .. } if environment_id == "env-b"
+            )),
+            "the held link for B goes to B's scope"
+        );
+        assert_eq!(
+            m.state().environment_id.as_deref(),
+            Some("node-a"),
+            "this stays A"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_sleeping_environment_subscribes_its_thread_once_connected() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.open_link("inst-7".to_owned(), "thread-1".to_owned());
+        // The user is already on the thread while the Instance wakes.
+        assert!(
+            !has_open_thread(&m.open_thread("thread-1".to_owned()), "thread-1"),
+            "nothing to subscribe yet"
+        );
+        let fx = m.attached(
+            1,
+            rejected(),
+            "http://inst/".to_owned(),
+            Some("inst-7".to_owned()),
+        );
+        assert!(
+            has_open_thread(&fx, "thread-1"),
+            "the thread is subscribed as soon as the connection exists"
+        );
+    }
+
+    #[test]
+    fn a_superseded_environment_lookup_writes_nothing() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.pair_manual("http://a:3773".to_owned(), "code-a".to_owned());
+        let fx = m.attached(1, rejected(), "http://a:3773/".to_owned(), None);
+        assert!(
+            fx.iter()
+                .any(|e| matches!(e, Effect::FetchEnvironment { id: 1, .. })),
+            "a manual server is asked for its environment"
+        );
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::PrepareOffline { .. })),
+            "no cache before the server's identity is known"
+        );
+        let _ = m.pair_manual("http://b:3773".to_owned(), "code-b".to_owned());
+        assert!(
+            m.environment(1, Some("env-a".to_owned())).is_empty(),
+            "A's late answer opens, saves and writes nothing"
+        );
+        assert_eq!(m.state().environment_id, None, "B's environment isn't A's");
+    }
+
+    #[test]
+    fn a_new_node_at_the_same_url_starts_with_an_empty_cache() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test tokio rt");
+        let (gw_url, server) = rt.block_on(spawn_mock_conn_server(
+            "good",
+            "code",
+            "fresh",
+            "/srv/workspace",
+        ));
+        let gateway = MockGateway::new(move |req| {
+            let body = match req.path.as_str() {
+                "/environments" => json!({ "data": [{
+                    "environment_id": "node-new",
+                    "label": "agent",
+                    "url": gw_url,
+                    "status": "registered",
+                    "cleanup_pending": false,
+                    "instance_id": null,
+                    "roles": ["agent"]
+                }]}),
+                _ => json!({ "data": {
+                    "pairing_url": format!("{gw_url}/pair#token=code"),
+                    "pairing": { "environment_id": "node-new" }
+                }}),
+            };
+            Ok(GatewayResponse {
+                status: 200,
+                body: body.to_string(),
+            })
+        });
+        // The old Node at this URL left its cache behind.
+        let cache = tempfile::tempdir().expect("cache dir");
+        let dir = cache.path().join("thread-cache");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join(IDENTITY_FILE), "node-old").expect("marker");
+        std::fs::write(dir.join("shell.json"), "old node's inbox").expect("old shell");
+
+        let recorder = Arc::new(Recorder::default());
+        let session = ConnSession::with_orbit(
+            OrbitCore::with_transport(gateway).expect("orbit"),
+            Some(dir.clone()),
+            recorder.clone(),
+        );
+        session.connect_primary_agent();
+        assert!(
+            recorder.wait_for(|s| s.offline_ready),
+            "the new Node's cache opens"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(IDENTITY_FILE))
+                .expect("marker")
+                .as_str(),
+            "node-new",
+            "the cache now belongs to the new Node"
+        );
+        assert!(
+            !dir.join("shell.json").exists(),
+            "nothing of the old Node's cache carries over"
+        );
+        if let Some(core) = session.core() {
+            core.disconnect();
+        }
+        server.abort();
     }
 }

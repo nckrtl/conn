@@ -73,7 +73,12 @@ final class CoreStore {
             lastError = error.localizedDescription
         }
         let saved = KeychainStore.loadSession(scope: scope).map {
-            FfiSavedSession(serverUrl: $0.serverURL, bearer: $0.bearerToken, orbitServerId: $0.orbitServerId)
+            FfiSavedSession(
+                serverUrl: $0.serverURL,
+                bearer: $0.bearerToken,
+                orbitServerId: $0.orbitServerId,
+                environmentId: $0.environmentId
+            )
         }
         guard scope.isEmpty else {
             session?.restore(saved: saved)
@@ -116,11 +121,12 @@ final class CoreStore {
 
     func openThread(_ threadId: String) {
         if let current = openThreadId, current != threadId {
-            core?.closeThread(threadId: current)
+            session?.closeThread(threadId: current)
             openThread = nil
         }
         openThreadId = threadId
-        core?.openThread(threadId: threadId)
+        // The session subscribes now, or as soon as a connection attaches.
+        session?.openThread(threadId: threadId)
         restoreThread(threadId)
     }
 
@@ -128,7 +134,7 @@ final class CoreStore {
         guard openThreadId == threadId else { return }
         openThreadId = nil
         openThread = nil
-        core?.closeThread(threadId: threadId)
+        session?.closeThread(threadId: threadId)
     }
 
     func sendMessage(threadId: String, text: String, mode: FfiSendMode = .auto) async -> Bool {
@@ -396,23 +402,33 @@ final class CoreStore {
         return openThreadId == link.threadId || isInboxVisible
     }
 
-    /// Opens a thread from a link. A linked environment shows it; another Orbit environment opens
-    /// beside this one in its own scope; otherwise this session decides (Rust).
+    /// Opens a thread from a link. A linked environment's store takes it; otherwise this
+    /// session decides (Rust): it keeps a link for its own environment and hands any other to
+    /// `openElsewhere`, waiting until it knows which environment it is.
     func open(_ link: ThreadLink) {
-        if linked[link.environmentId] != nil
-            || linked.values.contains(where: { $0.environmentId == link.environmentId }) {
-            pendingLink = link
-            return
-        }
-        if scope.isEmpty, isPaired, let environmentId, environmentId != link.environmentId {
-            let child = CoreStore(scope: link.environmentId)
-            linked[link.environmentId] = child
-            UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
+        if let child = linkedStore(for: link.environmentId) {
             child.session?.openLink(environmentId: link.environmentId, threadId: link.threadId)
             pendingLink = link
             return
         }
         session?.openLink(environmentId: link.environmentId, threadId: link.threadId)
+    }
+
+    private func linkedStore(for environmentId: String) -> CoreStore? {
+        linked[environmentId] ?? linked.values.first { $0.environmentId == environmentId }
+    }
+
+    /// The session routed a link to another environment: open it in that environment's scope.
+    fileprivate func openElsewhere(_ link: ThreadLink) {
+        guard scope.isEmpty else { return }
+        let child = linkedStore(for: link.environmentId) ?? {
+            let created = CoreStore(scope: link.environmentId)
+            linked[link.environmentId] = created
+            UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
+            return created
+        }()
+        child.session?.openLink(environmentId: link.environmentId, threadId: link.threadId)
+        pendingLink = link
     }
 
     /// Hands the pending link to the workspace once.
@@ -511,6 +527,7 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
                 serverURL: session.serverUrl,
                 bearerToken: session.bearer,
                 orbitServerId: session.orbitServerId,
+                environmentId: session.environmentId,
                 scope: scope
             )
         } else {
@@ -532,6 +549,11 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
 
     func onError(message: String) {
         Task { @MainActor [weak store] in store?.handleError(message) }
+    }
+
+    func onOpenElsewhere(environmentId: String, threadId: String) {
+        let link = ThreadLink(environmentId: environmentId, threadId: threadId)
+        Task { @MainActor [weak store] in store?.openElsewhere(link) }
     }
 
     func onProvidersChanged() {

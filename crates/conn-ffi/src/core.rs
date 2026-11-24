@@ -207,6 +207,7 @@ impl ConnCore {
                 server_url: normalized_url.clone(),
                 bearer: token.clone(),
                 orbit_server_id: Some(id.clone()),
+                environment_id: Some(id.clone()),
             }),
             _ => None,
         };
@@ -399,15 +400,18 @@ impl ConnCore {
     }
 
     /// Opens this pairing's cache on the connection runtime.
+    /// `identity` names the server the cache belongs to (its Orbit server id or environment id),
+    /// not its URL: another server at the same URL must not read this one's cache.
     pub async fn prepare_offline(
         &self,
         directory: String,
+        identity: String,
     ) -> Result<Arc<crate::OfflineReader>, FfiError> {
         let reader = self
             .runtime_handle
             .spawn(crate::OfflineReader::open(
                 directory.into(),
-                self.server_url(),
+                identity,
                 self.connection.clone(),
             ))
             .await
@@ -1251,6 +1255,7 @@ impl PumpState {
                     server_url: self.identity.server_url.clone(),
                     bearer: token,
                     orbit_server_id: self.identity.orbit_server_id.clone(),
+                    environment_id: self.identity.orbit_server_id.clone(),
                 });
             }
             ClientEvent::Shell(item) => {

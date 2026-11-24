@@ -6,6 +6,8 @@ struct StoredSession: Sendable, Equatable {
     let bearerToken: String
     /// The Orbit environment this session belongs to; `nil` for a manual pairing.
     let orbitServerId: String?
+    /// Which server this is; its offline cache belongs to it.
+    let environmentId: String?
 }
 
 enum KeychainStore {
@@ -13,6 +15,7 @@ enum KeychainStore {
     private static let serverURLAccount = "server-url"
     private static let bearerTokenAccount = "bearer-token"
     private static let orbitServerIdAccount = "orbit-server-id"
+    private static let environmentIdAccount = "environment-id"
 
     static func loadSession(scope: String = "") -> StoredSession? {
         guard let serverURL = read(account: serverURLAccount + scope),
@@ -22,16 +25,30 @@ enum KeychainStore {
             return nil
         }
         let orbitServerId = read(account: orbitServerIdAccount + scope).flatMap { $0.isEmpty ? nil : $0 }
-        return StoredSession(serverURL: serverURL, bearerToken: bearerToken, orbitServerId: orbitServerId)
+        let environmentId = read(account: environmentIdAccount + scope).flatMap { $0.isEmpty ? nil : $0 }
+        return StoredSession(
+            serverURL: serverURL,
+            bearerToken: bearerToken,
+            orbitServerId: orbitServerId,
+            environmentId: environmentId
+        )
     }
 
-    static func saveSession(serverURL: String, bearerToken: String, orbitServerId: String?, scope: String = "") {
+    static func saveSession(
+        serverURL: String,
+        bearerToken: String,
+        orbitServerId: String?,
+        environmentId: String?,
+        scope: String = ""
+    ) {
         write(serverURL, account: serverURLAccount + scope)
         write(bearerToken, account: bearerTokenAccount + scope)
-        if let orbitServerId {
-            write(orbitServerId, account: orbitServerIdAccount + scope)
-        } else {
-            delete(account: orbitServerIdAccount + scope)
+        for (value, account) in [(orbitServerId, orbitServerIdAccount), (environmentId, environmentIdAccount)] {
+            if let value {
+                write(value, account: account + scope)
+            } else {
+                delete(account: account + scope)
+            }
         }
     }
 
@@ -39,6 +56,7 @@ enum KeychainStore {
         delete(account: serverURLAccount + scope)
         delete(account: bearerTokenAccount + scope)
         delete(account: orbitServerIdAccount + scope)
+        delete(account: environmentIdAccount + scope)
     }
 
     private static let pushDeviceIdAccount = "push-device-id"

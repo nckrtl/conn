@@ -3500,6 +3500,7 @@ pub(crate) mod tests {
             server_url: format!("{server_url}/"),
             bearer: bearer.to_owned(),
             orbit_server_id: Some("node-agent".to_owned()),
+            environment_id: Some("node-agent".to_owned()),
         };
 
         // No saved session (first launch): mints a pairing; the bearer comes with its Node.

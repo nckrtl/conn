@@ -44,6 +44,9 @@ pub struct FfiSavedSession {
     pub bearer: String,
     /// The Orbit environment, or `None` for a manually paired server.
     pub orbit_server_id: Option<String>,
+    /// Which server this is: the Orbit server id, or a manual server's environment id once
+    /// known. The offline cache belongs to it.
+    pub environment_id: Option<String>,
 }
 
 impl fmt::Debug for FfiSavedSession {
@@ -51,6 +54,7 @@ impl fmt::Debug for FfiSavedSession {
         f.debug_struct("FfiSavedSession")
             .field("server_url", &self.server_url)
             .field("orbit_server_id", &self.orbit_server_id)
+            .field("environment_id", &self.environment_id)
             .finish_non_exhaustive()
     }
 }

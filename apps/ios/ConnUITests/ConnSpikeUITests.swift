@@ -600,6 +600,59 @@ final class ConnSpikeUITests: XCTestCase {
         if barTap(["inbox.newThreadButton", "New chat"], swiftX: 0.885) { settle(2); capture("new-chat") }
     }
 
+    /// Pairing's "Paste from Clipboard" takes a URL item ("Copy Link"), a string item, and says so
+    /// when the clipboard is empty; a long-press paste into the field takes a URL item too.
+    func testPairingPasteTakesURLAndStringItems() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session"]
+        app.launch()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let field = app.textFields["pairing.urlField"]
+        let paste = app.buttons["pairing.pasteButton"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10), "the pairing form shows")
+        func allowPaste() {
+            for alertApp in [springboard, app] {
+                let allow = alertApp.buttons["Allow Paste"].firstMatch
+                if allow.waitForExistence(timeout: 2) { allow.tap(); return }
+            }
+        }
+        func clearField() {
+            let clear = app.buttons["Clear URL"]
+            if clear.exists { clear.tap() }
+        }
+
+        let link = "http://127.0.0.1:3899/pair#token=url-item"
+        UIPasteboard.general.url = URL(string: link)
+        XCTAssertNil(UIPasteboard.general.string, "Copy Link stores only a URL item")
+        paste.tap()
+        allowPaste()
+        XCTAssertEqual(field.value as? String, link, "a URL item fills the field")
+        clearField()
+
+        UIPasteboard.general.string = "  http://127.0.0.1:3899/pair#token=string-item \n"
+        paste.tap()
+        allowPaste()
+        XCTAssertEqual(field.value as? String, "http://127.0.0.1:3899/pair#token=string-item",
+                       "a string item fills the field, trimmed")
+        clearField()
+
+        UIPasteboard.general.items = []
+        paste.tap()
+        allowPaste()
+        let error = app.staticTexts["pairing.errorText"]
+        XCTAssertTrue(error.waitForExistence(timeout: 5), "an empty clipboard says why nothing pasted")
+        XCTAssertTrue(error.label.hasPrefix("The clipboard has no pairing URL"), "the empty-clipboard message")
+
+        UIPasteboard.general.url = URL(string: link)
+        field.tap()
+        field.press(forDuration: 1.2)
+        let menuPaste = app.menuItems["Paste"].firstMatch
+        XCTAssertTrue(menuPaste.waitForExistence(timeout: 5), "the field offers Paste")
+        menuPaste.tap()
+        allowPaste()
+        XCTAssertEqual(field.value as? String, link, "a long-press paste takes a URL item")
+    }
+
     /// Writes the running app's accessibility tree to `CONN_DUMP_PATH` (layout debugging).
     func testDumpHierarchy() throws {
         guard let path = ProcessInfo.processInfo.environment["CONN_DUMP_PATH"] else {

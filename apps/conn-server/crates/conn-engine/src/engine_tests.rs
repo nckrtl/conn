@@ -9326,6 +9326,8 @@ struct RecordingHost {
     sessions: Mutex<Vec<crate::AgentSession>>,
     revoked: Mutex<Vec<String>>,
     released: Mutex<Vec<Value>>,
+    /// Attachments each claim was asked for, in order.
+    claims: Mutex<Vec<Value>>,
     closed: Mutex<Vec<(String, crate::ThreadClose)>>,
     html_cleanup: Mutex<Vec<(String, String)>>,
     closed_event: tokio::sync::Notify,
@@ -9363,6 +9365,7 @@ impl crate::EngineHost for RecordingHost {
         thread_id: String,
         attachments: Value,
     ) -> crate::BoxFuture<'_, Result<Value, String>> {
+        self.claims.lock().unwrap().push(attachments.clone());
         Box::pin(async move {
             let claimed: Vec<Value> = attachments
                 .as_array()
@@ -9381,6 +9384,36 @@ impl crate::EngineHost for RecordingHost {
     fn release_attachments(&self, attachments: Value) -> crate::BoxFuture<'_, ()> {
         self.released.lock().unwrap().push(attachments);
         Box::pin(async {})
+    }
+    /// A saved file whose id starts with `gone` was removed.
+    fn check_retained_attachments(
+        &self,
+        attachments: Value,
+    ) -> crate::BoxFuture<'_, Result<(), String>> {
+        let gone = attachments
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"].as_str().unwrap().starts_with("gone"));
+        Box::pin(async move {
+            if gone {
+                Err("Attachment 'old.txt' cannot be sent: attachment not found.".into())
+            } else {
+                Ok(())
+            }
+        })
+    }
+    fn attachment_references(
+        &self,
+        attachments: Value,
+    ) -> crate::BoxFuture<'_, Result<Vec<String>, String>> {
+        let lines = attachments
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| format!("saved at /files/{}", a["id"].as_str().unwrap()))
+            .collect();
+        Box::pin(async move { Ok(lines) })
     }
     fn cleanup_html_attachments(&self, ids: Vec<(String, String)>) -> crate::BoxFuture<'_, ()> {
         self.html_cleanup.lock().unwrap().extend(ids);
@@ -14921,4 +14954,162 @@ async fn an_idle_compaction_waits_for_an_undelivered_delegated_result() {
             .any(|m| m["id"] == "idle-compact:t1:2"),
         "the compaction runs"
     );
+}
+
+fn text_file(id: &str) -> Value {
+    json!({"type": "file", "id": id, "name": "notes.txt", "mimeType": "text/plain",
+        "sizeBytes": 3})
+}
+
+/// `ThreadMessageIntake.test.ts`, "shared intake preserves durable attachment bytes": a queued
+/// message's edit claims its new upload and keeps its saved file, once; a stale edit that keeps
+/// a removed file is refused.
+#[tokio::test(flavor = "current_thread")]
+async fn a_queued_edit_claims_its_new_upload_once() {
+    let db = TempDb::new("edit-claim");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    let mut later = message_with(
+        "t1",
+        "c3",
+        "later",
+        json!({"type": "queue_after_active"}),
+        None,
+    );
+    later["attachments"] = json!([text_file("pending-1")]);
+    dispatch(&engine, later).await;
+    let edit = json!({"type": "queued-run.edit", "commandId": "c4", "threadId": "t1",
+        "runId": "run:t1:2", "text": "edited",
+        "attachments": [text_file("t1-1"), text_file("pending-2")]});
+    dispatch(&engine, edit.clone()).await;
+    let ids = |p: &Value| -> Vec<Value> {
+        p["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "message:c3")
+            .unwrap()["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].clone())
+            .collect()
+    };
+    assert_eq!(
+        ids(&projection(&engine, "t1").await),
+        [json!("t1-1"), json!("t1-2")]
+    );
+    // A retry replays its receipt before any file is looked up or claimed again.
+    let claims = host.claims.lock().unwrap().len();
+    dispatch(&engine, edit).await;
+    assert_eq!(host.claims.lock().unwrap().len(), claims);
+    // A stale view that keeps a file another client removed is refused, and changes nothing.
+    let stale = json!({"type": "queued-run.edit", "commandId": "c5", "threadId": "t1",
+        "runId": "run:t1:2", "text": "stale", "attachments": [text_file("gone-1")]});
+    assert!(engine.dispatch(from_json(stale).unwrap()).await.is_err());
+    assert_eq!(
+        ids(&projection(&engine, "t1").await),
+        [json!("t1-1"), json!("t1-2")]
+    );
+    // A refused edit releases only the copy it made, never the file it kept.
+    let refused = json!({"type": "queued-run.edit", "commandId": "c6", "threadId": "t1",
+        "runId": "run:t1:9", "text": "no such run",
+        "attachments": [text_file("t1-1"), text_file("pending-3")]});
+    assert!(engine.dispatch(from_json(refused).unwrap()).await.is_err());
+    assert_eq!(
+        host.released.lock().unwrap().last().unwrap(),
+        &json!([text_file("t1-3")])
+    );
+}
+
+/// `ThreadMessageIntake.test.ts`, "claims question uploads and passes readable paths": each
+/// question's files are claimed for it, its answer reaches the provider with their paths, and a
+/// retry delivers neither again.
+#[tokio::test(flavor = "current_thread")]
+async fn question_answers_claim_their_files_and_pass_their_paths() {
+    let db = TempDb::new("answer-claim");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "question")).await;
+    loop {
+        let item = next(&mut thread).await;
+        if item["event"]["type"] == "runtime-request.updated" {
+            break;
+        }
+    }
+    // The question as a provider adapter records it, so the answer has its history row.
+    let request = projection(&engine, "t1").await["runtimeRequests"][0].clone();
+    engine
+        .inner()
+        .db(move |store| {
+            let mut tx = store.tx()?;
+            tx.append(crate::store::Draft::new("t1", "turn-item.updated", json!({
+                "id": "question-item", "threadId": "t1", "runId": "run:t1:1",
+                "nodeId": request["nodeId"], "type": "user_input_request", "ordinal": 1,
+                "status": "running", "requestId": "question:run:t1:1",
+                "questions": [{"id": "q", "question": "Which file?"}, {"id": "r", "question": "Other?"}],
+            })))?;
+            tx.commit(None)
+        })
+        .await
+        .unwrap();
+    let answer = json!({"type": "runtime-request.respond", "commandId": "c3", "threadId": "t1",
+        "requestId": "question:run:t1:1",
+        "answers": {"q": ["See file"], "r": "Other"},
+        "attachmentsByQuestionId": {"q": [text_file("pending-a")], "r": [text_file("pending-b")]}});
+    dispatch(&engine, answer.clone()).await;
+    until_run_ends(&mut thread).await;
+    assert_eq!(
+        *provider.answers.lock().unwrap(),
+        [json!({
+            "q": ["See file", "saved at /files/t1-a"],
+            "r": "Other\n\nsaved at /files/t1-b",
+        })]
+    );
+    let p = projection(&engine, "t1").await;
+    let item = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["type"] == "user_input_request")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        item["questionAnswer"]["attachmentsByQuestionId"],
+        json!({"q": [text_file("t1-a")], "r": [text_file("t1-b")]})
+    );
+    let claims = host.claims.lock().unwrap().len();
+    dispatch(&engine, answer).await;
+    assert_eq!(host.claims.lock().unwrap().len(), claims);
+    assert_eq!(provider.answers.lock().unwrap().len(), 1);
 }

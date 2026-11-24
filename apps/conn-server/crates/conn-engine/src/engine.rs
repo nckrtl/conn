@@ -20,7 +20,7 @@ use tokio::sync::watch;
 use crate::commands::{self, CommandError, Effect};
 use crate::runner::LiveThread;
 use crate::store::{Receipt, ReceiptKey, ReceiptOwner, Store, StoreResult, StoredOwner, Tx};
-use crate::{BoxFuture, Engine, EngineError, Subscription, streams};
+use crate::{BoxFuture, Engine, EngineError, EngineHost, Subscription, streams};
 
 /// A folder the engine offers as a project at start. Clients add more at runtime.
 #[derive(Clone, Debug)]
@@ -1267,8 +1267,11 @@ impl Inner {
         Ok(command)
     }
 
-    /// A new message's pending uploads become the thread's files before the message is
-    /// written (`AttachmentStore` claim). A retried command keeps what it claimed first.
+    /// A message's pending uploads become the thread's files before the command is written
+    /// (`ThreadMessageIntake`): a new message, a queued message's edit, and the files each
+    /// answer to a question carries. A retried command keeps what it claimed first: the
+    /// receipt is read before any file. Returns the command and the copies it made, which a
+    /// refused command releases.
     async fn claim_attachments(
         &self,
         mut command: Value,
@@ -1276,15 +1279,17 @@ impl Inner {
         let Some(host) = &self.host else {
             return Ok((command, None));
         };
-        let initial = command["type"] == "thread.create";
-        let attachments = if initial {
-            &command["initialMessage"]["attachments"]
-        } else {
-            &command["attachments"]
+        let kind = command["type"].as_str().unwrap_or_default().to_owned();
+        let has_files = |list: &Value| list.as_array().is_some_and(|a| !a.is_empty());
+        let wanted = match kind.as_str() {
+            "thread.create" => has_files(&command["initialMessage"]["attachments"]),
+            "message.dispatch" | "queued-run.edit" => has_files(&command["attachments"]),
+            "runtime-request.respond" => command["attachmentsByQuestionId"]
+                .as_object()
+                .is_some_and(|by_question| by_question.values().any(has_files)),
+            _ => false,
         };
-        if (!initial && command["type"] != "message.dispatch")
-            || attachments.as_array().is_none_or(Vec::is_empty)
-        {
+        if !wanted {
             return Ok((command, None));
         }
         let command_id = command["commandId"].as_str().unwrap_or_default().to_owned();
@@ -1296,40 +1301,32 @@ impl Inner {
             return Ok((command, None));
         }
         let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
-        let attachments = if initial {
-            command["initialMessage"]["attachments"].take()
+        if kind == "runtime-request.respond" {
+            return claim_answer_attachments(host.as_ref(), thread_id, command).await;
+        }
+        let slot = if kind == "thread.create" {
+            &mut command["initialMessage"]["attachments"]
         } else {
-            command["attachments"].take()
+            &mut command["attachments"]
         };
-        let named: Vec<String> = attachments
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|a| a["id"].as_str().map(str::to_owned))
-            .collect();
+        let attachments = slot.take();
+        if kind == "queued-run.edit" {
+            // A stale view can keep a file that another client's edit dropped and deleted.
+            host.check_retained_attachments(attachments.clone())
+                .await
+                .map_err(DispatchError::Rejected)?;
+        }
         let claimed = host
-            .claim_attachments(thread_id, attachments)
+            .claim_attachments(thread_id, attachments.clone())
             .await
             .map_err(DispatchError::Rejected)?;
-        // Only the copies this claim made are released on a refusal. An attachment named by a
-        // stable id (already a thread's file) passed the claim unchanged and stays.
-        let made: Vec<Value> = claimed
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|a| {
-                a["id"]
-                    .as_str()
-                    .is_some_and(|id| !named.iter().any(|n| n == id))
-            })
-            .cloned()
-            .collect();
-        if initial {
+        let copies = new_copies(&attachments, &claimed);
+        if kind == "thread.create" {
             command["initialMessage"]["attachments"] = claimed;
         } else {
             command["attachments"] = claimed;
         }
-        Ok((command, (!made.is_empty()).then_some(Value::Array(made))))
+        Ok((command, some_copies(copies)))
     }
 
     async fn dispatch_claimed(
@@ -2909,5 +2906,100 @@ mod dispatch_error_tests {
             );
             assert!(body.get("detail").is_none());
         }
+    }
+}
+
+/// The attachments `claimed` holds that `before` did not: the copies a claim made. A file the
+/// message already kept is not one of them, so a refused command never removes it.
+fn new_copies(before: &Value, claimed: &Value) -> Value {
+    let kept: Vec<&Value> = before
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|attachment| &attachment["id"])
+        .collect();
+    Value::Array(
+        claimed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|attachment| !kept.contains(&&attachment["id"]))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The copies to release on a refusal, or none when the claim made none.
+fn some_copies(copies: Value) -> Option<Value> {
+    copies
+        .as_array()
+        .is_some_and(|c| !c.is_empty())
+        .then_some(copies)
+}
+
+/// `runtime-request.respond` in `ThreadMessageIntake`: each question's uploads are claimed for
+/// the thread, and its answer gains one line per file with the file's readable path
+/// (`appendUserInputAttachmentPaths`), so the provider's answer protocol stays as it is.
+async fn claim_answer_attachments(
+    host: &dyn EngineHost,
+    thread_id: String,
+    mut command: Value,
+) -> Result<(Value, Option<Value>), DispatchError> {
+    let by_question = command["attachmentsByQuestionId"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let mut answers = command["answers"].as_object().cloned().unwrap_or_default();
+    let mut claimed_by_question = serde_json::Map::new();
+    let mut copies = Vec::new();
+    for (question, attachments) in by_question {
+        let prepared = async {
+            let claimed = host
+                .claim_attachments(thread_id.clone(), attachments.clone())
+                .await?;
+            if let Value::Array(made) = new_copies(&attachments, &claimed) {
+                copies.extend(made);
+            }
+            let references = host.attachment_references(claimed.clone()).await?;
+            Ok::<_, String>((claimed, references))
+        }
+        .await;
+        let (claimed, references) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                host.release_attachments(Value::Array(copies)).await;
+                return Err(DispatchError::Rejected(error));
+            }
+        };
+        if !references.is_empty() {
+            let answer = answers.remove(&question);
+            answers.insert(
+                question.clone(),
+                with_references(answer, &references.join("\n")),
+            );
+        }
+        claimed_by_question.insert(question, claimed);
+    }
+    command["attachmentsByQuestionId"] = Value::Object(claimed_by_question);
+    command["answers"] = Value::Object(answers);
+    Ok((command, some_copies(Value::Array(copies))))
+}
+
+/// An answer with `text` after it: one more entry of a list, a new paragraph of a text, or
+/// the whole answer when there was none.
+fn with_references(answer: Option<Value>, text: &str) -> Value {
+    match answer {
+        Some(Value::Array(mut list)) => {
+            list.push(json!(text));
+            Value::Array(list)
+        }
+        Some(Value::Object(mut wrapped)) if wrapped.get("answers").is_some_and(Value::is_array) => {
+            if let Some(Value::Array(list)) = wrapped.get_mut("answers") {
+                list.push(json!(text));
+            }
+            Value::Object(wrapped)
+        }
+        Some(Value::String(answer)) if !answer.is_empty() => json!(format!("{answer}\n\n{text}")),
+        _ => json!(text),
     }
 }

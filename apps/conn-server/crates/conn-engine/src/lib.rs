@@ -225,6 +225,21 @@ pub trait EngineHost: Send + Sync {
         Box::pin(std::future::ready(()))
     }
 
+    /// Refuses an edit that keeps a saved file which is gone (another client's edit dropped
+    /// and removed it). Pending uploads are the claim's to check.
+    fn check_retained_attachments(&self, _attachments: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// One line per claimed attachment naming its readable path, for a question's answer
+    /// (`appendUserInputAttachmentPaths`). An error refuses the answer.
+    fn attachment_references(
+        &self,
+        _attachments: Value,
+    ) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
+    }
+
     /// Stores a bounded, sandboxed MCP App document as a thread attachment.
     fn snapshot_mcp_app(
         &self,

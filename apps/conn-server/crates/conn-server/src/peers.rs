@@ -99,10 +99,10 @@ struct Row {
     expires_at_ms: u64,
     last_reached_at_ms: Option<u64>,
     last_error: Option<String>,
-    /// The peer answered 401: it no longer takes this link's token. The link stays listed,
-    /// but it is not reused; linking that environment again gets a new credential.
+    /// The peer answered 401: it no longer takes this link's token. Listed as `expired`, so
+    /// clients offer a fresh link; only a call the peer authenticates, or a relink, clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    rejected: bool,
+    expired: bool,
 }
 
 impl Row {
@@ -723,7 +723,7 @@ impl PeerLinks {
         // An address alone renews a link only where the link already reaches it.
         if input.expected_environment_id.is_none()
             && let Some(existing) = self.read_row(&peer_id).await?
-            && !existing.rejected
+            && !existing.expired
             && !existing.urls.contains(&primary)
         {
             return Err(PeerLinkError::new(
@@ -762,7 +762,7 @@ impl PeerLinks {
             expires_at_ms: now.saturating_add(expires_in.saturating_mul(1000)),
             last_reached_at_ms: Some(now),
             last_error: None,
-            rejected: false,
+            expired: false,
         };
         let link = row.to_link();
         // The token goes under a name of its own before the row points at it.
@@ -839,23 +839,26 @@ impl PeerLinks {
             (a.label.as_str(), a.environment_id.as_str())
                 .cmp(&(b.label.as_str(), b.environment_id.as_str()))
         });
-        // The tool's `expired` status stays in the shared catalog but is never sent: only the
-        // peer decides when a link ends.
         let mut set = JoinSet::new();
         for (index, row) in rows.into_iter().enumerate() {
             let this = self.clone();
             set.spawn(async move {
                 let mut row = row;
-                let status = match this
-                    .race_answers(&row.urls, &row.environment_id, Some(LIST_PROBE_TIMEOUT))
-                    .await
-                {
-                    Some((_, peer)) => {
-                        let label = peer["label"].as_str().unwrap_or_default().to_owned();
-                        this.with_label(&mut row, &label).await;
-                        "reachable"
+                // Expired means the peer refused the token, whatever its public probe says.
+                let status = if row.expired {
+                    "expired"
+                } else {
+                    match this
+                        .race_answers(&row.urls, &row.environment_id, Some(LIST_PROBE_TIMEOUT))
+                        .await
+                    {
+                        Some((_, peer)) => {
+                            let label = peer["label"].as_str().unwrap_or_default().to_owned();
+                            this.with_label(&mut row, &label).await;
+                            "reachable"
+                        }
+                        None => "unreachable",
                     }
-                    None => "unreachable",
                 };
                 let mut link = row.to_link();
                 link["status"] = json!(status);
@@ -952,24 +955,26 @@ impl PeerLinks {
         Ok(Resolved { url, token })
     }
 
-    async fn record_outcome(&self, environment_id: &str, error: Option<String>) {
+    async fn record_outcome(&self, environment_id: &str, outcome: &Result<Value, Answered>) {
         let id = environment_id.to_owned();
         let now = now_ms();
+        // Only the peer's own answer moves `expired`: a timeout or an offline peer says nothing
+        // about the token.
+        let (reached, expired, error) = match outcome {
+            Ok(_) | Err(Answered::Refused(_)) => (true, Some(false), None),
+            Err(Answered::Rejected(f)) => (false, Some(true), Some(f.message.clone())),
+            Err(Answered::Failed(f)) => (false, None, Some(f.message.clone())),
+        };
         let _ = self
             .change(move |rows| {
                 if let Some(row) = rows.iter_mut().find(|r| r.environment_id == id) {
-                    match error {
-                        None => {
-                            row.last_reached_at_ms = Some(now);
-                            row.last_error = None;
-                            row.rejected = false;
-                        }
-                        Some(error) => {
-                            // Both 401 paths answer with this text.
-                            row.rejected = error == NO_LONGER_ACCEPTED;
-                            row.last_error = Some(error);
-                        }
+                    if reached {
+                        row.last_reached_at_ms = Some(now);
                     }
+                    if let Some(expired) = expired {
+                        row.expired = expired;
+                    }
+                    row.last_error = error;
                 }
             })
             .await;
@@ -997,7 +1002,7 @@ impl PeerLinks {
         url: &str,
         token: &str,
         limit: &(&'static str, String),
-    ) -> Result<String, PeerFailure> {
+    ) -> Result<String, Answered> {
         let timeout = probe_timeout(url);
         let open = async {
             let initialized = http::send(
@@ -1013,25 +1018,25 @@ impl PeerLinks {
                 .timeout(timeout),
             )
             .await
-            .map_err(|_| failure("orchestration_error", STOPPED_ANSWERING))?;
+            .map_err(|_| Answered::Failed(failure("orchestration_error", STOPPED_ANSWERING)))?;
             if initialized.status == 403 {
-                return Err(failure(
+                return Err(Answered::Failed(failure(
                     "orchestration_error",
                     LINKED_ENVIRONMENTS_OFF_THERE,
-                ));
+                )));
             }
             let session = initialized.header("mcp-session-id").map(str::to_owned);
             let Some(session) = session.filter(|_| initialized.status == 200) else {
                 return Err(if initialized.status == 401 {
-                    failure("capability_denied", NO_LONGER_ACCEPTED)
+                    Answered::Rejected(failure("capability_denied", NO_LONGER_ACCEPTED))
                 } else {
-                    failure(
+                    Answered::Failed(failure(
                         "orchestration_error",
                         format!(
                             "The linked environment refused to start an MCP session (HTTP {}).",
                             initialized.status
                         ),
-                    )
+                    ))
                 });
             };
             let _ = http::send(
@@ -1052,24 +1057,21 @@ impl PeerLinks {
         };
         tokio::time::timeout(timeout, open)
             .await
-            .unwrap_or_else(|_| Err(failure("orchestration_error", STOPPED_ANSWERING)))
+            .unwrap_or_else(|_| {
+                Err(Answered::Failed(failure(
+                    "orchestration_error",
+                    STOPPED_ANSWERING,
+                )))
+            })
     }
 
     /// `PeerMcpClient.call`: runs a tool on the peer and returns its structured result.
     pub async fn call(self: &Arc<Self>, call: PeerCall) -> Result<Value, PeerFailure> {
         let outcome = self.call_once(&call).await;
-        match &outcome {
-            // A refusal is still an answer: the link works, so only this call fails.
-            Ok(_) | Err(Answered::Refused(_)) => {
-                self.record_outcome(&call.environment_id, None).await
-            }
-            Err(Answered::Failed(error)) => {
-                self.record_outcome(&call.environment_id, Some(error.message.clone()))
-                    .await;
-            }
-        }
+        // A refusal is still an answer: the link works, so only this call fails.
+        self.record_outcome(&call.environment_id, &outcome).await;
         outcome.map_err(|e| match e {
-            Answered::Refused(f) | Answered::Failed(f) => f,
+            Answered::Refused(f) | Answered::Rejected(f) | Answered::Failed(f) => f,
         })
     }
 
@@ -1123,8 +1125,7 @@ impl PeerLinks {
             None => {
                 let session = self
                     .open_session(&resolved.url, &resolved.token, &limit)
-                    .await
-                    .map_err(Answered::Failed)?;
+                    .await?;
                 self.remember_session(&key, &session);
                 session
             }
@@ -1146,14 +1147,13 @@ impl PeerLinks {
         if response.status == 404 {
             let renewed = self
                 .open_session(&resolved.url, &resolved.token, &limit)
-                .await
-                .map_err(Answered::Failed)?;
+                .await?;
             self.remember_session(&key, &renewed);
             response = send(renewed).await.map_err(|_| stopped())?;
         }
         match response.status {
             401 => {
-                return Err(Answered::Failed(failure(
+                return Err(Answered::Rejected(failure(
                     "capability_denied",
                     NO_LONGER_ACCEPTED,
                 )));
@@ -1243,9 +1243,9 @@ impl PeerLinks {
         self.read_row(environment_id).await
     }
 
-    /// A stored link the peer has not rejected.
+    /// A stored link that has not expired.
     async fn usable_link(&self, environment_id: &str) -> Result<Option<Row>, PeerLinkError> {
-        Ok(self.read_row(environment_id).await?.filter(|r| !r.rejected))
+        Ok(self.read_row(environment_id).await?.filter(|r| !r.expired))
     }
 }
 
@@ -1313,9 +1313,11 @@ impl Drop for Reservation {
     }
 }
 
-/// A forwarded call's end: the peer refused (the link works) or the call failed.
+/// A forwarded call's end: the peer refused (the link works), the peer refused the link's
+/// token (401: the link is expired), or the call failed.
 enum Answered {
     Refused(PeerFailure),
+    Rejected(PeerFailure),
     Failed(PeerFailure),
 }
 
@@ -1391,7 +1393,7 @@ pub(crate) fn write_t3_import(
             expires_at_ms: l.expires_at_ms,
             last_reached_at_ms: l.last_reached_at_ms,
             last_error: l.last_error,
-            rejected: false,
+            expired: false,
         })
         .collect();
     write_file(&state_dir.join(FILE), rows).map_err(|e| e.message)
@@ -1737,7 +1739,7 @@ impl PeerLinks {
                     match self.usable_link(id).await {
                         Ok(Some(link)) => linked_outcome(&link),
                         Ok(None) => failed_outcome(
-                            "That environment is no longer linked here. Link it again.",
+                            "That environment is no longer linked here, or its link expired. Link it again.",
                         ),
                         Err(error) => failed_outcome(&error.message),
                     }
@@ -1983,6 +1985,29 @@ mod tests {
                     } else if head.to_ascii_lowercase().contains("bearer rejected-token") {
                         // A peer that revoked the link's session.
                         (401, "application/json", "", String::new())
+                    } else if head.starts_with("POST /oauth/mcp/register ") {
+                        (
+                            201,
+                            "application/json",
+                            "",
+                            json!({"client_id": "client"}).to_string(),
+                        )
+                    } else if head.starts_with("POST /oauth/mcp/decision ") {
+                        // Approves the pairing code, echoing the sign-in's state.
+                        let request: Value = serde_json::from_str(&body).unwrap_or_default();
+                        let state = request["authorization"]["state"]
+                            .as_str()
+                            .unwrap_or_default();
+                        let redirect = format!("{LINK_REDIRECT_URI}?code=granted&state={state}");
+                        (
+                            200,
+                            "application/json",
+                            "",
+                            json!({"redirectTo": redirect}).to_string(),
+                        )
+                    } else if head.starts_with("POST /oauth/mcp/token ") {
+                        let token = json!({"access_token": "fresh-token", "expires_in": 3600});
+                        (200, "application/json", "", token.to_string())
                     } else {
                         let request: Value = serde_json::from_str(&body).unwrap_or_default();
                         match request["method"].as_str() {
@@ -2088,7 +2113,7 @@ mod tests {
                     expires_at_ms: now + 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
-                    rejected: false,
+                    expired: false,
                 })
             })
             .await
@@ -2138,7 +2163,7 @@ mod tests {
                     expires_at_ms: now - 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
-                    rejected: false,
+                    expired: false,
                 })
             })
             .await
@@ -2168,62 +2193,116 @@ mod tests {
         );
     }
 
-    /// A peer's 401 marks the link unusable: it stays listed, but asking to link that
-    /// environment again opens a new link instead of reporting the dead one as linked.
+    /// A peer's 401 makes the link `expired`, even while the peer's public probe answers. A
+    /// timeout or an offline peer leaves it so. The client then sees `expired`, answers the
+    /// link card with a fresh link, a new credential is minted, and the next call works.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_link_the_peer_rejected_is_not_reused() {
-        let (peers, thread) = links_with_a_running_thread("rejected").await;
-        let (url, _) = fake_peer(vec![(200, good_descriptor().to_string())], "{}").await;
+    async fn a_link_the_peer_rejected_expires_until_relinked() {
+        let (peers, thread) = links_with_a_running_thread("expired").await;
+        let (url, _) = fake_peer(
+            vec![(200, good_descriptor().to_string())],
+            r#"{"environmentId":"environment:peer","links":[],"notListed":""}"#,
+        )
+        .await;
+        let set_urls = |urls: Vec<String>| {
+            let peers = peers.clone();
+            async move {
+                peers
+                    .change(move |rows| {
+                        if let Some(row) = rows.first_mut() {
+                            row.urls = urls;
+                        }
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
         let now = now_ms();
+        let live = url.clone();
         peers
             .change(move |rows| {
                 rows.push(Row {
                     environment_id: "environment:peer".into(),
                     secret_name: "peer-link-test".into(),
                     label: "Peer".into(),
-                    urls: vec![url],
+                    urls: vec![live],
                     access: "auto".into(),
                     linked_at_ms: now,
                     expires_at_ms: now + 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
-                    rejected: false,
+                    expired: false,
                 })
             })
             .await
             .unwrap();
         conn_support::secret_store::write(&peers.secrets_dir, "peer-link-test", b"rejected-token")
             .unwrap();
-        let refused = peers
-            .call(PeerCall {
-                environment_id: "environment:peer".into(),
-                tool: "conn_thread_read".into(),
-                arguments: Map::new(),
-                limits: conn_mcp::PeerLimits {
-                    runtime_mode: "full-access".into(),
-                    interaction_mode: "default".into(),
-                },
-                sender: None,
-            })
-            .await
-            .unwrap_err();
+        let links_call = || PeerCall {
+            environment_id: "environment:peer".into(),
+            tool: "conn_environment_links".into(),
+            arguments: Map::new(),
+            limits: conn_mcp::PeerLimits {
+                runtime_mode: "full-access".into(),
+                interaction_mode: "default".into(),
+            },
+            sender: None,
+        };
+        let status = || async { peers.list().await.unwrap()[0]["status"].clone() };
+        let refused = peers.call(links_call()).await.unwrap_err();
         assert_eq!(refused.message, NO_LONGER_ACCEPTED);
         let listed = peers.list().await.unwrap();
         assert_eq!(listed.len(), 1, "the link stays listed");
+        assert_eq!(
+            listed[0]["status"], "expired",
+            "the probe answers, the token does not"
+        );
         assert_eq!(listed[0]["lastError"], NO_LONGER_ACCEPTED);
-        let asked = peers
+
+        // An offline peer says nothing about the token: still expired.
+        let offline = {
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", closed.local_addr().unwrap())
+        };
+        set_urls(vec![offline]).await;
+        let failed = peers.call(links_call()).await.unwrap_err();
+        assert_ne!(failed.message, NO_LONGER_ACCEPTED);
+        assert_eq!(status().await, "expired");
+        set_urls(vec![url.clone()]).await;
+
+        // Asking to link that machine again opens a card instead of reusing the dead link.
+        let pending = peers
             .request_link(LinkAsk {
-                thread_id: thread,
+                thread_id: thread.clone(),
                 provider_instance_id: "claudeAgent".into(),
                 namespace: "p".into(),
-                arguments: json!({"reason": "test", "environmentId": "environment:peer"})
-                    .as_object()
-                    .cloned()
-                    .unwrap(),
+                arguments: json!({"reason": "test", "environmentId": "environment:peer",
+                    "clientRequestId": "relink"})
+                .as_object()
+                .cloned()
+                .unwrap(),
             })
             .await
             .unwrap();
-        assert_ne!(asked["status"], "linked", "{asked}");
+        assert_ne!(pending["status"], "linked", "{pending}");
+        let card = pending["turnItemId"].as_str().unwrap().to_owned();
+        peers
+            .answer(json!({"threadId": thread, "turnItemId": card, "answer": {
+                "type": "link", "urls": [url], "access": "auto", "pairingCode": "ABCDEFGHJKLM",
+            }}))
+            .await
+            .unwrap();
+        let answered = peers.read_card(&thread, &card).await.unwrap().unwrap();
+        assert_eq!(answered["linkStatus"], "linked", "{answered}");
+        let row = peers.read_row("environment:peer").await.unwrap().unwrap();
+        assert!(!row.expired);
+        assert_eq!(
+            conn_support::secret_store::read(&peers.secrets_dir, &row.secret_name).unwrap(),
+            Some(b"fresh-token".to_vec()),
+            "a new credential was minted"
+        );
+        peers.call(links_call()).await.unwrap();
+        assert_eq!(status().await, "reachable");
     }
 
     /// A forwarded result is decoded with the tool's success shape (`PeerMcpClient`): a peer
@@ -2245,7 +2324,7 @@ mod tests {
                     expires_at_ms: now + 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
-                    rejected: false,
+                    expired: false,
                 })
             })
             .await

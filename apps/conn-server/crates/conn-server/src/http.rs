@@ -329,8 +329,8 @@ fn invalid_session_ttl() -> Response {
     error(
         StatusCode::BAD_REQUEST,
         "EnvironmentRequestInvalidError",
-        "invalid_request",
         "invalid_session_ttl",
+        "session_ttl_must_be_until_revoked",
     )
 }
 
@@ -1782,7 +1782,11 @@ mod tests {
         ] {
             let (status, reply) = post("/api/auth/pairing-token", body).await;
             assert_eq!(status, 400, "{body}: {reply}");
-            assert!(reply.contains("invalid_session_ttl"), "{reply}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap()["code"],
+                "invalid_session_ttl",
+                "{body}: {reply}"
+            );
         }
         let (status, body) = post(
             "/api/auth/pairing-token",
@@ -1843,7 +1847,11 @@ mod tests {
         ] {
             let (status, reply) = post("/api/auth/clients/extend", &device_ttl(ttl)).await;
             assert_eq!(status, 400, "{ttl}: {reply}");
-            assert!(reply.contains("invalid_session_ttl"), "{ttl}: {reply}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap()["code"],
+                "invalid_session_ttl",
+                "{ttl}: {reply}"
+            );
         }
         let (status, body) = post(
             "/api/auth/clients/extend",

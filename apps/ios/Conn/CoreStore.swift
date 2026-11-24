@@ -127,8 +127,11 @@ final class CoreStore {
     }
 
     /// Asks the server once for the models of the thread's provider in the thread's cwd.
-    func scanThreadWorkspaceModels(threadId: String) async {
-        try? await core?.scanThreadWorkspaceModels(threadId: threadId)
+    /// Keeps the thread's workspace models fresh while the picker is open; the core decides
+    /// whether to scan. Returns milliseconds until it wants to be asked again, if ever.
+    func scanThreadWorkspaceModels(threadId: String) async -> UInt64? {
+        guard let core else { return nil }
+        return (try? await core.scanThreadWorkspaceModels(threadId: threadId)) ?? nil
     }
 
     /// Sends the thread's draft. Like mobile, the draft clears as the message goes out; a failed
@@ -221,6 +224,8 @@ final class CoreStore {
         guard status == .connected, let core else { return }
         do {
             try await core.deleteThread(threadId: threadId)
+            // `useThreadListActions`: a deleted thread's draft goes with it.
+            drafts[threadId] = nil
         } catch {
             lastError = error.localizedDescription
         }
@@ -571,6 +576,16 @@ final class CoreStore {
     fileprivate func handleShell(_ snapshot: FfiShellSnapshot, generation: UInt64) {
         guard generation == activeGeneration else { return }
         if snapshot.synchronized || shell == nil { shell = snapshot }
+        if snapshot.synchronized { pruneDrafts(keeping: snapshot) }
+    }
+
+    /// Drops drafts of threads the synchronized shell no longer lists (deleted elsewhere), except
+    /// the open thread's.
+    private func pruneDrafts(keeping snapshot: FfiShellSnapshot) {
+        guard !drafts.isEmpty else { return }
+        let listed = Set(snapshot.threads.map(\.id))
+        let kept = drafts.filter { listed.contains($0.key) || $0.key == openThreadId }
+        if kept.count != drafts.count { drafts = kept }
     }
 
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, generation: UInt64) {

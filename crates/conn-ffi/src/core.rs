@@ -21,12 +21,16 @@ use tracing::warn;
 use crate::coalesce::SnapshotCoalescer;
 use crate::model_picker::{
     FfiModelPicker, FfiModelSave, PickerInput, PickerThread, SaveDecision, build_model_picker,
-    catalog_for_cwd, model_to_save, workspace_scan_target,
+    model_to_save,
 };
 use crate::types::{
     FfiApprovalDecision, FfiConnectionStatus, FfiCredential, FfiError, FfiSendMode,
     FfiShellSnapshot, FfiThreadSnapshot, FfiUserInputSubmission, ThreadSnapshotMeta,
     build_shell_snapshot, build_thread_snapshot,
+};
+use conn_state::thread_models::{
+    WORKSPACE_SCAN_RETRY_COOLDOWN_MS, WorkspaceScanState, fail_workspace_scan, plan_workspace_scan,
+    workspace_scan_refreshed, workspace_snapshot,
 };
 
 const TAG_SUBSCRIBE_SHELL: &str = "orchestration.subscribeShell";
@@ -64,6 +68,30 @@ struct LaunchDefaults {
     interaction_mode: String,
 }
 
+/// A workspace scan to send (`server.refreshProviders` for one provider and cwd).
+struct WorkspaceScanRequest {
+    instance_id: String,
+    cwd: String,
+    requested_at_ms: i64,
+    /// The provider as held when the scan was asked for.
+    before: Option<Box<conn_contract::ServerProvidersItemItem>>,
+}
+
+/// [`PumpState::plan_workspace_scan`]'s answer.
+struct WorkspaceScanStep {
+    request: Option<WorkspaceScanRequest>,
+    /// While the server still discovers, ask again at this time.
+    recheck_at_ms: Option<i64>,
+}
+
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
 enum PumpControl {
     EnableOffline(Arc<crate::OfflineReader>),
     OpenThread(String),
@@ -91,9 +119,16 @@ enum PumpControl {
         model: String,
         reply: oneshot::Sender<SaveDecision>,
     },
-    WorkspaceScanTarget {
+    PlanWorkspaceScan {
         thread_id: String,
-        reply: oneshot::Sender<Option<(String, String)>>,
+        now_ms: i64,
+        reply: oneshot::Sender<WorkspaceScanStep>,
+    },
+    FinishWorkspaceScan {
+        scan: WorkspaceScanRequest,
+        /// The provider as the server's reply lists it; `None` when the scan failed.
+        after: Option<Box<conn_contract::ServerProvidersItemItem>>,
+        now_ms: i64,
     },
     Shutdown,
 }
@@ -537,31 +572,65 @@ impl ConnCore {
         }
     }
 
-    /// Asks the server to scan the thread's provider in the thread's cwd once, so models that only
-    /// the project's own provider config lists reach the picker (`ProviderWorkspaceSnapshotScan`).
-    /// Does nothing when that cwd was scanned already.
+    /// Keeps the thread's workspace catalog fresh while the model picker is open
+    /// (`ProviderWorkspaceSnapshotScan`): asks the server to scan the thread's provider in the
+    /// thread's cwd when that snapshot is missing, pending or expired, at most once per TTL, with a
+    /// cooldown and three attempts after failures. Waits for the provider list; call again when
+    /// it changes ([`CoreListener::on_providers_changed`]). Returns the milliseconds after which to
+    /// call again while the server still discovers, if any.
     ///
     /// # Errors
     ///
-    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
-    pub async fn scan_thread_workspace_models(&self, thread_id: String) -> Result<(), FfiError> {
+    /// Returns [`FfiError::Closed`] if disconnected.
+    pub async fn scan_thread_workspace_models(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<u64>, FfiError> {
         self.ensure_connected()?;
+        let now_ms = now_epoch_ms();
         let (reply, rx) = oneshot::channel();
         self.ctrl_tx
-            .send(PumpControl::WorkspaceScanTarget { thread_id, reply })
+            .send(PumpControl::PlanWorkspaceScan {
+                thread_id,
+                now_ms,
+                reply,
+            })
             .map_err(|_| FfiError::Closed)?;
-        let Some((instance_id, cwd)) = rx.await.map_err(|_| FfiError::Closed)? else {
-            return Ok(());
+        let step = rx.await.map_err(|_| FfiError::Closed)?;
+        let recheck = step
+            .recheck_at_ms
+            .map(|at| u64::try_from(at.saturating_sub(now_ms)).unwrap_or(0));
+        let Some(scan) = step.request else {
+            return Ok(recheck);
         };
         let payload = json!({
-            "instanceId": instance_id,
-            "cwd": cwd,
+            "instanceId": scan.instance_id,
+            "cwd": scan.cwd,
             "workspaceSnapshotsOnDemand": true,
-            "omitProviders": true,
         });
-        self.call_json(TAG_REFRESH_PROVIDERS, payload)
+        let after = self
+            .call_json(TAG_REFRESH_PROVIDERS, payload)
             .await
-            .map(|_| ())
+            .ok()
+            .and_then(|value| {
+                conn_contract::from_json::<conn_contract::ServerProviderUpdatedPayload>(value).ok()
+            })
+            .and_then(|reply| {
+                reply
+                    .providers
+                    .into_iter()
+                    .flatten()
+                    .find(|provider| provider.instance_id == scan.instance_id)
+            })
+            .map(Box::new);
+        self.ctrl_tx
+            .send(PumpControl::FinishWorkspaceScan {
+                scan,
+                after,
+                now_ms: now_epoch_ms(),
+            })
+            .map_err(|_| FfiError::Closed)?;
+        Ok(recheck)
     }
 
     /// Stops the running turn on `thread_id` (`thread.stop`).
@@ -761,6 +830,8 @@ struct PumpState {
     listener: Arc<dyn CoreListener>,
     shell: ShellState,
     server_config: ServerConfigState,
+    /// Workspace scan history by `(instance_id, cwd)`.
+    workspace_scans: HashMap<(String, String), WorkspaceScanState>,
     threads: HashMap<String, ThreadState>,
     thread_projection_meta: HashMap<String, ThreadSnapshotMeta>,
     open_threads: HashSet<String>,
@@ -811,22 +882,80 @@ impl PumpState {
             instance_id,
             model,
             started: thread.latest_run_id.is_some(),
+            project_id: Some(thread.project_id.clone()).filter(|id| !id.is_empty()),
             cwd,
         }
     }
 
-    /// The server's providers as it sent them, in its order.
-    fn server_providers(&self) -> impl Iterator<Item = &conn_contract::ServerProvidersItemItem> {
-        self.server_config
-            .catalog()
-            .instances
-            .iter()
-            .filter_map(|info| self.server_config.provider(&info.instance_id))
+    /// The catalog of what the thread may pick (conn-state's `thread_catalog`).
+    fn catalog_for(&self, thread: &PickerThread) -> conn_state::providers::ModelCatalog {
+        self.server_config.thread_catalog(&thread.scope())
     }
 
-    /// The catalog for the thread's cwd (`serverConfigForCwd`).
-    fn catalog_for(&self, thread: &PickerThread) -> conn_state::providers::ModelCatalog {
-        catalog_for_cwd(self.server_providers(), thread.cwd.as_deref())
+    /// `planProviderWorkspaceSnapshotRefresh` for the thread's provider and cwd. Nothing is asked
+    /// before the provider list arrives.
+    fn plan_workspace_scan(&mut self, thread_id: &str, now_ms: i64) -> WorkspaceScanStep {
+        let idle = WorkspaceScanStep {
+            request: None,
+            recheck_at_ms: None,
+        };
+        if !self.server_config.is_loaded() {
+            return idle;
+        }
+        let thread = self.picker_thread(thread_id);
+        let (Some(instance_id), Some(cwd)) = (thread.instance_id, thread.cwd) else {
+            return idle;
+        };
+        let provider = self.server_config.provider(&instance_id);
+        let key = (instance_id.clone(), cwd.clone());
+        let previous = self.workspace_scans.get(&key).copied().unwrap_or_default();
+        let plan = plan_workspace_scan(previous, provider, &cwd, now_ms);
+        let before = provider.cloned().map(Box::new);
+        self.workspace_scans.insert(key, plan.state);
+        WorkspaceScanStep {
+            request: plan.refresh.then_some(WorkspaceScanRequest {
+                instance_id,
+                cwd,
+                requested_at_ms: now_ms,
+                before,
+            }),
+            recheck_at_ms: plan.recheck_at_ms,
+        }
+    }
+
+    /// The scan's reply: a reply without a complete new snapshot cools down; a reply dropped
+    /// because the provider changed meanwhile lets the next plan scan at once.
+    fn finish_workspace_scan(
+        &mut self,
+        scan: &WorkspaceScanRequest,
+        after: Option<&conn_contract::ServerProvidersItemItem>,
+        now_ms: i64,
+    ) {
+        let key = (scan.instance_id.clone(), scan.cwd.clone());
+        let Some(state) = self.workspace_scans.get(&key).copied() else {
+            return;
+        };
+        let refreshed = workspace_scan_refreshed(scan.before.as_deref(), after, &scan.cwd, now_ms);
+        let held_complete = self
+            .server_config
+            .provider(&scan.instance_id)
+            .and_then(|provider| workspace_snapshot(provider, &scan.cwd))
+            .is_some_and(|snapshot| {
+                !conn_state::thread_models::workspace_snapshot_pending(snapshot)
+            });
+        let next = if !refreshed {
+            fail_workspace_scan(
+                state,
+                scan.requested_at_ms,
+                now_ms,
+                WORKSPACE_SCAN_RETRY_COOLDOWN_MS,
+            )
+        } else if !held_complete {
+            fail_workspace_scan(state, scan.requested_at_ms, now_ms, 0)
+        } else {
+            state
+        };
+        self.workspace_scans.insert(key, next);
     }
 
     fn resolve_launch_defaults(&self, project_id: &str) -> LaunchDefaults {
@@ -1017,9 +1146,21 @@ impl PumpState {
                 let _ = reply.send(model_to_save(&catalog, &thread, &instance_id, &model));
                 true
             }
-            PumpControl::WorkspaceScanTarget { thread_id, reply } => {
-                let thread = self.picker_thread(&thread_id);
-                let _ = reply.send(workspace_scan_target(self.server_providers(), &thread));
+            PumpControl::PlanWorkspaceScan {
+                thread_id,
+                now_ms,
+                reply,
+            } => {
+                let step = self.plan_workspace_scan(&thread_id, now_ms);
+                let _ = reply.send(step);
+                true
+            }
+            PumpControl::FinishWorkspaceScan {
+                scan,
+                after,
+                now_ms,
+            } => {
+                self.finish_workspace_scan(&scan, after.as_deref(), now_ms);
                 true
             }
             PumpControl::Shutdown => false,
@@ -1194,6 +1335,7 @@ async fn run_pump(
         listener,
         shell: ShellState::default(),
         server_config: ServerConfigState::new(),
+        workspace_scans: HashMap::new(),
         threads: HashMap::new(),
         thread_projection_meta: HashMap::new(),
         open_threads: HashSet::new(),

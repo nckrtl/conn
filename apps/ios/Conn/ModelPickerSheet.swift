@@ -71,7 +71,14 @@ struct ModelPickerSheet: View {
             Text("Set up this provider on web or desktop, or select another model.")
         }
         // `ProviderWorkspaceSnapshotScan`: models only the project's own config lists.
-        .task { await store.scanThreadWorkspaceModels(threadId: threadId) }
+        // Asked again whenever the provider list changes, so a sheet opened before providers
+        // arrived scans once they do; a pending scan asks again when the core says to.
+        .task(id: store.providersRevision) {
+            while !Task.isCancelled,
+                  let delay = await store.scanThreadWorkspaceModels(threadId: threadId) {
+                try? await Task.sleep(for: .milliseconds(max(delay, 250)))
+            }
+        }
         .task(id: reloadKey) {
             picker = await store.modelPicker(
                 threadId: threadId,

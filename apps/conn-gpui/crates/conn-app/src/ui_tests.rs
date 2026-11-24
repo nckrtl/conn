@@ -3449,6 +3449,82 @@ fn the_right_panel_renders_the_launcher_then_a_picked_surface_without_panic(
     assert!(open(cx), "reopening restores the panel with its tab");
 }
 
+/// Closing a browser tab releases its browser (and with it the last frame and the Chromium
+/// view): no handle keeps the closed panel alive.
+#[gpui_kit::test]
+fn closing_a_browser_tab_releases_its_browser(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let frames = |cx: &mut TestAppContext| {
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+            cx.run_until_parked();
+        }
+    };
+    for _ in 0..2 {
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.add_right_panel_tab(conn_state::RightPanelTab::Browser, cx);
+            });
+        });
+        frames(cx);
+    }
+    let first = cx.update(|cx| app.read(cx).right_panel_tabs().tabs()[0].clone());
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_right_panel_surface(first.clone(), cx)
+        })
+    });
+    frames(cx);
+    let conn_state::PanelSurface::Browser(id) = first else {
+        panic!("the add menu opens browser tabs");
+    };
+    let Some(weak) = cx.update(|cx| app.read(cx).browser_weak_for_test(id, cx)) else {
+        panic!("the shown tab has a browser");
+    };
+    cx.update(|cx| app.update(cx, |app, cx| app.close_right_panel_tab(&first, cx)));
+    frames(cx);
+    assert!(
+        weak.upgrade().is_none(),
+        "the closed tab's browser is released"
+    );
+}
+
+/// A link opened in background tab B keeps its address when its opener A closes before B was
+/// ever shown: B loads the link, not a blank page.
+#[gpui_kit::test]
+fn closing_the_opener_keeps_a_background_tabs_link(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let frames = |cx: &mut TestAppContext| {
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+            cx.run_until_parked();
+        }
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(conn_state::RightPanelTab::Browser, cx);
+        });
+    });
+    frames(cx);
+    let opener = cx.update(|cx| app.read(cx).right_panel_tabs().tabs()[0].clone());
+    const LINK: &str = "http://localhost:3000/docs";
+    cx.update(|cx| app.update(cx, |app, cx| app.open_browser_tab(LINK.into(), true, cx)));
+    frames(cx);
+    let background = cx.update(|cx| app.read(cx).right_panel_tabs().tabs()[1].clone());
+    assert_eq!(
+        cx.update(|cx| app.read(cx).right_panel_tabs().active().cloned()),
+        Some(opener.clone()),
+        "a background tab leaves the opener showing"
+    );
+    cx.update(|cx| app.update(cx, |app, cx| app.close_right_panel_tab(&opener, cx)));
+    frames(cx);
+    let conn_state::PanelSurface::Browser(id) = background else {
+        panic!("the link opens a browser tab");
+    };
+    let target = cx.update(|cx| app.read(cx).browser_target_for_test(id, cx));
+    assert_eq!(target.as_deref(), Some(LINK));
+}
+
 // ---- the workspace rail: drag to reorder, right-click menu, remove ----
 
 fn rail_workspace(id: &str, name: &str) -> conn_desktop::orbit::OrbitWorkspace {

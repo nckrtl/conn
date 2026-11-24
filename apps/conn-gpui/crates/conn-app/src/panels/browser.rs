@@ -262,6 +262,11 @@ impl BrowserPanel {
             }
         }));
 
+        // A closed tab releases this panel: free its last frame from the sprite atlas (only a
+        // newer frame frees the one before) and close its Chromium browser.
+        cx.on_release(|this: &mut Self, cx| this.release(cx))
+            .detach();
+
         let annotations = AnnotationUiState::new(AnnotationSubject::Page, window, cx, |_, _, _| {});
         let view = Rc::new(RefCell::new(None));
         let last_bounds = Rc::new(Cell::new(None));
@@ -304,9 +309,26 @@ impl BrowserPanel {
         .with_reported_title()
     }
 
+    fn release(&mut self, cx: &mut gpui_kit::App) {
+        if let Some((_, image)) = self.rendered_frame.take() {
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+        self.wake_task = None;
+        self.overlay_task = None;
+        let view = self.view.borrow_mut().take();
+        if let Some(view) = view {
+            view.close();
+        }
+    }
+
     fn with_reported_title(mut self) -> Self {
         self.reported_title = self.tab_title();
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn target_url(&self) -> &str {
+        &self.url
     }
 
     /// The tab strip's title (`surfaceTitle`): the page title, else its host, else Browser.

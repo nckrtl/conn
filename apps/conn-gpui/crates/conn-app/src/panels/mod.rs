@@ -83,6 +83,9 @@ pub(crate) enum RightPanelEvent {
 
 impl gpui_kit::EventEmitter<RightPanelEvent> for RightPanel {}
 
+#[cfg(test)]
+pub(crate) type BrowserPanelHandle = BrowserPanel;
+
 #[cfg(feature = "automation")]
 const NO_BROWSER_TAB: &str = "No browser tab is open.";
 
@@ -287,6 +290,19 @@ impl RightPanel {
             .map(|(_, browser)| browser.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn browser_handle(
+        &self,
+        id: BrowserTabId,
+    ) -> Option<gpui_kit::WeakEntity<BrowserPanel>> {
+        self.browser(id).map(|b| b.downgrade())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_target(&self, id: BrowserTabId, cx: &App) -> Option<String> {
+        self.browser(id).map(|b| b.read(cx).target_url().to_owned())
+    }
+
     /// The browser tab that shows, or showed last.
     fn active_browser_entity(&self) -> Option<Entity<BrowserPanel>> {
         self.active_browser.and_then(|id| self.browser(id))
@@ -375,13 +391,16 @@ impl RightPanel {
         browser
     }
 
-    /// Drops the browsers of closed tabs, which closes their Chromium views.
-    fn retain_browsers(&mut self) {
-        let open: Vec<BrowserTabId> = self.tabs.browser_ids().collect();
-        self.browsers.retain(|(id, _)| open.contains(id));
-        self.pending_browser_urls
-            .retain(|(id, _)| open.contains(id));
-        if self.active_browser.is_some_and(|id| !open.contains(&id)) {
+    /// Drops a closed browser tab's browser and its pending address. Only that tab: the shell
+    /// can hold tabs this panel has not shown yet (a background tab), and their addresses stay.
+    /// Dropping the browser releases its last frame and closes its Chromium view.
+    fn drop_browser(&mut self, surface: &PanelSurface) {
+        let PanelSurface::Browser(closed) = *surface else {
+            return;
+        };
+        self.browsers.retain(|(id, _)| *id != closed);
+        self.pending_browser_urls.retain(|(id, _)| *id != closed);
+        if self.active_browser == Some(closed) {
             self.active_browser = None;
         }
     }
@@ -801,11 +820,10 @@ impl RightPanel {
 
     /// Forgets a tab the shell closed; a browser tab's Chromium view closes with it.
     pub fn close_surface(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
-        if self.tabs.close(surface).is_some() {
-            self.retain_browsers();
-            self.release_closed_file(surface, cx);
-            cx.notify();
-        }
+        self.tabs.close(surface);
+        self.drop_browser(surface);
+        self.release_closed_file(surface, cx);
+        cx.notify();
     }
 
     pub(crate) fn release_closed_file(&mut self, tab: &PanelSurface, cx: &mut Context<'_, Self>) {
@@ -822,7 +840,7 @@ impl RightPanel {
             return;
         }
         if let Some(closed) = self.tabs.close(surface) {
-            self.retain_browsers();
+            self.drop_browser(surface);
             self.release_closed_file(surface, cx);
             if let Some(next) = closed.activated {
                 self.set_surface(&next, cx);
@@ -849,11 +867,14 @@ impl RightPanel {
         self.tabs.tabs()
     }
 
-    /// The titles of the open browser tabs, for the tab strip.
+    /// The titles of browser tabs `ids`, for the tab strip.
     #[must_use]
-    pub fn browser_titles(&self, cx: &App) -> Vec<(BrowserTabId, String)> {
-        self.tabs
-            .browser_ids()
+    pub fn browser_titles(
+        &self,
+        ids: impl IntoIterator<Item = BrowserTabId>,
+        cx: &App,
+    ) -> Vec<(BrowserTabId, String)> {
+        ids.into_iter()
             .map(|id| (id, self.browser_tab_title(id, cx)))
             .collect()
     }
@@ -909,7 +930,7 @@ impl RightPanel {
         };
 
         let active = self.displayed_surface(self.surface(), self.tabs.tabs(), cx);
-        let browser_titles = self.browser_titles(cx);
+        let browser_titles = self.browser_titles(self.tabs.browser_ids(), cx);
         render_panel_header(
             PanelHeaderProps {
                 open_tabs: self.tabs.tabs(),

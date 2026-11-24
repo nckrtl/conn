@@ -3838,6 +3838,25 @@ impl ConnApp {
         &self.right_panel_tabs
     }
 
+    #[cfg(test)]
+    pub(crate) fn browser_weak_for_test(
+        &self,
+        id: conn_state::BrowserTabId,
+        cx: &App,
+    ) -> Option<gpui_kit::WeakEntity<crate::panels::BrowserPanelHandle>> {
+        self.right_panel.read(cx).browser_handle(id)
+    }
+
+    /// The address browser tab `id` loads, once its browser exists.
+    #[cfg(test)]
+    pub(crate) fn browser_target_for_test(
+        &self,
+        id: conn_state::BrowserTabId,
+        cx: &App,
+    ) -> Option<String> {
+        self.right_panel.read(cx).browser_target(id, cx)
+    }
+
     /// The active right-panel surface.
     fn right_panel_surface(&self) -> PanelSurface {
         self.right_panel_tabs
@@ -5596,7 +5615,10 @@ impl ConnApp {
             self.right_panel_tabs.tabs(),
             cx,
         );
-        let browser_titles = self.right_panel.read(cx).browser_titles(cx);
+        let browser_titles = self
+            .right_panel
+            .read(cx)
+            .browser_titles(self.right_panel_tabs.browser_ids(), cx);
         let header = render_panel_header(
             PanelHeaderProps {
                 open_tabs: self.right_panel_tabs.tabs(),

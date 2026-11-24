@@ -29,6 +29,8 @@ type LoadStartCallback = Arc<dyn Fn(&str) + Send + Sync>;
 type ConsoleMessageCallback = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type ContextMenuCallback = Arc<dyn Fn(ContextMenuEvent) + Send + Sync>;
 type OpenTabCallback = Arc<dyn Fn(crate::NewTabRequest) + Send + Sync>;
+/// The host's new-tab handler, shared by the popup and request handlers.
+pub(crate) type OpenTabSlot = Arc<Mutex<Option<OpenTabCallback>>>;
 
 struct FrameBuffer {
     generation: u64,
@@ -55,7 +57,7 @@ struct Shared {
     toolbar_response: super::toolbar_hooks::ToolbarResponseSlot,
     on_console_message: Mutex<Option<ConsoleMessageCallback>>,
     on_context_menu: Mutex<Option<ContextMenuCallback>>,
-    on_open_tab: Mutex<Option<OpenTabCallback>>,
+    on_open_tab: OpenTabSlot,
     /// When the last `load_url` was called, and how many paints came since (trace only).
     load_began: Mutex<Option<std::time::Instant>>,
     paints_since_load: AtomicU32,
@@ -152,7 +154,7 @@ impl MacBrowserView {
             toolbar_response: Arc::new(Mutex::new(None)),
             on_console_message: Mutex::new(None),
             on_context_menu: Mutex::new(None),
-            on_open_tab: Mutex::new(None),
+            on_open_tab: Arc::new(Mutex::new(None)),
             load_began: Mutex::new(None),
             paints_since_load: AtomicU32::new(0),
             load_error: Mutex::new(None),
@@ -177,7 +179,10 @@ impl MacBrowserView {
             ViewDisplayHandler::new(shared.clone()),
             ViewContextMenu::new(shared.clone()),
             ViewDownloadHandler::new(),
-            super::toolbar_hooks::ToolbarRequestHandler::new(shared.toolbar_response.clone()),
+            super::toolbar_hooks::ToolbarRequestHandler::new(
+                shared.toolbar_response.clone(),
+                shared.on_open_tab.clone(),
+            ),
         );
 
         let mut context = request_context_get_global_context();
@@ -582,6 +587,9 @@ impl MacBrowserView {
             slot.take();
         }
         if let Ok(mut slot) = self.shared.on_console_message.lock() {
+            slot.take();
+        }
+        if let Ok(mut slot) = self.shared.on_open_tab.lock() {
             slot.take();
         }
         if let Some(host) = self.browser.host() {
@@ -1224,6 +1232,28 @@ wrap_render_handler! {
     }
 }
 
+/// The parts of CEF's disposition that decide a new tab.
+pub(crate) fn popup_disposition(disposition: WindowOpenDisposition) -> crate::popup::Disposition {
+    if disposition == WindowOpenDisposition::NEW_FOREGROUND_TAB {
+        crate::popup::Disposition::ForegroundTab
+    } else if disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB {
+        crate::popup::Disposition::BackgroundTab
+    } else {
+        crate::popup::Disposition::Other
+    }
+}
+
+/// Hands a decided tab to the host and returns CEF's cancel flag.
+pub(crate) fn offer_tab(slot: &OpenTabSlot, decision: crate::popup::Decision) -> c_int {
+    if let Some(request) = decision.tab {
+        let callback = slot.lock().ok().and_then(|slot| slot.clone());
+        if let Some(callback) = callback {
+            callback(request);
+        }
+    }
+    c_int::from(decision.cancel)
+}
+
 wrap_life_span_handler! {
     struct ViewLifeSpan {
         shared: Arc<Shared>,
@@ -1240,7 +1270,7 @@ wrap_life_span_handler! {
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
             target_disposition: WindowOpenDisposition,
-            _user_gesture: c_int,
+            user_gesture: c_int,
             _popup_features: Option<&PopupFeatures>,
             _window_info: Option<&mut WindowInfo>,
             _client: Option<&mut Option<Client>>,
@@ -1248,21 +1278,13 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
-            let disposition = if target_disposition == WindowOpenDisposition::NEW_FOREGROUND_TAB {
-                crate::popup::Disposition::ForegroundTab
-            } else if target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB {
-                crate::popup::Disposition::BackgroundTab
-            } else {
-                crate::popup::Disposition::Other
-            };
             let url = target_url.map(CefString::to_string).unwrap_or_default();
-            if let Some(request) = crate::popup::new_tab_for(disposition, &url) {
-                let callback = self.shared.on_open_tab.lock().ok().and_then(|slot| slot.clone());
-                if let Some(callback) = callback {
-                    callback(request);
-                }
-            }
-            1
+            let decision = crate::popup::before_popup(
+                popup_disposition(target_disposition),
+                &url,
+                user_gesture == 1,
+            );
+            offer_tab(&self.shared.on_open_tab, decision)
         }
     }
 }

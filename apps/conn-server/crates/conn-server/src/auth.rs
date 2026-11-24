@@ -1298,9 +1298,22 @@ impl AuthStore {
         self.end_session(id).map(Ok)
     }
 
-    /// Ends session `id`, the caller's own included (`/api/auth/logout`). Returns whether it
-    /// existed.
-    pub fn end_session(&self, id: &str) -> io::Result<bool> {
+    /// Ends the session behind `token`, native or MCP (`/api/auth/logout`). Returns its id, or
+    /// `None` when the token names no live session.
+    pub fn logout(&self, token: &str) -> io::Result<Option<String>> {
+        let mut ended = None;
+        self.write(|state| {
+            let Some((key, session)) = self.resolve(state, token, now_ms()) else {
+                return Vec::new();
+            };
+            state.sessions.remove(&key);
+            ended = Some(session.id.clone());
+            vec![AccessChange::ClientRemoved(session.id)]
+        })?;
+        Ok(ended)
+    }
+
+    fn end_session(&self, id: &str) -> io::Result<bool> {
         let mut revoked = false;
         self.write(|state| {
             let before = state.sessions.len();

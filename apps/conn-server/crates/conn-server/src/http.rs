@@ -309,7 +309,19 @@ struct PairingTokenRequest {
     scopes: Option<Vec<String>>,
     access: Option<String>,
     purpose: Option<String>,
-    session_ttl: Option<String>,
+    /// Any JSON value, so `null` and numbers reach [`session_ttl`] and get its 400.
+    #[serde(default, deserialize_with = "present")]
+    session_ttl: Option<Value>,
+}
+
+/// A field that is present, `null` included; a missing one stays `None` (`serde(default)`).
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// A request's `sessionTtl`: only the string `until-revoked` is taken.
+fn session_ttl(value: &Value) -> Option<u64> {
+    value.as_str().and_then(auth::parse_session_ttl)
 }
 
 /// A `sessionTtl` other than `until-revoked`: 400.
@@ -393,9 +405,9 @@ fn pairing_token_blocking(
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    let session_ttl_ms = match request.session_ttl.as_deref() {
+    let session_ttl_ms = match &request.session_ttl {
         None => None,
-        Some(ttl) => match auth::parse_session_ttl(ttl) {
+        Some(ttl) => match session_ttl(ttl) {
             Some(ms) => Some(ms),
             None => return invalid_session_ttl(),
         },
@@ -548,19 +560,19 @@ async fn revoke_client(
 }
 
 /// `POST /api/auth/logout` (Conn only): ends the caller's own session, which
-/// `/api/auth/clients/revoke` refuses. Any session may call it. A repeat gets the usual 401,
-/// which a caller counts as done. Sessions here are bearer tokens, so no cookie to clear.
+/// `/api/auth/clients/revoke` refuses. Any session may call it, native or MCP. A repeat gets
+/// the usual 401, which a caller counts as done. Sessions here are bearer tokens, so no
+/// cookie to clear.
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     tokio::task::spawn_blocking(move || {
-        let principal = match authenticated(&state, &headers) {
-            Ok(principal) => principal,
-            Err(response) => return *response,
+        let Some(token) = bearer(&headers) else {
+            return auth_invalid("missing_credential");
         };
-        match state.auth.end_session(&principal.session_id) {
-            Ok(revoked) => no_store(
-                Json(json!({ "sessionId": principal.session_id, "revoked": revoked }))
-                    .into_response(),
-            ),
+        match state.auth.logout(token) {
+            Ok(Some(id)) => {
+                no_store(Json(json!({ "sessionId": id, "revoked": true })).into_response())
+            }
+            Ok(None) => auth_invalid("invalid_credential"),
             Err(e) => internal("client_session_revoke_failed", e),
         }
     })
@@ -572,7 +584,9 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 #[serde(rename_all = "camelCase")]
 struct ExtendRequest {
     session_id: Option<String>,
-    session_ttl: String,
+    /// Any JSON value, missing as `null`, so every value but `until-revoked` gets the 400.
+    #[serde(default)]
+    session_ttl: Value,
 }
 
 /// `POST /api/auth/clients/extend` (Conn only): moves a session's end out, the caller's own
@@ -596,7 +610,7 @@ fn extend_client_blocking(
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    let Some(ttl_ms) = auth::parse_session_ttl(&request.session_ttl) else {
+    let Some(ttl_ms) = session_ttl(&request.session_ttl) else {
         return invalid_session_ttl();
     };
     let id = request.session_id.unwrap_or(principal.session_id);
@@ -1072,6 +1086,13 @@ mod tests {
     }
 
     async fn serve_with(engine: Option<Arc<dyn Engine>>) -> (std::net::SocketAddr, Arc<AuthStore>) {
+        serve_with_deps(engine, Default::default()).await
+    }
+
+    async fn serve_with_deps(
+        engine: Option<Arc<dyn Engine>>,
+        deps: crate::methods::Deps,
+    ) -> (std::net::SocketAddr, Arc<AuthStore>) {
         let auth = AuthStore::in_memory();
         let state = AppState {
             table: Arc::new(MethodTable::new()),
@@ -1080,7 +1101,7 @@ mod tests {
                 "env-test", "Test", false, None,
             )),
             engine,
-            deps: Default::default(),
+            deps,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1239,6 +1260,44 @@ mod tests {
             slept < Duration::from_millis(400),
             "the runtime thread was blocked for {slept:?}"
         );
+    }
+
+    /// `logout` takes an MCP-audience bearer too: it ends that session, and `/mcp` then
+    /// refuses the token.
+    #[tokio::test(flavor = "current_thread")]
+    async fn logout_ends_an_mcp_session() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-http-mcp-logout-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, auth) = serve_on_disk(&dir).await;
+        let issued = auth
+            .issue_mcp_client_session(
+                "Agent",
+                "auto",
+                false,
+                ClientInfo::default(),
+                auth::MAX_TTL_MS,
+            )
+            .unwrap();
+        let bearer = format!("authorization: Bearer {}", issued.token);
+        let init = format!(
+            "POST /mcp HTTP/1.1\r\n{bearer}\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream"
+        );
+        let body = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#;
+        assert_eq!(call(addr, &init, body).await.0, 200);
+        let (status, reply) = call(
+            addr,
+            &format!("POST /api/auth/logout HTTP/1.1\r\n{bearer}"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap(),
+            json!({"sessionId": issued.principal.session_id, "revoked": true})
+        );
+        assert_eq!(call(addr, &init, body).await.0, 401);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// One HTTP/1.1 request; returns the status and the body.
@@ -1710,10 +1769,16 @@ mod tests {
             assert!(!reply.contains(r#""credential""#), "{body}: {reply}");
         }
         assert_eq!(auth.pairing_links().len(), links_before);
-        // `sessionTtl` takes only `until-revoked`, on plain and peer-link codes.
+        // `sessionTtl` takes only `until-revoked`, on plain and peer-link codes. Any other
+        // explicit value, `null` and numbers too, is 400; only an omitted field keeps the default.
         for body in [
             r#"{"sessionTtl":"30d"}"#,
+            r#"{"sessionTtl":null}"#,
+            r#"{"sessionTtl":3600}"#,
+            r#"{"sessionTtl":0}"#,
             r#"{"access":"auto","purpose":"peer-link","sessionTtl":"forever"}"#,
+            r#"{"access":"auto","purpose":"peer-link","sessionTtl":null}"#,
+            r#"{"access":"auto","purpose":"peer-link","sessionTtl":3600}"#,
         ] {
             let (status, reply) = post("/api/auth/pairing-token", body).await;
             assert_eq!(status, 400, "{body}: {reply}");
@@ -1768,15 +1833,23 @@ mod tests {
         assert_eq!(status, 200, "{body}");
         let extended: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(extended["sessionId"], admin.principal.session_id.as_str());
-        let device_ttl = |ttl: &str| {
-            format!(
-                r#"{{"sessionId":"{}","sessionTtl":"{ttl}"}}"#,
-                device.principal.session_id
-            )
-        };
-        let (status, _) = post("/api/auth/clients/extend", &device_ttl("1h")).await;
-        assert_eq!(status, 400);
-        let (status, body) = post("/api/auth/clients/extend", &device_ttl("until-revoked")).await;
+        let device_ttl =
+            |ttl: &str| format!(r#"{{"sessionId":"{}"{ttl}}}"#, device.principal.session_id);
+        for ttl in [
+            r#","sessionTtl":"1h""#,
+            r#","sessionTtl":null"#,
+            r#","sessionTtl":3600"#,
+            "",
+        ] {
+            let (status, reply) = post("/api/auth/clients/extend", &device_ttl(ttl)).await;
+            assert_eq!(status, 400, "{ttl}: {reply}");
+            assert!(reply.contains("invalid_session_ttl"), "{ttl}: {reply}");
+        }
+        let (status, body) = post(
+            "/api/auth/clients/extend",
+            &device_ttl(r#","sessionTtl":"until-revoked""#),
+        )
+        .await;
         assert_eq!(status, 200, "{body}");
         assert!(
             auth.authenticate_bearer(&device.token)
@@ -1890,6 +1963,79 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the socket stayed open after revocation");
+    }
+
+    /// The preview viewer socket ends with its session too, on revoke and on logout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_revoked_session_loses_its_preview_socket() {
+        let root = std::env::temp_dir().join(format!("conn-http-preview-{}", auth::random_hex(6)));
+        let preview = conn_preview::tabs::Preview::with_fixture(
+            root.clone(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../conn-preview/tests/fake-chrome.py"),
+        );
+        let opened = preview
+            .invoke("thread", "agent", "open", json!({}))
+            .await
+            .unwrap();
+        let tab = opened["tabId"].as_str().unwrap().to_owned();
+        let (addr, auth) = serve_with_deps(
+            None,
+            crate::methods::Deps {
+                preview: Some(preview.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        for end in ["revoke", "logout"] {
+            let session = auth
+                .issue_session(auth::SessionRequest {
+                    scopes: vec!["orchestration:read".into()],
+                    label: None,
+                    subject: None,
+                    ttl_ms: auth::MAX_TTL_MS,
+                })
+                .unwrap();
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "GET /api/preview-stream/ws?threadId=thread&tabId={tab} HTTP/1.1\r\nhost: {addr}\r\nauthorization: Bearer {}\r\n{UPGRADE}\r\n\r\n",
+                session.token
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(
+                buf[..n].starts_with(b"HTTP/1.1 101"),
+                "{end}: {}",
+                String::from_utf8_lossy(&buf[..n])
+            );
+            match end {
+                "revoke" => {
+                    auth.revoke_session(None, &session.principal.session_id)
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {
+                    let logout = format!(
+                        "POST /api/auth/logout HTTP/1.1\r\nauthorization: Bearer {}",
+                        session.token
+                    );
+                    assert_eq!(call(addr, &logout, "").await.0, 200);
+                }
+            }
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
+                }
+            })
+            .await;
+            assert!(closed.is_ok(), "the preview socket stayed open after {end}");
+        }
+        preview.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     /// `CREDENTIAL_RESPONSE_HEADERS`: no cache may keep a token or a ticket.

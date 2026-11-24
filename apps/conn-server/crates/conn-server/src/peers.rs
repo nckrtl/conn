@@ -99,6 +99,10 @@ struct Row {
     expires_at_ms: u64,
     last_reached_at_ms: Option<u64>,
     last_error: Option<String>,
+    /// The peer answered 401: it no longer takes this link's token. The link stays listed,
+    /// but it is not reused; linking that environment again gets a new credential.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rejected: bool,
 }
 
 impl Row {
@@ -719,6 +723,7 @@ impl PeerLinks {
         // An address alone renews a link only where the link already reaches it.
         if input.expected_environment_id.is_none()
             && let Some(existing) = self.read_row(&peer_id).await?
+            && !existing.rejected
             && !existing.urls.contains(&primary)
         {
             return Err(PeerLinkError::new(
@@ -757,6 +762,7 @@ impl PeerLinks {
             expires_at_ms: now.saturating_add(expires_in.saturating_mul(1000)),
             last_reached_at_ms: Some(now),
             last_error: None,
+            rejected: false,
         };
         let link = row.to_link();
         // The token goes under a name of its own before the row points at it.
@@ -956,8 +962,13 @@ impl PeerLinks {
                         None => {
                             row.last_reached_at_ms = Some(now);
                             row.last_error = None;
+                            row.rejected = false;
                         }
-                        Some(error) => row.last_error = Some(error),
+                        Some(error) => {
+                            // Both 401 paths answer with this text.
+                            row.rejected = error == NO_LONGER_ACCEPTED;
+                            row.last_error = Some(error);
+                        }
                     }
                 }
             })
@@ -1231,6 +1242,11 @@ impl PeerLinks {
     async fn get(&self, environment_id: &str) -> Result<Option<Row>, PeerLinkError> {
         self.read_row(environment_id).await
     }
+
+    /// A stored link the peer has not rejected.
+    async fn usable_link(&self, environment_id: &str) -> Result<Option<Row>, PeerLinkError> {
+        Ok(self.read_row(environment_id).await?.filter(|r| !r.rejected))
+    }
 }
 
 /// The addresses a link tries, every one in the order given (`[url, ...alternateUrls]`);
@@ -1375,6 +1391,7 @@ pub(crate) fn write_t3_import(
             expires_at_ms: l.expires_at_ms,
             last_reached_at_ms: l.last_reached_at_ms,
             last_error: l.last_error,
+            rejected: false,
         })
         .collect();
     write_file(&state_dir.join(FILE), rows).map_err(|e| e.message)
@@ -1566,7 +1583,7 @@ impl PeerLinks {
         }
         if let Some(environment) = arg("environmentId")
             && let Some(link) = self
-                .read_row(&environment)
+                .usable_link(&environment)
                 .await
                 .map_err(|e| failure("orchestration_error", e.message))?
         {
@@ -1717,7 +1734,7 @@ impl PeerLinks {
             match answer["type"].as_str() {
                 Some("use-existing") => {
                     let id = answer["environmentId"].as_str().unwrap_or_default();
-                    match self.read_row(id).await {
+                    match self.usable_link(id).await {
                         Ok(Some(link)) => linked_outcome(&link),
                         Ok(None) => failed_outcome(
                             "That environment is no longer linked here. Link it again.",
@@ -1963,6 +1980,9 @@ mod tests {
                         let n = counted.fetch_add(1, Ordering::SeqCst);
                         let (status, body) = descriptors[n.min(descriptors.len() - 1)].clone();
                         (status, "application/json", "", body)
+                    } else if head.to_ascii_lowercase().contains("bearer rejected-token") {
+                        // A peer that revoked the link's session.
+                        (401, "application/json", "", String::new())
                     } else {
                         let request: Value = serde_json::from_str(&body).unwrap_or_default();
                         match request["method"].as_str() {
@@ -2068,6 +2088,7 @@ mod tests {
                     expires_at_ms: now + 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
+                    rejected: false,
                 })
             })
             .await
@@ -2117,6 +2138,7 @@ mod tests {
                     expires_at_ms: now - 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
+                    rejected: false,
                 })
             })
             .await
@@ -2146,6 +2168,64 @@ mod tests {
         );
     }
 
+    /// A peer's 401 marks the link unusable: it stays listed, but asking to link that
+    /// environment again opens a new link instead of reporting the dead one as linked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_link_the_peer_rejected_is_not_reused() {
+        let (peers, thread) = links_with_a_running_thread("rejected").await;
+        let (url, _) = fake_peer(vec![(200, good_descriptor().to_string())], "{}").await;
+        let now = now_ms();
+        peers
+            .change(move |rows| {
+                rows.push(Row {
+                    environment_id: "environment:peer".into(),
+                    secret_name: "peer-link-test".into(),
+                    label: "Peer".into(),
+                    urls: vec![url],
+                    access: "auto".into(),
+                    linked_at_ms: now,
+                    expires_at_ms: now + 60_000,
+                    last_reached_at_ms: None,
+                    last_error: None,
+                    rejected: false,
+                })
+            })
+            .await
+            .unwrap();
+        conn_support::secret_store::write(&peers.secrets_dir, "peer-link-test", b"rejected-token")
+            .unwrap();
+        let refused = peers
+            .call(PeerCall {
+                environment_id: "environment:peer".into(),
+                tool: "conn_thread_read".into(),
+                arguments: Map::new(),
+                limits: conn_mcp::PeerLimits {
+                    runtime_mode: "full-access".into(),
+                    interaction_mode: "default".into(),
+                },
+                sender: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refused.message, NO_LONGER_ACCEPTED);
+        let listed = peers.list().await.unwrap();
+        assert_eq!(listed.len(), 1, "the link stays listed");
+        assert_eq!(listed[0]["lastError"], NO_LONGER_ACCEPTED);
+        let asked = peers
+            .request_link(LinkAsk {
+                thread_id: thread,
+                provider_instance_id: "claudeAgent".into(),
+                namespace: "p".into(),
+                arguments: json!({"reason": "test", "environmentId": "environment:peer"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_ne!(asked["status"], "linked", "{asked}");
+    }
+
     /// A forwarded result is decoded with the tool's success shape (`PeerMcpClient`): a peer
     /// answering `{}` to `conn_thread_launch` did not launch anything.
     #[tokio::test(flavor = "current_thread")]
@@ -2165,6 +2245,7 @@ mod tests {
                     expires_at_ms: now + 60_000,
                     last_reached_at_ms: None,
                     last_error: None,
+                    rejected: false,
                 })
             })
             .await

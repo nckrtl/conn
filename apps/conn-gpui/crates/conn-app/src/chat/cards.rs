@@ -476,7 +476,7 @@ impl ChatView {
     /// The attachments of a sent user bubble, in their own order: each run of images is one
     /// gallery painted straight on the bubble, each run of files a row of pills. The bubble owns
     /// the insets of the galleries; the pill rows carry the 16px side padding of the caption.
-    /// `has_caption` tells the last pill row whether text follows it.
+    /// `has_caption` tells a leading pill row whether the caption sits above it.
     pub(super) fn render_sent_attachments(
         &self,
         key: &str,
@@ -500,8 +500,9 @@ impl ChatView {
                 if is_image {
                     self.render_image_gallery(key, start, run, columns, cx)
                 } else {
-                    // The bubble's top inset is 3px, a text row starts 10px down; the bubble's
-                    // bottom inset is 3px, text sits 12px above the edge.
+                    // The bubble's top inset is 3px: without a caption above, a pill row
+                    // starts 10px down. The bubble's bottom inset is 3px: a last pill row sits
+                    // 12px above the edge.
                     let mut row = div()
                         .flex()
                         .flex_row()
@@ -509,10 +510,10 @@ impl ChatView {
                         .items_center()
                         .gap(px(8.0))
                         .px(px(16.0));
-                    if position == 0 {
+                    if position == 0 && !has_caption {
                         row = row.pt(px(7.0));
                     }
-                    if position == last && !has_caption {
+                    if position == last {
                         row = row.pb(px(9.0));
                     }
                     for (offset, att) in run.iter().enumerate() {

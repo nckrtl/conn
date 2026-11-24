@@ -2092,13 +2092,21 @@ impl ChatView {
         let text = &*cache::humanize_task_ids(self.cache.rows(), text);
         // Conn `TimelineUserMessageRow`: `max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)!
         // bg-message text-message-foreground px-4 pt-2.5 pb-3 text-sm leading-relaxed`.
-        let preview: String = text.chars().take(120).collect();
+        let has_images = attachments
+            .iter()
+            .any(|att| matches!(att, ChatAttachment::Image(_)));
+        // An image message labels its Article structurally; its caption is a Label of its own.
+        let article_label: String = if has_images {
+            "User message".to_owned()
+        } else {
+            text.chars().take(120).collect()
+        };
         let mut bubble = div()
             .id(SharedString::from(format!("chat-user-{id}")))
             .a11y(
                 gpui_kit::Role::Article,
                 SharedString::from(format!("chat.message.user.{id}")),
-                preview,
+                article_label,
             )
             .relative()
             .flex()
@@ -2112,17 +2120,34 @@ impl ChatView {
             .text_size(px(BODY_FONT_PX))
             .line_height(px(BODY_LINE_HEIGHT_PX))
             .text_color(hsla(self.tokens.message_foreground));
-        // A bubble with images is 80% wide with the galleries painted straight on it: a 3px
-        // inset all round (the 1px highlight is part of the top one), the caption padded back
-        // to the usual 16px sides and 12px below. The radius stays 14px when grouped.
-        let has_images = attachments
-            .iter()
-            .any(|att| matches!(att, ChatAttachment::Image(_)));
+        // Image bubble: 80% wide, 3px inset (highlight included) on top, sides and bottom, the
+        // galleries painted on it. The caption comes first (16px sides, text 12px from the top),
+        // then 8px to the attachments. The radius stays 14px when grouped.
         if has_images {
             bubble = bubble
                 .w(relative(0.8))
                 .pt(px(attachment_thumb::GALLERY_INSET_PX - 1.0))
                 .pb(px(attachment_thumb::GALLERY_INSET_PX));
+            if !text.is_empty() {
+                let caption = SharedString::from(text.to_owned());
+                bubble = bubble.child(
+                    div()
+                        .min_w_0()
+                        .px(px(16.0))
+                        .pt(px(12.0 - attachment_thumb::GALLERY_INSET_PX))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("chat-caption-{id}")))
+                                .a11y(
+                                    gpui_kit::Role::Label,
+                                    SharedString::from(format!("chat.caption.{id}")),
+                                    caption.clone(),
+                                )
+                                .min_w_0()
+                                .child(caption),
+                        ),
+                );
+            }
             for block in self.render_sent_attachments(
                 &format!("user-{id}"),
                 attachments,
@@ -2130,15 +2155,6 @@ impl ChatView {
                 cx,
             ) {
                 bubble = bubble.child(block);
-            }
-            if !text.is_empty() {
-                bubble = bubble.child(
-                    div()
-                        .min_w_0()
-                        .px(px(16.0))
-                        .pb(px(12.0 - attachment_thumb::GALLERY_INSET_PX))
-                        .child(text.to_owned()),
-                );
             }
         } else {
             bubble = bubble

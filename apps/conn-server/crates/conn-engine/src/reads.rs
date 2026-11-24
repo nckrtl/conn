@@ -187,18 +187,15 @@ fn older_settled(row: &Value, before: i64) -> bool {
 }
 
 /// The settle time below which a thread is "older settled": the 25th newest settle time of
-/// listed threads, or `None` with fewer than 25.
+/// listed threads, the oldest with fewer (so none is older), or `None` when none is settled.
 fn older_settled_cut(rows: &[Value]) -> Option<i64> {
     let mut times: Vec<i64> = rows
         .iter()
         .filter(|row| listed(row))
         .filter_map(settled_millis)
         .collect();
-    if times.len() < NEWEST_SETTLED_KEPT {
-        return None;
-    }
     times.sort_unstable_by(|a, b| b.cmp(a));
-    Some(times[NEWEST_SETTLED_KEPT - 1])
+    times.get(NEWEST_SETTLED_KEPT - 1).or(times.last()).copied()
 }
 
 /// A live subagent row stays in a shell that omits idle subagents (`isLiveSubagentShell`).
@@ -232,12 +229,19 @@ impl Store {
             .filter(|r| r["lineage"]["relationshipToParent"] == "subagent")
             .map(|r| r["lineage"]["parentThreadId"].clone())
             .collect();
+        let remote_task_owners = self.remote_task_owners()?;
+        let owns_remote_task = |r: &Value| {
+            r["id"]
+                .as_str()
+                .is_some_and(|id| remote_task_owners.contains(id))
+        };
         let mut keep: Vec<Value> = rows.clone();
         if omit_idle {
             keep.retain(|r| {
                 r["lineage"]["relationshipToParent"] != "subagent"
                     || live_subagent(r)
                     || parent_of_subagent.contains(&r["id"])
+                    || owns_remote_task(r)
             });
         }
         if omit_older {
@@ -268,6 +272,7 @@ impl Store {
                         .is_some_and(|until| until > now)
                     || live_subagent(r)
                     || ancestors.contains(&r["id"])
+                    || owns_remote_task(r)
             });
             let counts: Vec<Value> = counts
                 .into_iter()
@@ -487,7 +492,10 @@ impl Store {
             if seen.len() >= OLDER_SETTLED_MESSAGE_ROWS {
                 break;
             }
-            if seen.contains(id) || titled.iter().any(|row| row["id"] == id.as_str()) {
+            if seen.contains(id)
+                || titled.iter().any(|row| row["id"] == id.as_str())
+                || !candidates.iter().any(|row| row["id"] == id.as_str())
+            {
                 continue;
             }
             seen.push(id.clone());

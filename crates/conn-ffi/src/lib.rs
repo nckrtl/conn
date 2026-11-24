@@ -54,7 +54,7 @@ pub use crate::questions::{
     question_toggle_option,
 };
 pub use crate::session::{
-    ConnSession, FfiSessionPhase, FfiSessionState, FfiSessionTarget, SessionListener,
+    ConnSession, FfiLinkRoute, FfiSessionPhase, FfiSessionState, FfiSessionTarget, SessionListener,
 };
 pub use crate::theme::{
     FfiAppearance, FfiColor, FfiShellGeometry, FfiThemeSummary, FfiThemeTokens, builtin_themes,

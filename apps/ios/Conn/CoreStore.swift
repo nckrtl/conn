@@ -120,20 +120,19 @@ final class CoreStore {
     }
 
     func openThread(_ threadId: String) {
-        if let current = openThreadId, current != threadId {
-            session?.closeThread(threadId: current)
-            openThread = nil
-        }
+        if openThreadId != threadId { openThread = nil }
         openThreadId = threadId
-        // The session subscribes now, or as soon as a connection attaches.
+        // The session closes the scope's other thread, and subscribes this one now or as soon as
+        // a connection attaches.
         session?.openThread(threadId: threadId)
         restoreThread(threadId)
     }
 
     func closeThread(_ threadId: String) {
-        guard openThreadId == threadId else { return }
-        openThreadId = nil
-        openThread = nil
+        if openThreadId == threadId {
+            openThreadId = nil
+            openThread = nil
+        }
         session?.closeThread(threadId: threadId)
     }
 
@@ -402,33 +401,21 @@ final class CoreStore {
         return openThreadId == link.threadId || isInboxVisible
     }
 
-    /// Opens a thread from a link. A linked environment's store takes it; otherwise this
-    /// session decides (Rust): it keeps a link for its own environment and hands any other to
-    /// `openElsewhere`, waiting until it knows which environment it is.
+    /// Opens a thread from a link. Rust decides: this store keeps it only for its already known
+    /// environment; any other link opens right away in its environment's own scope.
     func open(_ link: ThreadLink) {
-        if let child = linkedStore(for: link.environmentId) {
-            child.session?.openLink(environmentId: link.environmentId, threadId: link.threadId)
-            pendingLink = link
-            return
-        }
-        session?.openLink(environmentId: link.environmentId, threadId: link.threadId)
+        defer { pendingLink = link }
+        if linkedStore(for: link.environmentId) != nil { return }
+        if session?.routeLink(environmentId: link.environmentId) == .here { return }
+        guard scope.isEmpty else { return }
+        let child = CoreStore(scope: link.environmentId)
+        linked[link.environmentId] = child
+        UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
+        child.session?.connectEnvironment(environmentId: link.environmentId)
     }
 
     private func linkedStore(for environmentId: String) -> CoreStore? {
         linked[environmentId] ?? linked.values.first { $0.environmentId == environmentId }
-    }
-
-    /// The session routed a link to another environment: open it in that environment's scope.
-    fileprivate func openElsewhere(_ link: ThreadLink) {
-        guard scope.isEmpty else { return }
-        let child = linkedStore(for: link.environmentId) ?? {
-            let created = CoreStore(scope: link.environmentId)
-            linked[link.environmentId] = created
-            UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
-            return created
-        }()
-        child.session?.openLink(environmentId: link.environmentId, threadId: link.threadId)
-        pendingLink = link
     }
 
     /// Hands the pending link to the workspace once.
@@ -441,10 +428,9 @@ final class CoreStore {
 
     fileprivate func handleState(_ newState: FfiSessionState) {
         if let state, newState.revision <= state.revision { return }
+        // The open thread stays: the session resubscribes it on the new connection.
         if newState.connectionId != state?.connectionId {
             shell = nil
-            openThread = nil
-            openThreadId = nil
             offlineReader = nil
         }
         state = newState
@@ -459,10 +445,6 @@ final class CoreStore {
         }
         if newState.offlineReady, offlineReader == nil, let reader = session?.offlineReader() {
             showOffline(reader, connection: newState.connectionId)
-        }
-        if let thread = newState.pendingThreadId, let environment = newState.environmentId,
-           session?.takePendingThread() != nil, scope.isEmpty {
-            pendingLink = ThreadLink(environmentId: environment, threadId: thread)
         }
     }
 
@@ -551,10 +533,6 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
         Task { @MainActor [weak store] in store?.handleError(message) }
     }
 
-    func onOpenElsewhere(environmentId: String, threadId: String) {
-        let link = ThreadLink(environmentId: environmentId, threadId: threadId)
-        Task { @MainActor [weak store] in store?.openElsewhere(link) }
-    }
 
     func onProvidersChanged() {
         Task { @MainActor [weak store] in store?.handleProvidersChanged() }

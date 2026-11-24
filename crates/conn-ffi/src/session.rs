@@ -1,6 +1,7 @@
-//! The app's one connection state machine. It owns the current attempt (its target, its
-//! connection and its status), decides which events still count, when a failure re-pairs through
-//! Orbit, and what Retry repeats. Swift renders [`FfiSessionState`] and calls the actions.
+//! The app's connection state machine, one per environment scope. It owns the current attempt
+//! (its target, its connection and its status), decides which events still count, when a failure
+//! re-pairs through Orbit, what Retry repeats, where a link belongs, and which thread is open.
+//! Swift renders [`FfiSessionState`] and calls the actions.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -23,23 +24,31 @@ use crate::types::{
 /// The cache directory's record of which server (identity) its contents belong to.
 const IDENTITY_FILE: &str = "identity";
 
-/// How long a thread link keeps trying a woken Instance: 12 tries, 5 s apart.
+/// How long a link keeps trying a woken Instance: 12 tries, 5 s apart.
 const LINK_TRIES: u32 = 12;
 const LINK_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+const IDENTITY_CHANGED: &str =
+    "This server's identity changed. Reconnect manually to replace its saved connection.";
 
 /// What an attempt connects to; Retry repeats it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiSessionTarget {
     /// The primary `agent`-role Node, found through Orbit.
     PrimaryAgent,
-    /// An Orbit environment, from a thread link or push (`thread_id`) or a saved linked
-    /// environment.
-    Environment {
-        environment_id: String,
-        thread_id: Option<String>,
-    },
+    /// One Orbit environment (a linked scope).
+    Environment { environment_id: String },
     /// A server paired by URL.
     Manual { server_url: String },
+}
+
+/// Where a thread link opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum FfiLinkRoute {
+    /// In this session: the link's environment is this session's known identity.
+    Here,
+    /// In the link environment's own scope.
+    Elsewhere,
 }
 
 /// What the app shows.
@@ -64,14 +73,12 @@ pub enum FfiSessionPhase {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiSessionState {
     pub revision: u64,
-    /// The current attempt; snapshots carry it, and a change means the old data is gone.
+    /// The current attempt; snapshots carry it.
     pub connection_id: u64,
     pub phase: FfiSessionPhase,
     pub server_url: Option<String>,
     /// The connected server's Conn environment id, once known.
     pub environment_id: Option<String>,
-    /// A thread a link asked to show; take it with [`ConnSession::take_pending_thread`].
-    pub pending_thread_id: Option<String>,
     /// The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
     pub offline_ready: bool,
 }
@@ -88,8 +95,6 @@ pub trait SessionListener: Send + Sync {
     fn on_providers_changed(&self);
     /// The thread's stream reported `thread.deleted` on this connection.
     fn on_thread_deleted(&self, connection_id: u64, thread_id: String);
-    /// A link for another environment: open it in that environment's own store and session.
-    fn on_open_elsewhere(&self, environment_id: String, thread_id: String);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,16 +138,14 @@ pub(crate) enum Effect<C> {
         core: C,
         identity: String,
     },
-    /// Delete the offline thread cache: its server is no longer this session's.
+    /// Delete the offline thread cache: the user paired anew or signed out.
     WipeCache,
-    /// Subscribe to the thread the user has open.
     OpenThread {
         core: C,
         thread_id: String,
     },
-    /// A link for another environment: the app opens it in that environment's own scope.
-    OpenElsewhere {
-        environment_id: String,
+    CloseThread {
+        core: C,
         thread_id: String,
     },
 }
@@ -174,10 +177,8 @@ pub(crate) struct Machine<C> {
     saved: Option<FfiSavedSession>,
     server_url: Option<String>,
     environment_id: Option<String>,
-    pending_thread: Option<String>,
-    /// Links that came while this session's environment was still unknown, oldest first.
-    held_links: Vec<(String, String)>,
-    /// The thread the user has open; subscribed on every connection this session attaches.
+    /// The thread the user has open in this scope (one at a time, as the app shows it). It is
+    /// subscribed on every connection this session attaches.
     open_thread: Option<String>,
 }
 
@@ -202,8 +203,6 @@ impl<C: SessionCore> Machine<C> {
             saved: None,
             server_url: None,
             environment_id: None,
-            pending_thread: None,
-            held_links: Vec::new(),
             open_thread: None,
         }
     }
@@ -224,13 +223,16 @@ impl<C: SessionCore> Machine<C> {
             phase,
             server_url: self.server_url.clone(),
             environment_id: self.environment_id.clone(),
-            pending_thread_id: self.pending_thread.clone(),
             offline_ready: self.attempt.as_ref().is_some_and(|a| a.offline_ready),
         }
     }
 
     fn is_current(&self, id: u64) -> bool {
         self.attempt.as_ref().is_some_and(|a| a.id == id)
+    }
+
+    fn core(&self) -> Option<C> {
+        self.attempt.as_ref().and_then(|a| a.core.clone())
     }
 
     /// Ends the current attempt, if any.
@@ -240,7 +242,6 @@ impl<C: SessionCore> Machine<C> {
         }
         self.server_url = None;
         self.environment_id = None;
-        self.pending_thread = None;
     }
 
     fn begin(
@@ -253,6 +254,17 @@ impl<C: SessionCore> Machine<C> {
         self.cancel(&mut fx);
         let id = self.next_id;
         self.next_id += 1;
+        // A manual server reconnects with its saved bearer.
+        let credential = credential.or_else(|| match &target {
+            FfiSessionTarget::Manual { server_url } => self
+                .saved
+                .as_ref()
+                .filter(|s| s.orbit_server_id.is_none() && s.server_url == *server_url)
+                .map(|s| FfiCredential::Bearer {
+                    token: s.bearer.clone(),
+                }),
+            _ => None,
+        });
         if let FfiSessionTarget::Manual { server_url } = &target {
             self.server_url = Some(server_url.clone());
         }
@@ -276,6 +288,25 @@ impl<C: SessionCore> Machine<C> {
         fx
     }
 
+    /// The server identity this session already knows: its attempt's, the environment it
+    /// targets, or its saved session's.
+    fn known_identity(&self) -> Option<String> {
+        let attempt = self.attempt.as_ref();
+        attempt
+            .and_then(|a| a.identity.clone())
+            .or_else(|| match attempt.map(|a| &a.target) {
+                Some(FfiSessionTarget::Environment { environment_id }) => {
+                    Some(environment_id.clone())
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                self.saved
+                    .as_ref()
+                    .and_then(|s| s.environment_id.clone().or(s.orbit_server_id.clone()))
+            })
+    }
+
     // -- user actions -------------------------------------------------------
 
     /// At launch: a manual session reconnects; anything else goes through Orbit.
@@ -286,7 +317,7 @@ impl<C: SessionCore> Machine<C> {
                 FfiSessionTarget::Manual {
                     server_url: s.server_url,
                 },
-                Some(FfiCredential::Bearer { token: s.bearer }),
+                None,
                 Recover::Allowed,
             ),
             _ => self.begin(FfiSessionTarget::PrimaryAgent, None, Recover::Allowed),
@@ -300,19 +331,12 @@ impl<C: SessionCore> Machine<C> {
             Some(FfiSavedSession {
                 orbit_server_id: Some(environment_id),
                 ..
-            }) => self.begin(
-                FfiSessionTarget::Environment {
-                    environment_id,
-                    thread_id: None,
-                },
-                None,
-                Recover::Allowed,
-            ),
+            }) => self.connect_environment(environment_id),
             Some(s) => self.begin(
                 FfiSessionTarget::Manual {
                     server_url: s.server_url,
                 },
-                Some(FfiCredential::Bearer { token: s.bearer }),
+                None,
                 Recover::Allowed,
             ),
             None => Vec::new(),
@@ -321,6 +345,15 @@ impl<C: SessionCore> Machine<C> {
 
     pub(crate) fn connect_primary_agent(&mut self) -> Effects<C> {
         self.begin(FfiSessionTarget::PrimaryAgent, None, Recover::Allowed)
+    }
+
+    /// A linked scope opened for an Orbit environment.
+    pub(crate) fn connect_environment(&mut self, environment_id: String) -> Effects<C> {
+        self.begin(
+            FfiSessionTarget::Environment { environment_id },
+            None,
+            Recover::Allowed,
+        )
     }
 
     pub(crate) fn pair_manual(&mut self, server_url: String, pairing_code: String) -> Effects<C> {
@@ -338,7 +371,6 @@ impl<C: SessionCore> Machine<C> {
     pub(crate) fn connect_manually(&mut self) -> Effects<C> {
         let mut fx = Vec::new();
         self.cancel(&mut fx);
-        self.held_links.clear();
         self.rest = FfiSessionPhase::Idle { message: None };
         fx
     }
@@ -368,73 +400,42 @@ impl<C: SessionCore> Machine<C> {
         self.retry()
     }
 
-    /// The user opened a thread: subscribe now if connected, and on every later connection.
-    pub(crate) fn open_thread(&mut self, thread_id: String) -> Effects<C> {
-        self.open_thread = Some(thread_id.clone());
-        self.attempt
-            .as_ref()
-            .and_then(|a| a.core.clone())
-            .map(|core| Effect::OpenThread { core, thread_id })
-            .into_iter()
-            .collect()
+    /// Where a link opens. Only a link for this session's already known identity stays here;
+    /// any other opens in its environment's own scope. A link never changes this session.
+    pub(crate) fn route_link(&self, environment_id: &str) -> FfiLinkRoute {
+        if self.known_identity().as_deref() == Some(environment_id) {
+            FfiLinkRoute::Here
+        } else {
+            FfiLinkRoute::Elsewhere
+        }
     }
 
-    pub(crate) fn close_thread(&mut self, thread_id: &str) -> Effects<C> {
-        if self.open_thread.as_deref() == Some(thread_id) {
+    /// The user opened a thread. Like the app, a scope shows one thread at a time, so another
+    /// open thread is closed. It is subscribed now if connected, and on every later connection.
+    pub(crate) fn open_thread(&mut self, thread_id: String) -> Effects<C> {
+        let mut fx = Vec::new();
+        let previous = self.open_thread.replace(thread_id.clone());
+        if let Some(core) = self.core() {
+            if let Some(previous) = previous.filter(|p| *p != thread_id) {
+                fx.push(Effect::CloseThread {
+                    core: core.clone(),
+                    thread_id: previous,
+                });
+            }
+            fx.push(Effect::OpenThread { core, thread_id });
+        }
+        fx
+    }
+
+    /// The user left a thread: unsubscribe it.
+    pub(crate) fn close_thread(&mut self, thread_id: String) -> Effects<C> {
+        if self.open_thread.as_deref() == Some(thread_id.as_str()) {
             self.open_thread = None;
         }
-        Vec::new()
-    }
-
-    /// A thread link. This session takes it only for its own environment. While that is still
-    /// unknown the link waits; a link for another environment opens elsewhere.
-    pub(crate) fn open_link(&mut self, environment_id: String, thread_id: String) -> Effects<C> {
-        let Some(attempt) = &self.attempt else {
-            // Nothing here yet: the link's environment becomes this session's.
-            return self.begin_link(environment_id, thread_id);
-        };
-        let own = match &attempt.target {
-            FfiSessionTarget::Environment {
-                environment_id: env,
-                ..
-            } => Some(env.clone()),
-            _ => self.environment_id.clone(),
-        };
-        match own {
-            None => {
-                self.held_links.push((environment_id, thread_id));
-                Vec::new()
-            }
-            Some(own) => self.route(own, environment_id, thread_id),
-        }
-    }
-
-    /// Sends a link to this session when it is its environment, else elsewhere.
-    fn route(&mut self, own: String, environment_id: String, thread_id: String) -> Effects<C> {
-        if own != environment_id {
-            return vec![Effect::OpenElsewhere {
-                environment_id,
-                thread_id,
-            }];
-        }
-        self.pending_thread = Some(thread_id.clone());
-        self.open_thread(thread_id)
-    }
-
-    fn begin_link(&mut self, environment_id: String, thread_id: String) -> Effects<C> {
-        self.open_thread = Some(thread_id.clone());
-        self.begin(
-            FfiSessionTarget::Environment {
-                environment_id,
-                thread_id: Some(thread_id),
-            },
-            None,
-            Recover::Allowed,
-        )
-    }
-
-    pub(crate) fn take_pending_thread(&mut self) -> Option<String> {
-        self.pending_thread.take()
+        self.core()
+            .map(|core| Effect::CloseThread { core, thread_id })
+            .into_iter()
+            .collect()
     }
 
     // -- events -------------------------------------------------------------
@@ -463,15 +464,8 @@ impl<C: SessionCore> Machine<C> {
         if let Some(message) = attempt.early_failure.take() {
             return self.failed(id, message);
         }
-        let link_thread = match &attempt.target {
-            FfiSessionTarget::Environment { thread_id, .. } => thread_id.clone(),
-            _ => None,
-        };
         let manual = environment_id.is_none();
         self.server_url = Some(server_url.clone());
-        if link_thread.is_some() {
-            self.pending_thread = link_thread;
-        }
         let mut fx: Effects<C> = self
             .open_thread
             .clone()
@@ -501,16 +495,6 @@ impl<C: SessionCore> Machine<C> {
         let mut fx = Vec::new();
         let target = self.attempt.as_ref().map(|a| a.target.clone());
         self.cancel(&mut fx);
-        let mut held = std::mem::take(&mut self.held_links).into_iter();
-        if let Some((env, thread)) = held.next() {
-            // This session never learned its environment; the first link's becomes its own,
-            // and the rest are routed against it.
-            fx.extend(self.begin_link(env, thread));
-            for (env, thread) in held {
-                fx.extend(self.open_link(env, thread));
-            }
-            return fx;
-        }
         self.rest = match target {
             Some(FfiSessionTarget::Manual { .. }) | None => FfiSessionPhase::Idle {
                 message: Some(detail.unwrap_or(message)),
@@ -600,12 +584,23 @@ impl<C: SessionCore> Machine<C> {
         let Some(env) = environment_id else {
             return Vec::new();
         };
-        let known = self.attempt.as_ref().and_then(|a| a.identity.clone());
-        match known {
+        match self.attempt.as_ref().and_then(|a| a.identity.clone()) {
             Some(known) if known == env => Vec::new(),
-            // Another server now answers at this URL: start over so nothing of the old one's
-            // cache carries over.
-            Some(_) => self.restart_as(env),
+            // Another server answers at this URL. Keep the saved identity and its cache; only a
+            // re-pair the user starts may replace them.
+            Some(_) => {
+                let mut fx = Vec::new();
+                let target = self.attempt.as_ref().map(|a| a.target.clone());
+                self.cancel(&mut fx);
+                if let Some(retry) = target {
+                    self.rest = FfiSessionPhase::Failed {
+                        message: IDENTITY_CHANGED.to_owned(),
+                        detail: Some(format!("It now reports environment {env}.")),
+                        retry,
+                    };
+                }
+                fx
+            }
             None => {
                 let mut fx = self.identified(id, Some(env.clone()));
                 if let Some(saved) = self.saved.as_mut().filter(|s| s.environment_id.is_none()) {
@@ -617,26 +612,7 @@ impl<C: SessionCore> Machine<C> {
         }
     }
 
-    fn restart_as(&mut self, env: String) -> Effects<C> {
-        let Some(saved) = self.saved.as_mut() else {
-            return Vec::new();
-        };
-        saved.environment_id = Some(env);
-        let saved = saved.clone();
-        let mut fx = vec![Effect::Save(Some(saved.clone()))];
-        fx.extend(self.begin(
-            FfiSessionTarget::Manual {
-                server_url: saved.server_url,
-            },
-            Some(FfiCredential::Bearer {
-                token: saved.bearer,
-            }),
-            Recover::Allowed,
-        ));
-        fx
-    }
-
-    /// The attempt's server is now known: open its cache and route a held link.
+    /// The attempt's server is now known: open its cache.
     fn identified(&mut self, id: u64, identity: Option<String>) -> Effects<C> {
         let Some(identity) = identity else {
             return Vec::new();
@@ -645,19 +621,13 @@ impl<C: SessionCore> Machine<C> {
             return Vec::new();
         };
         attempt.identity = Some(identity.clone());
-        let mut fx = Vec::new();
-        if let Some(core) = attempt.core.clone() {
-            fx.push(Effect::PrepareOffline {
-                id,
-                core,
-                identity: identity.clone(),
-            });
-        }
         self.environment_id = Some(identity.clone());
-        for (env, thread) in std::mem::take(&mut self.held_links) {
-            fx.extend(self.route(identity.clone(), env, thread));
-        }
-        fx
+        attempt
+            .core
+            .clone()
+            .map(|core| Effect::PrepareOffline { id, core, identity })
+            .into_iter()
+            .collect()
     }
 
     pub(crate) fn offline_ready(&mut self, id: u64) -> Effects<C> {
@@ -777,10 +747,7 @@ impl ConnSession {
                 });
             }
             Effect::OpenThread { core, thread_id } => core.open_thread(thread_id),
-            Effect::OpenElsewhere {
-                environment_id,
-                thread_id,
-            } => self.listener.on_open_elsewhere(environment_id, thread_id),
+            Effect::CloseThread { core, thread_id } => core.close_thread(thread_id),
             Effect::WipeCache => {
                 *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if let Some(dir) = &self.cache_dir {
@@ -1025,30 +992,30 @@ impl ConnSession {
         self.step(Machine::foreground);
     }
 
-    pub fn open_link(&self, environment_id: String, thread_id: String) {
-        self.step(|m| m.open_link(environment_id, thread_id));
+    /// Where a link for `environment_id` opens: here only when it is this session's already
+    /// known server; otherwise in that environment's own scope.
+    #[must_use]
+    pub fn route_link(&self, environment_id: String) -> FfiLinkRoute {
+        self.machine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .route_link(&environment_id)
     }
 
-    /// The user opened this thread; it stays subscribed across this session's connections.
+    /// A linked scope's session connects to its Orbit environment.
+    pub fn connect_environment(&self, environment_id: String) {
+        self.step(|m| m.connect_environment(environment_id));
+    }
+
+    /// The user opened this thread (closing the scope's other one); it stays subscribed across
+    /// this session's connections.
     pub fn open_thread(&self, thread_id: String) {
         self.step(|m| m.open_thread(thread_id));
     }
 
+    /// The user left this thread: unsubscribe it.
     pub fn close_thread(&self, thread_id: String) {
-        if let Some(core) = self.core() {
-            core.close_thread(thread_id.clone());
-        }
-        self.step(|m| m.close_thread(&thread_id));
-    }
-
-    /// The thread a link asked to show, once.
-    pub fn take_pending_thread(&self) -> Option<String> {
-        let mut taken = None;
-        self.step(|m| {
-            taken = m.take_pending_thread();
-            Vec::new()
-        });
-        taken
+        self.step(|m| m.close_thread(thread_id));
     }
 
     /// The live connection, for thread and command calls.
@@ -1204,7 +1171,33 @@ mod tests {
     fn link() -> FfiSessionTarget {
         FfiSessionTarget::Environment {
             environment_id: "inst-7".to_owned(),
-            thread_id: Some("thread-1".to_owned()),
+        }
+    }
+
+    fn opens(fx: &[Effect<FakeCore>]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::OpenThread { thread_id, .. } => Some(thread_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn closes(fx: &[Effect<FakeCore>]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::CloseThread { thread_id, .. } => Some(thread_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn saved(url: &str, orbit: Option<&str>, env: Option<&str>) -> FfiSavedSession {
+        FfiSavedSession {
+            server_url: url.to_owned(),
+            bearer: "bearer".to_owned(),
+            orbit_server_id: orbit.map(str::to_owned),
+            environment_id: env.map(str::to_owned),
         }
     }
 
@@ -1255,12 +1248,12 @@ mod tests {
     }
 
     #[test]
-    fn a_manual_pair_supersedes_a_pending_link_which_never_saves() {
+    fn a_manual_pair_supersedes_a_pending_environment_which_never_saves() {
         let mut m = Machine::<FakeCore>::new();
         assert_eq!(
-            starts(&m.open_link("inst-7".to_owned(), "thread-1".to_owned())),
+            starts(&m.connect_environment("inst-7".to_owned())),
             vec![(1, link())],
-            "the link starts an attempt"
+            "the linked environment starts an attempt"
         );
         let fx = m.pair_manual("http://mac:3773".to_owned(), "code".to_owned());
         assert_eq!(
@@ -1268,8 +1261,6 @@ mod tests {
             1,
             "the manual pair starts its own attempt"
         );
-
-        // The link's work finishes late.
         let fx = m.attached(
             1,
             rejected(),
@@ -1278,17 +1269,12 @@ mod tests {
         );
         assert!(
             matches!(fx.as_slice(), [Effect::Disconnect(_)]),
-            "the late link connection is closed, not taken over"
+            "the late connection is closed, not taken over"
         );
-        let session = FfiSavedSession {
-            server_url: "http://inst/".to_owned(),
-            bearer: "late".to_owned(),
-            orbit_server_id: Some("inst-7".to_owned()),
-            environment_id: Some("inst-7".to_owned()),
-        };
         assert!(
-            m.bearer(1, session).is_empty(),
-            "the late link never saves a bearer"
+            m.bearer(1, saved("http://inst/", Some("inst-7"), Some("inst-7")))
+                .is_empty(),
+            "the late attempt never saves a bearer"
         );
         assert!(
             m.status(1, FfiConnectionStatus::Connected).is_empty(),
@@ -1299,45 +1285,256 @@ mod tests {
             2,
             "the manual attempt stays current"
         );
-        assert!(
-            matches!(
-                m.state().phase,
-                FfiSessionPhase::Connecting {
-                    target: FfiSessionTarget::Manual { .. }
-                }
-            ),
-            "still pairing manually"
-        );
     }
 
     #[test]
-    fn retry_after_a_failed_link_repeats_the_link() {
+    fn retry_after_a_failed_environment_repeats_it_and_reopens_the_thread() {
         let mut m = Machine::<FakeCore>::new();
-        let _ = m.open_link("inst-7".to_owned(), "thread-1".to_owned());
-        let _ = m.start_failed(
-            1,
-            "Couldn't open that thread through Orbit.".to_owned(),
-            None,
-        );
+        let _ = m.connect_environment("inst-7".to_owned());
+        let _ = m.open_thread("thread-1".to_owned());
+        let _ = m.start_failed(1, "Couldn't reach it.".to_owned(), None);
         assert!(
             matches!(&m.state().phase, FfiSessionPhase::Failed { retry, .. } if *retry == link()),
-            "the failure keeps the link as its retry target"
+            "the failure keeps the environment as its retry target"
         );
         assert_eq!(
             starts(&m.retry()),
             vec![(2, link())],
-            "Try again opens the same Instance and thread"
+            "Try again opens the same Instance"
         );
-        let _ = m.attached(
+        let fx = m.attached(
             2,
             rejected(),
             "http://inst/".to_owned(),
             Some("inst-7".to_owned()),
         );
         assert_eq!(
-            m.take_pending_thread().as_deref(),
-            Some("thread-1"),
-            "the thread opens once connected"
+            opens(&fx),
+            vec!["thread-1"],
+            "the thread is subscribed once connected"
+        );
+    }
+
+    #[test]
+    fn a_linked_environment_restores_its_own_target() {
+        let mut m = Machine::<FakeCore>::new();
+        assert_eq!(
+            starts(&m.restore(Some(saved("http://inst/", Some("inst-7"), Some("inst-7"))))),
+            vec![(1, link())],
+            "a linked environment reconnects to itself, not the primary agent"
+        );
+    }
+
+    #[test]
+    fn a_link_for_b_while_a_connects_and_fails_leaves_a_alone() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://agent/", Some("node-a"), Some("node-a"))));
+        assert_eq!(
+            m.route_link("env-b"),
+            FfiLinkRoute::Elsewhere,
+            "B opens in its own scope while A is still connecting"
+        );
+        assert_eq!(
+            m.route_link("node-a"),
+            FfiLinkRoute::Here,
+            "A's own link stays"
+        );
+        let fx = m.start_failed(1, "Gateway down".to_owned(), None);
+        assert!(starts(&fx).is_empty(), "A's failure doesn't turn into B");
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::Save(_) | Effect::WipeCache)),
+            "A's bearer and cache are untouched"
+        );
+        assert!(
+            matches!(
+                m.state().phase,
+                FfiSessionPhase::Failed {
+                    retry: FfiSessionTarget::PrimaryAgent,
+                    ..
+                }
+            ),
+            "A fails as itself"
+        );
+
+        // B's scope has its own session.
+        let mut b = Machine::<FakeCore>::new();
+        assert_eq!(
+            starts(&b.connect_environment("env-b".to_owned())),
+            vec![(
+                1,
+                FfiSessionTarget::Environment {
+                    environment_id: "env-b".to_owned()
+                }
+            )],
+            "B connects in its own scope"
+        );
+        assert_eq!(
+            b.route_link("env-b"),
+            FfiLinkRoute::Here,
+            "and keeps B's links"
+        );
+    }
+
+    #[test]
+    fn links_still_open_for_a_legacy_session_without_an_environment_id() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://agent/", Some("node-a"), None)));
+        assert_eq!(
+            m.route_link("node-a"),
+            FfiLinkRoute::Here,
+            "an Orbit session is known by its server id"
+        );
+        let mut manual = Machine::<FakeCore>::new();
+        let _ = manual.launch(Some(saved("http://mac:3773/", None, None)));
+        assert_eq!(
+            manual.route_link("env-x"),
+            FfiLinkRoute::Elsewhere,
+            "an unknown manual server sends links to their own scope, which opens them"
+        );
+    }
+
+    #[test]
+    fn closing_the_visible_thread_leaves_nothing_subscribed() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_environment("inst-7".to_owned());
+        let _ = m.attached(
+            1,
+            rejected(),
+            "http://inst/".to_owned(),
+            Some("inst-7".to_owned()),
+        );
+        assert_eq!(
+            opens(&m.open_thread("t1".to_owned())),
+            vec!["t1"],
+            "t1 opens"
+        );
+        let fx = m.open_thread("t2".to_owned());
+        assert_eq!(
+            closes(&fx),
+            vec!["t1"],
+            "a second link's thread replaces the first"
+        );
+        assert_eq!(opens(&fx), vec!["t2"], "and is subscribed");
+        assert_eq!(
+            closes(&m.close_thread("t2".to_owned())),
+            vec!["t2"],
+            "closing unsubscribes it"
+        );
+
+        // A later connection subscribes nothing.
+        let _ = m.status(1, failed("lost"));
+        let _ = m.retry();
+        let fx = m.attached(
+            2,
+            rejected(),
+            "http://inst/".to_owned(),
+            Some("inst-7".to_owned()),
+        );
+        assert!(opens(&fx).is_empty(), "no thread is left subscribed");
+    }
+
+    #[test]
+    fn an_open_thread_survives_a_re_pair_and_closes_on_the_new_connection() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
+        let _ = m.open_thread("t1".to_owned());
+        let fx = m.attached(1, rejected(), "http://mac:3773/".to_owned(), None);
+        assert_eq!(opens(&fx), vec!["t1"], "the open thread is subscribed");
+        let _ = m.pair_manual("http://mac:3773/".to_owned(), "code".to_owned());
+        let fx = m.attached(2, rejected(), "http://mac:3773/".to_owned(), None);
+        assert_eq!(
+            opens(&fx),
+            vec!["t1"],
+            "the re-paired connection subscribes it again"
+        );
+        assert_eq!(
+            m.state().connection_id,
+            2,
+            "snapshots now come from the new connection"
+        );
+        assert_eq!(
+            closes(&m.close_thread("t1".to_owned())),
+            vec!["t1"],
+            "closing it unsubscribes it there"
+        );
+    }
+
+    #[test]
+    fn a_changed_identity_fails_without_touching_the_saved_identity_or_cache() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
+        let fx = m.attached(1, rejected(), "http://mac:3773/".to_owned(), None);
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::PrepareOffline { identity, .. } if identity == "env-a"
+            )),
+            "A's cache opens"
+        );
+
+        // B now answers at A's URL.
+        let fx = m.environment(1, Some("env-b".to_owned()));
+        assert!(
+            !fx.iter().any(|e| matches!(
+                e,
+                Effect::Save(_) | Effect::WipeCache | Effect::PrepareOffline { .. }
+            )),
+            "nothing is saved, emptied or opened for B: {fx:?}"
+        );
+        assert!(
+            matches!(
+                &m.state().phase,
+                FfiSessionPhase::Failed { message, retry: FfiSessionTarget::Manual { .. }, .. }
+                    if message == IDENTITY_CHANGED
+            ),
+            "the attempt fails with the reason, and Try again stays manual"
+        );
+
+        // A is back: Try again reconnects with the saved bearer and A's cache.
+        let fx = m.retry();
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::Start {
+                    credential: Some(FfiCredential::Bearer { .. }),
+                    ..
+                }
+            )),
+            "Try again reuses the saved bearer"
+        );
+        let fx = m.attached(2, rejected(), "http://mac:3773/".to_owned(), None);
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::PrepareOffline { identity, .. } if identity == "env-a"
+            )),
+            "A's cache is A's again, never emptied"
+        );
+        assert!(
+            m.environment(2, Some("env-a".to_owned())).is_empty(),
+            "A matches its saved identity"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_sleeping_environment_subscribes_its_thread_once_connected() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_environment("inst-7".to_owned());
+        assert!(
+            opens(&m.open_thread("thread-1".to_owned())).is_empty(),
+            "nothing to subscribe while the Instance wakes"
+        );
+        let fx = m.attached(
+            1,
+            rejected(),
+            "http://inst/".to_owned(),
+            Some("inst-7".to_owned()),
+        );
+        assert_eq!(
+            opens(&fx),
+            vec!["thread-1"],
+            "subscribed as soon as it connects"
         );
     }
 
@@ -1427,7 +1624,6 @@ mod tests {
                 .expect("deleted")
                 .push((connection_id, thread_id));
         }
-        fn on_open_elsewhere(&self, _environment_id: String, _thread_id: String) {}
     }
 
     #[test]
@@ -1464,28 +1660,6 @@ mod tests {
             *recorder.deleted.lock().expect("deleted"),
             vec![(new, "thread-1".to_owned())],
             "the current connection's delete reaches its store, with its id"
-        );
-    }
-
-    #[test]
-    fn a_linked_environment_restores_its_own_target() {
-        let mut m = Machine::<FakeCore>::new();
-        let saved = FfiSavedSession {
-            server_url: "http://inst/".to_owned(),
-            bearer: "b".to_owned(),
-            orbit_server_id: Some("inst-7".to_owned()),
-            environment_id: Some("inst-7".to_owned()),
-        };
-        assert_eq!(
-            starts(&m.restore(Some(saved))),
-            vec![(
-                1,
-                FfiSessionTarget::Environment {
-                    environment_id: "inst-7".to_owned(),
-                    thread_id: None,
-                }
-            )],
-            "a linked environment reconnects to itself, not the primary agent"
         );
     }
 
@@ -1542,118 +1716,6 @@ mod tests {
             "and stays failed, with Try again: {last:?}"
         );
         assert!(session.core().is_none(), "no connection is left behind");
-    }
-
-    fn has_open_thread(fx: &[Effect<FakeCore>], thread: &str) -> bool {
-        fx.iter()
-            .any(|e| matches!(e, Effect::OpenThread { thread_id, .. } if thread_id == thread))
-    }
-
-    #[test]
-    fn a_link_for_another_environment_before_this_one_is_known_opens_elsewhere() {
-        let mut m = Machine::<FakeCore>::new();
-        let saved = FfiSavedSession {
-            server_url: "http://agent/".to_owned(),
-            bearer: "a-bearer".to_owned(),
-            orbit_server_id: Some("node-a".to_owned()),
-            environment_id: Some("node-a".to_owned()),
-        };
-        let _ = m.launch(Some(saved.clone()));
-        assert!(
-            m.open_link("env-b".to_owned(), "thread-b".to_owned())
-                .is_empty(),
-            "the link waits while this session doesn't know its environment"
-        );
-        let _ = m.open_link("node-a".to_owned(), "thread-a".to_owned());
-        let fx = m.attached(
-            1,
-            rejected(),
-            "http://agent/".to_owned(),
-            Some("node-a".to_owned()),
-        );
-        assert!(
-            fx.iter().any(|e| matches!(
-                e,
-                Effect::OpenElsewhere { environment_id, .. } if environment_id == "env-b"
-            )),
-            "the held link for B goes to B's scope"
-        );
-        assert!(
-            starts(&fx).is_empty(),
-            "the main session doesn't reconnect elsewhere"
-        );
-        assert!(
-            !fx.iter().any(|e| matches!(e, Effect::Save(_))),
-            "A's bearer stays as it is"
-        );
-        assert!(
-            fx.iter().any(|e| matches!(
-                e,
-                Effect::PrepareOffline { identity, .. } if identity == "node-a"
-            )),
-            "A's cache stays A's"
-        );
-        assert_eq!(
-            m.take_pending_thread().as_deref(),
-            Some("thread-a"),
-            "a link for A opens in A"
-        );
-
-        // Now known: a link for B goes to B's own scope.
-        let fx = m.open_link("env-b".to_owned(), "thread-b".to_owned());
-        assert!(
-            matches!(
-                fx.as_slice(),
-                [Effect::OpenElsewhere { environment_id, thread_id }]
-                    if environment_id == "env-b" && thread_id == "thread-b"
-            ),
-            "a link for B opens in its own scope: {fx:?}"
-        );
-        assert_eq!(m.state().connection_id, 1, "A's connection stays current");
-
-        // B held before A was known is routed elsewhere once A is.
-        let mut m = Machine::<FakeCore>::new();
-        let _ = m.launch(Some(saved));
-        let _ = m.open_link("env-b".to_owned(), "thread-b".to_owned());
-        let fx = m.attached(
-            1,
-            rejected(),
-            "http://agent/".to_owned(),
-            Some("node-a".to_owned()),
-        );
-        assert!(
-            fx.iter().any(|e| matches!(
-                e,
-                Effect::OpenElsewhere { environment_id, .. } if environment_id == "env-b"
-            )),
-            "the held link for B goes to B's scope"
-        );
-        assert_eq!(
-            m.state().environment_id.as_deref(),
-            Some("node-a"),
-            "this stays A"
-        );
-    }
-
-    #[test]
-    fn a_link_to_a_sleeping_environment_subscribes_its_thread_once_connected() {
-        let mut m = Machine::<FakeCore>::new();
-        let _ = m.open_link("inst-7".to_owned(), "thread-1".to_owned());
-        // The user is already on the thread while the Instance wakes.
-        assert!(
-            !has_open_thread(&m.open_thread("thread-1".to_owned()), "thread-1"),
-            "nothing to subscribe yet"
-        );
-        let fx = m.attached(
-            1,
-            rejected(),
-            "http://inst/".to_owned(),
-            Some("inst-7".to_owned()),
-        );
-        assert!(
-            has_open_thread(&fx, "thread-1"),
-            "the thread is subscribed as soon as the connection exists"
-        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -282,12 +283,32 @@ impl DriverState {
     }
 }
 
+/// What the driver does when the server refuses the WebSocket handshake with 401 or 403.
+pub(crate) struct AuthRejection {
+    /// Stop with [`ConnectionStatus::Failed`] instead of retrying.
+    pub(crate) stop: bool,
+    /// Set on every such refusal; read through [`crate::Connection::auth_rejected`].
+    pub(crate) seen: Arc<AtomicBool>,
+}
+
+/// The message [`ConnectionStatus::Failed`] carries after an auth rejection.
+pub(crate) const AUTH_REJECTED_MESSAGE: &str = "The server rejected this device's sign-in.";
+
+fn is_auth_rejection(err: &tokio_tungstenite::tungstenite::Error) -> bool {
+    matches!(
+        err,
+        tokio_tungstenite::tungstenite::Error::Http(response)
+            if matches!(response.status().as_u16(), 401 | 403)
+    )
+}
+
 pub(crate) async fn run(
     config: ServerConfig,
     shared_bearer: Arc<RwLock<Option<String>>>,
     http: reqwest::Client,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     events_tx: mpsc::Sender<ClientEvent>,
+    auth_rejection: AuthRejection,
 ) {
     let mut state = DriverState::new(config, shared_bearer, http);
 
@@ -380,6 +401,19 @@ pub(crate) async fn run(
             }
             Err(err) => {
                 debug!("conn-client websocket connect failed: {err}");
+                if is_auth_rejection(&err) {
+                    auth_rejection.seen.store(true, Ordering::Release);
+                    if auth_rejection.stop {
+                        state
+                            .fail_all_calls(|| ClientError::Auth(AUTH_REJECTED_MESSAGE.to_owned()));
+                        let _ = events_tx
+                            .send(ClientEvent::Status(ConnectionStatus::Failed(
+                                AUTH_REJECTED_MESSAGE.to_owned(),
+                            )))
+                            .await;
+                        return;
+                    }
+                }
             }
         }
 

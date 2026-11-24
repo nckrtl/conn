@@ -26,6 +26,8 @@ struct ConnApp: App {
                 Group {
                     if store.isPaired {
                         WorkspaceRootView(store: store)
+                    } else if let orbitConnect = store.orbitConnect {
+                        OrbitConnectView(store: store, state: orbitConnect)
                     } else {
                         PairingView(store: store)
                     }

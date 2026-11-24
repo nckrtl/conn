@@ -4,12 +4,15 @@ import Security
 struct StoredSession: Sendable, Equatable {
     let serverURL: String
     let bearerToken: String
+    /// The Orbit environment this session belongs to; `nil` for a manual pairing.
+    let orbitServerId: String?
 }
 
 enum KeychainStore {
     private static let service = "com.nckrtl.conn.ios"
     private static let serverURLAccount = "server-url"
     private static let bearerTokenAccount = "bearer-token"
+    private static let orbitServerIdAccount = "orbit-server-id"
 
     static func loadSession(scope: String = "") -> StoredSession? {
         guard let serverURL = read(account: serverURLAccount + scope),
@@ -18,17 +21,24 @@ enum KeychainStore {
               !bearerToken.isEmpty else {
             return nil
         }
-        return StoredSession(serverURL: serverURL, bearerToken: bearerToken)
+        let orbitServerId = read(account: orbitServerIdAccount + scope).flatMap { $0.isEmpty ? nil : $0 }
+        return StoredSession(serverURL: serverURL, bearerToken: bearerToken, orbitServerId: orbitServerId)
     }
 
-    static func saveSession(serverURL: String, bearerToken: String, scope: String = "") {
+    static func saveSession(serverURL: String, bearerToken: String, orbitServerId: String?, scope: String = "") {
         write(serverURL, account: serverURLAccount + scope)
         write(bearerToken, account: bearerTokenAccount + scope)
+        if let orbitServerId {
+            write(orbitServerId, account: orbitServerIdAccount + scope)
+        } else {
+            delete(account: orbitServerIdAccount + scope)
+        }
     }
 
     static func clearSession(scope: String = "") {
         delete(account: serverURLAccount + scope)
         delete(account: bearerTokenAccount + scope)
+        delete(account: orbitServerIdAccount + scope)
     }
 
     private static let pushDeviceIdAccount = "push-device-id"

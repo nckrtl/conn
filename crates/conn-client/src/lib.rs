@@ -23,7 +23,7 @@ pub mod history;
 pub mod perf;
 mod wire;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 pub use crate::device_hub::{
@@ -199,6 +199,14 @@ pub enum ClientEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamId(u64);
 
+/// Optional behaviour for [`Connection::start_with_options`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StartOptions {
+    /// When the server refuses the WebSocket handshake with 401 or 403, report
+    /// [`ConnectionStatus::Failed`] and stop instead of retrying the same bearer.
+    pub stop_on_auth_rejection: bool,
+}
+
 /// Handle to a running connection. Cheap to clone; every method is non-blocking.
 #[derive(Clone)]
 pub struct Connection {
@@ -208,6 +216,7 @@ pub struct Connection {
     bearer: Arc<RwLock<Option<String>>>,
     http: reqwest::Client,
     rt: tokio::runtime::Handle,
+    auth_rejected: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Connection {
@@ -226,6 +235,16 @@ impl Connection {
         config: ServerConfig,
         rt: &tokio::runtime::Handle,
     ) -> (Self, mpsc::Receiver<ClientEvent>) {
+        Self::start_with_options(config, rt, StartOptions::default())
+    }
+
+    /// [`Connection::start`] with [`StartOptions`].
+    #[must_use]
+    pub fn start_with_options(
+        config: ServerConfig,
+        rt: &tokio::runtime::Handle,
+        options: StartOptions,
+    ) -> (Self, mpsc::Receiver<ClientEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let http_base_url = config.http_base_url.clone();
@@ -235,12 +254,17 @@ impl Connection {
         };
         let bearer = Arc::new(RwLock::new(initial_bearer));
         let http = reqwest::Client::new();
+        let auth_rejected = Arc::new(AtomicBool::new(false));
         rt.spawn(driver::run(
             config,
             Arc::clone(&bearer),
             http.clone(),
             cmd_rx,
             events_tx,
+            driver::AuthRejection {
+                stop: options.stop_on_auth_rejection,
+                seen: Arc::clone(&auth_rejected),
+            },
         ));
         let conn = Self {
             cmd_tx,
@@ -249,8 +273,15 @@ impl Connection {
             bearer,
             http,
             rt: rt.clone(),
+            auth_rejected,
         };
         (conn, events_rx)
+    }
+
+    /// True once the server refused the WebSocket handshake with 401 or 403.
+    #[must_use]
+    pub fn auth_rejected(&self) -> bool {
+        self.auth_rejected.load(Ordering::Acquire)
     }
 
     /// Runs a Tokio-dependent future (such as `reqwest` I/O) directly when the caller is already

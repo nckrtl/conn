@@ -129,6 +129,11 @@ impl LiveThread {
         elapsed(*held.get_or_insert(now)) >= max_hold
     }
 
+    /// Work goes on after the session's last turn (`sessionHasBackgroundWork`).
+    fn has_background_work(&self) -> bool {
+        !lock(&self.state).background_turns.is_empty() || self.session.has_pending_background_work()
+    }
+
     fn active(&self) -> Option<ActiveRun> {
         lock(&self.state).active.clone()
     }
@@ -688,11 +693,16 @@ impl Inner {
             .unwrap_or_default();
         // A live session of another instance closes; the run opens one on its own instance.
         // A fresh run releases the session too: each holds one native conversation
-        // (`sessionsReleasedByFreshContext`).
-        if let Some(live) = self.live_thread(thread_id)
-            && (live.instance != instance || context.fresh || context.leaves_side_conversation)
-        {
-            self.close_session(thread_id).await;
+        // (`sessionsReleasedByFreshContext`). One still running background work stays open
+        // beside the new session, as closing it would end that work.
+        if let Some(live) = self.live_thread(thread_id) {
+            if context.fresh && live.has_background_work() {
+                lock(&self.live).remove(thread_id);
+                lock(&self.detached).push((thread_id.to_owned(), live));
+            } else if live.instance != instance || context.fresh || context.leaves_side_conversation
+            {
+                self.close_session(thread_id).await;
+            }
         }
         let live = match self.live_thread(thread_id) {
             Some(live) => live,
@@ -1453,6 +1463,8 @@ impl Inner {
         {
             map.remove(&thread_id);
         }
+        drop(map);
+        lock(&self.detached).retain(|(_, detached)| !Arc::ptr_eq(detached, &live));
     }
 
     /// `app_thread.created`: the child thread a subagent's rows are written to. Created once;
@@ -2069,6 +2081,14 @@ impl Inner {
         for thread_id in idle_threads {
             self.close_session(&thread_id).await;
         }
+        let idle_detached: Vec<(String, Arc<LiveThread>)> = lock(&self.detached)
+            .extract_if(.., |(_, live)| {
+                live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold)
+            })
+            .collect();
+        for (thread_id, live) in idle_detached {
+            self.release(&thread_id, live).await;
+        }
     }
 
     fn revoke_tools(&self, key: Option<&str>) {
@@ -2137,7 +2157,8 @@ impl Inner {
     /// started. The server calls this before it exits. No session opens after it began.
     pub(crate) async fn close_all_sessions(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        let closing: Vec<(String, Arc<LiveThread>)> = lock(&self.live).drain().collect();
+        let mut closing: Vec<(String, Arc<LiveThread>)> = lock(&self.live).drain().collect();
+        closing.append(&mut lock(&self.detached));
         let mut closes = Vec::with_capacity(closing.len());
         self.drop_kept_tools(|_, _| true);
         for (thread_id, live) in closing {
@@ -2166,33 +2187,38 @@ impl Inner {
         let live = lock(&self.live).remove(thread_id);
         if let Some(live) = live {
             self.command_output.finish_thread(thread_id);
-            let closed = live.session.close().await;
-            let instance = self
-                .providers
-                .resolve(&live.instance)
-                .map(|p| p.instance_id().as_str().to_owned())
-                .unwrap_or_else(|| live.instance.clone());
-            match (closed, live.tools.clone()) {
-                (conn_provider::Closed::RuntimeShared, Some(tools)) if !self.shutting_down() => {
-                    self.keep_tools(thread_id, &instance, tools);
+            self.release(thread_id, live).await;
+        }
+    }
+
+    /// Closes one session: its tools, its row and, where they end with it, its rosters.
+    async fn release(&self, thread_id: &str, live: Arc<LiveThread>) {
+        let closed = live.session.close().await;
+        let instance = self
+            .providers
+            .resolve(&live.instance)
+            .map(|p| p.instance_id().as_str().to_owned())
+            .unwrap_or_else(|| live.instance.clone());
+        match (closed, live.tools.clone()) {
+            (conn_provider::Closed::RuntimeShared, Some(tools)) if !self.shutting_down() => {
+                self.keep_tools(thread_id, &instance, tools);
+            }
+            (closed, tools) => {
+                self.revoke_tools(tools.as_ref().map(|t| t.key.as_str()));
+                if closed == conn_provider::Closed::RuntimeStopped {
+                    self.drop_kept_tools(|_, kept| kept == instance);
                 }
-                (closed, tools) => {
-                    self.revoke_tools(tools.as_ref().map(|t| t.key.as_str()));
-                    if closed == conn_provider::Closed::RuntimeStopped {
-                        self.drop_kept_tools(|_, kept| kept == instance);
-                    }
-                }
             }
-            // `notify_one` keeps a permit, so a pump not yet waiting still sees it.
-            live.closed.notify_one();
-            if !self.shutting_down() {
-                self.record_release(thread_id, &live.provider_session_id)
-                    .await;
-            }
-            if live.background_tasks_end_with_process && !self.shutting_down() {
-                self.clear_released_rosters(thread_id, &live.provider_session_id)
-                    .await;
-            }
+        }
+        // `notify_one` keeps a permit, so a pump not yet waiting still sees it.
+        live.closed.notify_one();
+        if !self.shutting_down() {
+            self.record_release(thread_id, &live.provider_session_id)
+                .await;
+        }
+        if live.background_tasks_end_with_process && !self.shutting_down() {
+            self.clear_released_rosters(thread_id, &live.provider_session_id)
+                .await;
         }
     }
 

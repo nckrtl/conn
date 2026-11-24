@@ -836,9 +836,23 @@ async fn close_idle_closes_only_shells_at_their_prompt() {
         })
         .await;
     assert!(open(&manager), "a failed inspection keeps the terminal");
-    // Once its echo is out, the shell at its prompt is idle.
+    // Once its echo is out, the shell at its prompt is idle, even when the poller clears a
+    // job that ended (a settle script's) while the table is read.
     output_contains(&mut typed, "Q").await;
-    manager.close_idle("t13", None).await;
+    let ended = (i32::MAX, "sleep".to_owned());
+    manager
+        .inner
+        .lock()
+        .sessions
+        .get_mut(&("t13".to_owned(), "typed".to_owned()))
+        .unwrap()
+        .job = Some(ended);
+    manager
+        .close_idle_with("t13", None, async {
+            manager.inner.poll().await;
+            processes::process_table().await
+        })
+        .await;
     assert!(!open(&manager), "the quiet shell at its prompt closes");
     drop(streams);
 }

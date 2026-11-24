@@ -467,14 +467,26 @@ impl ConnApp {
                         .update(cx, |panel, cx| panel.set_turn_count(turn, cx));
                     app.select_right_panel_tab(RightPanelTab::Diff, cx);
                 }
-                crate::chat::ChatEvent::OpenThread(thread_id) => {
-                    app.select_thread(thread_id.clone(), cx);
+                crate::chat::ChatEvent::OpenThread {
+                    thread_id,
+                    environment_id,
+                } => {
+                    if let Some(environment) = environment_id {
+                        app.open_remote_child(environment, thread_id, cx);
+                    } else {
+                        app.select_thread(thread_id.clone(), cx);
+                    }
                 }
                 crate::chat::ChatEvent::ForkFromRun { run_id } => {
                     app.fork_selected_from_run(run_id, cx);
                 }
                 crate::chat::ChatEvent::OpenFile(location) => {
                     app.show_source_location(location, cx)
+                }
+                crate::chat::ChatEvent::OpenInBrowser(url) => {
+                    app.right_panel
+                        .update(cx, |panel, cx| panel.navigate_browser(url.clone(), cx));
+                    app.select_right_panel_tab(RightPanelTab::Browser, cx);
                 }
                 crate::chat::ChatEvent::RuntimeModeSelected(mode) => {
                     app.set_runtime_mode(mode, cx);
@@ -1191,6 +1203,21 @@ impl ConnApp {
                 interaction_mode,
             )
         };
+        let linked_pull_requests: Vec<crate::chat::LinkedPullRequest> = shell_thread
+            .and_then(|t| t.pull_requests.as_deref())
+            .map(|links| {
+                crate::panels::linked_items::pr_link::visible_thread_pull_requests(links)
+                    .iter()
+                    .map(|link| {
+                        crate::chat::LinkedPullRequest::new(
+                            &link.host,
+                            &link.repository,
+                            link.number,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let branch_context = self.branch_context(shell_thread, &branch);
         let has_projects = self.shell.projects.iter().any(|p| p.archived_at.is_none());
         let connected = self.connection.is_some();
@@ -1200,6 +1227,7 @@ impl ConnApp {
         } else {
             None
         };
+        let preferred_editor = self.thread_details.preferred_editor;
         self.chat.update(cx, |chat, cx| {
             if let Some((perf_thread, opened_at)) = perf_open {
                 chat.set_perf_open(perf_thread, opened_at);
@@ -1209,6 +1237,8 @@ impl ConnApp {
             chat.set_project_id(project_id.clone(), cx);
             chat.set_workspace_root(root, cx);
             chat.set_thread(thread, title, cx);
+            chat.set_linked_pull_requests(linked_pull_requests, cx);
+            chat.set_preferred_editor(preferred_editor);
             chat.set_child_approvals(child_approvals, cx);
             chat.set_branch_context(branch_context, cx);
             chat.set_thread_context(branch, worktree_active, runtime_mode, interaction_mode, cx);
@@ -1329,7 +1359,7 @@ impl ConnApp {
                         .shell
                         .top_level_active_threads()
                         .next()
-                        .or_else(|| self.shell.threads.first())
+                        .or_else(|| self.shell.threads.iter().find(|t| self.shell.is_listed(t)))
                         .map(|first| (first.project_id.clone(), first.id.clone()));
                     if let Some((project_id, thread_id)) = initial {
                         self.layout.selected_project_id = Some(project_id);
@@ -1813,7 +1843,7 @@ impl ConnApp {
                 .shell
                 .top_level_active_threads()
                 .next()
-                .or_else(|| self.shell.threads.first())
+                .or_else(|| self.shell.threads.iter().find(|t| self.shell.is_listed(t)))
                 .map(|first| (first.project_id.clone(), first.id.clone()));
             if let Some((project_id, thread_id)) = initial {
                 self.layout.selected_project_id = Some(project_id);
@@ -4858,6 +4888,8 @@ impl ConnApp {
     ) {
         self.thread_details.preferred_editor = Some(editor);
         self.thread_details.open_in_menu_open = false;
+        self.chat
+            .update(cx, |chat, _| chat.set_preferred_editor(Some(editor)));
         cx.notify();
     }
 

@@ -3225,6 +3225,35 @@ async fn a_restart_holds_an_undelivered_message_for_the_user() {
     assert_eq!(p["messages"][1]["text"], "echo: late");
 }
 
+/// A restart during workspace preparation cancels the run, as T3's recovery does
+/// (`ProviderRuntimeRecoveryService.test.ts`, "preparing"): its setup died with the process, so
+/// the provider never starts in a half-built checkout.
+#[tokio::test(flavor = "current_thread")]
+async fn a_restart_cancels_an_interrupted_preparation() {
+    let db = TempDb::new("restart-preparing");
+    {
+        let (engine, _) = open(&db);
+        dispatch(&engine, create("t1", "c1")).await;
+        let mut send = message("t1", "c2", "work");
+        send["dispatchMode"] = json!({"type": "defer_start",
+            "workspaceStrategy": {"type": "worktree", "baseRef": "HEAD", "startFromOrigin": false}});
+        dispatch(&engine, send).await;
+    }
+    let (engine, _) = open(&db);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][0]["status"], "cancelled");
+    assert!(p["providerThreads"].as_array().unwrap().is_empty());
+    let items = p["turnItems"].as_array().unwrap();
+    assert!(items.iter().any(|i| i["title"] == "Server restarted"));
+    assert!(
+        items
+            .iter()
+            .filter(|i| i["type"] == "command_execution")
+            .all(|i| i["status"] == "cancelled")
+    );
+}
+
 /// A store the pre-merge branch wrote is at version 6 with `message_keys.search_text` and no
 /// receipt owners (that branch numbered its search step 5 and had no receipts step). It opens
 /// at 5 without the column, gets the receipt columns, and commands and their retries work.
@@ -6976,7 +7005,7 @@ fn every_contract_command_is_handled_or_refused_with_a_reason() {
             );
         }
     }
-    assert_eq!(handled, 50);
+    assert_eq!(handled, 52);
     assert_eq!(conn_contract::COMMAND_TYPES.len(), 58);
 }
 
@@ -7810,7 +7839,7 @@ async fn thread_lifecycle_commands_reach_the_shell_row() {
     assert_eq!(r["activeProviderThreadId"], Value::Null);
 
     assert!(
-        crate::commands::refusal("prepared-run.release").contains("prepare worktrees"),
+        crate::commands::refusal("prepared-run.retry").contains("workspace preparation"),
         "a refused command says why"
     );
 }
@@ -13138,15 +13167,28 @@ fn transcript_queries_use_their_indexes() {
     let conn = rusqlite::Connection::open(db.path()).unwrap();
     let plan = |sql: &str| {
         let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-        stmt.query_map(["t1"], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-            .join("; ")
+        let args = vec!["t1"; stmt.parameter_count()];
+        stmt.query_map(rusqlite::params_from_iter(args), |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join("; ")
     };
     let items = plan(crate::store::TRANSCRIPT_ITEMS_SQL);
     assert!(items.contains("USING INDEX turn_items_in_order"), "{items}");
     assert!(!items.contains("TEMP B-TREE"), "{items}");
+    let outline = plan(<crate::outline::Markers as crate::transcript::RowSink>::ITEMS_SQL);
+    assert!(
+        outline.contains("thread_outline_rows") && !outline.contains("TEMP B-TREE"),
+        "{outline}"
+    );
+    let messages = plan(crate::outline::MESSAGE_PAGE);
+    assert!(
+        messages.contains("thread_outline_rows") && !messages.contains("TEMP B-TREE"),
+        "{messages}"
+    );
     let interrupts = plan(crate::store::TRANSCRIPT_INTERRUPTS_SQL);
     assert!(interrupts.contains("turn_item_interrupts"), "{interrupts}");
     assert!(!interrupts.contains("TEMP B-TREE"), "{interrupts}");
@@ -13497,6 +13539,95 @@ async fn attention_is_off_by_default() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// T3's `defer_start` with a workspace and `prepared-run.release`/`fail`: the run waits in
+/// `preparing` and reaches the provider only once released; a failed preparation fails it with
+/// `workspace_preparation_failed`, and neither applies twice.
+#[tokio::test(flavor = "current_thread")]
+async fn a_prepared_run_starts_only_when_released() {
+    let db = TempDb::new("prepared-run");
+    let (engine, _) = open(&db);
+    let strategy = json!({"type": "worktree", "baseRef": "HEAD", "startFromOrigin": false});
+    for thread in ["t1", "t2"] {
+        dispatch(&engine, create(thread, &format!("create-{thread}"))).await;
+        let mut send = message(thread, &format!("send-{thread}"), "work");
+        send["dispatchMode"] = json!({"type": "defer_start", "workspaceStrategy": strategy});
+        dispatch(&engine, send).await;
+        let held = projection(&engine, thread).await;
+        assert_eq!(held["runs"][0]["status"], "preparing");
+        assert_eq!(held["runs"][0]["workspacePreparation"], strategy);
+        assert!(held["providerThreads"].as_array().unwrap().is_empty());
+    }
+    let prepared = |kind: &str, thread: &str, id: &str| {
+        json!({"type": kind, "commandId": id, "threadId": thread, "runId": format!("run:{thread}:1"),
+            "failure": {"class": "validation_error", "message": "Setup script exited with 3.",
+                "code": null, "retryable": false}})
+    };
+    dispatch(&engine, prepared("prepared-run.release", "t1", "go")).await;
+    let started = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(started["runs"][0]["status"], "completed");
+    dispatch(&engine, prepared("prepared-run.fail", "t2", "stop")).await;
+    let failed = projection(&engine, "t2").await;
+    assert_eq!(failed["runs"][0]["status"], "failed");
+    assert!(failed["providerThreads"].as_array().unwrap().is_empty());
+    let error = failed["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "error")
+        .unwrap();
+    assert_eq!(error["failure"]["code"], "workspace_preparation_failed");
+    for (kind, thread) in [("prepared-run.release", "t1"), ("prepared-run.fail", "t2")] {
+        let again = engine
+            .dispatch(from_json(prepared(kind, thread, "again")).unwrap())
+            .await;
+        let Err(EngineError::Rejected(error)) = again else {
+            panic!("{kind} applied twice")
+        };
+        assert!(
+            to_json(&error)
+                .to_string()
+                .contains("is not awaiting workspace preparation")
+        );
+    }
+}
+
+/// T3's `startNextQueuedRun` after `prepared-run.fail`: the failure is a `validation_error` and
+/// the checkout exists, so a message queued while the setup ran starts next.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_preparation_starts_the_queued_run() {
+    let db = TempDb::new("prepared-run-queue");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut send = message("t1", "c2", "work");
+    send["dispatchMode"] = json!({"type": "defer_start",
+        "workspaceStrategy": {"type": "worktree", "baseRef": "HEAD", "startFromOrigin": false}});
+    dispatch(&engine, send).await;
+    let queued = message_with(
+        "t1",
+        "c3",
+        "next",
+        json!({"type": "queue_after_active"}),
+        None,
+    );
+    dispatch(&engine, queued).await;
+    assert_eq!(
+        projection(&engine, "t1").await["runs"][1]["status"],
+        "queued"
+    );
+    dispatch(
+        &engine,
+        json!({"type": "prepared-run.fail", "commandId": "fail", "threadId": "t1",
+            "runId": "run:t1:1", "failure": {"class": "validation_error",
+            "message": "Setup script exited with 3.", "code": null, "retryable": false}}),
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][0]["status"], "failed");
+    assert_ne!(p["runs"][1]["status"], "queued", "the queue advanced");
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(p["runs"][1]["status"], "completed");
 }
 
 /// Removing a queued run leaves the active run's approval answerable (T3's
@@ -14454,6 +14585,31 @@ async fn find_searches_the_visible_timeline_as_rendered_on_both_rpcs() {
         }),
     )
     .await;
+    let outline = engine.thread_outline("t3".into()).await.unwrap().unwrap();
+    let previews: Vec<_> = outline.markers.iter().map(|m| m.preview.as_str()).collect();
+    assert_eq!(previews.len(), 2);
+    assert_eq!(previews[0], "Archive lantern");
+    assert!(previews[1].starts_with("Check **the build**"));
+    let inherited = engine
+        .thread_window("t3".into(), outline.markers[1].entry_id.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        inherited["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["visibility"] == "inherited" && row["item"]["text"] == markdown)
+    );
+    let source = engine.thread_outline("t1".into()).await.unwrap().unwrap();
+    assert!(
+        engine
+            .thread_window("t3".into(), source.markers[2].entry_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
     let find = |thread: &str, query: &str| {
         let input = json!({"threadId": thread, "query": query});
         let engine = &engine;
@@ -14601,6 +14757,16 @@ async fn a_bounded_snapshot_holds_ten_turns_and_pages_back() {
         );
     }
     assert_eq!(view["hasMoreHistory"], true);
+    dispatch(&engine, create("unrelated", "unrelated-create")).await;
+    let mut reconnected = engine.subscribe_thread(
+        from_json(json!({"threadId":"t1", "acceptBoundedSnapshot":true, "acceptCompactTurnItems":true, "acceptDedupedBodies":true})).unwrap()
+    ).await.unwrap();
+    let warm = next(&mut reconnected).await;
+    assert!(warm["snapshotSequence"].as_u64() > view["snapshotSequence"].as_u64());
+    assert_eq!(
+        warm["historyCursor"], view["historyCursor"],
+        "an unrelated thread does not invalidate cached bodies"
+    );
     // Turns appended while the view is open do not move the cursor: the page still ends
     // right before the window, so window, page and new turns cover every turn once.
     for i in 16..19 {
@@ -14611,9 +14777,80 @@ async fn a_bounded_snapshot_holds_ten_turns_and_pages_back() {
         .await;
         until_run_ends(&mut stream).await;
     }
+    let outline = engine.thread_outline("t1".into()).await.unwrap().unwrap();
+    assert_eq!(outline.markers.len(), 19);
+    let anchor = &outline.markers[15];
+    let jumped = engine
+        .thread_window("t1".into(), anchor.entry_id.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let visible = projection(&engine, "t1").await["visibleTurnItems"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let target = visible
+        .iter()
+        .position(|r| r["sourceItemId"] == anchor.entry_id)
+        .unwrap();
+    let expected = &visible[target.saturating_sub(24)..(target + 76).min(visible.len())];
+    let ids = |rows: &[Value]| {
+        rows.iter()
+            .map(|r| r["sourceItemId"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(jumped["items"].as_array().unwrap()), ids(expected));
+    let before = engine
+        .thread_history_page(
+            "t1".into(),
+            jumped["nextCursor"].as_str().unwrap().to_owned(),
+            None,
+            crate::HistoryView::Timeline,
+        )
+        .await
+        .unwrap();
+    let crate::ThreadHistory::Page(before) = before else {
+        panic!("window cursor did not page");
+    };
+    assert_eq!(
+        before["items"].as_array().unwrap().last().unwrap()["sourceItemId"],
+        visible[target - 25]["sourceItemId"]
+    );
     let cursor = view["historyCursor"].as_str().unwrap().to_owned();
+    let crate::ThreadHistory::Page(cached) = engine
+        .thread_history_page(
+            "t1".into(),
+            cursor.clone(),
+            None,
+            crate::HistoryView::Messages,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("missing message cache page")
+    };
+    let first_visible = view["projection"]["visibleTurnItems"][0]["sourceItemId"].clone();
+    let boundary = visible
+        .iter()
+        .position(|row| row["sourceItemId"] == first_visible)
+        .unwrap();
+    let expected_messages: Vec<_> = visible[..boundary]
+        .iter()
+        .filter(|row| {
+            matches!(
+                row["item"]["type"].as_str(),
+                Some("user_message" | "assistant_message")
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        ids(cached["items"].as_array().unwrap()),
+        ids(&expected_messages)
+    );
+    assert_eq!(cached["hasMoreHistory"], false);
     let page = engine
-        .thread_history_page("t1".into(), cursor, None, false)
+        .thread_history_page("t1".into(), cursor, None, crate::HistoryView::Timeline)
         .await
         .unwrap();
     let crate::ThreadHistory::Page(page) = page else {
@@ -14632,7 +14869,12 @@ async fn a_bounded_snapshot_holds_ten_turns_and_pages_back() {
     );
     assert_eq!(
         engine
-            .thread_history_page("t1".into(), "bad".into(), None, false)
+            .thread_history_page(
+                "t1".into(),
+                "bad".into(),
+                None,
+                crate::HistoryView::Timeline
+            )
             .await
             .unwrap(),
         crate::ThreadHistory::InvalidCursor

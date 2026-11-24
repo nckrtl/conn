@@ -55,6 +55,7 @@ mod history;
 mod html_cleanup;
 mod link_requests;
 mod outbox;
+mod outline;
 mod output;
 mod projects;
 mod provider_handoff;
@@ -326,9 +327,12 @@ pub struct WorktreeRequest {
     pub thread_id: String,
     /// The project, for its settings overrides (`worktreeSubmodules`).
     pub project_id: Option<String>,
-    /// The link that starts the thread (`linkOrigin`); a delegate's is its parent's. A link
-    /// below full access runs no setup script (`linkOriginIsFenced`).
+    /// The link that starts the thread (`linkOrigin`). A link below full access runs no
+    /// setup script (`linkOriginIsFenced`).
     pub link_origin: Option<Value>,
+    /// Whether the checkout runs the project's setup script. A launch does; a `worktree`
+    /// delegate does not: its child runs the script while its run waits in `preparing`.
+    pub run_setup: bool,
     pub project_root: String,
     pub base_ref: String,
     pub branch: Option<String>,
@@ -729,9 +733,29 @@ pub trait Engine: Send + Sync {
         _thread_id: ThreadId,
         _cursor: String,
         _through_entry_id: Option<String>,
-        _conversation_only: bool,
+        _view: HistoryView,
     ) -> BoxFuture<'_, Result<ThreadHistory, EngineError<GetThreadProjectionError>>> {
         unsupported("thread history pages")
+    }
+
+    /// Compact whole-thread prompt index in timeline order.
+    fn thread_outline(
+        &self,
+        _thread_id: ThreadId,
+    ) -> BoxFuture<
+        '_,
+        Result<Option<conn_contract::ThreadOutline>, EngineError<GetThreadProjectionError>>,
+    > {
+        unsupported("the thread outline")
+    }
+
+    /// One bounded window around a visible prompt, including an inherited fork prompt.
+    fn thread_window(
+        &self,
+        _thread_id: ThreadId,
+        _entry_id: String,
+    ) -> BoxFuture<'_, Result<Option<Value>, EngineError<GetThreadProjectionError>>> {
+        unsupported("the thread window")
     }
 
     /// `ThreadManagementService.awaitBackgroundTasks`: the live session of the thread's
@@ -756,6 +780,15 @@ pub enum ThreadTranscript {
     NotFound,
     /// The file would pass the limit (`thread_transcript_too_large`).
     TooLarge,
+}
+
+/// Row selection for a paged thread history read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryView {
+    Timeline,
+    Conversation,
+    /// User and assistant rows for the native offline cache.
+    Messages,
 }
 
 /// The outcome of [`Engine::thread_history_page`].

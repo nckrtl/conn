@@ -7618,6 +7618,11 @@ public struct FfiSessionState: Equatable, Hashable {
      * connect manually). The app then keeps the workspace up through reconnects and re-pairs.
      */
     public var hasConnected: Bool
+    /**
+     * Grows when this scope connects to a different server than before (an Orbit primary
+     * switch, say): the previous environment's threads are gone.
+     */
+    public var identityEpoch: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7634,7 +7639,11 @@ public struct FfiSessionState: Equatable, Hashable {
         /**
          * This session has had a working connection since launch (or since the user last chose to
          * connect manually). The app then keeps the workspace up through reconnects and re-pairs.
-         */hasConnected: Bool) {
+         */hasConnected: Bool, 
+        /**
+         * Grows when this scope connects to a different server than before (an Orbit primary
+         * switch, say): the previous environment's threads are gone.
+         */identityEpoch: UInt64) {
         self.revision = revision
         self.connectionId = connectionId
         self.phase = phase
@@ -7642,6 +7651,7 @@ public struct FfiSessionState: Equatable, Hashable {
         self.environmentId = environmentId
         self.offlineReady = offlineReady
         self.hasConnected = hasConnected
+        self.identityEpoch = identityEpoch
     }
 
     
@@ -7666,7 +7676,8 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
                 serverUrl: FfiConverterOptionString.read(from: &buf), 
                 environmentId: FfiConverterOptionString.read(from: &buf), 
                 offlineReady: FfiConverterBool.read(from: &buf), 
-                hasConnected: FfiConverterBool.read(from: &buf)
+                hasConnected: FfiConverterBool.read(from: &buf), 
+                identityEpoch: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -7678,6 +7689,7 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.environmentId, into: &buf)
         FfiConverterBool.write(value.offlineReady, into: &buf)
         FfiConverterBool.write(value.hasConnected, into: &buf)
+        FfiConverterUInt64.write(value.identityEpoch, into: &buf)
     }
 }
 

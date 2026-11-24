@@ -86,6 +86,11 @@ pub(crate) enum RightPanelEvent {
 
 impl gpui_kit::EventEmitter<RightPanelEvent> for RightPanel {}
 
+/// Hidden browsers kept live, across all threads. Each keeps a Chromium renderer (often a few
+/// hundred MB) and its last frame in the sprite atlas. Six covers a few threads with a tab or
+/// two each, the usual working set, and caps the worst case near a couple of GB.
+const MAX_PARKED_BROWSERS: usize = 6;
+
 #[cfg(test)]
 pub(crate) type BrowserPanelHandle = BrowserPanel;
 
@@ -117,6 +122,10 @@ pub struct RightPanel {
     active_browser: Option<BrowserTabId>,
     /// Addresses asked for before a tab's browser exists; it loads them when made.
     pending_browser_urls: Vec<(BrowserTabId, String)>,
+    /// Live browsers by when they last showed, oldest first.
+    browsers_by_use: Vec<BrowserTabId>,
+    /// Titles of tabs whose browser was closed to stay under [`MAX_PARKED_BROWSERS`].
+    parked_titles: Vec<(BrowserTabId, String)>,
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
@@ -253,6 +262,8 @@ impl RightPanel {
             browsers: Vec::new(),
             active_browser: None,
             pending_browser_urls: Vec::new(),
+            browsers_by_use: Vec::new(),
+            parked_titles: Vec::new(),
             connection,
             environment_id: None,
             annotations: None,
@@ -302,11 +313,6 @@ impl RightPanel {
     }
 
     #[cfg(test)]
-    pub(crate) fn database_for_test(&self) -> &Entity<DatabasePanel> {
-        &self.database
-    }
-
-    #[cfg(test)]
     pub(crate) fn browser_target(&self, id: BrowserTabId, cx: &App) -> Option<String> {
         self.browser(id).map(|b| b.read(cx).target_url().to_owned())
     }
@@ -318,6 +324,9 @@ impl RightPanel {
 
     /// Browser tab `id`'s title for the tab strip (`surfaceTitle`).
     pub fn browser_tab_title(&self, id: BrowserTabId, cx: &App) -> String {
+        if let Some((_, title)) = self.parked_titles.iter().find(|(tab, _)| *tab == id) {
+            return title.clone();
+        }
         match self.browser(id) {
             Some(browser) => browser.read(cx).tab_title(),
             None => self
@@ -394,9 +403,51 @@ impl RightPanel {
                 b.navigate(url, cx);
             }
         });
+        self.parked_titles.retain(|(tab, _)| *tab != id);
         self.browsers.push((id, browser.clone()));
         self.sync_surface_visibility(cx);
         browser
+    }
+
+    /// Closes the least recently shown hidden browsers beyond [`MAX_PARKED_BROWSERS`]. Their
+    /// tabs stay with address and title, and load again when shown. This bounds the Chromium
+    /// views of tabs left open in threads the user moved on from, or that went away.
+    fn evict_parked_browsers(&mut self, cx: &App) {
+        let shown = self.shown_browser();
+        let parked = self
+            .browsers_by_use
+            .iter()
+            .filter(|id| Some(**id) != shown)
+            .count();
+        let over = parked.saturating_sub(MAX_PARKED_BROWSERS);
+        let evicted: Vec<BrowserTabId> = self
+            .browsers_by_use
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != shown)
+            .take(over)
+            .collect();
+        for id in evicted {
+            self.browsers_by_use.retain(|tab| *tab != id);
+            let Some(index) = self.browsers.iter().position(|(tab, _)| *tab == id) else {
+                continue;
+            };
+            let (_, browser) = self.browsers.remove(index);
+            let page = browser.read(cx);
+            let (url, title) = (page.page_url(), page.tab_title());
+            // Dropping the last handle releases its frame and closes its Chromium view.
+            drop(browser);
+            self.pending_browser_urls.retain(|(tab, _)| *tab != id);
+            self.pending_browser_urls.push((id, url));
+            self.parked_titles.push((id, title));
+        }
+    }
+
+    /// The browser tab on screen, if one is.
+    fn shown_browser(&self) -> Option<BrowserTabId> {
+        (self.surface_visible && self.tab == RightPanelTab::Browser)
+            .then_some(self.active_browser)
+            .flatten()
     }
 
     /// Drops a closed browser tab's browser and its pending address. Only that tab: the shell
@@ -408,6 +459,8 @@ impl RightPanel {
         };
         self.browsers.retain(|(id, _)| *id != closed);
         self.pending_browser_urls.retain(|(id, _)| *id != closed);
+        self.browsers_by_use.retain(|id| *id != closed);
+        self.parked_titles.retain(|(id, _)| *id != closed);
         if self.active_browser == Some(closed) {
             self.active_browser = None;
         }
@@ -471,17 +524,6 @@ impl RightPanel {
     }
 
     /// Places an agent-provided SQL query in the Database editor without executing it.
-    /// SQL an agent sent while the shown thread was hidden: it waits for this project's
-    /// connections to load, then lands in the connection the editor picks.
-    pub fn hand_pending_database_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) {
-        let Some(project) = self.project_id.clone() else {
-            return;
-        };
-        self.database.update(cx, |panel, cx| {
-            panel.hand_pending_agent_sql(project, sql, cx)
-        });
-    }
-
     /// Shows `surface` with the panel visible or not, in that order: the surface it leaves and
     /// the one it picks see the new visibility, so a closed panel's browser runs no script.
     pub fn show_surface(
@@ -736,6 +778,13 @@ impl RightPanel {
             let show = show_browser && self.active_browser == Some(*id);
             browser.update(cx, |b, cx| b.set_visible(show, cx));
         }
+        if let Some(shown) = self.shown_browser()
+            && self.browser(shown).is_some()
+        {
+            self.browsers_by_use.retain(|id| *id != shown);
+            self.browsers_by_use.push(shown);
+        }
+        self.evict_parked_browsers(cx);
         self.refresh_shown_browser(cx);
         self.device
             .update(cx, |d, cx| d.set_visible(show_device, cx));

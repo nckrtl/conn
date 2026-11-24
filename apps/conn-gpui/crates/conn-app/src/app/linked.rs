@@ -805,21 +805,6 @@ impl ConnApp {
         cx.notify();
     }
 
-    /// Test helper: one shell event of linked environment `environment_id`, merged and synced
-    /// as the linked batch loop does.
-    #[cfg(test)]
-    pub(crate) fn apply_linked_shell_event_for_test(
-        &mut self,
-        environment_id: &str,
-        item: conn_contract::OrchestrationV2ShellStreamItem,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let _ = self.linked.shells.apply(environment_id, item);
-        self.remerge_linked_shells();
-        self.sync_chat(cx);
-        cx.notify();
-    }
-
     /// Test helper: the scratch workspace root a linked environment reported.
     #[cfg(test)]
     pub(crate) fn set_linked_scratch_root_for_test(&mut self, environment_id: &str, root: &str) {
@@ -1341,9 +1326,13 @@ impl ConnApp {
                 false
             }
             ClientEvent::Shell(item) => {
+                let removed = super::removed_thread(&item);
                 let Some(change) = self.linked.shells.apply(&environment_id, item) else {
                     return false;
                 };
+                if let Some(thread_id) = removed {
+                    self.release_thread_panel(&thread_id, cx);
+                }
                 if change.snapshot_required
                     && let Some(connection) = self.linked_connection(&environment_id)
                 {

@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use conn_client::{ClientEvent, Connection, ConnectionStatus, ServerConfig};
 use conn_state::{
-    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellListing, ShellState,
-    ThreadPanel, ThreadPanels, ThreadState,
+    LayoutState, PanelSurface, RightPanelTab, RightPanelTabs, ShellState, ThreadPanel,
+    ThreadPanels, ThreadState,
 };
 use conn_theme::{ShellGeometry, Tokens};
 use gpui_kit::{
@@ -272,8 +272,6 @@ pub(crate) struct ConnApp {
     /// The other threads' right panels; `right_panel_tabs` and `layout.right_panel_open` hold
     /// the shown thread's (`rightPanelStore.byThreadKey`).
     thread_panels: ThreadPanels,
-    /// The shown thread's [`ThreadPanel::pending_sql`].
-    pending_database_sql: Option<String>,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -693,7 +691,6 @@ impl ConnApp {
             // No tab until one is picked: opening the panel shows the surface launcher.
             right_panel_tabs: RightPanelTabs::default(),
             thread_panels: ThreadPanels::default(),
-            pending_database_sql: None,
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -1154,7 +1151,6 @@ impl ConnApp {
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
         self.sync_panel_owner();
-        self.reconcile_thread_panels(cx);
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
@@ -1228,11 +1224,6 @@ impl ConnApp {
             panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
             panel.show_surface(&surface, surface_visible, cx);
         });
-        // SQL an agent sent while this thread was hidden goes to its own project's editor now.
-        if let Some(sql) = self.pending_database_sql.take() {
-            self.right_panel
-                .update(cx, |panel, cx| panel.hand_pending_database_sql(sql, cx));
-        }
         let (
             model_instance,
             model,
@@ -1428,6 +1419,7 @@ impl ConnApp {
                 }
             }
             ClientEvent::Shell(item) => {
+                let removed = removed_thread(&item);
                 let change = self.shell.apply(item);
                 self.remerge_linked_shells();
                 self.offline.shell_changed();
@@ -1442,6 +1434,9 @@ impl ConnApp {
                     self.layout.selected_thread_id = None;
                 }
                 self.release_settled_drop();
+                if let Some(thread_id) = removed {
+                    self.release_thread_panel(&thread_id, cx);
+                }
                 if change.snapshot_required || !change.threads_changed.is_empty() {
                     self.drive_older_pages(cx);
                 }
@@ -3862,7 +3857,6 @@ impl ConnApp {
         let mut panel = ThreadPanel {
             tabs: std::mem::take(&mut self.right_panel_tabs),
             open: self.layout.right_panel_open,
-            pending_sql: self.pending_database_sql.take(),
         };
         if self.thread_panels.switch(owner, &mut panel) {
             self.right_panel_add_menu_open = false;
@@ -3873,61 +3867,39 @@ impl ConnApp {
         }
         self.right_panel_tabs = panel.tabs;
         self.layout.right_panel_open = panel.open;
-        self.pending_database_sql = panel.pending_sql;
     }
 
-    /// Compares the parked panels with the shell, primary and linked merged, after every change
-    /// (`removeThread`): a thread deleted or archived anywhere, by any client, and one a
-    /// snapshot no longer lists, takes its panel and browsers with it. The shown thread goes
-    /// once the user leaves it. Drafts never list, so their launch, discard and Undo decide.
-    fn reconcile_thread_panels(&mut self, cx: &mut Context<'_, Self>) {
-        // A reset or reconnecting shell lists nothing yet; that is not a delete.
-        if !self.shell.synchronized {
-            return;
-        }
-        let shell = &self.shell;
-        let released = self.thread_panels.reconcile(|id| {
-            if shell.archived_threads.iter().any(|t| t.id == id) {
-                ShellListing::Archived
-            } else if shell.find_thread(id).is_some() {
-                ShellListing::Active
-            } else {
-                ShellListing::Unlisted
-            }
-        });
-        for id in released {
-            self.right_panel.update(cx, |panel, cx| {
-                panel.close_surface(&PanelSurface::Browser(id), cx);
-            });
-        }
-    }
-
-    /// An agent's `panel_open` for a thread the user is not looking at: its tab, and SQL for
-    /// its Database panel, wait in that thread's panel (`preparePanel`, `openDatabaseQuery`).
-    /// Nothing reaches the shown thread's panel. Returns why the request did not run, if so.
+    /// An agent's `panel_open` for a thread the user is not looking at: its tab waits in that
+    /// thread's panel (`preparePanel`), and nothing reaches the shown thread's panel. A query
+    /// or an MCP action does not run, and the agent hears why. Returns that, if so.
     fn prepare_background_panel(
         &mut self,
         request: &conn_contract::AgentPanelRequest,
         not_on_thread: &str,
     ) -> Option<String> {
         use conn_contract::AgentPanelKind;
-        if request.panel == AgentPanelKind::Mcp
-            && (request.mcp_server.is_some() || request.mcp_call.is_some())
-        {
+        let acts = match request.panel {
+            AgentPanelKind::Mcp => request.mcp_server.is_some() || request.mcp_call.is_some(),
+            AgentPanelKind::Database => request.sql.is_some(),
+            _ => false,
+        };
+        if acts {
             return Some(not_on_thread.to_owned());
         }
-        let sql = request
-            .sql
-            .clone()
-            .filter(|_| request.panel == AgentPanelKind::Database);
-        let ran = sql.is_some() && request.run == Some(true);
         self.thread_panels.prepare(
             &request.thread_id,
             agent_panel_tab(request.panel),
-            sql,
             &mut self.right_panel_tabs,
         );
-        ran.then(|| format!("{not_on_thread} The query is in its Database panel."))
+        None
+    }
+
+    /// A deleted thread's right panel goes with it, and so do its browsers. Said outright by a
+    /// local delete or a `thread.removed`, never inferred from the shell no longer listing it.
+    /// A thread still on screen keeps its panel until the user leaves; the browser cap bounds it.
+    pub(crate) fn release_thread_panel(&mut self, thread_id: &str, cx: &mut Context<'_, Self>) {
+        self.sync_panel_owner();
+        self.forget_thread_panel(thread_id, cx);
     }
 
     /// A deleted thread's right panel goes with it, and so do its browsers.
@@ -3958,6 +3930,14 @@ impl ConnApp {
     #[cfg(test)]
     pub(crate) fn apply_event_for_test(&mut self, event: ClientEvent, cx: &mut Context<'_, Self>) {
         self.apply_event(event, None, cx);
+        self.sync_chat(cx);
+        cx.notify();
+    }
+
+    /// What a server switch does to the app's state, without opening a connection.
+    #[cfg(test)]
+    pub(crate) fn switch_server_state_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        self.reset_environment_state();
         self.sync_chat(cx);
         cx.notify();
     }
@@ -5003,7 +4983,10 @@ impl ConnApp {
             "delete thread",
             crate::commands::delete_thread(thread_id),
             cx,
-            move |app, cx| app.forget_thread_draft(&deleted, cx),
+            move |app, cx| {
+                app.forget_thread_draft(&deleted, cx);
+                app.release_thread_panel(&deleted, cx);
+            },
         );
     }
 
@@ -6655,24 +6638,9 @@ impl ConnApp {
         (connection, events)
     }
 
-    /// Switches the active live `conn-server` connection to a new [`ServerConfig`] (e.g. an Orbit
-    /// Node or Instance), cleanly resetting shell/thread state and updating chat & right panels.
-    fn connect_to_server_config(
-        &mut self,
-        config: ServerConfig,
-        orbit_server_id: Option<String>,
-        label: Option<String>,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.connection_gen = self.connection_gen.wrapping_add(1);
-        let generation = self.connection_gen;
-        self.server_url = Some(config.http_base_url.to_string());
-        self.server_label = label;
-        self.status = Some(ConnectionStatus::Connecting);
-        self.orbit.active_server_id = orbit_server_id.clone();
-        self.orbit.connecting_server_id = orbit_server_id.clone();
-        self.orbit.notice = None;
-
+    /// Forgets the old server's shell, threads and selection when the app switches servers.
+    /// Right-panel tabs stay: they are not the server's, and the thread may come back.
+    fn reset_environment_state(&mut self) {
         self.offline = offline::Offline::new();
         self.reset_linked_environments();
         self.shell = ShellState::default();
@@ -6690,6 +6658,26 @@ impl ConnApp {
         // Drafts belong to their environment; this connection ends any launch in flight.
         self.park_active_draft();
         self.drafts.clear_launching();
+    }
+
+    /// Switches the active live `conn-server` connection to a new [`ServerConfig`] (e.g. an Orbit
+    /// Node or Instance), cleanly resetting shell/thread state and updating chat & right panels.
+    fn connect_to_server_config(
+        &mut self,
+        config: ServerConfig,
+        orbit_server_id: Option<String>,
+        label: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.connection_gen = self.connection_gen.wrapping_add(1);
+        let generation = self.connection_gen;
+        self.server_url = Some(config.http_base_url.to_string());
+        self.server_label = label;
+        self.status = Some(ConnectionStatus::Connecting);
+        self.orbit.active_server_id = orbit_server_id.clone();
+        self.orbit.connecting_server_id = orbit_server_id.clone();
+        self.orbit.notice = None;
+        self.reset_environment_state();
 
         let (connection, events) = Self::start_connection(config, self.device_name());
         Self::pump_events(generation, orbit_server_id, events, cx);
@@ -7273,6 +7261,18 @@ pub(crate) fn start_frame_log(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// The thread a shell event says was deleted.
+pub(crate) fn removed_thread(
+    item: &conn_contract::OrchestrationV2ShellStreamItem,
+) -> Option<String> {
+    match item {
+        conn_contract::OrchestrationV2ShellStreamItem::ThreadRemoved(removed) => {
+            Some(removed.thread_id.clone())
+        }
+        _ => None,
+    }
 }
 
 /// The right-panel tab an agent's `panel_open` request shows.

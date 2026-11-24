@@ -3699,136 +3699,140 @@ fn open_thread_browser(
     (id, page)
 }
 
-/// A delete or archive from any client reaches this one as a shell event, and the thread's
-/// browsers go with it. An archived thread the user still looks at keeps its page until they
-/// leave it.
+/// `thread.removed` from any client releases the thread's browsers. Nothing else does: an
+/// archive, a server switch or a workspace filter only changes what the shell lists, and a
+/// thread missing from it is not known to be gone.
 #[gpui_kit::test]
-fn shell_events_release_deleted_and_archived_threads_browsers(cx: &mut TestAppContext) {
+fn only_a_removed_thread_releases_its_browsers(cx: &mut TestAppContext) {
     let (window, app) = mount_two_thread_app(cx);
     let (_, deleted) = open_thread_browser(cx, window, &app, "thread-selected");
     let (_, archived) = open_thread_browser(cx, window, &app, "thread-pinned");
-    let (_, shown) = open_thread_browser(cx, window, &app, "thread-other");
-    let shell_thread = |cx: &mut TestAppContext, id: &str| {
-        cx.update(|cx| app.read(cx).shell().find_thread(id).cloned())
-            .expect("the thread is listed")
-    };
-    let pinned = shell_thread(cx, "thread-pinned");
-    let other = shell_thread(cx, "thread-other");
+    let (_, filtered) = open_thread_browser(cx, window, &app, "thread-other");
+    let (_, shown) = open_thread_browser(cx, window, &app, "thread-waiting");
+    let pinned = cx
+        .update(|cx| app.read(cx).shell().find_thread("thread-pinned").cloned())
+        .expect("the thread is listed");
 
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.apply_event_for_test(thread_removed("thread-selected"), cx);
             app.apply_event_for_test(thread_archived(&pinned), cx);
-            app.apply_event_for_test(thread_archived(&other), cx);
+            // The filter hides thread-other's project from the sidebar.
+            app.select_workspace(Some("proj-parity".to_owned()), cx);
         })
     });
     render_frames(cx, window);
     assert!(
         deleted.upgrade().is_none(),
-        "a deleted thread's browser goes"
+        "a removed thread's browser goes"
     );
+    assert!(archived.upgrade().is_some(), "an archive closes nothing");
     assert!(
-        archived.upgrade().is_none(),
-        "an archived thread's browser goes"
-    );
-    assert!(
-        shown.upgrade().is_some(),
-        "the archived thread on screen keeps its page"
+        filtered.upgrade().is_some(),
+        "a workspace filter closes nothing"
     );
 
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-waiting", cx)));
+    // A server switch empties the shell and the selection.
+    cx.update(|cx| app.update(cx, |app, cx| app.switch_server_state_for_test(cx)));
     render_frames(cx, window);
-    assert!(
-        shown.upgrade().is_none(),
-        "leaving the archived thread lets its page go"
-    );
+    for (page, what) in [
+        (&archived, "archived"),
+        (&filtered, "filtered"),
+        (&shown, "shown"),
+    ] {
+        assert!(
+            page.upgrade().is_some(),
+            "a server switch closes nothing ({what})"
+        );
+    }
 }
 
-/// A linked environment deletes the thread the user has open. Its panel stays while it shows,
-/// and goes once the user switches away.
+/// Browsers parked in tabs that do not show stay live up to a cap; past it the least recently
+/// shown one closes. Its tab stays with address and title, and loads the page again when shown.
 #[gpui_kit::test]
-fn a_linked_delete_of_the_open_thread_releases_its_panel_after_leaving(cx: &mut TestAppContext) {
+fn parked_browsers_beyond_the_cap_close_least_recently_shown_first(cx: &mut TestAppContext) {
     let (window, app) = mount_two_thread_app(cx);
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.add_linked_shell_for_test(
-                "mini",
-                "mini",
-                linked_mini_shell("/work/mini", "Mini"),
-                cx,
-            );
-        })
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    // One shown and six parked fill the cap; the eighth tab pushes the first one out.
+    let urls: Vec<String> = (1..=8)
+        .map(|n| format!("https://page{n}.example/"))
+        .collect();
+    let mut pages = Vec::new();
+    for url in &urls {
+        cx.update(|cx| app.update(cx, |app, cx| app.open_browser_tab(url.clone(), false, cx)));
+        render_frames(cx, window);
+        let id = cx
+            .update(|cx| app.read(cx).right_panel_tabs().browser_ids().last())
+            .expect("a browser tab is open");
+        let page = cx
+            .update(|cx| app.read(cx).browser_weak_for_test(id, cx))
+            .expect("the shown tab has a browser");
+        pages.push((id, page));
+    }
+    assert!(
+        pages[0].1.upgrade().is_none(),
+        "the least recently shown browser closed"
+    );
+    assert!(pages[1..].iter().all(|(_, page)| page.upgrade().is_some()));
+    assert_eq!(
+        cx.update(|cx| app.read(cx).right_panel_tabs().browser_ids().count()),
+        8,
+        "every tab stays"
+    );
+    let (first, _) = pages[0];
+    let title = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .browser_tab_title(first, cx)
     });
-    let (_, page) = open_thread_browser(cx, window, &app, "thread-mini");
-    let removed = match thread_removed("thread-mini") {
-        ClientEvent::Shell(item) => item,
-        _ => unreachable!("thread_removed is a shell event"),
-    };
+    assert_eq!(title, "page1.example", "the closed tab keeps its title");
+
+    // Shown again, it loads its address in a new browser, and the next oldest closes.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
-            app.apply_linked_shell_event_for_test("mini", removed, cx)
+            app.select_right_panel_surface(conn_state::PanelSurface::Browser(first), cx)
         })
     });
     render_frames(cx, window);
-    assert!(
-        page.upgrade().is_some(),
-        "the thread on screen keeps its page"
+    assert_eq!(
+        cx.update(|cx| app.read(cx).browser_target_for_test(first, cx))
+            .as_deref(),
+        Some(urls[0].as_str())
     );
+    assert!(
+        pages[1].1.upgrade().is_none(),
+        "now the second tab is the oldest"
+    );
+    assert!(pages[2..].iter().all(|(_, page)| page.upgrade().is_some()));
+}
 
+/// An agent's query for a thread the user is not looking at does not run and leaves nothing
+/// behind: it hears that it is not on its thread (`preparePanel`'s Database case).
+#[gpui_kit::test]
+fn a_background_database_query_is_refused(cx: &mut TestAppContext) {
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    let request: conn_contract::AgentPanelRequest = match from_json(json!({
+        "requestId": "req-sql",
+        "threadId": "thread-other",
+        "panel": "database",
+        "sql": "select 2",
+        "focusWindow": false,
+    })) {
+        Ok(request) => request,
+        Err(err) => panic!("AgentPanelRequest failed: {err}"),
+    };
+    let error =
+        cx.update(|cx| app.update(cx, |app, _| app.prepare_background_panel_for_test(&request)));
+    assert_eq!(error.as_deref(), Some("not on thread"));
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
     render_frames(cx, window);
     assert!(
-        page.upgrade().is_none(),
-        "leaving the deleted thread releases its panel"
+        cx.update(|cx| app.read(cx).right_panel_tabs().tabs().is_empty()),
+        "no Database tab waits for it"
     );
-}
-
-/// A delete missed while disconnected: the next snapshot replaces the shell without the thread,
-/// and its panel goes.
-#[gpui_kit::test]
-fn a_snapshot_without_a_thread_releases_its_panel(cx: &mut TestAppContext) {
-    let (window, app) = mount_two_thread_app(cx);
-    let (_, missed) = open_thread_browser(cx, window, &app, "thread-pinned");
-    let (_, kept) = open_thread_browser(cx, window, &app, "thread-other");
-    let snapshot = cx.update(|cx| {
-        let shell = app.read(cx).shell();
-        let threads: Vec<_> = shell
-            .threads
-            .iter()
-            .filter(|t| t.id != "thread-pinned")
-            .cloned()
-            .collect();
-        json!({
-            "kind": "snapshot",
-            "snapshot": {
-                "schemaVersion": 1,
-                "snapshotSequence": 20_000,
-                "threads": threads,
-                "archivedThreads": [],
-                "projects": shell.projects,
-            },
-        })
-    });
-    let snapshot = match from_json(snapshot) {
-        Ok(item) => ClientEvent::Shell(item),
-        Err(err) => panic!("snapshot failed: {err}"),
-    };
-    let synchronized = match from_json(json!({ "kind": "synchronized" })) {
-        Ok(item) => ClientEvent::Shell(item),
-        Err(err) => panic!("synchronized failed: {err}"),
-    };
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.apply_event_for_test(snapshot, cx);
-            app.apply_event_for_test(synchronized, cx);
-        })
-    });
-    render_frames(cx, window);
-    assert!(
-        missed.upgrade().is_none(),
-        "the thread the snapshot dropped loses its panel"
-    );
-    assert!(kept.upgrade().is_some());
 }
 
 /// Switching to a thread whose panel is closed, with its browser tab selected, runs no
@@ -3935,135 +3939,6 @@ fn hidden_browsers_get_no_annotation_scripts(cx: &mut TestAppContext) {
         "the page catches up on the queue once it shows"
     );
     assert_eq!(project(cx, &other).as_deref(), Some("proj-other"));
-}
-
-/// A connection the Database panel lists, by id and source.
-fn db_connection(
-    id: &str,
-    source: conn_desktop::database::api::ConnectionSource,
-) -> conn_desktop::database::api::PanelConnection {
-    let mut connection = conn_desktop::database::api::new_connection(None);
-    connection.id = id.to_owned();
-    connection.name = id.to_owned();
-    connection.source = source;
-    connection
-}
-
-fn background_sql_request(thread: &str, sql: &str) -> conn_contract::AgentPanelRequest {
-    match from_json(json!({
-        "requestId": format!("req-{thread}"),
-        "threadId": thread,
-        "panel": "database",
-        "sql": sql,
-        "run": true,
-        "focusWindow": false,
-    })) {
-        Ok(request) => request,
-        Err(err) => panic!("AgentPanelRequest failed: {err}"),
-    }
-}
-
-/// An agent in thread B sends SQL while the user looks at thread A's Database panel. A's editor
-/// gets nothing. B's SQL waits until B shows and B's project has loaded its connections, then
-/// lands in the connection B's editor picks: the remembered Vault one, not the saved one that
-/// is listed before the Vault list arrives (`DatabasePanel` `takePending`). With no connection
-/// at all it keeps waiting.
-#[gpui_kit::test]
-fn background_database_sql_waits_for_its_own_thread(cx: &mut TestAppContext) {
-    use conn_desktop::database::api::ConnectionSource;
-    let (window, app) = mount_two_thread_app(cx);
-    let database = cx.update(|cx| {
-        app.read(cx)
-            .right_panel_for_test()
-            .read(cx)
-            .database_for_test()
-            .clone()
-    });
-    let writes =
-        |cx: &mut TestAppContext| cx.update(|cx| database.read(cx).agent_sql_writes().to_vec());
-    let finish_load = |cx: &mut TestAppContext, connections| {
-        cx.update(|cx| {
-            database.update(cx, |db, cx| db.finish_vault_load_for_test(connections, cx));
-        });
-    };
-    cx.update(|cx| {
-        database.update(cx, |db, _| {
-            db.seed_connections_for_test(
-                "proj-other",
-                db_connection("saved-1", ConnectionSource::Manual),
-                "vault:db-1",
-            );
-        });
-        app.update(cx, |app, cx| {
-            app.select_thread("thread-selected", cx);
-            app.select_right_panel_tab(conn_state::RightPanelTab::Database, cx);
-        });
-    });
-    render_frames(cx, window);
-    finish_load(cx, Vec::new());
-    let error = cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.prepare_background_panel_for_test(&background_sql_request(
-                "thread-other",
-                "select 2",
-            ))
-        })
-    });
-    assert!(error.is_some(), "a query for another thread does not run");
-    render_frames(cx, window);
-    assert!(writes(cx).is_empty(), "A's Database editor is untouched");
-
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
-    render_frames(cx, window);
-    assert!(
-        writes(cx).is_empty(),
-        "the SQL waits while B's Vault list loads"
-    );
-    assert_eq!(
-        cx.update(|cx| app.read(cx).right_panel_tabs().active().cloned()),
-        Some(conn_state::PanelSurface::Kind(
-            conn_state::RightPanelTab::Database
-        ))
-    );
-    finish_load(
-        cx,
-        vec![db_connection("vault:db-1", ConnectionSource::Vault)],
-    );
-    assert_eq!(
-        writes(cx),
-        [(
-            "proj-other".to_owned(),
-            "vault:db-1".to_owned(),
-            "select 2".to_owned()
-        )],
-        "the remembered Vault connection gets the SQL once it has loaded"
-    );
-
-    // Thread A's project has no connection: its SQL keeps waiting rather than going anywhere.
-    let _ = cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.prepare_background_panel_for_test(&background_sql_request(
-                "thread-selected",
-                "select 3",
-            ))
-        })
-    });
-    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
-    render_frames(cx, window);
-    finish_load(cx, Vec::new());
-    assert_eq!(writes(cx).len(), 1, "no connection, no write");
-    finish_load(
-        cx,
-        vec![db_connection("vault:db-a", ConnectionSource::Vault)],
-    );
-    assert_eq!(
-        writes(cx).last().cloned(),
-        Some((
-            "proj-parity".to_owned(),
-            "vault:db-a".to_owned(),
-            "select 3".to_owned()
-        ))
-    );
 }
 
 /// A thread with no tabs shows the launcher, never another thread's browser.

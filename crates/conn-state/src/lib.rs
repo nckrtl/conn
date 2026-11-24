@@ -91,7 +91,7 @@ pub use crate::order_keys::{
     top_of_pinned_run_key,
 };
 pub use crate::panel_tabs::{
-    ClosedTab, RightPanelTabs, ShellListing, ThreadPanel, ThreadPanels, browser_tab_title,
+    ClosedTab, RightPanelTabs, ThreadPanel, ThreadPanels, browser_tab_title,
 };
 pub use crate::question::{
     clamp_context, markdown_preview_text, seed_user_input_drafts, split_recommended_label,

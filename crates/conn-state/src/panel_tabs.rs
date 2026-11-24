@@ -2,7 +2,7 @@
 //! the one that shows. Browser tabs are peers in that list (`browser:<tabId>`), so any number
 //! of them can be open; every other kind opens once.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::layout::{BrowserTabId, PanelSurface, RightPanelTab};
 
@@ -142,9 +142,6 @@ impl RightPanelTabs {
 pub struct ThreadPanel {
     pub tabs: RightPanelTabs,
     pub open: bool,
-    /// SQL an agent sent while the thread was not shown, for its Database panel once it shows
-    /// (`databaseStore.setPending`).
-    pub pending_sql: Option<String>,
 }
 
 /// Every thread's right panel, as `rightPanelStore.byThreadKey`. The shown thread's panel lives
@@ -155,18 +152,6 @@ pub struct ThreadPanels {
     owner: Option<String>,
     parked: HashMap<String, ThreadPanel>,
     next_browser: BrowserTabId,
-    /// Owners the shell has listed. Only these can be gone from it: a draft never lists, and
-    /// a thread just launched from one is not listed yet.
-    listed: HashSet<String>,
-}
-
-/// Where the shell lists a panel's owner, for [`ThreadPanels::reconcile`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShellListing {
-    Active,
-    Archived,
-    /// Not in the shell: deleted, if it was listed before; else a draft or a new thread.
-    Unlisted,
 }
 
 impl ThreadPanels {
@@ -189,7 +174,7 @@ impl ThreadPanels {
         let old = std::mem::replace(current, next);
         self.next_browser = self.next_browser.max(old.tabs.next_browser);
         if let Some(key) = self.owner.take()
-            && (old.open || !old.tabs.tabs().is_empty() || old.pending_sql.is_some())
+            && (old.open || !old.tabs.tabs().is_empty())
         {
             self.parked.insert(key, old);
         }
@@ -200,14 +185,7 @@ impl ThreadPanels {
 
     /// Opens a tab of kind `tab` on a thread that is not shown, so it is there when the thread
     /// shows (`preparePanel`). `shown` is the shown thread's tabs, which share the id range.
-    /// `sql` waits for that thread's Database panel (`openDatabaseQuery`).
-    pub fn prepare(
-        &mut self,
-        owner: &str,
-        tab: RightPanelTab,
-        sql: Option<String>,
-        shown: &mut RightPanelTabs,
-    ) {
+    pub fn prepare(&mut self, owner: &str, tab: RightPanelTab, shown: &mut RightPanelTabs) {
         debug_assert_ne!(
             self.owner.as_deref(),
             Some(owner),
@@ -217,9 +195,6 @@ impl ThreadPanels {
         panel.tabs.next_browser = self.next_browser.max(shown.next_browser);
         panel.tabs.open(tab);
         panel.open = true;
-        if sql.is_some() {
-            panel.pending_sql = sql;
-        }
         self.next_browser = panel.tabs.next_browser;
         shown.next_browser = self.next_browser;
     }
@@ -233,33 +208,9 @@ impl ThreadPanels {
         }
     }
 
-    /// Compares every panel with the shell (`removeThread`). A parked panel whose thread was
-    /// listed and is now gone, or is archived, is dropped; its browser tabs come back for the
-    /// caller to close. The shown owner is never dropped here: once the user leaves it, it is
-    /// parked, and the next reconcile decides.
-    pub fn reconcile(&mut self, listing: impl Fn(&str) -> ShellListing) -> Vec<BrowserTabId> {
-        if let Some(owner) = &self.owner
-            && listing(owner) != ShellListing::Unlisted
-        {
-            self.listed.insert(owner.clone());
-        }
-        let mut gone = Vec::new();
-        for owner in self.parked.keys() {
-            match listing(owner) {
-                ShellListing::Active => {
-                    self.listed.insert(owner.clone());
-                }
-                ShellListing::Archived => gone.push(owner.clone()),
-                ShellListing::Unlisted if self.listed.contains(owner) => gone.push(owner.clone()),
-                ShellListing::Unlisted => {}
-            }
-        }
-        gone.iter().flat_map(|owner| self.forget(owner)).collect()
-    }
-
-    /// Drops a parked panel and returns its browser tabs, whose browsers the caller closes.
+    /// Drops a deleted thread's or expired draft's parked panel and returns its browser tabs,
+    /// whose browsers the caller closes.
     pub fn forget(&mut self, owner: &str) -> Vec<BrowserTabId> {
-        self.listed.remove(owner);
         self.parked
             .remove(owner)
             .map(|panel| panel.tabs.browser_ids().collect())
@@ -389,15 +340,7 @@ mod tests {
         shown.open = true;
         let a = shown.clone();
         // An agent opens a tab on a thread the user is not looking at.
-        panels.prepare("env:c", RightPanelTab::Browser, None, &mut shown.tabs);
-        // SQL for a hidden thread waits for that thread, not the shown one.
-        panels.prepare(
-            "env:d",
-            RightPanelTab::Database,
-            Some("select 1".into()),
-            &mut shown.tabs,
-        );
-        assert_eq!(shown.pending_sql, None);
+        panels.prepare("env:c", RightPanelTab::Browser, &mut shown.tabs);
 
         assert!(panels.switch(Some("env:b".into()), &mut shown));
         assert!(
@@ -421,12 +364,6 @@ mod tests {
             panic!("one prepared tab")
         };
         assert!(![&a1, &a2, &b1].contains(&c1));
-        panels.switch(Some("env:d".into()), &mut shown);
-        assert_eq!(shown.pending_sql.as_deref(), Some("select 1"));
-        assert_eq!(
-            shown.tabs.active(),
-            Some(&PanelSurface::Kind(RightPanelTab::Database))
-        );
 
         // Deleting a thread hands back its browsers to close.
         let forgotten: Vec<_> = panels
@@ -436,41 +373,6 @@ mod tests {
             .collect();
         assert_eq!(forgotten, [b1]);
         assert!(panels.forget("env:b").is_empty());
-    }
-
-    #[test]
-    fn reconcile_drops_panels_of_threads_the_shell_no_longer_lists() {
-        use ShellListing::{Active, Archived, Unlisted};
-        let mut panels = ThreadPanels::default();
-        let mut shown = ThreadPanel::default();
-        let park = |panels: &mut ThreadPanels, shown: &mut ThreadPanel, owner: &str| {
-            panels.switch(Some(owner.into()), shown);
-            let PanelSurface::Browser(id) = shown.tabs.add(RightPanelTab::Browser) else {
-                panic!("the add menu opens browser tabs")
-            };
-            id
-        };
-        let deleted = park(&mut panels, &mut shown, "deleted");
-        let archived = park(&mut panels, &mut shown, "archived");
-        park(&mut panels, &mut shown, "kept");
-        park(&mut panels, &mut shown, "draft");
-        let shown_id = park(&mut panels, &mut shown, "shown");
-        let all_listed = |id: &str| if id == "draft" { Unlisted } else { Active };
-        assert!(panels.reconcile(all_listed).is_empty());
-
-        // A snapshot without "deleted", "archived" in the archive, and the shown thread gone.
-        let after = |id: &str| match id {
-            "deleted" | "shown" | "draft" => Unlisted,
-            "archived" => Archived,
-            _ => Active,
-        };
-        let mut released = panels.reconcile(after);
-        released.sort_unstable();
-        assert_eq!(released, [deleted, archived], "a draft never listed stays");
-        // Leaving the gone shown thread parks it; the next reconcile drops it.
-        panels.switch(Some("kept".into()), &mut shown);
-        assert_eq!(panels.reconcile(after), [shown_id]);
-        assert!(panels.reconcile(after).is_empty());
     }
 
     #[test]

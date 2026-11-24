@@ -423,6 +423,11 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// The page's address now, else the one it was asked to load.
+    pub(crate) fn page_url(&self) -> String {
+        self.current_url()
+    }
+
     fn current_url(&self) -> String {
         self.view
             .borrow()

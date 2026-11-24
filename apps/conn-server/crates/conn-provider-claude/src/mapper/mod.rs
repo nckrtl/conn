@@ -983,6 +983,10 @@ impl<E: Env> Mapper<E> {
                 };
                 if let Some(task_id) = &msg.task_id {
                     self.wakes.unmark_backgrounded(task_id);
+                    if self.turn.is_none() {
+                        // Its outcome supersedes a held restart: replaying it would reopen the task.
+                        self.wake.retain(|held| !is_task_started(held, task_id));
+                    }
                 }
                 self.on_task_notification(&msg, out);
                 self.apply_roster(&msg, out);
@@ -2929,6 +2933,11 @@ fn result_for_other_turn(
 }
 
 /// Root frames that mean Claude is working with no turn open.
+fn is_task_started(message: &Inbound, task_id: &str) -> bool {
+    matches!(message, Inbound::System(m)
+        if m.subtype == "task_started" && m.task_id.as_deref() == Some(task_id))
+}
+
 fn is_wake_frame(message: &Inbound) -> bool {
     match message {
         Inbound::Assistant(m) => m.parent_tool_use_id.is_none(),

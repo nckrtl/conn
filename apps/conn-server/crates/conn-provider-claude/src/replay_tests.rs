@@ -993,3 +993,50 @@ fn a_failed_continuation_stops_the_workflow_it_took_over() {
         assert!(!mapper.workflow_stop(&thread_json, "wf1", true), "{case}");
     }
 }
+
+/// While the root is idle, Claude restarts a running workflow and then reports it done.
+/// The continuation that the completion asks for must not replay the superseded start and
+/// reopen the finished workflow.
+#[test]
+fn an_idle_restart_then_completion_leaves_the_workflow_finished() {
+    let started = json!({"type":"system", "subtype":"task_started", "task_id":"wf1",
+        "tool_use_id":"run1", "task_type":"local_workflow", "workflow_name":"Review",
+        "description":"Review", "prompt":"workflow()"});
+    let completed = json!({"type":"system", "subtype":"task_notification", "task_id":"wf1",
+        "tool_use_id":"run1", "status":"completed", "summary":"Reviewed."});
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    let thread = provider_thread("idle-restart-workflow");
+    mapper.begin_turn(
+        &turn_input(1, &thread, "workflow", "full-access"),
+        "default",
+    );
+    mapper.handle(Inbound::from_value(started.clone()));
+    mapper.handle(Inbound::from_value(
+        json!({"type":"result", "subtype":"success",
+        "is_error":false, "result":"Launched.", "duration_ms":1, "duration_api_ms":1,
+        "num_turns":1, "usage":{}, "modelUsage":{}, "total_cost_usd":0}),
+    ));
+    let mut outs = Vec::new();
+    for frame in [started, completed] {
+        let step = mapper.handle(Inbound::from_value(frame));
+        let wake = step
+            .iter()
+            .any(|o| matches!(o, Out::Event(ProviderEvent::ContinuationRequested(_))));
+        outs.extend(step);
+        if wake {
+            outs.extend(
+                mapper.begin_continuation(&turn_input(2, &thread, "", "full-access"), "default"),
+            );
+        }
+    }
+    let last = outs
+        .iter()
+        .filter_map(|o| match o {
+            Out::Event(event) => Some(serde_json::to_value(event).unwrap()),
+            _ => None,
+        })
+        .rfind(|e| e["subagent"]["nativeTaskRef"]["nativeId"] == "wf1")
+        .unwrap();
+    assert_eq!(last["subagent"]["status"], "completed");
+    assert!(!mapper.has_pending_background_work());
+}

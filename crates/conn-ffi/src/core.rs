@@ -189,6 +189,18 @@ impl ConnCore {
         listener: Arc<dyn CoreListener>,
         orbit_server_id: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
+        Self::start_checked(server_url, credential, listener, orbit_server_id, None)
+    }
+
+    /// [`Self::start`], sending the bearer only to a server whose descriptor names
+    /// `expected_environment` (a manual server's saved identity).
+    pub(crate) fn start_checked(
+        server_url: String,
+        credential: FfiCredential,
+        listener: Arc<dyn CoreListener>,
+        orbit_server_id: Option<String>,
+        expected_environment: Option<String>,
+    ) -> Result<Arc<Self>, FfiError> {
         let http_base_url = parse_server_url(&server_url)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -221,6 +233,7 @@ impl ConnCore {
             &runtime_handle,
             StartOptions {
                 stop_on_auth_rejection: orbit_server_id.is_some(),
+                expected_environment,
             },
         );
         connection.subscribe_shell_with_idle_subagents();
@@ -262,6 +275,11 @@ impl ConnCore {
     /// True once the server refused this connection's bearer at the WebSocket handshake.
     pub(crate) fn auth_rejected(&self) -> bool {
         self.connection.auth_rejected()
+    }
+
+    /// True when another environment answered at this server's address (the bearer wasn't sent).
+    pub(crate) fn identity_changed(&self) -> bool {
+        self.connection.identity_mismatch().is_some()
     }
 
     /// True when this connection started from a saved bearer rather than a pairing code.

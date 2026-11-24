@@ -38,11 +38,26 @@ final class CoreStore {
     let scope: String
     private(set) var linked: [String: CoreStore] = [:]
 
+    /// The connection status the workspace shows inline. Once this scope has connected, a
+    /// reconnect or re-pair shows here, so the workspace and its open thread stay up.
     var status: FfiConnectionStatus? {
-        if case let .live(status) = state?.phase { status } else { nil }
+        switch state?.phase {
+        case let .live(status): status
+        case .connecting where hasConnected: .connecting
+        case let .failed(message, _, _) where hasConnected: .failed(message: message)
+        default: nil
+        }
     }
 
-    var isPaired: Bool { status != nil }
+    var isPaired: Bool {
+        if case .live = state?.phase { true } else { false }
+    }
+
+    /// Rust: this scope has had a working connection this launch.
+    var hasConnected: Bool { state?.hasConnected ?? false }
+
+    /// The workspace, rather than the Orbit or pairing screen: connected now, or before.
+    var showsWorkspace: Bool { isPaired || hasConnected }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
     var environmentId: String? { state?.environmentId }
@@ -405,8 +420,12 @@ final class CoreStore {
     /// environment; any other link opens right away in its environment's own scope.
     func open(_ link: ThreadLink) {
         defer { pendingLink = link }
-        if linkedStore(for: link.environmentId) != nil { return }
-        if session?.routeLink(environmentId: link.environmentId) == .here { return }
+        if let child = linkedStore(for: link.environmentId) {
+            // Tries again if that environment's last attempt failed.
+            _ = child.session?.openLink(environmentId: link.environmentId)
+            return
+        }
+        if session?.openLink(environmentId: link.environmentId) == .here { return }
         guard scope.isEmpty else { return }
         let child = CoreStore(scope: link.environmentId)
         linked[link.environmentId] = child

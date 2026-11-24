@@ -283,16 +283,40 @@ impl DriverState {
     }
 }
 
-/// What the driver does when the server refuses the WebSocket handshake with 401 or 403.
-pub(crate) struct AuthRejection {
-    /// Stop with [`ConnectionStatus::Failed`] instead of retrying.
-    pub(crate) stop: bool,
+/// Checks the driver makes around the WebSocket handshake ([`crate::StartOptions`]).
+pub(crate) struct Guards {
+    /// On a 401 or 403 handshake, stop with [`ConnectionStatus::Failed`] instead of retrying.
+    pub(crate) stop_on_auth_rejection: bool,
     /// Set on every such refusal; read through [`crate::Connection::auth_rejected`].
-    pub(crate) seen: Arc<AtomicBool>,
+    pub(crate) auth_seen: Arc<AtomicBool>,
+    /// Before each handshake, the server's descriptor must name this environment, or the
+    /// bearer is never sent.
+    pub(crate) expected_environment: Option<String>,
+    /// The environment a server named instead; read through
+    /// [`crate::Connection::identity_mismatch`].
+    pub(crate) mismatch: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// The message [`ConnectionStatus::Failed`] carries after an auth rejection.
 pub(crate) const AUTH_REJECTED_MESSAGE: &str = "The server rejected this device's sign-in.";
+
+/// The message [`ConnectionStatus::Failed`] carries when another environment answers.
+pub(crate) const IDENTITY_CHANGED_MESSAGE: &str =
+    "Another environment answers at this server's address.";
+
+/// Reads the server's environment id (`/.well-known/t3/environment`), without credentials.
+/// `None` when the server can't be reached or doesn't say.
+async fn fetch_environment(http: &reqwest::Client, base: &url::Url) -> Option<String> {
+    let url = base.join(".well-known/t3/environment").ok()?;
+    let response = http
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    let body: Value = response.json().await.ok()?;
+    body.get("environmentId")?.as_str().map(str::to_owned)
+}
 
 fn is_auth_rejection(err: &tokio_tungstenite::tungstenite::Error) -> bool {
     matches!(
@@ -308,7 +332,7 @@ pub(crate) async fn run(
     http: reqwest::Client,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     events_tx: mpsc::Sender<ClientEvent>,
-    auth_rejection: AuthRejection,
+    guards: Guards,
 ) {
     let mut state = DriverState::new(config, shared_bearer, http);
 
@@ -344,6 +368,34 @@ pub(crate) async fn run(
                 continue;
             }
         };
+
+        if let Some(expected) = guards.expected_environment.as_deref() {
+            match fetch_environment(&state.http, &state.config.http_base_url).await {
+                Some(found) if found == expected => {}
+                Some(found) => {
+                    warn!("conn-client: {found} answers where {expected} was expected");
+                    if let Ok(mut slot) = guards.mismatch.lock() {
+                        *slot = Some(found);
+                    }
+                    state.fail_all_calls(|| {
+                        ClientError::Connection(IDENTITY_CHANGED_MESSAGE.to_owned())
+                    });
+                    let _ = events_tx
+                        .send(ClientEvent::Status(ConnectionStatus::Failed(
+                            IDENTITY_CHANGED_MESSAGE.to_owned(),
+                        )))
+                        .await;
+                    return;
+                }
+                // Not reachable (or silent): no handshake, so the bearer stays here.
+                None => {
+                    if !wait_backoff(&mut state, &mut cmd_rx, &events_tx).await {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
 
         let ws_request = match build_ws_request(&state.config.http_base_url, &token) {
             Ok(req) => req,
@@ -402,8 +454,8 @@ pub(crate) async fn run(
             Err(err) => {
                 debug!("conn-client websocket connect failed: {err}");
                 if is_auth_rejection(&err) {
-                    auth_rejection.seen.store(true, Ordering::Release);
-                    if auth_rejection.stop {
+                    guards.auth_seen.store(true, Ordering::Release);
+                    if guards.stop_on_auth_rejection {
                         state
                             .fail_all_calls(|| ClientError::Auth(AUTH_REJECTED_MESSAGE.to_owned()));
                         let _ = events_tx

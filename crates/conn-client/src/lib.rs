@@ -267,7 +267,38 @@ impl Connection {
         &self,
         query: conn_contract::source::DefinitionRequest,
     ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
-        let url = self.http_base_url.join("api/files/definition")?;
+        self.navigation_request("api/files/definition", query).await
+    }
+
+    pub async fn first_source_definition(
+        &self,
+        query: conn_contract::source::DefinitionRequest,
+        hover: bool,
+    ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
+        let endpoint = if hover {
+            "api/files/definition?mode=hover"
+        } else {
+            "api/files/definition?mode=first"
+        };
+        self.navigation_request(endpoint, query).await
+    }
+
+    pub async fn prepare_php_navigation(
+        &self,
+        doc: conn_contract::source::PreparePhpNavigation,
+    ) -> Result<(), ClientError> {
+        self.navigation_request("api/files/prepare-php", doc).await
+    }
+
+    async fn navigation_request<
+        Q: Serialize + Send + Sync + 'static,
+        R: DeserializeOwned + Send + 'static,
+    >(
+        &self,
+        endpoint: &str,
+        query: Q,
+    ) -> Result<R, ClientError> {
+        let url = self.http_base_url.join(endpoint)?;
         let token = self
             .bearer
             .read()

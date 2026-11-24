@@ -170,6 +170,13 @@ pub struct DefinitionRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PreparePhpNavigation {
+    pub thread_id: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DefinitionTarget {
     pub path: String,
     #[serde(flatten)]

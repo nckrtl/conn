@@ -233,10 +233,18 @@ async fn run(
             let (pt, matched) = resolve_target_point(window, cmd, cx)?;
             window
                 .update(cx, |_, window, cx| {
+                    let original = window.modifiers();
+                    let command = cmd.get("command").and_then(Value::as_bool) == Some(true);
+                    if command {
+                        window.change_modifiers(gpui_kit::Modifiers::command(), cx);
+                    }
                     window.pointer_move(pt, None, cx);
                     for _ in 0..clicks {
                         window.pointer_down(pt, button, cx);
                         window.pointer_up(pt, button, cx);
+                    }
+                    if command {
+                        window.change_modifiers(original, cx);
                     }
                 })
                 .map_err(|e| e.to_string())?;
@@ -245,6 +253,18 @@ async fn run(
                 "y": f32::from(pt.y),
                 "target": matched,
             }))
+        }
+        #[cfg(target_os = "macos")]
+        "modifiers" => {
+            let modifiers = if cmd.get("command").and_then(Value::as_bool) == Some(true) {
+                gpui_kit::Modifiers::command()
+            } else {
+                gpui_kit::Modifiers::none()
+            };
+            window
+                .update(cx, |_, window, cx| window.change_modifiers(modifiers, cx))
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
         }
         #[cfg(target_os = "macos")]
         "hover" => {

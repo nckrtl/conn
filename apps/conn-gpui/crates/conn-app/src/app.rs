@@ -538,6 +538,7 @@ impl ConnApp {
             &right_panel,
             window,
             |app, _, event: &crate::panels::RightPanelEvent, window, cx| match event {
+                crate::panels::RightPanelEvent::DisplayedFileChanged => cx.notify(),
                 crate::panels::RightPanelEvent::Definition(location) => {
                     app.show_source_location(location, cx)
                 }
@@ -3661,6 +3662,13 @@ impl ConnApp {
     #[cfg(feature = "automation")]
     pub(crate) fn spike_files_state(&self, window: &Window, cx: &App) -> serde_json::Value {
         let mut state = self.right_panel.read(cx).spike_files_state(window, cx);
+        if let PanelSurface::File(path) = self.right_panel.read(cx).displayed_surface(
+            self.right_panel_surface(),
+            &self.right_panel_open_tabs,
+            cx,
+        ) {
+            state["displayedTab"] = path.into();
+        }
         state["composerFocused"] = self.chat.read(cx).spike_input_focused(window, cx).into();
         state
     }
@@ -3721,6 +3729,8 @@ impl ConnApp {
             return;
         };
         self.right_panel_open_tabs.remove(pos);
+        self.right_panel
+            .update(cx, |panel, cx| panel.release_closed_file(surface, cx));
         if &self.right_panel_surface() == surface {
             let next = self.right_panel_open_tabs[pos.saturating_sub(1)].clone();
             self.select_right_panel_surface(next, cx);
@@ -5364,7 +5374,11 @@ impl ConnApp {
         use std::rc::Rc;
         let app = cx.entity();
         let available_tabs = self.available_right_panel_tabs();
-        let active_surface = self.right_panel_surface();
+        let active_surface = self.right_panel.read(cx).displayed_surface(
+            self.right_panel_surface(),
+            &self.right_panel_open_tabs,
+            cx,
+        );
         let header = render_panel_header(
             PanelHeaderProps {
                 open_tabs: &self.right_panel_open_tabs,
@@ -6900,6 +6914,13 @@ impl Render for ConnApp {
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.sync_thread_menu_focus(window, cx);
         self.sync_undo_notice_focus(window, cx);
+        #[cfg(feature = "zed-files")]
+        if self.layout.right_panel_open
+            && self.layout.right_panel_tab == RightPanelTab::File
+            && window.focused(cx).is_none()
+        {
+            self.focus_handle.focus(window, cx);
+        }
         let viewport = window.viewport_size();
         let viewport_w = f32::from(viewport.width);
         let viewport_h = f32::from(viewport.height);
@@ -6940,6 +6961,10 @@ impl Render for ConnApp {
             )
             .on_modifiers_changed(cx.listener(
                 |app, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
+                    #[cfg(feature = "zed-files")]
+                    app.right_panel.update(cx, |panel, cx| {
+                        panel.file_modifiers_changed(event.modifiers, window, cx)
+                    });
                     app.modifiers_changed(&event.modifiers, window, cx);
                 },
             ))

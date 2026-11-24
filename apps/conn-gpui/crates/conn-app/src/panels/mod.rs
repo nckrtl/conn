@@ -62,6 +62,7 @@ use crate::a11y::ConnA11yExt as _;
 /// What the right panel asks of the shell.
 #[derive(Clone, Debug)]
 pub(crate) enum RightPanelEvent {
+    DisplayedFileChanged,
     /// The Files tree asked to open a file as its own tab.
     OpenFile(String),
     Definition(conn_contract::source::SourceLocation),
@@ -141,6 +142,10 @@ impl RightPanel {
         cx.subscribe(
             &files,
             |this, _, event: &files::FilesEvent, cx| match event {
+                files::FilesEvent::DisplayedFileChanged => {
+                    cx.emit(RightPanelEvent::DisplayedFileChanged);
+                    cx.notify();
+                }
                 files::FilesEvent::Definition(location) => {
                     cx.emit(RightPanelEvent::Definition(location.clone()))
                 }
@@ -495,6 +500,24 @@ impl RightPanel {
         self.sync_surface_visibility(cx);
     }
 
+    #[cfg(feature = "zed-files")]
+    pub(crate) fn file_modifiers_changed(
+        &self,
+        modifiers: gpui_kit::Modifiers,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.surface_visible && self.tab == RightPanelTab::File {
+            self.files.update(cx, |panel, cx| {
+                if modifiers == gpui_kit::Modifiers::command() {
+                    panel.zed_definition_at(window.mouse_position(), false, window, cx);
+                } else {
+                    panel.cancel_hover();
+                }
+            });
+        }
+    }
+
     fn sync_surface_visibility(&mut self, cx: &mut Context<'_, Self>) {
         if !self.surface_visible || self.tab != RightPanelTab::File {
             self.files.update(cx, |files, _| files.cancel_reveal());
@@ -535,7 +558,7 @@ impl RightPanel {
             self.open_tabs.push(surface);
         }
         self.add_menu_open = false;
-        if tab == RightPanelTab::Files {
+        if self.tab == RightPanelTab::File || tab == RightPanelTab::Files {
             self.files.update(cx, |p, cx| p.show_tree(cx));
         }
         if self.tab == tab {
@@ -605,12 +628,35 @@ impl RightPanel {
         }
     }
 
+    pub(crate) fn displayed_surface(
+        &self,
+        requested: PanelSurface,
+        tabs: &[PanelSurface],
+        cx: &gpui_kit::App,
+    ) -> PanelSurface {
+        if matches!(requested, PanelSurface::File(_))
+            && let Some(held) = self.files.read(cx).held_file()
+            && let Some(tab) = tabs.iter().find(|tab| matches!(tab, PanelSurface::File(path) if file_path::split_line_suffix(path).0 == held))
+        {
+            return tab.clone();
+        }
+        requested
+    }
+
     /// The active surface.
     #[must_use]
     pub fn surface(&self) -> PanelSurface {
         match (&self.tab, &self.file) {
             (RightPanelTab::File, Some(path)) => PanelSurface::File(path.clone()),
             (tab, _) => PanelSurface::Kind(*tab),
+        }
+    }
+
+    pub(crate) fn release_closed_file(&mut self, tab: &PanelSurface, cx: &mut Context<'_, Self>) {
+        if let PanelSurface::File(path) = tab {
+            self.files.update(cx, |files, cx| {
+                files.release_closed_file(file_path::split_line_suffix(path).0, cx)
+            });
         }
     }
 
@@ -621,6 +667,7 @@ impl RightPanel {
         }
         if let Some(pos) = self.open_tabs.iter().position(|t| t == surface) {
             self.open_tabs.remove(pos);
+            self.release_closed_file(surface, cx);
             if &self.surface() == surface {
                 let next = self
                     .open_tabs
@@ -695,7 +742,7 @@ impl RightPanel {
             on_open_sidebar: Rc::new(|_, _| {}),
         };
 
-        let active = self.surface();
+        let active = self.displayed_surface(self.surface(), &self.open_tabs, cx);
         render_panel_header(
             PanelHeaderProps {
                 open_tabs: &self.open_tabs,

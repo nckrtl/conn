@@ -25,7 +25,7 @@ impl SettingsModal {
         for palette in Palette::ALL {
             let id = SharedString::from(format!(
                 "settings.editor.theme.{}",
-                palette.label().to_lowercase()
+                palette.label().to_lowercase().replace(' ', "-")
             ));
             let mut button = div()
                 .id(id.clone())
@@ -35,6 +35,7 @@ impl SettingsModal {
                 .flex()
                 .items_center()
                 .cursor_pointer()
+                .whitespace_nowrap()
                 .child(palette.label());
             if palette == selected {
                 button = button

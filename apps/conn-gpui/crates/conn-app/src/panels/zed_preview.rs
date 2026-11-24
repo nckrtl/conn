@@ -5,16 +5,38 @@ use zed_editor::{Editor, MultiBufferOffset, RowHighlightOptions, ToOffset};
 use zed_language::{Buffer, Language, LanguageConfig};
 use zed_theme::ActiveTheme as _;
 
+#[derive(Default, Clone)]
+struct PhpGrammar(Arc<std::sync::OnceLock<Arc<Language>>>);
+impl gpui_kit::Global for PhpGrammar {}
+
+fn php_grammar() -> Arc<Language> {
+    let config = LanguageConfig {
+        name: "PHP".into(),
+        ..Default::default()
+    };
+    let php = Language::new(config, Some(tree_sitter_php::LANGUAGE_PHP.into()))
+        .with_highlights_query(tree_sitter_php::HIGHLIGHTS_QUERY)
+        .expect("PHP query must match its bundled grammar");
+    Arc::new(php)
+}
+
 pub(crate) fn enabled() -> bool {
     std::env::var("CONN_FILES_EDITOR").as_deref() == Ok("zed")
 }
 
 pub(crate) fn init(cx: &mut App) {
     if enabled() {
+        let grammar = PhpGrammar::default();
+        cx.set_global(grammar.clone());
+        cx.background_executor()
+            .spawn(async move {
+                grammar.0.get_or_init(php_grammar);
+            })
+            .detach();
         let defaults = zed_settings::default_settings();
         let settings = zed_settings::SettingsStore::new(cx, &defaults);
         cx.set_global(settings);
-        zed_theme::init(zed_theme::LoadThemes::JustBase, cx);
+        zed_theme_settings::init(zed_theme::LoadThemes::JustBase, cx);
         let themes = zed_theme::ThemeRegistry::global(cx);
         for palette in crate::editor_settings::Palette::ALL {
             zed_theme_settings::load_user_theme(&themes, palette.bytes())
@@ -41,6 +63,12 @@ pub(crate) fn apply(name: &str, tokens: &conn_theme::Tokens, cx: &mut App) {
     let font = crate::editor_settings::family(cx).to_string();
     cx.update_global::<zed_settings::SettingsStore, _>(|settings, cx| {
         settings.update_default_settings(cx, |settings| {
+            settings.editor.scroll_beyond_last_line = Some(zed_settings::ScrollBeyondLastLine::Off);
+            let gutter = settings.editor.gutter.get_or_insert_with(Default::default);
+            gutter.min_line_number_digits = Some(1);
+            gutter.runnables = Some(false);
+            gutter.breakpoints = Some(false);
+            gutter.bookmarks = Some(false);
             settings.theme.buffer_font_family = Some(font.into());
             settings.theme.buffer_font_size = Some(prefs.font_size.into());
             settings.theme.buffer_line_height =
@@ -51,15 +79,8 @@ pub(crate) fn apply(name: &str, tokens: &conn_theme::Tokens, cx: &mut App) {
 }
 
 pub(super) fn open(source: &str, wrap: bool, window: &mut Window, cx: &mut App) -> Entity<Editor> {
-    let config = LanguageConfig {
-        name: "PHP".into(),
-        ..Default::default()
-    };
-    let php = Language::new(config, Some(tree_sitter_php::LANGUAGE_PHP.into()))
-        .with_highlights_query(tree_sitter_php::HIGHLIGHTS_QUERY)
-        .expect("PHP query must match its bundled grammar");
-    php.set_theme(cx.theme().syntax());
-    let language = Arc::new(php);
+    let language = cx.global::<PhpGrammar>().0.get_or_init(php_grammar).clone();
+    language.set_theme(cx.theme().syntax());
     let buffer = cx.new(|cx| {
         let mut buffer = Buffer::local(source, cx);
         buffer.set_language(Some(language.clone()), cx);
@@ -74,6 +95,7 @@ pub(super) fn open(source: &str, wrap: bool, window: &mut Window, cx: &mut App) 
         .detach();
         let mut editor = Editor::for_buffer(buffer, None, window, cx);
         editor.set_read_only(true);
+        editor.set_show_git_diff_gutter(false, cx);
         set_wrap(&mut editor, wrap, cx);
         editor
     })

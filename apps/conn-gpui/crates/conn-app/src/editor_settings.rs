@@ -13,16 +13,26 @@ pub(crate) enum Palette {
     One,
     Ayu,
     Gruvbox,
+    TokyoNight,
+    Catppuccin,
 }
 
 impl Palette {
-    pub(crate) const ALL: [Self; 3] = [Self::One, Self::Ayu, Self::Gruvbox];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::One,
+        Self::Ayu,
+        Self::Gruvbox,
+        Self::TokyoNight,
+        Self::Catppuccin,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::One => "One",
             Self::Ayu => "Ayu",
             Self::Gruvbox => "Gruvbox",
+            Self::TokyoNight => "Tokyo Night",
+            Self::Catppuccin => "Catppuccin",
         }
     }
 
@@ -37,19 +47,24 @@ impl Palette {
             Self::Gruvbox => {
                 include_bytes!("../../../.refs/zed-files-spike/assets/themes/gruvbox/gruvbox.json")
             }
+            Self::TokyoNight => include_bytes!("../assets/themes/tokyo-night/tokyo-night.json"),
+            Self::Catppuccin => include_bytes!("../assets/themes/catppuccin/catppuccin-mauve.json"),
         }
     }
 
-    fn name(self, appearance: Appearance) -> String {
-        format!(
-            "{} {}",
-            self.label(),
-            if appearance == Appearance::Light {
-                "Light"
-            } else {
-                "Dark"
-            }
-        )
+    fn name(self, appearance: Appearance) -> &'static str {
+        let (light, dark) = match self {
+            Self::One => ("One Light", "One Dark"),
+            Self::Ayu => ("Ayu Light", "Ayu Dark"),
+            Self::Gruvbox => ("Gruvbox Light", "Gruvbox Dark"),
+            Self::TokyoNight => ("Tokyo Night Light", "Tokyo Night"),
+            Self::Catppuccin => ("Catppuccin Latte", "Catppuccin Mocha"),
+        };
+        if appearance == Appearance::Light {
+            light
+        } else {
+            dark
+        }
     }
 }
 
@@ -180,5 +195,5 @@ pub(crate) fn apply(tokens: &Tokens, cx: &mut App) {
         });
     }
     #[cfg(feature = "zed-files")]
-    crate::panels::zed_preview::apply(&name, tokens, cx);
+    crate::panels::zed_preview::apply(name, tokens, cx);
 }

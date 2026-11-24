@@ -274,8 +274,15 @@ pub(crate) fn foreground_job(control: &OwnedFd, shell_pid: i32) -> Option<i32> {
     foreground_group(control).filter(|group| *group != shell_pid)
 }
 
+/// Whether the shell itself holds the PTY's foreground. An unreadable group counts as not:
+/// an idle close must never guess.
+pub(crate) fn shell_in_foreground(control: &OwnedFd, shell_pid: i32) -> bool {
+    foreground_group(control) == Some(shell_pid)
+}
+
 /// Whether the PTY holds output the reader has not taken yet. `poll` on the master checks the
-/// queue the reader drains on Linux and macOS; `FIONREAD` reads the other queue on macOS.
+/// queue the reader drains on Linux and macOS; `FIONREAD` reads the other queue on macOS. A
+/// failed poll counts as pending.
 pub(crate) fn output_pending(control: &OwnedFd) -> bool {
     let mut fds = [PollFd::new(control, PollFlags::IN)];
     let now = rustix::event::Timespec {
@@ -283,7 +290,7 @@ pub(crate) fn output_pending(control: &OwnedFd) -> bool {
         tv_nsec: 0,
     };
     rustix::event::poll(&mut fds, Some(&now))
-        .is_ok_and(|_| fds[0].revents().contains(PollFlags::IN))
+        .map_or(true, |_| fds[0].revents().contains(PollFlags::IN))
 }
 
 /// What a finished shell reports.

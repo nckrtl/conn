@@ -569,7 +569,7 @@ impl TerminalManager {
                     && s.proc.as_ref().is_some_and(|p| {
                         // A job that started after the table was read holds the terminal now,
                         // and output not yet read would be lost with it.
-                        pty::foreground_job(&p.control, p.pid).is_none()
+                        pty::shell_in_foreground(&p.control, p.pid)
                             && !pty::output_pending(&p.control)
                             && !table.has_running_subprocess(
                                 p.pid,

@@ -19,6 +19,8 @@ final class CoreStore {
     private(set) var pendingLink: ThreadLink?
     /// The thread inbox is on screen (no thread pushed, no sheet), for push suppression.
     var isInboxVisible = false
+    /// Bumped whenever the server's provider list changes; model pickers re-read on it.
+    private(set) var providersRevision = 0
 
     @ObservationIgnored private var core: ConnCore?
     @ObservationIgnored private var activeGeneration: UInt64 = 0
@@ -74,6 +76,32 @@ final class CoreStore {
         } catch {
             lastError = error.localizedDescription
             return false
+        }
+    }
+
+    /// The composer's model chip and the thread settings sheet's model list.
+    func modelPicker(
+        threadId: String,
+        query: String = "",
+        toggled: [String] = [],
+        pending: (instanceId: String, model: String)? = nil
+    ) async -> FfiModelPicker? {
+        guard let core else { return nil }
+        return await core.modelPicker(
+            threadId: threadId,
+            query: query,
+            toggled: toggled,
+            pendingInstanceId: pending?.instanceId,
+            pendingModel: pending?.model
+        )
+    }
+
+    func setThreadModel(threadId: String, instanceId: String, model: String) async {
+        guard let core else { return }
+        do {
+            try await core.setThreadModel(threadId: threadId, instanceId: instanceId, model: model)
+        } catch {
+            lastError = error.localizedDescription
         }
     }
 
@@ -399,6 +427,11 @@ final class CoreStore {
         guard generation == activeGeneration else { return }
         lastError = message
     }
+
+    fileprivate func handleProvidersChanged(generation: UInt64) {
+        guard generation == activeGeneration else { return }
+        providersRevision &+= 1
+    }
 }
 
 private final class ListenerBridge: CoreListener, @unchecked Sendable {
@@ -442,6 +475,13 @@ private final class ListenerBridge: CoreListener, @unchecked Sendable {
         let generation = self.generation
         Task { @MainActor [weak store] in
             store?.handleError(message, generation: generation)
+        }
+    }
+
+    func onProvidersChanged() {
+        let generation = self.generation
+        Task { @MainActor [weak store] in
+            store?.handleProvidersChanged(generation: generation)
         }
     }
 }

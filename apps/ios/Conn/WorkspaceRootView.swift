@@ -196,15 +196,18 @@ private struct WorkspacePhoneBar: ToolbarContent {
             .accessibilityIdentifier("workspace.settingsButton")
         }
         if isSearching {
-            ToolbarItem(placement: .bottomBar) {
-                WorkspaceFilterMenu(
-                    selectedTab: selectedTab,
-                    filterActive: filterActive,
-                    projects: projects,
-                    selectedProjectFilter: $selectedProjectFilter,
-                    taskLanes: taskLanes,
-                    onSelectTaskLane: onSelectTaskLane
-                )
+            // Mobile passes no filter menu on the PR tab (`PullRequestsScreen.tsx`).
+            if selectedTab != .pullRequests {
+                ToolbarItem(placement: .bottomBar) {
+                    WorkspaceFilterMenu(
+                        selectedTab: selectedTab,
+                        filterActive: filterActive,
+                        projects: projects,
+                        selectedProjectFilter: $selectedProjectFilter,
+                        taskLanes: taskLanes,
+                        onSelectTaskLane: onSelectTaskLane
+                    )
+                }
             }
             DefaultToolbarItem(kind: .search, placement: .bottomBar)
             ToolbarSpacer(.fixed, placement: .bottomBar)
@@ -322,7 +325,7 @@ private struct WorkspaceFilterMenu: View {
                         }
                     }
                 }
-            } else if selectedTab == .tasks {
+            } else {
                 Section("Lanes") {
                     TaskLaneMenuItems(lanes: taskLanes, onSelect: onSelectTaskLane)
                 }

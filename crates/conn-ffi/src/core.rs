@@ -12,12 +12,14 @@ use conn_contract::{
     OrchestrationV2Command, OrchestrationV2ThreadLaunchResult, OrchestrationV2ThreadProjection,
     OrchestrationV2ThreadStreamItem,
 };
+use conn_state::providers::ServerConfigState;
 use conn_state::{ShellState, ThreadActivity, ThreadState};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use crate::coalesce::SnapshotCoalescer;
+use crate::model_picker::{FfiModelPicker, PickerInput, PickerThread, build_model_picker};
 use crate::types::{
     FfiApprovalDecision, FfiConnectionStatus, FfiCredential, FfiError, FfiSendMode,
     FfiShellSnapshot, FfiThreadSnapshot, FfiUserInputSubmission, ThreadSnapshotMeta,
@@ -42,6 +44,8 @@ pub trait CoreListener: Send + Sync {
     fn on_shell(&self, snapshot: FfiShellSnapshot);
     fn on_thread(&self, snapshot: FfiThreadSnapshot);
     fn on_error(&self, message: String);
+    /// The server's provider list changed; re-read [`ConnCore::model_picker`].
+    fn on_providers_changed(&self);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -68,6 +72,13 @@ enum PumpControl {
         projection: Box<Option<OrchestrationV2ThreadProjection>>,
         sequence: Option<i64>,
         reply: oneshot::Sender<()>,
+    },
+    ModelPicker {
+        thread_id: String,
+        query: String,
+        toggled: Vec<String>,
+        pending: Option<(String, String)>,
+        reply: oneshot::Sender<FfiModelPicker>,
     },
     Shutdown,
 }
@@ -258,6 +269,7 @@ impl ConnCore {
         };
         let (connection, events_rx) = Connection::start(config, &runtime_handle);
         connection.subscribe_shell();
+        connection.subscribe_server_config();
 
         let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
         let thread_runs = Arc::new(RwLock::new(HashMap::new()));
@@ -415,6 +427,56 @@ impl ConnCore {
         self.call_json(SECRETS_ANSWER_REQUEST, payload)
             .await
             .map(|_| ())
+    }
+
+    /// The composer's model chip and the thread settings sheet's model list for `thread_id`.
+    /// `toggled` holds the sections the user folded or unfolded; `pending` is the row tapped but
+    /// not saved yet, as `(instance_id, model)`.
+    pub async fn model_picker(
+        &self,
+        thread_id: String,
+        query: String,
+        toggled: Vec<String>,
+        pending_instance_id: Option<String>,
+        pending_model: Option<String>,
+    ) -> FfiModelPicker {
+        let (reply, rx) = oneshot::channel();
+        let pending = pending_instance_id.zip(pending_model);
+        let sent = self.ctrl_tx.send(PumpControl::ModelPicker {
+            thread_id,
+            query,
+            toggled,
+            pending,
+            reply,
+        });
+        let empty = FfiModelPicker {
+            loaded: false,
+            selected_driver: None,
+            selected_label: None,
+            sections: Vec::new(),
+            has_pending: false,
+        };
+        if sent.is_err() {
+            return empty;
+        }
+        rx.await.unwrap_or(empty)
+    }
+
+    /// Switches `thread_id` to `model` on provider `instance_id` (`thread.model-selection.set`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn set_thread_model(
+        &self,
+        thread_id: String,
+        instance_id: String,
+        model: String,
+    ) -> Result<(), FfiError> {
+        let command =
+            conn_client::commands::set_model_selection(&thread_id, &instance_id, &model, None)
+                .map_err(|err| map_build_error("thread.model-selection.set", err))?;
+        self.dispatch_command(command).await
     }
 
     /// Stops the running turn on `thread_id` (`thread.stop`).
@@ -612,6 +674,7 @@ struct PumpState {
     connection: Connection,
     listener: Arc<dyn CoreListener>,
     shell: ShellState,
+    server_config: ServerConfigState,
     threads: HashMap<String, ThreadState>,
     thread_projection_meta: HashMap<String, ThreadSnapshotMeta>,
     open_threads: HashSet<String>,
@@ -629,6 +692,31 @@ impl PumpState {
             .find_thread(thread_id)
             .map(ThreadSnapshotMeta::from_shell)
             .or_else(|| self.thread_projection_meta.get(thread_id).cloned())
+    }
+
+    /// The thread's provider and model for the model picker, from its shell row.
+    fn picker_thread(&self, thread_id: &str) -> PickerThread {
+        let Some(thread) = self.shell.find_thread(thread_id) else {
+            return PickerThread::default();
+        };
+        let selection = &thread.model_selection;
+        let instance_id = selection
+            .instance_id
+            .clone()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .or_else(|| Some(thread.provider_instance_id.clone()))
+            .filter(|id| !id.is_empty());
+        let model = selection
+            .model
+            .as_str()
+            .map(str::to_owned)
+            .filter(|m| !m.is_empty());
+        PickerThread {
+            instance_id,
+            model,
+            started: thread.latest_run_id.is_some(),
+        }
     }
 
     fn resolve_launch_defaults(&self, project_id: &str) -> LaunchDefaults {
@@ -763,6 +851,28 @@ impl PumpState {
                 let _ = reply.send(());
                 true
             }
+            PumpControl::ModelPicker {
+                thread_id,
+                query,
+                toggled,
+                pending,
+                reply,
+            } => {
+                let thread = self.picker_thread(&thread_id);
+                let input = PickerInput {
+                    query: &query,
+                    toggled: &toggled,
+                    pending: pending.as_ref().map(|(i, m)| (i.as_str(), m.as_str())),
+                };
+                let picker = build_model_picker(
+                    self.server_config.catalog(),
+                    self.server_config.is_loaded(),
+                    &thread,
+                    &input,
+                );
+                let _ = reply.send(picker);
+                true
+            }
             PumpControl::Shutdown => false,
         }
     }
@@ -859,10 +969,12 @@ impl PumpState {
                     }
                 }
             }
-            // The iPhone app does not subscribe to the server config yet.
-            ClientEvent::PanelRequest(_)
-            | ClientEvent::Annotations { .. }
-            | ClientEvent::ServerConfig(_) => {}
+            ClientEvent::ServerConfig(event) => {
+                if self.server_config.apply(*event).providers_changed {
+                    self.listener.on_providers_changed();
+                }
+            }
+            ClientEvent::PanelRequest(_) | ClientEvent::Annotations { .. } => {}
         }
     }
 
@@ -915,6 +1027,7 @@ async fn run_pump(
         connection,
         listener,
         shell: ShellState::default(),
+        server_config: ServerConfigState::new(),
         threads: HashMap::new(),
         thread_projection_meta: HashMap::new(),
         open_threads: HashSet::new(),
@@ -1053,6 +1166,8 @@ mod tests {
             guard.errors.push(message);
             self.notify.notify_all();
         }
+
+        fn on_providers_changed(&self) {}
     }
 
     #[test]

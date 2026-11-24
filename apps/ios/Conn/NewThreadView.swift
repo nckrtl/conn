@@ -160,8 +160,8 @@ struct NewThreadDraftView: View {
                     canSend: canLaunch,
                     onSend: launch,
                     onStop: {},
-                    leading: { ConnComposerAttachButton() },
-                    trailing: { ConnComposerModelChip() }
+                    // A new chat starts on the project's model; picking one needs a launch override.
+                    trailing: { EmptyView() }
                 )
                 .accessibilityIdentifier("newThread.promptField")
             }

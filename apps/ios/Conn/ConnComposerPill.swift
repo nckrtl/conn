@@ -4,7 +4,7 @@ import SwiftUI
 /// Conn mobile's floating composer pill (`ComposerSurface.tsx`, `ThreadComposer.tsx`): regular
 /// Liquid Glass, radius 27, a 44pt control row inside 4×2 padding (48pt tall when collapsed), and
 /// a `0 6 28` shadow at 15% black (light) / 35% (dark). It floats over the feed; no band behind it.
-struct ConnComposerPill<Leading: View, Trailing: View>: View {
+struct ConnComposerPill<Trailing: View>: View {
     let placeholder: String
     @Binding var text: String
     var maxLines = 4
@@ -12,7 +12,6 @@ struct ConnComposerPill<Leading: View, Trailing: View>: View {
     var canSend = false
     let onSend: () -> Void
     var onStop: (() -> Void)?
-    @ViewBuilder let leading: () -> Leading
     @ViewBuilder let trailing: () -> Trailing
 
     @Environment(\.connTheme) private var theme
@@ -24,10 +23,8 @@ struct ConnComposerPill<Leading: View, Trailing: View>: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+        // Mobile's `+` (`ComposerAttachmentButton`) stays out until the core sends attachments.
         HStack(alignment: .bottom, spacing: 0) {
-            leading()
-                .frame(width: Self.control, height: Self.control)
-
             // Body text 16/23 (`useComposerTextStyle(body)`), at least 36 tall, up to four lines.
             TextField(placeholder, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -36,6 +33,7 @@ struct ConnComposerPill<Leading: View, Trailing: View>: View {
                 .foregroundStyle(theme.foreground)
                 .lineLimit(1...maxLines)
                 .padding(.vertical, 10)
+                .padding(.leading, 12)
                 .frame(maxWidth: .infinity, minHeight: Self.control, alignment: .leading)
 
             trailing()
@@ -81,39 +79,52 @@ struct ConnComposerPill<Leading: View, Trailing: View>: View {
     }
 }
 
-/// `ComposerAttachmentButton`: a 20pt `plus` in a 44pt target. Attachments are not built yet.
-struct ConnComposerAttachButton: View {
+/// `ComposerModelControl` collapsed (`iconOnly`): the provider icon at 16 and a 10pt chevron in a
+/// 44pt target. It opens the thread settings sheet.
+struct ConnComposerModelChip: View {
+    let driver: String?
+    let modelLabel: String?
+    let action: () -> Void
     @Environment(\.connTheme) private var theme
 
     var body: some View {
-        Menu {
-            Button("Attachments (coming soon)") {}
-                .disabled(true)
-        } label: {
-            ConnIcon("plus")
-                .font(.system(size: 20))
-                .foregroundStyle(theme.foreground)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+        Button(action: action) {
+            HStack(spacing: 3.5) {
+                ProviderIcon(driver: driver, size: 16)
+                ConnIcon("chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(theme.mutedForeground)
+            }
+            .padding(.horizontal, 7)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
-        .accessibilityLabel("More composer actions")
+        .buttonStyle(.plain)
+        .accessibilityLabel(modelLabel.map { "Model, \($0)" } ?? "Model")
+        .accessibilityIdentifier("composer.modelButton")
     }
 }
 
-/// The collapsed model chip: the provider icon at 16 and a 10pt chevron, 44pt tall.
-struct ConnComposerModelChip: View {
-    @Environment(\.connTheme) private var theme
+/// `ProviderIcon`: Claude's mark, Antigravity's image, and the knot for every other driver,
+/// drawn in `#e5e5e5` (dark) or `#171717` (light).
+struct ProviderIcon: View {
+    let driver: String?
+    var size: CGFloat = 16
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        HStack(spacing: 3.5) {
-            Image(systemName: "sparkle")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
-            Image(systemName: "chevron.down")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(theme.mutedForeground)
+        switch driver?.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "claudeagent":
+            Image("provider-claude").resizable().scaledToFit().frame(width: size, height: size)
+        case "antigravity":
+            Image("provider-antigravity").resizable().scaledToFit().frame(width: size, height: size)
+        default:
+            Image("provider-default")
+                .resizable()
+                .renderingMode(.template)
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .foregroundStyle(colorScheme == .dark ? Color(white: 0.898) : Color(white: 0.09))
         }
-        .padding(.horizontal, 7)
-        .frame(minHeight: 44)
     }
 }

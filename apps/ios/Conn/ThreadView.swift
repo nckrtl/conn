@@ -29,6 +29,9 @@ struct ThreadView: View {
     @State private var advancingStep: Int?
     @State private var advanceTask: Task<Void, Never>?
     @State private var viewHeight: CGFloat = 800
+    /// The chip's provider and the sheet; `model_picker` in conn-ffi builds both.
+    @State private var modelPicker: FfiModelPicker?
+    @State private var showingModelPicker = false
 
     init(
         store: CoreStore,
@@ -366,7 +369,6 @@ struct ThreadView: View {
                                 await store.stopThread(threadId: threadId)
                             }
                         },
-                        leading: { ConnComposerAttachButton() },
                         trailing: {
                             HStack(spacing: 4) {
                                 if isWorking && (hasDraft || questionPanelModel != nil) {
@@ -382,13 +384,44 @@ struct ThreadView: View {
                                     .buttonStyle(.plain)
                                     .accessibilityLabel("Stop")
                                 }
-                                ConnComposerModelChip()
+                                ConnComposerModelChip(
+                                    driver: modelPicker?.selectedDriver,
+                                    modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel
+                                ) {
+                                    showingModelPicker = true
+                                }
                             }
                         }
                     )
                     .accessibilityIdentifier("thread.composer")
                     .padding(.top, 6)
                 }
+                // `FloatingWorkingControl`: a 38.5pt glass chevron, centred 40.5pt above the overlay
+                // (`CONTROL_OVERLAY_OFFSET`), while the reader is away from the end of the feed.
+                .overlay(alignment: .top) {
+                    if snapshot != nil && !stickToBottom {
+                        Button {
+                            UISelectionFeedbackGenerator().selectionChanged()
+                            stickToBottom = true
+                            withAnimation(Kit.Motion.fast) {
+                                proxy.scrollTo("timeline-bottom", anchor: .bottom)
+                            }
+                        } label: {
+                            ConnIcon("chevron.down")
+                                .font(.system(size: 14))
+                                .foregroundStyle(theme.foreground)
+                                .frame(width: 38.5, height: 38.5)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: Circle())
+                        .offset(y: -40.5)
+                        .transition(.opacity)
+                        .accessibilityLabel("Scroll to end")
+                        .accessibilityIdentifier("thread.scrollToEnd")
+                    }
+                }
+                .animation(.easeOut(duration: 0.18), value: stickToBottom)
                 // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
                 .padding(.horizontal, 12)
                 .padding(.bottom, 2)
@@ -444,21 +477,32 @@ struct ThreadView: View {
         .task(id: threadId) {
             store.openThread(threadId)
         }
+        .task(id: "\(threadId)|\(store.providersRevision)|\(snapshot?.modelLabel ?? "")") {
+            modelPicker = await store.modelPicker(threadId: threadId)
+        }
+        .sheet(isPresented: $showingModelPicker) {
+            ModelPickerSheet(store: store, threadId: threadId)
+                .presentationDetents([.large])
+        }
         .onDisappear {
             store.closeThread(threadId)
         }
     }
 
+    /// Mobile clears the draft as it sends (`use-thread-composer-state.ts`), so what the user types
+    /// during a slow send stays; a failed send puts the sent text back (`composerRestoreDraft`).
     private func sendDraft(scrollProxy: ScrollViewProxy) {
         let message = draft
+        draft = ""
         stickToBottom = true
         Task {
             let sent = await store.sendMessage(threadId: threadId, text: message, mode: .auto)
             if sent {
-                draft = ""
                 withAnimation(Kit.Motion.fast) {
                     scrollProxy.scrollTo("timeline-bottom", anchor: .bottom)
                 }
+            } else {
+                draft = composerRestoreDraft(current: draft, sent: message)
             }
         }
     }

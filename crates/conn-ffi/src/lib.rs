@@ -6,7 +6,9 @@
 
 mod approvals;
 mod coalesce;
+mod composer;
 mod core;
+mod model_picker;
 mod orbit;
 mod phone_tasks;
 mod questions;
@@ -16,7 +18,9 @@ mod types;
 uniffi::setup_scaffolding!();
 
 pub use crate::approvals::{FfiApprovalOption, FfiButtonTone, FfiPendingApproval};
+pub use crate::composer::composer_restore_draft;
 pub use crate::core::{ConnCore, CoreListener};
+pub use crate::model_picker::{FfiModelPicker, FfiModelPickerRow, FfiModelPickerSection};
 pub use crate::orbit::{
     FfiAgentRole, FfiAgentState, FfiAttentionKind, FfiChangeTone, FfiConversationRef,
     FfiDeliverable, FfiImplementerMode, FfiInsightCard, FfiInsightId, FfiInsightTrendPoint,

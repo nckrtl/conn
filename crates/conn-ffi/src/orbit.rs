@@ -2447,6 +2447,8 @@ mod tests {
         fn on_thread(&self, _snapshot: FfiThreadSnapshot) {}
 
         fn on_error(&self, _message: String) {}
+
+        fn on_providers_changed(&self) {}
     }
 
     /// Minimal in-process HTTP + WebSocket mock `conn-server` supporting:

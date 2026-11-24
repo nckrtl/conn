@@ -514,7 +514,32 @@ final class ConnSpikeUITests: XCTestCase {
         if feed.exists {
             feed.swipeDown(velocity: .slow)
             settle(1.5)
+            // The down-chevron above the composer shows here (`FloatingWorkingControl`).
             capture("thread-scrolled")
+            let toEnd = app.buttons.matching(NSPredicate(format: "label == %@", "Scroll to end")).firstMatch
+            if toEnd.exists && toEnd.isHittable { toEnd.tap(); settle(1.2) }
+        }
+        // The `+` menu (Expo), or the pill without it (Swift: the core cannot send attachments).
+        if tap(app, ["Add attachment"]) {
+            settle(1)
+            capture("attachments")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+            settle(0.8)
+        } else {
+            capture("attachments")
+        }
+        // The model chip opens the thread settings sheet.
+        let modelChip = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ OR label BEGINSWITH %@", "composer.modelButton", "Model and reasoning settings"
+        )).firstMatch
+        if modelChip.waitForExistence(timeout: 5) && modelChip.isHittable {
+            modelChip.tap()
+            settle(2)
+            capture("model-picker")
+            if !tap(app, ["Cancel thread settings", "Close"]) { app.swipeDown() }
+            settle(1.2)
+        } else {
+            capture("missing-model-picker")
         }
         let composer = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
         if composer.waitForExistence(timeout: 5) {
@@ -546,7 +571,18 @@ final class ConnSpikeUITests: XCTestCase {
             return true
         }
         if barTap(["workspace.tab.tasks", "Tasks"], swiftX: 0.43) { settle(3); capture("tasks") }
-        if barTap(["workspace.tab.pullRequests", "Pull requests"], swiftX: 0.57) { settle(3); capture("prs") }
+        if barTap(["workspace.tab.pullRequests", "Pull requests"], swiftX: 0.57) {
+            settle(3)
+            capture("prs")
+            // PR search: the field and `+`, with no filter menu.
+            if barTap(["workspace.searchButton", "Search"], swiftX: 0.71) {
+                settle(1.5)
+                if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
+                capture("prs-search")
+                if !tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"]) { app.swipeDown() }
+                settle(1.5)
+            }
+        }
         if barTap(["workspace.tab.threads", "Threads"], swiftX: 0.29) { settle(1) }
         if barTap(["workspace.searchButton", "Search"], swiftX: 0.71) {
             settle(1.5)

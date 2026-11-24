@@ -63,6 +63,8 @@ pub struct CodexConfig {
     /// The folder the probe runs in: the server's working folder (T3's `process.cwd()`).
     /// `None`: this process's working folder.
     pub status_cwd: Option<PathBuf>,
+    /// The model manifest the server accepted last; the probe classifies models with it.
+    pub model_manifest: conn_provider::LiveManifest,
 }
 
 impl Default for CodexConfig {
@@ -78,6 +80,7 @@ impl Default for CodexConfig {
             goal_continuation_grace: GOAL_CONTINUATION_GRACE,
             status_probe: true,
             status_cwd: None,
+            model_manifest: conn_provider::LiveManifest::default(),
         }
     }
 }

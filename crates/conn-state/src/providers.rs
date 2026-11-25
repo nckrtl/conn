@@ -980,7 +980,14 @@ impl crate::SubagentModel {
     pub fn label(&self, catalog: &ModelCatalog) -> Option<SubagentModelLabel> {
         let slug = self.model.as_deref()?;
         let found = catalog.find_model(self.instance_id.as_deref(), slug);
-        let model = found.map_or_else(|| prettify_model_slug(slug), ModelOption::display_label);
+        // Desktop's subagent cards use the picker's short trigger label ("Opus 5.5").
+        let model = found.map_or_else(
+            || {
+                let pretty = prettify_model_slug(slug);
+                model_short_name(&pretty, &FAMILY_PREFIXES).unwrap_or(pretty)
+            },
+            ModelOption::trigger_label,
+        );
         let options: OptionMap = self
             .options
             .iter()
@@ -1011,7 +1018,7 @@ impl crate::SubagentModel {
 }
 
 /// A readable name for a model slug the catalog does not list: `gpt-6.2-astra` becomes
-/// `GPT-6.2 Astra`, `claude-opus-5-5` becomes `Claude Opus 5.5`.
+/// `GPT-6.2 Astra`, `claude-opus-5-5` becomes `Claude Opus 5.5` (callers shorten it).
 fn prettify_model_slug(slug: &str) -> String {
     let short_number =
         |part: &str| (1..=2).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
@@ -2506,16 +2513,16 @@ mod live_tests {
                 "gpt-6-astra",
                 &[("reasoningEffort", "high")]
             )),
-            named("GPT-6-Astra", Some("high"))
+            named("6 Astra", Some("high"))
         );
         assert_eq!(
             label(&subagent("codex", "gpt-6-astra", &[])),
-            named("GPT-6-Astra", Some("medium")),
+            named("6 Astra", Some("medium")),
             "no options: the catalog's current effort"
         );
         assert_eq!(
             label(&subagent("claudeAgent", "claude-opus-5-5", &[])).map(|(m, _)| m),
-            Some("Claude Opus 5.5".to_owned())
+            Some("Opus 5.5".to_owned())
         );
         assert_eq!(
             label(&subagent(
@@ -2523,12 +2530,12 @@ mod live_tests {
                 "gpt-6.2-astra",
                 &[("reasoningEffort", "xhigh")]
             )),
-            named("GPT-6.2 Astra", Some("xhigh")),
-            "an unlisted model: prettified slug, raw effort"
+            named("6.2 Astra", Some("xhigh")),
+            "an unlisted model: prettified short name, raw effort"
         );
         assert_eq!(
             label(&subagent("claudeAgent", "claude-haiku-4-5-20251001", &[])),
-            named("Claude Haiku 4.5 20251001", None)
+            named("Haiku 4.5 20251001", None)
         );
         assert_eq!(label(&crate::SubagentModel::default()), None);
     }

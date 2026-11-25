@@ -251,7 +251,7 @@ interface FileAttachment {
   href?: string;
 }
 
-function FileAttachmentRow({ name, size, href }: FileAttachment) {
+export function FileAttachmentRow({ name, size, href }: FileAttachment) {
   const content = (
     <>
       <span

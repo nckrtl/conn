@@ -57,7 +57,7 @@ struct NewThreadDraftView: View {
         // Draft mode of the thread screen: the same floating glass pill, no band behind it.
         .safeAreaBar(edge: .bottom, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                if store.status != .connected { OfflinePill().frame(maxWidth: .infinity) }
+                if store.showsOffline { OfflinePill().frame(maxWidth: .infinity) }
                 ConnComposerPill(
                     placeholder: "Ask anything",
                     text: $prompt,

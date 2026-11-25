@@ -193,6 +193,31 @@ final class ConnSpikeUITests: XCTestCase {
 
     /// The question panel on a thread whose (fake Grok) run waits for three answers. With
     /// CONN_QUESTION_ANSWER=1 it answers every step, from the options and the composer.
+    func testOrbitDesktopThreads() throws {
+        guard let label = ProcessInfo.processInfo.environment["CONN_TEST_DESKTOP_LABEL"] else {
+            throw XCTSkip("Requires an authorized Orbit desktop with active threads")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session"]
+        app.launch()
+        let filter = app.buttons["Filter threads"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 90))
+        filter.tap()
+        let option = app.buttons[label].firstMatch
+        if !option.waitForExistence(timeout: 5) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.8)).tap()
+            filter.tap()
+        }
+        XCTAssertTrue(option.waitForExistence(timeout: 30))
+        option.tap()
+        let thread = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).firstMatch
+        XCTAssertTrue(thread.waitForExistence(timeout: 90))
+        let title = thread.label
+        thread.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["thread.composer"].waitForExistence(timeout: 30))
+        XCTAssertFalse(title.isEmpty)
+    }
+
     func testWorkspaceRecords() throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_PAIRING_URL"] else { throw XCTSkip("Requires an isolated Conn server") }

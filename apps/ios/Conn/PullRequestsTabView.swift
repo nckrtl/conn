@@ -430,7 +430,7 @@ private struct ReviewFileView: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if store.status != .connected { OfflinePill().padding(.bottom, 8) }
+            if store.showsOffline { OfflinePill().padding(.bottom, 8) }
         }
         .sheet(isPresented: Binding(get: { line != nil }, set: { if !$0 { line = nil } })) {
             NavigationStack {

@@ -37,7 +37,7 @@ pub enum FfiSessionTarget {
     /// The primary `agent`-role Node, found through Orbit.
     PrimaryAgent,
     /// One Orbit environment (a linked scope).
-    Environment { environment_id: String },
+    Environment { environment_id: String, wake: bool },
     /// A server paired by URL.
     Manual { server_url: String },
 }
@@ -81,6 +81,7 @@ pub struct FfiSessionState {
     pub environment_id: Option<String>,
     /// The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
     pub offline_ready: bool,
+    pub shows_offline: bool,
     /// This session has had a working connection since launch (or since the user last chose to
     /// connect manually). The app then keeps the workspace up through reconnects and re-pairs.
     pub has_connected: bool,
@@ -242,6 +243,15 @@ impl<C: SessionCore> Machine<C> {
         FfiSessionState {
             revision: self.revision,
             connection_id: self.attempt.as_ref().map_or(0, |a| a.id),
+            shows_offline: matches!(
+                &phase,
+                FfiSessionPhase::Failed { .. }
+                    | FfiSessionPhase::Idle { message: Some(_) }
+                    | FfiSessionPhase::Live {
+                        status: FfiConnectionStatus::Reconnecting { .. }
+                            | FfiConnectionStatus::Failed { .. }
+                    }
+            ),
             phase,
             server_url: self.server_url.clone(),
             environment_id: self.environment_id.clone(),
@@ -319,7 +329,7 @@ impl<C: SessionCore> Machine<C> {
         attempt
             .and_then(|a| a.identity.clone())
             .or_else(|| match attempt.map(|a| &a.target) {
-                Some(FfiSessionTarget::Environment { environment_id }) => {
+                Some(FfiSessionTarget::Environment { environment_id, .. }) => {
                     Some(environment_id.clone())
                 }
                 _ => None,
@@ -327,7 +337,7 @@ impl<C: SessionCore> Machine<C> {
             .or_else(|| match &self.rest {
                 // A failed environment scope is still that environment.
                 FfiSessionPhase::Failed {
-                    retry: FfiSessionTarget::Environment { environment_id },
+                    retry: FfiSessionTarget::Environment { environment_id, .. },
                     ..
                 } => Some(environment_id.clone()),
                 _ => None,
@@ -363,7 +373,7 @@ impl<C: SessionCore> Machine<C> {
             Some(FfiSavedSession {
                 orbit_server_id: Some(environment_id),
                 ..
-            }) => self.connect_environment(environment_id),
+            }) => self.follow_environment(environment_id),
             Some(s) => self.begin(
                 FfiSessionTarget::Manual {
                     server_url: s.server_url,
@@ -382,7 +392,21 @@ impl<C: SessionCore> Machine<C> {
     /// A linked scope opened for an Orbit environment.
     pub(crate) fn connect_environment(&mut self, environment_id: String) -> Effects<C> {
         self.begin(
-            FfiSessionTarget::Environment { environment_id },
+            FfiSessionTarget::Environment {
+                environment_id,
+                wake: true,
+            },
+            None,
+            Recover::Allowed,
+        )
+    }
+
+    fn follow_environment(&mut self, environment_id: String) -> Effects<C> {
+        self.begin(
+            FfiSessionTarget::Environment {
+                environment_id,
+                wake: false,
+            },
             None,
             Recover::Allowed,
         )
@@ -900,12 +924,29 @@ impl ConnSession {
                     } => self.step(|m| m.start_failed(id, message, detail)),
                 }
             }
-            FfiSessionTarget::Environment { environment_id, .. } => {
+            FfiSessionTarget::Environment {
+                environment_id,
+                wake,
+            } => {
                 // A bearer saved for this environment is reused (and re-paired if refused).
                 let cached = saved
                     .filter(|s| s.orbit_server_id.as_deref() == Some(environment_id.as_str()))
                     .map(|s| s.bearer);
-                self.run_link(id, environment_id, cached, listener).await;
+                if wake {
+                    self.run_link(id, environment_id, cached, listener).await;
+                } else {
+                    match self
+                        .orbit
+                        .connect_environment(environment_id.clone(), cached, listener)
+                        .await
+                    {
+                        Ok(core) => {
+                            let url = core.server_url();
+                            self.step(|m| m.attached(id, core, url, Some(environment_id)));
+                        }
+                        Err(err) => self.step(|m| m.start_failed(id, err.to_string(), None)),
+                    }
+                }
             }
             FfiSessionTarget::Manual { server_url } => {
                 let Some(credential) = credential else {
@@ -1053,6 +1094,53 @@ impl ConnSession {
             .map(|(_, reader)| Arc::clone(reader))
     }
 
+    pub fn follow_environment(&self, environment_id: String, saved: Option<FfiSavedSession>) {
+        self.step(|m| {
+            m.saved = saved.filter(|s| s.orbit_server_id.as_deref() == Some(&environment_id));
+            m.follow_environment(environment_id)
+        });
+    }
+
+    pub async fn linked_nodes(
+        &self,
+        primary_id: String,
+        saved: Vec<String>,
+        disabled: Vec<String>,
+    ) -> Result<Vec<crate::orbit::FfiOrbitEnvironment>, FfiError> {
+        use conn_orbit::linked::{LinkedPlanInput, plan_linked_environments};
+        use std::collections::HashSet;
+        self.orbit.me().await?;
+        let client = self.orbit.fleet_client();
+        self.orbit
+            .spawn_on_rt(async move {
+                let fleet = client.list_fleet(None).await.map_err(FfiError::from)?;
+                if fleet.find_by_server_id(&primary_id).is_none() {
+                    return Err(FfiError::Connection {
+                        message: "The connected server is not registered in this Orbit fleet."
+                            .into(),
+                    });
+                }
+                let targets: Vec<_> = fleet.nodes.into_iter().chain(fleet.instances).collect();
+                let plan = plan_linked_environments(&LinkedPlanInput {
+                    targets: &targets,
+                    primary_id: Some(&primary_id),
+                    saved: &saved.into_iter().collect(),
+                    held: &HashSet::new(),
+                    disabled: &disabled.into_iter().collect(),
+                    instance_opt_in: &HashSet::new(),
+                    pair_attempted_at_ms: &Default::default(),
+                    now_ms: 0,
+                });
+                let wanted: HashSet<_> = plan.connect.into_iter().chain(plan.pair).collect();
+                Ok(targets
+                    .iter()
+                    .filter(|t| wanted.contains(&t.server_id))
+                    .map(|t| crate::orbit::map_orbit_environment(t, false))
+                    .collect())
+            })
+            .await
+    }
+
     pub fn connect_primary_agent(&self) {
         self.step(Machine::connect_primary_agent);
     }
@@ -1194,7 +1282,7 @@ fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<()>
 }
 
 /// Reads a server's Conn environment id (`/.well-known/t3/environment`).
-async fn fetch_environment_id(server_url: &str) -> Option<String> {
+pub(crate) async fn fetch_environment_id(server_url: &str) -> Option<String> {
     let url = url::Url::parse(server_url)
         .ok()?
         .join(".well-known/t3/environment")
@@ -1263,6 +1351,7 @@ mod tests {
     fn link() -> FfiSessionTarget {
         FfiSessionTarget::Environment {
             environment_id: "inst-7".to_owned(),
+            wake: true,
         }
     }
 
@@ -1409,11 +1498,71 @@ mod tests {
     }
 
     #[test]
+    fn connection_progress_is_not_an_offline_state() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://node/", None, Some("node"))));
+        assert!(!m.state().shows_offline);
+        let _ = m.attached(1, FakeCore::default(), "http://node/".into(), None);
+        assert!(!m.state().shows_offline);
+        let _ = m.status(1, FfiConnectionStatus::Reconnecting { attempt: 1 });
+        assert!(m.state().shows_offline);
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        assert!(!m.state().shows_offline);
+        let _ = m.status(1, failed("Lost connection"));
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_saved_primary_discovers_other_registered_nodes_and_refuses_an_unknown_primary() {
+        use conn_orbit::gateway::GatewayResponse;
+        let gateway = MockGateway::new(|req| {
+            let data = match req.path.as_str() {
+                "/me" => json!({"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}),
+                "/environments" => json!(["primary","desktop","disabled"].map(|id|
+                    json!({"environment_id":id,"label":id,"url":format!("http://{id}/"),"status":"registered","roles":[],"instance_id":null,"cleanup_pending":false})
+                )),
+                other => panic!("Unexpected discovery request: {other}"),
+            };
+            Ok(GatewayResponse {
+                status: 200,
+                body: json!({"data":data}).to_string(),
+            })
+        });
+        let session = ConnSession::with_orbit(
+            OrbitCore::with_transport(gateway).unwrap(),
+            None,
+            Arc::new(Recorder::default()),
+        );
+        let discover = |id: &str| {
+            futures::executor::block_on(session.linked_nodes(
+                id.to_owned(),
+                vec!["desktop".into()],
+                vec!["disabled".into()],
+            ))
+        };
+        let targets = discover("primary").unwrap();
+        assert_eq!(
+            targets
+                .iter()
+                .map(|t| t.server_id.as_str())
+                .collect::<Vec<_>>(),
+            ["desktop"]
+        );
+        assert!(discover("other").is_err());
+    }
+
+    #[test]
     fn a_linked_environment_restores_its_own_target() {
         let mut m = Machine::<FakeCore>::new();
         assert_eq!(
             starts(&m.restore(Some(saved("http://inst/", Some("inst-7"), Some("inst-7"))))),
-            vec![(1, link())],
+            vec![(
+                1,
+                FfiSessionTarget::Environment {
+                    environment_id: "inst-7".to_owned(),
+                    wake: false
+                }
+            )],
             "a linked environment reconnects to itself, not the primary agent"
         );
     }
@@ -1457,7 +1606,8 @@ mod tests {
             vec![(
                 1,
                 FfiSessionTarget::Environment {
-                    environment_id: "env-b".to_owned()
+                    environment_id: "env-b".to_owned(),
+                    wake: true
                 }
             )],
             "B connects in its own scope"
@@ -1681,6 +1831,7 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         states: Mutex<Vec<FfiSessionState>>,
+        shells: Mutex<Vec<FfiShellSnapshot>>,
         deleted: Mutex<Vec<(u64, String)>>,
         saves: Mutex<Vec<Option<FfiSavedSession>>>,
         notify: Condvar,
@@ -1710,7 +1861,10 @@ mod tests {
         fn on_save(&self, session: Option<FfiSavedSession>) {
             self.saves.lock().expect("saves").push(session);
         }
-        fn on_shell(&self, _connection_id: u64, _snapshot: FfiShellSnapshot) {}
+        fn on_shell(&self, _: u64, snapshot: FfiShellSnapshot) {
+            self.shells.lock().unwrap().push(snapshot);
+            self.notify.notify_all();
+        }
         fn on_thread(&self, _connection_id: u64, _snapshot: FfiThreadSnapshot) {}
         fn on_error(&self, _message: String) {}
         fn on_providers_changed(&self) {}
@@ -1720,6 +1874,111 @@ mod tests {
                 .expect("deleted")
                 .push((connection_id, thread_id));
         }
+    }
+
+    #[test]
+    #[ignore = "requires an authorized Orbit gateway and CONN_TEST_DESKTOP_ENV"]
+    fn live_saved_primary_and_distinct_desktop_shell() {
+        let desktop_id = std::env::var("CONN_TEST_DESKTOP_ENV").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let start = |scope: &str| {
+            let recorder = Arc::new(Recorder::default());
+            let session = ConnSession::new(
+                None,
+                Some(tmp.path().join(scope).display().to_string()),
+                recorder.clone(),
+            )
+            .unwrap();
+            (session, recorder)
+        };
+        fn read(rec: &Recorder) -> FfiShellSnapshot {
+            let (shells, _) = rec
+                .notify
+                .wait_timeout_while(
+                    rec.shells.lock().unwrap(),
+                    Duration::from_secs(90),
+                    |shells| !shells.iter().any(|s| s.synchronized),
+                )
+                .unwrap();
+            shells
+                .iter()
+                .rev()
+                .find(|s| s.synchronized)
+                .expect("authorized synchronized shell")
+                .clone()
+        }
+        let (primary, events) = start("primary");
+        primary.launch(None);
+        let shell = read(&events);
+        let credential = events
+            .saves
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .last()
+            .cloned()
+            .expect("primary credential");
+        let primary_id = credential.environment_id.clone().unwrap();
+        assert_ne!(primary_id, desktop_id);
+        eprintln!(
+            "primary {primary_id}: {} projects, {} loaded threads",
+            shell.projects.len(),
+            shell.threads.len()
+        );
+        drop(primary);
+        let (restored, events) = start("primary");
+        restored.launch(Some(credential.clone()));
+        read(&events);
+        let targets =
+            futures::executor::block_on(restored.linked_nodes(primary_id.clone(), vec![], vec![]))
+                .unwrap();
+        assert!(targets.iter().any(|t| t.server_id == desktop_id));
+        let (desktop, child) = start("desktop");
+        desktop.follow_environment(desktop_id.clone(), None);
+        let shell = read(&child);
+        let child_credential = child
+            .saves
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .last()
+            .cloned()
+            .unwrap();
+        assert!(child_credential.bearer != credential.bearer);
+        assert_eq!(
+            child_credential.environment_id.as_deref(),
+            Some(desktop_id.as_str())
+        );
+        let active = shell
+            .threads
+            .iter()
+            .filter(|t| !t.settled && !t.is_subagent)
+            .count();
+        assert!(active > 0);
+        eprintln!(
+            "desktop {desktop_id}: {} projects, {active} active, {} loaded settled, {} older",
+            shell.projects.len(),
+            shell.threads.iter().filter(|t| t.settled).count(),
+            shell.older_settled_count
+        );
+        if shell.older_settled_count > 0 {
+            futures::executor::block_on(desktop.core().unwrap().load_older_settled()).unwrap();
+            let (_snapshots, timed) = child
+                .notify
+                .wait_timeout_while(
+                    child.shells.lock().unwrap(),
+                    Duration::from_secs(30),
+                    |shells| !shells.iter().any(|s| s.threads.len() > shell.threads.len()),
+                )
+                .unwrap();
+            assert!(!timed.timed_out(), "older page added threads");
+        }
+        drop(desktop);
+        let (resumed, events) = start("desktop");
+        resumed.follow_environment(desktop_id, Some(child_credential));
+        assert!(read(&events).threads.iter().any(|t| !t.settled));
     }
 
     #[test]
@@ -1846,6 +2105,7 @@ mod tests {
             .build()
             .expect("test tokio rt");
         let (gw_url, server) = rt.block_on(spawn_mock_conn_server(
+            "node-new",
             "good",
             "code",
             "fresh",

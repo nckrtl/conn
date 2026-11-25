@@ -355,25 +355,6 @@ pub(crate) async fn run(
             break;
         }
 
-        let token = match resolve_bearer(&mut state, &events_tx).await {
-            Ok(token) => token,
-            Err(ResolveError::Fatal(msg)) => {
-                warn!("conn-client fatal auth failure: {msg}");
-                state.fail_all_calls(|| ClientError::Auth(msg.clone()));
-                let _ = events_tx
-                    .send(ClientEvent::Status(ConnectionStatus::Failed(msg)))
-                    .await;
-                return;
-            }
-            Err(ResolveError::Retryable(msg)) => {
-                debug!("conn-client retryable auth error: {msg}");
-                if !wait_backoff(&mut state, &mut cmd_rx, &events_tx).await {
-                    break;
-                }
-                continue;
-            }
-        };
-
         let expected = guards
             .expected_environment
             .lock()
@@ -406,6 +387,25 @@ pub(crate) async fn run(
                 }
             }
         }
+
+        let token = match resolve_bearer(&mut state, &events_tx).await {
+            Ok(token) => token,
+            Err(ResolveError::Fatal(msg)) => {
+                warn!("conn-client fatal auth failure: {msg}");
+                state.fail_all_calls(|| ClientError::Auth(msg.clone()));
+                let _ = events_tx
+                    .send(ClientEvent::Status(ConnectionStatus::Failed(msg)))
+                    .await;
+                return;
+            }
+            Err(ResolveError::Retryable(msg)) => {
+                debug!("conn-client retryable auth error: {msg}");
+                if !wait_backoff(&mut state, &mut cmd_rx, &events_tx).await {
+                    break;
+                }
+                continue;
+            }
+        };
 
         let ws_request = match build_ws_request(&state.config.http_base_url, &token) {
             Ok(req) => req,

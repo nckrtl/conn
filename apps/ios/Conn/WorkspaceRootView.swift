@@ -29,6 +29,7 @@ struct WorkspaceRootView: View {
     @AppStorage("workspace.selectedTab") private var selectedTab: WorkspaceTab = .threads
     @State private var navigationPath: [WorkspaceRoute] = []
     @State private var restoredEnvironment: String?
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
     @State private var isSearching = false
     @State private var searchQuery = ""
@@ -69,7 +70,7 @@ struct WorkspaceRootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(theme.background.ignoresSafeArea())
 
-                if let status = store.status, status != .connected {
+                if store.showsOffline {
                     OfflinePill()
                         .padding(.bottom, 12)
                 }
@@ -160,6 +161,13 @@ struct WorkspaceRootView: View {
         .onAppear {
             showPendingLink()
             store.isInboxVisible = inboxOnScreen
+        }
+        .task(id: scenePhase == .active && store.status == .connected ? store.environmentId : nil) {
+            guard scenePhase == .active, store.status == .connected else { return }
+            while !Task.isCancelled {
+                await store.discoverLinked()
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            }
         }
         .task(id: store.environmentId) {
             guard let environment = store.environmentId, restoredEnvironment != environment else { return }

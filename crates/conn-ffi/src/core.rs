@@ -97,6 +97,11 @@ fn now_epoch_ms() -> i64 {
 }
 
 enum PumpControl {
+    BeginOlderPage(oneshot::Sender<Option<conn_state::OlderPageRequest>>),
+    FinishOlderPage(
+        conn_state::OlderPageRequest,
+        Option<conn_contract::OrchestrationV2OlderSettledThreadsPage>,
+    ),
     EnableOffline(Arc<crate::OfflineReader>),
     OpenThread(String),
     CloseThread(String),
@@ -190,7 +195,13 @@ impl ConnCore {
         listener: Arc<dyn CoreListener>,
         orbit_server_id: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        Self::start_checked(server_url, credential, listener, orbit_server_id, None)
+        Self::start_checked(
+            server_url,
+            credential,
+            listener,
+            orbit_server_id.clone(),
+            orbit_server_id,
+        )
     }
 
     /// [`Self::start`], sending the bearer only to a server whose descriptor names
@@ -418,6 +429,37 @@ pub enum FfiPullRequestOperation {
 
 #[uniffi::export]
 impl ConnCore {
+    /// Reads one server-owned settled cursor without blocking incoming shell changes.
+    pub async fn load_older_settled(&self) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let tx = self.ctrl_tx.clone();
+        let connection = self.connection.clone();
+        self.runtime_handle
+            .spawn(async move {
+                let (reply, rx) = oneshot::channel();
+                tx.send(PumpControl::BeginOlderPage(reply))
+                    .map_err(|_| FfiError::Closed)?;
+                let Some(request) = rx.await.map_err(|_| FfiError::Closed)? else {
+                    return Ok(());
+                };
+                let result = connection
+                    .call::<_, conn_contract::OrchestrationV2OlderSettledThreadsPage>(
+                        "orchestration.getOlderSettledThreads",
+                        &request.payload(),
+                    )
+                    .await;
+                let (page, outcome) = match result {
+                    Ok(page) => (Some(page), Ok(())),
+                    Err(error) => (None, Err(FfiError::from(error))),
+                };
+                tx.send(PumpControl::FinishOlderPage(request, page))
+                    .map_err(|_| FfiError::Closed)?;
+                outcome
+            })
+            .await
+            .map_err(|_| FfiError::Closed)?
+    }
+
     /// Runs a pull request operation on this environment's authenticated connection.
     pub async fn pull_request(
         &self,
@@ -1234,6 +1276,24 @@ impl PumpState {
 
     fn handle_control(&mut self, ctrl: PumpControl) -> bool {
         match ctrl {
+            PumpControl::BeginOlderPage(reply) => {
+                self.shell.retry_older_page();
+                let request = self.shell.next_older_page(0, 1);
+                if let Some(ref request) = request {
+                    self.shell.older_page_started(request);
+                }
+                let _ = reply.send(request);
+                true
+            }
+            PumpControl::FinishOlderPage(request, page) => {
+                if let Some(page) = page {
+                    self.shell.apply_older_page(&request, page);
+                } else {
+                    self.shell.older_page_failed(&request);
+                }
+                self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                true
+            }
             PumpControl::EnableOffline(reader) => {
                 let mut sync = crate::offline::SyncState::new(reader);
                 if self.shell.synchronized {

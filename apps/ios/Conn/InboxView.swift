@@ -19,7 +19,7 @@ struct InboxView: View {
             if let shell = store.shell {
                 inboxList(shell: shell)
             } else if store.linked.values.contains(where: { $0.shell != nil }) {
-                inboxList(shell: FfiShellSnapshot(projects: [], threads: [], synchronized: false))
+                inboxList(shell: FfiShellSnapshot(olderSettledCount: 0, projects: [], threads: [], synchronized: false))
             } else {
                 loadingState
             }
@@ -49,9 +49,15 @@ struct InboxView: View {
         }
     }
 
+    private struct ScopedRow: Identifiable {
+        let thread: FfiThreadSummary
+        let owner: CoreStore
+        let project: FfiProject?
+        var id: [String] { [owner.scope, thread.id] }
+    }
+
     @ViewBuilder
     private func inboxList(shell: FfiShellSnapshot) -> some View {
-        let projectsById = Dictionary(uniqueKeysWithValues: shell.projects.map { ($0.id, $0) })
         let catalogs = ([("", shell)] + store.linked.compactMap { key, owner in owner.shell.map { (key, $0) } })
             .filter { environmentFilter == nil || $0.0 == environmentFilter }
         let projectChoices = catalogs.reduce(into: [String: String]()) { choices, entry in
@@ -60,33 +66,37 @@ struct InboxView: View {
                 if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
             }
         }
-        let filtered = environmentFilter == nil || environmentFilter == "" ? filteredThreads(in: shell, projectsById: projectsById) : []
-        let active = filtered
-            .filter { !$0.settled }
-            .sorted { lhs, rhs in
-                if lhs.pinned != rhs.pinned { return lhs.pinned }
-                return (lhs.updatedAt ?? "") > (rhs.updatedAt ?? "")
+        let owners = ([store] + store.linked.values.sorted { $0.displayName < $1.displayName })
+            .filter { environmentFilter == nil || $0.scope == environmentFilter }
+        let rows = owners.flatMap { owner -> [ScopedRow] in
+            guard let snapshot = owner.shell else { return [] }
+            let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0) })
+            return filteredThreads(in: snapshot, projectsById: projects).map {
+                ScopedRow(thread: $0, owner: owner, project: projects[$0.projectId])
             }
-        let settled = filtered
-            .filter { $0.settled }
-            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
-
+        }
+        let active = rows.filter { !$0.thread.settled }.sorted {
+            if $0.thread.pinned != $1.thread.pinned { return $0.thread.pinned }
+            return ($0.thread.updatedAt ?? "", $0.owner.scope, $0.thread.id) > ($1.thread.updatedAt ?? "", $1.owner.scope, $1.thread.id)
+        }
+        let settled = rows.filter { $0.thread.settled }.sorted {
+            ($0.thread.updatedAt ?? "", $0.owner.scope, $0.thread.id) > ($1.thread.updatedAt ?? "", $1.owner.scope, $1.thread.id)
+        }
+        let paged = owners.filter { ($0.shell?.olderSettledCount ?? 0) > 0 }
+        let missing = paged.reduce(0) { $0 + Int($1.shell?.olderSettledCount ?? 0) }
         List {
-            let remoteCount = store.linked.filter { environmentFilter == nil || environmentFilter == $0.key }.values.reduce(0) { count, owner in
-                guard let remote = owner.shell else { return count }
-                return count + filteredThreads(in: remote, projectsById: Dictionary(uniqueKeysWithValues: remote.projects.map { ($0.id, $0) })).count
-            }
             ZStack(alignment: .trailing) {
                 VStack(spacing: 0) {
                     Text("Threads").font(.system(size: 18, weight: .medium))
-                    Text("\(filtered.count + remoteCount) threads").font(.caption).foregroundStyle(.secondary)
+                    Text("\(rows.count) threads · " + (owners.count == 1 ? owners[0].displayName : "\(owners.count) environments")).font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity)
                 Menu {
                     Picker("Environment", selection: $environmentFilter) {
                         Text("All environments").tag(nil as String?)
                         Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
                         ForEach(store.linked.keys.sorted(), id: \.self) { scope in
-                            Text(store.linked[scope]?.serverURL.flatMap { URL(string: $0)?.host } ?? scope).tag(Optional(scope))
+                            Text(store.linked[scope]?.displayName ?? scope).tag(Optional(scope))
+                                .accessibilityIdentifier("inbox.environment." + (store.linked[scope]?.fleetID ?? scope))
                         }
                     }
                     .pickerStyle(.inline)
@@ -117,24 +127,40 @@ struct InboxView: View {
                 .listRowBackground(Color.clear)
             }
 
-            if active.isEmpty && settled.isEmpty && store.linked.isEmpty {
-                emptyState
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(theme.background)
-            } else {
-                ForEach(active, id: \.id) { thread in
-                    threadRow(thread, owner: store, project: projectsById[thread.projectId], settled: false)
+            if store.discoveredPrimary != store.environmentId && store.discoveryError == nil {
+                ProgressView("Finding environments")
+            }
+            if let error = store.discoveryError {
+                Text("Environment discovery: " + error).foregroundStyle(.secondary)
+                Button("Retry discovery") { Task { await store.discoverLinked() } }
+            }
+            ForEach(owners.filter { !$0.scope.isEmpty }, id: \.scope) { child in
+                if child.showsOffline || child.lastError != nil {
+                    VStack(alignment: .leading) {
+                        Text(child.displayName + " · Not connected")
+                        if case let .failed(message, detail, _) = child.state?.phase {
+                            Text([message, detail].compactMap { $0 }.joined(separator: " ")).font(.caption)
+                        } else if let message = child.lastError { Text(message).font(.caption) }
+                        Button("Retry") { child.reconnect() }
+                    }
+                } else if child.shell?.synchronized != true {
+                    Text("Loading " + child.displayName + "…").foregroundStyle(.secondary)
                 }
-
-                if !settled.isEmpty {
+            }
+            if active.isEmpty && settled.isEmpty && missing == 0 {
+                if store.discoveredPrimary == store.environmentId && owners.allSatisfy({ $0.shell?.synchronized == true }) && store.discoveryError == nil { emptyState }
+            } else {
+                ForEach(active) { row in
+                    threadRow(row.thread, owner: row.owner, project: row.project, settled: false)
+                }
+                if !settled.isEmpty || missing > 0 {
                     Button {
                         withAnimation(Kit.Motion.base) {
                             settledExpanded.toggle()
                         }
                     } label: {
                         HStack(spacing: 6) {
-                            Text("Settled (\(settled.count))")
+                            Text("Settled (\(settled.count + missing))")
                                 .font(.system(size: 13, weight: .medium).monospacedDigit())
                                 .foregroundStyle(theme.mutedForeground)
                             Spacer()
@@ -154,18 +180,14 @@ struct InboxView: View {
                     .accessibilityIdentifier("inbox.settledHeader")
 
                     if settledExpanded {
-                        ForEach(settled, id: \.id) { thread in
-                            threadRow(thread, owner: store, project: projectsById[thread.projectId], settled: true)
+                        ForEach(settled) { row in
+                            threadRow(row.thread, owner: row.owner, project: row.project, settled: true)
                         }
-                    }
-                }
-            }
-            ForEach(store.linked.keys.sorted(), id: \.self) { id in
-                if (environmentFilter == nil || environmentFilter == id), let owner = store.linked[id], let remote = owner.shell {
-                    let projects = Dictionary(uniqueKeysWithValues: remote.projects.map { ($0.id, $0) })
-                    Section(owner.serverURL.flatMap { URL(string: $0)?.host } ?? id) {
-                        ForEach(filteredThreads(in: remote, projectsById: projects), id: \.id) { thread in
-                            threadRow(thread, owner: owner, project: projects[thread.projectId], settled: thread.settled)
+                        ForEach(paged, id: \.scope) { owner in
+                            Button("Load older threads · " + owner.displayName) {
+                                Task { await owner.loadOlder() }
+                            }.disabled(owner.loadingOlder || owner.status != .connected)
+                            if let message = owner.olderError { Text(message).foregroundStyle(.secondary) }
                         }
                     }
                 }

@@ -720,6 +720,11 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func launchThread(projectId: String, text: String) async throws  -> String
     
     /**
+     * Reads one server-owned settled cursor without blocking incoming shell changes.
+     */
+    func loadOlderSettled() async throws 
+    
+    /**
      * Marks `thread_id` unread so it appears as unseen (`thread.mark-unread`).
      *
      * # Errors
@@ -1126,6 +1131,25 @@ open func launchThread(projectId: String, text: String)async throws  -> String  
             completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Reads one server-owned settled cursor without blocking incoming shell changes.
+     */
+open func loadOlderSettled()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_load_older_settled(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -1603,12 +1627,16 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
      */
     func core()  -> ConnCore?
     
+    func followEnvironment(environmentId: String, saved: FfiSavedSession?) 
+    
     func foreground() 
     
     /**
      * The app's main session at launch: a saved manual server, else the primary agent.
      */
     func launch(saved: FfiSavedSession?) 
+    
+    func linkedNodes(primaryId: String, saved: [String], disabled: [String]) async throws  -> [FfiOrbitEnvironment]
     
     /**
      * The current connection's offline thread cache, once open.
@@ -1768,6 +1796,16 @@ open func core() -> ConnCore?  {
 })
 }
     
+open func followEnvironment(environmentId: String, saved: FfiSavedSession?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_follow_environment(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(environmentId),
+        FfiConverterOptionTypeFfiSavedSession.lower(saved),uniffiCallStatus
+    )
+}
+}
+    
 open func foreground()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_conn_ffi_fn_method_connsession_foreground(
@@ -1786,6 +1824,22 @@ open func launch(saved: FfiSavedSession?)  {try! rustCall() {
         FfiConverterOptionTypeFfiSavedSession.lower(saved),uniffiCallStatus
     )
 }
+}
+    
+open func linkedNodes(primaryId: String, saved: [String], disabled: [String])async throws  -> [FfiOrbitEnvironment]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_connsession_linked_nodes(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(primaryId),FfiConverterSequenceString.lower(saved),FfiConverterSequenceString.lower(disabled)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiOrbitEnvironment.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
 }
     
     /**
@@ -8494,6 +8548,7 @@ public struct FfiSessionState: Equatable, Hashable {
      * The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
      */
     public var offlineReady: Bool
+    public var showsOffline: Bool
     /**
      * This session has had a working connection since launch (or since the user last chose to
      * connect manually). The app then keeps the workspace up through reconnects and re-pairs.
@@ -8516,7 +8571,7 @@ public struct FfiSessionState: Equatable, Hashable {
          */environmentId: String?, 
         /**
          * The connection's offline thread cache is open; read it with [`ConnSession::offline_reader`].
-         */offlineReady: Bool, 
+         */offlineReady: Bool, showsOffline: Bool, 
         /**
          * This session has had a working connection since launch (or since the user last chose to
          * connect manually). The app then keeps the workspace up through reconnects and re-pairs.
@@ -8531,6 +8586,7 @@ public struct FfiSessionState: Equatable, Hashable {
         self.serverUrl = serverUrl
         self.environmentId = environmentId
         self.offlineReady = offlineReady
+        self.showsOffline = showsOffline
         self.hasConnected = hasConnected
         self.identityEpoch = identityEpoch
     }
@@ -8557,6 +8613,7 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
                 serverUrl: FfiConverterOptionString.read(from: &buf), 
                 environmentId: FfiConverterOptionString.read(from: &buf), 
                 offlineReady: FfiConverterBool.read(from: &buf), 
+                showsOffline: FfiConverterBool.read(from: &buf), 
                 hasConnected: FfiConverterBool.read(from: &buf), 
                 identityEpoch: FfiConverterUInt64.read(from: &buf)
         )
@@ -8569,6 +8626,7 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.serverUrl, into: &buf)
         FfiConverterOptionString.write(value.environmentId, into: &buf)
         FfiConverterBool.write(value.offlineReady, into: &buf)
+        FfiConverterBool.write(value.showsOffline, into: &buf)
         FfiConverterBool.write(value.hasConnected, into: &buf)
         FfiConverterUInt64.write(value.identityEpoch, into: &buf)
     }
@@ -8745,13 +8803,15 @@ public func FfiConverterTypeFfiShellGeometry_lower(_ value: FfiShellGeometry) ->
  * Point-in-time shell snapshot emitted to [`crate::CoreListener::on_shell`].
  */
 public struct FfiShellSnapshot: Equatable, Hashable {
+    public var olderSettledCount: UInt64
     public var projects: [FfiProject]
     public var threads: [FfiThreadSummary]
     public var synchronized: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(projects: [FfiProject], threads: [FfiThreadSummary], synchronized: Bool) {
+    public init(olderSettledCount: UInt64, projects: [FfiProject], threads: [FfiThreadSummary], synchronized: Bool) {
+        self.olderSettledCount = olderSettledCount
         self.projects = projects
         self.threads = threads
         self.synchronized = synchronized
@@ -8773,6 +8833,7 @@ public struct FfiConverterTypeFfiShellSnapshot: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiShellSnapshot {
         return
             try FfiShellSnapshot(
+                olderSettledCount: FfiConverterUInt64.read(from: &buf), 
                 projects: FfiConverterSequenceTypeFfiProject.read(from: &buf), 
                 threads: FfiConverterSequenceTypeFfiThreadSummary.read(from: &buf), 
                 synchronized: FfiConverterBool.read(from: &buf)
@@ -8780,6 +8841,7 @@ public struct FfiConverterTypeFfiShellSnapshot: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiShellSnapshot, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.olderSettledCount, into: &buf)
         FfiConverterSequenceTypeFfiProject.write(value.projects, into: &buf)
         FfiConverterSequenceTypeFfiThreadSummary.write(value.threads, into: &buf)
         FfiConverterBool.write(value.synchronized, into: &buf)
@@ -14071,7 +14133,7 @@ public enum FfiSessionTarget: Equatable, Hashable {
     /**
      * One Orbit environment (a linked scope).
      */
-    case environment(environmentId: String
+    case environment(environmentId: String, wake: Bool
     )
     /**
      * A server paired by URL.
@@ -14101,7 +14163,7 @@ public struct FfiConverterTypeFfiSessionTarget: FfiConverterRustBuffer {
         
         case 1: return .primaryAgent
         
-        case 2: return .environment(environmentId: try FfiConverterString.read(from: &buf)
+        case 2: return .environment(environmentId: try FfiConverterString.read(from: &buf), wake: try FfiConverterBool.read(from: &buf)
         )
         
         case 3: return .manual(serverUrl: try FfiConverterString.read(from: &buf)
@@ -14119,9 +14181,10 @@ public struct FfiConverterTypeFfiSessionTarget: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case let .environment(environmentId):
+        case let .environment(environmentId,wake):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(environmentId, into: &buf)
+            FfiConverterBool.write(wake, into: &buf)
             
         
         case let .manual(serverUrl):
@@ -17844,6 +17907,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_launch_thread() != 45360) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_load_older_settled() != 10868) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_mark_thread_unread() != 59744) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18060,10 +18126,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_core() != 31451) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_follow_environment() != 25513) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_foreground() != 24799) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_launch() != 24523) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_linked_nodes() != 16297) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_offline_reader() != 43115) {

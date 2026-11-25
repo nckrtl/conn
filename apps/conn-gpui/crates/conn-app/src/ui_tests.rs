@@ -1126,7 +1126,7 @@ fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAp
     });
     let _ = cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        let hero = window.find_by_label("New thread");
+        let hero = window.find("chat-draft-hero");
         let card = window.find_by_label("Message input card");
         assert!(window.try_find_by_label("Thread context").is_none());
         assert!(

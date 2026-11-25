@@ -1741,6 +1741,8 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     func state()  -> FfiSessionState
     
+    func suspend() 
+    
 }
 /**
  * UniFFI handle to the app's connection: one state machine plus the Orbit client it uses.
@@ -2052,6 +2054,14 @@ open func state() -> FfiSessionState  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func suspend()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_suspend(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 
@@ -5767,12 +5777,14 @@ public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendP
 public struct FfiLinkedDiscovery: Equatable, Hashable {
     public var targets: [FfiOrbitEnvironment]
     public var unresolvedEndpoints: [String]
+    public var unresolvedServerIds: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String]) {
+    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String], unresolvedServerIds: [String]) {
         self.targets = targets
         self.unresolvedEndpoints = unresolvedEndpoints
+        self.unresolvedServerIds = unresolvedServerIds
     }
 
     
@@ -5792,13 +5804,15 @@ public struct FfiConverterTypeFfiLinkedDiscovery: FfiConverterRustBuffer {
         return
             try FfiLinkedDiscovery(
                 targets: FfiConverterSequenceTypeFfiOrbitEnvironment.read(from: &buf), 
-                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf)
+                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf), 
+                unresolvedServerIds: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiLinkedDiscovery, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeFfiOrbitEnvironment.write(value.targets, into: &buf)
         FfiConverterSequenceString.write(value.unresolvedEndpoints, into: &buf)
+        FfiConverterSequenceString.write(value.unresolvedServerIds, into: &buf)
     }
 }
 
@@ -10759,6 +10773,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
     public var historyCursor: String?
     public var serverPage: Bool
     public var threadId: String
+    public var projectId: String?
     public var title: String?
     public var branch: String?
     public var modelLabel: String?
@@ -10783,7 +10798,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
+    public init(historyCursor: String?, serverPage: Bool, threadId: String, projectId: String?, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -10795,6 +10810,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         self.historyCursor = historyCursor
         self.serverPage = serverPage
         self.threadId = threadId
+        self.projectId = projectId
         self.title = title
         self.branch = branch
         self.modelLabel = modelLabel
@@ -10829,6 +10845,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
                 historyCursor: FfiConverterOptionString.read(from: &buf), 
                 serverPage: FfiConverterBool.read(from: &buf), 
                 threadId: FfiConverterString.read(from: &buf), 
+                projectId: FfiConverterOptionString.read(from: &buf), 
                 title: FfiConverterOptionString.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
@@ -10849,6 +10866,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.historyCursor, into: &buf)
         FfiConverterBool.write(value.serverPage, into: &buf)
         FfiConverterString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.projectId, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterOptionString.write(value.modelLabel, into: &buf)
@@ -14475,6 +14493,7 @@ public enum FfiSessionPhase: Equatable, Hashable {
      */
     case failed(message: String, detail: String?, retry: FfiSessionTarget
     )
+    case suspended
 
 
 
@@ -14508,6 +14527,8 @@ public struct FfiConverterTypeFfiSessionPhase: FfiConverterRustBuffer {
         case 4: return .failed(message: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf), retry: try FfiConverterTypeFfiSessionTarget.read(from: &buf)
         )
         
+        case 5: return .suspended
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -14537,6 +14558,10 @@ public struct FfiConverterTypeFfiSessionPhase: FfiConverterRustBuffer {
             FfiConverterOptionString.write(detail, into: &buf)
             FfiConverterTypeFfiSessionTarget.write(retry, into: &buf)
             
+        
+        case .suspended:
+            writeInt(&buf, Int32(5))
+        
         }
     }
 }
@@ -18647,6 +18672,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_state() != 16395) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_suspend() != 44540) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_state() != 42113) {

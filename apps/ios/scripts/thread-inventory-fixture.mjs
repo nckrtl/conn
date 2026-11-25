@@ -10,11 +10,15 @@ const fixture = read("../../../crates/conn-state/tests/fixtures/sidebar_inventor
 const base = read("../../../crates/conn-state/tests/fixtures/shell_thread_updates.json")[0].thread;
 const marker = { kind: "synchronized" };
 const scenario = process.argv[3] ?? "inventory";
-const childProjectTest = scenario === "child-project";
+const archivedChild = scenario === "archived-child-project";
+const childProjectTest = scenario === "child-project" || archivedChild;
 const sleepingTest = scenario === "sleeping";
 let fleetState = "running";
 const releaseDiscovery = Promise.withResolvers();
 let sleepingConnectionAttempts = 0;
+let wakeCount = 0;
+let sleepingDriver;
+const driverClosed = Promise.withResolvers();
 const followUp = Promise.withResolvers();
 const row = (fields) => ({
   ...base, title: fields.id, lineage: { rootThreadId: fields.id }, ...fields,
@@ -38,7 +42,7 @@ function childProjectRequest(ws, frame) {
         workspaceRoot: "/tmp/" + t.projectId, scripts: [], createdAt: t.createdAt, updatedAt: t.updatedAt,
       }));
       chunk({ kind: "snapshot", snapshot: {
-        schemaVersion: 1, snapshotSequence: 1, projects, threads: [parent, child], archivedThreads: [],
+        schemaVersion: 1, snapshotSequence: 1, projects, threads: archivedChild ? [parent] : [parent, child], archivedThreads: [],
       } });
       return true;
     }
@@ -49,6 +53,7 @@ function childProjectRequest(ws, frame) {
       const projection = snap.projection;
       const thread = id === child.id ? child : parent;
       Object.assign(projection.thread, { id, title: thread.title, projectId: thread.projectId });
+      if (archivedChild && id === child.id) projection.thread.archivedAt = thread.updatedAt;
       const common = { id: "item-" + id, threadId: id, ordinal: 1, updatedAt: thread.updatedAt, status: "completed" };
       const item = id === parent.id ? {
         ...common, type: "subagent", subagentId: "worker", title: child.title, origin: "app_owned",
@@ -96,6 +101,9 @@ function environment(name) {
         sleepingConnectionAttempts++;
         return new Response(null, { status: 503 });
       }
+      if (sleepingTest && name === "witness" && fleetState === "removed" && path === "/.well-known/t3/environment") {
+        return new Response(null, { status: 503 });
+      }
       if (path === "/ws" && server.upgrade(req, { data: { id: ++socketId } })) return;
       if (path.endsWith("/outline")) return Response.json({ snapshotSequence: seq, markers: [] });
       if (path === "/api/auth/session") return Response.json({ authenticated: true });
@@ -104,6 +112,9 @@ function environment(name) {
       return new Response(null, { status: 404 });
     },
     websocket: {
+      close(ws) {
+        if (name === "linked" && ws.data.id === sleepingDriver) driverClosed.resolve();
+      },
       message(ws, text) {
         for (const frame of [JSON.parse(text)].flat()) {
           if (childProjectTest && childProjectRequest(ws, frame)) continue;
@@ -117,7 +128,8 @@ function environment(name) {
               receiveAck = receiveSubscription;
             } else {
               const id = name === "witness" ? "witness-" + fleetState : "old-" + name;
-              send([snapshot([row({ id })]), marker]);
+              const title = name === "linked" && wakeCount ? "Linked machine resumed " + wakeCount : id;
+              send([snapshot([row({ id, title })]), marker]);
             }
           }
           if (frame.tag === "orchestration.getOlderSettledThreads") {
@@ -127,6 +139,12 @@ function environment(name) {
           }
           if (frame.tag === "orchestration.subscribeThread") {
             threads.set(frame.payload.threadId, { ws, id: frame.id });
+            if (sleepingTest && name === "linked" && frame.payload.threadId === "old-linked") {
+              const snap = read("../../../crates/conn-state/tests/fixtures/thread_turn_stream.json")[0];
+              const data = JSON.stringify(snap).replaceAll(snap.projection.thread.id, "old-linked")
+                .replaceAll(snap.projection.messages[0].text, "Saved linked message");
+              ws.send(JSON.stringify({ _tag: "Chunk", requestId: frame.id, values: [JSON.parse(data), marker] }));
+            }
           }
           if (frame._tag === "Ack" && frame.requestId === requestId && ws.data.id === socket?.data.id) {
             receiveAck?.();
@@ -138,6 +156,8 @@ function environment(name) {
   });
   return {
     url: server.url.href,
+    closeSocket() { socket.close(); },
+    socketId() { return socket.data.id; },
     hold() { replay = true; return ready(); },
     interrupt() { const next = ready(); socket.close(); return next; },
     commit() { send([snapshot(rows), marker]); },
@@ -194,7 +214,14 @@ async function waitForSavedInventories() {
     for (const name of readdirSync(dir).filter((name) => name === "thread-cache" || name.startsWith("thread-cache-"))) {
       try {
         const saved = JSON.parse(readFileSync(dir + "/" + name + "/shell.json", "utf8"));
-        if (saved.threads.some((t) => t.id === "old-" + saved.environmentId)) expected.delete("old-" + saved.environmentId);
+        if (!saved.threads.some((t) => t.id === "old-" + saved.environmentId)) continue;
+        if (sleepingTest && saved.environmentId === "linked") {
+          const db = new Database(dir + "/" + name + "/messages.sqlite3", { readonly: true });
+          try {
+            if (!db.query("SELECT 1 FROM messages WHERE environment = 'linked' AND thread = 'old-linked' LIMIT 1").get()) continue;
+          } finally { db.close(); }
+        }
+        expected.delete("old-" + saved.environmentId);
       } catch (err) { if (err.code !== "ENOENT") throw err; }
     }
     if (!expected.size) return;
@@ -216,7 +243,8 @@ const control = Bun.serve({
           environment_id: id, label: id, url: server.url, status: "registered", roles: [],
         });
         const data = [registration("primary", primary), registration("witness", witness)];
-        if (fleetState !== "removed") data.push({
+        if (fleetState === "removed") data.push(registration("witness-alias", witness));
+        else data.push({
           ...registration("linked", linked), instance_id: 19, instance_name: "Linked instance", power_state: fleetState,
         });
         return Response.json({ data });
@@ -235,7 +263,21 @@ const control = Bun.serve({
       case "saved": await waitForSavedInventories(); break;
       case "sleep": fleetState = "stopped"; break;
       case "discover-sleeping": releaseDiscovery.resolve(); break;
-      case "remove-machine": fleetState = "removed"; break;
+      case "wake-machine":
+        wakeCount++;
+        fleetState = "running";
+        primary.closeSocket();
+        break;
+      case "sleep-live":
+        sleepingDriver = linked.socketId();
+        fleetState = "stopped";
+        primary.closeSocket();
+        break;
+      case "driver-stopped": await driverClosed.promise; break;
+      case "remove-machine":
+        fleetState = "removed";
+        primary.closeSocket();
+        break;
       case "api/v1/instances/19/wake":
         sleepingConnectionAttempts++;
         return new Response(null, { status: 403 });
@@ -280,13 +322,14 @@ const control = Bun.serve({
 const device = process.argv[2];
 if (!device) throw new Error("Pass the task simulator UDID");
 const test = { inventory: "testAtomicThreadInventory", "child-project": "testChildArtifactFollowUpProject",
-  sleeping: "testSavedSleepingMachineInventory" }[scenario];
+  "archived-child-project": "testChildArtifactFollowUpProject", sleeping: "testSavedSleepingMachineInventory" }[scenario];
 if (!test) throw new Error("Unknown inventory scenario " + scenario);
 const child = spawn("xcodebuild", ["test", "-project", "apps/ios/Conn.xcodeproj", "-scheme", "Conn",
   "-destination", "id=" + device, "-derivedDataPath", "apps/ios/build/DerivedData",
   "-parallel-testing-enabled", "NO",
   "-only-testing:ConnUITests/ConnSpikeUITests/" + test,
   "CODE_SIGN_IDENTITY=-"], { cwd: root, stdio: "inherit", env: { ...process.env,
+    TEST_RUNNER_CONN_ARCHIVED_CHILD: archivedChild ? "1" : "0",
     TEST_RUNNER_CONN_INVENTORY_FIXTURE: control.url.href,
     TEST_RUNNER_CONN_PAIRING_URL: primary.url + "#token=test",
     TEST_RUNNER_CONN_LINKED_PAIRING_URL: linked.url + "#token=test",

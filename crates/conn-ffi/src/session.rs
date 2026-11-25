@@ -55,17 +55,24 @@ pub enum FfiLinkRoute {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiSessionPhase {
     /// No attempt: the pairing form, with the last manual failure if any.
-    Idle { message: Option<String> },
+    Idle {
+        message: Option<String>,
+    },
     /// Finding the server; no connection yet.
-    Connecting { target: FfiSessionTarget },
+    Connecting {
+        target: FfiSessionTarget,
+    },
     /// A connection exists: the workspace, with its status.
-    Live { status: FfiConnectionStatus },
+    Live {
+        status: FfiConnectionStatus,
+    },
     /// The attempt ended. `retry` is what Try again repeats.
     Failed {
         message: String,
         detail: Option<String>,
         retry: FfiSessionTarget,
     },
+    Suspended,
 }
 
 /// The one observable state. `revision` grows with every change, so an older state that
@@ -250,7 +257,8 @@ impl<C: SessionCore> Machine<C> {
             revision: self.revision,
             connection_id: self.attempt.as_ref().map_or(0, |a| a.id),
             shows_offline: match &phase {
-                FfiSessionPhase::Failed { .. }
+                FfiSessionPhase::Suspended
+                | FfiSessionPhase::Failed { .. }
                 | FfiSessionPhase::Idle { message: Some(_) }
                 | FfiSessionPhase::Live {
                     status: FfiConnectionStatus::Failed { .. },
@@ -347,6 +355,7 @@ impl<C: SessionCore> Machine<C> {
                 }
                 _ => None,
             })
+            .or_else(|| self.environment_id.clone())
             .or_else(|| match &self.rest {
                 // A failed environment scope is still that environment.
                 FfiSessionPhase::Failed {
@@ -437,6 +446,17 @@ impl<C: SessionCore> Machine<C> {
             Recover::Allowed,
         ));
         fx
+    }
+
+    /// Discovery has no live target for this scope. Keep its identity, credential and open thread.
+    fn suspend(&mut self) -> Effects<C> {
+        self.rest = FfiSessionPhase::Suspended;
+        self.attempt
+            .take()
+            .and_then(|a| a.core)
+            .map(Effect::Disconnect)
+            .into_iter()
+            .collect()
     }
 
     /// "Connect manually": stop any attempt and show the pairing form.
@@ -787,6 +807,7 @@ enum Recover {
 pub struct FfiLinkedDiscovery {
     pub targets: Vec<crate::orbit::FfiOrbitEnvironment>,
     pub unresolved_endpoints: Vec<String>,
+    pub unresolved_server_ids: Vec<String>,
 }
 
 /// UniFFI handle to the app's connection: one state machine plus the Orbit client it uses.
@@ -1247,6 +1268,7 @@ impl ConnSession {
                     .map(|t| crate::orbit::map_orbit_environment(t, false))
                     .collect();
                 let mut unresolved_endpoints = Vec::new();
+                let mut unresolved_server_ids = Vec::new();
                 let mut included = HashSet::new();
                 for (url, registrations) in endpoints {
                     if !registrations.iter().any(|t| wanted.contains(&t.server_id)) {
@@ -1258,7 +1280,8 @@ impl ConnSession {
                     } else {
                         let actual = fetch_environment_id(&url).await;
                         registrations
-                            .into_iter()
+                            .iter()
+                            .copied()
                             .find(|t| Some(t.server_id.as_str()) == actual.as_deref())
                     };
                     match target {
@@ -1268,13 +1291,22 @@ impl ConnSession {
                         {
                             linked.push(crate::orbit::map_orbit_environment(t, false))
                         }
-                        None => unresolved_endpoints.push(url),
+                        None => {
+                            unresolved_endpoints.push(url);
+                            unresolved_server_ids.extend(
+                                registrations
+                                    .iter()
+                                    .filter(|t| wanted.contains(&t.server_id))
+                                    .map(|t| t.server_id.clone()),
+                            );
+                        }
                         _ => {}
                     }
                 }
                 Ok(FfiLinkedDiscovery {
                     targets: linked,
                     unresolved_endpoints,
+                    unresolved_server_ids,
                 })
             })
             .await
@@ -1298,6 +1330,10 @@ impl ConnSession {
 
     pub fn retry(&self) {
         self.step(Machine::retry);
+    }
+
+    pub fn suspend(&self) {
+        self.step(Machine::suspend);
     }
 
     pub fn foreground(&self) {
@@ -1816,9 +1852,17 @@ mod tests {
         let gateway = MockGateway::new(move |req| {
             let data = match req.path.as_str() {
                 "/me" => json!({"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}),
-                "/environments" => json!(["primary","stale","current"].map(|id|
-                    json!({"environment_id":id,"label":id,"url":if id == "primary" {"http://primary/".to_owned()} else if id == "stale" {url.trim_end_matches('/').to_owned()} else {url.clone()},"status":"registered","roles":[],"instance_id":null,"cleanup_pending":false})
-                )),
+                "/environments" => {
+                    json!(["primary", "stale", "current", "ambiguous-a", "ambiguous-b"].map(|id| {
+                    let endpoint = match id {
+                        "primary" => "http://primary/",
+                        "current" => &url,
+                        "stale" => url.trim_end_matches('/'),
+                        _ => "http://127.0.0.1:0/",
+                    };
+                    json!({"environment_id":id,"label":id,"url":endpoint,"status":"registered"})
+                }))
+                }
                 other => panic!("Discovery must not mint pairings: {other}"),
             };
             Ok(GatewayResponse {
@@ -1833,7 +1877,7 @@ mod tests {
         );
         let plan = futures::executor::block_on(session.linked_nodes(
             "primary".into(),
-            vec!["stale".into()],
+            vec!["stale".into(), "removed".into(), "ambiguous-a".into()],
             vec![],
         ))
         .unwrap();
@@ -1844,8 +1888,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["current"]
         );
-        assert!(plan.unresolved_endpoints.is_empty());
+        assert_eq!(plan.unresolved_endpoints, ["http://127.0.0.1:0"]);
+        assert_eq!(plan.unresolved_server_ids, ["ambiguous-a", "ambiguous-b"]);
         assert!(!saw_bearer.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_suspended_environment_stops_its_driver_and_reopens_its_cached_thread_on_wake() {
+        let mut machine = Machine::<FakeCore>::new();
+        let credential = saved("http://inst/", Some("inst-7"), Some("inst-7"));
+        let _ = machine.restore(Some(credential.clone()));
+        let _ = machine.attached(
+            1,
+            FakeCore::default(),
+            "http://inst/".into(),
+            Some("inst-7".into()),
+        );
+        let _ = machine.status(1, FfiConnectionStatus::Reconnecting { attempt: 1 });
+        assert!(matches!(
+            machine.suspend().as_slice(),
+            [Effect::Disconnect(_)]
+        ));
+        assert_eq!(machine.state().environment_id.as_deref(), Some("inst-7"));
+        assert_eq!(machine.saved, Some(credential));
+        assert_eq!(machine.route_link("inst-7"), FfiLinkRoute::Here);
+        assert!(machine.foreground().is_empty());
+        assert!(machine.open_thread("cached".into()).is_empty());
+        assert!(machine.status(1, failed("late failure")).is_empty());
+        assert!(matches!(machine.state().phase, FfiSessionPhase::Suspended));
+        assert!(machine.suspend().is_empty());
+        assert_eq!(starts(&machine.follow_environment("inst-7".into()))[0].0, 2);
+        assert_eq!(
+            opens(&machine.attached(
+                2,
+                FakeCore::default(),
+                "http://inst/".into(),
+                Some("inst-7".into())
+            )),
+            ["cached"]
+        );
     }
 
     #[test]

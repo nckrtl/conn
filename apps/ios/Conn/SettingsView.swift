@@ -149,7 +149,10 @@ private struct SettingsEnvironmentsDetailView: View {
                                 if case let .failed(message, detail, _) = child.state?.phase {
                                     SettingsNoteRow(text: [message, detail].compactMap { $0 }.joined(separator: " "))
                                 } else if let message = child.lastError { SettingsNoteRow(text: message) }
-                                SettingsActionRow(title: "Retry " + child.displayName) { child.reconnect() }
+                                // A sleeping machine's retries are suspended until it wakes.
+                                if child.state?.phase != .suspended {
+                                    SettingsActionRow(title: "Retry " + child.displayName) { child.reconnect() }
+                                }
                             }
                             SettingsActionRow(title: "Disconnect") { store.removeLinked(id) }
                                 .accessibilityLabel("Disconnect " + child.displayName)

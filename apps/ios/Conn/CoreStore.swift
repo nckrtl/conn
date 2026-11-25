@@ -89,7 +89,7 @@ final class CoreStore {
     private var coldLaunchSession: FfiSavedSession?
     private var choseOffline = false
     var showsSavedConnectionAlert: Bool {
-        coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
+        scope.isEmpty && coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
     }
 
     func useSavedWorkspaceOffline() { choseOffline = true }
@@ -238,7 +238,9 @@ final class CoreStore {
             for id in linkedOrder where KeychainStore.loadSession(scope: id) != nil {
                 linked[id] = CoreStore(scope: id, deferOrbit: true, publications: publications)
             }
-        } else if !deferOrbit || fleetID == nil {
+        } else if deferOrbit && fleetID != nil {
+            session?.suspend()
+        } else {
             session?.restore(saved: saved)
         }
         coldLaunchSession = saved
@@ -292,6 +294,7 @@ final class CoreStore {
         })
         let saved = credentials.values.compactMap(\.orbitServerId)
         let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
+        let previousLinks = linked
         do {
             let discovery = try await session.linkedNodes(primaryId: primary, saved: saved, disabled: disabled)
             guard !Task.isCancelled, generation == identityEpoch, environmentId == primary else { return }
@@ -300,10 +303,14 @@ final class CoreStore {
                 "Could not verify the server identity at " + discovery.unresolvedEndpoints.joined(separator: ", ")
             discoveredPrimary = primary
             let wanted = Set(targets.map(\.serverId))
-            for (key, child) in linked {
-                guard let id = child.fleetID, !wanted.contains(id),
-                      discovery.unresolvedEndpoints.isEmpty else { continue }
-                forgetLinked(key)
+            let unresolved = Set(discovery.unresolvedServerIds)
+            for (key, child) in previousLinks {
+                guard linked[key] === child, let id = child.fleetID, !wanted.contains(id) else { continue }
+                if unresolved.contains(id) {
+                    child.suspendFleetSession()
+                } else {
+                    forgetLinked(key)
+                }
             }
             for target in targets {
                 let id = target.serverId
@@ -315,7 +322,7 @@ final class CoreStore {
                 child.fleetLabel = target.displayTitle
                 registerLinked(child)
                 guard target.isAwake else {
-                    child.lastFleetAttempt = nil
+                    child.suspendFleetSession()
                     continue
                 }
                 if let attempt = child.lastFleetAttempt {
@@ -330,6 +337,12 @@ final class CoreStore {
         } catch {
             if !Task.isCancelled && environmentId == primary { discoveryError = connectionMessage(error) }
         }
+    }
+
+    private func suspendFleetSession() {
+        lastFleetAttempt = nil
+        guard let session, session.state().phase != .suspended else { return }
+        session.suspend()
     }
 
     private static func cacheDirectory(_ scope: String) -> URL {
@@ -615,10 +628,9 @@ final class CoreStore {
 
     private func restoreThread(_ id: String) {
         guard let reader = offlineReader, openThread == nil else { return }
-        let connection = state?.connectionId
         Task {
             guard let cached = try? await reader.recent(thread: id),
-                  state?.connectionId == connection, openThreadId == id,
+                  offlineReader === reader, openThreadId == id,
                   openThread == nil, !cached.entries.isEmpty else { return }
             openThread = cached
         }
@@ -686,7 +698,7 @@ final class CoreStore {
 
     // MARK: - Session events
 
-    fileprivate func handleState(_ newState: FfiSessionState) {
+    func handleState(_ newState: FfiSessionState) {
         if let state, newState.revision <= state.revision { return }
         // The open thread stays: the session resubscribes it on the new connection. Only a switch
         // to another server drops it, with that server's inbox.
@@ -694,7 +706,6 @@ final class CoreStore {
         let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
             imageThumbnails.clear()
-            drafts.removeAll()
             discardComposerDrafts()
             coldLaunchSession = nil
             shell = nil

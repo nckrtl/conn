@@ -59,6 +59,18 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nckrtl.conn.ios
         ASSETCATALOG_COMPILER_APPICON_NAME: ConnIcon
+  ConnTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [ConnTests]
+    dependencies:
+      - target: Conn
+      - framework: build/ConnCore.xcframework
+        link: false
+        embed: false
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
   ConnUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -77,4 +89,4 @@ schemes:
       targets:
         Conn: all
     test:
-      targets: [ConnUITests]
+      targets: [ConnTests, ConnUITests]

@@ -10,7 +10,7 @@ struct ThreadCard<Header: View, Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        let outer = theme.background.mix(with: theme.foreground, by: appearance == .light ? 0.06 : 0.056, in: .device)
+        let outer = threadCardSurface(theme, appearance)
         let inner = code ? theme.codeBackground : appearance == .light ? Color.white : outer.mix(with: .white, by: 0.06, in: .device)
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) { header }
@@ -26,6 +26,33 @@ struct ThreadCard<Header: View, Content: View>: View {
         }
         .padding(3)
         .background(outer, in: .rect(cornerRadius: 14))
+    }
+}
+
+/// The outer card colour (lab `--thread-card-surface`).
+func threadCardSurface(_ theme: ConnTheme, _ appearance: ColorScheme) -> Color {
+    theme.background.mix(with: theme.foreground, by: appearance == .light ? 0.06 : 0.056, in: .device)
+}
+
+/// A card icon's status dot: 5 pt, a 2 pt ring in the card surface, 4 pt past the icon's
+/// top-right corner (lab `.m-feed-card-header .m-dot`).
+struct CardStatusDot: View {
+    let color: Color
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+
+    var body: some View {
+        Circle().fill(color).frame(width: 5, height: 5)
+            .padding(2)
+            .background(threadCardSurface(theme, appearance), in: Circle())
+            .offset(x: 4, y: -4)
+            .allowsHitTesting(false)
+    }
+}
+
+extension View {
+    func cardStatusDot(_ color: Color) -> some View {
+        overlay(alignment: .topTrailing) { CardStatusDot(color: color) }
     }
 }
 

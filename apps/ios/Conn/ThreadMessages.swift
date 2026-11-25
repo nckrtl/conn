@@ -153,13 +153,17 @@ struct TaskReceiptCard: View {
     var body: some View {
         let row = taskReceiptRow(task: task, nowMs: Int64(Date.now.timeIntervalSince1970 * 1000))
         ThreadCard {
-            Image(systemName: "checklist")
-                .overlay(alignment: .topTrailing) { StatusBadgeDot(dot: row.dot).offset(x: 4, y: -4) }
+            ThreadGlyph(name: "checklist", size: 16)
+                .frame(width: 14, height: 14)
+                .cardStatusDot(dotColor(row.dot))
             Text(row.detail).lineLimit(2)
             Spacer(minLength: 0)
             if let pr = row.pullRequest, let url = URL(string: pr.url), ["https", "http"].contains(url.scheme) {
                 Link(destination: url) {
-                    Label("#\(pr.number)", systemImage: pr.state == .merged ? "arrow.triangle.merge" : "arrow.triangle.pull")
+                    HStack(spacing: 3) {
+                        ThreadGlyph(name: pr.state == .merged ? "merge" : "pull-request", size: size)
+                        Text("#\(pr.number)")
+                    }
                 }
                 .foregroundStyle(pr.state == .merged ? AdaptiveColor.violet600400.color(appearance) :
                     pr.state == .closed ? theme.destructive : AdaptiveColor.emerald700300.color(appearance))
@@ -169,6 +173,15 @@ struct TaskReceiptCard: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    private func dotColor(_ dot: FfiTaskDot) -> Color {
+        switch dot {
+        case .working: AdaptiveColor.sky600400.color(appearance)
+        case .waiting: theme.mutedForeground
+        case .done: AdaptiveColor.emerald600400.color(appearance)
+        case .failed: theme.destructive
+        }
     }
 }
 

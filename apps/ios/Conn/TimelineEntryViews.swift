@@ -144,10 +144,9 @@ struct TimelineEntryRow: View {
         case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, _, started, ended):
             let metadata = subagentMetadata
             ThreadCard {
-                ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
-                    Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
-                        .frame(width: 6, height: 6)
-                }
+                // GPUI's fixed info and success colours (lab `--thread-info`, `--thread-success`).
+                ProviderIcon(driver: metadata.provider, size: 14).cardStatusDot(
+                    status == .completed ? Color(rgbHex: 0x00BC7D) : status == .failed ? theme.destructive : Color(rgbHex: 0x2B7FFF))
                 let elapsed = threadElapsed(started, ended)
                 Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)

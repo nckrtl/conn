@@ -364,7 +364,42 @@ pub const PASSKEY_URL_MAX_BYTES: usize = 8192;
 /// Largest `options` string Vault accepts in a passkey request.
 pub const PASSKEY_OPTIONS_MAX_BYTES: usize = 12_000;
 
-/// A passkey request carries exactly these fields: Vault refuses any other.
+/// Where the browser's page area sits on screen, so Vault opens its passkey panel at the area's
+/// top-right corner instead of the top centre of the screen.
+///
+/// The rect is in AppKit's global screen coordinates, in points: the origin is the bottom-left
+/// corner of the primary display, `y` grows upward, and `(x, y)` is the rect's bottom-left
+/// corner. Retina scale does not apply: these are points, never pixels. Placement only: Vault
+/// ignores it for every security decision, and drops a rect it cannot use.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct PasskeyAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl PasskeyAnchor {
+    /// No display comes near this. Vault refuses anything larger.
+    pub const LIMIT: f64 = 100_000.0;
+
+    /// The anchor, when every number is finite and sane and the size is positive.
+    #[must_use]
+    pub fn new(x: f64, y: f64, width: f64, height: f64) -> Option<Self> {
+        let sane = [x, y, width, height]
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= Self::LIMIT);
+        (sane && width > 0.0 && height > 0.0).then_some(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
+/// A passkey request carries exactly these fields: Vault refuses any other. `anchor` is optional
+/// and left out when Conn cannot say where its browser is.
 #[derive(Serialize)]
 struct PasskeyBridgeRequest<'a> {
     version: u8,
@@ -373,6 +408,8 @@ struct PasskeyBridgeRequest<'a> {
     mode: &'static str,
     url: &'a str,
     options: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<PasskeyAnchor>,
 }
 
 #[derive(Deserialize)]
@@ -734,11 +771,15 @@ impl VaultClient {
     /// # Errors
     ///
     /// Returns the [`PasskeyError`] the page's promise rejects with.
+    ///
+    /// `anchor` is where the browser's page area is on screen; Vault places its panel there.
+    /// Pass `None` when it is unknown: Vault then opens the panel where it always did.
     pub async fn passkey(
         &self,
         mode: PasskeyMode,
         url: &str,
         options: &str,
+        anchor: Option<PasskeyAnchor>,
     ) -> Result<String, PasskeyError> {
         if https_origin(url).is_none() || url.len() > PASSKEY_URL_MAX_BYTES {
             return Err(PasskeyError::Security);
@@ -757,6 +798,8 @@ impl VaultClient {
             mode: mode.as_str(),
             url,
             options,
+            // Re-checked here, so a caller that built the struct by hand cannot send a bad rect.
+            anchor: anchor.and_then(|a| PasskeyAnchor::new(a.x, a.y, a.width, a.height)),
         })
         .map_err(|_| PasskeyError::NotSupported)?;
         let payload = self
@@ -1246,8 +1289,15 @@ import json, struct, sys
 
 req = json.loads(sys.stdin.buffer.read(struct.unpack("<I", sys.stdin.buffer.read(4))[0]))
 keys = sorted(req.keys())
+base = ["id", "kind", "mode", "options", "url", "version"]
+anchor = req.get("anchor")
+ok_anchor = anchor is None or (
+    sorted(anchor.keys()) == ["height", "width", "x", "y"]
+    and all(isinstance(v, (int, float)) for v in anchor.values())
+)
 ok_shape = (
-    keys == ["id", "kind", "mode", "options", "url", "version"]
+    ok_anchor
+    and keys in (base, sorted(base + ["anchor"]))
     and req["version"] == 1
     and req["kind"] == "passkey"
     and req["mode"] in ("passkey-create", "passkey-get")
@@ -1326,7 +1376,7 @@ sys.stdout.buffer.flush()
         let url = "https://example.com/login?next=%2F";
         for mode in [PasskeyMode::Get, PasskeyMode::Create] {
             let credential = client
-                .passkey(mode, url, PASSKEY_OPTIONS)
+                .passkey(mode, url, PASSKEY_OPTIONS, None)
                 .await
                 .map_err(|err| err.name())?;
             let value: serde_json::Value = serde_json::from_str(&credential)?;
@@ -1334,6 +1384,109 @@ sys.stdout.buffer.flush()
             assert_eq!(value["url"], url);
             assert_eq!(value["options"], PASSKEY_OPTIONS);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn anchor_needs_finite_sane_numbers_and_a_positive_size() {
+        assert_eq!(
+            PasskeyAnchor::new(100.0, 200.5, 900.0, 700.0),
+            Some(PasskeyAnchor {
+                x: 100.0,
+                y: 200.5,
+                width: 900.0,
+                height: 700.0
+            })
+        );
+        // A second display sits at negative coordinates.
+        assert!(PasskeyAnchor::new(-1920.0, -300.0, 1920.0, 1080.0).is_some());
+        for bad in [
+            PasskeyAnchor::new(f64::NAN, 0.0, 10.0, 10.0),
+            PasskeyAnchor::new(0.0, f64::INFINITY, 10.0, 10.0),
+            PasskeyAnchor::new(0.0, 0.0, f64::NEG_INFINITY, 10.0),
+            PasskeyAnchor::new(0.0, 0.0, 0.0, 10.0),
+            PasskeyAnchor::new(0.0, 0.0, 10.0, -1.0),
+            PasskeyAnchor::new(1.0e12, 0.0, 10.0, 10.0),
+            PasskeyAnchor::new(0.0, -1.0e12, 10.0, 10.0),
+        ] {
+            assert_eq!(bad, None);
+        }
+    }
+
+    #[test]
+    fn request_serialises_the_anchor_only_when_there_is_one() -> Result<(), serde_json::Error> {
+        let build = |anchor| {
+            serde_json::to_value(PasskeyBridgeRequest {
+                version: 1,
+                id: "11111111-1111-1111-1111-111111111111",
+                kind: "passkey",
+                mode: PasskeyMode::Get.as_str(),
+                url: "https://example.com/login",
+                options: PASSKEY_OPTIONS,
+                anchor,
+            })
+        };
+        let plain = build(None)?;
+        assert!(plain.get("anchor").is_none(), "{plain}");
+        let anchored = build(PasskeyAnchor::new(100.0, 200.0, 900.5, 700.0))?;
+        assert_eq!(
+            anchored["anchor"],
+            serde_json::json!({"x": 100.0, "y": 200.0, "width": 900.5, "height": 700.0})
+        );
+        // Everything else is the contract's shape, with or without it.
+        let mut keys: Vec<_> = anchored
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["anchor", "id", "kind", "mode", "options", "url", "version"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_request_carries_the_anchor_to_vault() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let script = passkey_script(
+            r#"{"id": req["id"], "status": "ok", "passkey": json.dumps({"anchor": req.get("anchor")})}"#,
+        );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let anchor = PasskeyAnchor::new(-1920.0, 40.5, 1500.0, 900.0);
+        let credential = client
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                anchor,
+            )
+            .await
+            .map_err(|err| err.name())?;
+        let value: serde_json::Value = serde_json::from_str(&credential)?;
+        assert_eq!(
+            value["anchor"],
+            serde_json::json!({"x": -1920.0, "y": 40.5, "width": 1500.0, "height": 900.0})
+        );
+        // A hand-built bad rect never leaves Conn.
+        let bad = PasskeyAnchor {
+            x: f64::NAN,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let credential = client
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                Some(bad),
+            )
+            .await
+            .map_err(|err| err.name())?;
+        let value: serde_json::Value = serde_json::from_str(&credential)?;
+        assert!(value["anchor"].is_null(), "{value}");
         Ok(())
     }
 
@@ -1349,7 +1502,12 @@ body = json.dumps(reply)"#,
         let (_dir, bin) = write_fake_vault(&script)?;
         let client = VaultClient::with_binary(&bin);
         let credential = client
-            .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                None,
+            )
             .await;
         assert_eq!(credential.as_deref(), Ok("{}"));
         Ok(())
@@ -1368,7 +1526,12 @@ body = json.dumps(reply)"#,
             ));
             let (_dir, bin) = write_fake_vault(&script)?;
             let outcome = VaultClient::with_binary(&bin)
-                .passkey(PasskeyMode::Create, "https://example.com/", PASSKEY_OPTIONS)
+                .passkey(
+                    PasskeyMode::Create,
+                    "https://example.com/",
+                    PASSKEY_OPTIONS,
+                    None,
+                )
                 .await;
             assert_eq!(outcome, Err(expected), "{name}");
         }
@@ -1385,7 +1548,12 @@ sys.exit(0)
 ",
         )?;
         let outcome = VaultClient::with_binary(&bin)
-            .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                None,
+            )
             .await;
         assert_eq!(outcome, Err(PasskeyError::NotAllowed));
         Ok(())
@@ -1401,7 +1569,12 @@ time.sleep(30)
         let started = std::time::Instant::now();
         let outcome = VaultClient::with_binary(&bin)
             .with_timeout(Duration::from_millis(300))
-            .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                None,
+            )
             .await;
         assert_eq!(outcome, Err(PasskeyError::NotAllowed));
         assert!(started.elapsed() < Duration::from_secs(10));
@@ -1425,7 +1598,9 @@ time.sleep(30)
             "not a url",
         ] {
             assert_eq!(
-                client.passkey(PasskeyMode::Get, url, PASSKEY_OPTIONS).await,
+                client
+                    .passkey(PasskeyMode::Get, url, PASSKEY_OPTIONS, None)
+                    .await,
                 Err(PasskeyError::Security),
                 "{url}"
             );
@@ -1433,21 +1608,26 @@ time.sleep(30)
         let long_url = format!("https://example.com/{}", "a".repeat(PASSKEY_URL_MAX_BYTES));
         assert_eq!(
             client
-                .passkey(PasskeyMode::Get, &long_url, PASSKEY_OPTIONS)
+                .passkey(PasskeyMode::Get, &long_url, PASSKEY_OPTIONS, None)
                 .await,
             Err(PasskeyError::Security)
         );
         for options in ["", &"x".repeat(PASSKEY_OPTIONS_MAX_BYTES + 1)] {
             assert_eq!(
                 client
-                    .passkey(PasskeyMode::Get, "https://example.com/", options)
+                    .passkey(PasskeyMode::Get, "https://example.com/", options, None)
                     .await,
                 Err(PasskeyError::NotSupported)
             );
         }
         assert_eq!(
             client
-                .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+                .passkey(
+                    PasskeyMode::Get,
+                    "https://example.com/",
+                    PASSKEY_OPTIONS,
+                    None
+                )
                 .await,
             Err(PasskeyError::NotAllowed),
             "no Vault installed"

@@ -10,10 +10,11 @@ use std::time::Duration;
 
 use crate::a11y::ConnA11yExt as _;
 use crate::runtime_warmup;
+use crate::screen_anchor;
 use conn_client::Connection;
-use conn_desktop::vault::PasskeyError;
 #[cfg(not(test))]
 use conn_desktop::vault::VaultClient;
+use conn_desktop::vault::{PasskeyAnchor, PasskeyError};
 use conn_desktop::vault::{
     VaultLoginField, VaultLoginFillLookup, VaultLoginItem, VaultLoginsResponse, VaultLoginsStatus,
     https_origin,
@@ -237,6 +238,9 @@ pub(crate) struct BrowserPanel {
     passkeys: PasskeyGate,
     /// The token of the page the main frame shows, set by the browser as each document starts.
     passkey_token: passkeys::SharedToken,
+    /// The window this panel last drew in. A passkey request asks it where the page area is on
+    /// screen, so Vault can open its panel there.
+    window_handle: Option<gpui_kit::AnyWindowHandle>,
     /// Replies sent to the page's passkey shim, view or not, so tests can read them.
     #[cfg(test)]
     passkey_replies: RefCell<Vec<String>>,
@@ -375,6 +379,7 @@ impl BrowserPanel {
             inline_logins: InlineLogins::default(),
             passkeys: PasskeyGate::default(),
             passkey_token: passkeys::SharedToken::default(),
+            window_handle: None,
             #[cfg(test)]
             passkey_replies: RefCell::new(Vec::new()),
             laravel_toolbar,
@@ -775,7 +780,9 @@ impl BrowserPanel {
                         return;
                     }
                 };
-                let task = Self::run_vault_passkey(admitted);
+                // Read when the page asks, not when it last drew: the window may have moved since.
+                let anchor = self.page_anchor_on_screen(cx);
+                let task = Self::run_vault_passkey(admitted, anchor);
                 self.passkeys.attach(&id, task.abort_handle());
                 cx.notify();
                 cx.spawn(async move |this, cx| {
@@ -802,14 +809,28 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// Where the page area is on screen right now, in AppKit screen coordinates. `None` when this
+    /// panel has not drawn, the window is busy or has no native view, or nothing of the page shows:
+    /// Vault then opens its panel where it always did. Placement only.
+    fn page_anchor_on_screen(&self, cx: &mut Context<'_, Self>) -> Option<PasskeyAnchor> {
+        let page = self.last_bounds.get()?;
+        let handle = self.window_handle?;
+        cx.update_window(handle, |_, window, _| {
+            screen_anchor::page_anchor(window, (page.x, page.y, page.width, page.height))
+        })
+        .ok()
+        .flatten()
+    }
+
     /// Runs the ceremony in Vault off the UI thread. Aborting the task closes the pipe.
     #[cfg(not(test))]
     fn run_vault_passkey(
         request: passkeys::Admitted,
+        anchor: Option<PasskeyAnchor>,
     ) -> tokio::task::JoinHandle<Result<String, PasskeyError>> {
         crate::live::RT.spawn(async move {
             VaultClient::new()
-                .passkey(request.mode, &request.url, &request.options)
+                .passkey(request.mode, &request.url, &request.options, anchor)
                 .await
         })
     }
@@ -818,6 +839,7 @@ impl BrowserPanel {
     #[cfg(test)]
     fn run_vault_passkey(
         request: passkeys::Admitted,
+        _anchor: Option<PasskeyAnchor>,
     ) -> tokio::task::JoinHandle<Result<String, PasskeyError>> {
         crate::live::RT.spawn(async move { passkeys::stub_vault(&request).await })
     }
@@ -3099,6 +3121,7 @@ impl BrowserPanel {
 
 impl Render for BrowserPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.window_handle = Some(window.window_handle());
         // Keep the address field on the page's URL (navigation, redirects, links).
         let current_url = self
             .view

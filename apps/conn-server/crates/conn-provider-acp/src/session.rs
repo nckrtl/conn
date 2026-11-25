@@ -1419,6 +1419,7 @@ impl Inner {
         if state.active_prompt.take().is_none() {
             return;
         }
+        let outcome = state.mapper.prompt_outcome(outcome);
         let delivery = state.delivery.take();
         // Grok cancels locally, refusals discard the prompt, and errors need a retry.
         if let Some(delivery) = delivery

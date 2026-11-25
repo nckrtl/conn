@@ -1709,6 +1709,23 @@ impl<E: Env> Mapper<E> {
         }
     }
 
+    pub(crate) fn prompt_outcome(&self, outcome: PromptOutcome) -> PromptOutcome {
+        if let Some(warning) = self.flavor.terminal_warning
+            && matches!(&outcome, PromptOutcome::Stopped(reason) if reason == "end_turn")
+            && let Some(message) = self
+                .turn
+                .as_ref()
+                .and_then(|turn| turn.assistant.current.as_ref())
+            && message.text.trim() == warning
+        {
+            return PromptOutcome::Failed {
+                message: warning.to_owned(),
+                code: None,
+            };
+        }
+        outcome
+    }
+
     /// The prompt settled: finalize with the status its outcome gives.
     pub(crate) fn prompt_settled(&mut self, outcome: PromptOutcome) -> Vec<Out> {
         let interrupted = self.turn_interrupted();

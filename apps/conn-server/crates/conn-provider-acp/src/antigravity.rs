@@ -769,6 +769,9 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     prompt_failure: |message, code| {
         crate::flavor::provider_failure(message, "provider_error", code)
     },
+    terminal_warning: Some(
+        "⚠ There was a network issue connecting to the server, please try again.",
+    ),
     permission_override: |_| None,
     select_model: |_, _, _, _| None,
     normalize_tool: None,

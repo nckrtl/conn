@@ -14,6 +14,7 @@ final class ComposerDraft {
     var files: [ComposerFile] = [] { didSet { renewKey() } }
     var projectOverride: (id: String?, title: String)? { didSet { renewKey() } }
     private(set) var key = UUID().uuidString
+    private var discarded = false
     var sending = false
     var importing = false
     var error: String?
@@ -24,7 +25,16 @@ final class ComposerDraft {
 
     private func renewKey() { key = UUID().uuidString }
 
+    func discard() {
+        discarded = true
+        text = ""
+        files = []
+        projectOverride = nil
+        error = nil
+    }
+
     func append(_ file: ComposerFile) throws {
+        guard !discarded else { throw CancellationError() }
         guard files.count < 100 else { throw ComposerFileError("Attach up to 100 files per message.") }
         if file.isImage && files.filter(\.isImage).reduce(file.size, { $0 + $1.size }) > 80 * 1024 * 1024 {
             throw ComposerFileError("Images can total up to 80 MiB per message.")

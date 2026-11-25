@@ -5,14 +5,14 @@ use crate::{FfiError, FfiSendMode};
 use conn_client::Connection;
 use conn_contract::{ChatAttachment, ExecutionEnvironmentCapabilities};
 
-#[derive(uniffi::Record)]
+#[derive(Debug, uniffi::Record)]
 pub struct FfiComposerFile {
     pub path: String,
     pub name: String,
     pub mime_type: String,
 }
 
-#[derive(uniffi::Enum)]
+#[derive(Debug, uniffi::Enum)]
 pub enum FfiComposerTarget {
     New {
         project_id: Option<String>,

@@ -7,6 +7,7 @@ mod api;
 mod browser;
 mod browser_context_menu;
 mod browser_inline_logins;
+mod browser_passkeys;
 pub(crate) mod chrome;
 mod color;
 mod database;

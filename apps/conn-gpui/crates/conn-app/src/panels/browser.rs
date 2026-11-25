@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::a11y::ConnA11yExt as _;
 use crate::runtime_warmup;
 use conn_client::Connection;
+use conn_desktop::vault::PasskeyError;
 #[cfg(not(test))]
 use conn_desktop::vault::VaultClient;
 use conn_desktop::vault::{
@@ -46,6 +47,7 @@ use super::browser_context_menu::{MenuActions, OpenMenu, render_context_menu};
 use super::browser_inline_logins::{
     self as inline, InlineEvent, InlineLogins, KeyOutcome, PickerActions, RowAction,
 };
+use super::browser_passkeys::{self as passkeys, PasskeyGate, PasskeyMessage, PasskeyOp};
 use super::chrome::{self, ConnTooltipExt as _, FloatingSurfaceExt as _};
 use super::color::to_hsla;
 use super::header::superhero_icon;
@@ -109,6 +111,17 @@ enum OverlayBridgeMessage {
         #[serde(default)]
         event: serde_json::Value,
     },
+    /// The passkey shim's request or cancel. It holds the page's token and the request options,
+    /// never the page's address.
+    Passkey {
+        token: String,
+        op: String,
+        id: String,
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        options: String,
+    },
 }
 
 enum BrowserOverlayEvent {
@@ -118,6 +131,7 @@ enum BrowserOverlayEvent {
         page: String,
         png: Vec<u8>,
     },
+    Passkey(PasskeyMessage),
     Rpc {
         request_id: String,
         op: String,
@@ -219,6 +233,13 @@ pub(crate) struct BrowserPanel {
     vault_logins: VaultLoginUiState,
     /// The picker under a focused sign-in field of an HTTPS page.
     inline_logins: InlineLogins,
+    /// The tab's passkey ceremony, if Vault is being waited for.
+    passkeys: PasskeyGate,
+    /// The token of the page the main frame shows, set by the browser as each document starts.
+    passkey_token: passkeys::SharedToken,
+    /// Replies sent to the page's passkey shim, view or not, so tests can read them.
+    #[cfg(test)]
+    passkey_replies: RefCell<Vec<String>>,
     /// The Laravel debug bar under the page (`x-toolbar` headers and `__LARAVEL_TOOLBAR_DATA__`).
     laravel_toolbar: Entity<LaravelToolbar>,
     /// The toolbar's overflow menu (`PreviewMoreMenu`) is open.
@@ -352,6 +373,10 @@ impl BrowserPanel {
             annotations,
             vault_logins: VaultLoginUiState::default(),
             inline_logins: InlineLogins::default(),
+            passkeys: PasskeyGate::default(),
+            passkey_token: passkeys::SharedToken::default(),
+            #[cfg(test)]
+            passkey_replies: RefCell::new(Vec::new()),
             laravel_toolbar,
             more_menu_open: false,
             polling_runtime: false,
@@ -386,6 +411,8 @@ impl BrowserPanel {
         self.wake_task = None;
         self.overlay_task = None;
         self.host_handle.set_control(None);
+        // Closing the tab ends a ceremony Vault is still showing.
+        self.passkeys.cancel();
         let view = self.view.borrow_mut().take();
         if let Some(view) = view {
             view.close();
@@ -649,6 +676,8 @@ impl BrowserPanel {
     /// A page finished loading. Its bridge and pins go in now only if it shows; a hidden tab
     /// takes them when it is shown, so a page in the background runs none of our scripts.
     fn on_load_end(&mut self, cx: &mut Context<'_, Self>) {
+        // The shim goes in at document start; this is the backstop, and does nothing when it ran.
+        self.ensure_passkey_shim();
         self.overlay_injected_load_count.set(None);
         self.annotations.annotating = false;
         self.vault_logins.open = false;
@@ -665,6 +694,8 @@ impl BrowserPanel {
     fn on_load_start(&mut self, cx: &mut Context<'_, Self>) {
         // A new document has no focused field yet; its watcher reports one once the bridge is in.
         self.inline_logins.reset();
+        // The page that asked for a passkey is gone: end its ceremony and close the pipe to Vault.
+        self.cancel_passkey(cx);
         if self.visible.get() {
             self.inject_host_script();
         } else {
@@ -672,6 +703,162 @@ impl BrowserPanel {
         }
         self.laravel_toolbar
             .update(cx, |bar, cx| bar.on_load_start(cx));
+    }
+
+    /// Puts the passkey shim into the main frame of an HTTPS page that has a token. Safe to run
+    /// again: a page that already has it ignores a second copy.
+    fn ensure_passkey_shim(&self) {
+        let token = self
+            .passkey_token
+            .lock()
+            .ok()
+            .and_then(|token| token.clone());
+        let Some(script) = token.as_deref().and_then(passkeys::shim_script) else {
+            return;
+        };
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(&script);
+        }
+    }
+
+    fn page_passkey_token(&self) -> Option<String> {
+        self.passkey_token
+            .lock()
+            .ok()
+            .and_then(|token| token.clone())
+    }
+
+    /// Answers the page's shim.
+    fn reply_passkey(&self, id: &str, result: &Result<String, PasskeyError>) {
+        #[cfg(test)]
+        self.passkey_replies.borrow_mut().push(match result {
+            Ok(credential) => format!("{id}:ok:{credential}"),
+            Err(error) => format!("{id}:{}", error.name()),
+        });
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(&passkeys::reply_script(id, result));
+        }
+    }
+
+    /// Ends the ceremony without an answer: the page that asked is gone.
+    fn cancel_passkey(&mut self, cx: &mut Context<'_, Self>) {
+        if self.passkeys.is_active() {
+            self.passkeys.cancel();
+            cx.notify();
+        }
+    }
+
+    /// Runs one message from the page's passkey shim. The address Vault sees is the browser's
+    /// own, never the message's.
+    fn on_passkey(&mut self, message: PasskeyMessage, cx: &mut Context<'_, Self>) {
+        let page_token = self.page_passkey_token();
+        match message.op {
+            PasskeyOp::Abort { id } => {
+                self.passkeys
+                    .abort(page_token.as_deref(), &message.token, &id);
+                cx.notify();
+            }
+            PasskeyOp::Start { id, mode, options } => {
+                let page_url = self.current_url();
+                let admitted = self.passkeys.admit(
+                    page_token.as_deref(),
+                    &page_url,
+                    &message.token,
+                    &id,
+                    &mode,
+                    &options,
+                );
+                let admitted = match admitted {
+                    Ok(admitted) => admitted,
+                    Err(error) => {
+                        self.reply_passkey(&id, &Err(error));
+                        return;
+                    }
+                };
+                let task = Self::run_vault_passkey(admitted);
+                self.passkeys.attach(&id, task.abort_handle());
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let outcome = task.await;
+                    let _ = this.update(cx, |panel, cx| panel.on_passkey_done(&id, outcome, cx));
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn on_passkey_done(
+        &mut self,
+        id: &str,
+        outcome: Result<Result<String, PasskeyError>, tokio::task::JoinError>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // A ceremony that was cancelled (a new page, an abort or a closed tab) gets no answer.
+        if !self.passkeys.finish(id) {
+            return;
+        }
+        let result = outcome.unwrap_or(Err(PasskeyError::NotAllowed));
+        self.reply_passkey(id, &result);
+        cx.notify();
+    }
+
+    /// Runs the ceremony in Vault off the UI thread. Aborting the task closes the pipe.
+    #[cfg(not(test))]
+    fn run_vault_passkey(
+        request: passkeys::Admitted,
+    ) -> tokio::task::JoinHandle<Result<String, PasskeyError>> {
+        crate::live::RT.spawn(async move {
+            VaultClient::new()
+                .passkey(request.mode, &request.url, &request.options)
+                .await
+        })
+    }
+
+    /// Tests never reach the real Vault: the options say what the stand-in does.
+    #[cfg(test)]
+    fn run_vault_passkey(
+        request: passkeys::Admitted,
+    ) -> tokio::task::JoinHandle<Result<String, PasskeyError>> {
+        crate::live::RT.spawn(async move { passkeys::stub_vault(&request).await })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn passkey_message_for_test(
+        &mut self,
+        (token, op, id): (&str, &str, &str),
+        (mode, options): (&str, &str),
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(message) = passkeys::parse_message(
+            token.to_owned(),
+            op,
+            id.to_owned(),
+            mode.to_owned(),
+            options.to_owned(),
+        ) {
+            self.on_passkey(message, cx);
+        }
+    }
+
+    /// Makes the page's token as the browser does when a document starts.
+    #[cfg(test)]
+    pub(crate) fn document_start_for_test(&self, url: &str) -> Option<String> {
+        passkeys::document_script(url, &self.passkey_token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn passkey_token_for_test(&self) -> Option<String> {
+        self.page_passkey_token()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn passkey_replies_for_test(&self) -> Vec<String> {
+        self.passkey_replies.borrow().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn passkey_waiting_for_test(&self) -> bool {
+        self.passkeys.is_active()
     }
 
     fn inject_host_script(&mut self) {
@@ -1710,6 +1897,7 @@ impl BrowserPanel {
         let view_while_hidden = self.view_while_hidden.clone();
         let applied_hidden = self.applied_hidden.clone();
         let host_handle = self.host_handle.clone();
+        let passkey_token = self.passkey_token.clone();
         let entity = cx.entity().downgrade();
 
         // Defer BrowserView creation until after GPUI finishes the current frame.
@@ -1736,6 +1924,12 @@ impl BrowserPanel {
                         let _ = wake_tx.try_send(());
                     };
                     browser_view.on_frame(wake_cb);
+
+                    // Each new HTTPS document gets the passkey shim and a token of its own, from
+                    // the browser's own callback, ahead of the page's scripts.
+                    browser_view.on_document_start(move |url| {
+                        passkeys::document_script(url, &passkey_token)
+                    });
 
                     // Console + load-end bridge for Conn's `@t3tools/annotation-overlay`.
                     let (overlay_tx, mut overlay_rx) =
@@ -1776,6 +1970,21 @@ impl BrowserPanel {
                                     value,
                                     error,
                                 },
+                                OverlayBridgeMessage::Passkey {
+                                    token,
+                                    op,
+                                    id,
+                                    mode,
+                                    options,
+                                } => {
+                                    // A malformed request is dropped.
+                                    let Some(message) =
+                                        passkeys::parse_message(token, &op, id, mode, options)
+                                    else {
+                                        return true;
+                                    };
+                                    BrowserOverlayEvent::Passkey(message)
+                                }
                                 OverlayBridgeMessage::CredentialInline { event } => {
                                     // Malformed or off-page metadata is dropped.
                                     let Some(event) = inline::parse_inline_event(&event) else {
@@ -1844,6 +2053,9 @@ impl BrowserPanel {
                                             if panel.inline_logins.set_icon(&page, png) {
                                                 cx.notify();
                                             }
+                                        }
+                                        BrowserOverlayEvent::Passkey(message) => {
+                                            panel.on_passkey(message, cx);
                                         }
                                         BrowserOverlayEvent::Rpc {
                                             request_id,
@@ -3249,6 +3461,14 @@ impl Render for BrowserPanel {
                                         .text_size(px(UI_TEXT_PX)),
                                 ),
                             )
+                            .children(self.passkeys.is_active().then(|| {
+                                div()
+                                    .id("browser-passkey-status")
+                                    .a11y_group("browser.passkey-status", "Waiting for Vault")
+                                    .text_size(px(11.0))
+                                    .text_color(muted)
+                                    .child("Waiting for Vault…")
+                            }))
                             .children(vault_btn),
                     )
                     .child(self.render_annotations_toolbar_group(cx)),

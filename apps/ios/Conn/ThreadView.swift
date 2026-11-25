@@ -640,9 +640,12 @@ struct ThreadView: View {
     }
 
     private func composerArea(_ proxy: ScrollViewProxy) -> some View {
-        GlassEffectContainer(spacing: 12) {
+        // Merge spacing 8: below the 12pt gap kept between the floating control and the composer, so
+        // the jump circle never blends into the prompt box's glass, also as the box grows.
+        GlassEffectContainer(spacing: 8) {
           VStack(alignment: .leading, spacing: 0) {
-            floatingControl()
+            // The 38.5pt circle sits 2.75pt inside its 44pt frame: 9.25 more makes a 12pt gap.
+            floatingControl().padding(.bottom, 9.25)
           VStack(alignment: .leading, spacing: 10.5) {
             if let historyNotice {
                 Text(historyNotice).font(.kitDetail)
@@ -803,7 +806,7 @@ struct ThreadView: View {
 
     /// Mobile's `FloatingWorkingControl`, above the approvals and the composer: a glass capsule for
     /// the running subagents ("2/3", or "3 done" once they settle) and the jump-to-latest circle,
-    /// 16 apart. Both share one glass container with the composer, so they merge when they touch.
+    /// 16 apart, 12 above the composer.
     @ViewBuilder
     private func floatingControl() -> some View {
         let agents = turnSubagents
@@ -855,8 +858,10 @@ struct ThreadView: View {
                     .foregroundStyle(theme.foreground)
             }
             .padding(.horizontal, 12)
-            .frame(height: 44)
+            // Mobile's 38.5pt control in a 44pt target, like the jump circle beside it.
+            .frame(height: 38.5)
             .glassEffect(.regular.interactive(), in: .capsule)
+            .frame(height: 44)
             .contentShape(Capsule())
         }
         .accessibilityLabel(live > 0 ? "Open agents, \(live) of \(agents.count) agents working" : "Open agents, \(agents.count) done")

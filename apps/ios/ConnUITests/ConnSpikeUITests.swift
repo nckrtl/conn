@@ -736,10 +736,10 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertTrue(pr.waitForExistence(timeout: 40), "The test server should list at least one open pull request")
         app.buttons["Filter pull requests"].tap()
         capture("pull-requests-populated-filter")
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Draft (")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Draft ·")).firstMatch.tap()
         capture("filtered-prs")
         app.buttons["Filter pull requests"].tap()
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All (")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All ·")).firstMatch.tap()
         if fixture != nil { XCTAssertTrue(pr.label.contains("25d")) }
         capture("pull-requests")
         pr.tap()

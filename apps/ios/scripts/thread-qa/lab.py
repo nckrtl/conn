@@ -49,6 +49,8 @@ with sync_playwright() as playwright:
         ("hidden-attachment", ".m-composer-plus {visibility: hidden}", "missing attachment plus"),
         ("small-type", ".m-feed .m-feed-card-preview {font-size: 10px !important}",
          "preview type or inset"),
+        ("tight-composer-inset", ".m-composer-input {transform: translateX(-12px)}",
+         "empty composer placeholder missing or misplaced"),
         ("old-body-size", ".m-feed-text .m-md {font-size: 13px !important; line-height: 21.125px !important}",
          "message body wrap differs"),
         ("covered-tail", ".m-feed-item:last-child .ios-message-meta {visibility: hidden}",

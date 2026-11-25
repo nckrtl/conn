@@ -10,9 +10,11 @@ WIDTH, HEIGHT = 402, 874
 PAGE, CARD, INSET = (22, 26, 30), (35, 39, 42), (48, 52, 55)
 
 
-def recognize(image, tessdata):
+def recognize(image, tessdata, rect=None):
     with PyTessBaseAPI(path=str(tessdata), psm=PSM.SPARSE_TEXT) as api:
         api.SetImage(ImageOps.invert(image.convert("L").resize((WIDTH * 3, HEIGHT * 3))))
+        if rect is not None:
+            api.SetRectangle(*(value * 3 for value in rect))
         api.Recognize()
         lines = []
         iterator = api.GetIterator()
@@ -78,8 +80,8 @@ def body_lines(feed, expected, left, require):
             require(False, f"message body wrap differs at: {words}")
             return []
         lines.append(matches[0])
-    require(all(abs(x - left) <= 4 and 13 <= b - y <= 17 for _, x, y, r, b in lines),
-            "message body type size or inset differs")
+    require(all(13 <= b - y <= 17 for _, x, y, r, b in lines), "message body glyph height differs")
+    require(all(abs(x - left) <= 4 for _, x, y, r, b in lines), "message body horizontal inset differs")
     require(all(abs(b[2] - a[2] - 24) <= 2 for a, b in zip(lines, lines[1:])),
             "message body line spacing differs")
     return lines
@@ -101,7 +103,9 @@ def check(path, tessdata, keyboard_top, bubble=False):
         source = source.convert("RGB")
     lines = recognize(source, tessdata)
     image = source.resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
-    require(any("wireguard launch" in t and y < 100 for t, x, y, r, b in lines), "wrong thread title")
+    titles = ("wireguard launch", "normal user bubble") if bubble else ("wireguard launch",)
+    require(any(any(title in text for title in titles) and y < 100
+                for text, x, y, r, b in lines), "wrong thread title")
     # The lab leaves 36 pt below the 48 pt composer. On iOS the focused
     # composer sits directly above the measured software keyboard.
     bottom = keyboard_top if keyboard_top is not None else HEIGHT - 36
@@ -111,8 +115,11 @@ def check(path, tessdata, keyboard_top, bubble=False):
     require(keyboard == (keyboard_top is not None), "keyboard visibility does not match the capture")
     require(plus_visible(image, center), f"missing attachment plus near composer y={center}")
     if not keyboard:
-        require(any("ask anything" in t and x > 57 and abs(y - center) < 14
-                    for t, x, y, r, b in lines), "empty composer placeholder missing or misplaced")
+        # OCR can combine the plus and placeholder into one string. Crop out
+        # the button so the measured x is always the first glyph of "Ask".
+        field = recognize(source, tessdata, rect=(55, center - 20, 200, 40))
+        require(any("ask anything" in t and abs(x - 73) <= 4 and abs(y - center) < 14
+                    for t, x, y, r, b in field), "empty composer placeholder missing or misplaced")
 
     feed = [line for line in lines if 104 < line[2] and line[4] <= top]
     if bubble:

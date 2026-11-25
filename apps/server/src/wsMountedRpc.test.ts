@@ -8,10 +8,16 @@ const restoredFeatureRpcs = [
   WS_METHODS.annotationsSubscribe,
   WS_METHODS.annotationsCreate,
   WS_METHODS.annotationsRemove,
-  WS_METHODS.orbitWorkspacesSubscribe,
-  WS_METHODS.orbitWorkspacesRegister,
-  WS_METHODS.orbitWorkspacesRemove,
 ] as const;
+
+// Orbit installs and updates provider CLIs, so these official RPCs stay unmounted.
+const orbitManagedProviderRpcs = new Set<string>([
+  WS_METHODS.providerInstallStart,
+  WS_METHODS.providerInstallCancel,
+  WS_METHODS.providerInstallSubscribe,
+  WS_METHODS.providerInstallRemove,
+  WS_METHODS.serverUpdateProvider,
+]);
 
 const connMainAlreadyMountedExtras = [
   WS_METHODS.desktopTabRegister,
@@ -20,9 +26,11 @@ const connMainAlreadyMountedExtras = [
 ] as const;
 
 describe("mounted server WS RPCs", () => {
-  it("mounts official RPCs and only the authorized annotation and Orbit fork RPCs", () => {
+  it("mounts official RPCs and only the authorized annotation fork RPCs", () => {
     const mounted = new Set(mountedServerWsRpcTags);
-    const official = new Set(OfficialWsRpcGroup.requests.keys());
+    const official = new Set(
+      [...OfficialWsRpcGroup.requests.keys()].filter((tag) => !orbitManagedProviderRpcs.has(tag)),
+    );
     const splitAndOther = new Set([...mountedSplitWsRpcTags, ...mountedOtherWsRpcTags]);
 
     expect(mounted).toEqual(new Set([...official, ...restoredFeatureRpcs]));
@@ -34,11 +42,12 @@ describe("mounted server WS RPCs", () => {
     }
   });
 
-  it("adds only desktop relay and authorized feature RPCs beyond upstream 240446e2 and its November 8 auth update", () => {
+  it("mounts only authorized upstream, desktop relay and restored feature RPCs", () => {
     const authorized = new Set([
-      ...authorizedUpstreamWsRpcTags,
+      ...authorizedUpstreamWsRpcTags.filter((tag) => !orbitManagedProviderRpcs.has(tag)),
       ...connMainAlreadyMountedExtras,
       WS_METHODS.providerAuthRemoveMethod,
+      WS_METHODS.serverGetSettings,
       ...restoredFeatureRpcs,
     ]);
     expect(new Set(mountedServerWsRpcTags)).toEqual(authorized);

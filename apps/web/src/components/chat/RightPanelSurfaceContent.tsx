@@ -1,6 +1,8 @@
+import { useGT } from "gt-react";
 import type {
   EditorId,
   EnvironmentId,
+  IssueTrackerKind,
   PreviewAnnotationPayload,
   ProjectId,
   ResolvedKeybindingsConfig,
@@ -16,17 +18,20 @@ import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore"
 import { DatabasePanel } from "../../database/DatabasePanel";
 import type { ShortcutMatchContext } from "../../keybindings";
 import { McpPanel } from "../../mcp/McpPanel";
+import { TasksPanel } from "../../orbit/tasks/TasksPanel";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import { type RightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
 import {
   PersistentThreadTerminalPanel,
   type PersistentThreadTerminalPanelProps,
 } from "../PersistentThreadTerminals";
+import { IssueDetailPanel } from "../issue/IssueDetailPanel";
 import { pullRequestPanelContext } from "../pullRequest/pullRequestDetail.logic";
 import { PullRequestDetailPanel } from "../pullRequest/PullRequestDetailPanel";
 import { PullRequestDetailGhost } from "../pullRequest/PullRequestGhosts";
 import { PullRequestsUnavailableState } from "../pullRequest/PullRequestsUnavailableState";
 import { ThreadPullRequestsPanel } from "../pullRequest/ThreadPullRequestsPanel";
+import { appName } from "@t3tools/shared/appName";
 
 const PreviewPanel = lazy(() =>
   import("../preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
@@ -62,8 +67,10 @@ interface RightPanelFileProps {
   readonly onPendingChange: (relativePath: string, pending: boolean) => void;
 }
 
-/** Conn: the project the API, Database and MCP panels belong to. */
+/** Conn: the project the API, Database, MCP and Tasks panels belong to. */
 export interface RightPanelConnProjectProps {
+  /** The Orbit Project of the Instance this thread's server runs in, if any. */
+  readonly orbitProjectId: number | null;
   readonly projectKey: string | null;
   readonly environmentId: EnvironmentId | null;
   readonly workspaceRoot: string | null;
@@ -90,11 +97,13 @@ export function RightPanelSurfaceContent(props: {
   readonly onCloseSurface: (surface: RightPanelSurface) => void;
   readonly terminal: RightPanelTerminalProps;
   readonly pullRequest: RightPanelPullRequestProps;
+  readonly issuesSupported: boolean;
   readonly files: RightPanelFileProps;
   readonly connProject: RightPanelConnProjectProps;
   readonly sideChatParentPanel: SideChatParentPanel;
 }) {
   const { surface, threadRef, visible, onCloseSurface } = props;
+  const gt = useGT();
   if (surface === null) return null;
   switch (surface.kind) {
     case "preview":
@@ -137,8 +146,10 @@ export function RightPanelSurfaceContent(props: {
       if (!pullRequest.supported) {
         return (
           <PullRequestsUnavailableState
-            title="Pull requests unavailable"
-            error="Update this environment's T3 Code server to browse pull requests."
+            title={gt("Pull requests unavailable")}
+            error={gt("Update this environment's {appName} server to browse pull requests.", {
+              appName: appName(),
+            })}
           />
         );
       }
@@ -147,9 +158,13 @@ export function RightPanelSurfaceContent(props: {
           getShortcutContext={props.getShortcutContext}
           shortcutsEnabled={visible && props.activeSurfaceId === surface.id}
           key={`${scopedThreadKey(threadRef)}:${surface.id}`}
-          environmentId={props.environmentId}
+          // A PR from another environment (a task's stacked PR) reads from the one that hosts it.
+          environmentId={
+            (surface.environmentId as EnvironmentId | undefined) ?? props.environmentId
+          }
           onSelectPullRequest={(reference) => {
             useRightPanelStore.getState().openPullRequest(threadRef, {
+              ...(surface.environmentId ? { environmentId: surface.environmentId } : {}),
               projectId: reference.projectId,
               repository: reference.repository,
               number: reference.number,
@@ -164,6 +179,10 @@ export function RightPanelSurfaceContent(props: {
             number: surface.number,
           }}
           initialTab={surface.detailTab ?? "summary"}
+          revealUrl={surface.revealUrl}
+          onRevealSettled={(revealUrl) => {
+            useRightPanelStore.getState().settlePullRequestReveal(threadRef, surface.id, revealUrl);
+          }}
           onTabChange={(tab) => {
             useRightPanelStore.getState().setPullRequestDetailTab(threadRef, surface.id, tab);
           }}
@@ -181,6 +200,42 @@ export function RightPanelSurfaceContent(props: {
         />
       );
     }
+    case "issue":
+      if (!props.pullRequest.capabilityKnown) return <PullRequestDetailGhost />;
+      if (!props.issuesSupported) {
+        return (
+          <PullRequestsUnavailableState
+            title={gt("Issues unavailable")}
+            error={gt("Update this environment's {appName} server to browse issues.", {
+              appName: appName(),
+            })}
+          />
+        );
+      }
+      return (
+        <IssueDetailPanel
+          key={`${surface.environmentId ?? props.environmentId}:${surface.id}`}
+          environmentId={
+            (surface.environmentId as EnvironmentId | undefined) ?? props.environmentId
+          }
+          reference={{
+            projectId: surface.projectId as ProjectId,
+            tracker: surface.tracker as IssueTrackerKind,
+            ...(surface.host ? { host: surface.host } : {}),
+            scope: surface.scope,
+            key: surface.key,
+          }}
+          threadRef={threadRef}
+          onSelectPullRequest={(reference) => {
+            useRightPanelStore.getState().openPullRequest(threadRef, {
+              projectId: reference.projectId,
+              repository: reference.repository,
+              number: reference.number,
+              ...(reference.host ? { host: reference.host } : {}),
+            });
+          }}
+        />
+      );
     case "pull-requests":
       return <ThreadPullRequestsPanel threadRef={threadRef} />;
     case "api": {
@@ -219,6 +274,18 @@ export function RightPanelSurfaceContent(props: {
         />
       );
     }
+    case "tasks":
+      return (
+        <TasksPanel
+          threadKey={scopedThreadKey(threadRef)}
+          orbitProjectId={props.connProject.orbitProjectId}
+          host={{
+            shortcutsEnabled: visible && props.activeSurfaceId === surface.id,
+            getShortcutContext: props.getShortcutContext,
+            composerDraftTarget: props.composerDraftTarget,
+          }}
+        />
+      );
     case "side-chat":
       // Not lazy: revealing a suspended tiptap editor tears down its view and crashes the composer.
       return (

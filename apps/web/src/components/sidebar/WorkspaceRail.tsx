@@ -14,24 +14,14 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useAtomValue } from "@effect/atom-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import {
-  ChartNoAxesColumnIcon,
-  CircleCheckIcon,
-  DownloadIcon,
-  LayersIcon,
-  PlusIcon,
-  SettingsIcon,
-  TriangleAlertIcon,
-} from "lucide-react";
+import { ChartNoAxesColumnIcon, LayersIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { type ComponentProps, type ReactNode, useEffect, useState } from "react";
 
 import { canOpenDesktopWindows, openDesktopWorkspaceWindow } from "../../lib/desktopWindowContext";
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
 import { useEnvironments } from "../../state/environments";
-import { primaryServerProvidersAtom } from "../../state/server";
 import { useWorkspaceStore } from "../../workspaceStore";
 import {
   workspaceProjectRefs,
@@ -39,12 +29,13 @@ import {
   type Workspace,
 } from "../../workspaces.logic";
 import { useWorkspaceThreadNavigation } from "../../hooks/useWorkspaceThreadNavigation";
+import { useOrbitThreadsAvailable } from "../../orbit/environmentProvider";
+import { isOrbitPanelPage, ORBIT_PANEL_HOME } from "../../orbit/orbitPanelPages";
+import { OrbitLogoIcon } from "../OrbitLogoIcon";
 import { useDelegatedUnderParent, useThreadShells } from "../../state/entities";
 import { useUiStateStore } from "../../uiStateStore";
 import { workspaceAttention, workspaceThreads } from "../../workspaceActivity.logic";
-import { getProviderUpdateSidebarPillView } from "../ProviderUpdateLaunchNotification.logic";
 import { useSidebar } from "../ui/sidebar";
-import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "../pullRequest/pullRequestListPreferences";
@@ -339,10 +330,10 @@ export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
 /**
  * The app's utility actions at the bottom of the rail, top to bottom: a provider
  * update (only while there is one), the app update button (always there in the
- * desktop app, so an update never shifts the rest), usage, pull requests and
- * settings. They replace the thread sidebar's footer row.
+ * desktop app, so an update never shifts the rest), usage, pull requests, Orbit
+ * (Conn: only while environments come from Orbit) and settings. They replace the thread sidebar's footer row.
  */
-function RailActions() {
+export function RailActions() {
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
   const page = useLocation({
@@ -351,8 +342,11 @@ function RailActions() {
         ? "usage"
         : location.pathname === "/pull-requests"
           ? "pull-requests"
-          : null,
+          : isOrbitPanelPage(location.pathname)
+            ? "orbit"
+            : null,
   });
+  const orbitAvailable = useOrbitThreadsAvailable();
   const { environments } = useEnvironments();
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
@@ -364,7 +358,6 @@ function RailActions() {
 
   return (
     <div className="flex w-full shrink-0 flex-col items-center gap-2 pb-2">
-      <RailProviderUpdate />
       <SidebarUpdatePill variant="rail" />
       <RailButton
         label="Usage"
@@ -384,73 +377,18 @@ function RailActions() {
           <PullRequestGlyph.pullRequest className="size-4" />
         </RailButton>
       ) : null}
+      {orbitAvailable ? (
+        <RailButton
+          label="Orbit"
+          active={page === "orbit"}
+          onClick={go(() => void navigate({ to: ORBIT_PANEL_HOME }))}
+        >
+          <OrbitLogoIcon className="size-4" />
+        </RailButton>
+      ) : null}
       <RailButton label="Settings" onClick={go(() => void navigate({ to: "/settings" }))}>
         <SettingsIcon className="size-4" />
       </RailButton>
     </div>
-  );
-}
-
-const PROVIDER_UPDATE_TONE_CLASSES = {
-  loading: "",
-  success: "",
-  warning: "text-warning hover:text-warning",
-  error: "text-destructive hover:text-destructive",
-} as const;
-
-/**
- * The provider update notice as a rail icon (the same view the footer pill used):
- * spinner while updating, download when an update is available, check when done,
- * warning on failure. Click opens provider settings; a done notice hides itself.
- */
-function RailProviderUpdate() {
-  const navigate = useNavigate();
-  const providers = useAtomValue(primaryServerProvidersAtom);
-  const [dismissedKeys, setDismissedKeys] = useState<ReadonlySet<string>>(() => new Set());
-  // Only notices that arrive after the app opened, as in the pill.
-  const [visibleAfterIso] = useState(() =>
-    providers.reduce<string | undefined>(
-      (latest, provider) =>
-        latest === undefined || provider.checkedAt > latest ? provider.checkedAt : latest,
-      undefined,
-    ),
-  );
-  const view = getProviderUpdateSidebarPillView(providers, {
-    ...(visibleAfterIso !== undefined ? { visibleAfterIso } : {}),
-    dismissedKeys,
-  });
-  const viewKey = view?.key;
-  const dismissAfterMs = view?.dismissAfterVisibleMs;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- dismisses the notice after a timer
-  useEffect(() => {
-    if (!viewKey || !dismissAfterMs) return;
-    const timeout = window.setTimeout(
-      () => setDismissedKeys((keys) => new Set(keys).add(viewKey)),
-      dismissAfterMs,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [dismissAfterMs, viewKey]);
-  if (!view) return null;
-
-  return (
-    <RailButton
-      label={view.title}
-      hint={view.dismissible ? `${view.description} · right-click to dismiss` : view.description}
-      className={PROVIDER_UPDATE_TONE_CLASSES[view.tone]}
-      onClick={() => void navigate({ to: "/settings/providers" })}
-      {...(view.dismissible
-        ? { onEdit: () => setDismissedKeys((keys) => new Set(keys).add(view.key)) }
-        : {})}
-    >
-      {view.tone === "loading" ? (
-        <Spinner className="size-4" />
-      ) : view.tone === "success" ? (
-        <CircleCheckIcon className="size-4" />
-      ) : view.tone === "error" ? (
-        <TriangleAlertIcon className="size-4" />
-      ) : (
-        <DownloadIcon className="size-4" />
-      )}
-    </RailButton>
   );
 }

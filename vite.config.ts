@@ -7,10 +7,13 @@ import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
 const TEST_EXCLUDE = [
   "**/.repos/**",
   "**/.t3/**",
+  "**/.conn/**",
   "**/node_modules/**",
   "**/dist/**",
   "**/dist-electron/**",
   "**/.{idea,git,cache,output,temp}/**",
+  // The Conn Server (Rust) has its own checks; its tools/*.test.ts run inside apps/server.
+  "apps/conn-server/**",
 ];
 
 // Directories whose tests belong to a package's own test config. desktop also
@@ -30,6 +33,12 @@ const isRepoRootTestRun = process.cwd() === import.meta.dirname;
 
 const RESTRICTED_IMPORT_PATHS = [
   {
+    name: "react-native",
+    importNames: ["FlatList"],
+    message:
+      "Use LegendList from @legendapp/list/react-native, with renderScrollComponent={NativeScrollView} in a screen. Pass whatever renderItem reads through extraData: rows only re-render when their item or extraData changes.",
+  },
+  {
     name: "@t3tools/client-runtime",
     message:
       "Import from an explicit @t3tools/client-runtime/* subpath. The package has no root export.",
@@ -44,6 +53,12 @@ const RESTRICTED_IMPORT_PATHS = [
     importNames: ["ScrollViewMarker"],
     message:
       "Use NativeScrollViewMarker or NativeScrollView (src/native/NativeScrollViewMarker.tsx): they carry the header's scroll-edge blur under the Duo's vertical bar.",
+  },
+  {
+    name: "react-native",
+    importNames: ["RefreshControl"],
+    message:
+      "Use RefreshControl from src/components/ui/RefreshControl: Android bottom sheets own the pull at the top, so it steps aside there.",
   },
 ];
 
@@ -137,6 +152,7 @@ export default defineConfig({
       NodeURL.fileURLToPath(
         new URL("./packages/shared/src/testing/providerEnv.ts", import.meta.url),
       ),
+      NodeURL.fileURLToPath(new URL("./packages/shared/src/testing/gitEnv.ts", import.meta.url)),
     ],
     ...(isRepoRootTestRun
       ? {
@@ -167,6 +183,13 @@ export default defineConfig({
   fmt: {
     ignorePatterns: [
       ".repos/**",
+      // The Conn Server (Rust) formats and checks itself (apps/conn-server/tools/check.sh).
+      "apps/conn-server/**",
+      // So does the GPUI desktop client (apps/conn-gpui/scripts/check.sh).
+      "apps/conn-gpui/**",
+      // The native SwiftUI iPhone app (Xcode project, asset catalogs, generated bindings).
+      "apps/ios/**",
+      "crates/**",
       "infra/task-cache/vendor/**",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
       ".macroscope/ignore.md",
@@ -203,6 +226,10 @@ export default defineConfig({
     ignorePatterns: [
       ".repos",
       ".repos/**",
+      "apps/conn-server/**",
+      "apps/conn-gpui/**",
+      "apps/ios/**",
+      "crates/**",
       "infra/task-cache/vendor/**",
       "dist",
       "dist-electron",
@@ -318,6 +345,12 @@ export default defineConfig({
           "packages/provider-testing/**",
         ],
         rules: { "t3code/prefer-effect-fn": "off" },
+      },
+      {
+        files: ["apps/web/src/**", "apps/mobile/src/**", "apps/desktop/src/**"],
+        // Users still pick their own project icon from the full Lucide set.
+        excludeFiles: ["apps/web/src/projectIconOptions.ts"],
+        rules: { "t3code/no-sparkles-icon": "error" },
       },
       {
         files: ["apps/web/**/*.test.{ts,tsx}"],
@@ -481,6 +514,8 @@ export default defineConfig({
         excludeFiles: [
           "apps/mobile/src/components/ui/AppSymbol.tsx",
           "apps/mobile/src/components/ui/AppSymbol.android.tsx",
+          "apps/mobile/src/components/ui/connGlyphs.generated.ts",
+          "apps/mobile/src/native/connHeaderIcons.generated.ts",
           "apps/mobile/src/features/pull-requests/pullRequestGlyphs.ts",
         ],
         rules: { "t3code/no-mobile-pull-request-glyph-literals": "error" },
@@ -535,6 +570,25 @@ export default defineConfig({
         ],
         rules: { "t3code/no-em-dash-copy": "error" },
       },
+      // Conn: copy names the app through the `{appName}` placeholder (FORK.md, "i18n and the
+      // app name"); `node scripts/check-conn-brand.ts` checks the catalogs.
+      {
+        files: [
+          "apps/web/src/**",
+          "apps/mobile/src/**",
+          "apps/desktop/src/**",
+          "packages/client-runtime/src/**",
+          "packages/shared/src/**",
+        ],
+        excludeFiles: [
+          "**/*.{test,spec,bench}.{ts,tsx,js,jsx,mts,cts,mjs,cjs}",
+          "**/{test,testkit,testing,fixtures}/**",
+          "**/*.test-fixtures.ts",
+          "**/{test-fixtures,*TestFixtures}.ts",
+          "**/*.gen.ts",
+        ],
+        rules: { "t3code/no-hardcoded-app-name": "error" },
+      },
       {
         files: ["apps/web/src/**"],
         rules: { "shadcn/no-raw-colors": "error" },
@@ -587,6 +641,138 @@ export default defineConfig({
           ],
         },
       },
+      // Registered always so a disable comment for intentional English counts as used.
+      // `vp run i18n:untranslated` counts what it flags.
+      {
+        files: ["apps/web/src/**", "apps/mobile/src/**", "packages/client-runtime/src/**"],
+        excludeFiles: [
+          "**/*.{test,spec,bench}.{ts,tsx}",
+          "**/{test,testkit,testing,fixtures}/**",
+          "**/*.test-fixtures.ts",
+          "**/{test-fixtures,*TestFixtures}.ts",
+          "apps/mobile/src/features/development/**",
+          "packages/client-runtime/src/rpc/**",
+        ],
+        rules: { "t3code/no-untranslated-copy": "error" },
+      },
+      // Conn: fork screens kept English copy when upstream adopted gt-i18n (2026-11-18 sync).
+      // Warn there until each is wrapped; delete a file from this list once it has no warnings.
+      {
+        files: [
+          "apps/mobile/src/Stack.tsx",
+          "apps/mobile/src/components/ConnMark.tsx",
+          "apps/mobile/src/features/home/home-list-filter-menu.ts",
+          "apps/mobile/src/features/layout/workspace/WorkspacePhoneBar.tsx",
+          "apps/mobile/src/features/orbit/OrbitEnvironmentSections.tsx",
+          "apps/mobile/src/features/orbit/OrbitLogo.tsx",
+          "apps/mobile/src/features/orbit/OrbitThreadStartRows.tsx",
+          "apps/mobile/src/features/orbit/OrbitThreadStartScreen.tsx",
+          "apps/mobile/src/features/orbit/orbitThreadStarts.ts",
+          "apps/mobile/src/features/settings/SettingsTranscriptionSection.tsx",
+          "apps/mobile/src/features/settings/components/SettingsScreen.tsx",
+          "apps/mobile/src/features/threads/NewTaskRouteScreen.tsx",
+          "apps/mobile/src/features/voice-input/operatorTranscription.ts",
+          "apps/mobile/src/native/V5StackHeader.ios.tsx",
+          "apps/web/src/annotations/AnnotationQueuePopover.tsx",
+          "apps/web/src/annotations/sendAnnotationPrompt.ts",
+          "apps/web/src/annotations/useAnnotationWatchBanner.tsx",
+          "apps/web/src/api/ApiPanel.tsx",
+          "apps/web/src/api/ApiRequestEditor.tsx",
+          "apps/web/src/api/ApiResponseView.tsx",
+          "apps/web/src/components/BranchToolbarEnvModeSelector.tsx",
+          "apps/web/src/components/BranchToolbarOrbitBranch.tsx",
+          "apps/web/src/components/CommandPalette.tsx",
+          "apps/web/src/components/CommandPaletteOrbitChecksPage.tsx",
+          "apps/web/src/components/CommandPaletteOrbitInstanceStep.tsx",
+          "apps/web/src/components/CommandPaletteOrbitProjects.tsx",
+          "apps/web/src/components/OrbitInstanceRemove.tsx",
+          "apps/web/src/components/OrbitInstancesPage.tsx",
+          "apps/web/src/components/OrbitPanel.tsx",
+          "apps/web/src/components/OrbitProfilePage.tsx",
+          "apps/web/src/components/RightPanelTabs.tsx",
+          "apps/web/src/components/ServerRestartAction.tsx",
+          "apps/web/src/components/Sidebar.tsx",
+          "apps/web/src/components/chat/ComposerControlsBar.tsx",
+          "apps/web/src/components/chat/OpenInPicker.tsx",
+          "apps/web/src/components/chat/OrbitSetupCard.tsx",
+          "apps/web/src/components/chat/ThreadDetailsOrbitRows.tsx",
+          "apps/web/src/components/chat/useComposerSend.ts",
+          "apps/web/src/components/device/DeviceAnnotationOverlay.tsx",
+          "apps/web/src/components/preview/PreviewChromeRow.tsx",
+          "apps/web/src/components/settings/IntegrationsSettings.tsx",
+          "apps/web/src/components/settings/OrbitSettings.tsx",
+          "apps/web/src/components/settings/PasswordsSettings.tsx",
+          "apps/web/src/components/settings/SettingsPanels.tsx",
+          "apps/web/src/components/settings/TypographySettings.tsx",
+          "apps/web/src/components/settings/VaultProviderRow.tsx",
+          "apps/web/src/components/settings/VaultwardenSettings.tsx",
+          "apps/web/src/components/settings/settingsSearch.ts",
+          "apps/web/src/components/sidebar/WorkspaceDialog.tsx",
+          "apps/web/src/components/sidebar/WorkspaceRail.tsx",
+          "apps/web/src/credentials/CredentialInlineSuggestions.tsx",
+          "apps/web/src/credentials/CredentialKeyButton.tsx",
+          "apps/web/src/credentials/TestLoginDialog.tsx",
+          "apps/web/src/credentials/credentialInline.ts",
+          "apps/web/src/credentials/credentialPageFields.ts",
+          "apps/web/src/credentials/credentialSubmit.ts",
+          "apps/web/src/credentials/useVaultLogins.ts",
+          "apps/web/src/database/DatabasePanel.tsx",
+          "apps/web/src/database/SqlEditor.tsx",
+          "apps/web/src/database/databaseStore.ts",
+          "apps/web/src/laravelToolbar/model.ts",
+          "apps/web/src/laravelToolbar/ui/ToolbarBar.tsx",
+          "apps/web/src/laravelToolbar/ui/dependencies.tsx",
+          "apps/web/src/laravelToolbar/ui/orbit.tsx",
+          "apps/web/src/laravelToolbar/ui/panels.tsx",
+          "apps/web/src/laravelToolbar/ui/parts.tsx",
+          "apps/web/src/laravelToolbar/ui/requests.tsx",
+          "apps/web/src/laravelToolbar/ui/tableSort.tsx",
+          "apps/web/src/laravelToolbar/useOrbit.ts",
+          "apps/web/src/laravelToolbarPreview/fixtures.ts",
+          "apps/web/src/laravelToolbarPreview/main.tsx",
+          "apps/web/src/laravelToolbarPreview/source.ts",
+          "apps/web/src/lib/sidebarTree.ts",
+          "apps/web/src/mcp/McpCatalogViews.tsx",
+          "apps/web/src/mcp/McpPanel.tsx",
+          "apps/web/src/mcp/mcpServers.ts",
+          "apps/web/src/mcp/mcpStore.ts",
+          "apps/web/src/orbit/OrbitPendingThreadList.tsx",
+          "apps/web/src/orbit/OrbitPendingThreadView.tsx",
+          "apps/web/src/orbit/OrbitThreadStartRunner.tsx",
+          "apps/web/src/orbit/appearanceProfileSync.ts",
+          "apps/web/src/orbit/orbitBranchControl.ts",
+          "apps/web/src/orbit/orbitChecksPage.ts",
+          "apps/web/src/orbit/orbitDraft.ts",
+          "apps/web/src/orbit/orbitInstanceRemoval.ts",
+          "apps/web/src/orbit/orbitInstanceSleep.ts",
+          "apps/web/src/orbit/orbitInstanceStepLogic.ts",
+          "apps/web/src/orbit/orbitPanelPages.ts",
+          "apps/web/src/orbit/orbitSetupView.ts",
+          "apps/web/src/orbit/orbitThreadStarts.ts",
+          "apps/web/src/orbit/orbitTransport.ts",
+          "apps/web/src/orbit/tasks/TaskDetail.tsx",
+          "apps/web/src/orbit/tasks/TasksPanel.tsx",
+          "apps/web/src/orbit/tasks/orbitAgentConversation.ts",
+          "apps/web/src/orbit/tasks/orbitTasksFixtures.ts",
+          "apps/web/src/orbit/tasks/taskDetail.logic.ts",
+          "apps/web/src/orbit/tasks/tasksBoard.logic.ts",
+          "apps/web/src/panels/agentPanelRequests.ts",
+          "apps/web/src/rpc/desktopTabRelay.ts",
+          "apps/web/src/state/query.ts",
+          "packages/client-runtime/src/orbitGateway/client.ts",
+          "packages/client-runtime/src/orbitGateway/instanceGit.ts",
+          "packages/client-runtime/src/orbitGateway/instanceList.ts",
+          "packages/client-runtime/src/orbitGateway/instanceRemoval.ts",
+          "packages/client-runtime/src/orbitGateway/instanceWake.ts",
+          "packages/client-runtime/src/orbitGateway/orbitCompletionText.ts",
+          "packages/client-runtime/src/orbitGateway/orbitConnection.ts",
+          "packages/client-runtime/src/orbitGateway/profilePage.ts",
+          "packages/client-runtime/src/orbitGateway/tasks.ts",
+          "packages/client-runtime/src/orbitGateway/tasksClient.ts",
+          "packages/client-runtime/src/work-log/presentation.ts",
+        ],
+        rules: { "t3code/no-untranslated-copy": "warn" },
+      },
       {
         // React Compiler owns memoization; upstream rules do not ban redundant useMemo/useCallback.
         files: ["apps/web/src/**/*.{ts,tsx}"],
@@ -628,7 +814,13 @@ export default defineConfig({
         rules: { "t3code/no-manual-memo": ["error", { allowMemoHooks: true }] },
       },
       {
-        files: ["apps/web/src/**", "apps/mobile/src/**", "packages/*/src/**"],
+        files: [
+          "apps/web/src/**",
+          "apps/lab-gpui/src/**",
+          "apps/lab-ios/src/**",
+          "apps/mobile/src/**",
+          "packages/*/src/**",
+        ],
         rules: { "t3code/no-unreasoned-state-sync": "error" },
       },
       {
@@ -651,10 +843,12 @@ export default defineConfig({
           "apps/mobile/src/features/review/useNativeReviewDiffBridge.ts",
           "apps/mobile/src/features/settings/SettingsEnvironmentsRouteScreen.tsx",
           "apps/mobile/src/features/threads/ThreadComposer.tsx",
+          "apps/mobile/src/components/ComposerSurface.tsx",
           "apps/mobile/src/features/threads/ThreadFeed.tsx",
           "apps/mobile/src/features/threads/ThreadQueueControl.tsx",
           "apps/mobile/src/features/review/ReviewCommentCard.tsx",
           "apps/mobile/src/features/threads/thread-list-v2-items.tsx",
+          "apps/mobile/src/features/tasks/TaskInsightsStrip.tsx",
           "apps/mobile/src/components/ui/SecretTextInput.android.tsx",
           "apps/mobile/src/lib/useMobileNavigationTheme.ts",
           "apps/mobile/src/native/T3ComposerEditor.ios.tsx",
@@ -664,6 +858,27 @@ export default defineConfig({
         ],
         rules: {
           "t3code/no-mobile-uniwind-theme-escape-hatches": ["error", { allowUniwindTheme: true }],
+        },
+      },
+      {
+        // The UI labs are design tools, not product code: fixture copy is English sample text,
+        // the mobile lab styles with plain CSS classes, its scripts are node tools, the generated
+        // icon maps list every glyph name, the stand-ins keep the hook names of the modules they
+        // replace, and the lab driver talks to the fake environment's RPC.
+        files: [
+          "apps/lab-gpui/**",
+          "apps/lab-ios/**",
+          "apps/mobile/scripts/lab/**",
+          "apps/mobile/src/lab/**",
+        ],
+        rules: {
+          "shadcn/no-unknown-classes": "off",
+          "t3code/namespace-node-imports": "off",
+          "t3code/no-hookless-use-function": "off",
+          "t3code/no-mobile-pull-request-glyph-literals": "off",
+          "t3code/no-rpc-permission-bypass": "off",
+          "t3code/no-sparkles-icon": "off",
+          "t3code/no-untranslated-copy": "off",
         },
       },
     ],

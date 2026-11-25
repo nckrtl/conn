@@ -1,10 +1,18 @@
-import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import {
+  ClipboardApiUnavailableError,
+  ClipboardWriteError,
+  writeTextToClipboard,
+} from "../hooks/useCopyToClipboard";
+import * as Schema from "effect/Schema";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { readLocalApi } from "../localApi";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { msg, T, useGT, useMessages } from "gt-react";
+import { m as resolveMessage } from "../i18n/messages";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon, ScaleIcon } from "lucide-react";
 import {
   type ReactNode,
@@ -20,6 +28,8 @@ import { flushSync } from "react-dom";
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useProject, useThreadShellsForProjectRefs } from "../state/entities";
+import { useOpenLink } from "../browser/useOpenLink";
+import { ThreadDetailsOrbitRows } from "./chat/ThreadDetailsOrbitRows";
 import {
   ADD_TO_MACHINE_LABEL_CLASS,
   type EnvMode,
@@ -40,9 +50,11 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
-import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitWorkspaces";
-import { OrbitLogoIcon } from "./OrbitLogoIcon";
-import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
+import { useOrbitInstance } from "../orbit/environmentProvider";
+import { isOrbitCheckout } from "../orbit/orbitCheckout";
+import { BranchToolbarOrbitInstance } from "./BranchToolbarOrbitInstance";
+import type { OrbitDraftTarget } from "../orbit/orbitDraft";
+import { buildWorkspaceOptions, PREVIOUS_WORKTREE_OPTION } from "./workspaceOptions";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -68,7 +80,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { cn } from "~/lib/utils";
+
 import { observeResize } from "~/lib/observeResize";
+
+const isClipboardApiUnavailableError = Schema.is(ClipboardApiUnavailableError);
+const isClipboardWriteError = Schema.is(ClipboardWriteError);
 
 export interface BranchToolbarHandle {
   openBranchPicker: () => void;
@@ -86,8 +102,6 @@ interface BranchToolbarProps {
   worktreePath: string | null;
   isServerThread: boolean;
   showGitControls: boolean;
-  /** Orbit's folder for a Project: no branches, only new Orbit Instances. */
-  orbitProjectFolder?: boolean;
   draftId?: DraftId;
   onEnvModeChange: (mode: EnvMode) => void;
   envMode: EnvMode;
@@ -104,6 +118,8 @@ interface BranchToolbarProps {
   trailing?: ReactNode;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  /** Conn: the draft starts in an Orbit Instance; the row shows its Node and Instance only. */
+  orbitDraftTarget?: OrbitDraftTarget | null;
 }
 
 function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string) {
@@ -112,33 +128,31 @@ function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string)
   event.preventDefault();
   event.stopPropagation();
   void api.contextMenu
-    .show([{ id: "copy-path", label: "Copy full path", icon: "copy" }], {
+    .show([{ id: "copy-path", label: resolveMessage(msg("Copy full path")), icon: "copy" }], {
       x: event.clientX,
       y: event.clientY,
     })
     .then((action) => {
       if (action !== "copy-path") return;
       const clipboardPath = formatFilePathForClipboard(workspacePath);
-      void writeTextToClipboard(clipboardPath, "workspace path").then(
-        (didCopy) => {
-          if (didCopy) {
-            toastManager.add({
-              type: "success",
-              title: "Path copied",
-              description: clipboardPath,
-            });
-          }
-        },
-        (error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Failed to copy path",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-        },
-      );
+      void writeTextToClipboard(clipboardPath, {
+        target: "workspace path",
+        unavailableMessage: msg("Clipboard API is unavailable while copying workspace path."),
+        failureMessage: msg("Failed to copy workspace path to the clipboard."),
+      }).then(undefined, (error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: resolveMessage(msg("Failed to copy path")),
+            description: isClipboardApiUnavailableError(error)
+              ? resolveMessage(msg("Clipboard API is unavailable while copying workspace path."))
+              : isClipboardWriteError(error)
+                ? resolveMessage(msg("Failed to copy workspace path to the clipboard."))
+                : (thrownErrorMessage(error, resolveMessage) ??
+                  resolveMessage(msg("An error occurred."))),
+          }),
+        );
+      });
     });
 }
 
@@ -161,7 +175,6 @@ interface RunContextSelectorProps {
   previousWorktreeLabel: string | null;
   previousWorktreeBranch: string | null;
   onUsePreviousWorktree: () => void;
-  orbitTarget: { readonly environmentId: EnvironmentId; readonly projectRoot: string } | null;
   addTargets: readonly AddProjectTarget[];
   onAddToMachine: (environmentId: EnvironmentId) => void;
 }
@@ -185,36 +198,33 @@ const RunContextSelector = memo(function RunContextSelector({
   previousWorktreeLabel,
   previousWorktreeBranch,
   onUsePreviousWorktree,
-  orbitTarget,
   addTargets,
   onAddToMachine,
 }: RunContextSelectorProps) {
+  const gt = useGT();
+  const m = useMessages();
   const composerFloatingLayerProps = useComposerMenuProps();
-  const { options: workspaceOptions } = useWorkspaceOptions({
+  const workspaceOptions = buildWorkspaceOptions({
     activeWorktreePath,
-    effectiveEnvMode,
     forceNewWorktree,
-    orbitTarget,
     previousWorktreeLabel,
     previousWorktreeBranch,
   });
   const activeEnvironment =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
   const WorkspaceIcon =
-    effectiveEnvMode === "orbit"
-      ? OrbitLogoIcon
-      : effectiveEnvMode === "worktree"
-        ? FolderGit2Icon
-        : activeWorktreePath
-          ? FolderGitIcon
-          : FolderIcon;
+    effectiveEnvMode === "worktree"
+      ? FolderGit2Icon
+      : activeWorktreePath
+        ? FolderGitIcon
+        : FolderIcon;
   const workspaceLabel = forceNewWorktree
-    ? resolveEnvModeLabel("worktree")
+    ? resolveEnvModeLabel("worktree", m)
     : envModeLocked
-      ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
-      : effectiveEnvMode === "worktree" || effectiveEnvMode === "orbit"
-        ? resolveEnvModeLabel(effectiveEnvMode)
-        : resolveCurrentWorkspaceLabel(activeWorktreePath);
+      ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode, m)
+      : effectiveEnvMode === "worktree"
+        ? resolveEnvModeLabel(effectiveEnvMode, m)
+        : resolveCurrentWorkspaceLabel(activeWorktreePath, m);
   const isPanel = displayMode === "panel";
   const isLocked = envLocked || (envModeLocked && (!isPanel || !showEnvironmentPicker));
   const workspacePath =
@@ -234,7 +244,7 @@ const RunContextSelector = memo(function RunContextSelector({
       <TooltipPopup>
         {isPanel
           ? forceNewWorktree
-            ? "Each model starts in its own worktree."
+            ? gt("Each model starts in its own worktree.")
             : (workspacePath ?? workspaceLabel)
           : workspaceLabel}
       </TooltipPopup>
@@ -258,7 +268,9 @@ const RunContextSelector = memo(function RunContextSelector({
           />
         )}
       </TooltipTrigger>
-      <TooltipPopup>{autoEnvironmentLabel ?? activeEnvironment?.label ?? "Run on"}</TooltipPopup>
+      <TooltipPopup>
+        {autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+      </TooltipPopup>
     </Tooltip>
   );
   const icon = showEnvironmentIndicator ? environmentIcon : workspaceIcon;
@@ -267,7 +279,7 @@ const RunContextSelector = memo(function RunContextSelector({
       {icon}
       <ComposerContextLabel displayMode={displayMode}>
         {autoEnvironmentLabel ??
-          (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+          (showEnvironmentIndicator ? (activeEnvironment?.label ?? gt("Run on")) : workspaceLabel)}
       </ComposerContextLabel>
       {/* Trailing in the panel, so every row label starts on the same edge. */}
       {isPanel && showEnvironmentIndicator ? workspaceIcon : null}
@@ -285,7 +297,11 @@ const RunContextSelector = memo(function RunContextSelector({
         onContextMenu={handleContextMenu}
         aria-label={
           isPanel
-            ? `Run context: ${[autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel].filter(Boolean).join(", ")}`
+            ? gt("Run context: {context}", {
+                context: [autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel]
+                  .filter(Boolean)
+                  .join(", "),
+              })
             : undefined
         }
         data-composer-context-control
@@ -310,7 +326,11 @@ const RunContextSelector = memo(function RunContextSelector({
         }
         aria-label={
           isPanel
-            ? `Run context: ${[autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel].filter(Boolean).join(", ")}`
+            ? gt("Run context: {context}", {
+                context: [autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel]
+                  .filter(Boolean)
+                  .join(", "),
+              })
             : undefined
         }
         data-composer-context-control
@@ -337,7 +357,9 @@ const RunContextSelector = memo(function RunContextSelector({
         ((showEnvironmentPicker && onEnvironmentChange) || addTargets.length > 0) ? (
           <>
             <MenuGroup>
-              <MenuGroupLabel>Run on</MenuGroupLabel>
+              <MenuGroupLabel>
+                <T>Run on</T>
+              </MenuGroupLabel>
               <MenuRadioGroup
                 value={autoEnvironmentLabel ? "auto" : environmentId}
                 onValueChange={(value) =>
@@ -361,7 +383,7 @@ const RunContextSelector = memo(function RunContextSelector({
                         aria-hidden="true"
                       />
                       <span className="min-w-0 truncate">
-                        {autoEnvironmentLabel ?? "Auto balance"}
+                        {autoEnvironmentLabel ?? gt("Auto balance")}
                       </span>
                     </span>
                   </MenuRadioItem>
@@ -398,7 +420,9 @@ const RunContextSelector = memo(function RunContextSelector({
                   <MenuSubTrigger>
                     <span className={ADD_TO_MACHINE_LABEL_CLASS}>
                       <PlusIcon className="size-3" />
-                      <span className="min-w-0 truncate">Add to another machine</span>
+                      <span className="min-w-0 truncate">
+                        <T>Add to another machine</T>
+                      </span>
                     </span>
                   </MenuSubTrigger>
                   <MenuSubPopup {...(!isPanel ? composerFloatingLayerProps : {})}>
@@ -421,7 +445,9 @@ const RunContextSelector = memo(function RunContextSelector({
           </>
         ) : null}
         <MenuGroup>
-          <MenuGroupLabel>Workspace</MenuGroupLabel>
+          <MenuGroupLabel>
+            <T>Workspace</T>
+          </MenuGroupLabel>
           <MenuRadioGroup
             value={effectiveEnvMode}
             onValueChange={(value) => {
@@ -621,7 +647,6 @@ export const BranchToolbar = memo(function BranchToolbar({
   worktreePath,
   isServerThread,
   showGitControls,
-  orbitProjectFolder = false,
   draftId,
   onEnvModeChange,
   envMode,
@@ -637,7 +662,9 @@ export const BranchToolbar = memo(function BranchToolbar({
   availableEnvironments,
   onEnvironmentChange,
   trailing,
+  orbitDraftTarget = null,
 }: BranchToolbarProps) {
+  const m = useMessages();
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
   const threadRef = scopeThreadRef(environmentId, threadId);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -647,24 +674,19 @@ export const BranchToolbar = memo(function BranchToolbar({
   const activeWorktreePath = forceNewWorktree ? null : worktreePath;
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
-  const orbitThread = useOrbitCheckout(environmentId, activeWorktreePath);
-  const orbitTarget =
-    activeProject && !forceNewWorktree
-      ? { environmentId: activeProject.environmentId, projectRoot: activeProject.workspaceRoot }
-      : null;
 
   const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
   const projectRefsForWorktreeLookup = canUsePreviousWorktree ? [activeProjectRef] : [];
   const projectThreads = useThreadShellsForProjectRefs(projectRefsForWorktreeLookup);
   const previousWorktreeSeed = canUsePreviousWorktree
     ? resolvePreviousWorktreeSeed({
-        // Orbit checkouts are not T3 worktrees; they come back through Orbit.
+        // Orbit checkouts are not T3 worktrees; never offer one for reuse.
         threads: projectThreads.filter((thread) => !isOrbitCheckout(thread.worktreePath)),
         currentWorktreePath: activeWorktreePath,
       })
     : null;
   const previousWorktreeLabel = previousWorktreeSeed
-    ? resolvePreviousWorktreeLabel(previousWorktreeSeed)
+    ? resolvePreviousWorktreeLabel(previousWorktreeSeed, m)
     : null;
   const onUsePreviousWorktree = () => {
     if (!previousWorktreeSeed) return;
@@ -710,13 +732,49 @@ export const BranchToolbar = memo(function BranchToolbar({
     canPickEnvironment: hasMultipleEnvironments,
   });
   const [attachStrip, labelsOverflow] = useLabelsOverflow();
+  const orbitInstance = useOrbitInstance(environmentId);
+  const openLink = useOpenLink(threadRef);
+
+  if (orbitDraftTarget) {
+    // No domain chip; the branch control shows for a new Instance.
+    if (layout === "panel") return null;
+    const updateOrbitTarget = draftId
+      ? (patch: Partial<OrbitDraftTarget>) => {
+          const current = useComposerDraftStore.getState().getDraftSession(draftId)?.orbitTarget;
+          if (current) setDraftThreadContext(draftId, { orbitTarget: { ...current, ...patch } });
+        }
+      : undefined;
+    return (
+      <ComposerSurface.ContextStrip
+        ref={attachStrip}
+        data-compact={labelsOverflow ? "" : undefined}
+        className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
+      >
+        <BranchToolbarOrbitInstance
+          target={orbitDraftTarget}
+          draftId={draftId}
+          onTargetChange={updateOrbitTarget}
+        />
+        {trailing}
+      </ComposerSurface.ContextStrip>
+    );
+  }
 
   if (!activeProject) return null;
 
   if (layout === "panel") {
     return (
       <div className="flex w-full flex-col" data-thread-panel-run-context>
-        {panelSection !== "branch" ? (
+        {panelSection !== "branch" && orbitInstance ? (
+          <ThreadDetailsOrbitRows
+            orbitInstance={orbitInstance}
+            onOpenUrl={(url, event) => {
+              void openLink(url, { event }).catch((error: unknown) => console.error(error));
+            }}
+          />
+        ) : null}
+        {/* A draft that can still change machine or workspace keeps its picker below the Orbit row. */}
+        {panelSection !== "branch" && (!orbitInstance || !(envLocked || envModeLocked)) ? (
           <RunContextSelector
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}
@@ -736,12 +794,11 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
-            orbitTarget={orbitTarget}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
         ) : null}
-        {panelSection !== "workspace" && !orbitProjectFolder ? (
+        {panelSection !== "workspace" ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
             className="w-full"
@@ -787,7 +844,6 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
-            orbitTarget={orbitTarget}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
@@ -831,15 +887,12 @@ export const BranchToolbar = memo(function BranchToolbar({
               previousWorktreeLabel={previousWorktreeLabel}
               previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
               onUsePreviousWorktree={onUsePreviousWorktree}
-              orbitTarget={orbitTarget}
-              orbitThread={orbitThread}
-              threadRef={threadRef}
             />
           ) : null}
         </div>
       ) : null}
 
-      {showGitControls && !orbitProjectFolder ? (
+      {showGitControls ? (
         <BranchToolbarBranchSelector
           forceNewWorktree={forceNewWorktree}
           ref={branchSelectorRef}

@@ -1,0 +1,20 @@
+[package]
+name = "conn-theme"
+description = "Conn theme palettes, color-mix shell tokens, and GPUI Hsla mapping."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[features]
+highlight = ["dep:syntect"]
+
+[dependencies]
+syntect = { version = "5.3.0", optional = true, default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

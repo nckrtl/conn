@@ -8,6 +8,7 @@ import {
   type ScopedThreadRef,
   NodeId,
   ProviderSessionId,
+  RunId,
   RuntimeRequestId,
   TurnItemId,
   type OrchestrationV2ThreadProjection,
@@ -196,14 +197,20 @@ describe("announcing resolved thread requests", () => {
     using recorder = record();
     const announce = makeThreadRequestsResolvedAnnouncer(environmentId, threadId);
 
-    announce([first]);
-    announce([first, second]);
-    announce([first, second]);
-    announce([second]);
+    const pending = (id: RuntimeRequestId) => ({ id, status: "pending" as const });
+    announce([pending(first)]);
+    announce([pending(first), pending(second)]);
+    announce([pending(first), pending(second)]);
+    announce([{ id: first, status: "cancelled" }, pending(second)]);
+    announce([
+      { id: first, status: "cancelled" },
+      { id: second, status: "resolved" },
+    ]);
 
     expect(recorder.events).toEqual([
-      { environmentId, threadId, pendingRequestIds: [first] },
-      { environmentId, threadId, pendingRequestIds: [second] },
+      { environmentId, threadId, pendingRequestIds: [first], unansweredRequestIds: [] },
+      { environmentId, threadId, pendingRequestIds: [second], unansweredRequestIds: [first] },
+      { environmentId, threadId, pendingRequestIds: [], unansweredRequestIds: [first] },
     ]);
   });
 });
@@ -321,6 +328,38 @@ describe("pending v2 questions", () => {
         ],
       },
     ]);
+  });
+
+  it("names the assistant messages that came before the question in its own run", () => {
+    const question = projection.turnItems[0]!;
+    const assistant = (id: string, runId: string | null, ordinal: number) => ({
+      ...question,
+      id: TurnItemId.make(`assistant-${id}`),
+      runId: runId === null ? null : RunId.make(runId),
+      ordinal,
+      type: "assistant_message" as const,
+      messageId: MessageId.make(id),
+      providerThreadId: null,
+      text: "",
+      streaming: false,
+    });
+    const asked = {
+      ...projection,
+      turnItems: [
+        assistant("other-run", "run-0", 1),
+        assistant("second", "run-1", 3),
+        assistant("first", "run-1", 2),
+        { ...question, runId: RunId.make("run-1"), ordinal: 4 },
+        assistant("after", "run-1", 5),
+      ],
+    };
+    expect(derivePendingThreadRequests(asked).userInputs[0]?.contextMessageIds).toEqual([
+      MessageId.make("first"),
+      MessageId.make("second"),
+    ]);
+    expect(derivePendingThreadRequests(projection).userInputs[0]).not.toHaveProperty(
+      "contextMessageIds",
+    );
   });
 
   it("only marks asynchronous questions as dismissible", () => {

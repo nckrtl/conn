@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily t3-orbit-register (like the launchd RunAtLoad + 86400 s job)
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1d
+Persistent=true
+[Install]
+WantedBy=timers.target

@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
+import * as RemoteDelegation from "../../../peer/RemoteDelegation.ts";
 import { readCaller } from "../../threadAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -40,7 +41,7 @@ const handlers = {
       return yield* service.cancelTask(scope, input);
     }),
   ),
-  t3_workflow_stop: McpToolAccess.writesThreads(
+  conn_workflow_stop: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
@@ -60,10 +61,10 @@ const handlers = {
         );
       }),
   ),
-  t3_background_wait: McpToolAccess.actsAsCaller((input) =>
+  conn_background_wait: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { scope, threads } = yield* readCaller();
-      const caller = yield* McpInvocationContext.requireThreadScope(scope, "t3_background_wait");
+      const caller = yield* McpInvocationContext.requireThreadScope(scope, "conn_background_wait");
       return yield* threads
         .awaitBackgroundTasks({
           threadId: caller.thread.threadId,
@@ -74,7 +75,10 @@ const handlers = {
           Effect.mapError(
             (cause) =>
               new OrchestratorMcpFailure({
-                code: cause.reason === "unsupported" ? "invalid_request" : "orchestration_error",
+                code:
+                  cause.reason === "unsupported" || cause.reason === "unmatched"
+                    ? "invalid_request"
+                    : "orchestration_error",
                 message: cause.message,
               }),
           ),
@@ -101,7 +105,7 @@ const handlers = {
       { refused: "schedule tasks in this environment" },
     ),
     McpToolAccess.writes(
-      ({ scheduledTaskId, prompt, title, schedule, enabled, bindToCurrentThread }) =>
+      ({ scheduledTaskId, prompt, title, schedule, enabled, freshSession, bindToCurrentThread }) =>
         Effect.gen(function* () {
           if (scheduledTaskId === undefined) return yield* Effect.die("unreachable");
           const scope = yield* McpInvocationContext.McpInvocationContext;
@@ -112,6 +116,7 @@ const handlers = {
             title,
             schedule,
             enabled,
+            freshSession,
             bindToCurrentThread,
           });
         }),
@@ -145,21 +150,21 @@ const handlers = {
       return yield* service.createThreads(scope, input);
     }),
   ),
-  t3_thread_list: McpToolAccess.reads((input) =>
+  conn_thread_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.listThreads(scope, input);
     }),
   ),
-  t3_thread_read: McpToolAccess.reads((input) =>
+  conn_thread_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.readThread(scope, input);
     }),
   ),
-  t3_thread_update: McpToolAccess.writesThreads(
+  conn_thread_update: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
@@ -168,23 +173,32 @@ const handlers = {
         return yield* service.update(scope, input);
       }),
   ),
-  t3_thread_send: McpToolAccess.writesThreads(
-    (input) => [input.threadId],
-    (input) =>
+  conn_thread_send: McpToolAccess.afterForwarding(
+    McpToolAccess.writesThreads(
+      (input) => [input.threadId],
+      (input) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          return yield* service.sendToThread(scope, input);
+        }),
+    ),
+    // There the thread's parent is here, so only this side can make a follow-up a task.
+    (input, environmentId, sent) =>
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
-        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        return yield* service.sendToThread(scope, input);
+        const remote = yield* RemoteDelegation.RemoteDelegation;
+        return yield* remote.followUp(scope, environmentId, input, sent);
       }),
   ),
-  t3_thread_wait: McpToolAccess.reads((input) =>
+  conn_thread_wait: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.waitForThread(scope, input);
     }),
   ),
-  t3_environment_links: McpToolAccess.reads(() =>
+  conn_environment_links: McpToolAccess.reads(() =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const forwarding = yield* PeerForwarding.PeerForwarding;
@@ -193,14 +207,14 @@ const handlers = {
   ),
   // A link lets every agent here reach the other environment, so it is an
   // environment setting: full access, and never for linked work.
-  t3_environment_link: McpToolAccess.writesEnvironment((input) =>
+  conn_environment_link: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const requests = yield* PeerLinkRequests.PeerLinkRequests;
       return yield* requests.request(scope, input);
     }),
   ),
-  t3_environment_unlink: McpToolAccess.writesEnvironment(({ environmentId }) =>
+  conn_environment_unlink: McpToolAccess.writesEnvironment(({ environmentId }) =>
     Effect.gen(function* () {
       const links = yield* PeerLinks.PeerLinks;
       const removed = yield* links
@@ -214,7 +228,7 @@ const handlers = {
       return { environmentId, removed };
     }),
   ),
-  t3_thread_interrupt: McpToolAccess.writesThreads(
+  conn_thread_interrupt: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {

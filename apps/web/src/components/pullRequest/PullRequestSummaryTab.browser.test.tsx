@@ -1,9 +1,17 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import {
+  DEFAULT_CLIENT_SETTINGS,
+  SourceControlProviderKind,
+  type ClientSettings,
+} from "@t3tools/contracts";
 import { EnvironmentId, ProjectId, type PullRequestDetailView } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
-const state = vi.hoisted(() => ({ update: vi.fn(), canUpdate: true }));
+const state = vi.hoisted(() => ({
+  update: vi.fn(),
+  canUpdate: true,
+  timestampFormat: "locale" as "locale" | "12-hour" | "24-hour",
+}));
 
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
   ...(await original()),
@@ -13,6 +21,13 @@ vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
   readEnvironmentScope: () => true,
   useEnvironmentScope: () => true,
+}));
+vi.mock(import("~/hooks/useSettings"), async (original) => ({
+  ...(await original()),
+  useClientSettings: ((select?: (settings: ClientSettings) => unknown) => {
+    const settings = { ...DEFAULT_CLIENT_SETTINGS, timestampFormat: state.timestampFormat };
+    return select ? select(settings) : settings;
+  }) as never,
 }));
 vi.mock(import("~/state/pullRequests"), async (original) => {
   const actual = await original();
@@ -35,10 +50,11 @@ function setup() {
   state.update.mockReset();
   state.update.mockResolvedValue({ _tag: "Success", value: undefined });
   state.canUpdate = true;
+  state.timestampFormat = "locale";
 }
 
 import { act, render as renderUi } from "../../../test/render";
-import { PullRequestSummaryTab } from "./PullRequestSummaryTab";
+import { PullRequestChecksTab, PullRequestDescriptionTab } from "./PullRequestSummaryTab";
 
 const detail: PullRequestDetailView = {
   provider: SourceControlProviderKind.make("github"),
@@ -92,39 +108,20 @@ const detail: PullRequestDetailView = {
   },
 };
 
-// The comment filter persists to localStorage, so tests that touch it start and end empty.
-
 const tab = (value = detail) => (
-  <PullRequestSummaryTab
+  <PullRequestDescriptionTab
     scrollerRef={() => {}}
     environmentId={EnvironmentId.make("environment")}
     threadRef={null}
     reference={value}
     detail={value}
-    activityPending={false}
-    activityError={null}
     onRefresh={() => {}}
   />
 );
 
-async function render(value = detail) {
-  const screen = await renderUi(tab(value));
-  const { container } = screen;
-  const heading = (title: string) => {
-    const section = container.querySelector(`section[aria-label="${title}"]`);
-    expect(section, `section ${title}`).not.toBeNull();
-    return [...section!.querySelectorAll("button")].find(
-      (button) => button.querySelector("span")?.textContent === title,
-    )!;
-  };
-  return Object.assign(screen, {
-    click: (title: string) => act(async () => heading(title).click()),
-    expanded: (title: string) => heading(title).getAttribute("aria-expanded"),
-    visibleText: () => container.innerText,
-  });
-}
+const render = (value = detail) => renderUi(tab(value));
 
-it("keeps an unsaved description when collapsed and reopened, and after a failed save", async () => {
+it("keeps an unsaved description after a failed save", async () => {
   setup();
   state.update.mockResolvedValue({ _tag: "Failure", cause: new Error("offline") });
   await using screen = await render();
@@ -134,10 +131,6 @@ it("keeps an unsaved description when collapsed and reopened, and after a failed
   const textarea = screen.container.querySelector("textarea")!;
   await userEvent.clear(textarea);
   await userEvent.type(textarea, "Unsaved description");
-  await screen.click("Description");
-  expect(screen.expanded("Description")).toBe("false");
-  await screen.click("Description");
-  expect(screen.container.querySelector("textarea")!.value).toBe("Unsaved description");
 
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   expect(state.update).toHaveBeenCalledTimes(1);
@@ -184,4 +177,35 @@ it("leaves description checkboxes read-only without the right to edit it", async
   expect(screen.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(
     true,
   );
+});
+
+it("leaves a link to another tab's content for that tab to settle", async () => {
+  setup();
+  const settled = vi.fn();
+  const url = `${detail.url}#issuecomment-5`;
+  {
+    await using _description = await renderUi(
+      <PullRequestDescriptionTab
+        scrollerRef={() => {}}
+        revealUrl={url}
+        onRevealSettled={settled}
+        environmentId={EnvironmentId.make("environment")}
+        threadRef={null}
+        reference={detail}
+        detail={detail}
+        onRefresh={() => {}}
+      />,
+    );
+  }
+  await using _checks = await renderUi(
+    <PullRequestChecksTab
+      scrollerRef={() => {}}
+      revealUrl={url}
+      onRevealSettled={settled}
+      threadRef={null}
+      detail={detail}
+      onRefreshChecks={() => {}}
+    />,
+  );
+  expect(settled).not.toHaveBeenCalled();
 });

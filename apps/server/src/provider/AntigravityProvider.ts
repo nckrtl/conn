@@ -1,3 +1,4 @@
+import { resolveProviderProbeTimeoutMs } from "@t3tools/provider-core/server/snapshotProbe";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   ProviderDriverKind,
@@ -40,7 +41,7 @@ import { antigravityThinkingConfig } from "./acp/AntigravityAcpSupport.ts";
 
 const EMPTY_MODEL_CAPABILITIES = createModelCapabilities({ optionDescriptors: [] });
 const MAX_WORKSPACE_SNAPSHOTS = 32;
-const HEALTH_CHECK_TIMEOUT = "90 seconds";
+const HEALTH_CHECK_TIMEOUT_MS = 90_000;
 const SIGN_IN_MESSAGE = "Sign in with Google to use Antigravity.";
 const AUTH_UNCHECKED_MESSAGE =
   "Antigravity is installed. Google account access is not checked yet.";
@@ -155,12 +156,15 @@ interface AntigravityProviderState {
 }
 
 interface AntigravityProviderOptions {
+  readonly environment?: NodeJS.ProcessEnv;
   readonly stampIdentity: (snapshot: ServerProviderDraft) => Effect.Effect<ServerProvider>;
   readonly probe: Effect.Effect<
     EffectAcpSchema.InitializeResponse,
     EffectAcpErrors.AcpError | ProviderSetupError
   >;
   readonly supportsTextGeneration: Effect.Effect<boolean>;
+  /** Opens a throwaway session that reports the account and models through `onSessionStarted`. */
+  readonly loadModels?: Effect.Effect<void>;
   readonly probeUsage?: Effect.Effect<ServerProviderUsageLimits>;
   readonly clearUsage?: Effect.Effect<void>;
   readonly maintenanceCapabilities?: ProviderMaintenanceCapabilities;
@@ -198,11 +202,11 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         auth: { status: "unknown", ...(options.auth ? { type: options.auth.type } : {}) },
         message: settings.enabled
           ? "Checking Antigravity availability."
-          : "Antigravity is disabled in T3 Code settings.",
+          : "Antigravity is disabled in Conn settings.",
       },
     }),
-    setup: { canAuthenticate: true, canInstall: true },
-    supportsConversationRollback: false,
+    setup: { canAuthenticate: true, canInstall: false },
+    supportsConversationRollback: true,
     supportsTextGeneration: false,
     workspaceSnapshots: [],
   } satisfies ServerProviderDraft;
@@ -271,10 +275,12 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
   const checkProvider = Effect.fn("checkAntigravityProvider")(function* () {
     if (!settings.enabled) return yield* getSnapshot;
     const before = yield* SubscriptionRef.get(metadata);
-    const result = yield* options.probe.pipe(
-      Effect.timeoutOption(HEALTH_CHECK_TIMEOUT),
-      Effect.result,
+    const timeoutMs = resolveProviderProbeTimeoutMs(
+      "antigravity",
+      HEALTH_CHECK_TIMEOUT_MS,
+      options.environment,
     );
+    const result = yield* options.probe.pipe(Effect.timeoutOption(timeoutMs), Effect.result);
     const initialized =
       Result.isSuccess(result) && Option.isSome(result.success) ? result.success.value : undefined;
     const version = initialized?.agentInfo?.version;
@@ -286,10 +292,10 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         : failure?._tag === "ProviderSetupError"
           ? failure.detail.trim() || "Antigravity could not complete its local health check."
           : missingInstallation
-            ? "Antigravity ACP runtime is not installed or its executable could not be found."
+            ? "Antigravity (agy) is not installed on this environment's PATH. Orbit installs it."
             : failure
               ? "Antigravity could not complete its local health check."
-              : `Antigravity did not respond to its local health check within ${HEALTH_CHECK_TIMEOUT}.`;
+              : `Antigravity did not respond to its local health check within ${timeoutMs / 1_000} seconds.`;
     const supportsTextGeneration =
       initialized !== undefined ? yield* options.supportsTextGeneration : false;
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
@@ -309,8 +315,8 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         draft: {
           ...draft,
           installed: !missingInstallation,
-          // Lightweight custom-launcher probes lack versions; preserve the real handshake's version.
-          version: version === "unknown" ? draft.version : version || draft.version,
+          // Only this probe's `agy --version` counts, so a replaced binary never keeps the old one.
+          version: version && version !== "unknown" ? version : null,
           status: errorMessage ? "error" : authenticated ? "ready" : "warning",
           checkedAt: updatedAt,
           usageLimits: missingInstallation ? undefined : draft.usageLimits,
@@ -333,8 +339,13 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         },
       } satisfies AntigravityProviderState;
     });
-    if (initialized !== undefined) yield* refreshUsage();
-    return yield* options.stampIdentity(next.draft);
+    if (initialized === undefined) return yield* options.stampIdentity(next.draft);
+    // Only a session proves the sign-in and lists models, so load them before anyone picks one.
+    if (options.loadModels && next.draft.auth.status === "unknown") {
+      yield* options.loadModels;
+    }
+    yield* refreshUsage();
+    return yield* getSnapshot;
   });
 
   const maintenanceCapabilities =
@@ -384,7 +395,8 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           ...draft,
           installed: true,
           status: "ready",
-          version: started.initializeResult.agentInfo?.version || draft.version,
+          // A health check's `agy --version` wins; a session reports its own only before one.
+          version: draft.version ?? (started.initializeResult.agentInfo?.version || null),
           auth: {
             status: "authenticated",
             type: options.auth?.type ?? "oauth-personal",

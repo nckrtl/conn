@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import type { Thread } from "../types";
@@ -15,7 +16,16 @@ import {
   createCommandPaletteSearchState,
   reduceCommandPaletteSearchState,
   type CommandPaletteUiState,
+  type OrbitPaletteProjectsState,
+  buildOrbitPaletteProjectRows,
+  collapsedOrbitCloneEnvironmentIds,
+  orbitPaletteProjectSubline,
+  orbitProjectInstanceCount,
 } from "./CommandPalette.logic";
+import type {
+  OrbitGatewayEnvironment,
+  OrbitGatewayProjectListing,
+} from "@t3tools/client-runtime/orbit-gateway";
 
 describe("linked pull request thread navigation", () => {
   it("keeps archived relations searchable and routes them through the PR environment", async () => {
@@ -666,11 +676,13 @@ describe("buildThreadActionItems", () => {
     ]);
   });
 
-  it("hides subagent threads but keeps forks", () => {
+  it("hides subagent threads and tasks shown under their parent but keeps forks", () => {
     const parentId = ThreadId.make("parent");
+    const delegatedId = ThreadId.make("delegated");
     const items = buildThreadActionItems({
       threads: [
         makeThread({ id: parentId, title: "Parent" }),
+        makeThread({ id: delegatedId, title: "Delegated task" }),
         makeThread({
           id: ThreadId.make("subagent"),
           title: "Subagent",
@@ -690,6 +702,9 @@ describe("buildThreadActionItems", () => {
           },
         }),
       ],
+      delegatedUnderParent: new Set([
+        threadKey({ environmentId: LOCAL_ENVIRONMENT_ID, threadId: delegatedId }),
+      ]),
       projectByKey: new Map(),
       icon: null,
       runThread: async () => undefined,
@@ -795,6 +810,26 @@ describe("filterPinnedBrowseEntries", () => {
       visibleEntries: windowsEntries,
       exactEntry: windowsEntries[0],
     });
+    const decomposed = { name: "De\u0301veloppement", fullPath: "/Users/me/De\u0301veloppement" };
+    expect(
+      filterPinnedBrowseEntries({
+        browseEntries: [decomposed],
+        filterQuery: "D\u00e9veloppement",
+        pinnedDirectoryName: "repo",
+        caseSensitive: true,
+      }).exactEntry,
+    ).toBe(decomposed);
+    expect(
+      filterPinnedBrowseEntries({
+        browseEntries: [
+          { name: "\u212B", fullPath: "/home/me/\u212B" },
+          { name: "A\u030A", fullPath: "/home/me/A\u030A" },
+        ],
+        filterQuery: "\u00C5",
+        pinnedDirectoryName: "repo",
+        caseSensitive: true,
+      }).exactEntry,
+    ).toBeNull();
   });
 });
 
@@ -959,5 +994,140 @@ describe("newThreadNoProjectIndex", () => {
   it("keeps a pinned or current scratch project in its own place", () => {
     expect(newThreadNoProjectIndex([entry(false, true, true), entry()])).toBe(0);
     expect(newThreadNoProjectIndex([entry(true), entry(true, false, true), entry()])).toBe(1);
+  });
+});
+
+describe("Orbit Projects in the New thread list", () => {
+  const project = (id: number, extra: Partial<OrbitGatewayProjectListing> = {}) => ({
+    id,
+    slug: `p${id}`,
+    name: `P${id}`,
+    nodeId: 7,
+    nodeName: "beast",
+    instanceDomainSuffix: null,
+    cloneable: true,
+    cloneableReason: null,
+    checks: null,
+    ...extra,
+  });
+  const environment = (
+    instanceId: number | null,
+    projectId: number | null,
+    instanceName: string,
+  ): OrbitGatewayEnvironment => ({
+    environmentId: `env-${instanceId ?? "host"}-${instanceName}`,
+    label: instanceName,
+    url: "https://example.test",
+    serverVersion: null,
+    registeredBy: null,
+    registeredAt: null,
+    status: "registered",
+    instanceId,
+    powerState: "running",
+    projectId,
+    projectName: null,
+    projectSlug: null,
+    instanceName,
+    nodeName: "beast",
+    instanceUrl: null,
+  });
+  const loaded = (
+    projects: OrbitGatewayProjectListing[],
+    environments: ReturnType<typeof environment>[] = [],
+  ): OrbitPaletteProjectsState => ({ status: "loaded", projects, environments });
+
+  it("counts each Instance of the Project once and never the default", () => {
+    const environments = [
+      environment(41, 3, "fix"),
+      environment(41, 3, "fix"),
+      environment(42, 3, "login"),
+      environment(9, 3, "default"),
+      environment(50, 4, "other"),
+      environment(null, 3, "host"),
+    ];
+    expect(orbitProjectInstanceCount(3, environments)).toBe(2);
+    const rows = buildOrbitPaletteProjectRows(loaded([project(3), project(6)], environments));
+    expect(rows.map(orbitPaletteProjectSubline)).toEqual([
+      "orbit · 2 instances",
+      "orbit · no instances",
+    ]);
+    expect(orbitPaletteProjectSubline({ ...rows[0]!, instanceCount: 1 })).toBe(
+      "orbit · 1 instance",
+    );
+  });
+
+  it("keeps a Project in which threads cannot start, with Orbit's reason", () => {
+    const failing = {
+      key: "seed_snapshot",
+      label: "Seed snapshot",
+      status: "fail" as const,
+      code: "instance.default_missing",
+      message: "its default Instance has no seed yet",
+    };
+    const rows = buildOrbitPaletteProjectRows(
+      loaded([
+        project(1, { cloneable: false, cloneableReason: "instance.default_missing" }),
+        project(2, {
+          cloneable: false,
+          cloneableReason: "instance.default_missing",
+          checks: [failing],
+        }),
+        project(3, { cloneable: false }),
+        project(4, { nodeId: null, nodeName: null }),
+        project(5, {
+          cloneable: false,
+          checks: [{ ...failing, message: `${"x".repeat(120)}\nsecond line` }],
+        }),
+      ]),
+    );
+    // Never the raw code in cloneable_reason; a long message keeps one short line.
+    expect(rows.map((row) => [row.startable, orbitPaletteProjectSubline(row)])).toEqual([
+      [false, "orbit · cannot start threads yet"],
+      [false, "orbit · cannot start threads: its default Instance has no seed yet"],
+      [false, "orbit · cannot start threads yet"],
+      [false, "orbit · cannot start threads yet"],
+      [false, `orbit · cannot start threads: ${"x".repeat(79)}…`],
+    ]);
+    expect(rows[1]!.checks).toEqual([failing]);
+  });
+
+  it("shows a list of only startable Projects (Orbit without include_unavailable) with no greyed rows", () => {
+    const environments = [environment(41, 2, "fix"), environment(42, 4, "login")];
+    const rows = buildOrbitPaletteProjectRows(loaded([project(2), project(4)], environments));
+    expect(rows.map((row) => [row.id, row.startable, orbitPaletteProjectSubline(row)])).toEqual([
+      [2, true, "orbit · 1 instance"],
+      [4, true, "orbit · 1 instance"],
+    ]);
+  });
+
+  it("lists Projects in which threads can start before the greyed ones", () => {
+    const rows = buildOrbitPaletteProjectRows(
+      loaded([
+        project(1, { cloneable: false }),
+        project(2),
+        project(3, { cloneable: false }),
+        project(4),
+      ]),
+    );
+    expect(rows.map((row) => row.id)).toEqual([2, 4, 1, 3]);
+  });
+
+  it("lists nothing and collapses nothing outside Orbit mode", () => {
+    const clones = { "env-clone": { projectId: 3, instanceName: "fix" } };
+    expect(buildOrbitPaletteProjectRows({ status: "off" })).toEqual([]);
+    expect(collapsedOrbitCloneEnvironmentIds({ status: "off" }, clones).size).toBe(0);
+  });
+
+  it("collapses clone rows into their Project, and every clone row while Orbit loads or fails", () => {
+    const clones = {
+      "env-a": { projectId: 3, instanceName: "fix" },
+      "env-b": { projectId: 8, instanceName: "gone" },
+      "env-default": { projectId: 3, instanceName: "default" },
+    };
+    expect([...collapsedOrbitCloneEnvironmentIds(loaded([project(3)]), clones)]).toEqual(["env-a"]);
+    for (const state of [{ status: "loading" }, { status: "unreachable" }] as const) {
+      expect(buildOrbitPaletteProjectRows(state)).toEqual([]);
+      expect([...collapsedOrbitCloneEnvironmentIds(state, clones)]).toEqual(["env-a", "env-b"]);
+    }
   });
 });

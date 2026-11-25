@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { usesChatGptSharing } from "@t3tools/shared/usageLimits";
+import { T, Var } from "gt-react";
 import { useState } from "react";
 import { environmentPresentations } from "../../state/presentation";
 import { OpenAI } from "../Icons";
@@ -13,6 +14,7 @@ import {
   DialogFooter,
 } from "../ui/dialog";
 import { ChatGptUsageButton } from "./ChatGptUsageButton";
+import { appName } from "@t3tools/shared/appName";
 
 const STORAGE_KEY = "t3:chatgpt-sharing-welcome:v1";
 function readAcknowledgedProfiles(): string[] {
@@ -64,18 +66,26 @@ export function ChatGptWelcomeCoordinator() {
       <DialogPopup>
         <DialogHeader>
           <OpenAI className="mb-2 size-8" aria-hidden="true" />
-          <DialogTitle>Your ChatGPT plan is connected</DialogTitle>
+          <DialogTitle>
+            <T>Your ChatGPT plan is connected</T>
+          </DialogTitle>
           <DialogDescription>
-            Eligible usage in T3 Code uses your ChatGPT plan. Manage your shared usage and any
-            credit settings in ChatGPT.
+            <T>
+              Eligible usage in <Var>{appName()}</Var> uses your ChatGPT plan. Manage your shared
+              usage and any credit settings in ChatGPT.
+            </T>
           </DialogDescription>
           <p className="text-xs text-muted-foreground">
-            {next?.providerName} on {next?.environmentLabel}
+            <T>
+              <Var>{next?.providerName}</Var> on <Var>{next?.environmentLabel}</Var>
+            </T>
           </p>
         </DialogHeader>
         <DialogFooter>
           <ChatGptUsageButton />
-          <Button onClick={dismiss}>Continue</Button>
+          <Button onClick={dismiss}>
+            <T>Continue</T>
+          </Button>
         </DialogFooter>
       </DialogPopup>
     </Dialog>

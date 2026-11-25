@@ -1,0 +1,109 @@
+.m-composer-deck {
+  --composer-panel-surface: var(--thread-card-surface);
+  --composer-panel-edge: color-mix(in oklab, var(--color-foreground) 5%, transparent);
+  --composer-deck-shadow: 0 1px 32px -6px rgb(0 0 0 / 16%);
+}
+[data-ios-theme="light"] .m-composer-deck {
+  --composer-panel-surface: color-mix(in srgb, var(--thread-page) 94%, var(--color-foreground));
+  --composer-panel-edge: rgb(255 255 255 / 45%);
+  --composer-deck-shadow: 0 1px 32px -6px rgb(0 0 0 / 7%);
+}
+.m-composer-panel {
+  --composer-panel-inner: color-mix(in srgb, var(--composer-panel-surface) 94%, white);
+  --composer-panel-radius: var(--thread-card-radius, 14px);
+  --composer-panel-content-padding: 16px 17px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--thread-card-inset);
+  min-height: 0;
+  padding: var(--thread-card-inset);
+  border-top: 1px solid var(--composer-panel-edge);
+  border-radius: var(--composer-panel-radius);
+  background: var(--composer-panel-surface);
+}
+[data-ios-theme="light"] .m-composer-panel {
+  --composer-panel-inner: color-mix(in srgb, white 97%, var(--color-foreground));
+}
+.m-composer-panel-header {
+  display: flex;
+  align-items: center;
+  gap: var(--thread-card-icon-gap);
+  min-height: 30px;
+  flex: none;
+  padding: 10px 17px;
+  color: var(--color-foreground-muted);
+  font: 500 13px/16px var(--m-font);
+}
+.m-composer-panel-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--composer-panel-edge);
+  border-radius: calc(var(--composer-panel-radius) - var(--thread-card-inset));
+  background: var(--composer-panel-inner);
+}
+.m-composer-panel-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+.m-composer-panel-actions {
+  flex: none;
+  padding: 10px 8px;
+}
+.m-composer-text-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: 500 14px/19px var(--m-font);
+  color: var(--color-foreground-secondary);
+  cursor: pointer;
+}
+.m-composer-deck {
+  --composer-deck-radius: 28px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+  isolation: isolate;
+}
+.m-composer-deck[data-layers="1"] {
+  padding-block-start: 6px;
+}
+.m-composer-deck[data-layers="2"] {
+  padding-block-start: 12px;
+}
+.m-composer-deck:is([data-layers="1"], [data-layers="2"])::before,
+.m-composer-deck[data-layers="2"]::after {
+  content: "";
+  position: absolute;
+  inset-block: 6px;
+  inset-inline: 8px;
+  border-radius: var(--composer-deck-radius);
+  background: color-mix(in srgb, var(--composer-panel-surface) 85%, var(--thread-page));
+  box-shadow:
+    inset 0 1px var(--composer-panel-edge),
+    var(--composer-deck-shadow);
+  pointer-events: none;
+}
+.m-composer-deck::before {
+  z-index: 1;
+}
+.m-composer-deck[data-layers="1"]::before {
+  inset-block-start: 0;
+}
+.m-composer-deck[data-layers="2"]::after {
+  inset-block: 0 12px;
+  inset-inline: 16px;
+  background: color-mix(in srgb, var(--composer-panel-surface) 70%, var(--thread-page));
+}
+.m-composer-deck > .m-composer-panel {
+  --composer-panel-radius: var(--composer-deck-radius);
+  position: relative;
+  z-index: 2;
+}
+.m-composer-deck:is([data-layers="1"], [data-layers="2"]) > .m-composer-panel {
+  box-shadow: var(--composer-deck-shadow);
+}

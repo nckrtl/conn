@@ -26,3 +26,5 @@ export function decide(
     mobile_native: boolean;
   };
 };
+
+export const FORK_FILE_DEPS: Record<string, Record<string, RegExp>>;

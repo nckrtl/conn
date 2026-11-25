@@ -1,0 +1,1595 @@
+//! Offline tests on real folders: reads, writes, listings, search, attachments and assets,
+//! with every path escape (`..`, absolute paths, symlinks, `.git`, the server's own state).
+
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers: a failure should fail the test"
+)]
+
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use conn_contract::{
+    AssetResource, AssetsCreateUrlError, ChatAttachment, ChatFileAttachment, ChatImageAttachment,
+    FilesystemBrowseInput, PersistChatAttachmentsInput, ProjectEntryKind,
+    ProjectReadFileErrorFailure as Failure, ProjectReadFileInput, ProjectSearchContentsInput,
+    ProjectSearchEntriesInput, ProjectWriteFileInput, UploadChatImageAttachment, from_json, lit,
+};
+use conn_files::{
+    AssetContext, Files, KnownWorkspaces, Served,
+    attachments::{UploadOutcome, UploadRequest, now_ms, validate_claims, validate_limits},
+    entries, search, workspace,
+};
+use serde_json::json;
+
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("conn-files-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        Self(fs::canonicalize(&path).unwrap())
+    }
+
+    fn write(&self, relative: &str, contents: impl AsRef<[u8]>) -> PathBuf {
+        let path = self.0.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        path
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A project, an outside folder and a server state folder side by side.
+struct Fixture {
+    _base: Dir,
+    project: PathBuf,
+    outside: PathBuf,
+    state: PathBuf,
+    files: Files,
+}
+
+fn fixture(name: &str) -> Fixture {
+    let base = Dir::new(name);
+    let project = base.0.join("project");
+    let outside = base.0.join("outside");
+    let state = base.0.join("state");
+    for dir in [&project, &outside, &state] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(outside.join("secret.txt"), "outside").unwrap();
+    let files = Files::open(&state).unwrap();
+    Fixture {
+        _base: base,
+        project,
+        outside,
+        state,
+        files,
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap();
+    assert!(status.success(), "git failed: {status}");
+}
+
+fn read(f: &Fixture, path: &str) -> Result<conn_contract::ProjectReadFileResult, Failure> {
+    read_with(f, path, false)
+}
+
+fn read_with(
+    f: &Fixture,
+    path: &str,
+    allow_missing: bool,
+) -> Result<conn_contract::ProjectReadFileResult, Failure> {
+    let input = ProjectReadFileInput {
+        cwd: f.project.to_string_lossy().into_owned(),
+        relative_path: path.into(),
+        allow_missing: allow_missing.then_some(true),
+    };
+    workspace::read_file(&input, None, &f.files.internal).map_err(|e| e.failure)
+}
+
+#[test]
+fn reads_stay_inside_the_root_and_out_of_server_state() {
+    let f = fixture("read");
+    fs::write(f.project.join("a.txt"), "hello").unwrap();
+    assert_eq!(read(&f, "a.txt").unwrap().contents, "hello");
+    assert_eq!(read(&f, "./sub/../a.txt").unwrap().relative_path, "a.txt");
+
+    // `..` and a link out of the root.
+    assert_eq!(
+        read(&f, "../outside/secret.txt").unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    symlink(&f.outside, f.project.join("out")).unwrap();
+    assert_eq!(
+        read(&f, "out/secret.txt").unwrap_err(),
+        Failure::ResolvedPathOutsideRoot
+    );
+
+    // An absolute path reads the host file in place, as the TypeScript server does...
+    let secret = f.outside.join("secret.txt");
+    assert_eq!(
+        read(&f, &secret.to_string_lossy()).unwrap().contents,
+        "outside"
+    );
+    // ...but never the server's own state, directly or through a link.
+    let key = f.state.join("secrets/asset-signing-key");
+    assert_eq!(
+        read(&f, &key.to_string_lossy()).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    symlink(&f.state, f.project.join("state-link")).unwrap();
+    symlink(&f.state, f.outside.join("state-link")).unwrap();
+    let via_link = f.outside.join("state-link/secrets/asset-signing-key");
+    assert_eq!(
+        read(&f, &via_link.to_string_lossy()).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    // Network paths never reach the file system.
+    assert_eq!(
+        read(&f, "//host/share/x").unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+
+    // Missing, binary, directory, truncated.
+    assert_eq!(read_with(&f, "nope.txt", true).unwrap().exists, Some(false));
+    assert_eq!(read(&f, "nope.txt").unwrap_err(), Failure::OperationFailed);
+    fs::write(f.project.join("bin"), b"a\0b").unwrap();
+    assert_eq!(read(&f, "bin").unwrap_err(), Failure::BinaryFile);
+    fs::create_dir(f.project.join("dir")).unwrap();
+    assert_eq!(read(&f, "dir").unwrap_err(), Failure::PathNotFile);
+    let mut big = "é".repeat(600_000).into_bytes(); // 1.2 MB
+    big.push(b'x');
+    fs::write(f.project.join("big.txt"), &big).unwrap();
+    let result = read(&f, "big.txt").unwrap();
+    assert!(result.truncated);
+    assert_eq!(result.byte_length, big.len() as i64);
+    assert_eq!(result.contents.len(), 1024 * 1024);
+
+    // T3 "rejects files with invalid UTF-8": U+FFFD would overwrite Latin-1 bytes on save.
+    fs::write(f.project.join("latin1.txt"), b"name=caf\xe9\n").unwrap();
+    assert_eq!(read(&f, "latin1.txt").unwrap_err(), Failure::BinaryFile);
+    // An incomplete last character is invalid when the whole file was read.
+    fs::write(f.project.join("cut.txt"), b"a\xe2\x82").unwrap();
+    assert_eq!(read(&f, "cut.txt").unwrap_err(), Failure::BinaryFile);
+    // T3 "drops a multibyte character split by the read limit".
+    let mut split = vec![b'a'; 1024 * 1024 - 1];
+    split.extend_from_slice("€\n".as_bytes());
+    fs::write(f.project.join("split.txt"), &split).unwrap();
+    let result = read(&f, "split.txt").unwrap();
+    assert!(result.truncated);
+    assert_eq!(result.byte_length, split.len() as i64);
+    assert_eq!(result.contents, "a".repeat(1024 * 1024 - 1));
+    // Invalid bytes before the limit are still refused.
+    split[10] = 0xe9;
+    fs::write(f.project.join("split.txt"), &split).unwrap();
+    assert_eq!(read(&f, "split.txt").unwrap_err(), Failure::BinaryFile);
+}
+
+// T3 `readFile`: storage cleanup removes an idle worktree but keeps its path, so an optional
+// read below it is absent. A required read and any other root failure keep their error.
+#[test]
+fn an_optional_read_in_a_removed_worktree_is_absent() {
+    let f = fixture("read-removed-worktree");
+    git(&f.project, &["init", "-q", "-b", "main"]);
+    git(
+        &f.project,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    let worktree = f._base.0.join("worktree");
+    git(
+        &f.project,
+        &["worktree", "add", "-q", worktree.to_str().unwrap()],
+    );
+    let read_at = |cwd: &Path, path: &str, allow_missing: bool| {
+        let input = ProjectReadFileInput {
+            cwd: cwd.to_string_lossy().into_owned(),
+            relative_path: path.into(),
+            allow_missing: allow_missing.then_some(true),
+        };
+        workspace::read_file(&input, None, &f.files.internal)
+    };
+    let root_failure = |result: Result<_, workspace::FileFailure>| {
+        let failure = result.unwrap_err();
+        (failure.failure, failure.operation.map(|(op, _)| op))
+    };
+    let realpath_root = (
+        Failure::OperationFailed,
+        Some(conn_contract::ProjectReadFileErrorOperation::RealpathWorkspaceRoot),
+    );
+
+    // An existing worktree: a missing optional file is absent; a present one reads.
+    let missing = read_at(&worktree, "t3.json", true).unwrap();
+    assert_eq!(missing.exists, Some(false));
+    fs::write(worktree.join("t3.json"), "{}").unwrap();
+    assert_eq!(read_at(&worktree, "t3.json", true).unwrap().contents, "{}");
+
+    git(
+        &f.project,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    assert!(!worktree.exists());
+    let removed = read_at(&worktree, "t3.json", true).unwrap();
+    assert_eq!(
+        (removed.relative_path.as_str(), removed.exists),
+        ("t3.json", Some(false))
+    );
+    assert_eq!(
+        root_failure(read_at(&worktree, "t3.json", false)),
+        realpath_root
+    );
+
+    // A root that exists but cannot be resolved is an error, optional or not.
+    // A file as a root component gives ENOTDIR for every user, root included.
+    let file = f._base.0.join("plain-file");
+    fs::write(&file, "x").unwrap();
+    let not_dir = read_at(&file.join("root"), "t3.json", true);
+    assert_eq!(root_failure(not_dir), realpath_root);
+
+    // Permission denied, where the runner can actually be denied (not root).
+    let locked = f._base.0.join("locked");
+    fs::create_dir_all(locked.join("root")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = read_at(&locked.join("root"), "t3.json", true);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    match denied {
+        Err(failure) => assert_eq!(
+            (failure.failure, failure.operation.map(|(op, _)| op)),
+            realpath_root
+        ),
+        // A privileged runner traverses mode 000, and the optional file is simply absent.
+        Ok(result) => assert_eq!(result.exists, Some(false)),
+    }
+}
+
+#[test]
+fn writes_only_inside_known_workspaces_and_outside_git() {
+    let f = fixture("write");
+    git(&f.project, &["init", "-q"]);
+    let projects = vec![f.project.to_string_lossy().into_owned()];
+    let known = KnownWorkspaces::new(&projects, &[]);
+    let write = |cwd: &Path, path: &str| {
+        let input = ProjectWriteFileInput {
+            cwd: cwd.to_string_lossy().into_owned(),
+            relative_path: path.into(),
+            contents: "x".into(),
+        };
+        workspace::write_file(&input, &|real| known.contains(real)).map_err(|e| e.failure)
+    };
+    assert_eq!(
+        write(&f.project, "new/dir/a.txt").unwrap().relative_path,
+        "new/dir/a.txt"
+    );
+    assert_eq!(
+        fs::read_to_string(f.project.join("new/dir/a.txt")).unwrap(),
+        "x"
+    );
+
+    assert_eq!(
+        write(&f.outside, "a.txt").unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    assert_eq!(
+        write(&f.project, "../outside/a.txt").unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    let absolute = f.outside.join("a.txt");
+    assert_eq!(
+        write(&f.project, &absolute.to_string_lossy()).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    // A link to a folder outside, and a dangling link, cannot carry a new file out.
+    symlink(&f.outside, f.project.join("out")).unwrap();
+    assert_eq!(
+        write(&f.project, "out/new.txt").unwrap_err(),
+        Failure::ResolvedPathOutsideRoot
+    );
+    symlink(f.outside.join("missing"), f.project.join("dangling")).unwrap();
+    assert_eq!(
+        write(&f.project, "dangling/x.txt").unwrap_err(),
+        Failure::OperationFailed
+    );
+    assert!(!f.outside.join("new.txt").exists() && !f.outside.join("missing").exists());
+    // Git metadata, named or through a link.
+    assert_eq!(
+        write(&f.project, ".git/config").unwrap_err(),
+        Failure::ResolvedPathOutsideRoot
+    );
+    symlink(f.project.join(".git"), f.project.join("meta")).unwrap();
+    assert_eq!(
+        write(&f.project, "meta/hooks/pre-commit").unwrap_err(),
+        Failure::ResolvedPathOutsideRoot
+    );
+    // A file link swapped in at the target is not followed.
+    symlink(f.outside.join("secret.txt"), f.project.join("swap.txt")).unwrap();
+    assert!(write(&f.project, "swap.txt").is_err());
+    assert_eq!(
+        fs::read_to_string(f.outside.join("secret.txt")).unwrap(),
+        "outside"
+    );
+
+    // A worktree of the project in a managed folder, before a thread names it (T3
+    // `KnownWorkspaces.contains`); a plain folder there, or a foreign repository, is not one.
+    let managed = f.outside.join("managed");
+    git(
+        &f.project,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let worktree = managed.join("project/probe-0123");
+    git(
+        &f.project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "probe",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    fs::create_dir_all(managed.join("project/plain")).unwrap();
+    let foreign = managed.join("other/repo");
+    fs::create_dir_all(&foreign).unwrap();
+    git(&foreign, &["init", "-q"]);
+    let with_managed =
+        KnownWorkspaces::new(&projects, &[]).with_managed(std::slice::from_ref(&managed));
+    let save = |cwd: &Path, known: &KnownWorkspaces| {
+        let input = ProjectWriteFileInput {
+            cwd: cwd.to_string_lossy().into_owned(),
+            relative_path: "audit.txt".into(),
+            contents: "probe".into(),
+        };
+        workspace::write_file(&input, &|real| known.contains(real)).map_err(|e| e.failure)
+    };
+    assert_eq!(
+        save(&worktree, &known).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    assert_eq!(
+        save(&worktree, &with_managed).unwrap().relative_path,
+        "audit.txt"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("audit.txt")).unwrap(),
+        "probe"
+    );
+    // A worktree of a repository nested in the project, as `vcs.createWorktree` makes from
+    // that folder, saves too.
+    let nested = f.project.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    git(
+        &nested,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    let nested_worktree = managed.join("nested/probe-4567");
+    git(
+        &nested,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "probe",
+            &nested_worktree.to_string_lossy(),
+        ],
+    );
+    assert_eq!(
+        save(&nested_worktree, &with_managed).unwrap().relative_path,
+        "audit.txt"
+    );
+    // A link in the worktree cannot carry the save out of it.
+    symlink(&f.outside, worktree.join("escape")).unwrap();
+    assert_eq!(
+        save(&worktree.join("escape"), &with_managed).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    assert!(!f.outside.join("audit.txt").exists());
+    // A project that is itself a linked worktree: a managed checkout its repository lists
+    // saves, though that repository lies outside the project.
+    let linked = f.outside.join("linked");
+    git(
+        &f.project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            &linked.to_string_lossy(),
+        ],
+    );
+    let from_linked = managed.join("linked/probe-89ab");
+    git(
+        &linked,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "from-linked",
+            &from_linked.to_string_lossy(),
+        ],
+    );
+    let linked_projects = [linked.to_string_lossy().into_owned()];
+    let linked_known =
+        KnownWorkspaces::new(&linked_projects, &[]).with_managed(std::slice::from_ref(&managed));
+    assert_eq!(
+        save(&from_linked, &linked_known).unwrap().relative_path,
+        "audit.txt"
+    );
+    assert_eq!(
+        save(&nested_worktree, &linked_known).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    // A linked project of a bare repository: its managed checkouts save, a sibling bare
+    // repository's do not.
+    let bare = f.outside.join("bare/app.git");
+    let sibling = f.outside.join("bare/other.git");
+    for repo in [&bare, &sibling] {
+        git(
+            &f.outside,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                &f.project.to_string_lossy(),
+                &repo.to_string_lossy(),
+            ],
+        );
+    }
+    let bare_linked = f.outside.join("bare-linked");
+    git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "bl",
+            &bare_linked.to_string_lossy(),
+        ],
+    );
+    let from_bare = managed.join("bare-linked/probe-cdef");
+    git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "fb",
+            &from_bare.to_string_lossy(),
+        ],
+    );
+    let from_sibling = managed.join("bare-linked/probe-sib");
+    git(
+        &sibling,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "fs",
+            &from_sibling.to_string_lossy(),
+        ],
+    );
+    let bare_known = KnownWorkspaces::new(&[bare_linked.to_string_lossy().into_owned()], &[])
+        .with_managed(std::slice::from_ref(&managed));
+    assert_eq!(
+        save(&from_bare, &bare_known).unwrap().relative_path,
+        "audit.txt"
+    );
+    assert_eq!(
+        save(&from_sibling, &bare_known).unwrap_err(),
+        Failure::WorkspacePathOutsideRoot
+    );
+    for elsewhere in [managed.join("project/plain"), foreign] {
+        assert_eq!(
+            save(&elsewhere, &with_managed).unwrap_err(),
+            Failure::WorkspacePathOutsideRoot,
+            "{}",
+            elsewhere.display()
+        );
+    }
+}
+
+#[test]
+fn lists_folders_with_links_inside_and_ignored_marks() {
+    let f = fixture("list");
+    git(&f.project, &["init", "-q"]);
+    let d = Dir(f.project.clone());
+    d.write(".gitignore", "build/\n*.log\n");
+    d.write("src/main.rs", "fn main() {}");
+    d.write("build/out.js", "x");
+    d.write("debug.log", "x");
+    symlink(&f.outside, f.project.join("out")).unwrap();
+    symlink(f.project.join("src"), f.project.join("src-link")).unwrap();
+    symlink(&f.project, f.project.join("src/up")).unwrap();
+    // File links: inside (listed, as in T3), ignored by name, and out of the root.
+    symlink(f.project.join("src/main.rs"), f.project.join("alias.rs")).unwrap();
+    symlink(
+        f.project.join("src/main.rs"),
+        f.project.join("debug-link.log"),
+    )
+    .unwrap();
+    symlink(f.outside.join("secret.txt"), f.project.join("secret.txt")).unwrap();
+
+    let listed = entries::list_directory(&f.project, "", &f.files.internal).unwrap();
+    let mut names: Vec<(String, ProjectEntryKind, Option<bool>)> = listed
+        .entries
+        .into_iter()
+        .map(|e| (e.path, e.kind, e.ignored))
+        .collect();
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        names,
+        vec![
+            (".gitignore".into(), ProjectEntryKind::File, None),
+            ("alias.rs".into(), ProjectEntryKind::File, None),
+            ("build".into(), ProjectEntryKind::Directory, Some(true)),
+            ("debug-link.log".into(), ProjectEntryKind::File, Some(true)),
+            ("debug.log".into(), ProjectEntryKind::File, Some(true)),
+            ("src".into(), ProjectEntryKind::Directory, None),
+            ("src-link".into(), ProjectEntryKind::Directory, None),
+        ],
+        "the link out and .git are left out"
+    );
+    // A link back up to an ancestor is not offered as a folder.
+    let src = entries::list_directory(&f.project, "src", &f.files.internal).unwrap();
+    assert_eq!(src.entries.len(), 1, "{:?}", src.entries);
+    for escape in ["..", "../outside", "out", ".git", "src/../.."] {
+        assert!(
+            entries::list_directory(&f.project, escape, &f.files.internal).is_err(),
+            "{escape}"
+        );
+    }
+
+    let all = entries::list_all(&f.project, &f.files.internal);
+    let paths: Vec<&str> = all.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [".gitignore", "alias.rs", "src", "src/main.rs"],
+        "a file link counts, a folder link is not walked into"
+    );
+    let search = |query: &str| {
+        let input = ProjectSearchEntriesInput {
+            cwd: String::new(),
+            query: query.into(),
+            limit: 20,
+            kind: None,
+            image_only: None,
+        };
+        search::search_entries(&f.project, &input, &f.files.internal)
+            .entries
+            .into_iter()
+            .map(|e| (e.path, e.kind))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        search("alias.rs"),
+        [("alias.rs".to_owned(), ProjectEntryKind::File)]
+    );
+    assert!(
+        search("secret").is_empty(),
+        "a link out of the root is not offered"
+    );
+    assert!(
+        search("debug-link").is_empty(),
+        "ignore rules apply to links"
+    );
+    // Content search reads each file once, by its own name.
+    let grep = search::search_contents(
+        &f.project,
+        &ProjectSearchContentsInput {
+            cwd: String::new(),
+            query: "fn main".into(),
+            limit: 10,
+            case_sensitive: true,
+            whole_word: false,
+            use_regex: false,
+        },
+        &f.files.internal,
+    );
+    let hits: Vec<&str> = grep.matches.iter().map(|m| m.path.as_str()).collect();
+    assert_eq!(hits, ["src/main.rs"]);
+    let ignored = entries::list_ignored(&f.project, &f.files.internal, None);
+    let ignored: Vec<&str> = ignored.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(ignored, ["debug.log"], "build/ is a wholly ignored folder");
+}
+
+/// T3's WorkspaceEntries test: a query finds ignored files that sort past the 200 cap.
+#[test]
+fn a_query_finds_ignored_files_past_the_listing_limit() {
+    let f = fixture("ignored-query");
+    git(&f.project, &["init", "-q"]);
+    let d = Dir(f.project.clone());
+    d.write(".gitignore", "*.secret\n");
+    for index in 1..=205 {
+        d.write(&format!("file-{index:03}.secret"), "s");
+    }
+    let all = entries::list_ignored(&f.project, &f.files.internal, None);
+    assert!(all.truncated, "205 files pass the cap");
+    assert!(!all.files.iter().any(|f| f.path == "file-205.secret"));
+    let found = entries::list_ignored(&f.project, &f.files.internal, Some("FILE-205"));
+    let paths: Vec<(&str, i64)> = found
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.byte_length))
+        .collect();
+    assert_eq!(
+        paths,
+        [("file-205.secret", 1)],
+        "case-insensitive, before the cap"
+    );
+    assert!(!found.truncated);
+}
+
+#[test]
+fn searches_names_and_contents_without_ignored_files() {
+    let f = fixture("search");
+    git(&f.project, &["init", "-q"]);
+    let d = Dir(f.project.clone());
+    d.write(".gitignore", "dist/\n");
+    d.write(
+        "src/server/main.rs",
+        "fn main() {\n    let MainLoop = 1; // mainly\n}\n",
+    );
+    d.write("src/client/app.ts", "export const main = 'Main';\n");
+    d.write("dist/main.js", "main main main");
+    d.write("logo.png", b"\x89PNG\0\0");
+
+    let names = |query: &str, kind: Option<ProjectEntryKind>, image_only: bool| {
+        let input = ProjectSearchEntriesInput {
+            cwd: String::new(),
+            query: query.into(),
+            limit: 10,
+            kind,
+            image_only: image_only.then_some(true),
+        };
+        search::search_entries(&f.project, &input, &f.files.internal)
+            .entries
+            .into_iter()
+            .map(|e| e.path)
+            .collect::<Vec<_>>()
+    };
+    let found = names("main", None, false);
+    assert_eq!(found[0], "src/server/main.rs", "{found:?}");
+    assert!(!found.iter().any(|p| p.starts_with("dist")), "{found:?}");
+    assert_eq!(
+        names("srv", Some(ProjectEntryKind::Directory), false),
+        ["src/server"]
+    );
+    assert_eq!(names("", None, true), ["logo.png"]);
+    assert_eq!(names("*.ts", None, false), ["src/client/app.ts"]);
+
+    let grep = |query: &str, case: bool, word: bool, regex: bool| {
+        let input = ProjectSearchContentsInput {
+            cwd: String::new(),
+            query: query.into(),
+            limit: 50,
+            case_sensitive: case,
+            whole_word: word,
+            use_regex: regex,
+        };
+        search::search_contents(&f.project, &input, &f.files.internal)
+    };
+    let all = grep("main", false, false, false);
+    assert_eq!(all.matches.len(), 3, "{:?}", all.matches);
+    assert!(all.matches.iter().all(|m| !m.path.starts_with("dist")));
+    let words = grep("main", false, true, false);
+    let mut word_lines: Vec<(String, i64)> = words
+        .matches
+        .iter()
+        .map(|m| (m.path.clone(), m.line_number))
+        .collect();
+    word_lines.sort();
+    assert_eq!(
+        word_lines,
+        [
+            ("src/client/app.ts".into(), 1),
+            ("src/server/main.rs".into(), 1)
+        ]
+    );
+    let app = words
+        .matches
+        .iter()
+        .find(|m| m.path.ends_with("app.ts"))
+        .unwrap();
+    assert_eq!(app.match_ranges.len(), 2, "main and Main");
+    assert_eq!(
+        (app.match_ranges[0].start, app.match_ranges[0].end),
+        (13, 17)
+    );
+    assert_eq!(grep("Main", true, false, false).matches.len(), 2);
+    assert_eq!(grep(r"Main\w+", true, false, true).matches.len(), 1);
+    let broken = grep("(main", false, false, true);
+    assert!(broken.regex_fallback_error.is_some());
+    assert!(broken.matches.is_empty());
+
+    // A file over 4 MiB is searched, not skipped: T3 finds its first and its last line.
+    d.write(
+        "large.txt",
+        format!("earlyNeedle\n{}lateNeedle\n", "filler\n".repeat(610_000)),
+    );
+    for (needle, line) in [("earlyNeedle", 1), ("lateNeedle", 610_002)] {
+        let found = grep(needle, true, false, false);
+        let lines: Vec<i64> = found.matches.iter().map(|m| m.line_number).collect();
+        assert_eq!((lines, found.truncated), (vec![line], false), "{needle}");
+    }
+    // One line longer than the search holds: what it could not read makes the result partial.
+    d.write("one-line.txt", "x".repeat(5 * 1024 * 1024));
+    let long = grep("earlyNeedle", true, false, false);
+    assert_eq!((long.matches.len(), long.truncated), (1, true));
+}
+
+fn names(f: &Fixture, query: &str, limit: i64) -> Vec<String> {
+    let input = ProjectSearchEntriesInput {
+        cwd: String::new(),
+        query: query.into(),
+        limit,
+        kind: None,
+        image_only: None,
+    };
+    let mut paths: Vec<String> = search::search_entries(&f.project, &input, &f.files.internal)
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// fff and ripgrep read `.ignore` ahead of Git's rules: the nearest matching rule decides,
+/// before ranking and the limit (`WorkspaceSearchIndex.ts` `decideByIgnoreFiles`).
+#[test]
+fn search_leaves_out_what_ignore_files_exclude() {
+    let f = fixture("dot-ignore");
+    git(&f.project, &["init", "-q"]);
+    let d = Dir(f.project.clone());
+    d.write(".ignore", "*.scratch\n");
+    d.write(".gitignore", "*.log\n");
+    d.write("select-me.scratch", "ignore example");
+    d.write("long/directory/select-me.ts", "include example");
+    d.write("unused.scratch", "uniquemarker");
+    d.write("build.log", "uniquemarker");
+    d.write("src/a.ts", "uniquemarker");
+    // The nearer `.ignore` re-includes; a Git ignore rule there loses to it as well.
+    d.write("keep/.ignore", "!*.scratch\n!*.log\n");
+    d.write("keep/kept.scratch", "uniquemarker");
+    d.write("keep/kept.log", "uniquemarker");
+
+    assert_eq!(names(&f, "select-me", 1), ["long/directory/select-me.ts"]);
+    let grep = ProjectSearchContentsInput {
+        cwd: String::new(),
+        query: "uniquemarker".into(),
+        limit: 30,
+        case_sensitive: true,
+        whole_word: false,
+        use_regex: false,
+    };
+    let mut content: Vec<String> = search::search_contents(&f.project, &grep, &f.files.internal)
+        .matches
+        .into_iter()
+        .map(|m| m.path)
+        .collect();
+    content.sort();
+    assert_eq!(content, ["keep/kept.log", "keep/kept.scratch", "src/a.ts"]);
+    let listed = entries::list_all(&f.project, &f.files.internal);
+    let listed: Vec<&str> = listed.entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(!listed.contains(&"unused.scratch"), "{listed:?}");
+    assert!(listed.contains(&"keep/kept.scratch"), "{listed:?}");
+}
+
+/// T3's WorkspaceEntries test: a path in a gitignored nested worktree is found only exactly.
+#[test]
+fn finds_a_path_inside_a_gitignored_nested_worktree_only_by_its_exact_path() {
+    let f = fixture("nested-worktree");
+    let id = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+    let git_id = |args: &[&str]| git(&f.project, &[&id[..], args].concat());
+    git_id(&["init", "-q"]);
+    let d = Dir(f.project.clone());
+    d.write(".gitignore", ".worktrees/\nignored/\n");
+    git_id(&["add", ".gitignore"]);
+    git_id(&["commit", "-qm", "init"]);
+    git_id(&["worktree", "add", "-q", "-b", "x", ".worktrees/x"]);
+    d.write(".worktrees/x/src/foo.py", "print(1)");
+    git_id(&["worktree", "add", "-q", "--detach", ".worktrees/line\nname"]);
+    d.write(".worktrees/line\nname/src/foo.py", "print(2)");
+    // The same file in an ignored folder that is not a checkout stays out.
+    d.write("ignored/src/foo.py", "print(3)");
+
+    assert_eq!(
+        names(&f, "src/foo.py", 25),
+        [
+            ".worktrees/line\nname/src/foo.py",
+            ".worktrees/x/src/foo.py"
+        ]
+    );
+    assert!(names(&f, "src/fo", 25).is_empty());
+    assert_eq!(names(&f, "src/foo.py", 1).len(), 1, "the limit holds");
+    // A drive-letter-like relative name is a path, not a Windows absolute one.
+    d.write(".worktrees/x/a:docs/new.py", "print(5)");
+    assert_eq!(
+        names(&f, "a:docs/new.py", 25),
+        [".worktrees/x/a:docs/new.py"]
+    );
+    // A link out of the workspace or into `.git` is not a file of the checkout.
+    symlink(
+        f.outside.join("secret.txt"),
+        f.project.join(".worktrees/x/src/leak.py"),
+    )
+    .unwrap();
+    symlink(
+        f.project.join(".git/HEAD"),
+        f.project.join(".worktrees/x/src/head.py"),
+    )
+    .unwrap();
+    for query in ["src/leak.py", "src/head.py"] {
+        assert!(names(&f, query, 25).is_empty(), "{query}");
+    }
+    // As in the walk, a name under a `.git` folder stays out; a link inside the checkout counts.
+    d.write(".worktrees/x/sub/.git/plain.py", "print(6)");
+    assert!(names(&f, "sub/.git/plain.py", 25).is_empty());
+    symlink(
+        f.project.join(".worktrees/x/src/foo.py"),
+        f.project.join(".worktrees/x/src/alias.py"),
+    )
+    .unwrap();
+    assert_eq!(names(&f, "src/alias.py", 25), [".worktrees/x/src/alias.py"]);
+    // A gone checkout's folder is no longer one of them.
+    fs::remove_dir_all(f.project.join(".worktrees/x")).unwrap();
+    d.write(".worktrees/x/src/foo.py", "print(4)");
+    assert_eq!(
+        names(&f, "src/foo.py", 25),
+        [".worktrees/line\nname/src/foo.py"]
+    );
+}
+
+/// T3's WorkspaceEntries test "matches glob metacharacters in the query literally".
+#[test]
+fn name_globs_take_brace_alternatives_and_keep_literal_braces() {
+    let f = fixture("brace-glob");
+    let d = Dir(f.project.clone());
+    for path in [
+        "src/app/game/[id]/index.tsx",
+        "src/foo{bar}.ts",
+        "src/main.ts",
+        "src/notes.md",
+        "src/UPPER.TS",
+        "src/clip.ts}",
+        "config/.env",
+        "config/app.ENV",
+    ] {
+        d.write(path, "");
+    }
+    for query in ["game/[i", "game/[id]"] {
+        assert!(names(&f, query, 10).contains(&"src/app/game/[id]/index.tsx".into()));
+    }
+    assert!(names(&f, "foo{bar}.ts", 10).contains(&"src/foo{bar}.ts".into()));
+    assert_eq!(
+        names(&f, "*.{ts,tsx}", 10),
+        [
+            "src/app/game/[id]/index.tsx",
+            "src/foo{bar}.ts",
+            "src/main.ts"
+        ]
+    );
+    assert_eq!(names(&f, "*.{ts}", 10), ["src/foo{bar}.ts", "src/main.ts"]);
+    // fff: `*.ext` filters extensions in any case; a brace glob matches case as written.
+    assert_eq!(
+        names(&f, "*.ts", 10),
+        ["src/UPPER.TS", "src/foo{bar}.ts", "src/main.ts"]
+    );
+    assert_eq!(names(&f, "*.ts}", 10), ["src/clip.ts}"]);
+    // fff wants a name longer than the extension: a bare `.env` is not an `*.env` file.
+    assert_eq!(names(&f, "*.env", 10), ["config/app.ENV"]);
+    assert_eq!(names(&f, "src/{main}.ts", 10), ["src/main.ts"]);
+    assert_eq!(names(&f, "src/{foo{bar},notes}.md", 10), ["src/notes.md"]);
+    assert_eq!(names(&f, "*.{TS}", 10), ["src/foo{bar}.ts", "src/main.ts"]);
+}
+
+#[test]
+fn browses_folders_for_the_project_picker() {
+    let f = fixture("browse");
+    for d in ["alpha", "Beta", ".hidden", "alpine"] {
+        fs::create_dir(f.project.join(d)).unwrap();
+    }
+    fs::write(f.project.join("afile"), "").unwrap();
+    let browse = |partial: String, cwd: Option<String>| {
+        workspace::browse(
+            &FilesystemBrowseInput {
+                partial_path: partial,
+                cwd,
+            },
+            None,
+        )
+    };
+    let root = f.project.to_string_lossy().into_owned();
+    let names = |r: conn_contract::FilesystemBrowseResult| {
+        r.entries.into_iter().map(|e| e.name).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(browse(format!("{root}/al"), None).unwrap()),
+        ["alpha", "alpine"]
+    );
+    assert_eq!(
+        names(browse(format!("{root}/"), None).unwrap()),
+        [".hidden", "alpha", "alpine", "Beta"]
+    );
+    assert_eq!(
+        names(browse("./b".into(), Some(root.clone())).unwrap()),
+        ["Beta"]
+    );
+    assert!(browse("./x".into(), None).is_err());
+    let missing = browse(format!("{root}/nope/"), None).unwrap_err();
+    assert_eq!(missing.path_missing, Some(true));
+}
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[0; 16]);
+    bytes
+}
+
+fn upload(f: &Fixture, kind: Option<&str>, name: &str, mime: &str, bytes: &[u8]) -> String {
+    let request = UploadRequest {
+        kind: kind.map(str::to_owned),
+        name: name.into(),
+        mime_type: mime.into(),
+        size_bytes: bytes.len() as u64,
+    };
+    request.validate().unwrap();
+    let issued = f
+        .files
+        .attachments
+        .create_upload(&f.files.signer, &request, now_ms());
+    let token = issued
+        .relative_url
+        .strip_prefix("/api/attachments/upload/")
+        .unwrap();
+    let claims = f
+        .files
+        .attachments
+        .verify_upload(&f.files.signer, token, now_ms())
+        .unwrap();
+    let (part, target) = f.files.attachments.upload_paths(&claims).unwrap();
+    fs::write(&part, bytes).unwrap();
+    let outcome =
+        f.files
+            .attachments
+            .publish_upload(&part, &target, bytes.len() as u64, claims.size_bytes);
+    assert_eq!(outcome, UploadOutcome::Stored, "the upload is published");
+    assert!(!part.exists(), "the part file is gone after publish");
+    issued.attachment_id
+}
+
+/// `AttachmentClaims.claimPendingAttachments`: a document's extracted text (`<path>.txt`) goes
+/// with its claimed copy; a release and a cleanup remove both, and only for thread files.
+#[test]
+fn a_claim_carries_its_documents_extracted_text() {
+    let f = fixture("attach-text");
+    let store = &f.files.attachments;
+    let mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    let id = upload(&f, Some("file"), "brief.docx", mime, b"docx");
+    let pending = store.resolve(&id).unwrap().path;
+    let sidecar = |path: &Path| PathBuf::from(format!("{}.txt", path.display()));
+    fs::write(sidecar(&pending), "brief text").unwrap();
+    let attachment = ChatAttachment::File(ChatFileAttachment {
+        r#type: lit::File,
+        id: id.clone(),
+        name: "brief.docx".into(),
+        mime_type: mime.into(),
+        size_bytes: 4,
+        source: None,
+    });
+    let claim = || {
+        let ChatAttachment::File(claimed) = store.claim("Thread 1", &attachment).unwrap() else {
+            panic!()
+        };
+        claimed
+    };
+    let first = claim();
+    let path = store.resolve(&first.id).unwrap().path;
+    assert_eq!(fs::read_to_string(sidecar(&path)).unwrap(), "brief text");
+    store.release(&[ChatAttachment::File(first)]);
+    assert!(!path.exists() && !sidecar(&path).exists());
+
+    let second = claim();
+    let path = store.resolve(&second.id).unwrap().path;
+    store.delete(&[id, second.id]);
+    assert!(!path.exists() && !sidecar(&path).exists());
+    assert!(
+        pending.exists(),
+        "a cleanup leaves pending uploads to the sweep"
+    );
+}
+
+/// `getProviderAttachmentLimitError`: at most 100 files per message or question response, and
+/// duplicates are a single message's or question's check.
+#[test]
+fn a_response_holds_at_most_100_files() {
+    let files: Vec<ChatAttachment> = (0..101)
+        .map(|n| {
+            ChatAttachment::File(ChatFileAttachment {
+                r#type: lit::File,
+                id: format!("thread-{n}"),
+                name: "a.txt".into(),
+                mime_type: "text/plain".into(),
+                size_bytes: 1,
+                source: None,
+            })
+        })
+        .collect();
+    assert_eq!(
+        validate_claims(&files).unwrap_err(),
+        "You can attach up to 100 files per message or question response."
+    );
+    assert!(validate_claims(&files[..100]).is_ok());
+    // A whole question response may share one upload between questions; one question may not.
+    let shared = [files[0].clone(), files[0].clone()];
+    assert!(validate_limits(&shared).is_ok());
+    assert_eq!(
+        validate_claims(&shared).unwrap_err(),
+        "Duplicate attachment ids are not allowed."
+    );
+}
+
+#[test]
+fn uploads_claims_and_deletes_attachments() {
+    let f = fixture("attach");
+    let image = png(3, 2);
+    let id = upload(&f, None, "shot.png", "image/png", &image);
+    assert!(id.starts_with("pending-"));
+    let stored = f.files.attachments.resolve(&id).unwrap();
+    assert_eq!(stored.extension, ".png");
+    assert_eq!(stored.byte_length, image.len() as u64);
+    assert_eq!(stored.mime_type, Some("image/png"));
+    assert!(stored.path.starts_with(f.files.attachments.dir()));
+
+    // Tokens: tampered, expired, wrong size.
+    let request = UploadRequest {
+        kind: Some("file".into()),
+        name: "notes.pdf".into(),
+        mime_type: "application/pdf".into(),
+        size_bytes: 4,
+    };
+    let issued = f
+        .files
+        .attachments
+        .create_upload(&f.files.signer, &request, now_ms());
+    assert!(issued.attachment_id.ends_with("-pdf"));
+    let token = issued.relative_url.rsplit('/').next().unwrap().to_owned();
+    let store = &f.files.attachments;
+    assert!(
+        store
+            .verify_upload(&f.files.signer, &token, now_ms() + 11 * 60_000)
+            .is_none()
+    );
+    let mut forged = token.clone();
+    forged.insert(3, 'A');
+    assert!(
+        store
+            .verify_upload(&f.files.signer, &forged, now_ms())
+            .is_none()
+    );
+    let claims = store
+        .verify_upload(&f.files.signer, &token, now_ms())
+        .unwrap();
+    let (part, target) = store.upload_paths(&claims).unwrap();
+    fs::write(&part, b"abc").unwrap();
+    assert!(matches!(
+        store.publish_upload(&part, &target, 3, 4),
+        UploadOutcome::Rejected { status: 400, .. }
+    ));
+    assert!(store.resolve(&issued.attachment_id).is_none());
+    // Contract limits.
+    let too_big = UploadRequest {
+        size_bytes: 11 * 1024 * 1024,
+        ..request_image()
+    };
+    assert!(too_big.validate().is_err());
+
+    // Ids that would leave the store resolve to nothing.
+    for bad in [
+        "../state/secrets/asset-signing-key",
+        "/etc/passwd",
+        "pending-x",
+        "",
+    ] {
+        assert!(store.resolve(bad).is_none(), "{bad}");
+    }
+
+    // Claim for a thread: a copy under the thread's id; the pending file stays for a retry.
+    let attachment = ChatAttachment::Image(ChatImageAttachment {
+        r#type: lit::Image,
+        id: id.clone(),
+        name: "shot.png".into(),
+        mime_type: "IMAGE/PNG".into(),
+        size_bytes: image.len() as i64,
+        source: None,
+    });
+    let ChatAttachment::Image(claimed) = store.claim("Thread 1", &attachment).unwrap() else {
+        panic!()
+    };
+    assert!(claimed.id.starts_with("thread-1-"), "{}", claimed.id);
+    assert_eq!(claimed.mime_type, "image/png");
+    assert_eq!(
+        fs::read(store.resolve(&claimed.id).unwrap().path).unwrap(),
+        image
+    );
+    let wrong_size = match &attachment {
+        ChatAttachment::Image(a) => ChatAttachment::Image(ChatImageAttachment {
+            size_bytes: 1,
+            ..a.clone()
+        }),
+        _ => unreachable!(),
+    };
+    assert!(store.claim("t", &wrong_size).unwrap_err().contains("size"));
+    store.release(&[ChatAttachment::Image(claimed.clone())]);
+    assert!(store.resolve(&claimed.id).is_none());
+
+    let missing = ChatAttachment::Image(ChatImageAttachment {
+        id: format!("pending-{}", conn_support::uuid_v4()),
+        ..match &attachment {
+            ChatAttachment::Image(a) => a.clone(),
+            _ => unreachable!(),
+        }
+    });
+    let before = fs::read_dir(store.dir()).unwrap().count();
+    assert!(
+        store
+            .claim_all("Thread 1", &[attachment.clone(), missing.clone()])
+            .unwrap_err()
+            .contains("not found")
+    );
+    assert_eq!(
+        fs::read_dir(store.dir()).unwrap().count(),
+        before,
+        "failed batch must release its claimed copies"
+    );
+    // An attachment already a thread's file passes the claim unchanged; a failed batch keeps it.
+    let ChatAttachment::Image(existing) = store.claim("Thread 1", &attachment).unwrap() else {
+        panic!()
+    };
+    let existing = ChatAttachment::Image(existing);
+    assert!(
+        store
+            .claim_all("Thread 1", &[existing.clone(), missing])
+            .is_err()
+    );
+    let ChatAttachment::Image(kept_file) = &existing else {
+        unreachable!()
+    };
+    assert!(
+        store.resolve(&kept_file.id).is_some(),
+        "a failed batch must keep files it did not claim"
+    );
+
+    // Delete removes pending uploads only.
+    store.delete_pending(&id);
+    assert!(store.resolve(&id).is_none());
+
+    // The sweep: old pending uploads and parts go, thread attachments stay.
+    let kept = upload(&f, None, "b.png", "image/png", &image);
+    let ChatAttachment::Image(thread_copy) = store
+        .claim(
+            "t",
+            &ChatAttachment::Image(ChatImageAttachment {
+                id: kept.clone(),
+                ..match &attachment {
+                    ChatAttachment::Image(a) => a.clone(),
+                    _ => unreachable!(),
+                }
+            }),
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    fs::write(store.dir().join("x.png.1.part"), b"").unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(25 * 60 * 60);
+    assert_eq!(store.sweep(later), 2);
+    assert!(store.resolve(&kept).is_none());
+    assert!(store.resolve(&thread_copy.id).is_some());
+}
+
+fn request_image() -> UploadRequest {
+    UploadRequest {
+        kind: None,
+        name: "a.png".into(),
+        mime_type: "image/png".into(),
+        size_bytes: 1,
+    }
+}
+
+#[test]
+fn persists_data_url_images_with_stable_ids() {
+    let f = fixture("persist");
+    let input = PersistChatAttachmentsInput {
+        thread_id: "t1".into(),
+        message_id: "m1".into(),
+        attachments: vec![UploadChatImageAttachment {
+            id: None,
+            r#type: lit::Image,
+            name: "a.png".into(),
+            mime_type: "image/png".into(),
+            size_bytes: 2,
+            data_url: "data:image/png;base64,aGk=".into(),
+            source: None,
+        }],
+    };
+    let first = f.files.attachments.persist_data_urls(&input).unwrap();
+    let again = f.files.attachments.persist_data_urls(&input).unwrap();
+    assert_eq!(first, again, "a retry keeps its ids");
+    let ChatAttachment::Image(image) = &first[0] else {
+        panic!()
+    };
+    assert!(image.id.starts_with("t1-"));
+    assert_eq!(
+        fs::read(f.files.attachments.resolve(&image.id).unwrap().path).unwrap(),
+        b"hi"
+    );
+    let mut bad = input;
+    bad.attachments[0].size_bytes = 3;
+    assert!(f.files.attachments.persist_data_urls(&bad).is_err());
+    bad.attachments[0].data_url = "data:image/jpeg;base64,aGk=".into();
+    assert!(f.files.attachments.persist_data_urls(&bad).is_err());
+}
+
+fn resource(value: serde_json::Value) -> AssetResource {
+    from_json(value).unwrap()
+}
+
+fn token_and_name(url: &str) -> (String, String) {
+    let rest = url.strip_prefix("/api/assets/").unwrap();
+    let (token, name) = rest.split_once('/').unwrap();
+    (token.into(), name.into())
+}
+
+fn served_path(served: Option<Served>) -> Option<PathBuf> {
+    match served? {
+        Served::File { path, .. } => Some(path),
+        Served::Bytes { .. } => None,
+    }
+}
+
+/// T3 `validates canonical preview dependency paths`, plus a media alias.
+#[test]
+fn page_dependencies_are_checked_on_their_canonical_path() {
+    let f = fixture("assets-canonical");
+    let d = Dir(f.project.clone());
+    d.write("report.html", "<!doctype html>");
+    for name in [
+        "report.css",
+        ".internal.css",
+        "notes.txt",
+        "clips/clip.mp4",
+        ".private.mp4",
+    ] {
+        d.write(name, "fixture");
+    }
+    let link = |target: &str, alias: &str| {
+        symlink(f.project.join(target), f.project.join(alias)).unwrap();
+    };
+    link("report.css", "theme.css");
+    link(".internal.css", "internal.css");
+    link("notes.txt", "notes.css");
+    link("clips/clip.mp4", "intro.mp4");
+    link(".private.mp4", "movie.mp4");
+    link("notes.txt", "notes.mp3");
+
+    let context = AssetContext {
+        workspace_root: Some(f.project.to_string_lossy().into_owned()),
+        project_favicon_path: None,
+    };
+    let now = now_ms();
+    let page = f
+        .files
+        .create_asset_url(
+            &resource(json!({"_tag": "workspace-file", "threadId": "t", "path": "report.html"})),
+            &context,
+            now,
+        )
+        .unwrap();
+    let (token, _) = token_and_name(&page.relative_url);
+    let resolve = |name: &str| served_path(f.files.resolve_asset(&token, name, now));
+    assert_eq!(resolve("theme.css"), Some(f.project.join("report.css")));
+    assert_eq!(resolve("intro.mp4"), Some(f.project.join("clips/clip.mp4")));
+    for denied in ["internal.css", "notes.css", "movie.mp4", "notes.mp3"] {
+        assert_eq!(resolve(denied), None, "{denied}");
+    }
+}
+
+#[test]
+fn signs_asset_urls_and_rechecks_them_when_served() {
+    let f = fixture("assets");
+    let d = Dir(f.project.clone());
+    d.write("img/a.png", png(4, 3));
+    d.write("docs/page.html", "<script src='app.js'></script>");
+    d.write("docs/app.js", "1");
+    d.write("docs/.env.js", "secret");
+    d.write("src/code.rs", "fn x() {}");
+    let root = Some(f.project.to_string_lossy().into_owned());
+    let context = AssetContext {
+        workspace_root: root,
+        project_favicon_path: None,
+    };
+    let now = now_ms();
+
+    let image = f
+        .files
+        .create_asset_url(
+            &resource(json!({"_tag": "workspace-file", "threadId": "t", "path": "img/a.png"})),
+            &context,
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        image.image_dimensions.map(|d| (d.width, d.height)),
+        Some((4, 3))
+    );
+    let (token, name) = token_and_name(&image.relative_url);
+    assert_eq!(name, "a.png");
+    assert_eq!(
+        served_path(f.files.resolve_asset(&token, &name, now)),
+        Some(f.project.join("img/a.png"))
+    );
+    assert!(f.files.resolve_asset(&token, "other.png", now).is_none());
+    assert!(
+        f.files
+            .resolve_asset(&token, &name, now + 2 * 3600 * 1000)
+            .is_none(),
+        "expired"
+    );
+    let (payload, signature) = token.split_once('.').unwrap();
+    assert!(
+        f.files
+            .resolve_asset(&format!("{payload}x.{signature}"), &name, now)
+            .is_none()
+    );
+    // The file swapped for a link out after minting is not served.
+    fs::remove_file(f.project.join("img/a.png")).unwrap();
+    symlink(f.outside.join("secret.txt"), f.project.join("img/a.png")).unwrap();
+    assert!(f.files.resolve_asset(&token, &name, now).is_none());
+
+    // Source files are not previews; `..` and absolute escapes are refused at mint.
+    let mint = |value: serde_json::Value| f.files.create_asset_url(&resource(value), &context, now);
+    assert!(matches!(
+        mint(json!({"_tag": "workspace-file", "threadId": "t", "path": "src/code.rs"})),
+        Err(AssetsCreateUrlError::AssetPreviewTypeValidationError(_))
+    ));
+    assert!(matches!(
+        mint(json!({"_tag": "workspace-file", "threadId": "t", "path": "../outside/x.png"})),
+        Err(AssetsCreateUrlError::AssetWorkspacePathValidationError(_))
+    ));
+
+    // An HTML page grants its folder's scripts, never hidden files or `..`.
+    let page =
+        mint(json!({"_tag": "workspace-file", "threadId": "t", "path": "docs/page.html"})).unwrap();
+    let (token, _) = token_and_name(&page.relative_url);
+    assert_eq!(
+        served_path(f.files.resolve_asset(&token, "app.js", now)),
+        Some(f.project.join("docs/app.js"))
+    );
+    // Media next to the page plays through the same grant (T3's `clips/clip.*` case).
+    for media in ["clips/clip.mp4", "clips/clip.webm", "clips/clip.mp3"] {
+        d.write(&format!("docs/{media}"), "media bytes");
+        assert_eq!(
+            served_path(f.files.resolve_asset(&token, media, now)),
+            Some(f.project.join("docs").join(media)),
+            "{media}"
+        );
+    }
+    d.write("docs/clips/.hidden.mp4", "media bytes");
+    d.write("docs/fig.bmp", "bitmap");
+    for denied in [
+        ".env.js",
+        "..%2Fimg%2Fa.png",
+        "../img/a.png",
+        "app.rs",
+        "clips/.hidden.mp4",
+        "fig.bmp",
+    ] {
+        assert!(
+            f.files.resolve_asset(&token, denied, now).is_none(),
+            "{denied}"
+        );
+    }
+
+    // Host media by absolute path: served, pinned; the server's state is not.
+    fs::write(f.outside.join("clip.mp4"), b"mp4").unwrap();
+    let clip = f.outside.join("clip.mp4");
+    let media = mint(json!({"_tag": "media-file", "threadId": "t", "path": clip})).unwrap();
+    assert!(media.file_revision.is_some());
+    let (token, name) = token_and_name(&media.relative_url);
+    assert_eq!(
+        served_path(f.files.resolve_asset(&token, &name, now)),
+        Some(clip)
+    );
+    let key = f.state.join("secrets/asset-signing-key");
+    assert!(
+        mint(
+            json!({"_tag": "media-file", "threadId": "t", "path": key, "disposition": "attachment"})
+        )
+        .is_err()
+    );
+
+    // Attachments.
+    let id = upload(&f, None, "s.png", "image/png", &png(5, 6));
+    let asset = mint(json!({"_tag": "attachment", "attachmentId": id})).unwrap();
+    assert_eq!(
+        asset.image_dimensions.map(|d| (d.width, d.height)),
+        Some((5, 6))
+    );
+    let (token, name) = token_and_name(&asset.relative_url);
+    assert!(served_path(f.files.resolve_asset(&token, &name, now)).is_some());
+    for extension in ["html", "pdf"] {
+        let id = upload(
+            &f,
+            Some("file"),
+            &format!("app.{extension}"),
+            "application/octet-stream",
+            b"capture",
+        );
+        for disposition in ["inline", "attachment"] {
+            let asset = mint(json!({"_tag":"attachment","attachmentId":id,"disposition":disposition,"renderIntent":"mcp-app"})).unwrap();
+            let (token, name) = token_and_name(&asset.relative_url);
+            let served = f.files.resolve_asset(&token, &name, now).unwrap();
+            let Served::File { render_intent, .. } = served else {
+                panic!("expected file");
+            };
+            assert_eq!(
+                render_intent.is_some(),
+                extension == "html" && disposition == "inline"
+            );
+            let (body, signature) = token.split_once('.').unwrap();
+            let mut claims: serde_json::Value =
+                serde_json::from_slice(&conn_support::base64::url_decode(body).unwrap()).unwrap();
+            claims["renderIntent"] = json!(if render_intent.is_some() {
+                "other"
+            } else {
+                "mcp-app"
+            });
+            let changed = format!(
+                "{}.{signature}",
+                conn_support::base64::url_encode(claims.to_string().as_bytes())
+            );
+            assert!(f.files.resolve_asset(&changed, &name, now).is_none());
+        }
+    }
+    assert!(matches!(
+        mint(json!({"_tag": "attachment", "attachmentId": "pending-../../x"})),
+        Err(AssetsCreateUrlError::AssetAttachmentNotFoundError(_))
+    ));
+}
+
+#[test]
+fn finds_project_favicons() {
+    let f = fixture("favicon");
+    let d = Dir(f.project.clone());
+    let cwd = f.project.to_string_lossy().into_owned();
+    let mint = |files: &Files| {
+        files.create_asset_url(
+            &resource(json!({"_tag": "project-favicon", "cwd": cwd})),
+            &AssetContext::default(),
+            now_ms(),
+        )
+    };
+    let missing = mint(&f.files).unwrap();
+    assert!(missing.relative_url.ends_with("/project-favicon-missing"));
+    d.write("index.html", r#"<link rel="icon" href="/brand.svg">"#);
+    d.write("public/brand.svg", "<svg/>");
+    let found = mint(&f.files).unwrap();
+    assert_eq!(found.source_path.as_deref(), Some("public/brand.svg"));
+    assert!(found.relative_url.contains("/v"), "{}", found.relative_url);
+    let (token, name) = token_and_name(&found.relative_url);
+    assert_eq!(
+        served_path(f.files.resolve_asset(&token, &name, now_ms())),
+        Some(f.project.join("public/brand.svg"))
+    );
+    d.write("favicon.png", png(1, 1));
+    assert_eq!(
+        mint(&f.files).unwrap().source_path.as_deref(),
+        Some("favicon.png")
+    );
+}
+
+#[test]
+fn serves_a_published_theme_background_and_nothing_else() {
+    let f = fixture("theme-background");
+    let themes = f.state.join("themes");
+    let now = now_ms();
+    let mint = |id: &str| {
+        f.files.create_asset_url(
+            &resource(json!({"_tag": "environment-theme-background", "themeId": id})),
+            &AssetContext::default(),
+            now,
+        )
+    };
+    let issued = mint("night").unwrap();
+    let (token, name) = token_and_name(&issued.relative_url);
+    assert_eq!(name, "night-background");
+    // No image yet: the URL is minted, the route answers 404.
+    assert!(f.files.resolve_asset(&token, &name, now).is_none());
+    fs::write(themes.join("night.jpg"), "jpg").unwrap();
+    let real_themes = fs::canonicalize(&themes).unwrap();
+    assert_eq!(
+        served_path(f.files.resolve_asset(&token, &name, now)),
+        Some(real_themes.join("night.jpg"))
+    );
+    // The route serves only the file with the inode checked here, not a link swapped in later.
+    let Some(Served::File { identity, .. }) = f.files.resolve_asset(&token, &name, now) else {
+        panic!("no background served");
+    };
+    let inode =
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(themes.join("night.jpg")).unwrap());
+    assert_eq!(identity.map(|(_, ino)| ino), Some(inode));
+    // Earlier extensions win; a link is never served.
+    fs::write(themes.join("night.webp"), "webp").unwrap();
+    assert_eq!(
+        served_path(f.files.resolve_asset(&token, &name, now)),
+        Some(real_themes.join("night.webp"))
+    );
+    fs::remove_file(themes.join("night.webp")).unwrap();
+    fs::remove_file(themes.join("night.jpg")).unwrap();
+    symlink(f.outside.join("secret.txt"), themes.join("night.png")).unwrap();
+    assert!(f.files.resolve_asset(&token, &name, now).is_none());
+    // Ids T3's schema refuses never reach the folder.
+    assert!(mint("../secrets").is_err());
+    assert!(mint("Night").is_err());
+}

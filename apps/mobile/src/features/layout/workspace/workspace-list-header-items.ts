@@ -2,16 +2,14 @@ import type {
   NativeStackHeaderItem,
   NativeStackHeaderItemMenu,
 } from "@react-navigation/native-stack";
+import { msg } from "gt-react-native";
 
 import type { AppBarMenuItem } from "../../../components/ui/AppBar.types";
+import { m, type MessageResolver } from "../../../i18n/messages";
 import { withNativeGlassHeaderItem } from "../native-glass-header-items";
+import { connHeaderIcon } from "../../../native/connHeaderIcon";
 
 type NativeHeaderMenuItems = NativeStackHeaderItemMenu["menu"]["items"];
-type NativeHeaderIcon = NonNullable<Extract<NativeStackHeaderItem, { type: "button" }>["icon"]>;
-
-function sfSymbolIcon(name: string): NativeHeaderIcon {
-  return { type: "sfSymbol", name: name as never };
-}
 
 function toNativeHeaderMenuItems(items: ReadonlyArray<AppBarMenuItem>): NativeHeaderMenuItems {
   return items.map((item) =>
@@ -40,14 +38,16 @@ export function createWorkspaceListHeaderItems(input: {
     readonly items: ReadonlyArray<AppBarMenuItem>;
   };
   readonly onOpenSettings?: () => void;
+  readonly resolve?: MessageResolver;
 }): NativeStackHeaderItem[] {
+  const resolve = input.resolve ?? m;
   return [
     withNativeGlassHeaderItem({
       type: "menu",
       axisBehavior: "horizontalOnly",
       label: "",
       accessibilityLabel: input.filter.accessibilityLabel,
-      icon: sfSymbolIcon(input.filter.icon),
+      icon: connHeaderIcon(input.filter.icon),
       menu: {
         title: input.filter.title,
         items: toNativeHeaderMenuItems(input.filter.items),
@@ -58,9 +58,9 @@ export function createWorkspaceListHeaderItems(input: {
           withNativeGlassHeaderItem({
             type: "button",
             axisBehavior: "horizontalOnly",
-            label: "Settings",
-            accessibilityLabel: "Open settings",
-            icon: sfSymbolIcon("gearshape"),
+            label: resolve(msg("Settings")),
+            accessibilityLabel: resolve(msg("Open settings")),
+            icon: connHeaderIcon("gearshape"),
             onPress: input.onOpenSettings,
           }),
         ]

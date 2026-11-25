@@ -1,0 +1,252 @@
+.m-gallery-card {
+  min-width: 0;
+  padding: var(--thread-card-inset);
+  border-radius: var(--thread-card-radius, 14px);
+  background: var(--thread-card-surface);
+  font: 13px/1.5 var(--m-font);
+}
+.m-gallery-card-header {
+  justify-content: flex-start;
+  color: var(--color-foreground-muted);
+}
+.m-gallery-card-header > .m-card-actions {
+  margin-inline-start: auto;
+}
+.m-gallery-card-header > .m-card-actions:has(> .m-gallery-header-save) {
+  gap: 6px;
+}
+.m-gallery-header-link {
+  min-height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.m-gallery-header-link[data-tone="danger"] {
+  color: var(--color-danger-foreground);
+}
+.m-gallery-header-link:disabled {
+  color: var(--color-foreground-muted);
+  cursor: default;
+}
+.m-gallery-header-link[data-tone="danger"]:hover {
+  text-decoration: underline;
+}
+.m-gallery-header-link:focus-visible {
+  outline: 2px solid var(--color-focus);
+}
+.m-gallery-header-save {
+  padding-inline: 10px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+.m-gallery-header-save:disabled {
+  background: color-mix(in srgb, var(--thread-card-surface) 86%, var(--color-foreground));
+}
+.m-gallery-mcp-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  mask: url("../../../conn-gpui/crates/conn-app/assets/icons/brand/mcp.svg") center / contain
+    no-repeat;
+}
+.m-worktree-status {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+.m-worktree-total {
+  padding-inline-end: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.m-worktree-progress::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--color-primary) var(--worktree-progress-fill, 50%),
+    color-mix(in srgb, var(--thread-card-surface) 76%, var(--color-foreground)) 0
+  );
+  mask: radial-gradient(closest-side, transparent calc(100% - 2px), black 0);
+}
+.m-worktree-step-progress {
+  --worktree-progress-fill: 25%;
+  display: grid;
+  flex: none;
+}
+.m-gallery-card-body {
+  --gallery-inner-surface: color-mix(in srgb, var(--thread-card-surface) 94%, white);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px;
+  border-radius: calc(var(--thread-card-radius, 14px) - var(--thread-card-inset));
+  background: var(--gallery-inner-surface);
+}
+[data-ios-theme="light"] .m-gallery-card-body {
+  --gallery-inner-surface: white;
+}
+.m-gallery-card-body > p {
+  margin: 0;
+  color: var(--color-foreground-muted);
+}
+.m-gallery-template-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--thread-card-icon-gap, 8px);
+}
+.m-gallery-template-file small {
+  color: var(--color-foreground-muted);
+  font: inherit;
+  white-space: nowrap;
+}
+.m-gallery-card-body:has(> .m-gallery-embed) {
+  padding: 0;
+  overflow: hidden;
+}
+.m-gallery-embed {
+  width: 100%;
+  border: 0;
+  color-scheme: dark;
+}
+[data-ios-theme="light"] .m-gallery-embed {
+  color-scheme: light;
+}
+.m-gallery-card-body input {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--gallery-inner-surface) 83%, white);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--gallery-inner-surface) 93%, white);
+  color: var(--color-foreground);
+  font: inherit;
+}
+[data-ios-theme="light"] .m-gallery-card-body input {
+  border-color: color-mix(in srgb, var(--color-input-border) 72%, white);
+}
+.m-gallery-card-body input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+.m-gallery-card-body > .m-gallery-result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.m-gallery-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.m-gallery-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.m-gallery-list li span:not(.m-worktree-step-progress) {
+  margin-inline-start: auto;
+  color: var(--color-foreground-muted);
+}
+.m-user-bubble.m-gallery-inset-message {
+  display: flex;
+  flex-direction: column;
+  gap: var(--thread-card-inset);
+  min-width: 0;
+  padding: var(--thread-card-inset);
+  white-space: normal;
+}
+.m-gallery-inset-message > span {
+  padding: 7px 13px;
+}
+.m-gallery-inset-message > :is(.m-code, .m-gallery-file-list) {
+  border-radius: calc(var(--thread-card-radius, 14px) - var(--thread-card-inset));
+}
+.m-user-bubble.m-gallery-attachment-bubble {
+  width: 85%;
+  max-width: 85%;
+}
+.m-gallery-file-list {
+  --gallery-file-muted: color-mix(in srgb, var(--color-foreground) 68%, transparent);
+  --gallery-file-join-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--thread-card-inset, 3px);
+  color: var(--color-foreground);
+}
+.m-gallery-file-list > .m-gallery-attachment {
+  display: flex;
+  align-items: center;
+  gap: var(--thread-card-icon-gap, 8px);
+  padding: 10px 13px;
+  border-radius: inherit;
+  background: var(--thread-card-surface);
+  color: inherit;
+  white-space: normal;
+  text-decoration: none;
+}
+.m-gallery-file-list > .m-gallery-attachment:not(:first-child) {
+  border-start-start-radius: var(--gallery-file-join-radius);
+  border-start-end-radius: var(--gallery-file-join-radius);
+}
+.m-gallery-file-list > .m-gallery-attachment:not(:last-child) {
+  border-end-start-radius: var(--gallery-file-join-radius);
+  border-end-end-radius: var(--gallery-file-join-radius);
+}
+.m-gallery-attachment strong,
+.m-gallery-attachment small {
+  font: inherit;
+}
+.m-gallery-attachment strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.m-gallery-attachment small {
+  flex: none;
+  margin-inline-start: auto;
+  white-space: nowrap;
+  color: var(--gallery-file-muted);
+}
+.m-gallery-file-icon {
+  --file-glyph: url("../../../../assets/conn/superheroicons/24/solid/file-text.svg");
+  flex: none;
+  width: var(--thread-card-icon-size, 14px);
+  height: var(--thread-card-icon-size, 14px);
+  background: var(--gallery-file-muted);
+  mask: var(--file-glyph) center / contain no-repeat;
+}
+.m-gallery-file-icon[data-extension="docx"] {
+  --file-glyph: url("../../../conn-gpui/crates/conn-app/assets/icons/files/t3-file-icon-word.svg");
+}
+.m-gallery-file-icon[data-extension="xlsx"] {
+  --file-glyph: url("../../../conn-gpui/crates/conn-app/assets/icons/files/t3-file-icon-spreadsheet.svg");
+}
+.m-gallery-file-icon[data-extension="pdf"] {
+  --file-glyph: url("../../../conn-gpui/crates/conn-app/assets/icons/files/t3-file-icon-pdf.svg");
+}
+.m-gallery-file-icon[data-extension="md"] {
+  --file-glyph: url("../../../conn-gpui/crates/conn-app/assets/icons/files/file-tree-builtin-markdown.svg");
+}
+.m-gallery-file-icon[data-extension="zip"] {
+  --file-glyph: url("../../../conn-gpui/crates/conn-app/assets/icons/files/file-tree-builtin-zip.svg");
+}
+.m-user-bubble.m-gallery-video-bubble {
+  padding: var(--thread-card-inset);
+}
+.m-gallery-video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: calc(var(--thread-card-radius, 14px) - var(--thread-card-inset));
+  background: black;
+}

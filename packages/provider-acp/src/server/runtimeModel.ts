@@ -648,12 +648,22 @@ function locationsFromToolCallInput(input: {
 const TOOL_CALL_CONTENT_MAX_CHARS = 8_000;
 const TOOL_CALL_CONTENT_TRUNCATION_MARKER = "[Earlier output truncated]\n\n";
 
-function boundToolCallOutputText(text: string): string {
-  if (text.length <= TOOL_CALL_CONTENT_MAX_CHARS) {
-    return text;
+/** The tail to keep, or undefined when the text fits or an adapter already bounded it. */
+function retainedToolCallOutputTail(text: string): string | undefined {
+  if (
+    text.length <= TOOL_CALL_CONTENT_MAX_CHARS ||
+    (text.startsWith(TOOL_CALL_CONTENT_TRUNCATION_MARKER) &&
+      text.length <= TOOL_CALL_CONTENT_MAX_CHARS + TOOL_CALL_CONTENT_TRUNCATION_MARKER.length)
+  ) {
+    return undefined;
   }
-  const tail = text.slice(text.length - TOOL_CALL_CONTENT_MAX_CHARS);
-  return `${TOOL_CALL_CONTENT_TRUNCATION_MARKER}${tail}`;
+  // A tail starting inside a surrogate pair is invalid Unicode.
+  return text.slice(-TOOL_CALL_CONTENT_MAX_CHARS).replace(/^[\uDC00-\uDFFF]/u, "");
+}
+
+function boundToolCallOutputText(text: string): string {
+  const tail = retainedToolCallOutputTail(text);
+  return tail === undefined ? text : `${TOOL_CALL_CONTENT_TRUNCATION_MARKER}${tail}`;
 }
 
 const RAW_OUTPUT_TEXT_FIELDS = ["content", "stdout", "stderr", "output"] as const;
@@ -726,13 +736,12 @@ function extractTextContentFromToolCallContent(
     return { text: undefined, content: boundToolCallContentEntries(content) };
   }
   const joined = chunks.join("\n");
-  if (joined.length <= TOOL_CALL_CONTENT_MAX_CHARS) {
+  const tail = retainedToolCallOutputTail(joined);
+  if (tail === undefined) {
     return { text: joined, content: boundToolCallContentEntries(content) };
   }
-  const bounded = boundToolCallOutputText(joined);
-  const tail = joined.slice(joined.length - TOOL_CALL_CONTENT_MAX_CHARS);
   return {
-    text: bounded,
+    text: `${TOOL_CALL_CONTENT_TRUNCATION_MARKER}${tail}`,
     content: distributeRetainedTailAcrossContent(content, tail),
   };
 }
@@ -811,6 +820,8 @@ function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecyc
   }
 }
 
+const TOOL_FALLBACK_SUMMARY = "Tool";
+
 function makeToolCallState(
   input: {
     readonly toolCallId: string;
@@ -842,6 +853,19 @@ function makeToolCallState(
       ? title
       : undefined;
   const data: Record<string, unknown> = { toolCallId };
+  // ACP v2 clears a field set to null; mergeToolCallState consumes these markers.
+  const clearable = {
+    name: input.name,
+    title: input.title,
+    kind: input.kind,
+    status: input.status,
+    content: input.content,
+    rawInput: input.rawInput,
+    meta: input._meta,
+  };
+  for (const [key, value] of Object.entries(clearable)) {
+    if (value === null) data[key] = null;
+  }
   if (input.name != null) data.name = input.name;
   if (kind) {
     data.kind = kind;
@@ -886,14 +910,19 @@ function makeToolCallState(
         title,
         detail: fallbackDetail,
         data,
-        fallbackSummary: title ?? "Tool",
+        fallbackSummary: title ?? TOOL_FALLBACK_SUMMARY,
       })
     : undefined;
+  // A titleless update omits an unchanged title; the generic fallback must not replace it.
+  const presentationTitle =
+    title === undefined && presentation?.summary === TOOL_FALLBACK_SUMMARY
+      ? undefined
+      : presentation?.summary;
   const status = normalizeToolCallStatus(input.status, options?.fallbackStatus);
   return {
     toolCallId,
     ...(kind ? { kind } : {}),
-    ...(presentation?.summary ? { title: presentation.summary } : {}),
+    ...(presentationTitle ? { title: presentationTitle } : {}),
     ...(status ? { status } : {}),
     ...(command ? { command } : {}),
     ...(presentation?.detail ? { detail: presentation.detail } : {}),
@@ -929,9 +958,9 @@ export function mergeToolCallState(
   next: AcpToolCallState,
 ): AcpToolCallState {
   const nextKind = next.kind ?? (typeof next.data.kind === "string" ? next.data.kind : undefined);
-  const kind = nextKind ?? previous?.kind;
-  const title = next.title ?? previous?.title;
-  const status = next.status ?? previous?.status;
+  const kind = next.data.kind === null ? nextKind : (nextKind ?? previous?.kind);
+  const title = next.data.title === null ? next.title : (next.title ?? previous?.title);
+  const status = next.data.status === null ? next.status : (next.status ?? previous?.status);
   const command = next.command ?? previous?.command;
   const detail = next.detail ?? previous?.detail;
   const data = mergeToolActivityData(previous?.data, next.data) ?? next.data;
@@ -1069,17 +1098,20 @@ function acpMcpFallbackInput(value: string | undefined): Record<string, unknown>
 
 // Known T3 inventory gates matches, so server-name separators can stay loose. Kiro titles "@t3-code/<tool>".
 const T3_MCP_TITLE_CALL =
-  /^(?:@|mcp[-_]{1,2})?t3[-_ ]?code[-_.:/ ]{1,3}(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*)(?::.*)?$/i;
+  /^(?:@|mcp[-_]{1,2})?(?:conn|t3[-_ ]?code)[-_.:/ ]{1,3}(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*)(?::.*)?$/i;
 
 const T3_MCP_TITLE_SUFFIX_CALL =
-  /^(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*?)(?: \(t3[-_ ]?code MCP Server\)(?::|$)|[-_.]t3[-_ ]?code$)/i;
+  /^(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*?)(?: \((?:conn|t3[-_ ]?code) MCP Server\)(?::|$)|[-_.](?:conn|t3[-_ ]?code)$)/i;
 
 /**
- * glm and Kimi use bare names; Antigravity uses "Running <tool>". Kimi appends
- * streamed JSON arguments. Require a name or JSON opening brace so built-ins
- * titled "<tool>: <description>" cannot impersonate an inventory entry.
+ * glm and Kimi use bare names. Kimi appends streamed JSON arguments. Require a
+ * name or JSON opening brace so built-ins titled "<tool>: <description>" cannot
+ * impersonate an inventory entry.
  */
-const T3_MCP_BARE_TITLE_CALL = /^(?:Running )?(?<tool>[A-Za-z0-9_]+)(?::\s*\{|$)/;
+const T3_MCP_BARE_TITLE_CALL = /^(?<tool>[A-Za-z0-9_]+)(?::\s*\{|$)/;
+
+// Antigravity titles calls "Running <tool>" or, from agy 1.5.8, "Run mcp_<server>_<tool>"; prompts end in "?".
+const ANTIGRAVITY_TOOL_TITLE = /^Run(?:ning)? (?<name>[^\s?]+)\??$/;
 
 /** ACP lacks typed MCP calls; recognize provider metadata and terminal fallback commands. */
 export function extractMcpToolCallIdentity(
@@ -1115,7 +1147,7 @@ export function extractMcpToolCallIdentity(
     : undefined;
   const metaServerId = typeof meta?.serverId === "string" ? meta.serverId.trim() : "";
   const metaToolName = typeof meta?.toolName === "string" ? meta.toolName.trim() : "";
-  if (/^t3[-_ ]?code$/i.test(metaServerId) && metaToolName.length > 0) {
+  if (/^(?:conn|t3[-_ ]?code)$/i.test(metaServerId) && metaToolName.length > 0) {
     for (const knownTool of T3_MCP_TOOL_NAMES) {
       const boundary = metaToolName.length - knownTool.length - 1;
       if (
@@ -1124,15 +1156,15 @@ export function extractMcpToolCallIdentity(
           boundary >= 0 &&
           !/[A-Za-z0-9]/.test(metaToolName.charAt(boundary)))
       ) {
-        return { server: "t3-code", tool: knownTool };
+        return { server: "conn", tool: knownTool };
       }
     }
   }
   const gooseExtension =
     typeof gooseToolCall?.extensionName === "string" ? gooseToolCall.extensionName.trim() : "";
   const assertsForeignOrigin =
-    (metaServerId.length > 0 && !/^t3[-_ ]?code$/i.test(metaServerId)) ||
-    (gooseExtension.length > 0 && !/^t3[-_ ]?code$/i.test(gooseExtension));
+    (metaServerId.length > 0 && !/^(?:conn|t3[-_ ]?code)$/i.test(metaServerId)) ||
+    (gooseExtension.length > 0 && !/^(?:conn|t3[-_ ]?code)$/i.test(gooseExtension));
   // goose metadata also tags built-ins; retain their command/file projections instead of classifying as MCP.
   if (assertsForeignOrigin) {
     if (metaServerId.length === 0 || metaToolName.length === 0) return undefined;
@@ -1141,6 +1173,16 @@ export function extractMcpToolCallIdentity(
     );
     const tool = prefix === undefined ? metaToolName : metaToolName.slice(prefix.length);
     return tool ? { server: metaServerId, tool } : undefined;
+  }
+  // OMP mounts MCP tools as xd://mcp__<server>_<tool> devices and calls them by writing JSON
+  // args; a read of the same path only fetches the tool's docs.
+  const devicePath = typeof rawInput?.path === "string" ? rawInput.path : "";
+  if (devicePath.startsWith("xd://") && typeof rawInput?.content === "string") {
+    const deviceTool = T3_MCP_TITLE_CALL.exec(devicePath.slice("xd://".length))?.groups?.tool;
+    if (deviceTool !== undefined && T3_MCP_TOOL_NAMES.has(deviceTool)) {
+      const input = acpMcpFallbackInput(rawInput.content);
+      return { server: "conn", tool: deviceTool, ...(input === undefined ? {} : { input }) };
+    }
   }
   const candidates = [
     meta?.toolName,
@@ -1151,15 +1193,25 @@ export function extractMcpToolCallIdentity(
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
     const qualified = /^mcp__(.+?)__(.+)$/i.exec(trimmed);
-    if (qualified?.[1] && qualified[2] && !/^t3[-_ ]?code$/i.test(qualified[1]))
+    // Hermes renames client MCP servers to editor_<sanitized name>_<8 hex of a per-session hash>.
+    if (
+      qualified?.[1] &&
+      qualified[2] &&
+      /^editor_(?:conn|t3_?code)_[0-9a-f]{8}$/.test(qualified[1]) &&
+      T3_MCP_TOOL_NAMES.has(qualified[2])
+    ) {
+      return { server: "conn", tool: qualified[2] };
+    }
+    if (qualified?.[1] && qualified[2] && !/^(?:conn|t3[-_ ]?code)$/i.test(qualified[1]))
       return { server: qualified[1], tool: qualified[2] };
+    const name = ANTIGRAVITY_TOOL_TITLE.exec(trimmed)?.groups?.name ?? trimmed;
     const match =
-      T3_MCP_TITLE_CALL.exec(trimmed) ??
-      T3_MCP_TITLE_SUFFIX_CALL.exec(trimmed) ??
-      T3_MCP_BARE_TITLE_CALL.exec(trimmed);
+      T3_MCP_TITLE_CALL.exec(name) ??
+      T3_MCP_TITLE_SUFFIX_CALL.exec(name) ??
+      T3_MCP_BARE_TITLE_CALL.exec(name);
     const candidateTool = match?.groups?.tool;
     if (candidateTool !== undefined && T3_MCP_TOOL_NAMES.has(candidateTool)) {
-      return { server: "t3-code", tool: candidateTool };
+      return { server: "conn", tool: candidateTool };
     }
   }
   const commands = [
@@ -1172,7 +1224,7 @@ export function extractMcpToolCallIdentity(
     const match = ACP_MCP_FALLBACK_CALL.exec(command);
     if (match?.[1] !== undefined) {
       const input = acpMcpFallbackInput(match[2]);
-      return { server: "t3-code", tool: match[1], ...(input === undefined ? {} : { input }) };
+      return { server: "conn", tool: match[1], ...(input === undefined ? {} : { input }) };
     }
   }
   return undefined;

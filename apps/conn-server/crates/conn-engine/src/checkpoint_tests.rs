@@ -1,0 +1,2529 @@
+//! Checkpoints per turn, diffs, rollback: the fake provider on scratch git repositories.
+
+use std::path::PathBuf;
+
+use super::*;
+
+/// A scratch repository with one commit, removed on drop.
+pub(super) struct Repo(PathBuf);
+
+impl Repo {
+    pub(super) fn new(name: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-repo-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let repo = Self(dir);
+        repo.git(&["init", "-q", "-b", "main"]);
+        repo.write("README.md", "hello\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-qm", "init"]);
+        repo
+    }
+
+    /// A folder with no repository.
+    pub(super) fn plain(name: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-plain-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(std::fs::canonicalize(dir).unwrap())
+    }
+
+    pub(super) fn root(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+
+    pub(super) fn git(&self, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(&self.0)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    pub(super) fn write(&self, path: &str, text: &str) {
+        let file = self.0.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+
+    pub(super) fn read(&self, path: &str) -> Option<String> {
+        std::fs::read_to_string(self.0.join(path)).ok()
+    }
+}
+
+impl Drop for Repo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub(super) fn open_repo(db: &TempDb, repo: &Repo) -> (SqliteEngine, Arc<FakeProvider>) {
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: repo.root(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.checkpoints = true;
+    (SqliteEngine::open(config).unwrap(), provider)
+}
+
+pub(super) fn create_in(repo: &Repo, thread: &str, command: &str) -> Value {
+    let mut command = create(thread, command);
+    command["projectId"] = json!(SqliteEngine::project_id_for(&repo.root()));
+    command
+}
+
+/// Sends `text` and waits for the run to be final (a completed run waits for its checkpoint).
+pub(super) async fn turn<E: serde::Serialize>(
+    engine: &SqliteEngine,
+    stream: &mut Subscription<conn_contract::ThreadStreamItem, E>,
+    command: &str,
+    text: &str,
+) -> Vec<(String, Value)> {
+    dispatch(engine, message("t1", command, text)).await;
+    until_run_ends(stream).await
+}
+
+fn files(checkpoint: &Value) -> Vec<String> {
+    checkpoint["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            format!(
+                "{} {} +{} -{}",
+                f["path"].as_str().unwrap(),
+                f["kind"].as_str().unwrap(),
+                f["additions"],
+                f["deletions"]
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn each_turn_is_captured_as_the_t3_server_captures_it() {
+    let db = TempDb::new("checkpoints");
+    let repo = Repo::new("checkpoints");
+    let (engine, _) = open_repo(&db, &repo);
+    dispatch(&engine, create_in(&repo, "t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+
+    let first = turn(&engine, &mut thread, "c2", "write a.txt one").await;
+    let kinds = kinds(&first);
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k == "checkpoint-scope.created root_run"),
+        "the scope is created with the run: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"run.updated waiting".to_owned()),
+        "a completed provider turn waits for its checkpoint: {kinds:?}"
+    );
+    let tail: Vec<&String> = kinds.iter().rev().take(4).collect();
+    assert_eq!(
+        tail,
+        [
+            "run.updated completed",
+            "turn-item.updated checkpoint completed",
+            "checkpoint.captured ready",
+            "checkpoint.captured ready",
+        ],
+        "the capture command's events: {kinds:?}"
+    );
+    turn(&engine, &mut thread, "c3", "write b.txt two").await;
+
+    let p = projection(&engine, "t1").await;
+    let scopes = p["checkpointScopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 1, "one root scope: {scopes:?}");
+    let scope = &scopes[0];
+    assert_eq!(
+        scope["id"], "checkpoint-scope:thread:t1:name:root",
+        "scope id"
+    );
+    assert_eq!(scope["kind"], "root_run", "kind");
+    assert_eq!(scope["cwd"], repo.root(), "cwd");
+    assert_eq!(scope["advancesAppRunCount"], true, "advances");
+
+    let checkpoints = p["checkpoints"].as_array().unwrap();
+    let by_ordinal = |n: u64| {
+        checkpoints
+            .iter()
+            .find(|c| c["ordinalWithinScope"] == n)
+            .unwrap_or_else(|| panic!("checkpoint {n}: {checkpoints:?}"))
+    };
+    assert_eq!(
+        checkpoints.len(),
+        3,
+        "baseline and two turns: {checkpoints:?}"
+    );
+    let base = by_ordinal(0);
+    assert_eq!(
+        base["id"], "checkpoint:scope:checkpoint-scope%3Athread%3At1%3Aname%3Aroot:name:0",
+        "id"
+    );
+    assert_eq!(base["status"], "ready", "baseline");
+    assert!(
+        base["runId"].is_null() && base["appRunOrdinal"].is_null(),
+        "{base}"
+    );
+    let one = by_ordinal(1);
+    assert_eq!(one["runId"], "run:t1:1", "run");
+    assert_eq!(one["appRunOrdinal"], 1, "app ordinal");
+    assert_eq!(one["parentCheckpointId"], base["id"], "parent");
+    assert_eq!(files(one), ["a.txt modified +1 -0"], "turn 1 files");
+    assert_eq!(
+        files(by_ordinal(2)),
+        ["b.txt modified +1 -0"],
+        "turn 2 files"
+    );
+    assert!(
+        one["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("refs/t3/orchestration-v2/checkpoints/"),
+        "{one}"
+    );
+    assert!(
+        repo.git(&["show-ref"])
+            .contains(one["ref"].as_str().unwrap()),
+        "the ref is in the project's repository"
+    );
+
+    let runs = p["runs"].as_array().unwrap();
+    for run in runs {
+        assert_eq!(run["status"], "completed", "{run}");
+        assert!(run["checkpointId"].is_string(), "{run}");
+    }
+    let item = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["type"] == "checkpoint" && i["runId"] == "run:t1:1")
+        .expect("checkpoint item");
+    let last_of_run = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["runId"] == "run:t1:1" && i["type"] != "checkpoint")
+        .filter_map(|i| i["ordinal"].as_u64())
+        .max()
+        .unwrap();
+    assert!(
+        item["ordinal"].as_u64().unwrap() > last_of_run,
+        "the checkpoint item ends the turn (T3: run ordinal * 100 + 99): {item}"
+    );
+    assert_eq!(item["checkpointId"], one["id"], "item names the checkpoint");
+    assert_eq!(
+        item["id"],
+        format!(
+            "turn-item:provider:claudeAgent:native-item:{}",
+            conn_support::ids::encode_component(&format!(
+                "checkpoint:{}",
+                one["id"].as_str().unwrap()
+            ))
+        ),
+        "item id"
+    );
+    let node = p["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == runs[0]["rootNodeId"])
+        .unwrap();
+    assert_eq!(node["checkpointScopeId"], scope["id"], "{node}");
+    assert_eq!(node["status"], "completed", "{node}");
+    assert_eq!(
+        repo.read("a.txt").as_deref(),
+        Some("one\n"),
+        "the turn's file"
+    );
+    assert!(
+        !repo.git(&["status", "--porcelain"]).contains("A "),
+        "the user's index is untouched"
+    );
+}
+
+async fn call(engine: &SqliteEngine, method: &str, input: Value) -> Result<Value, Value> {
+    match engine.call(method, input).await {
+        Ok(value) => Ok(value),
+        Err(EngineError::Rejected(e)) => Err(e),
+        Err(EngineError::Internal(e)) => panic!("internal: {e}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn turn_and_full_thread_diffs_follow_get_turn_diff() {
+    let db = TempDb::new("diffs");
+    let repo = Repo::new("diffs");
+    let (engine, _) = open_repo(&db, &repo);
+    dispatch(&engine, create_in(&repo, "t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    turn(&engine, &mut thread, "c2", "write a.txt one").await;
+    turn(&engine, &mut thread, "c3", "write b.txt two").await;
+
+    let diff =
+        |from: u64, to: u64| json!({"threadId": "t1", "fromTurnCount": from, "toTurnCount": to});
+    let second = call(&engine, "orchestration.getTurnDiff", diff(1, 2))
+        .await
+        .unwrap();
+    assert_eq!(second["threadId"], "t1", "{second}");
+    assert_eq!(
+        (
+            second["fromTurnCount"].clone(),
+            second["toTurnCount"].clone()
+        ),
+        (json!(1), json!(2)),
+        "range"
+    );
+    let text = second["diff"].as_str().unwrap();
+    assert!(
+        text.contains("diff --git a/b.txt b/b.txt") && text.contains("+two"),
+        "{text}"
+    );
+    assert!(!text.contains("a.txt"), "{text}");
+
+    let full = call(
+        &engine,
+        "orchestration.getFullThreadDiff",
+        json!({"threadId": "t1", "toTurnCount": 2}),
+    )
+    .await
+    .unwrap();
+    let text = full["diff"].as_str().unwrap();
+    assert!(text.contains("+one") && text.contains("+two"), "{text}");
+    assert_eq!(full["fromTurnCount"], 0, "from the thread start");
+
+    let same = call(&engine, "orchestration.getTurnDiff", diff(2, 2))
+        .await
+        .unwrap();
+    assert_eq!(same["diff"], "", "an empty range");
+    let zero = call(
+        &engine,
+        "orchestration.getFullThreadDiff",
+        json!({"threadId": "t1", "toTurnCount": 0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(zero["diff"], "", "nothing before the first turn");
+
+    let past = call(&engine, "orchestration.getTurnDiff", diff(1, 3))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        past,
+        json!({"_tag": "OrchestrationGetTurnDiffError", "message": "Failed to load turn diff",
+            "cause": {"_tag": "CheckpointTurnRangeUnavailableError",
+                "message": "Checkpoint unavailable for thread t1 turn 3: Turn diff range exceeds current turn count: requested 3, current 2."}}),
+        "past the last turn"
+    );
+    let unknown = call(
+        &engine,
+        "orchestration.getFullThreadDiff",
+        json!({"threadId": "nope", "toTurnCount": 1}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unknown["_tag"], "OrchestrationGetFullThreadDiffError",
+        "{unknown}"
+    );
+    assert_eq!(
+        unknown["message"], "Failed to load full thread diff",
+        "{unknown}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_folder_without_git_records_missing_checkpoints() {
+    let db = TempDb::new("no-git");
+    let folder = Repo::plain("no-git");
+    let (engine, _) = open_repo(&db, &folder);
+    dispatch(&engine, create_in(&folder, "t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    turn(&engine, &mut thread, "c2", "write a.txt one").await;
+    let p = projection(&engine, "t1").await;
+    let statuses: Vec<_> = p["checkpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["ordinalWithinScope"].clone(), c["status"].clone()))
+        .collect();
+    assert_eq!(
+        statuses,
+        [(json!(0), json!("missing")), (json!(1), json!("missing"))],
+        "no repository"
+    );
+    assert_eq!(
+        p["runs"][0]["status"], "completed",
+        "the run still completes"
+    );
+    let err = call(
+        &engine,
+        "orchestration.getTurnDiff",
+        json!({"threadId": "t1", "fromTurnCount": 0, "toTurnCount": 1}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err["cause"]["_tag"], "CheckpointTurnRangeUnavailableError",
+        "no ready checkpoint: {err}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_restart_finishes_a_run_left_waiting_for_its_checkpoint() {
+    let db = TempDb::new("waiting-restart");
+    let repo = Repo::new("waiting-restart");
+    {
+        let (engine, _) = open_repo(&db, &repo);
+        dispatch(&engine, create_in(&repo, "t1", "c1")).await;
+        let mut thread = engine
+            .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+            .await
+            .unwrap();
+        next(&mut thread).await;
+        turn(&engine, &mut thread, "c2", "write a.txt one").await;
+        // A kill between the provider's end and the capture leaves the run waiting.
+        engine.test_force_waiting("t1", "run:t1:1").await;
+    }
+    let (engine, _) = open_repo(&db, &repo);
+    let mut done = false;
+    for _ in 0..200 {
+        let p = projection(&engine, "t1").await;
+        if p["runs"][0]["status"] == "completed" {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(done, "the restart captures and completes the run");
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["runs"]);
+    assert!(p["runs"][0]["checkpointId"].is_string(), "{}", p["runs"]);
+    // The #268 gate's probe: the waiting path also ends the previous process's sessions.
+    let sessions = p["providerSessions"].as_array().unwrap();
+    assert!(
+        sessions.iter().all(|s| s["status"] == "stopped"),
+        "{sessions:?}"
+    );
+}
+
+/// A parent thread in `repo` whose run hangs, with delegated child `d1` running `task`.
+async fn parent_with_child(db: &TempDb, repo: &Repo, task: &str) -> (SqliteEngine, String, String) {
+    let (engine, _) = open_repo(db, repo);
+    dispatch(&engine, create_in(repo, "t1", "c1")).await;
+    let mut parent = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut parent).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut parent).await;
+    dispatch(&engine, super::delegate("d1", task, Some("always"))).await;
+    let child = "thread:delegated-task:d1".to_owned();
+    let child_run = format!("run:{child}:1");
+    (engine, child, child_run)
+}
+
+fn parent_wakes(p: &Value) -> usize {
+    p["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| {
+            m["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("Delegated task"))
+        })
+        .count()
+}
+
+/// The #268 gate's probe: a capture row an older build (#261) committed but did not settle has
+/// no mark. Run again after a reopen, it must not wake the parent a second time.
+#[tokio::test(flavor = "current_thread")]
+async fn an_unmarked_capture_row_replayed_wakes_the_parent_once() {
+    let db = TempDb::new("capture-unmarked");
+    let repo = Repo::new("capture-unmarked");
+    {
+        let (engine, child, child_run) = parent_with_child(&db, &repo, "look").await;
+        super::run_to_end(&engine, &child, &child_run).await;
+        let p = until(&engine, |p| parent_wakes(p) > 0).await;
+        assert_eq!(parent_wakes(&p), 1);
+        let run = child_run.clone();
+        engine
+            .inner()
+            .db(move |store| {
+                store
+                    .raw()
+                    .execute(
+                        "UPDATE effect_outbox SET status = 'running', progress = NULL
+                         WHERE effect_type = 'checkpoint.capture'
+                           AND json_extract(payload, '$.runId') = ?1",
+                        [run],
+                    )
+                    .unwrap()
+            })
+            .await;
+    }
+    let (engine, _) = open_repo(&db, &repo);
+    super::settled_statuses(&db, "checkpoint.capture").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(parent_wakes(&projection(&engine, "t1").await), 1);
+}
+
+/// The #268 gate's probe: a delegated child whose project opted out of continuing ends at the
+/// restart, and its parent hears of it (T3 commits the family completion).
+#[tokio::test(flavor = "current_thread")]
+async fn an_opted_out_child_ends_for_its_parent_at_a_restart() {
+    let db = TempDb::new("child-opt-out");
+    let repo = Repo::new("child-opt-out");
+    {
+        let (engine, child, _) = parent_with_child(&db, &repo, "hang").await;
+        let mut stream = engine
+            .subscribe_thread(from_json(json!({"threadId": child})).unwrap())
+            .await
+            .unwrap();
+        next(&mut stream).await;
+        until_provider_turn(&mut stream).await;
+        super::settled_statuses(&db, "provider-turn.start").await;
+    }
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: repo.root(),
+    }];
+    config.providers = vec![provider];
+    config.checkpoints = true;
+    config.restart_policy = crate::RestartPolicy {
+        continue_by_default: false,
+        projects: Default::default(),
+    };
+    let engine = SqliteEngine::open(config).unwrap();
+    let p = projection(&engine, "t1").await;
+    assert_eq!(
+        p["subagents"][0]["status"], "cancelled",
+        "{}",
+        p["subagents"]
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Rollback
+
+/// A thread whose worktree is `repo`, so its files may be restored.
+fn create_worktree_thread(repo: &Repo) -> Value {
+    let mut command = create_in(repo, "t1", "c1");
+    command["worktreePath"] = json!(repo.root());
+    command["branch"] = json!("main");
+    command
+}
+
+fn rollback(command: &str, checkpoint: &Value, restore_files: Option<bool>) -> Value {
+    let mut command = json!({
+        "type": "checkpoint.rollback", "commandId": command, "threadId": "t1",
+        "scopeId": checkpoint["scopeId"], "checkpointId": checkpoint["id"],
+    });
+    if let Some(restore) = restore_files {
+        command["restoreFiles"] = json!(restore);
+    }
+    command
+}
+
+fn checkpoint_at(p: &Value, ordinal: u64) -> Value {
+    p["checkpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["ordinalWithinScope"] == ordinal)
+        .cloned()
+        .unwrap_or_else(|| panic!("checkpoint {ordinal}"))
+}
+
+/// Waits until `done` holds for the thread's projection.
+async fn until(engine: &SqliteEngine, done: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..250 {
+        let p = projection(engine, "t1").await;
+        if done(&p) {
+            return p;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "the thread never got there: {}",
+        projection(engine, "t1").await
+    )
+}
+
+async fn with_turns(
+    db: &TempDb,
+    repo: &Repo,
+    provider: FakeProvider,
+    thread: Value,
+    texts: &[&str],
+) -> (SqliteEngine, Arc<FakeProvider>) {
+    with_turns_on(
+        db,
+        repo,
+        provider,
+        thread,
+        texts,
+        Arc::new(crate::SystemClock),
+    )
+    .await
+}
+
+/// [`with_turns`] on a given clock, so a test can order timestamps.
+async fn with_turns_on(
+    db: &TempDb,
+    repo: &Repo,
+    provider: FakeProvider,
+    thread: Value,
+    texts: &[&str],
+    clock: Arc<dyn crate::Clock>,
+) -> (SqliteEngine, Arc<FakeProvider>) {
+    let provider = Arc::new(provider);
+    let mut config = EngineConfig::new(db.path());
+    config.clock = clock;
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: repo.root(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.checkpoints = true;
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, thread).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    for (i, text) in texts.iter().enumerate() {
+        turn(&engine, &mut stream, &format!("turn-{i}"), text).await;
+    }
+    (engine, provider)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rollback_restores_files_cuts_later_runs_and_rolls_the_provider_back() {
+    let db = TempDb::new("rollback");
+    let repo = Repo::new("rollback");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two", "write c.txt three"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let (two, three) = (checkpoint_at(&p, 2), checkpoint_at(&p, 3));
+    let target = checkpoint_at(&p, 1);
+    dispatch(&engine, rollback("rb-1", &target, None)).await;
+
+    let p = until(&engine, |p| p["runs"][2]["status"] == "rolled_back").await;
+    assert_eq!(
+        p["thread"]["rollbackRequestId"], "rb-1",
+        "the request is the thread's"
+    );
+    assert!(p["thread"]["rollbackFailure"].is_null(), "{}", p["thread"]);
+    let statuses: Vec<_> = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["completed", "rolled_back", "rolled_back"],
+        "runs after the target"
+    );
+    for n in [2, 3] {
+        assert_eq!(checkpoint_at(&p, n)["status"], "stale", "checkpoint {n}");
+    }
+    assert_eq!(
+        *provider.rollbacks.lock().unwrap(),
+        ["turn 1"],
+        "the provider rolled back"
+    );
+    let pt = &p["providerThreads"][0];
+    assert_eq!(pt["lastRunOrdinal"], 1, "{pt}");
+    assert_eq!(repo.read("a.txt").as_deref(), Some("one\n"), "kept");
+    assert_eq!(repo.read("b.txt"), None, "removed");
+    assert_eq!(repo.read("c.txt"), None, "removed");
+    let refs = repo.git(&["show-ref"]);
+    assert!(
+        !refs.contains(two["ref"].as_str().unwrap()),
+        "stale ref deleted"
+    );
+    assert!(
+        !refs.contains(three["ref"].as_str().unwrap()),
+        "stale ref deleted"
+    );
+    let kinds: Vec<String> = engine
+        .test_events("t1")
+        .await
+        .into_iter()
+        .map(|(ty, _)| ty)
+        .collect();
+    assert!(
+        kinds.contains(&"checkpoint.rollback-requested".to_owned()),
+        "{kinds:?}"
+    );
+
+    // The thread goes on from the restored workspace.
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    turn(&engine, &mut stream, "c9", "write d.txt four").await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"][3]["status"], "completed", "{}", p["runs"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rollback_to_the_thread_start_and_a_conversation_only_rewind() {
+    let db = TempDb::new("rollback-start");
+    let repo = Repo::new("rollback-start");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c1"),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let start = checkpoint_at(&p, 0);
+    // A thread in the project root shares its folder: no file restore.
+    let refused = engine
+        .dispatch(from_json(rollback("rb-1", &start, None)).unwrap())
+        .await;
+    let Err(EngineError::Rejected(error)) = refused else {
+        panic!("a file restore outside a worktree is refused")
+    };
+    assert!(
+        to_json(&error)["message"]
+            .as_str()
+            .unwrap()
+            .contains("File restore requires an isolated worktree."),
+        "{}",
+        to_json(&error)
+    );
+    dispatch(&engine, rollback("rb-2", &start, Some(false))).await;
+    let p = until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+    assert_eq!(p["runs"][0]["status"], "rolled_back", "every run");
+    assert_eq!(
+        *provider.rollbacks.lock().unwrap(),
+        ["start"],
+        "to the thread start"
+    );
+    assert!(
+        p["providerThreads"][0]["lastRunOrdinal"].is_null(),
+        "no run left"
+    );
+    assert_eq!(repo.read("b.txt").as_deref(), Some("two\n"), "files stay");
+}
+
+/// A message sent right after a rollback starts its turn only after the rollback ended, as
+/// T3's effect outbox runs a thread's effects in order (`thread_rollback_after_restart`).
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_sent_during_a_rollback_starts_after_it() {
+    let db = TempDb::new("rollback-then-send");
+    let repo = Repo::new("rollback-then-send");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c1"),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let first = checkpoint_at(&p, 1);
+    dispatch(&engine, rollback("rb-1", &first, Some(false))).await;
+    dispatch(&engine, message("t1", "c3", "after")).await;
+    let p = until(&engine, |p| p["runs"][2]["status"] == "completed").await;
+    assert_eq!(p["runs"][1]["status"], "rolled_back", "{}", p["runs"]);
+    assert_eq!(*provider.rollbacks.lock().unwrap(), ["turn 1"]);
+    let events = engine.test_events("t1").await;
+    let rolled_back = events
+        .iter()
+        .position(|(kind, payload)| kind == "run.updated" && payload["status"] == "rolled_back")
+        .unwrap();
+    let started = events
+        .iter()
+        .position(|(kind, payload)| kind == "run-attempt.created" && payload["runId"] == "run:t1:3")
+        .unwrap();
+    assert!(
+        rolled_back < started,
+        "the rollback commits before the next turn starts"
+    );
+}
+
+/// The gate's probe: the rollback's result commit frees the thread's lane, so a queued turn
+/// may start at once. It must start from the rolled-back conversation, never the old head.
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_queued_behind_a_rollback_starts_from_the_rolled_back_head() {
+    let db = TempDb::new("rollback-head");
+    let repo = Repo::new("rollback-head");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c1"),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    crate::lock(&engine.inner().worker_hooks).rollback_committed = Some((paused_tx, release_rx));
+    dispatch(
+        &engine,
+        rollback("rb-1", &checkpoint_at(&p, 1), Some(false)),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), paused_rx)
+        .await
+        .expect("the rollback committed")
+        .unwrap();
+    dispatch(&engine, message("t1", "c3", "after")).await;
+    until(&engine, |p| p["runs"][2]["status"] == "completed").await;
+    assert_eq!(
+        provider.heads.lock().unwrap().last().map(String::as_str),
+        Some("rolled-back:turn 1")
+    );
+    release_tx.send(()).unwrap();
+}
+
+/// The gate's probe: the write that records a rollback's failure fails once. The rollback's
+/// own result write settles its row `failed`, so it tries again and the client hears of the
+/// failure; the worker does not settle the row as if it had succeeded.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_rollback_result_write_is_written_again() {
+    let db = TempDb::new("rollback-result-fault");
+    let repo = Repo::new("rollback-result-fault");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").with_failing_rollback(),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    crate::lock(&engine.inner().worker_hooks).rollback_result_faults = 1;
+    let p = projection(&engine, "t1").await;
+    dispatch(&engine, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    let p = until(&engine, |p| p["thread"]["rollbackFailure"].is_object()).await;
+    assert_eq!(p["thread"]["rollbackFailure"]["requestId"], "rb-1");
+    let status: String = engine
+        .inner()
+        .db(|store| {
+            store.raw().query_row(
+                "SELECT status FROM effect_outbox WHERE effect_type = 'provider-thread.rollback'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(status, "failed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_provider_rollback_changes_nothing_and_tells_the_client() {
+    let db = TempDb::new("rollback-fail");
+    let repo = Repo::new("rollback-fail");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").with_failing_rollback(),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    dispatch(&engine, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    let p = until(&engine, |p| p["thread"]["rollbackFailure"].is_object()).await;
+    assert_eq!(
+        p["thread"]["rollbackFailure"],
+        json!({"requestId": "rb-1", "message": "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs."}),
+        "T3's message"
+    );
+    assert_eq!(p["runs"][1]["status"], "completed", "nothing rolled back");
+    assert_eq!(
+        repo.read("b.txt").as_deref(),
+        Some("two\n"),
+        "files untouched"
+    );
+    assert_eq!(
+        provider.rollbacks.lock().unwrap().len(),
+        5,
+        "tried five times, as T3's effect worker"
+    );
+}
+
+/// A rollback that fails and then works is not reported, and the send after it waits for it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_rollback_that_fails_twice_then_works_is_retried() {
+    let db = TempDb::new("rollback-retry");
+    let repo = Repo::new("rollback-retry");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").with_rollback_failures(2),
+        create_in(&repo, "t1", "c1"),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    dispatch(
+        &engine,
+        rollback("rb-1", &checkpoint_at(&p, 1), Some(false)),
+    )
+    .await;
+    dispatch(&engine, message("t1", "c3", "after")).await;
+    let p = until(&engine, |p| p["runs"][2]["status"] == "completed").await;
+    assert_eq!(p["runs"][1]["status"], "rolled_back", "{}", p["runs"]);
+    assert!(p["thread"]["rollbackFailure"].is_null(), "{}", p["thread"]);
+    let calls = provider.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls[calls.len() - 5..],
+        [
+            "rollback",
+            "rollback",
+            "rollback",
+            "rolled back",
+            "start run:t1:3"
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rollback_refuses_a_busy_or_unknown_target() {
+    let db = TempDb::new("rollback-refuse");
+    let repo = Repo::new("rollback-refuse");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &["write a.txt one"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let mut unknown = checkpoint_at(&p, 1);
+    unknown["id"] = json!("checkpoint:nope");
+    let refused = engine
+        .dispatch(from_json(rollback("rb-1", &unknown, None)).unwrap())
+        .await;
+    let Err(EngineError::Rejected(error)) = refused else {
+        panic!("unknown checkpoint")
+    };
+    assert!(
+        to_json(&error)["message"]
+            .as_str()
+            .unwrap()
+            .contains("Checkpoint checkpoint:nope was not found."),
+        "{}",
+        to_json(&error)
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Fork
+
+fn refused<T, E: serde::Serialize>(result: Result<T, EngineError<E>>) -> String {
+    match result {
+        Err(EngineError::Rejected(e)) => to_json(&e)["message"].as_str().unwrap().to_owned(),
+        _ => panic!("expected a refusal"),
+    }
+}
+
+fn fork(command: &str, source_point: Value) -> Value {
+    json!({
+        "type": "thread.fork", "commandId": command, "sourceThreadId": "t1",
+        "targetThreadId": "t2", "sourcePoint": source_point,
+        "createdBy": "user", "creationSource": "web",
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_native_fork_refusal_recovers_the_selected_parent_history() {
+    let db = TempDb::new("fork-declined");
+    let repo = Repo::new("fork-declined");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").rejecting_fork(),
+        create_in(&repo, "t1", "create"),
+        &["kept parent message", "later parent message"],
+    )
+    .await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:1"})),
+    )
+    .await;
+    dispatch(&engine, message("t2", "after", "continue fork")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    let sent = provider.prompts.lock().unwrap();
+    assert!(!provider.forks.lock().unwrap().is_empty());
+    assert!(sent.last().unwrap().contains("kept parent message"));
+    assert!(!sent.last().unwrap().contains("later parent message"));
+}
+
+#[tokio::test]
+async fn an_ambiguous_fork_history_injection_replaces_the_native_thread_before_retry() {
+    let db = TempDb::new("fork-uncertain-injection");
+    let repo = Repo::new("fork-uncertain-injection");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent")
+            .with_driver("codex")
+            .rejecting_fork()
+            .losing_one_injection_reply(),
+        create_in(&repo, "t1", "create"),
+        &["kept external parent history", "outside the fork"],
+    )
+    .await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:1"})),
+    )
+    .await;
+    dispatch(&engine, message("t2", "lost", "lost turn")).await;
+    let ambiguous = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(ambiguous["runs"][0]["status"], "failed");
+    let pending = ambiguous["contextHandoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["delivery"]["status"] == "pending")
+        .unwrap();
+    let original = pending["delivery"]["nativeThreadId"].clone();
+    assert!(original.is_string());
+    dispatch(&engine, message("t2", "retry", "continue the fork")).await;
+    let recovered = run_to_end(&engine, "t2", "run:t2:2").await;
+    assert_eq!(
+        recovered["runs"][1]["status"], "completed",
+        "{}",
+        recovered["turnItems"]
+    );
+    let carried = recovered["contextHandoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == pending["id"])
+        .unwrap();
+    assert_eq!(carried["delivery"]["status"], "injected");
+    assert_ne!(carried["delivery"]["nativeThreadId"], original);
+    let injected = crate::lock(&provider.injected).clone();
+    assert_eq!(injected.len(), 2);
+    assert_ne!(injected[0].0, injected[1].0);
+    let history = injected[1].1.to_string();
+    assert!(
+        history.contains("kept external parent history"),
+        "{history}"
+    );
+    assert!(!history.contains("outside the fork"), "{history}");
+    dispatch(&engine, message("t2", "again", "again")).await;
+    assert_eq!(
+        run_to_end(&engine, "t2", "run:t2:3").await["runs"][2]["status"],
+        "completed"
+    );
+    assert_eq!(
+        crate::lock(&provider.injected).len(),
+        2,
+        "no repeat on the fresh native thread"
+    );
+    assert_eq!(
+        crate::lock(&provider.prompts)
+            .iter()
+            .filter(|p| p.ends_with("continue the fork"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_portable_fork_keeps_its_original_runs_after_a_parent_rollback_and_clear() {
+    let db = TempDb::new("fork-after-clear");
+    let repo = Repo::new("fork-after-clear");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "create"),
+        &["before clear"],
+    )
+    .await;
+    let mut fresh = message("t1", "fresh", "fresh parent context");
+    fresh["freshContext"] = json!(true);
+    dispatch(&engine, fresh).await;
+    run_to_end(&engine, "t1", "run:t1:2").await;
+    dispatch(&engine, message("t1", "discard", "absent at fork")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:3").await;
+    dispatch(
+        &engine,
+        rollback("rollback-before", &checkpoint_at(&p, 2), Some(false)),
+    )
+    .await;
+    until(&engine, |p| p["runs"][2]["status"] == "rolled_back").await;
+    dispatch(&engine, message("t1", "keep", "present at fork")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:4").await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:4"})),
+    )
+    .await;
+    dispatch(
+        &engine,
+        rollback("rollback-after", &checkpoint_at(&p, 2), Some(false)),
+    )
+    .await;
+    until(&engine, |p| p["runs"][3]["status"] == "rolled_back").await;
+    dispatch(&engine, message("t2", "continue", "resume the fork")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    let sent = provider.prompts.lock().unwrap();
+    let prompt = sent.last().unwrap();
+    assert!(
+        prompt.contains("fresh parent context") && prompt.contains("present at fork"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("before clear") && !prompt.contains("absent at fork"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn early_side_chat_gets_running_parent_activity_once_and_excludes_queued_work() {
+    let db = TempDb::new("early-side");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t1", "first", "hang")).await;
+    until_provider_turn(&mut stream).await;
+    dispatch(&engine, queued("queued", "invisible queued message")).await;
+    let mut side = fork("fork", json!({"type":"latest_stable"}));
+    side["sideChat"] = json!(true);
+    dispatch(&engine, side).await;
+    dispatch(&engine, message("t2", "question", "side question")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    dispatch(&engine, message("t2", "second", "next question")).await;
+    run_to_end(&engine, "t2", "run:t2:2").await;
+    let prompts = provider.prompts.lock().unwrap();
+    let first = &prompts[prompts.len() - 2];
+    assert!(
+        first.contains("in a side chat")
+            && first.contains("- User: hang")
+            && !first.contains("invisible queued message"),
+        "{first}"
+    );
+    assert_eq!(prompts.last().unwrap(), "next question");
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_fork_starts_from_the_source_run_with_a_native_fork() {
+    let db = TempDb::new("fork");
+    let repo = Repo::new("fork");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c1"),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    dispatch(
+        &engine,
+        fork("f1", json!({"type": "run", "runId": "run:t1:1"})),
+    )
+    .await;
+    let fork_view = projection(&engine, "t2").await;
+    let thread = &fork_view["thread"];
+    assert_eq!(thread["title"], "New thread fork", "{thread}");
+    assert_eq!(
+        thread["lineage"],
+        json!({"parentThreadId": "t1", "relationshipToParent": "fork", "rootThreadId": "t1"}),
+        "lineage"
+    );
+    assert_eq!(
+        thread["forkedFrom"],
+        json!({"type": "run", "threadId": "t1", "runId": "run:t1:1"}),
+        "forkedFrom"
+    );
+    assert!(thread["activeProviderThreadId"].is_null(), "{thread}");
+    let transfer = &fork_view["contextTransfers"][0];
+    assert_eq!(transfer["type"], "fork", "{transfer}");
+    assert_eq!(transfer["status"], "pending", "{transfer}");
+    assert_eq!(transfer["sourcePoint"]["runId"], "run:t1:1", "{transfer}");
+    assert!(
+        transfer["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("context-transfer:type:fork:source-thread:t1:target-thread:t2:"),
+        "{transfer}"
+    );
+
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t2"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    let mut first = message("t2", "f2", "go on");
+    first["threadId"] = json!("t2");
+    dispatch(&engine, first).await;
+    until_run_ends(&mut stream).await;
+    let fork_view = projection(&engine, "t2").await;
+    assert_eq!(
+        *provider.forks.lock().unwrap(),
+        ["t2 turn:run:t1:1"],
+        "the provider forked from the source run's turn"
+    );
+    assert_eq!(
+        fork_view["runs"][0]["status"], "completed",
+        "{}",
+        fork_view["runs"]
+    );
+    assert_eq!(
+        fork_view["thread"]["activeProviderThreadId"], "provider-thread:t2",
+        "the forked native thread"
+    );
+    let transfer = &fork_view["contextTransfers"][0];
+    assert_eq!(transfer["status"], "consumed", "{transfer}");
+    assert_eq!(transfer["targetRunId"], "run:t2:1", "{transfer}");
+    assert_eq!(
+        transfer["resolution"]["strategy"], "native_fork",
+        "{transfer}"
+    );
+    assert_eq!(
+        transfer["resolution"]["providerThreadRef"]["nativeId"], "native-fork-t2",
+        "{transfer}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_fork_refuses_a_missing_source_or_a_taken_target() {
+    let db = TempDb::new("fork-refuse");
+    let repo = Repo::new("fork-refuse");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c1"),
+        &["write a.txt one"],
+    )
+    .await;
+    let missing = engine
+        .dispatch(from_json(fork("f1", json!({"type": "run", "runId": "run:t1:9"}))).unwrap())
+        .await;
+    assert!(
+        refused(missing).contains("No stable source run was found for fork source run."),
+        "unknown run"
+    );
+    dispatch(&engine, create_in(&repo, "t2", "c2")).await;
+    let taken = engine
+        .dispatch(from_json(fork("f2", json!({"type": "latest_stable"}))).unwrap())
+        .await;
+    assert!(refused(taken).contains("t2"), "the target exists");
+}
+
+/// A file restore that keeps failing retries the restore only: the provider is rolled back
+/// once per request, and the store keeps every run (review finding 1; T3 sends it again on
+/// every retry).
+#[tokio::test(flavor = "current_thread")]
+async fn a_failing_restore_rolls_the_provider_back_once() {
+    let db = TempDb::new("rb-once");
+    let repo = Repo::new("rb-once");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two", "write c.txt three"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    std::fs::write(repo.0.join(".git/index.lock"), "").unwrap();
+    dispatch(&engine, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    let p = until(&engine, |p| p["thread"]["rollbackFailure"].is_object()).await;
+    assert_eq!(
+        p["thread"]["rollbackFailure"]["message"],
+        "Git's index is locked. Wait for other Git operations to finish, then try again."
+    );
+    assert_eq!(p["runs"][2]["status"], "completed", "store unchanged");
+    assert_eq!(
+        *provider.rollbacks.lock().unwrap(),
+        ["turn 1"],
+        "the provider conversation is rolled back once"
+    );
+}
+
+/// A rollback whose file restore fails leaves the live session on the thread it had: the next
+/// turn continues the stored provider thread, not the one the provider rolled back to.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_restore_leaves_the_live_session_on_its_thread() {
+    let db = TempDb::new("rb-live-kept");
+    let repo = Repo::new("rb-live-kept");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let lock = repo.0.join(".git/index.lock");
+    std::fs::write(&lock, "").unwrap();
+    dispatch(&engine, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    until(&engine, |p| p["thread"]["rollbackFailure"].is_object()).await;
+    std::fs::remove_file(&lock).unwrap();
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    turn(&engine, &mut stream, "c9", "after").await;
+    let heads = provider.turn_heads.lock().unwrap().clone();
+    assert_eq!(heads.len(), 3, "{heads:?}");
+    assert!(
+        heads[2].is_null(),
+        "the turn continues the stored thread: {heads:?}"
+    );
+}
+
+/// A store left with a rollback pending, as a crash leaves it (review finding 4.2): the
+/// previous process admitted the rollback and stopped with the provider rollback in flight.
+/// `phase` is what the store then says: `admitted` (sent nothing), `provider` (sent it, no
+/// answer), `provider_done` (its answer kept). A restart finishes the first and the last, as
+/// T3 requeues the effect, and records a failure for the middle one.
+/// The #268 gate's probe: a child with a checkpoint scope that is interrupted (or cancelled)
+/// ends before its capture, which then finds it terminal. Its parent still hears of it, once.
+#[tokio::test(flavor = "current_thread")]
+async fn an_interrupted_child_with_a_checkpoint_wakes_its_parent_once() {
+    let db = TempDb::new("child-interrupted-wake");
+    let repo = Repo::new("child-interrupted-wake");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c1"),
+        &[],
+    )
+    .await;
+    let mut parent = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut parent).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut parent).await;
+    dispatch(&engine, super::delegate("d1", "hang", Some("always"))).await;
+    let child = "thread:delegated-task:d1";
+    let child_run = format!("run:{child}:1");
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": child})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    until_provider_turn(&mut stream).await;
+    dispatch(
+        &engine,
+        json!({"type": "run.interrupt", "commandId": "i1", "threadId": child, "runId": child_run}),
+    )
+    .await;
+    let wakes = |p: &Value| {
+        p["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Delegated task"))
+            })
+            .count()
+    };
+    let p = until(&engine, |p| wakes(p) > 0).await;
+    assert_eq!(wakes(&p), 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(wakes(&projection(&engine, "t1").await), 1);
+}
+
+/// The #269 gate's probe: the write that records a rollback's failure keeps failing, and
+/// another engine takes the store. The write stops trying: the new engine owns the row.
+#[tokio::test(flavor = "current_thread")]
+async fn a_rollback_failure_write_stops_once_another_engine_owns_the_store() {
+    let db = TempDb::new("rb-failure-owner");
+    let repo = Repo::new("rb-failure-owner");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").with_failing_rollback(),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    crate::lock(&engine.inner().worker_hooks).rollback_result_faults = u32::MAX;
+    let p = projection(&engine, "t1").await;
+    dispatch(&engine, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    let faults = || crate::lock(&engine.inner().worker_hooks).rollback_result_faults;
+    for _ in 0..500 {
+        if faults() < u32::MAX {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(faults() < u32::MAX, "the failure write failed once");
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute(
+            "UPDATE meta SET value = value + 1 WHERE key = 'engine_epoch'",
+            [],
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let first = faults();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(faults(), first, "no failure write after the owner changed");
+}
+
+/// The round-3 gate's probe: an engine is replaced while its provider rollback is in flight.
+/// The new engine records the rollback as interrupted. The old engine, when the provider
+/// answers, is fenced: it must touch no file and delete no ref.
+#[tokio::test(flavor = "current_thread")]
+async fn a_replaced_engine_s_rollback_touches_no_files() {
+    let db = TempDb::new("rb-fenced-files");
+    let repo = Repo::new("rb-fenced-files");
+    let pending = || -> Vec<String> {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(json_extract(progress, '$.phase'), 'admitted') FROM effect_outbox
+                 WHERE effect_type = 'provider-thread.rollback' AND status IN ('pending', 'running')",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let (old, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").with_control_delay(Duration::from_millis(300)),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&old, "t1").await;
+    let stale = checkpoint_at(&p, 2)["ref"].as_str().unwrap().to_owned();
+    dispatch(&old, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    for _ in 0..250 {
+        if pending() == ["provider"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(pending(), ["provider"]);
+    drop(old);
+    let (engine, _) = open_repo(&db, &repo);
+    let p = until(&engine, |p| p["thread"]["rollbackFailure"].is_object()).await;
+    assert_eq!(p["thread"]["rollbackFailure"]["requestId"], "rb-1");
+    // The old engine's provider answers; give its task time to go on, as it did before.
+    for _ in 0..250 {
+        if provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "rolled back")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        repo.read("b.txt").as_deref(),
+        Some("two\n"),
+        "files untouched"
+    );
+    assert!(repo.git(&["show-ref"]).contains(&stale), "refs untouched");
+}
+
+/// The #268 round-5 gate's probe: run A was interrupted with prompt B queued, and the store
+/// was copied after A ended but before its checkpoint capture committed. In a project that
+/// opted out of restart continuation, the replayed capture must not start B: it stays held.
+#[tokio::test(flavor = "current_thread")]
+async fn a_replayed_capture_does_not_start_a_queued_prompt() {
+    let db = TempDb::new("capture-replay-queued");
+    let copy = TempDb::new("capture-replay-queued-copy");
+    let repo = Repo::new("capture-replay-queued");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &[],
+    )
+    .await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut stream).await;
+    dispatch(&engine, message("t1", "c3", "after")).await;
+    let p = projection(&engine, "t1").await;
+    assert_eq!(run_of(&p, "run:t1:2")["status"], "queued");
+    let cwd = p["checkpointScopes"][0]["cwd"].as_str().unwrap().to_owned();
+    {
+        let _held = engine.test_hold_workspace(&cwd).await;
+        dispatch(
+            &engine,
+            json!({"type": "run.interrupt", "commandId": "c4", "threadId": "t1", "runId": "run:t1:1"}),
+        )
+        .await;
+        until(&engine, |p| p["runs"][0]["status"] == "interrupted").await;
+        assert_eq!(outbox_statuses(&db, "checkpoint.capture"), ["running"]);
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .execute("VACUUM INTO ?1", [copy.path().to_str().unwrap()])
+            .unwrap();
+    }
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let mut config = EngineConfig::new(copy.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: repo.root(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.checkpoints = true;
+    config.restart_policy = crate::RestartPolicy {
+        continue_by_default: true,
+        projects: [(SqliteEngine::project_id_for(&repo.root()), false)].into(),
+    };
+    let restarted = SqliteEngine::open(config).unwrap();
+    assert_eq!(
+        settled_statuses(&copy, "checkpoint.capture").await,
+        ["succeeded"]
+    );
+    let p = projection(&restarted, "t1").await;
+    assert_eq!(run_of(&p, "run:t1:2")["status"], "queued");
+    assert_eq!(run_of(&p, "run:t1:2")["queueHeld"], true);
+    assert!(
+        crate::lock(&provider.calls)
+            .iter()
+            .all(|c| c != "start run:t1:2")
+    );
+}
+
+/// The round-5 gate's probe: an engine dropped while its rollback restores files keeps the
+/// store locked until the restore ends, so no replacement opens beside it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_store_stays_locked_while_a_dropped_engine_restores_files() {
+    let db = TempDb::new("rb-restore-lock");
+    let repo = Repo::new("rb-restore-lock");
+    let (old, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&old, "t1").await;
+    let (paused_tx, paused) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = tokio::sync::oneshot::channel();
+    crate::lock(&old.inner().worker_hooks).restore_pause = Some((paused_tx, release_rx));
+    dispatch(&old, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+    paused.await.unwrap();
+    drop(old);
+    let config = || {
+        let mut config = EngineConfig::new(db.path());
+        config.checkpoints = true;
+        config
+    };
+    let Err(error) = SqliteEngine::start(config()).await else {
+        panic!("a replacement opened while the dropped engine restored files");
+    };
+    assert_eq!(error, crate::STORE_IN_USE);
+    release.send(()).unwrap();
+    // The restore ends within the open's lock wait; then the store is free.
+    SqliteEngine::start(config()).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_restart_finishes_or_fails_a_rollback_left_pending() {
+    for phase in ["admitted", "provider", "provider_done"] {
+        let db = TempDb::new(&format!("rb-pending-{phase}"));
+        let repo = Repo::new(&format!("rb-pending-{phase}"));
+        let pending = || -> Vec<(String, String)> {
+            let conn = rusqlite::Connection::open(db.path()).unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT command_id, COALESCE(json_extract(progress, '$.phase'), 'admitted')
+                     FROM effect_outbox WHERE effect_type = 'provider-thread.rollback'
+                       AND status IN ('pending', 'running')",
+                )
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let provider_thread = {
+            let (engine, _) = with_turns(
+                &db,
+                &repo,
+                FakeProvider::new("claudeAgent").with_control_delay(Duration::from_secs(60)),
+                create_worktree_thread(&repo),
+                &["write a.txt one", "write b.txt two", "write c.txt three"],
+            )
+            .await;
+            let p = projection(&engine, "t1").await;
+            dispatch(&engine, rollback("rb-1", &checkpoint_at(&p, 1), None)).await;
+            for _ in 0..250 {
+                if pending() == [("rb-1".to_owned(), "provider".to_owned())] {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(pending(), [("rb-1".to_owned(), "provider".to_owned())]);
+            p["providerThreads"][0].clone()
+        };
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "UPDATE effect_outbox SET progress = CASE WHEN ?1 = 'admitted' THEN NULL
+               ELSE json_object('phase', ?1, 'snapshot', json(?2)) END
+             WHERE effect_type = 'provider-thread.rollback'",
+            rusqlite::params![
+                phase,
+                (phase == "provider_done").then(|| provider_thread.to_string())
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (engine, provider) = open_repo(&db, &repo);
+        let p = until(&engine, |p| {
+            p["runs"][2]["status"] == "rolled_back" || p["thread"]["rollbackFailure"].is_object()
+        })
+        .await;
+        assert!(pending().is_empty(), "{phase}: the row goes");
+        let (status, error): (String, Option<String>) = rusqlite::Connection::open(db.path())
+            .unwrap()
+            .query_row(
+                "SELECT status, last_error FROM effect_outbox
+                 WHERE effect_type = 'provider-thread.rollback'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // An interrupted rollback stays on record as failed: a succeeded row is pruned.
+        if phase == "provider" {
+            assert_eq!(
+                (status.as_str(), error.as_deref()),
+                (
+                    "failed",
+                    Some(crate::rollback::ROLLBACK_INTERRUPTED_MESSAGE)
+                ),
+                "{phase}"
+            );
+        } else {
+            assert_eq!(status, "succeeded", "{phase}");
+        }
+        let statuses: Vec<_> = p["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["status"].as_str().unwrap().to_owned())
+            .collect();
+        if phase == "provider" {
+            assert_eq!(
+                p["thread"]["rollbackFailure"],
+                json!({"requestId": "rb-1", "message": crate::rollback::ROLLBACK_INTERRUPTED_MESSAGE}),
+                "{phase}"
+            );
+            assert_eq!(statuses, ["completed", "completed", "completed"], "{phase}");
+            assert_eq!(repo.read("c.txt").as_deref(), Some("three\n"), "{phase}");
+            assert!(provider.rollbacks.lock().unwrap().is_empty(), "{phase}");
+        } else {
+            assert!(
+                p["thread"]["rollbackFailure"].is_null(),
+                "{phase}: {}",
+                p["thread"]
+            );
+            assert_eq!(
+                statuses,
+                ["completed", "rolled_back", "rolled_back"],
+                "{phase}"
+            );
+            assert_eq!(repo.read("b.txt"), None, "{phase}: files restored");
+            assert_eq!(repo.read("c.txt"), None, "{phase}: files restored");
+            let sent = provider.rollbacks.lock().unwrap().clone();
+            let expected: &[&str] = if phase == "admitted" {
+                &["turn 1"]
+            } else {
+                &[]
+            };
+            assert_eq!(
+                sent, expected,
+                "{phase}: provider rollbacks after the restart"
+            );
+            assert_eq!(p["providerThreads"][0]["lastRunOrdinal"], 1, "{phase}");
+        }
+    }
+}
+
+/// A rollback admitted while a run still waits for its checkpoint runs after that capture, so
+/// it rolls that run back too (review finding 2.2): T3 runs `checkpoint.capture` as an effect
+/// in the thread's lane. The workspace lock holds the capture back while the rollback comes in.
+#[tokio::test(flavor = "current_thread")]
+async fn a_rollback_admitted_while_a_run_waits_for_its_capture_rolls_it_back() {
+    let db = TempDb::new("rb-waiting");
+    let repo = Repo::new("rb-waiting");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let target = checkpoint_at(&p, 1);
+    let cwd = p["checkpointScopes"][0]["cwd"].as_str().unwrap().to_owned();
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t1", "c3", "hang")).await;
+    until_provider_turn(&mut stream).await;
+    let held = engine.test_hold_workspace(&cwd).await;
+    // The steer ends the provider turn; the run then waits for its capture.
+    dispatch(
+        &engine,
+        message_with(
+            "t1",
+            "c4",
+            "finish",
+            json!({"type": "steer_active", "targetRunId": "run:t1:3"}),
+            None,
+        ),
+    )
+    .await;
+    until(&engine, |p| p["runs"][2]["status"] == "waiting").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    dispatch(&engine, rollback("rb-1", &target, None)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(held);
+    let p = until(&engine, |p| {
+        p["runs"][1]["status"] == "rolled_back" || p["thread"]["rollbackFailure"].is_object()
+    })
+    .await;
+    // Both writes are done once the lane is empty again.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let p = if p["runs"][2]["status"] == "waiting" {
+        until(&engine, |p| p["runs"][2]["status"] != "waiting").await
+    } else {
+        projection(&engine, "t1").await
+    };
+    let statuses: Vec<_> = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["completed", "rolled_back", "rolled_back"],
+        "the waiting run is rolled back too"
+    );
+    assert_eq!(
+        checkpoint_at(&p, 3)["status"],
+        "stale",
+        "its checkpoint too"
+    );
+}
+
+/// Admission asks the provider instance for its capabilities, as T3 does, not the stored
+/// session row (review finding 4.3): a provider that cannot roll back is refused with T3's
+/// reason, and nothing is sent to it.
+#[tokio::test(flavor = "current_thread")]
+async fn rollback_asks_the_provider_instance_whether_it_can_roll_back() {
+    let db = TempDb::new("rb-caps");
+    let repo = Repo::new("rb-caps");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").without_rollback(),
+        create_worktree_thread(&repo),
+        &["write a.txt one", "write b.txt two"],
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let refused = engine
+        .dispatch(from_json(rollback("rb-1", &checkpoint_at(&p, 1), None)).unwrap())
+        .await;
+    assert_eq!(
+        refused_message(refused),
+        "claudeAgent cannot satisfy rollback for command rb-1: providerInstanceId conversation rollback is unavailable"
+    );
+    assert!(provider.rollbacks.lock().unwrap().is_empty());
+    let p = projection(&engine, "t1").await;
+    assert!(
+        p["thread"]["rollbackRequestId"].is_null(),
+        "{}",
+        p["thread"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn portable_rollback_starts_a_new_native_conversation_with_only_kept_history() {
+    for driver in ["grok", "antigravity"] {
+        let db = TempDb::new(driver);
+        let repo = Repo::new(driver);
+        let (engine, provider) = with_turns(
+            &db,
+            &repo,
+            FakeProvider::new("claudeAgent")
+                .with_driver(driver)
+                .without_rollback(),
+            create_worktree_thread(&repo),
+            &["kept apples", "discarded pears"],
+        )
+        .await;
+        let p = projection(&engine, "t1").await;
+        dispatch(&engine, rollback("rb", &checkpoint_at(&p, 1), Some(false))).await;
+        until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+        let slash = if driver == "grok" {
+            "/review saved changes"
+        } else {
+            "/compact"
+        };
+        dispatch(&engine, message("t1", "command", slash)).await;
+        run_to_end(&engine, "t1", "run:t1:3").await;
+        assert_eq!(provider.prompts.lock().unwrap().last().unwrap(), slash);
+        dispatch(&engine, message("t1", "after", "next question")).await;
+        run_to_end(&engine, "t1", "run:t1:4").await;
+        dispatch(&engine, message("t1", "again", "later")).await;
+        run_to_end(&engine, "t1", "run:t1:5").await;
+        let prompts = provider.prompts.lock().unwrap();
+        assert_eq!(prompts.last().unwrap(), "later");
+        let prompt = &prompts[prompts.len() - 2];
+        assert!(
+            prompt.contains("kept apples") && prompt.contains("next question"),
+            "{driver}: {prompt}"
+        );
+        assert!(!prompt.contains("discarded pears"), "{driver}: {prompt}");
+        assert!(provider.rollbacks.lock().unwrap().is_empty());
+        assert!(
+            !provider
+                .resumes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id.contains("native:1 "))
+        );
+    }
+}
+
+fn refused_message<T, E: serde::Serialize>(result: Result<T, EngineError<E>>) -> String {
+    let Err(EngineError::Rejected(error)) = result else {
+        panic!("refused")
+    };
+    to_json(&error)["message"].as_str().unwrap().to_owned()
+}
+
+/// A rollback that opens its own session (no live one, as after a restart) lays the
+/// configured runtime policy override over it, as a turn start does (review finding 11).
+#[tokio::test(flavor = "current_thread")]
+async fn a_rollback_session_gets_the_runtime_policy_override() {
+    let db = TempDb::new("rb-override");
+    let repo = Repo::plain("rb-override");
+    let config = |provider: Arc<FakeProvider>| {
+        let mut config = EngineConfig::new(db.path());
+        config.projects = vec![ProjectConfig {
+            title: "Project".into(),
+            workspace_root: repo.root(),
+        }];
+        config.providers = vec![provider];
+        config.checkpoints = true;
+        config.runtime_policy_override = Some(crate::RuntimePolicyOverride {
+            cwd: None,
+            approval_policy: Some(json!("never")),
+            sandbox_policy: None,
+        });
+        config
+    };
+    {
+        let engine =
+            SqliteEngine::open(config(Arc::new(FakeProvider::new("claudeAgent")))).unwrap();
+        dispatch(&engine, create_in(&repo, "t1", "c1")).await;
+        let mut stream = engine
+            .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+            .await
+            .unwrap();
+        next(&mut stream).await;
+        turn(&engine, &mut stream, "c2", "one").await;
+        turn(&engine, &mut stream, "c3", "two").await;
+    }
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let engine = SqliteEngine::open(config(provider.clone())).unwrap();
+    let p = projection(&engine, "t1").await;
+    dispatch(
+        &engine,
+        rollback("rb-1", &checkpoint_at(&p, 1), Some(false)),
+    )
+    .await;
+    until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+    let policies = provider.opened_policies.lock().unwrap().clone();
+    assert_eq!(policies.len(), 1, "{policies:?}");
+    assert_eq!(policies[0]["approvalPolicy"], "never", "{policies:?}");
+}
+
+fn fork_to(command: &str, target: &str) -> Value {
+    let mut c = fork(command, json!({"type": "latest_stable"}));
+    c["targetThreadId"] = json!(target);
+    c
+}
+
+fn side_chat(command: &str, target: &str) -> Value {
+    let mut c = fork_to(command, target);
+    c["sideChat"] = json!(true);
+    c
+}
+
+/// T3 `Orchestrator.ts` `thread.delete` with `onlyIfUnused`: the clients close a side chat this
+/// way, and a side chat that holds a conversation stays. An unused one goes.
+#[tokio::test(flavor = "current_thread")]
+async fn closing_a_side_chat_keeps_it_once_used() {
+    let db = TempDb::new("side-chat-close");
+    let repo = Repo::new("side-chat-close");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c"),
+        &["one"],
+    )
+    .await;
+    dispatch(&engine, side_chat("f", "t2")).await;
+    dispatch(&engine, side_chat("f2", "t3")).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t2"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t2", "m", "a real side conversation")).await;
+    until_run_ends(&mut stream).await;
+    for (id, target) in [("close", "t2"), ("close-unused", "t3")] {
+        dispatch(
+            &engine,
+            json!({"type":"thread.delete","commandId":id,"threadId":target,"onlyIfUnused":true}),
+        )
+        .await;
+    }
+    assert!(projection(&engine, "t2").await["thread"]["deletedAt"].is_null());
+    assert!(engine.get_thread_projection("t3".into()).await.is_err());
+
+    // A first send racing the close: whichever commits first decides, and an accepted send
+    // always keeps its chat.
+    dispatch(&engine, side_chat("f3", "t4")).await;
+    let send = engine.dispatch(from_json(message("t4", "race", "first words")).unwrap());
+    let close = engine.dispatch(
+        from_json(
+            json!({"type": "thread.delete", "commandId": "close-race", "threadId": "t4",
+            "onlyIfUnused": true}),
+        )
+        .unwrap(),
+    );
+    let (sent, closed) = tokio::join!(send, close);
+    assert!(closed.is_ok());
+    let kept = engine.get_thread_projection("t4".into()).await.is_ok();
+    assert_eq!(sent.is_ok(), kept, "an accepted send keeps the chat");
+}
+
+/// T3 `Orchestrator.ts` `thread.archive`/`unarchive`/`delete`: side chats live inside their
+/// parent. Archive takes the active ones, except one waiting on delegated tasks; unarchive
+/// restores only those it took; delete takes all.
+#[tokio::test(flavor = "current_thread")]
+async fn side_chats_follow_their_parent() {
+    let db = TempDb::new("side-chat-parent");
+    let repo = Repo::new("side-chat-parent");
+    let clock = Arc::new(crate::ManualClock::at(1_800_000_000_000));
+    let (engine, _) = with_turns_on(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c"),
+        &["one"],
+        clock.clone(),
+    )
+    .await;
+    let tick = || clock.advance(std::time::Duration::from_secs(1));
+    dispatch(&engine, side_chat("f", "t2")).await;
+    dispatch(&engine, side_chat("f2", "t3")).await;
+    dispatch(&engine, fork_to("f3", "t4")).await;
+    // A side chat whose own turn waits on a running delegated task.
+    dispatch(&engine, side_chat("f5", "t5")).await;
+    dispatch(&engine, message("t5", "busy", "hang")).await;
+    let mut task = super::delegate("task", "hang", None);
+    task["parentThreadId"] = json!("t5");
+    task["parentRunId"] = json!("run:t5:1");
+    task["parentNodeId"] = json!("node:run:t5:1:root");
+    dispatch(&engine, task).await;
+    // A delegated child of the parent: not a side chat, so the cascade leaves it alone.
+    dispatch(&engine, message("t1", "busy-parent", "hang")).await;
+    let mut child_task = super::delegate("parent-task", "child work", None);
+    child_task["parentRunId"] = json!("run:t1:2");
+    child_task["parentNodeId"] = json!("node:run:t1:2:root");
+    dispatch(&engine, child_task).await;
+    let child = "thread:delegated-task:parent-task";
+    super::run_to_end(&engine, child, &format!("run:{child}:1")).await;
+    // A client with the side chat open hears each transition.
+    let mut view = engine
+        .subscribe_thread(from_json(json!({"threadId": "t2"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut view).await;
+    let archive = |id: &str, thread: &str, kind: &str| json!({"type": kind, "commandId": id, "threadId": thread});
+    dispatch(&engine, archive("early", "t3", "thread.archive")).await;
+    tick();
+    dispatch(&engine, archive("archive", "t1", "thread.archive")).await;
+    let archived = |p: Value| p["thread"]["archivedAt"].is_string();
+    assert!(archived(projection(&engine, "t2").await));
+    until_event(&mut view, "thread.archived").await;
+    assert!(
+        !archived(projection(&engine, child).await),
+        "a delegated child stays"
+    );
+    assert!(
+        !archived(projection(&engine, "t4").await),
+        "a plain fork stays"
+    );
+    assert!(
+        !archived(projection(&engine, "t5").await),
+        "a side chat waiting on delegated tasks stays"
+    );
+    tick();
+    dispatch(&engine, archive("restore", "t1", "thread.unarchive")).await;
+    assert!(!archived(projection(&engine, "t2").await));
+    until_event(&mut view, "thread.unarchived").await;
+    assert!(
+        archived(projection(&engine, "t3").await),
+        "archived before its parent"
+    );
+    tick();
+    dispatch(&engine, archive("delete", "t1", "thread.delete")).await;
+    for gone in ["t1", "t2", "t3", "t5"] {
+        assert!(
+            engine.get_thread_projection(gone.into()).await.is_err(),
+            "{gone}"
+        );
+    }
+    until_event(&mut view, "thread.deleted").await;
+    assert!(projection(&engine, "t4").await["thread"]["deletedAt"].is_null());
+    assert!(projection(&engine, child).await["thread"]["deletedAt"].is_null());
+}
+
+/// Reads a thread view until an event of `kind` for that thread arrives.
+async fn until_event<T: serde::Serialize, E: serde::Serialize>(
+    view: &mut Subscription<T, E>,
+    kind: &str,
+) {
+    loop {
+        let item = next(view).await;
+        if item["kind"] == "event" && item["event"]["type"] == kind {
+            return;
+        }
+    }
+}
+
+/// T3 refuses to archive an archived thread (`Orchestrator.ts` "is already archived") before
+/// either thread changes, so a restore still brings the side chat back. Unarchiving a thread
+/// that is not archived is refused the same way.
+#[tokio::test(flavor = "current_thread")]
+async fn archiving_an_archived_parent_is_refused_and_restore_brings_its_side_chat_back() {
+    let db = TempDb::new("side-chat-archive-twice");
+    let repo = Repo::new("side-chat-archive-twice");
+    let clock = Arc::new(crate::ManualClock::at(1_800_000_000_000));
+    let (engine, _) = with_turns_on(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c"),
+        &["one"],
+        clock.clone(),
+    )
+    .await;
+    dispatch(&engine, side_chat("f", "t2")).await;
+    let command = |id: &str, kind: &str| json!({"type": kind, "commandId": id, "threadId": "t1"});
+    dispatch(&engine, command("a1", "thread.archive")).await;
+    clock.advance(std::time::Duration::from_secs(1));
+    let refusal = |result: Result<
+        _,
+        EngineError<conn_contract::OrchestrationV2DispatchCommandError>,
+    >| match result {
+        Err(EngineError::Rejected(e)) => to_json(&e).to_string(),
+        _ => panic!("expected a refusal"),
+    };
+    let again = engine
+        .dispatch(from_json(command("a2", "thread.archive")).unwrap())
+        .await;
+    assert!(refusal(again).contains("Thread t1 is already archived."));
+    dispatch(&engine, command("u1", "thread.unarchive")).await;
+    assert!(projection(&engine, "t2").await["thread"]["archivedAt"].is_null());
+    let again = engine
+        .dispatch(from_json(command("u2", "thread.unarchive")).unwrap())
+        .await;
+    assert!(refusal(again).contains("Thread t1 is not archived."));
+}
+
+/// T3's archive (`Orchestrator.ts` `thread.archive`): each archived thread, a side chat too,
+/// cancels its queued work and detaches its live provider session.
+#[tokio::test(flavor = "current_thread")]
+async fn archiving_ends_a_side_chats_queued_work_and_session() {
+    let db = TempDb::new("side-chat-archive-busy");
+    let repo = Repo::new("side-chat-archive-busy");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c"),
+        &["one"],
+    )
+    .await;
+    dispatch(&engine, side_chat("f", "t2")).await;
+    let mut view = engine
+        .subscribe_thread(from_json(json!({"threadId": "t2"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut view).await;
+    dispatch(&engine, message("t2", "busy", "hang")).await;
+    until_event(&mut view, "provider-session.updated").await;
+    dispatch(&engine, message("t2", "later", "waits in the queue")).await;
+    let busy = projection(&engine, "t2").await;
+    assert_eq!(busy["runs"][1]["status"], "queued");
+    assert!(!busy["providerSessions"].as_array().unwrap().is_empty());
+    dispatch(
+        &engine,
+        json!({"type": "thread.archive", "commandId": "archive", "threadId": "t1"}),
+    )
+    .await;
+    let archived = projection(&engine, "t2").await;
+    assert!(archived["thread"]["archivedAt"].is_string());
+    assert_eq!(archived["runs"][1]["status"], "cancelled");
+    assert!(
+        archived["providerSessions"].as_array().unwrap().is_empty(),
+        "the live session is detached: {}",
+        archived["providerSessions"]
+    );
+}
+
+/// T3 refuses to archive a thread with running delegated tasks, before any side chat moves.
+#[tokio::test(flavor = "current_thread")]
+async fn a_parent_with_a_running_delegate_is_not_archived() {
+    let db = TempDb::new("side-chat-busy-parent");
+    let repo = Repo::new("side-chat-busy-parent");
+    let (engine, _) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "c"),
+        &["one"],
+    )
+    .await;
+    dispatch(&engine, side_chat("f", "t2")).await;
+    dispatch(&engine, message("t1", "busy", "hang")).await;
+    let mut task = super::delegate("task", "hang", None);
+    task["parentRunId"] = json!("run:t1:2");
+    task["parentNodeId"] = json!("node:run:t1:2:root");
+    dispatch(&engine, task).await;
+    let refused = engine
+        .dispatch(
+            from_json(json!({"type": "thread.archive", "commandId": "archive", "threadId": "t1"}))
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(EngineError::Rejected(e)) if to_json(e).to_string()
+            .contains("Thread t1 has running delegated tasks. Wait for them or cancel them before archiving.")),
+        "{refused:?}"
+    );
+    for thread in ["t1", "t2"] {
+        assert!(projection(&engine, thread).await["thread"]["archivedAt"].is_null());
+    }
+}
+
+/// The lease a terminal holds while it restores a worktree (`Engine::workspace_lease`) is the
+/// lock checkpoint capture and turn preparation take: a capture waits for it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_workspace_lease_holds_off_checkpoint_capture() {
+    let db = TempDb::new("lease");
+    let repo = Repo::new("lease");
+    let (engine, _) = open_repo(&db, &repo);
+    let root = repo.root();
+    let lease = engine
+        .workspace_lease(&root)
+        .await
+        .expect("checkpoints take locks");
+    let waiting = tokio::time::timeout(
+        Duration::from_millis(200),
+        engine.test_hold_workspace(&root),
+    )
+    .await;
+    assert!(waiting.is_err(), "the capture lock waits for the lease");
+    drop(lease);
+    let _capture = tokio::time::timeout(Duration::from_secs(5), engine.test_hold_workspace(&root))
+        .await
+        .expect("the capture lock follows the lease");
+}
+
+/// Audit 1.5, T3's `decideForkExecution`: a fork whose first message goes to another
+/// provider cannot fork natively, so the history it inherits through its fork point travels
+/// as a full handoff (`portable_context`). Later source turns stay out. On the source's own
+/// provider the fork is native, and a target that cannot take a handoff is refused.
+#[tokio::test(flavor = "current_thread")]
+async fn a_fork_on_another_provider_carries_its_history() {
+    let engine_with = |db: &TempDb, repo: &Repo, codex: FakeProvider| {
+        let claude = Arc::new(FakeProvider::new("claudeAgent"));
+        let codex = Arc::new(codex);
+        let mut config = EngineConfig::new(db.path());
+        config.projects = vec![ProjectConfig {
+            title: "Project".into(),
+            workspace_root: repo.root(),
+        }];
+        config.providers = vec![claude.clone(), codex.clone()];
+        config.checkpoints = true;
+        (SqliteEngine::open(config).unwrap(), claude, codex)
+    };
+    async fn history(engine: &SqliteEngine) {
+        for (id, text, run) in [
+            ("c2", "remember the marker blue-17", "run:t1:1"),
+            ("c3", "a later turn green-9", "run:t1:2"),
+        ] {
+            dispatch(engine, message("t1", id, text)).await;
+            run_to_end(engine, "t1", run).await;
+        }
+        dispatch(
+            engine,
+            fork("f", json!({"type": "run", "runId": "run:t1:1"})),
+        )
+        .await;
+        dispatch(
+            engine,
+            json!({"type": "thread.model-selection.set", "threadId": "t2",
+                "commandId": "to-codex", "modelSelection": {"instanceId": "codex", "model": "m"}}),
+        )
+        .await;
+    }
+
+    let db = TempDb::new("fork-portable");
+    let repo = Repo::new("fork-portable");
+    let (engine, claude, codex) = engine_with(
+        &db,
+        &repo,
+        FakeProvider::new("codex").with_history_injection(),
+    );
+    dispatch(&engine, create_in(&repo, "t1", "c1")).await;
+    history(&engine).await;
+    dispatch(&engine, message("t2", "send", "continue")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed");
+    let injected = crate::lock(&codex.injected).clone();
+    assert_eq!(injected.len(), 1);
+    let received = injected[0].1.to_string();
+    assert!(received.contains("blue-17"), "{received}");
+    assert!(
+        !received.contains("green-9"),
+        "a later source turn: {received}"
+    );
+    assert_eq!(*crate::lock(&codex.prompts), ["continue"]);
+    let transfer = p["contextTransfers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["type"] == "fork")
+        .unwrap();
+    assert_eq!(transfer["status"], "consumed");
+    assert_eq!(transfer["resolution"]["strategy"], "portable_context");
+    assert_eq!(transfer["targetProviderInstanceId"], "codex");
+    assert!(crate::lock(&claude.forks).is_empty());
+
+    // On the source's own provider, a fork of a finished turn is native.
+    dispatch(
+        &engine,
+        json!({"type": "thread.fork", "commandId": "f-native", "sourceThreadId": "t1",
+            "targetThreadId": "t3", "sourcePoint": {"type": "run", "runId": "run:t1:2"},
+            "createdBy": "user", "creationSource": "web"}),
+    )
+    .await;
+    dispatch(&engine, message("t3", "go", "native")).await;
+    let p = run_to_end(&engine, "t3", "run:t3:1").await;
+    assert_eq!(p["runs"][0]["contextHandoffId"], Value::Null);
+    assert_eq!(crate::lock(&claude.forks).len(), 1);
+
+    // A target that cannot take a handoff refuses the send, and the fork keeps no run.
+    let db = TempDb::new("fork-unsupported");
+    let repo = Repo::new("fork-unsupported");
+    let (engine, _, _) = engine_with(
+        &db,
+        &repo,
+        FakeProvider::new("codex").without_context_handoff(),
+    );
+    dispatch(&engine, create_in(&repo, "t1", "c1")).await;
+    history(&engine).await;
+    let refused = engine
+        .dispatch(from_json(message("t2", "send", "continue")).unwrap())
+        .await;
+    assert!(
+        matches!(&refused, Err(EngineError::Rejected(e)) if to_json(e).to_string()
+            .contains("codex cannot satisfy context_handoff for command send")),
+        "{refused:?}"
+    );
+    assert!(
+        projection(&engine, "t2").await["runs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A thread in worktree `repo` that ran `first` there, then moved to a sibling worktree of the
+/// same repository: the moved run has not started yet.
+async fn moved_thread(
+    db: &TempDb,
+    repo: &Repo,
+    work: &Repo,
+    first: &str,
+) -> (
+    SqliteEngine,
+    Subscription<conn_contract::ThreadStreamItem, conn_contract::GetThreadProjectionError>,
+) {
+    repo.git(&["worktree", "add", "-b", "probe", &work.root(), "HEAD"]);
+    let (engine, _) = open_repo(db, repo);
+    dispatch(&engine, create_worktree_thread(repo)).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    turn(&engine, &mut stream, "run-one", first).await;
+    dispatch(
+        &engine,
+        json!({
+            "type":"thread.metadata.update", "threadId":"t1", "commandId":"move",
+            "worktreePath":work.root(), "branch":"probe", "expectedWorktreePath":repo.root()
+        }),
+    )
+    .await;
+    (engine, stream)
+}
+
+/// The files a unified diff touches, in its order.
+fn diff_files(diff: &Value) -> Vec<String> {
+    diff["diff"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.strip_prefix("diff --git a/"))
+        .map(|l| l.split(" b/").next().unwrap().to_owned())
+        .collect()
+}
+
+/// T3 rebuilds the root scope from the run that starts in another folder
+/// (`CheckpointService.makeRootRunScope`): the moved run's id, root node and folder.
+/// Its turn diff compares with the previous checkout's ref, as T3's does: a file only the
+/// previous checkout had shows as deleted (a gap T3 shares).
+#[tokio::test(flavor = "current_thread")]
+async fn a_moved_thread_captures_its_new_checkout() {
+    let db = TempDb::new("handoff-diff");
+    let repo = Repo::new("handoff-diff");
+    let work = Repo::plain("handoff-new");
+    let (engine, mut stream) = moved_thread(&db, &repo, &work, "write first.txt one").await;
+    repo.write(
+        "old-only.txt",
+        "an unrelated edit in the previous checkout\n",
+    );
+    turn(
+        &engine,
+        &mut stream,
+        "run-two",
+        "write new-only.txt user-change",
+    )
+    .await;
+    let p = projection(&engine, "t1").await;
+    let scope = &p["checkpointScopes"][0];
+    let run_two = &p["runs"][1];
+    assert_eq!(scope["cwd"], work.root(), "{scope}");
+    assert_eq!(scope["runId"], run_two["id"], "{scope}");
+    assert_eq!(scope["nodeId"], run_two["rootNodeId"], "{scope}");
+    let diff = call(
+        &engine,
+        "orchestration.getTurnDiff",
+        json!({"threadId":"t1", "fromTurnCount":1, "toTurnCount":2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(diff_files(&diff), ["first.txt", "new-only.txt"], "{diff}");
+    let first = call(
+        &engine,
+        "orchestration.getTurnDiff",
+        json!({"threadId":"t1", "fromTurnCount":0, "toTurnCount":1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(diff_files(&first), ["first.txt"], "{first}");
+}
+
+/// T3 restores a checkpoint into the scope's current folder whatever checkout captured it, so
+/// rewinding files across a move would put checkout A's tree into checkout B. This server
+/// refuses that file restore; a conversation-only rewind still works.
+#[tokio::test(flavor = "current_thread")]
+async fn a_file_rewind_across_a_checkout_move_is_refused() {
+    let db = TempDb::new("moved-rewind");
+    let repo = Repo::new("moved-rewind");
+    let work = Repo::plain("moved-rewind-new");
+    let (engine, mut stream) = moved_thread(&db, &repo, &work, "write first.txt one").await;
+    work.write("b-only.txt", "only in the new checkout\n");
+    turn(&engine, &mut stream, "run-two", "write new-only.txt two").await;
+    let p = projection(&engine, "t1").await;
+    let target = checkpoint_at(&p, 1);
+    let message = refused_message(
+        engine
+            .dispatch(from_json(rollback("rb-1", &target, None)).unwrap())
+            .await,
+    );
+    assert!(message.contains("another checkout"), "{message}");
+    assert_eq!(
+        work.read("b-only.txt").as_deref(),
+        Some("only in the new checkout\n")
+    );
+    assert_eq!(work.read("new-only.txt").as_deref(), Some("two\n"));
+
+    dispatch(&engine, rollback("rb-2", &target, Some(false))).await;
+    let p = until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+    assert!(p["thread"]["rollbackFailure"].is_null(), "{}", p["thread"]);
+    assert_eq!(
+        work.read("b-only.txt").as_deref(),
+        Some("only in the new checkout\n")
+    );
+    assert_eq!(work.read("new-only.txt").as_deref(), Some("two\n"));
+}
+
+/// A scope imported from the T3 server has no `checkpoint-scope.created` in this log. A run
+/// that resumes it records its folder before it captures, and a checkpoint captured here whose
+/// folder the log cannot tell is not restored after a move.
+#[tokio::test(flavor = "current_thread")]
+async fn an_imported_scope_still_refuses_a_file_rewind_across_a_move() {
+    let db = TempDb::new("imported-rewind");
+    let repo = Repo::new("imported-rewind");
+    let work = Repo::plain("imported-rewind-new");
+    repo.git(&["worktree", "add", "-b", "probe", &work.root(), "HEAD"]);
+    let (engine, _) = open_repo(&db, &repo);
+    dispatch(&engine, create_worktree_thread(&repo)).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    turn(&engine, &mut stream, "run-one", "write first.txt one").await;
+    // As if the scope had come from the T3 server: its row is here, its event is not.
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .execute(
+            "DELETE FROM events WHERE type = 'checkpoint-scope.created'",
+            [],
+        )
+        .unwrap();
+    turn(&engine, &mut stream, "run-two", "write second.txt two").await;
+    dispatch(
+        &engine,
+        json!({
+            "type":"thread.metadata.update", "threadId":"t1", "commandId":"move",
+            "worktreePath":work.root(), "branch":"probe", "expectedWorktreePath":repo.root()
+        }),
+    )
+    .await;
+    work.write("b-only.txt", "only in the new checkout\n");
+    turn(&engine, &mut stream, "run-three", "write third.txt three").await;
+    let p = projection(&engine, "t1").await;
+    for ordinal in [2, 1] {
+        let message = refused_message(
+            engine
+                .dispatch(
+                    from_json(rollback(
+                        &format!("rb-{ordinal}"),
+                        &checkpoint_at(&p, ordinal),
+                        None,
+                    ))
+                    .unwrap(),
+                )
+                .await,
+        );
+        assert!(message.contains("another checkout"), "{ordinal}: {message}");
+    }
+    assert_eq!(
+        work.read("b-only.txt").as_deref(),
+        Some("only in the new checkout\n")
+    );
+    dispatch(
+        &engine,
+        rollback("rb-talk", &checkpoint_at(&p, 2), Some(false)),
+    )
+    .await;
+    let p = until(&engine, |p| p["runs"][2]["status"] == "rolled_back").await;
+    assert!(p["thread"]["rollbackFailure"].is_null(), "{}", p["thread"]);
+}

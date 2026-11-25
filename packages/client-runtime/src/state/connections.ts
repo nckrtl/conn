@@ -6,7 +6,10 @@ import { AsyncResult, Atom } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import { connectionRoutes, entryWithRoutes } from "../connection/routes.ts";
+import { provisionalPairingId } from "../platform/storageDocument.ts";
 import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
+import type { ParkReason } from "../connection/parking.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import {
   PullRequestRoutingPermissions,
@@ -33,6 +36,24 @@ export function* enabledEnvironmentIds(
       yield environmentId;
     }
   }
+}
+
+/** A provisional route can connect in the background but is not shown until it is promoted. */
+export function visibleConnectionCatalog(catalogAtom: Atom.Atom<EnvironmentCatalogState>) {
+  return Atom.make((get) => {
+    const catalog = get(catalogAtom);
+    const entries = new Map(catalog.entries);
+    let changed = false;
+    for (const [id, entry] of catalog.entries) {
+      const routes = connectionRoutes(entry);
+      const visible = routes.filter(({ target }) => provisionalPairingId(target) === undefined);
+      if (visible.length === routes.length) continue;
+      changed = true;
+      if (visible.length === 0) entries.delete(id);
+      else entries.set(id, entryWithRoutes(entry, visible));
+    }
+    return changed ? { ...catalog, entries } : catalog;
+  }).pipe(Atom.withLabel("environment-catalog-visible"));
 }
 
 const EMPTY_ENVIRONMENT_CATALOG_STATE: EnvironmentCatalogState = Object.freeze({
@@ -143,6 +164,21 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.remove(environmentId)),
       ),
   });
+  const settleProvisionalPairing = createRuntimeCommand(runtime, {
+    label: "environment-catalog:settle-provisional-pairing",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: {
+      readonly environmentId: EnvironmentIdType;
+      readonly installId: string;
+      readonly keep: boolean;
+    }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) =>
+          registry.settleProvisionalPairing(input.environmentId, input.installId, input.keep),
+        ),
+      ),
+  });
   const removeRelayEnvironments = createRuntimeCommand(runtime, {
     label: "environment-catalog:remove-relay-environments",
     scheduler: commandScheduler,
@@ -192,6 +228,45 @@ export function createEnvironmentCatalogAtoms<R, E>(
       ),
   });
 
+  /** Conn: holds an asleep Orbit Instance's connection off, or lets it connect again. */
+  const setParked = createRuntimeCommand(runtime, {
+    label: "environment-catalog:set-parked",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: { readonly environmentId: EnvironmentIdType; readonly parked: boolean }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.setParked(input.environmentId, input.parked)),
+      ),
+  });
+
+  /** Conn: adds or removes one reason to hold an environment's connection off. */
+  const setParkReason = createRuntimeCommand(runtime, {
+    label: "environment-catalog:set-park-reason",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: {
+      readonly environmentId: EnvironmentIdType;
+      readonly reason: ParkReason;
+      readonly held: boolean;
+    }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) =>
+          registry.setParkReason(input.environmentId, input.reason, input.held),
+        ),
+      ),
+  });
+
+  /** Conn: the reasons each environment is held off for now. */
+  const parkReasons = createRuntimeCommand(runtime, {
+    label: "environment-catalog:park-reasons",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: () =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.parkReasons),
+      ),
+  });
+
   return {
     catalogAtom,
     catalogValueAtom,
@@ -203,10 +278,14 @@ export function createEnvironmentCatalogAtoms<R, E>(
     sessionGenerationAtom,
     register,
     remove,
+    settleProvisionalPairing,
     removeRoute,
     reorderRoutes,
     removeRelayEnvironments,
     retryNow,
     setEnabled,
+    setParked,
+    setParkReason,
+    parkReasons,
   };
 }

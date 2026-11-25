@@ -16,8 +16,10 @@ import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/http/HttpClient";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
+import { appBrand } from "../branding/appBrand.ts";
 
-const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(15);
+// Each /oauth/token attempt may take 10 s, so a backend busy after ready needs several attempts.
+const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(60);
 const BOOTSTRAP_TRANSIENT_RETRY_INTERVAL = Duration.millis(500);
 const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
 
@@ -105,7 +107,7 @@ export const make = Effect.gen(function* () {
           httpBaseUrl: config.httpBaseUrl.href,
           credential,
           clientMetadata: {
-            label: "T3 Code Desktop",
+            label: `${appBrand.name} Desktop`,
             deviceType: "desktop",
           },
         }).pipe(

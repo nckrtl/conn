@@ -19,7 +19,7 @@ and stop verification. Do not install or switch to another automation system.
 
 Reuse this task's healthy backend. Otherwise run `vp run dev` from the
 repository root, retain its terminal session, and read the actual backend port
-from the dev-runner output. Use the worktree's ignored `.t3` state. Never run
+from the dev-runner output. Use the worktree's ignored `.conn` state. Never run
 against `~/.t3/userdata`. The Browser panel is not required for this workflow.
 
 Test with meaningful project and thread data. Read the shared
@@ -43,10 +43,15 @@ prints one JSON line; on failure it names the next command. Mobile verification
 includes that step unless the user prohibits it.
 
 For a device you opened in an agent-device session elsewhere (a device pool,
-cloud, or remote host), run `vp run mobile:install <ios|android> --session <s>`
-from the directory you opened the session in. It installs the cached build into
-that session (`--abi arm64-v8a` for an ARM Android device; `--metro <url>` also
-opens it against Metro) and never builds.
+cloud, or remote host), run `vp run mobile:install <ios|android> --session <s>
+--config <file>` from the directory you opened the session in, passing the
+`--config` file from `device_open`'s `targetArgs`. Without it, a device pool's
+gateway refuses the install, wrongly saying agent-device is too old. It installs
+the cached build into that session (`--abi arm64-v8a` for an ARM Android device;
+pool Android emulators are x86_64, the default; `--metro <url>` also opens it
+against Metro). Without a cached build for this checkout it builds first, which can
+outlast the lease, so run `vp run mobile:install <ios|android> --prepare` (with
+the same `--abi`) before you open the device.
 
 Start `vp run dev:client` from `apps/mobile`, or reuse a healthy Metro belonging
 to this checkout. Open its printed development-client URL with AgentDevice

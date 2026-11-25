@@ -10,7 +10,7 @@ import {
   TestLoginSummary,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import * as CredentialAutofill from "../../../credentials/CredentialAutofill.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -40,7 +40,8 @@ const RequestCredentialsTool = Tool.make("request_credentials", {
   .annotate(Tool.Title, "Find saved logins")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const FillCredentialTool = Tool.make("fill_credential", {
   description:
@@ -52,18 +53,20 @@ const FillCredentialTool = Tool.make("fill_credential", {
 })
   .annotate(Tool.Title, "Fill saved login")
   .annotate(Tool.OpenWorld, true)
-  .annotate(Tool.Destructive, true);
+  .annotate(Tool.Destructive, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const SaveTestLoginTool = Tool.make("save_test_login", {
   description:
-    "Save a test user you created for a site under development (sign-up, seeder or admin) in T3 Code's test-login store, so you and the user can sign in with it later. Test logins appear in request_credentials with source 'test' and fill without an approval prompt. Only for test users of sites being developed, never for real accounts.",
+    "Save a test user you created for a site under development (sign-up, seeder or admin) in Conn's test-login store, so you and the user can sign in with it later. Test logins appear in request_credentials with source 'test' and fill without an approval prompt. Only for test users of sites being developed, never for real accounts.",
   parameters: SaveTestLoginInput,
   success: TestLoginSummary,
   failure: CredentialToolFailure,
   dependencies,
 })
   .annotate(Tool.Title, "Save test login")
-  .annotate(Tool.Destructive, false);
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 export const CredentialsToolkit = Toolkit.make(
   RequestCredentialsTool,

@@ -1,0 +1,110 @@
+import {
+  createOrbitTasksClient,
+  followOrbitTasks,
+  type OrbitTasksLiveStatus,
+  type OrbitTasksClient,
+  type OrbitGatewayTransport,
+} from "@t3tools/client-runtime/orbit-gateway";
+
+import { desktopOrbitGatewayTransport } from "../desktopOrbitGateway";
+
+// Only the desktop main process reaches Orbit's Gateway: browsers fail its WireGuard Node auth,
+// its CORS allows no origin, and they cannot resolve or trust gateway.orbit.
+export const ORBIT_TASKS_WEB_REASON = "Tasks needs the Conn desktop app.";
+
+export const ORBIT_TASKS_FIXTURE_SCENARIOS = [
+  "default",
+  "empty",
+  "not-a-node",
+  "access-required",
+  "extension-disabled",
+  "unreachable",
+] as const;
+export type OrbitTasksFixtureScenario = (typeof ORBIT_TASKS_FIXTURE_SCENARIOS)[number];
+
+/** Dev builds only: localStorage `conn:orbit-tasks-fixture` names a fixture scenario. */
+function fixtureScenario(): OrbitTasksFixtureScenario | null {
+  if (!import.meta.env.DEV) return null;
+  let value: string | null = null;
+  try {
+    value = window.localStorage.getItem("conn:orbit-tasks-fixture");
+  } catch {
+    return null;
+  }
+  return ORBIT_TASKS_FIXTURE_SCENARIOS.find((scenario) => scenario === value) ?? null;
+}
+
+/** Whether Tasks can work in this app, and why not. Read once per render, it is cheap. */
+export function orbitTasksAvailability():
+  | { available: true }
+  | { available: false; reason: string } {
+  return window.desktopBridge?.orbitGatewaySend !== undefined || fixtureScenario() !== null
+    ? { available: true }
+    : { available: false, reason: ORBIT_TASKS_WEB_REASON };
+}
+
+let client: Promise<OrbitTasksClient | null> | null = null;
+let clientTransport: OrbitGatewayTransport | null = null;
+
+/** One client per window, so slice 3's realtime notices reach every open Tasks tab. */
+export function loadOrbitTasksClient(): Promise<OrbitTasksClient | null> {
+  client ??= (async () => {
+    const scenario = fixtureScenario();
+    if (scenario !== null) {
+      const { fixtureOrbitTasksTransport } = await import("./orbitTasksFixtures");
+      clientTransport = fixtureOrbitTasksTransport(scenario, () => {
+        try {
+          return JSON.parse(window.localStorage.getItem("conn:orbit-tasks-fixture-data") ?? "{}");
+        } catch {
+          return {};
+        }
+      });
+      return createOrbitTasksClient(clientTransport);
+    }
+    clientTransport = desktopOrbitGatewayTransport();
+    return clientTransport ? createOrbitTasksClient(clientTransport) : null;
+  })();
+  return client;
+}
+
+interface TasksFollower {
+  readonly listeners: Set<(status: OrbitTasksLiveStatus) => void>;
+  status: OrbitTasksLiveStatus;
+  stop: () => void;
+}
+
+let follower: TasksFollower | null = null;
+
+/**
+ * Shares the existing desktop Gateway transport; no browser proxy or replica. One connection
+ * serves every follower (the Tasks tabs and the chat's task cards); it closes with the last one.
+ */
+export function followTasksUpdates(
+  client: OrbitTasksClient,
+  onStatus: (status: OrbitTasksLiveStatus) => void,
+): () => void {
+  if (follower === null) {
+    const created: TasksFollower = { listeners: new Set(), status: "connecting", stop: () => {} };
+    const publish = (status: OrbitTasksLiveStatus) => {
+      created.status = status;
+      for (const listener of created.listeners) listener(status);
+    };
+    const transport = clientTransport;
+    if (transport) {
+      created.stop = followOrbitTasks({ transport, client, onStatus: publish });
+    } else {
+      publish("polling");
+    }
+    follower = created;
+  }
+  const current = follower;
+  current.listeners.add(onStatus);
+  if (current.status !== "connecting") onStatus(current.status);
+  return () => {
+    current.listeners.delete(onStatus);
+    if (current.listeners.size === 0 && follower === current) {
+      follower = null;
+      current.stop();
+    }
+  };
+}

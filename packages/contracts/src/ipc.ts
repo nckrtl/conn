@@ -37,6 +37,7 @@ import type {
 export interface ContextMenuItem<T extends string = string> {
   id: T;
   label: string;
+  detail?: string;
   destructive?: boolean;
   disabled?: boolean;
   /** Renders as a non-interactive section header label. Web fallback only — stripped on desktop native menus. */
@@ -57,6 +58,7 @@ export type QuitShortcutHintEvent =
 export interface ContextMenuItemSchemaType {
   readonly id: string;
   readonly label: string;
+  readonly detail?: string;
   readonly destructive?: boolean;
   readonly disabled?: boolean;
   readonly header?: boolean;
@@ -69,6 +71,7 @@ export interface ContextMenuItemSchemaType {
 export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
+  detail: Schema.optionalKey(Schema.String),
   destructive: Schema.optionalKey(Schema.Boolean),
   disabled: Schema.optionalKey(Schema.Boolean),
   header: Schema.optionalKey(Schema.Boolean),
@@ -81,6 +84,11 @@ export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Sc
     ),
   ),
 });
+
+// Native menus opened from the keyboard select their first item, which is what
+// moves a screen reader into the menu. Electron assumes a mouse unless told.
+export const ContextMenuSource = Schema.Literals(["mouse", "keyboard"]);
+export type ContextMenuSource = typeof ContextMenuSource.Type;
 
 export type DesktopUpdateStatus =
   | "disabled"
@@ -349,6 +357,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
   canRetry: Schema.Boolean,
   notAppliedVersion: Schema.optionalKey(Schema.String),
+  channelBlockedByPolicy: Schema.optionalKey(Schema.Literal(true)),
 });
 
 /** The desktop app's `t3` command on PATH, managed from Settings. */
@@ -699,6 +708,12 @@ export interface DesktopPreviewOpenLinkEvent {
   url: string;
   /** True for middle-click / Cmd-click, which should not take focus. */
   background: boolean;
+}
+
+export interface DesktopPreviewFindResultEvent {
+  tabId: string;
+  activeMatchOrdinal: number;
+  matches: number;
 }
 
 /** Recording decorations are forwarded separately from the captured page pixels. */
@@ -1089,6 +1104,19 @@ export const DesktopPreviewConfigInputSchema = Schema.Struct({
    * UA rewrite or permission handlers installed.
    */
   profileId: Schema.optional(BrowserProfileId),
+  /** Carry the partition's loopback traffic to the environment instead of this machine. */
+  tunnelLoopback: Schema.optional(Schema.Boolean),
+});
+
+export interface DesktopPreviewTunnelAccessRequest {
+  readonly requestId: string;
+  readonly environmentId: EnvironmentId;
+}
+
+export const DesktopPreviewTunnelAccessResolutionInputSchema = Schema.Struct({
+  requestId: Schema.String,
+  /** The environment's tunnel WebSocket URL with its ticket, or null when it cannot be reached. */
+  url: Schema.NullOr(Schema.String),
 });
 
 export const DesktopPreviewClearDataInputSchema = Schema.Struct({
@@ -1107,11 +1135,22 @@ export const DesktopPreviewSetZoomFactorInputSchema = Schema.Struct({
   zoomFactor: Schema.Number.check(Schema.isGreaterThan(0)),
 });
 
+export const DesktopPreviewFindInPageInputSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  text: Schema.NonEmptyString.check(Schema.isMaxLength(1000)),
+  forward: Schema.Boolean,
+  newSession: Schema.Boolean,
+});
+
 export const DesktopPreviewSetAudioMutedInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   audioMuted: Schema.Boolean,
 });
 
+export const DesktopPreviewSetCaptureDrawnInputSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  drawn: Schema.Boolean,
+});
 export const DesktopPreviewAnnotationThemeInputSchema = Schema.Struct({
   theme: DesktopPreviewAnnotationThemeSchema,
 });
@@ -1264,10 +1303,18 @@ export interface DesktopApiResponse {
 
 /** One call to the Orbit Gateway's Conn layer; `path` is below `/api/v1/conn`. */
 export interface DesktopOrbitGatewayRequest {
-  readonly method: "GET" | "POST" | "PUT" | "PATCH";
+  /** DELETE only releases a reservation (`/reservations/{id}`). */
+  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   readonly path: string;
   /** A JSON body, or null. */
   readonly body: string | null;
+  /** Query parameters; the main process allows only a few exact ones. */
+  readonly query?: Readonly<Record<string, string>>;
+  /** Overrides the default 15 s limit, up to 120 s. */
+  readonly timeoutMs?: number;
+  readonly idempotencyKey?: string;
+  /** Conn: `path` is below `/api/v1`; the main process allows only an Instance wake and an Operation read. */
+  readonly root?: true;
 }
 
 export interface DesktopOrbitGatewayResponse {
@@ -1275,6 +1322,18 @@ export interface DesktopOrbitGatewayResponse {
   readonly error: string | null;
   readonly status: number;
   readonly body: string;
+}
+
+/** Conn: one call of the Laravel toolbar's Orbit tool, from the desktop main process. */
+export interface DesktopOrbitToolRequest {
+  /** The thread's environment; writes go only to its own Orbit Instance. */
+  readonly environmentId: string;
+  readonly method: "GET" | "POST" | "PUT" | "DELETE";
+  readonly path: string;
+  readonly query: Readonly<Record<string, string>>;
+  /** A JSON body, or null. */
+  readonly body: string | null;
+  readonly timeoutMs?: number;
 }
 
 export interface DesktopDatabaseConnection {
@@ -1423,9 +1482,11 @@ export interface DesktopMcpEvent {
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
-  getRelayTelemetryEnabled: () => boolean;
+  /** `null` until the desktop host has read the login shell's environment; ask again later. */
+  getRelayTelemetryEnabled: () => boolean | null;
   getPathForFile: (file: File) => string;
   getClientPlatform: () => string;
+  restartAudioService?: () => Promise<boolean>;
   setNotificationBadge: (badge: { count: number; image: string | null }) => Promise<void>;
   onNotificationBadgeClear: (listener: () => void) => () => void;
   onTrackpadScrollBegin: (listener: () => void) => () => void;
@@ -1444,6 +1505,8 @@ export interface DesktopBridge {
   getSystemLocale: () => string | null;
   /** The OS's preferred languages, most preferred first; `navigator.languages` is pinned like the locale. */
   getPreferredSystemLanguages: () => readonly string[];
+  /** False when the OS turned off middle-click PRIMARY paste (`gtk-enable-primary-paste`). */
+  getPrimaryPasteEnabled?: () => boolean;
   // One bootstrap per pool instance currently registered with bootstrap
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
@@ -1493,6 +1556,8 @@ export interface DesktopBridge {
   ) => Promise<AuthAccessTokenResult>;
   fetchSshSessionState: (httpBaseUrl: string, bearerToken: string) => Promise<AuthSessionState>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
+  /** Fires with a prompt's request id once it is answered, cancelled, expired or abandoned. */
+  onSshPasswordPromptSettled: (listener: (requestId: string) => void) => () => void;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
@@ -1506,15 +1571,19 @@ export interface DesktopBridge {
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
+  /** Maps a Windows path to the one a local backend (`primary` or `wsl:…`) sees; null when it cannot. */
+  toLocalBackendPath: (backendId: string, windowsPath: string) => Promise<string | null>;
   pickProjectFavicon: (initialPath?: string) => Promise<string | null>;
   pickThemeFiles: () => Promise<readonly PickedThemeFile[] | null>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },
+    source?: ContextMenuSource,
   ) => Promise<T | null>;
   receiveProviderAuthCallback: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback: (authorizationUrl: string) => Promise<void>;
+  startFileDrag: (input: { environmentId: EnvironmentId; path: string }) => Promise<boolean>;
   openExternal: (url: string) => Promise<boolean>;
   /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
   readMedia: (url: string) => Promise<DesktopMediaRead | null>;
@@ -1537,6 +1606,11 @@ export interface DesktopBridge {
    * (the Gateway refuses a page Origin). Optional: other desktop builds lack it.
    */
   orbitGatewaySend?: (request: DesktopOrbitGatewayRequest) => Promise<DesktopOrbitGatewayResponse>;
+  /**
+   * nckrtl fork: one allowlisted call of the Laravel toolbar's Orbit tool, sent by the main process
+   * for a thread in an Orbit Instance. Optional: other desktop builds lack it.
+   */
+  orbitToolSend?: (request: DesktopOrbitToolRequest) => Promise<DesktopOrbitGatewayResponse>;
   /**
    * nckrtl fork: one read-only Database panel call, run by the main process on a direct
    * connection. Optional: other desktop builds lack it.
@@ -1633,6 +1707,7 @@ export interface DesktopPreviewBridge {
   goBack: (tabId: string) => Promise<void>;
   goForward: (tabId: string) => Promise<void>;
   refresh: (tabId: string) => Promise<void>;
+  stopLoading: (tabId: string) => Promise<void>;
   zoomIn: (tabId: string) => Promise<void>;
   zoomOut: (tabId: string) => Promise<void>;
   resetZoom: (tabId: string) => Promise<void>;
@@ -1651,8 +1726,16 @@ export interface DesktopPreviewBridge {
    * allowed; it simply takes effect once the page plays something.
    */
   setAudioMuted: (tabId: string, audioMuted: boolean) => Promise<void>;
+  findInPage: (
+    tabId: string,
+    text: string,
+    options: { forward: boolean; newSession: boolean },
+  ) => Promise<void>;
+  stopFindInPage: (tabId: string) => Promise<void>;
   /** Tells the tab's server whether its webview is on screen. */
   setShown: (tabId: string, shown: boolean) => Promise<void>;
+  /** Tells the tab's server whether its webview is drawn at full detail for a capture. */
+  setCaptureDrawn: (tabId: string, drawn: boolean) => Promise<void>;
   /** Open the guest webview's DevTools (detached). */
   openDevTools: (tabId: string) => Promise<void>;
   /** Drop cookies + storage data for the preview partition (all tabs). */
@@ -1668,7 +1751,13 @@ export interface DesktopPreviewBridge {
   getPreviewConfig: (
     environmentId: EnvironmentId,
     profileId?: string,
+    tunnelLoopback?: boolean,
   ) => Promise<DesktopPreviewWebviewConfig>;
+  /** Main asks for an environment's tunnel URL once per connection a tunnelled page opens. */
+  onTunnelAccessRequest: (
+    listener: (request: DesktopPreviewTunnelAccessRequest) => void,
+  ) => () => void;
+  resolveTunnelAccess: (requestId: string, url: string | null) => Promise<void>;
   /** Browsers on this machine whose cookies can be imported. */
   listBrowserImportSources: () => Promise<ReadonlyArray<BrowserImportSource>>;
   importBrowserCookies: (input: {
@@ -1720,12 +1809,15 @@ export interface DesktopPreviewBridge {
   onStateChange: (listener: (tabId: string, state: DesktopPreviewTabState) => void) => () => void;
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;
   onOpenLink: (listener: (event: DesktopPreviewOpenLinkEvent) => void) => () => void;
+  onFindResult: (listener: (event: DesktopPreviewFindResultEvent) => void) => () => void;
 }
 
 export type ConfirmDialogVariant = "default" | "destructive";
 
 export interface ConfirmDialogOptions {
   readonly variant?: ConfirmDialogVariant;
+  /** Which button takes focus on open. Defaults to Cancel; destructive confirms always keep Cancel. */
+  readonly initialFocus?: "confirm" | "cancel";
 }
 
 /**
@@ -1746,6 +1838,7 @@ export interface LocalApi {
     show: <T extends string>(
       items: readonly ContextMenuItem<T>[],
       position?: { x: number; y: number },
+      source?: ContextMenuSource,
     ) => Promise<T | null>;
     close: () => Promise<void>;
   };

@@ -28,15 +28,13 @@ is found, it reads **Set up an agent** and opens by itself:
 
 - **Turn on** enables an agent that is off on this computer, including one only
   some projects use. T3 Code then checks whether it is installed and signed in.
-- For Claude Code, **Install** or **Sign in** opens a terminal with the correct
-  command ready to run. Install uses the vendor's own installer, which keeps
-  **Update now** working in Settings.
+- For Claude Code, **Sign in** opens a terminal with the login command ready to
+  run.
 - For Codex, **Set up** offers sign-in with your ChatGPT account or your own
-  Codex CLI. **Use existing CLI** opens the terminal to install or sign in, and
+  Codex CLI. **Use existing CLI** opens the terminal to sign in, and
   **Continue with ChatGPT** stays available until Codex is signed in.
-- When T3 Code knows an installed version does not work with it, **Update** opens
-  the agent in **Settings → Providers**, which shows the version to use and updates it
-  when it can.
+- An agent whose CLI is not on the computer's `PATH` says so. Orbit installs and
+  updates provider CLIs; T3 Code does not.
 - Other agents, and agents that could not load, open their page in
   **Settings → Providers**.
 - **Browse** opens the ACP Registry for more agents.
@@ -74,9 +72,10 @@ three conversations, already checked. Projects already in T3 Code are not checke
 again. Uncheck the box to start without them, or
 select **Review all** to pick from everything found, with "Select all" and
 "Select none". Linked worktrees of bare repositories
-can be offered as separate projects. Other linked git worktrees, Codex scratch
-directories under `Documents/Codex`, and anything under `Downloads` are not
-offered.
+can be offered as separate projects. Conversations in other linked git worktrees
+count toward their main checkout, so a repository is offered even if you only
+worked in its worktrees. Codex scratch directories under `Documents/Codex`, and
+anything under `Downloads` are not offered.
 
 A large or malformed history can reach the scan limit. T3 Code keeps the
 projects it found and warns when projects or conversations may be missing.
@@ -94,14 +93,19 @@ newest remaining visible user and assistant messages, with 200 messages total.
 It omits tool activity and attachments. For Codex, it omits generated setup
 context only when a canonical user event and a valid shared turn ID identify the
 same user turn. Ambiguous legacy or response-only context stays in the imported
-conversation so T3 Code does not remove user text. It reads one conversation at
-a time and skips files larger than 4 GiB. It also skips a conversation when the
+conversation so T3 Code does not remove user text. For Claude, slash commands
+and `!` shell commands appear as you typed them; their output, background task
+notifications and interruption markers are left out, and a conversation that
+only ran commands such as `/clear`, with no reply, is skipped. It reads one
+conversation at a time and skips files larger than 4 GiB. It also skips a conversation when the
 message text and metadata it keeps need more than 32 MiB of memory. Tool output
 does not count toward that limit. It skips a conversation with more than 100,000
 records every time, so opening the page again does not import it. It ignores
-malformed records and skips unreadable or unparseable conversations.
+malformed records and conversations with no messages, such as a session opened
+in an editor but never used. It skips unreadable or unparseable conversations.
 
-Each import attempt reads up to 100 conversation files and 4 GiB per project. To
+Each import attempt reads up to 100 conversations and 4 GiB per project.
+Conversations with no messages count toward the 4 GiB but not the 100. To
 continue a large batch, open the Welcome page again and pick the project in
 **Review all**. Completed conversations are not imported again. You can continue
 without the remaining history.

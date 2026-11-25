@@ -1,0 +1,200 @@
+[
+  {
+    "id": "claude-opus-5-5",
+    "name": "Claude Opus 5.5",
+    "provider": "Claude",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultrathink"],
+    "defaultEffort": "medium",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": true
+  },
+  {
+    "id": "claude-sonnet-5-5",
+    "name": "Claude Sonnet 5.5",
+    "provider": "Claude",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultrathink"],
+    "defaultEffort": "high",
+    "speeds": [],
+    "ultracode": true
+  },
+  {
+    "id": "claude-fable-5-2",
+    "name": "Claude Fable 5.2",
+    "provider": "Claude",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultrathink"],
+    "defaultEffort": "medium",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": true
+  },
+  {
+    "id": "claude-haiku-5-5",
+    "name": "Claude Haiku 5.5",
+    "provider": "Claude",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultrathink"],
+    "defaultEffort": "medium",
+    "speeds": [],
+    "ultracode": true
+  },
+  {
+    "id": "gpt-6.2-sol",
+    "name": "GPT-6.2-Sol",
+    "provider": "Codex",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "defaultEffort": "low",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": false
+  },
+  {
+    "id": "gpt-6.2-astra",
+    "name": "GPT-6.2-Astra",
+    "provider": "Codex",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "defaultEffort": "low",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": false
+  },
+  {
+    "id": "gpt-6.1-terra",
+    "name": "GPT-6.1 Terra",
+    "provider": "Codex",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "defaultEffort": "low",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": false
+  },
+  {
+    "id": "gpt-6.1-sol",
+    "name": "GPT-6.1-Sol",
+    "provider": "Codex",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "defaultEffort": "low",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": false
+  },
+  {
+    "id": "gpt-6-astra",
+    "name": "GPT-6-Astra",
+    "provider": "Codex",
+    "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "defaultEffort": "medium",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": false
+  },
+  {
+    "id": "gpt-6-luna",
+    "name": "GPT-6-Luna",
+    "provider": "Codex",
+    "efforts": ["low", "medium", "high", "xhigh", "max"],
+    "defaultEffort": "medium",
+    "speeds": ["Standard", "Fast"],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-4-neon",
+    "name": "Gemini 4 Neon",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high", "xhigh"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-4-carbon",
+    "name": "Gemini 4 Carbon",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-4-hydrogen",
+    "name": "Gemini 4 Hydrogen",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high", "xhigh"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-4-argon",
+    "name": "Gemini 4 Argon",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-3.8-flash",
+    "name": "Gemini 3.8 Flash",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-3.7-flash",
+    "name": "Gemini 3.7 Flash",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-3.6-flash",
+    "name": "Gemini 3.6 Flash",
+    "provider": "Antigravity",
+    "efforts": ["low", "medium", "high"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "gemini-3.1-pro",
+    "name": "Gemini 3.1 Pro",
+    "provider": "Antigravity",
+    "efforts": ["low", "high"],
+    "defaultEffort": "low",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "grok-4.7",
+    "name": "Grok 4.7",
+    "provider": "Grok",
+    "efforts": ["low", "medium", "high", "xhigh"],
+    "defaultEffort": "medium",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "grok-4.7-build-fast",
+    "name": "Grok 4.7 Fast",
+    "provider": "Grok",
+    "efforts": ["low", "medium", "high", "xhigh"],
+    "defaultEffort": "high",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "grok-4.6",
+    "name": "Grok 4.6",
+    "provider": "Grok",
+    "efforts": ["low", "medium", "high", "xhigh"],
+    "defaultEffort": "high",
+    "speeds": [],
+    "ultracode": false
+  },
+  {
+    "id": "grok-4.5",
+    "name": "Grok 4.5",
+    "provider": "Grok",
+    "efforts": ["low", "medium", "high"],
+    "defaultEffort": "high",
+    "speeds": [],
+    "ultracode": false
+  }
+]

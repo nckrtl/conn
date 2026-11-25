@@ -1,5 +1,6 @@
 import { getFontEmbedCSS, toJpeg } from "html-to-image";
 import { hostCapture } from "./hooks";
+import { ANNOTATION_HOST_ID } from "./host";
 import type { AnnotationDraft, AnnotationRect } from "./types";
 import { screenshotCrop } from "./viewport";
 
@@ -30,7 +31,9 @@ export async function captureAnnotationScreenshot(
     y: crop.y + scroll.y - window.scrollY,
   };
 
-  const image = (await captureWithHost(live)) ?? (await renderDom(crop, live, scroll));
+  // A DOM render now would block the page the host was asked to spare, so a failed host
+  // capture leaves the annotation without a screenshot.
+  const image = hostCapture() ? await captureWithHost(live) : await renderDom(crop, live, scroll);
 
   if (!image) {
     return undefined;
@@ -50,12 +53,62 @@ async function captureWithHost(rect: AnnotationRect): Promise<string | undefined
     return undefined;
   }
 
-  try {
+  const host = document.getElementById(ANNOTATION_HOST_ID);
+  if (host) hideOverlay(host);
+  let active = true;
+  let limit: number | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    limit = window.setTimeout(() => resolve(undefined), OVERLAY_HIDE_LIMIT_MS);
+  });
+  const current = () => active && document.getElementById(ANNOTATION_HOST_ID) === host;
+  const copy = async () => {
+    await nextPaint();
+    if (!current()) return undefined;
     const image = await capture(rect);
+    return current() ? image : undefined;
+  };
+  let image: Blob | string | undefined;
+  try {
+    image = await Promise.race([copy(), timeout]);
+  } catch {
+    return undefined;
+  } finally {
+    active = false;
+    window.clearTimeout(limit);
+    if (host) revealOverlay(host);
+  }
+  if (!image) return undefined;
+  try {
     return typeof image === "string" ? image : await blobToDataUrl(image);
   } catch {
     return undefined;
   }
+}
+
+const overlayHides = new WeakMap<HTMLElement, number>();
+const OVERLAY_HIDE_LIMIT_MS = 1000;
+
+// Opacity keeps the popup's textarea focused while the host copies the screen.
+function hideOverlay(host: HTMLElement) {
+  overlayHides.set(host, (overlayHides.get(host) ?? 0) + 1);
+  host.style.opacity = "0";
+}
+
+function revealOverlay(host: HTMLElement) {
+  const remaining = (overlayHides.get(host) ?? 1) - 1;
+  if (remaining > 0) {
+    overlayHides.set(host, remaining);
+  } else {
+    overlayHides.delete(host);
+    host.style.removeProperty("opacity");
+  }
+}
+
+/** Resolves once a frame with the latest DOM state has been composited. */
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+  });
 }
 
 async function renderDom(
@@ -141,9 +194,11 @@ export async function paintHighlight(
   color = HIGHLIGHT,
 ): Promise<string> {
   const picture = await loadImage(image);
+  // Host captures arrive in device pixels; keep them sharp and scale the box instead.
+  const scale = picture.naturalWidth > 0 ? picture.naturalWidth / crop.width : 1;
   const canvas = document.createElement("canvas");
-  canvas.width = crop.width;
-  canvas.height = crop.height;
+  canvas.width = Math.round(crop.width * scale);
+  canvas.height = Math.round(crop.height * scale);
 
   const context = canvas.getContext("2d");
 
@@ -151,7 +206,8 @@ export async function paintHighlight(
     return image;
   }
 
-  context.drawImage(picture, 0, 0, crop.width, crop.height);
+  context.drawImage(picture, 0, 0, canvas.width, canvas.height);
+  context.scale(scale, scale);
   context.fillStyle = `${color}14`;
   context.strokeStyle = `${color}80`;
   context.lineWidth = 2;

@@ -1,0 +1,13 @@
+# T3 testkit fixture variants that fail through this engine today, with the reason.
+# `<fixture>/<driver> reason`; `*/<driver>` covers every variant of a provider this server
+# does not offer. check.mjs fails when a variant not listed here fails, and when a listed one
+# passes (then remove it). Grouped by cause.
+
+# --- Providers this server does not offer (no provider, or not offered yet) ---
+*/kiro          provider: not built (ACP)
+*/acpRegistry   provider: not built (ACP registry)
+*/fx            provider: not built (ACP)
+*/cursor        provider: not built (Cursor SDK in the SDK host)
+*/opencode      provider: not built (OpenCode SDK in the SDK host)
+*/muse          provider: not built (Muse SDK in the SDK host)
+*/pi            provider: out of scope (AGENTS.md)

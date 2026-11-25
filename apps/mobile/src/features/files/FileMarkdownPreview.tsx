@@ -3,9 +3,11 @@ import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { resolveMobileMarkdownMediaSource } from "../../lib/markdownMediaSource";
 import { getBrowseDirectoryPath } from "@t3tools/client-runtime/state/projects";
 import { maskMarkdownFrontmatter } from "@t3tools/shared/markdownFrontmatter";
+import { useGT } from "gt-react-native";
 import { useState } from "react";
 import { StackActions, useNavigation } from "@react-navigation/native";
-import { RefreshControl, ScrollView, View } from "react-native";
+import { ScrollView, View } from "react-native";
+import { RefreshControl } from "../../components/ui/RefreshControl";
 
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { SANS_FONT_FAMILY } from "../../lib/fonts";
@@ -36,6 +38,8 @@ import { fileRoutePathSegments, resolveWorkspaceFilePath } from "./filePath";
 
 interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
+  /** The same text a size smaller, in the muted colors: an agent's earlier text beside a question. */
+  readonly mutedNativeTextStyle: NativeMarkdownTextStyle;
 }
 
 export function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
@@ -50,23 +54,36 @@ export function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
   const codeText = theme["--color-md-code-text"];
   const horizontalRule = theme["--color-md-hr"];
 
+  const nativeTextStyle: NativeMarkdownTextStyle = {
+    color: body,
+    strongColor: strong,
+    mutedColor: body,
+    linkColor: link,
+    inlineCodeColor: codeText,
+    codeColor: codeText,
+    codeBackgroundColor: codeBackground,
+    codeBlockBackgroundColor: codeBackground,
+    fileTextColor: codeText,
+    quoteMarkerColor: blockquoteBorder,
+    dividerColor: horizontalRule,
+    fontSize: nativeMarkdownTypography.fontSize,
+    lineHeight: nativeMarkdownTypography.lineHeight,
+    headingFontSizes: nativeMarkdownTypography.headingFontSizes,
+    fontFamily: SANS_FONT_FAMILY,
+  };
   return {
-    nativeTextStyle: {
-      color: body,
-      strongColor: strong,
-      mutedColor: body,
-      linkColor: link,
-      inlineCodeColor: codeText,
-      codeColor: codeText,
-      codeBackgroundColor: codeBackground,
-      codeBlockBackgroundColor: codeBackground,
-      fileTextColor: codeText,
-      quoteMarkerColor: blockquoteBorder,
-      dividerColor: horizontalRule,
-      fontSize: nativeMarkdownTypography.fontSize,
-      lineHeight: nativeMarkdownTypography.lineHeight,
-      headingFontSizes: nativeMarkdownTypography.headingFontSizes,
-      fontFamily: SANS_FONT_FAMILY,
+    nativeTextStyle,
+    mutedNativeTextStyle: {
+      ...nativeTextStyle,
+      // Every text and marker colour is muted, so bold, code and bullets stay quiet; links keep theirs.
+      color: theme["--color-foreground-muted"],
+      strongColor: theme["--color-foreground-muted"],
+      mutedColor: theme["--color-foreground-muted"],
+      inlineCodeColor: theme["--color-foreground-muted"],
+      codeColor: theme["--color-foreground-muted"],
+      fileTextColor: theme["--color-foreground-muted"],
+      fontSize: nativeTextStyle.fontSize - 1,
+      lineHeight: nativeTextStyle.lineHeight - 2,
     },
   };
 }
@@ -81,6 +98,7 @@ export function FileMarkdownPreview(props: {
   readonly onRefresh?: () => Promise<void> | void;
 }) {
   const navigation = useNavigation();
+  const gt = useGT();
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
@@ -115,11 +133,11 @@ export function FileMarkdownPreview(props: {
       (!props.captured && fileLink.kind === "file" && fileLink.line !== undefined)
     ) {
       const name =
-        preview?.source.name ?? (fileLink.kind === "file" ? fileLink.label : "Open file");
+        preview?.source.name ?? (fileLink.kind === "file" ? fileLink.label : gt("Open file"));
       return (
         <Text
           accessibilityRole="link"
-          accessibilityLabel={`Open ${name}`}
+          accessibilityLabel={gt("Open {name}", { name })}
           onPress={() => openMedia(image.href, true)}
           style={{ color: styles.nativeTextStyle.linkColor }}
         >

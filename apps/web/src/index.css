@@ -145,8 +145,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
   @variant dark {
     --appearance-contrast-target: white;
-    --app-scrollbar-thumb: rgb(255 255 255 / 8%);
-    --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
+    /* Keeps the idle thumb above 3:1 (WCAG 1.4.11) on #000; 35% renders as gray 89, just under. */
+    --app-scrollbar-thumb: rgb(255 255 255 / 36%);
+    --app-scrollbar-thumb-hover: rgb(255 255 255 / 45%);
     --glass-blur: 16px;
     --glass-saturation: 1.08;
   }
@@ -238,7 +239,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     linear-gradient(
       to top,
       transparent 0 var(--chat-composer-attachment-overlap),
-      rgb(0 0 0 / 18%) var(--chat-composer-attachment-overlap),
+      var(--chat-composer-attached-seam, rgb(0 0 0 / 18%)) var(--chat-composer-attachment-overlap),
       transparent calc(var(--chat-composer-attachment-overlap) + 10px)
     );
   --color-zinc-25: oklch(99.2% 0 0);
@@ -495,6 +496,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/* The app modals cover the whole window, the browser page included: a bright page under the
+   lighter dialog-backdrop stays orange and its large text readable. */
+@utility app-modal-backdrop {
+  background: color-mix(in srgb, var(--background) 80%, transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+}
+
 @utility dropdown-glass {
   /* Floating surfaces share the shell's overlay: mostly fill, heavy blur. Rows
      inside highlight with the shell's highlight instead of the faint accent. */
@@ -701,7 +710,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 @utility live-activity-focus-aligned {
   width: calc(100% - var(--live-activity-focus-width) - var(--live-activity-focus-width));
-  margin-left: var(--live-activity-focus-width);
+  margin-inline-start: var(--live-activity-focus-width);
 }
 
 @property --assistant-citation-highlight-opacity {
@@ -2017,13 +2026,33 @@ html {
   list-style-type: disc;
 }
 
-/* --list-gutter defaults to the same 1.25rem as .chat-markdown ul, but
-   ChatMarkdown's `ol` renderer widens it (via inline style) for lists whose
-   widest marker has multiple characters so it isn't clipped by list-style-position:
-   outside painting the marker past the padding box. Reset it here too so a
-   nested ol without its own widened marker doesn't inherit the outer one. */
+/* Chat bullets: a drawn dot whose left edge sits on the paragraph text edge, with the item text
+   hanging after it, so the list lines up with the text above and below (Nick, 2026-11-20). */
+.chat-markdown > ul:not(:has(> li.task-list-item)) {
+  list-style-type: none;
+  padding-inline-start: 0;
+}
+.chat-markdown > ul:not(:has(> li.task-list-item)) > li {
+  position: relative;
+  padding-inline-start: 1rem;
+}
+.chat-markdown > ul:not(:has(> li.task-list-item)) > li::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0.0625rem;
+  top: calc(0.5lh - 0.15625rem);
+  width: 0.3125rem;
+  height: 0.3125rem;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+
+/* Outside markers paint past the padding box, so the gutter must fit `0. `,
+   measured per font in appearanceFonts. ChatMarkdown widens it inline for
+   multi-digit markers; setting it here stops a nested ol inheriting that. */
 :is(.chat-markdown, .composer-tiptap) ol {
-  --list-gutter: 1.25rem;
+  --list-gutter: max(1.25rem, var(--list-marker-sans, 0px));
   padding-inline-start: var(--list-gutter, 1.25rem);
   list-style-type: decimal;
 }
@@ -2096,6 +2125,18 @@ html {
   list-style-type: lower-roman;
 }
 
+.chat-markdown.user-message-markdown ol {
+  list-style-type: decimal;
+}
+
+/* Spaces a user typed at the start of a line, which Markdown would otherwise drop. pre-wrap, not
+   pre, so an indent wider than the bubble wraps instead of pushing the line's text out of view.
+   Not selectable, so a selection, a drag or a copy carries the text as it did before. */
+.chat-markdown.user-message-markdown [data-leading-whitespace] {
+  white-space: pre-wrap;
+  user-select: none;
+}
+
 .chat-markdown li + li {
   margin-top: 0.25rem;
 }
@@ -2119,6 +2160,25 @@ html {
 
 .chat-markdown a {
   text-decoration: none;
+}
+
+/* Triple-click selection stops at block-level boxes, flex items included, so file chips in
+   prose stay inline-level down to the icon and label. */
+.chat-markdown-file-link {
+  display: inline-block;
+  overflow-x: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-markdown-file-link > :is(svg, img) {
+  display: inline;
+  margin-inline-end: 0.2em;
+  vertical-align: -0.125em;
+}
+
+.chat-markdown-file-link > [data-slot="context-chip-label"] {
+  display: inline;
 }
 
 /* File links and context chips own their color and focus ring. */
@@ -2220,6 +2280,11 @@ html {
   font-size: 0.85em;
 }
 
+.chat-markdown.user-message-markdown :not(pre) > code {
+  background: color-mix(in srgb, var(--contrast-message-foreground) 10%, transparent);
+  color: var(--contrast-message-foreground);
+}
+
 .chat-markdown strong {
   font-weight: 700;
 }
@@ -2282,6 +2347,18 @@ html {
   & :is(pre, pre *) {
     color: inherit !important;
   }
+}
+
+/* Sent messages color prose with the message foreground, which is not chosen
+   for the code surface, so their plain-text fences keep the global foreground. */
+.chat-markdown.user-message-markdown
+  .chat-markdown-codeblock:is(
+    [data-language="text" i],
+    [data-language="txt" i],
+    [data-language="plain" i],
+    [data-language="plaintext" i]
+  ) {
+  color: var(--contrast-foreground) !important;
 }
 
 /* Paragraphs and code blocks arrive in chunks while a response streams. Fade
@@ -2524,6 +2601,12 @@ html {
   position: relative;
 }
 
+/* Tiptap's injected base CSS disables ligatures; match sent messages. */
+.composer-tiptap.ProseMirror {
+  font-variant-ligatures: normal;
+  font-feature-settings: normal;
+}
+
 .composer-tiptap p {
   margin: 0;
 }
@@ -2641,6 +2724,10 @@ html {
   --shell-blur: 40px;
   --shell-saturate: 1.6;
   --shell-fill: color-mix(in srgb, var(--sidebar) 88%, transparent);
+  /* The frame of the app modals (Settings, Usage, Orbit). They float over the app, not over
+     the desktop, so they keep this fill when html.electron-macos thins --shell-fill for the
+     native glass: a bright page behind them must not tint them. Same 94% as --shell-overlay. */
+  --shell-modal-fill: color-mix(in srgb, var(--sidebar) 94%, transparent);
   --shell-panel: color-mix(in oklab, var(--sidebar) 40%, var(--background));
   /* Chat and right-panel cards share the thread panel's opaque color, so they
      can re-root --background on it for everything inside. */
@@ -2652,6 +2739,12 @@ html {
   --shell-divider-header: color-mix(in oklab, var(--sidebar) 84%, var(--foreground));
   /* Divider shared by the selected sidebar row's top edge and the toolbar flyout. */
   --shell-divider-raised: color-mix(in oklab, var(--sidebar) 80%, var(--foreground));
+  /* A card's top edge (task cards, insight blocks): the divider, a little lighter. */
+  --shell-card-edge: color-mix(in oklab, var(--shell-divider) 80%, white);
+  /* Chart gridlines: a little brighter than the dividers. */
+  --shell-chart-grid: color-mix(in oklab, var(--shell-divider) 93%, var(--foreground));
+  /* A rule inside a popover that still reads on its lighter fill. */
+  --popover-rule: color-mix(in oklab, var(--popover) 80%, var(--foreground));
   /* Settings cards (SettingsGroup) have their own fill. Light mode matches the selected-row
      fill (--sidebar-row-active); dark mode sits a notch darker so the card does not glare on
      the page. Dark mode derives the rest of the card from that fill (outer border, top edge and
@@ -2671,6 +2764,8 @@ html {
   /* One step up, for controls on a surface that already uses --shell-control. */
   --shell-control-raised: var(--card);
   --shell-control-raised-border: var(--shell-divider-header);
+  /* The chat composer's fill. Dark mode lifts it off the chat card, which upstream leaves level. */
+  --shell-composer: var(--card);
   /* Shape of toolbar groups and soft search fields, and of the buttons inside groups.
      Pill: 9999px / 9999px. Rounded rectangle: var(--radius) / 6px. */
   --toolbar-radius: 9999px;
@@ -2704,6 +2799,11 @@ html {
     color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 86%,
     transparent
   );
+  --shell-modal-fill: color-mix(
+    in srgb,
+    color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 94%,
+    transparent
+  );
   --shell-panel: var(--sidebar);
   /* Chat and right-panel cards share the thread panel's opaque color, so they
      can re-root --background on it for everything inside. */
@@ -2721,6 +2821,7 @@ html {
   /* The header runs on the lighter frame, so its stretch of divider is lighter. */
   --shell-divider-header: color-mix(in oklab, var(--sidebar) 82%, var(--foreground));
   --shell-divider-raised: color-mix(in oklab, var(--sidebar) 78%, var(--foreground));
+  --shell-card-edge: color-mix(in oklab, var(--shell-divider) 96.5%, white);
   /* A notch darker than the selected-row fill (22% toward the sidebar). */
   --shell-settings-card: color-mix(in oklab, var(--sidebar-row-active) 78%, var(--sidebar));
   /* One hairline for the outer border, top edge and row dividers: the card fill, 10% toward
@@ -2744,6 +2845,7 @@ html {
   --shell-control: color-mix(in oklab, var(--sidebar) 91%, var(--foreground));
   --shell-control-raised: color-mix(in oklab, var(--sidebar) 86%, var(--foreground));
   --shell-control-raised-border: color-mix(in oklab, var(--sidebar) 74%, var(--foreground));
+  --shell-composer: color-mix(in oklab, var(--sidebar) 95%, var(--foreground));
   --toolbar-group-fill: var(--shell-control);
   --toolbar-group-border: var(--shell-divider-header);
   /* Header buttons sit on the frosted frame, where the theme's toolbar control role alone reads
@@ -2899,6 +3001,7 @@ html.electron-macos.dark {
   html.electron-macos,
   html.electron-macos.dark {
     --shell-fill: var(--sidebar);
+    --shell-modal-fill: var(--sidebar);
     --shell-inner-fill: var(--shell-card);
   }
 }
@@ -2920,11 +3023,19 @@ html.dark[data-theme-id] [data-app-sidebar] {
 }
 
 /* A workspace area with no control of its own takes F6 focus itself; keep that visible.
-   workspaceFocus.ts marks those, since :focus-visible also matches a clicked area after a key press. */
+   workspaceFocus.ts marks those, since :focus-visible also matches a clicked area after a key press.
+   The conversation's timeline takes it instead, and its top fade mask would hide its own ring. */
 [data-workspace-area]:focus-visible {
   outline: none;
 }
-[data-workspace-keyboard-focus]:focus {
+[data-workspace-keyboard-focus]:focus,
+[data-workspace-area="conversation"]:has(
+  .messages-timeline-scroll[data-workspace-keyboard-focus]:focus
+) {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
+}
+
+.messages-timeline-scroll:focus-visible {
+  outline: none;
 }

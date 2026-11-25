@@ -3,7 +3,6 @@ import {
   sessionGrantsScope,
   type AuthSessionState,
   type ExecutionEnvironmentCapabilities,
-  type ServerProvider,
 } from "@t3tools/contracts";
 import {
   CLI_RELEASES_PAGE_URL,
@@ -12,7 +11,10 @@ import {
   newestCliReleaseVersion,
 } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
+import { msg } from "gt-react-native";
 import * as Schema from "effect/Schema";
+
+import { m } from "../../i18n/messages";
 
 export function canMaintainEnvironment(session: AuthSessionState | null, connected: boolean) {
   return (
@@ -31,21 +33,6 @@ export function supportsEnvironmentUpdate(
   );
 }
 
-export function canUpdateEnvironmentProvider(provider: ServerProvider) {
-  const compatibility = provider.compatibilityAdvisory?.latestVersionStatus;
-  return (
-    provider.installed &&
-    provider.availability !== "unavailable" &&
-    provider.versionAdvisory?.status === "behind_latest" &&
-    provider.versionAdvisory.canUpdate &&
-    provider.versionAdvisory.latestVersion !== null &&
-    compatibility !== "broken" &&
-    compatibility !== "unsupported" &&
-    provider.updateState?.status !== "running" &&
-    provider.updateState?.status !== "queued"
-  );
-}
-
 const Release = Schema.Struct({
   tag_name: Schema.String,
   draft: Schema.optionalKey(Schema.Boolean),
@@ -55,7 +42,11 @@ const decodeReleases = Schema.decodeUnknownSync(Schema.Array(Release));
 
 async function fetchReleases(url: string, accept: string, signal: AbortSignal) {
   const response = await fetch(url, { signal, headers: { Accept: accept } });
-  if (!response.ok) throw new Error(`Could not check releases (${response.status}). Try again.`);
+  if (!response.ok) {
+    throw new Error(
+      m(msg("Could not check releases ({status}). Try again.", { status: response.status })),
+    );
+  }
   return response;
 }
 
@@ -90,6 +81,7 @@ export async function findEnvironmentUpdate(currentVersion: string, signal: Abor
     if (releases.length < 100) break;
   }
 
-  if (version === undefined) throw new Error(`No ${channel} release was found.`);
+  if (version === undefined)
+    throw new Error(m(msg("No {channel} release was found.", { channel })));
   return compareSemverVersions(version, currentVersion) > 0 ? version : null;
 }

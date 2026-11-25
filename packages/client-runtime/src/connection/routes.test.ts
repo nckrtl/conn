@@ -16,9 +16,11 @@ import {
   credentialConnectionId,
   insertRoute,
   entryWithRoutes,
+  isNearbyAddress,
   mergeLearnedRoutes,
   pendingRouteOrder,
   removedWithRelay,
+  routeKeepsItsHost,
   routesAfterRemoving,
   sendsTokenInClear,
   upsertRoute,
@@ -77,6 +79,35 @@ describe("connection routes", () => {
     expect(connectionRouteLabel(RELAY)).toBe("T3 Connect");
   });
 
+  it("knows which addresses reach the same machine on every network", () => {
+    const tailnetIp = direct("ts-ip", "http://100.101.102.103:3773/");
+    const profile = Option.getOrThrow(tailnetIp.profile) as BearerConnectionProfile;
+    const marked = {
+      target: tailnetIp.target,
+      profile: Option.some(new BearerConnectionProfile({ ...profile, network: "tailscale" })),
+    };
+    expect(routeKeepsItsHost(PUBLIC)).toBe(true);
+    expect(routeKeepsItsHost(direct("ts-tls", "https://desk.tail1234.ts.net/"))).toBe(true);
+    expect(routeKeepsItsHost(direct("lo", "http://127.0.0.1:3773/"))).toBe(true);
+    // With Tailscale down, a plain http tailnet address can reach another host:
+    // carrier networks use 100.64.0.0/10 too, and nothing proves who answers.
+    expect(routeKeepsItsHost(direct("ts", "http://desk.tail1234.ts.net:3773/"))).toBe(false);
+    expect(routeKeepsItsHost(marked)).toBe(false);
+    expect(routeKeepsItsHost(tailnetIp)).toBe(false);
+    expect(routeKeepsItsHost(LAN)).toBe(false);
+    expect(routeKeepsItsHost(direct("http", "http://desk.example.com/"))).toBe(false);
+    expect(routeKeepsItsHost(RELAY)).toBe(false);
+  });
+
+  it("treats only loopback and LAN addresses as nearby", () => {
+    expect(isNearbyAddress("http://127.0.0.1:3773/")).toBe(true);
+    expect(isNearbyAddress("http://192.168.1.10:3773/")).toBe(true);
+    expect(isNearbyAddress("http://100.101.102.103:3773/")).toBe(false);
+    expect(isNearbyAddress("https://desk.tail1234.ts.net/")).toBe(false);
+    expect(isNearbyAddress("https://desk.example.com/")).toBe(false);
+    expect(isNearbyAddress("not a url")).toBe(false);
+  });
+
   it("places a new route after faster kinds and ahead of T3 Connect", () => {
     expect(insertRoute([RELAY], LAN)).toEqual([LAN, RELAY]);
     expect(insertRoute([LAN, RELAY], TAILNET)).toEqual([LAN, TAILNET, RELAY]);
@@ -132,6 +163,24 @@ describe("learned routes", () => {
       authorization: "t3-connect",
       wsBaseUrl: "ws://192.168.1.10:3773/",
     });
+  });
+
+  it("Conn: a learned route keeps a name the person chose", () => {
+    const named: ConnectionCatalogEntry = {
+      ...relayOnly,
+      target: new RelayConnectionTarget({
+        environmentId: RELAY.target.environmentId,
+        label: "My box",
+        labelSetByUser: true,
+      }),
+    };
+    const routes = mergeLearnedRoutes({
+      entry: named,
+      activeRoute: { target: named.target, profile: named.profile },
+      reported: [{ httpBaseUrl: "http://192.168.1.10:3773/" }],
+      allowInsecure: true,
+    });
+    expect(routes![0]!.target).toMatchObject({ label: "My box", labelSetByUser: true });
   });
 
   it("replaces a learned LAN address when the server reports a new one", () => {

@@ -1,20 +1,20 @@
 # Antigravity
 
 T3 Code runs Google's official Antigravity ACP agent on your selected environment.
-It has its own sign-in, separate from the Antigravity IDE or CLI. Google controls
+Orbit installs and updates the Antigravity CLI; T3 Code finds it on the environment's `PATH`
+and manages sign-in, separate from your terminal or IDE. Google controls
 which models and account access are available through this agent.
 
 ## Set up Antigravity
 
 On web or desktop, open **Settings > Providers**, choose the environment that runs
-your project, and enable Antigravity. Install its runtime there, then choose
-**Sign in** and complete the browser sign-in. Wait for T3 Code to confirm
-account access and load models before starting a thread. Once the runtime is installed,
-you can also sign in from **Settings > Providers** in the mobile app.
+your project, and enable Antigravity. Choose **Sign in** and complete the browser
+sign-in. Wait for T3 Code to confirm account access and load models before
+starting a thread. You can also sign in from **Settings > Providers** in the
+mobile app.
 
-Installation continues if you leave settings or reconnect. Setup requires
-permission to operate the environment; update an older server if it does not offer
-Antigravity setup.
+If Antigravity is not on the environment's `PATH`, Orbit has not installed it
+there yet. Setup requires permission to operate the environment.
 
 ### Sign in from a remote device
 
@@ -49,22 +49,15 @@ ambient `GEMINI_API_KEY` and Google credential variables do not override them.
 Changing the method stops the instance's sessions. Sign out before replacing an
 account.
 
-## Runtime installation
+## The Antigravity CLI
 
-Managed installation supports Apple Silicon macOS, Linux x64 or ARM64, and Windows
-x64 or ARM64. Intel Macs can connect to a supported remote environment. Allow
-several GB of free disk space, especially on Linux.
-
-### Use a manual installation
-
-Download the archive for your environment from the [official ACP Registry][registry].
-Extract the ACP executable and its `localharness_external` helper into the same
-directory, at the same version. Make both executable on macOS or Linux; Windows
-uses `.exe` files.
-
-Set **Binary path** to the ACP executable on the environment and update it yourself.
-Leave the field blank to use the managed runtime, or a compatible executable on
-`PATH` if no managed runtime is installed.
+Orbit installs and updates the Antigravity CLI on each environment. T3 Code shows
+its version in provider settings and never installs, updates, or removes it.
+To use another executable, set **Binary path**; leave it blank to use `agy` on
+`PATH`.
+On Windows, **Binary path** can also be a `.cmd` or `.bat` script that only sets
+variables and then runs `agy_acp_server.exe` by its full path or a `%~dp0`-relative
+path; keep `localharness_external.exe` beside that executable.
 
 ## Models and threads
 
@@ -82,9 +75,10 @@ Use Antigravity's native `/plan` command for planning. Tool approvals follow [Pe
 Questions with fixed choices still need one of the offered answers, even in
 **Full access**.
 
-T3 Code keeps conversation history and file diffs, but Antigravity cannot rewind
-its conversation. Reverting a thread or editing and resubmitting an earlier turn
-is unavailable. Continue with a follow-up message or start a new thread.
+On web and desktop, [Edit from here](./composer.md#edit-an-earlier-prompt) works with
+Antigravity. Antigravity cannot rewind its own conversation, so the next turn
+starts a fresh Antigravity session and T3 Code sends it the kept conversation,
+without the turns you removed.
 
 Manual context compaction is unavailable through Antigravity's ACP runtime, even
 though its CLI has `/compact`. Send `/clear` when you need a fresh context.
@@ -118,22 +112,27 @@ activity.
 ## Accounts and removal
 
 Add an Antigravity provider instance for each Google account in
-**Settings > Providers** on web or desktop. Each has its own sign-in; downloaded
-runtimes are shared on the environment.
+**Settings > Providers** on web or desktop. Each has its own sign-in; the CLI is
+shared on the environment.
 
-| Action                    | Effect                                                            |
-| ------------------------- | ----------------------------------------------------------------- |
-| Disable                   | Stops the instance's sessions and keeps its Google sign-in.       |
-| Sign out                  | Stops the instance's sessions and removes its saved Google login. |
-| Remove downloaded runtime | Removes the shared installation and keeps Google credentials.     |
+| Action   | Effect                                                            |
+| -------- | ----------------------------------------------------------------- |
+| Disable  | Stops the instance's sessions and keeps its Google sign-in.       |
+| Sign out | Stops the instance's sessions and removes its saved Google login. |
 
-All three keep thread history and workspace files. Sending `/logout` by itself in
+Both keep thread history and workspace files. Sending `/logout` by itself in
 a thread signs out its instance, including stopping that instance's other sessions.
 Sign out, then sign in again to replace an account.
 
-Before removing a managed runtime, disable its instances and cancel any active
-installation. Clear any explicit binary path pointing into that runtime. Removal
-is refused while the runtime is in use.
+## Run a native goal
+
+When your Antigravity runtime offers `/goal`, send `/goal` followed by a verifiable
+objective. Antigravity keeps working until it completes the goal or you cancel it.
+An older 1.4.5 runtime has no `/goal`; once Orbit updates it, refresh provider status.
+
+Use Stop to interrupt a running goal, then ask Antigravity to stop pursuing it
+before starting more work. Ordinary follow-ups wait until the running turn ends.
+T3 does not support Antigravity goal status, pause, resume, or clear commands.
 
 ## Check access and troubleshoot
 
@@ -152,5 +151,4 @@ If Google reports `SUBSCRIPTION_REQUIRED`, an account restriction, or a usage li
 follow the provider's message and any retry time. See [Google's account plans][plans]
 for eligibility.
 
-[registry]: https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json
 [plans]: https://antigravity.google/docs/plans

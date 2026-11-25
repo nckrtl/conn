@@ -1,62 +1,43 @@
 import {
-  APPEARANCE_SECTION,
-  DESKTOP_DEVICE_SECTION,
+  orbitConnectionChecks,
+  orbitNodeServers,
+  orbitSignedInText,
+  renewalFailureText,
   type EnvironmentProvider,
+  type OrbitConnectionCheckState,
+  type OrbitConnectionProbe,
   type OrbitGatewayEnvironment,
-  type OrbitGatewayNode,
-  type OrbitGatewayProfile,
-  type ProfileSectionName,
+  type OrbitNodeState,
+  visibleOrbitEnvironments,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { useEffect, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { CheckIcon, XIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
-import { setEnvironmentProvider, useEnvironmentProvider } from "~/orbit/environmentProvider";
 import {
-  desktopOrbitGatewayClient,
-  forceOrbitProfileSync,
-  syncOrbitProfileNow,
-  useOrbitProfileSyncStatus,
-} from "~/orbit/OrbitProfileSync";
-import { backupLocalSections, restoreSectionBackup } from "~/orbit/profileSyncRegistry";
-import {
-  setGroupSyncEnabled,
-  SYNC_GROUPS,
-  useProfileSyncBackups,
-  useProfileSyncOptOuts,
-  type SyncGroup,
-} from "~/orbit/profileSyncStorage";
+  connectOrbitEnvironment,
+  retryOrbitRenewal,
+  setEnvironmentProvider,
+  useEnvironmentProvider,
+} from "~/orbit/environmentProvider";
+import { desktopOrbitGatewayClient } from "~/orbit/OrbitProfileSync";
 import { useEnvironments } from "~/state/environments";
 
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { Switch } from "../ui/switch";
-import { toastManager } from "../ui/toast";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
-import { useStableCallback } from "~/hooks/useStableCallback";
+import { cn } from "~/lib/utils";
 
-interface GatewayView {
-  readonly node: OrbitGatewayNode;
-  readonly profiles: readonly OrbitGatewayProfile[];
-  readonly environments: readonly OrbitGatewayEnvironment[];
-}
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Spinner } from "../ui/spinner";
+import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import { searchableSetting, SETTINGS_SECTION_LABELS } from "./settingsSearch";
+import { useMessages } from "gt-react";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 const PROVIDER_LABELS: Record<EnvironmentProvider, string> = {
   default: "Default",
   orbit: "Orbit",
 };
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function relativeTime(at: number | null): string {
-  if (at === null) return "not yet";
-  const seconds = Math.round((Date.now() - at) / 1000);
-  if (seconds < 60) return "just now";
-  const minutes = Math.round(seconds / 60);
-  return minutes < 60 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
-}
 
 /**
  * Where this device's environments come from: the ones added here (Default) or the T3 servers on
@@ -74,7 +55,7 @@ export function EnvironmentProviderSection() {
         title="Environments from"
         description={
           provider === "orbit"
-            ? "The T3 servers registered on the Orbit Gateway, paired automatically. Environments added here are switched off until you choose Default again."
+            ? "The Conn Servers registered on the Orbit Gateway. Host servers pair automatically. Instances are managed in the Orbit panel. Environments added here are switched off until you choose Default again."
             : "Environments you add on this device. Orbit uses the servers on the Orbit Gateway instead and syncs workspaces with your profile."
         }
         control={
@@ -100,324 +81,289 @@ export function EnvironmentProviderSection() {
   );
 }
 
-const SYNC_GROUP_LABELS: Record<SyncGroup, string> = {
-  appearance: "Appearance",
-  device: "This desktop's settings",
+const CHECK_BADGES: Record<
+  OrbitConnectionCheckState,
+  { readonly label: string; readonly variant: "success" | "error" | "outline" }
+> = {
+  pass: { label: "OK", variant: "success" },
+  fail: { label: "Failed", variant: "error" },
+  checking: { label: "Checking", variant: "outline" },
+  not_checked: { label: "Not checked", variant: "outline" },
 };
 
-function changedLine(
-  label: string,
-  change: { readonly updatedAt: string | null; readonly updatedBy: string | null } | undefined,
-): string | null {
-  if (!change) return null;
-  const at = change.updatedAt === null ? Number.NaN : Date.parse(change.updatedAt);
-  const when = Number.isNaN(at) ? "" : ` ${relativeTime(at)}`;
-  return `${label}: changed${change.updatedBy ? ` by ${change.updatedBy}` : ""}${when}`;
-}
-
-/**
- * What the profile shares beyond workspaces: the appearance on every device, and this desktop's
- * settings with the user's other desktops. Each can be turned off on this device only.
- */
-function ProfileSyncSection({ profileName }: { readonly profileName: string | null }) {
-  const sync = useOrbitProfileSyncStatus();
-  const optOuts = useProfileSyncOptOuts();
-  const backups = useProfileSyncBackups();
-  const unsupported = sync.sections === "unsupported";
-  const disabled = profileName === null;
-
-  const enabledSections = (Object.keys(SYNC_GROUPS) as SyncGroup[])
-    .filter((group) => !optOuts[group])
-    .map((group): ProfileSectionName => SYNC_GROUPS[group]);
-  const backedUp = ([APPEARANCE_SECTION, DESKTOP_DEVICE_SECTION] as const).filter(
-    (name) => backups[name] !== undefined,
-  );
-  const backupTime = Math.max(0, ...backedUp.map((name) => backups[name]?.savedAt ?? 0));
-  const changes = [
-    changedLine("Appearance", sync.sectionChanges?.[APPEARANCE_SECTION]),
-    changedLine("This desktop's settings", sync.sectionChanges?.[DESKTOP_DEVICE_SECTION]),
-  ].filter((line): line is string => line !== null);
-
-  const statusTitle =
-    sync.phase === "error"
-      ? "Sync failed"
-      : profileName === null
-        ? "No profile"
-        : unsupported
-          ? "Workspaces only"
-          : "Synced";
-  const statusDescription =
-    sync.phase === "error"
-      ? sync.error
-      : profileName === null
-        ? "Choose a profile to sync workspaces, appearance and settings."
-        : unsupported
-          ? `Gateway doesn't support profile sync yet. Workspaces still sync with ${profileName}.`
-          : sync.phase === "synced"
-            ? `Synced with ${profileName}. Last synced ${relativeTime(sync.syncedAt)}.`
-            : "Waiting for the first sync.";
-
-  const toggle = (group: SyncGroup, enabled: boolean) => {
-    setGroupSyncEnabled(group, enabled);
-    syncOrbitProfileNow();
-  };
-  const force = (direction: "push" | "pull") => {
-    if (direction === "pull") backupLocalSections(enabledSections);
-    forceOrbitProfileSync(direction, enabledSections);
-    toastManager.add({
-      type: "info",
-      title: "Profile sync",
-      description:
-        direction === "push"
-          ? "Sending this device's settings to the profile."
-          : "Replacing this device's settings with the profile's. Restore previous settings undoes it.",
-    });
-  };
-  const restore = () => {
-    const restored = backedUp.filter((name) => restoreSectionBackup(name));
-    toastManager.add({
-      type: restored.length > 0 ? "success" : "error",
-      title: "Profile sync",
-      description:
-        restored.length > 0
-          ? "Previous settings restored. They replace the profile's at the next sync."
-          : "Nothing to restore yet. Try again in a moment.",
-    });
-  };
-
+function CheckBadge({ state }: { readonly state: OrbitConnectionCheckState }) {
+  const { label, variant } = CHECK_BADGES[state];
   return (
-    <SettingsSection {...searchableSetting("orbit-profile-sync")}>
-      <SettingsRow
-        title={statusTitle}
-        description={statusDescription}
-        status={
-          sync.sectionsError ? (
-            `Appearance and settings: ${sync.sectionsError}`
-          ) : changes.length > 0 ? (
-            <ul>
-              {changes.map((line) => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
-          ) : undefined
-        }
-        control={
-          <Button size="xs" variant="outline" disabled={disabled} onClick={syncOrbitProfileNow}>
-            Sync now
-          </Button>
-        }
-      />
-      {(Object.keys(SYNC_GROUPS) as SyncGroup[]).map((group) => (
-        <SettingsRow
-          key={group}
-          title={`Sync ${SYNC_GROUP_LABELS[group].toLowerCase()}`}
-          description={
-            group === "appearance"
-              ? "Theme, light or dark mode, contrast and custom themes follow your profile on every device."
-              : "Fonts, text sizes, chat width, glass, motion, diff and timestamp options are shared with your other desktops. Phones keep their own."
-          }
-          control={
-            <Switch
-              aria-label={`Sync ${SYNC_GROUP_LABELS[group].toLowerCase()}`}
-              checked={!optOuts[group]}
-              disabled={disabled || unsupported}
-              onCheckedChange={(enabled) => toggle(group, enabled)}
-            />
-          }
-        />
-      ))}
-      <SettingsRow
-        title="Resolve differences"
-        description="Replace the profile with what this device has, or this device with what the profile has."
-        control={
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={disabled || unsupported || enabledSections.length === 0}
-              onClick={() => force("push")}
-            >
-              Use this device
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={disabled || unsupported || enabledSections.length === 0}
-              onClick={() => force("pull")}
-            >
-              Use the profile
-            </Button>
-          </div>
-        }
-      />
-      {backedUp.length > 0 ? (
-        <SettingsRow
-          title="Restore previous settings"
-          description={`What this device had before the profile's settings replaced them, saved ${relativeTime(backupTime)}.`}
-          control={
-            <Button size="xs" variant="outline" onClick={restore}>
-              Restore
-            </Button>
-          }
-        />
+    <Badge variant={variant} data-check-state={state}>
+      {state === "pass" ? (
+        <CheckIcon />
+      ) : state === "fail" ? (
+        <XIcon />
+      ) : state === "checking" ? (
+        <Spinner />
       ) : null}
-    </SettingsSection>
+      {label}
+    </Badge>
   );
 }
 
+const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot: string }> = {
+  paired: { label: "Paired", dot: "bg-success" },
+  pairing: { label: "Pairing…", dot: "bg-muted-foreground/40" },
+  expired: { label: "Registration expired", dot: "bg-warning" },
+  revoked: { label: "Revoked in Orbit", dot: "bg-destructive" },
+  // The row shows the reason's sentence (renewalFailureText) in place of this label.
+  renewal_failed: { label: "Could not renew.", dot: "bg-warning" },
+};
+
 /**
- * The Orbit side of Connections: this device's Node and profile on the Gateway, the workspace sync,
- * and the Gateway's T3 servers. Workspaces are edited on the desktop; pairing is automatic.
+ * The Gateway's answer to `me` (which runs the three checks) and its server list. Reload runs both
+ * again; an answer to an earlier load that comes late is dropped.
  */
-export function OrbitEnvironmentSections() {
+function useOrbitConnection() {
   // One client per mount: the load effect below must not restart on every render.
   const [client] = useState(desktopOrbitGatewayClient);
-  const sync = useOrbitProfileSyncStatus();
-  const { environments: savedEnvironments } = useEnvironments();
-  const [view, setView] = useState<GatewayView | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [newProfileName, setNewProfileName] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Without a client (outside the desktop app) nothing runs, so the checks settle as not checked.
+  const [probe, setProbe] = useState<OrbitConnectionProbe>(() =>
+    client ? { status: "checking" } : { status: "unavailable" },
+  );
+  const [environments, setEnvironments] = useState<readonly OrbitGatewayEnvironment[] | null>(null);
+  const latest = useRef(0);
 
   const load = useStableCallback(async () => {
     if (!client) return;
-    try {
-      const [node, profiles, environments] = await Promise.all([
-        client.me(),
-        client.profiles(),
-        client.environments(),
-      ]);
-      setView({ node, profiles, environments });
-      setLoadError(null);
-    } catch (error) {
-      setLoadError(message(error));
-    }
+    const run = ++latest.current;
+    setProbe({ status: "checking" });
+    const [me, servers] = await Promise.allSettled([client.me(), client.environments()]);
+    if (run !== latest.current) return;
+    setProbe(
+      me.status === "fulfilled"
+        ? { status: "ok", node: me.value }
+        : { status: "error", error: me.reason },
+    );
+    setEnvironments(
+      servers.status === "fulfilled" ? visibleOrbitEnvironments(servers.value) : null,
+    );
   });
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway on mount and after each profile sync
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway once on mount; Reload reads it again
   useEffect(() => {
     void load();
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A finished profile sync can change the node and profiles, so the view reloads.
-  }, [load, sync.syncedAt]);
+  }, [load]);
 
-  const bindProfile = async (profile: { readonly id: number } | { readonly name: string }) => {
-    if (!client) return;
-    setBusy(true);
-    try {
-      const id = "id" in profile ? profile.id : (await client.createProfile(profile.name)).id;
-      await client.bindProfile(id);
-      setNewProfileName("");
-      await load();
-      syncOrbitProfileNow();
-    } catch (error) {
-      toastManager.add({ type: "error", title: "Orbit", description: message(error) });
-    }
-    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
-    setBusy(false);
-  };
+  return { probe, environments, load };
+}
 
-  const connected = new Set(
-    savedEnvironments.map((environment) => String(environment.environmentId)),
+/** Conn: Retry for a server whose last renewal failed: renews it now, without the planner's wait. */
+function RenewalRetryButton(props: {
+  readonly environmentId: string;
+  readonly environments: readonly OrbitGatewayEnvironment[] | null;
+}) {
+  const [renewing, setRenewing] = useState(false);
+  const environment = props.environments?.find(
+    (entry) => entry.environmentId === props.environmentId,
   );
-  const profile = view?.node.profile ?? null;
+  if (!environment) return null;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      disabled={renewing}
+      onClick={() => {
+        const client = desktopOrbitGatewayClient();
+        if (!client) return;
+        setRenewing(true);
+        void retryOrbitRenewal(client, environment).finally(() => setRenewing(false));
+      }}
+    >
+      {renewing ? "Renewing…" : "Retry"}
+    </Button>
+  );
+}
+
+/**
+ * Conn: Connect for a server whose pairing Orbit revoked; the one way to pair it again. It lifts
+ * the revoked state first, so renewals resume even when this pairing fails.
+ */
+function RevokedConnectButton(props: {
+  readonly environmentId: string;
+  readonly environments: readonly OrbitGatewayEnvironment[] | null;
+}) {
+  const [connecting, setConnecting] = useState(false);
+  const environment = props.environments?.find(
+    (entry) => entry.environmentId === props.environmentId,
+  );
+  if (!environment) return null;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      disabled={connecting}
+      onClick={() => {
+        const client = desktopOrbitGatewayClient();
+        if (!client) return;
+        setConnecting(true);
+        void connectOrbitEnvironment(client, environment).finally(() => setConnecting(false));
+      }}
+    >
+      {connecting ? "Connecting…" : "Connect"}
+    </Button>
+  );
+}
+
+/**
+ * The Orbit panel's Connection page: this device's Node, the three checks of its connection to
+ * the Gateway, and the Nodes that run a T3 server. Conn picks up the connection from the machine,
+ * so a failed check says what to fix outside Conn. Instances are on the Instances page.
+ */
+export function OrbitConnectionPage() {
+  const { probe, environments, load } = useOrbitConnection();
+  const { environments: savedEnvironments } = useEnvironments();
+  const revokedAt = useEnvironmentProvider((store) => store.state.revokedAt);
+  const renewalFailed = useEnvironmentProvider((store) => store.state.renewalFailed);
+  const navigate = useNavigate();
+  const m = useMessages();
+  const connectionsLabel = m(SETTINGS_SECTION_LABELS["/settings/connections"]);
+
+  const node = probe.status === "ok" ? probe.node : null;
+  const checks = orbitConnectionChecks(probe);
+  const nodes =
+    environments === null
+      ? null
+      : orbitNodeServers({
+          environments,
+          paired: new Set(
+            savedEnvironments.map((environment) => String(environment.environmentId)),
+          ),
+          revoked: new Set(Object.keys(revokedAt ?? {})),
+          renewalFailed: new Map(
+            Object.entries(renewalFailed ?? {}).map(([id, failure]) => [id, failure.reason]),
+          ),
+          device: node,
+        });
 
   return (
-    <>
-      <SettingsSection {...searchableSetting("orbit-device")}>
+    <SettingsPageContainer width="wide">
+      <SettingsSection id="orbit-device" title="This device" hideTitle>
         <SettingsRow
-          title={view?.node.name ?? (loadError ? "Gateway unreachable" : "Connecting…")}
+          title={node?.name ?? "This device"}
           description={
-            loadError ??
-            (view ? `Signed in to gateway.orbit as ${view.node.wireguardIp}` : "gateway.orbit")
+            node
+              ? orbitSignedInText(node)
+              : probe.status === "checking"
+                ? "Connecting to gateway.orbit…"
+                : "The Node name and WireGuard address show once all checks pass."
           }
           control={
-            <Button size="xs" variant="outline" onClick={() => void load()}>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={probe.status === "checking" || probe.status === "unavailable"}
+              onClick={() => void load()}
+            >
               Reload
             </Button>
           }
         />
       </SettingsSection>
 
-      {view ? (
-        <SettingsSection {...searchableSetting("orbit-profile")}>
+      <SettingsSection id="orbit-checks" title="Connection checks" hideTitle>
+        {checks.map((check) => (
           <SettingsRow
-            title="Profile"
-            description="Devices with the same profile share their workspaces."
-            control={
-              <Select
-                value={profile ? String(profile.id) : ""}
-                onValueChange={(next) => {
-                  const chosen = view.profiles.find((entry) => String(entry.id) === next);
-                  if (chosen && chosen.id !== profile?.id) void bindProfile({ id: chosen.id });
-                }}
-              >
-                <SelectTrigger size="sm" aria-label="Profile" disabled={busy}>
-                  <SelectValue>{profile?.name ?? "Choose a profile"}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {view.profiles.map((entry) => (
-                    <SelectItem key={entry.id} value={String(entry.id)}>
-                      {entry.name}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            }
+            key={check.key}
+            data-check={check.key}
+            title={check.label}
+            description={check.message}
+            control={<CheckBadge state={check.state} />}
           />
-          <SettingsRow
-            title="New profile"
-            description="Creates a profile and switches this device to it."
-            control={
-              <div className="flex items-center gap-2">
-                <Input
-                  aria-label="New profile name"
-                  placeholder="Name"
-                  value={newProfileName}
-                  onChange={(event) => setNewProfileName(event.target.value)}
-                />
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={newProfileName.trim() === "" || busy}
-                  onClick={() => void bindProfile({ name: newProfileName.trim() })}
-                >
-                  Create
-                </Button>
-              </div>
-            }
-          />
-        </SettingsSection>
-      ) : null}
+        ))}
+      </SettingsSection>
 
-      {view ? <ProfileSyncSection profileName={profile?.name ?? null} /> : null}
-
-      {view ? (
-        <SettingsSection {...searchableSetting("orbit-servers")}>
-          {view.environments.length === 0 ? (
+      <section id="orbit-nodes" className="space-y-2.5">
+        <div className="px-3 sm:px-4">
+          <h2 className="flex min-h-7 items-center text-base font-semibold text-foreground">
+            Nodes
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            The Nodes that run a Conn Server. Conn pairs with them automatically.
+          </p>
+        </div>
+        <SettingsSection title="Nodes that run a Conn Server" hideTitle>
+          {nodes === null ? (
             <SettingsRow
-              title="No servers registered"
-              description="T3 servers register themselves with the Gateway."
+              title={probe.status === "checking" ? "Loading…" : "Nodes not available"}
+              description={
+                probe.status === "checking"
+                  ? "Reading the Nodes from gateway.orbit."
+                  : probe.status === "unavailable"
+                    ? undefined
+                    : probe.status === "ok"
+                      ? "The Gateway did not send its list of servers. Reload to try again."
+                      : "The Nodes show once the Gateway answers. Reload to try again."
+              }
+            />
+          ) : nodes.length === 0 ? (
+            <SettingsRow
+              title="No Nodes yet"
+              description="A Node's Conn Server registers itself with the Gateway."
             />
           ) : (
-            view.environments.map((environment) => (
+            nodes.map((entry) => (
               <SettingsRow
-                key={environment.environmentId}
-                title={environment.label}
-                description={environment.url.replace(/^https?:\/\//, "")}
+                key={entry.environmentId}
+                title={
+                  <span className="flex items-center gap-2">
+                    <span
+                      aria-hidden
+                      className={cn("size-2 shrink-0 rounded-full", NODE_STATES[entry.state].dot)}
+                    />
+                    {entry.name}
+                  </span>
+                }
+                description={entry.isThisDevice ? `This device · ${entry.address}` : entry.address}
                 control={
-                  <span className="text-ui text-muted-foreground">
-                    {environment.status === "session_expired"
-                      ? "Registration expired"
-                      : connected.has(environment.environmentId)
-                        ? "Paired"
-                        : "Pairing…"}
+                  <span className="flex items-center gap-3">
+                    <span className="text-ui text-muted-foreground">
+                      {entry.renewalFailure !== null
+                        ? renewalFailureText(entry.renewalFailure)
+                        : NODE_STATES[entry.state].label}
+                    </span>
+                    {entry.state === "revoked" ? (
+                      <RevokedConnectButton
+                        environmentId={entry.environmentId}
+                        environments={environments}
+                      />
+                    ) : entry.state === "renewal_failed" ? (
+                      <RenewalRetryButton
+                        environmentId={entry.environmentId}
+                        environments={environments}
+                      />
+                    ) : null}
                   </span>
                 }
               />
             ))
           )}
         </SettingsSection>
-      ) : null}
-    </>
+      </section>
+
+      <SettingsSection id="orbit-environments-from" title="Environments from Orbit" hideTitle>
+        <SettingsRow
+          title="Environments from Orbit"
+          description={`Orbit is turned on and off in Settings > ${connectionsLabel}, with "Environments from". While it is off, the Orbit icon is hidden.`}
+          control={
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() =>
+                void navigate({ to: "/settings/connections", hash: "environment-provider" })
+              }
+            >
+              Open {connectionsLabel}
+            </Button>
+          }
+        />
+      </SettingsSection>
+    </SettingsPageContainer>
   );
 }

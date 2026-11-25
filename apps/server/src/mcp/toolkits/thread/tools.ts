@@ -1,5 +1,6 @@
 import {
   OrchestratorMcpEnvironmentTarget,
+  OrbitProjectRef,
   ScheduledTaskId,
   ScheduledTask,
   OrchestrationSearchThreadsInput,
@@ -19,6 +20,7 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  clampedPositiveInt,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
@@ -29,9 +31,9 @@ import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskServ
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
-const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
+const ThreadOrganizeTool = Tool.make("conn_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. For file_project, pass orbitProject with the id and slug from Orbit; unfile_project clears it. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -45,8 +47,11 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "file_project",
+      "unfile_project",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
+    orbitProject: Schema.optional(OrbitProjectRef),
   }),
   success: Schema.Union([
     OrchestrationV2DispatchCommandResult,
@@ -80,7 +85,7 @@ const queueEntry = Schema.Struct({
   truncated: Schema.Boolean,
 });
 const QUEUE_READ_ACTIONS = ["list", "read"] as const;
-const QueueTool = Tool.make("t3_queue", {
+const QueueTool = Tool.make("conn_queue", {
   ...commandTool,
   description:
     "Manage a thread's queued messages. Omit `threadId` for this thread. list: send order, paged by `cursor` and `limit`. read: up to 16,000 chars of one. edit: replace its `text`; attachments stay. cancel. reorder: before `beforeRunId`, or to the end with null. promote_to_steer: send it now as steering to active `targetRunId`. Writes fail once the run is no longer queued.",
@@ -99,7 +104,7 @@ const QueueTool = Tool.make("t3_queue", {
     beforeRunId: Schema.optional(Schema.NullOr(RunId)),
     targetRunId: Schema.optional(RunId),
     cursor: Schema.optional(NonNegativeInt),
-    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+    limit: Schema.optional(clampedPositiveInt(100)),
   }),
   success: Schema.Union([
     Schema.Struct({ items: Schema.Array(queueEntry), nextCursor: Schema.NullOr(NonNegativeInt) }),
@@ -117,6 +122,7 @@ const question = Schema.Struct({
       label: Schema.String,
       description: Schema.String,
       value: Schema.optional(Schema.String),
+      preview: Schema.optional(Schema.String),
     }),
   ),
   multiSelect: Schema.optional(Schema.Boolean),
@@ -124,7 +130,7 @@ const question = Schema.Struct({
   initialAnswer: Schema.optional(Schema.String),
   required: Schema.optional(Schema.Boolean),
 });
-const PendingRequestTool = Tool.make("t3_pending_request", {
+const PendingRequestTool = Tool.make("conn_pending_request", {
   ...commandTool,
   description:
     "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request.",
@@ -150,7 +156,7 @@ const threadConfiguration = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
 });
-const ThreadConfigureTool = Tool.make("t3_thread_configure", {
+const ThreadConfigureTool = Tool.make("conn_thread_configure", {
   ...commandTool,
   description:
     "Read a thread's provider, model, and modes, or set its provider, model, and options with `modelSelection`. Omit `threadId` for this thread. Permission modes stay. Values from `orchestrator_capabilities`.",
@@ -162,7 +168,7 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   success: Schema.Union([threadConfiguration, OrchestrationV2DispatchCommandResult]),
 }).annotate(Tool.Destructive, true);
 
-const ThreadTransferTool = Tool.make("t3_thread_transfer", {
+const ThreadTransferTool = Tool.make("conn_thread_transfer", {
   ...commandTool,
   description:
     "Move context between threads. Omit `threadId` for this thread. fork: copy it from `sourcePoint` (default latest stable run) into a new thread with the same setup; no turn runs yet. merge_back: merge it from `sourcePoint` into a related `targetThreadId` in the same project. status: its context transfers.",
@@ -189,7 +195,7 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
   ]),
 }).annotate(Tool.Destructive, true);
 
-const ThreadSearchTool = Tool.make("t3_thread_search", {
+const ThreadSearchTool = Tool.make("conn_thread_search", {
   ...commandTool,
   description:
     "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive.",
@@ -199,6 +205,7 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
     projectId: Schema.optional(ProjectId),
   }),
   success: Schema.Struct({
+    currentThreadId: Schema.optional(Schema.NullOr(ThreadId)),
     matches: Schema.Array(
       Schema.Struct({
         threadId: OrchestrationThreadSearchMatch.fields.threadId,
@@ -229,6 +236,7 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
     threadId: ScheduledTask.fields.threadId,
     link: Schema.optional(Schema.String),
     lastRunStatus: ScheduledTask.fields.lastRunStatus,
+    lastRunError: ScheduledTask.fields.lastRunError,
     runCount: NonNegativeInt,
     nextRunAt: ScheduledTask.fields.nextRunAt,
   }),

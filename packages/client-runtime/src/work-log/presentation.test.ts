@@ -10,8 +10,12 @@ import {
   workEntryIndicatesToolFailure,
   workEntryDisplayIndicatesToolFailure,
 } from "./presentation.js";
-import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
+import {
+  resolveT3McpToolDefinition,
+  T3_MCP_TOOL_NAMES,
+} from "@t3tools/shared/t3McpToolPresentation";
 import { summarizeToolGroup } from "./presentation.js";
+import { t3ToolSentence } from "./t3ToolSentences.js";
 
 function commandItem(
   fields: Partial<Extract<OrchestrationV2TurnItem, { type: "command_execution" }>> = {},
@@ -113,10 +117,10 @@ describe("workEntryIndicatesToolFailure", () => {
 describe("resolveWorkEntryToolPresentation", () => {
   const fill = (status: "inProgress" | "completed", result?: unknown) =>
     resolveWorkEntryToolPresentation({
-      label: "t3-code · fill_credential",
+      label: "conn · fill_credential",
       toolLifecycleStatus: status,
       toolData: {
-        server: "t3-code",
+        server: "conn",
         tool: "fill_credential",
         arguments: { itemId: "abcdefghijklmnopqrstuvwxyz", field: "password" },
         ...(result === undefined ? {} : { result }),
@@ -143,7 +147,7 @@ describe("resolveWorkEntryToolPresentation", () => {
   it("names the site of a credential lookup", () => {
     expect(
       resolveWorkEntryToolPresentation({
-        label: "mcp__t3-code__request_credentials",
+        label: "mcp__conn__request_credentials",
         toolLifecycleStatus: "completed",
         toolData: { toolName: "request_credentials", input: { domain: "github.com" } },
       }),
@@ -157,13 +161,16 @@ describe("resolveWorkEntryToolPresentation", () => {
         createdAt: "2026-09-19T00:00:00.000Z",
         tone: "tool",
         label: "Custom provider title",
-        toolData: { server: "t3-code", tool },
+        toolData: { server: "conn", tool },
         toolLifecycleStatus: "completed",
         itemType: "dynamic_tool",
-        toolSource: { key: "t3-code", name: "T3 Code", kind: "integration" },
+        toolSource: { key: "conn", name: "T3 Code", kind: "integration" },
       };
       const presentation = resolveWorkEntryToolPresentation(entry);
       expect(presentation, tool).not.toBeNull();
+      // A thread label that misses its sentence falls back to untranslated English.
+      const labels = resolveT3McpToolDefinition(tool)!.labels;
+      if (labels[3].includes("thread")) expect(t3ToolSentence(labels), tool).toBeDefined();
       expect(presentation?.displayName, tool).not.toContain(tool);
       const summary = summarizeToolGroup([entry]);
       expect(summary.summary, tool).not.toMatch(/Used (?:1 tool|T3 Code integration)/);
@@ -178,17 +185,17 @@ describe("resolveWorkEntryToolPresentation", () => {
   });
 
   it.each([
-    ["t3_project_list", "Listing projects", "Listed projects"],
-    ["t3_project_clone", "Cloning a repository", "Cloned a repository"],
-    ["t3_project_create", "Registering a project", "Registered a project"],
-    ["t3_thread_launch", "Launching a project thread", "Launched a project thread"],
-    ["t3_queue_edit", "Editing a queued message", "Edited a queued message"],
-    ["t3_pending_request_respond", "Answering pending questions", "Answered pending questions"],
-    ["t3_thread_configure", "Using thread model settings", "Used thread model settings"],
-    ["t3_thread_fork", "Forking this thread", "Requested a fork of this thread"],
-    ["t3_thread_send_attachments", "Sending attachments", "Sent attachments"],
+    ["conn_project_list", "Listing projects", "Listed projects"],
+    ["conn_project_clone", "Cloning a repository", "Cloned a repository"],
+    ["conn_project_create", "Registering a project", "Registered a project"],
+    ["conn_thread_launch", "Launching a project thread", "Launched a project thread"],
+    ["conn_queue_edit", "Editing a queued message", "Edited a queued message"],
+    ["conn_pending_request_respond", "Answering pending questions", "Answered pending questions"],
+    ["conn_thread_configure", "Using thread model settings", "Used thread model settings"],
+    ["conn_thread_fork", "Forking this thread", "Requested a fork of this thread"],
+    ["conn_thread_send_attachments", "Sending attachments", "Sent attachments"],
     ["run_scheduled_task_now", "Running a scheduled task", "Requested a run of a scheduled task"],
-    ["t3_workflow_stop", "Stopping a workflow", "Requested a stop for a workflow"],
+    ["conn_workflow_stop", "Stopping a workflow", "Requested a stop for a workflow"],
   ])("labels %s through its lifecycle", (tool, running, completed) => {
     expect(resolveWorkEntryToolPresentation({ label: `T3-code.${tool}` })?.displayName).toBe(
       running,
@@ -210,8 +217,8 @@ describe("resolveWorkEntryToolPresentation", () => {
       itemType: "dynamic_tool",
       toolLifecycleStatus: "completed",
       toolData: {
-        server: "t3-code",
-        tool: "t3_workflow_stop",
+        server: "conn",
+        tool: "conn_workflow_stop",
         arguments: { threadId: "parent", subagentId: "workflow-1" },
         result: {},
       },
@@ -231,7 +238,7 @@ describe("resolveWorkEntryToolPresentation", () => {
           ...entry,
           toolData: {
             ...entry.toolData,
-            tool: "t3_thread_interrupt",
+            tool: "conn_thread_interrupt",
             arguments: { threadId: "parent" },
           },
         },
@@ -251,20 +258,20 @@ describe("resolveWorkEntryToolPresentation", () => {
       itemType: "dynamic_tool",
       toolLifecycleStatus: "completed",
       toolData: {
-        server: "t3-code",
-        tool: "t3_project_clone",
+        server: "conn",
+        tool: "conn_project_clone",
         arguments: { url: "https://github.com/acme/repo" },
         result: { cwd: "/tmp/repo" },
       },
     };
-    const list = { ...entry, toolData: { server: "t3-code", tool: "t3_project_list" } };
+    const list = { ...entry, toolData: { server: "conn", tool: "conn_project_list" } };
     expect(summarizeToolGroup([list, entry])).toEqual({
       summary: "Listed projects 1 time and cloned 1 repository",
       hasFailure: false,
     });
     const failed = {
       ...entry,
-      toolData: { toolName: "T3-code.t3_project_clone", rawOutput: { isError: true } },
+      toolData: { toolName: "T3-code.conn_project_clone", rawOutput: { isError: true } },
     };
     expect(summarizeToolGroup([entry, failed])).toEqual({
       summary: "Cloned 1 repository",
@@ -277,9 +284,9 @@ describe("resolveWorkEntryToolPresentation", () => {
       id: "foreign",
       createdAt: "2026-09-19T00:00:00.000Z",
       tone: "tool",
-      label: "t3_project_clone",
+      label: "conn_project_clone",
       toolLifecycleStatus: "completed",
-      toolData: { server: "another-server", tool: "t3_project_clone" },
+      toolData: { server: "another-server", tool: "conn_project_clone" },
     };
     expect(summarizeToolGroup([entry]).summary).toBe("Used 1 tool");
   });
@@ -289,7 +296,7 @@ describe("resolveWorkEntryToolPresentation", () => {
       id: "clone",
       createdAt: "2026-09-19T00:00:00.000Z",
       tone: "tool",
-      label: "T3-code.t3_project_clone",
+      label: "T3-code.conn_project_clone",
       toolLifecycleStatus: "inProgress",
       itemType: "dynamic_tool",
       toolData: { output: { isError: true } },
@@ -307,12 +314,12 @@ describe("resolveWorkEntryToolPresentation", () => {
     expect(workEntryDisplayIndicatesToolFailure(childFailure)).toBe(false);
   });
   it.each([
-    "mcp__t3-code__preview_click",
-    "mcp__t3_code__preview_click",
+    "mcp__conn__preview_click",
+    "mcp__conn__preview_click",
     "mcp__t3code__preview_click",
     "T3-code.preview_click",
-    "t3-code · preview_click completed",
-    "t3_code/preview_click",
+    "conn · preview_click completed",
+    "conn/preview_click",
     "preview_click",
   ])("recognizes browser tool names across providers: %s", (label) => {
     expect(resolveWorkEntryToolPresentation({ label })).toEqual({
@@ -326,7 +333,7 @@ describe("resolveWorkEntryToolPresentation", () => {
       resolveWorkEntryToolPresentation({
         label: "Tool call complete",
         toolTitle: "Inspect the current page",
-        toolData: { server: "t3-code", tool: "preview_snapshot", result: { title: "Example" } },
+        toolData: { server: "conn", tool: "preview_snapshot", result: { title: "Example" } },
       }),
     ).toEqual({ displayName: "Taking a snapshot of the preview page", icon: "browser" });
   });
@@ -365,8 +372,8 @@ describe("resolveWorkEntryToolPresentation", () => {
   it("does not brand unknown tools or another server's matching tool name", () => {
     for (const label of [
       "mcp__github__preview_click",
-      "t3-code.unknown_tool",
-      "t3-code.toString",
+      "conn.unknown_tool",
+      "conn.toString",
       "Search files",
     ]) {
       expect(resolveWorkEntryToolPresentation({ label })).toBeNull();

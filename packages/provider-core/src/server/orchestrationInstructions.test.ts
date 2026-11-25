@@ -16,7 +16,7 @@ describe("T3 device instructions", () => {
     }
     assert.notInclude(T3_CODE_DEVICE_TOOL_INSTRUCTIONS, "ToolSearch");
     const loadLine =
-      " Load them with ToolSearch `select:mcp__t3-code__device_list,mcp__t3-code__device_open,mcp__t3-code__device_screenshot,mcp__t3-code__device_close`.";
+      " Load them with ToolSearch `select:mcp__conn__device_list,mcp__conn__device_open,mcp__conn__device_screenshot,mcp__conn__device_close`.";
     assert.include(T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH, loadLine);
     assert.equal(
       T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH.replace(loadLine, ""),
@@ -41,7 +41,7 @@ describe("T3 device instructions", () => {
 
   it("reach OpenCode and Cursor only when the session holds device access", () => {
     assert.include(t3OrchestrationSystemPrompt(true, true), T3_CODE_DEVICE_TOOL_INSTRUCTIONS);
-    assert.notInclude(t3OrchestrationSystemPrompt(true, false), "## T3 Code devices");
+    assert.notInclude(t3OrchestrationSystemPrompt(true, false), "## Conn devices");
     assert.isUndefined(t3OrchestrationSystemPrompt(false, true));
 
     const firstRun = (hasDeviceTools: boolean) =>
@@ -53,7 +53,7 @@ describe("T3 device instructions", () => {
         deviceInstructionsDelivered: false,
       });
     assert.include(firstRun(true), T3_CODE_DEVICE_TOOL_INSTRUCTIONS);
-    assert.notInclude(firstRun(false), "## T3 Code devices");
+    assert.notInclude(firstRun(false), "## Conn devices");
 
     const laterRun = (deviceInstructionsDelivered: boolean) =>
       t3OrchestrationPrompt({
@@ -80,6 +80,6 @@ describe("T3 device instructions", () => {
       t3AcpPromptWithInstructions({ prompt: "Again.", state, previousState: state }),
       "Again.",
     );
-    assert.notInclude(t3AcpPromptWithInstructions({ prompt: "Hi.", state }), "## T3 Code devices");
+    assert.notInclude(t3AcpPromptWithInstructions({ prompt: "Hi.", state }), "## Conn devices");
   });
 });

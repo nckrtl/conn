@@ -32,19 +32,6 @@ describe("buildCodexAdditionalContext", () => {
 });
 
 describe("Codex runtime context", () => {
-  it("describes Markdown media support in the runtime context in both modes", () => {
-    {
-      const instructions = runtimeInstructions({
-        model: "gpt-5.3-codex",
-        reasoningEffort: "high",
-      });
-      NodeAssert.match(
-        instructions,
-        /<runtime_info>.*embed images, video, and audio.*Markdown image syntax with absolute file paths.*Link any other file.*absolute path.*files viewer.*<\/runtime_info>/,
-      );
-    }
-  });
-
   it("flattens multiline metadata into single-line runtime info", () => {
     const instructions = runtimeInstructions({
       model: "gpt\n5.3\ncodex",
@@ -59,7 +46,7 @@ describe("Codex runtime context", () => {
 describe("Codex orchestration context", () => {
   it("routes subagents native first, delegate_task for the rest", () => {
     const orchestration = Object.entries(buildCodexAdditionalContext({ model: "gpt-6.1-sol" }))
-      .filter(([key]) => key.startsWith("t3_code_orchestration_"))
+      .filter(([key]) => key.startsWith("conn_orchestration_"))
       .map(([, entry]) => entry.value)
       .join("\n");
 
@@ -72,7 +59,7 @@ describe("Codex orchestration context", () => {
     NodeAssert.ok(
       orchestration.includes("Every new delegate review or re-check is a new `delegate_task`"),
     );
-    NodeAssert.ok(orchestration.includes("never a `t3_thread_send`"));
+    NodeAssert.ok(orchestration.includes("never a `conn_thread_send`"));
     NodeAssert.ok(!orchestration.includes("inheritedOptions"));
     NodeAssert.ok(!orchestration.includes("Prefer native"));
     // The ACP terminal fallback is ACP-only; Codex agents never need it.
@@ -83,15 +70,15 @@ describe("Codex orchestration context", () => {
 describe("Codex device context", () => {
   it("adds the shared device block only when the session holds device access", () => {
     const tools = (device: boolean) =>
-      buildCodexAdditionalContext({ model: "gpt-6.1-sol" }, { browser: true, device }).t3_code_tools
+      buildCodexAdditionalContext({ model: "gpt-6.1-sol" }, { browser: true, device }).conn_tools
         ?.value ?? "";
 
     NodeAssert.ok(tools(true).includes(T3_CODE_DEVICE_TOOL_INSTRUCTIONS));
     NodeAssert.ok(!tools(true).includes("ToolSearch"));
-    NodeAssert.ok(!tools(false).includes("## T3 Code devices"));
+    NodeAssert.ok(!tools(false).includes("## Conn devices"));
   });
 });
 
 function runtimeInstructions(runtime: Parameters<typeof buildCodexAdditionalContext>[0]) {
-  return buildCodexAdditionalContext(runtime).t3_code_runtime!.value;
+  return buildCodexAdditionalContext(runtime).conn_runtime!.value;
 }

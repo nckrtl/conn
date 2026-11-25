@@ -8,12 +8,11 @@ const settle = async () => {
 };
 
 function slowTask() {
-  const log = { started: 0, finished: 0, maxInFlight: 0, options: [] as unknown[] };
+  const log = { started: 0, finished: 0, maxInFlight: 0 };
   let inFlight = 0;
   const releases: (() => void)[] = [];
-  const task = async (options: unknown) => {
+  const task = async () => {
     log.started += 1;
-    log.options.push(options);
     inFlight += 1;
     log.maxInFlight = Math.max(log.maxInFlight, inFlight);
     await new Promise<void>((resolve) => releases.push(resolve));
@@ -29,10 +28,10 @@ describe("createSerialRunner", () => {
     const trigger = createSerialRunner(task);
 
     // Two mounts, a focus event and a poll tick, all before the first run ends.
-    trigger();
-    trigger();
-    trigger();
-    trigger();
+    void trigger();
+    void trigger();
+    void trigger();
+    void trigger();
     await settle();
     expect(log.started).toBe(1);
 
@@ -46,37 +45,55 @@ describe("createSerialRunner", () => {
     expect(log.maxInFlight).toBe(1);
   });
 
+  it("joins the queued follow-up when triggered after a run ends but before the follow-up starts", async () => {
+    const { log, task, release } = slowTask();
+    const trigger = createSerialRunner(task);
+    // This continuation runs once the first run ends, before the follow-up launches.
+    void trigger().then(() => void trigger());
+    void trigger();
+    release();
+    await settle();
+    expect(log.started).toBe(2);
+    expect(log.maxInFlight).toBe(1);
+  });
+
   it("starts nothing extra when no trigger came during a run", async () => {
     const { log, task, release } = slowTask();
     const trigger = createSerialRunner(task);
-    trigger();
+    void trigger();
     release();
     await settle();
     expect(log.started).toBe(1);
   });
 
-  it("keeps a forced push for the follow-up and survives a failing run", async () => {
-    const seen: unknown[] = [];
+  it("settles a trigger only after a run that started after it, and survives a failing run", async () => {
     let fail = true;
+    let runs = 0;
     const releases: (() => void)[] = [];
-    const trigger = createSerialRunner(async (options) => {
-      seen.push(options);
+    const trigger = createSerialRunner(async () => {
+      runs += 1;
       await new Promise<void>((resolve) => releases.push(resolve));
       if (fail) {
         fail = false;
         throw new Error("gateway down");
       }
     });
-    trigger();
-    trigger({ force: { push: ["appearance"] } });
-    trigger();
+    const first = trigger();
+    let secondDone = false;
+    const second = trigger().then(() => {
+      secondDone = true;
+    });
     releases.shift()?.();
+    await first;
     await settle();
-    expect(seen).toEqual([undefined, { force: { push: ["appearance"] } }]);
+    // The first run failed and ended; the second trigger waits for the follow-up run.
+    expect(runs).toBe(2);
+    expect(secondDone).toBe(false);
     releases.shift()?.();
+    await second;
+    expect(secondDone).toBe(true);
+    void trigger();
     await settle();
-    trigger();
-    await settle();
-    expect(seen).toHaveLength(3);
+    expect(runs).toBe(3);
   });
 });

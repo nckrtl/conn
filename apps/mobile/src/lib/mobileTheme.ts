@@ -14,6 +14,7 @@ import {
   STANDARD_THEME_PREVIEW_COLORS,
   type ThemePreviewColors,
 } from "@t3tools/shared/themePreview";
+import { appName } from "@t3tools/shared/appName";
 
 /**
  * Themes a connected machine publishes (`<stateDir>/themes/<id>.json`), such as
@@ -38,7 +39,7 @@ export const MOBILE_THEME_OPTIONS: ReadonlyArray<{
   readonly id: MobileThemeId;
   readonly label: string;
 }> = [
-  { id: DEFAULT_MOBILE_THEME_ID, label: "T3 Code" },
+  { id: DEFAULT_MOBILE_THEME_ID, label: appName() },
   { id: "material-you", label: "Material You" },
   ...BUILT_IN_THEMES.map((theme) => ({ id: theme.id as MobileThemeId, label: theme.label })),
 ];
@@ -364,6 +365,20 @@ export function themeColorWithAlpha(color: string, alpha: number): string {
   return rgb ? `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})` : color;
 }
 
+/**
+ * Desktop's task card face on the pane: opaque fill, side border and lighter top edge. A React Native
+ * border paints over the view's own fill, so a translucent one would not match desktop's pixels.
+ */
+function themeCardFaceVariables(c: ThemeColors, pane: string, appearance: MobileThemeAppearance) {
+  const dark = appearance === "dark";
+  const divider = mixOklab(pane, c.text, dark ? 89 : 90);
+  return {
+    "--color-card-face": dark ? flattenThemeColor(withAlpha(c.text, 0.08 * 0.7), pane) : pane,
+    "--color-card-face-border": divider,
+    "--color-card-face-edge": mixOklab(divider, "#ffffff", dark ? 96.5 : 80),
+  };
+}
+
 export function createMobileThemeVariables(
   colors: ThemeColors,
   appearance: MobileThemeAppearance,
@@ -404,6 +419,7 @@ export function createMobileThemeVariables(
     "--color-card": shellPanel,
     "--color-grouped-card": groupedCard,
     "--color-card-alt": c.surfaceRaised,
+    ...themeCardFaceVariables(c, shellPanel, appearance),
     "--color-card-translucent": withAlpha(c.surface, 0.8),
     "--color-thread-canvas": shellPanel,
     "--color-thread-selected": c.sidebarRowActive,

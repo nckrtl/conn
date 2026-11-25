@@ -1,8 +1,9 @@
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { ComposerSelectControl } from "./chat/ComposerControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon, GlobeIcon } from "lucide-react";
 import { memo, type MouseEvent as ReactMouseEvent } from "react";
+import { T, useGT, useMessages } from "gt-react";
 
 import {
   resolveCurrentWorkspaceLabel,
@@ -11,13 +12,9 @@ import {
   type EnvMode,
 } from "./BranchToolbar.logic";
 import { useOpenLink } from "../browser/useOpenLink";
-import { type OrbitWorkspaceView, registerOrbitWorkspace } from "../orbit/orbitWorkspaces";
-import { Button } from "./ui/button";
-import { toastManager } from "./ui/toast";
 import { useComposerMenuProps } from "./chat/composerEventScope";
-import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { Badge } from "./ui/badge";
-import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
+import { buildWorkspaceOptions, PREVIOUS_WORKTREE_OPTION } from "./workspaceOptions";
 import {
   Select,
   SelectGroup,
@@ -30,9 +27,17 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useAtomValue } from "@effect/atom-react";
 import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
+import { useInstanceLinkContextMenu } from "../orbit/useInstanceLinkContextMenu";
 
-function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: ScopedThreadRef }) {
+export function OrbitInstanceUrlChip({
+  url,
+  threadRef,
+}: {
+  url: string;
+  threadRef: ScopedThreadRef;
+}) {
   const openLink = useOpenLink(threadRef);
+  const showLinkMenu = useInstanceLinkContextMenu(threadRef);
   const host = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
   return (
     <Tooltip>
@@ -48,6 +53,7 @@ function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: Scop
                   event.preventDefault();
                   void openLink(url, { event }).catch((error: unknown) => console.error(error));
                 }}
+                onContextMenu={(event) => showLinkMenu(event, url)}
               />
             }
           />
@@ -72,47 +78,6 @@ function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: Scop
   );
 }
 
-function orbitThreadLabel(instance: OrbitWorkspaceView): string {
-  if (instance.phase === "waiting" || instance.phase === "registering") return "Orbit: setting up";
-  if (instance.phase === "failed") return "Orbit: not registered";
-  // The route's first label is the readable name, e.g. `login-redirect`.
-  const host = instance.url?.replace(/^https?:\/\//, "").split(".")[0];
-  return `Orbit: ${host || instance.instanceName}`;
-}
-
-function orbitThreadTooltip(instance: OrbitWorkspaceView): string {
-  if (instance.phase === "waiting") {
-    return `Worktree ${instance.checkoutPath}. Orbit registers it once the branch has its name.`;
-  }
-  if (instance.phase === "registering") return `Orbit is setting up ${instance.checkoutPath}.`;
-  if (instance.phase === "failed")
-    return `Orbit could not register this worktree: ${instance.failure}`;
-  return `Orbit instance ${instance.instanceName} in ${instance.checkoutPath}`;
-}
-
-function OrbitRetryButton(props: {
-  readonly environmentId: EnvironmentId;
-  readonly input: NonNullable<OrbitWorkspaceView["retryInput"]>;
-}) {
-  return (
-    <Button
-      variant="ghost-muted"
-      size="micro"
-      onClick={() => {
-        void registerOrbitWorkspace(props.environmentId, props.input).catch((error: unknown) =>
-          toastManager.add({
-            type: "error",
-            title: "Orbit could not register the worktree",
-            description: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      }}
-    >
-      Retry
-    </Button>
-  );
-}
-
 interface BranchToolbarEnvModeSelectorProps {
   forceNewWorktree?: boolean;
   envLocked: boolean;
@@ -122,11 +87,6 @@ interface BranchToolbarEnvModeSelectorProps {
   previousWorktreeLabel?: string | null;
   previousWorktreeBranch?: string | null;
   onUsePreviousWorktree?: () => void;
-  /** Where the hidden Orbit check runs; omit to hide the Orbit option. */
-  orbitTarget?: { readonly environmentId: EnvironmentId; readonly projectRoot: string } | null;
-  /** The Orbit Instance this thread runs in, if any. */
-  orbitThread?: OrbitWorkspaceView | null;
-  threadRef?: ScopedThreadRef | null;
 }
 
 export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSelector({
@@ -138,20 +98,17 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   previousWorktreeLabel,
   previousWorktreeBranch = null,
   onUsePreviousWorktree,
-  orbitTarget = null,
-  orbitThread = null,
-  threadRef = null,
 }: BranchToolbarEnvModeSelectorProps) {
+  const gt = useGT();
+  const m = useMessages();
   const composerFloatingLayerProps = useComposerMenuProps();
   const shortcutLabel = shortcutLabelForCommand(
     useAtomValue(primaryServerKeybindingsAtom),
     "composer.workspace",
   );
-  const { options, orbitNote } = useWorkspaceOptions({
+  const options = buildWorkspaceOptions({
     activeWorktreePath,
-    effectiveEnvMode,
     forceNewWorktree,
-    orbitTarget,
     previousWorktreeLabel: onUsePreviousWorktree ? (previousWorktreeLabel ?? null) : null,
     previousWorktreeBranch,
   });
@@ -161,40 +118,6 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
       event.stopPropagation();
     }
   };
-
-  if (orbitThread !== null || (envLocked && effectiveEnvMode === "orbit")) {
-    const lockedLabel = orbitThread ? orbitThreadLabel(orbitThread) : resolveEnvModeLabel("orbit");
-    const lockedRow = (
-      <span
-        className="inline-flex h-7 min-w-0 items-center gap-1 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6"
-        data-composer-context-control
-      >
-        <OrbitLogoIcon className="size-3" />
-        <ComposerContextLabel>{lockedLabel}</ComposerContextLabel>
-      </span>
-    );
-    return (
-      <span className="inline-flex min-w-0 items-center gap-1.5">
-        <Tooltip>
-          <TooltipTrigger render={lockedRow} />
-          <TooltipPopup>
-            {orbitThread
-              ? orbitThreadTooltip(orbitThread)
-              : "Creating an Orbit worktree for this thread"}
-          </TooltipPopup>
-        </Tooltip>
-        {orbitThread?.url && threadRef ? (
-          <OrbitInstanceUrlChip url={orbitThread.url} threadRef={threadRef} />
-        ) : null}
-        {orbitThread?.retryInput && threadRef ? (
-          <OrbitRetryButton
-            environmentId={threadRef.environmentId}
-            input={orbitThread.retryInput}
-          />
-        ) : null}
-      </span>
-    );
-  }
 
   if (envLocked || forceNewWorktree) {
     const lockedRow = (
@@ -211,8 +134,8 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         )}
         <ComposerContextLabel>
           {forceNewWorktree
-            ? resolveEnvModeLabel("worktree")
-            : resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)}
+            ? resolveEnvModeLabel("worktree", m)
+            : resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode, m)}
         </ComposerContextLabel>
       </span>
     );
@@ -222,8 +145,9 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         <TooltipTrigger render={lockedRow} />
         <TooltipPopup>
           {forceNewWorktree
-            ? "Each model starts in its own worktree."
-            : resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)}
+            ? gt("Each model starts in its own worktree.")
+            : (activeWorktreePath ??
+              resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode, m))}
         </TooltipPopup>
       </Tooltip>
     );
@@ -248,16 +172,14 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
             <ComposerSelectControl
               size="xs"
               className="min-w-0 shrink"
-              aria-label="Workspace"
+              aria-label={gt("Workspace")}
               data-composer-shortcut="composer.workspace"
               data-composer-context-control
               onMouseDownCapture={stopContextMenuMouseDown}
             />
           }
         >
-          {effectiveEnvMode === "orbit" ? (
-            <OrbitLogoIcon className="size-3" />
-          ) : effectiveEnvMode === "worktree" ? (
+          {effectiveEnvMode === "worktree" ? (
             <FolderGit2Icon className="size-3" />
           ) : activeWorktreePath ? (
             <FolderGitIcon className="size-3" />
@@ -269,11 +191,9 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
           </ComposerContextLabel>
         </TooltipTrigger>
         <TooltipPopup>
-          {effectiveEnvMode === "orbit" && orbitNote
-            ? `${resolveEnvModeLabel("orbit")}: ${orbitNote}`
-            : effectiveEnvMode === "worktree" || effectiveEnvMode === "orbit"
-              ? resolveEnvModeLabel(effectiveEnvMode)
-              : resolveCurrentWorkspaceLabel(activeWorktreePath)}
+          {effectiveEnvMode === "worktree"
+            ? resolveEnvModeLabel(effectiveEnvMode, m)
+            : resolveCurrentWorkspaceLabel(activeWorktreePath, m)}
           {shortcutLabel ? ` · ${shortcutLabel}` : null}
         </TooltipPopup>
       </Tooltip>
@@ -283,7 +203,9 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         className={options.length > 2 ? "w-[min(21rem,calc(100vw-2rem))]" : undefined}
       >
         <SelectGroup>
-          <SelectGroupLabel>Workspace</SelectGroupLabel>
+          <SelectGroupLabel>
+            <T>Workspace</T>
+          </SelectGroupLabel>
           {options.map((option) => (
             <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
               {option.content}

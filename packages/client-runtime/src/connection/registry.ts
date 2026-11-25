@@ -1,4 +1,6 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { msg } from "gt-i18n";
+import { translatableDetail } from "../errors/translatable.ts";
+import { EnvironmentId, type ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -33,11 +35,12 @@ import type {
   PersistedConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
-import { ConnectionBlockedError } from "./model.ts";
+import { BearerConnectionTarget, ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { ConnectionParkSeed, type ParkReason, type ParkReasons } from "./parking.ts";
 import {
   PullRequestRoutingPermissions,
   pullRequestRoutingConnectionKey,
@@ -55,6 +58,7 @@ import {
   upsertRoute,
   type ReportedEndpoint,
 } from "./routes.ts";
+import { entryWithServerLabel, routesWithUserLabel } from "./serverLabel.ts";
 
 const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 
@@ -108,6 +112,11 @@ export class EnvironmentRegistry extends Context.Service<
       registration: ConnectionRegistration,
       options?: { readonly knownAddressOnly?: boolean },
     ) => Effect.Effect<boolean, Persistence.ConnectionPersistenceError | ConnectionBlockedError>;
+    readonly settleProvisionalPairing: (
+      environmentId: EnvironmentId,
+      installId: string,
+      keep: boolean,
+    ) => Effect.Effect<boolean, Persistence.ConnectionPersistenceError | ConnectionAttemptError>;
     /**
      * Fails when the route would add a new address to a saved user environment. Pairing that does
      * not target an environment checks this, because the server reports its own environment id.
@@ -158,6 +167,25 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * Conn: holds an enabled environment off without changing the user's saved on/off choice,
+     * for an Orbit Instance that is asleep and not in use. Not persisted. Same as
+     * `setParkReason(environmentId, "asleep", parked)`.
+     */
+    readonly setParked: (environmentId: EnvironmentId, parked: boolean) => Effect.Effect<void>;
+    /**
+     * Conn: adds or removes one reason to hold an enabled environment off. It connects only while
+     * it has no reason; each owner changes only its own. Kept for environments not registered yet.
+     */
+    readonly setParkReason: (
+      environmentId: EnvironmentId,
+      reason: ParkReason,
+      held: boolean,
+    ) => Effect.Effect<void>;
+    /** Conn: the reasons each environment is held off for now (only environments with one). */
+    readonly parkReasons: Effect.Effect<ParkReasons>;
+    /** Conn: environments whose connection is up now. */
+    readonly connectedEnvironmentIds: Effect.Effect<ReadonlySet<EnvironmentId>>;
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
@@ -199,6 +227,30 @@ export class EnvironmentRegistry extends Context.Service<
     ) => Stream.Stream<A, E, Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>>;
   }
 >()("@t3tools/client-runtime/connection/registry/EnvironmentRegistry") {}
+
+function withoutProvisionalTarget(target: ConnectionTarget): ConnectionTarget {
+  if (target._tag !== "BearerConnectionTarget" || target.provisionalPairingId === undefined) {
+    return target;
+  }
+  const { provisionalPairingId: _owner, ...committed } = target;
+  return new BearerConnectionTarget(committed);
+}
+
+/** The entry as it is once its provisional pairing is promoted. */
+function withoutProvisionalPairing(entry: ConnectionCatalogEntry): ConnectionCatalogEntry {
+  return {
+    ...entry,
+    target: withoutProvisionalTarget(entry.target),
+    ...(entry.alternateRoutes === undefined
+      ? {}
+      : {
+          alternateRoutes: entry.alternateRoutes.map((route) => ({
+            ...route,
+            target: withoutProvisionalTarget(route.target),
+          })),
+        }),
+  };
+}
 
 interface EnvironmentServiceScope {
   readonly entry: ConnectionCatalogEntry;
@@ -284,6 +336,13 @@ export const make = Effect.gen(function* () {
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
+  // Conn: seeded before any supervisor exists, so a held-off server never opens a socket at start.
+  const parkSeed = yield* (yield* ConnectionParkSeed).load;
+  const parked = yield* Ref.make<ParkReasons>(
+    new Map([...parkSeed].filter(([, reasons]) => reasons.size > 0)),
+  );
+  const isParked = (environmentId: EnvironmentId) =>
+    Ref.get(parked).pipe(Effect.map((current) => current.has(environmentId)));
 
   const withLeaseLock = <A, E, R>(
     environmentId: EnvironmentId,
@@ -366,8 +425,15 @@ export const make = Effect.gen(function* () {
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
             // Seed the intent to avoid publishing a false switched-off state
             // before an enabled, compatible environment starts connecting.
-            initiallyDesired: entry.enabled && entry.unsupportedReason === undefined,
+            initiallyDesired:
+              entry.enabled &&
+              entry.unsupportedReason === undefined &&
+              !(yield* isParked(environmentId)),
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
+            learnLabel: (descriptor) => learnLabel({ environmentId, descriptor }),
+            latestEntry: SubscriptionRef.get(entries).pipe(
+              Effect.map((current) => Option.fromUndefinedOr(current.get(environmentId))),
+            ),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
             Effect.provideService(ConnectionDriver.ConnectionDriver, driver),
@@ -487,7 +553,11 @@ export const make = Effect.gen(function* () {
 
   const installEntryLocked = Effect.fn("EnvironmentRegistry.installEntryLocked")(function* (
     entry: ConnectionCatalogEntry,
-    options?: { readonly retainEquivalentRuntime?: boolean },
+    options?: {
+      readonly retainEquivalentRuntime?: boolean;
+      /** The provisional pairing whose own credential the store just promoted. */
+      readonly promotedPairingId?: string;
+    },
   ) {
     const target = entry.target;
     const previous = (yield* SubscriptionRef.get(entries)).get(target.environmentId);
@@ -499,6 +569,27 @@ export const make = Effect.gen(function* () {
       existingScope !== undefined &&
       Equal.equals(existingScope.entry, entry)
     ) {
+      return;
+    }
+    // Conn: promoting a provisional pairing changes no address or credential. Its live session
+    // stays; the supervisor takes the saved route at its next attempt (`latestEntry`). Only the
+    // promotion of the pairing that session uses: a discard or another credential needs a new one.
+    const promoted = options?.promotedPairingId;
+    if (
+      promoted !== undefined &&
+      existingScope !== undefined &&
+      connectionRoutes(existingScope.entry).some(
+        ({ target: route }) =>
+          route._tag === "BearerConnectionTarget" && route.provisionalPairingId === promoted,
+      ) &&
+      Equal.equals(withoutProvisionalPairing(existingScope.entry), withoutProvisionalPairing(entry))
+    ) {
+      yield* SubscriptionRef.update(entries, (current) =>
+        new Map(current).set(target.environmentId, entry),
+      );
+      yield* SubscriptionRef.update(serviceScopes, (current) =>
+        new Map(current).set(target.environmentId, { ...existingScope, entry }),
+      );
       return;
     }
 
@@ -553,7 +644,12 @@ export const make = Effect.gen(function* () {
     ) {
       return yield* new ConnectionBlockedError({
         reason: "configuration",
-        detail: `That address claims to be ${saved.target.label}, which is already saved. Add it as a route from that environment's settings instead.`,
+        ...translatableDetail(
+          msg(
+            "That address claims to be {host}, which is already saved. Add it as a route from that environment's settings instead.",
+            { host: saved.target.label },
+          ),
+        ),
       });
     }
   });
@@ -575,6 +671,12 @@ export const make = Effect.gen(function* () {
           yield* assertKnownAddress(route);
         }
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (
+          previous !== undefined &&
+          route.target._tag === "BearerConnectionTarget" &&
+          route.target.provisionalPairingId !== undefined
+        )
+          return false;
         let entry = registered;
         if (previous !== undefined) {
           const existing = connectionRoutes(previous);
@@ -584,13 +686,16 @@ export const make = Effect.gen(function* () {
               existing !== sameAddress ||
               connectionRouteId(existing.target) === connectionRouteId(route.target),
           );
-          const next = withRoutes(previous, upsertRoute(routes, route));
+          const next = withRoutes(
+            previous,
+            routesWithUserLabel(previous, route.target, upsertRoute(routes, route)),
+          );
           if (next.addressesChanged) {
             yield* forgetRoutingTrust(environmentId, "register-connection");
           }
           entry = next.entry;
         }
-        yield* registrations.register(registration, persistedRoutes(entry));
+        if (!(yield* registrations.register(registration, persistedRoutes(entry)))) return false;
         yield* Ref.update(persistedEnvironmentIds, (current) =>
           new Set(current).add(environmentId),
         );
@@ -599,6 +704,77 @@ export const make = Effect.gen(function* () {
       }),
     );
   });
+
+  const settleProvisionalPairing = Effect.fn("EnvironmentRegistry.settleProvisionalPairing")(
+    function* (environmentId: EnvironmentId, installId: string, keep: boolean) {
+      return yield* withLeaseLock(
+        environmentId,
+        Effect.gen(function* () {
+          const settled = yield* registrations.settleProvisionalPairing(
+            environmentId,
+            installId,
+            keep,
+          );
+          if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) return false;
+          const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
+          // Startup hides old provisional records even if their first recovery write failed.
+          // Do not reintroduce one into this registry when settling a different install.
+          const active = new Set(
+            previous === undefined
+              ? []
+              : connectionRoutes(previous).flatMap(({ target }) =>
+                  target._tag === "BearerConnectionTarget" &&
+                  target.provisionalPairingId !== undefined
+                    ? [target.provisionalPairingId]
+                    : [],
+                ),
+          );
+          const routes = yield* Effect.forEach(
+            settled.routes.filter(
+              (target) =>
+                target._tag !== "BearerConnectionTarget" ||
+                target.provisionalPairingId === undefined ||
+                active.has(target.provisionalPairingId),
+            ),
+            loadRoute,
+          );
+          const first = routes[0];
+          if (first !== undefined) {
+            yield* Ref.update(persistedEnvironmentIds, (current) =>
+              new Set(current).add(environmentId),
+            );
+            yield* installEntryLocked(
+              entryWithRoutes(previous ?? { ...first, enabled: true }, routes),
+              {
+                retainEquivalentRuntime: true,
+                ...(keep && settled.promoted ? { promotedPairingId: installId } : {}),
+              },
+            );
+          } else if (
+            previous !== undefined &&
+            connectionRoutes(previous).some(
+              ({ target }) =>
+                target._tag === "BearerConnectionTarget" &&
+                target.provisionalPairingId === installId,
+            )
+          ) {
+            yield* Ref.update(persistedEnvironmentIds, (current) => {
+              const next = new Set(current);
+              next.delete(environmentId);
+              return next;
+            });
+            yield* closeServiceScope(environmentId);
+            yield* SubscriptionRef.update(entries, (current) => {
+              const next = new Map(current);
+              next.delete(environmentId);
+              return next;
+            });
+          }
+          return settled.promoted;
+        }),
+      );
+    },
+  );
 
   const replaceRoutesLocked = Effect.fn("EnvironmentRegistry.replaceRoutesLocked")(function* (
     previous: ConnectionCatalogEntry,
@@ -720,7 +896,11 @@ export const make = Effect.gen(function* () {
 
           yield* installEntryLocked(entry, { retainEquivalentRuntime: true });
 
-          if (bearerReplaced && registration._tag === "BearerConnectionRegistration") {
+          if (
+            bearerReplaced &&
+            registration._tag === "BearerConnectionRegistration" &&
+            registration.credential._tag === "BearerConnectionCredential"
+          ) {
             const scope = (yield* SubscriptionRef.get(serviceScopes)).get(target.environmentId);
             if (scope !== undefined) {
               const state = yield* SubscriptionRef.get(scope.supervisor.state);
@@ -911,6 +1091,60 @@ export const make = Effect.gen(function* () {
       Effect.ignore,
     );
 
+  /**
+   * Conn: a saved environment takes the name its server presents on a connection that verified
+   * the same environment id. A name the person chose stays (see `entryWithServerLabel`). The live
+   * supervisor keeps running; only its entry is replaced, as for learned routes.
+   */
+  const learnLabel = Effect.fn("EnvironmentRegistry.learnLabel")(function* (input: {
+    readonly environmentId: EnvironmentId;
+    readonly descriptor: ExecutionEnvironmentDescriptor;
+  }) {
+    return yield* withLeaseLock(
+      input.environmentId,
+      Effect.gen(function* () {
+        if ((yield* Ref.get(platformEnvironmentIds)).has(input.environmentId)) {
+          return Option.none<ConnectionCatalogEntry>();
+        }
+        const entry = (yield* SubscriptionRef.get(entries)).get(input.environmentId);
+        if (entry === undefined) return Option.none<ConnectionCatalogEntry>();
+        const named = entryWithServerLabel(entry, input.environmentId, input.descriptor);
+        if (named === null) return Option.none<ConnectionCatalogEntry>();
+        const saved = yield* registrations.learnLabel(
+          input.environmentId,
+          persistedRoutes(entry),
+          named.target.label,
+        );
+        if (saved.length === 0) return Option.none<ConnectionCatalogEntry>();
+        const savedById = new Map(saved.map((target) => [connectionRouteId(target), target]));
+        const next = entryWithRoutes(
+          entry,
+          connectionRoutes(entry).map((route) => ({
+            ...route,
+            target: savedById.get(connectionRouteId(route.target)) ?? route.target,
+          })),
+        );
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(input.environmentId);
+        if (lease !== undefined) {
+          yield* SubscriptionRef.update(serviceScopes, (current) =>
+            new Map(current).set(input.environmentId, { ...lease, entry: next }),
+          );
+        }
+        yield* SubscriptionRef.update(entries, (current) =>
+          new Map(current).set(input.environmentId, next),
+        );
+        return Option.some(next);
+      }),
+    ).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Could not save the name the environment presents.", {
+          environmentId: input.environmentId,
+          error,
+        }).pipe(Effect.as(Option.none<ConnectionCatalogEntry>())),
+      ),
+    );
+  });
+
   // Plain HTTP routes are unusable from an HTTPS page, which blocks mixed content.
   const allowInsecureRoutes =
     typeof globalThis.location === "undefined" || globalThis.location.protocol !== "https:";
@@ -1016,7 +1250,7 @@ export const make = Effect.gen(function* () {
         if (reordered.length !== routes.length || new Set(routeIds).size !== routes.length) {
           return yield* new ConnectionBlockedError({
             reason: "configuration",
-            detail: "The route order must list every saved route once.",
+            ...translatableDetail(msg("The route order must list every saved route once.")),
           });
         }
         if (reordered.every((route, index) => route === routes[index])) return;
@@ -1053,6 +1287,45 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
       Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
+  const setParkReason = (environmentId: EnvironmentId, reason: ParkReason, held: boolean) =>
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const current = yield* Ref.get(parked);
+        const reasons = current.get(environmentId) ?? new Set<ParkReason>();
+        if (reasons.has(reason) === held) return;
+        const wasHeld = reasons.size > 0;
+        const nextReasons = new Set(reasons);
+        if (held) nextReasons.add(reason);
+        else nextReasons.delete(reason);
+        const next = new Map(current);
+        if (nextReasons.size > 0) next.set(environmentId, nextReasons);
+        else next.delete(environmentId);
+        yield* Ref.set(parked, next);
+        // Only the first reason disconnects and only the last one's removal connects.
+        const isHeld = nextReasons.size > 0;
+        if (wasHeld === isHeld) return;
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+        if (lease === undefined) return;
+        if (isHeld) {
+          yield* lease.supervisor.disconnect;
+        } else if (lease.entry.enabled && lease.entry.unsupportedReason === undefined) {
+          yield* lease.supervisor.connect;
+        }
+      }),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.setParkReason"));
+  const setParked = (environmentId: EnvironmentId, hold: boolean) =>
+    setParkReason(environmentId, "asleep", hold);
+  const parkReasons: Effect.Effect<ParkReasons> = Ref.get(parked);
+  const connectedEnvironmentIds = Effect.gen(function* () {
+    const connected = new Set<EnvironmentId>();
+    for (const [environmentId, lease] of yield* SubscriptionRef.get(serviceScopes)) {
+      if ((yield* SubscriptionRef.get(lease.supervisor.state)).phase === "connected") {
+        connected.add(environmentId);
+      }
+    }
+    return connected as ReadonlySet<EnvironmentId>;
+  });
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,
@@ -1092,8 +1365,9 @@ export const make = Effect.gen(function* () {
           nextEntries.set(environmentId, next);
           return nextEntries;
         });
+        const held = yield* isParked(environmentId);
         if (lease !== undefined) {
-          yield* enabled ? lease.supervisor.connect : lease.supervisor.disconnect;
+          yield* enabled && !held ? lease.supervisor.connect : lease.supervisor.disconnect;
         } else if (enabled) {
           yield* createServiceScope(next);
         }
@@ -1174,7 +1448,8 @@ export const make = Effect.gen(function* () {
             new Map(current).set(environmentId, { ...lease, entry: next }),
           );
           if (error !== null) yield* lease.supervisor.disconnect;
-          else if (next.enabled) yield* lease.supervisor.connect;
+          else if (next.enabled && !(yield* isParked(environmentId)))
+            yield* lease.supervisor.connect;
         }
         yield* SubscriptionRef.update(entries, (current) =>
           new Map(current).set(environmentId, next),
@@ -1188,6 +1463,7 @@ export const make = Effect.gen(function* () {
     networkStatus,
     start,
     register,
+    settleProvisionalPairing,
     assertKnownAddress,
     reconcilePlatform,
     remove,
@@ -1195,6 +1471,10 @@ export const make = Effect.gen(function* () {
     reorderRoutes,
     removeRelayEnvironments,
     retryNow,
+    setParked,
+    setParkReason,
+    parkReasons,
+    connectedEnvironmentIds,
     setEnabled,
     setCompatibility,
     state,

@@ -85,6 +85,18 @@ describe("collectServerUpdateTargets", () => {
     ]);
   });
 
+  it("does not offer a Nightly build to a Stable desktop app, whose own feed has nothing newer", () => {
+    const { targets, skipped } = collectServerUpdateTargets(
+      [machine("stable-desktop", "0.1.9", "desktop-managed")],
+      "0.1.10-nightly.20261116.4761",
+    );
+
+    expect(targets.map((target) => target.serverLabel)).toEqual([]);
+    expect(skipped.map((entry) => [entry.label, entry.reason])).toEqual([
+      ["stable-desktop", "on the stable channel"],
+    ]);
+  });
+
   it("skips servers whose policy refuses the update, with the policy's message", () => {
     const managed = (
       id: string,
@@ -112,14 +124,17 @@ describe("collectServerUpdateTargets", () => {
         entry.label,
         entry.reason,
       ]),
-    ).toEqual([["off", "Example Corp manages T3 Code updates."]]);
+    ).toEqual([["off", "Example Corp manages Conn updates."]]);
     expect(
       collectServerUpdateTargets(
         machines.map((entry) => ({
           ...entry,
           serverConfig: {
             ...entry.serverConfig,
-            environment: { ...entry.serverConfig.environment, serverVersion: "0.0.49-nightly.1" },
+            environment: {
+              ...entry.serverConfig.environment,
+              serverVersion: "0.0.49-nightly.20261027.1",
+            },
           },
         })),
         "0.0.50-nightly.20261028.1",
@@ -240,10 +255,7 @@ describe("collectChannelSwitchTargets", () => {
         `its database has changes ${NIGHTLY} does not support yet; stay on Stable until Nightly has them`,
       ],
       ["old-desktop", "needs a newer desktop app"],
-      [
-        "no-nightly",
-        "Example Corp manages T3 Code updates. Only stable releases can be installed.",
-      ],
+      ["no-nightly", "Example Corp manages Conn updates. Only stable releases can be installed."],
     ]);
   });
 });
@@ -254,7 +266,7 @@ describe("localSwitchBlockReason", () => {
     const nightly = "0.1.4-nightly.20261027.3796";
 
     const windows = { connected: true, databaseMigration: 69 };
-    expect(localSwitchBlockReason(nightly, stable, [windows], 1)).toBeNull();
+    expect(localSwitchBlockReason(nightly, stable, [windows], 1, true)).toBeNull();
     // A WSL server's newer migration blocks the reinstall that would restart it.
     expect(
       localSwitchBlockReason(
@@ -262,17 +274,31 @@ describe("localSwitchBlockReason", () => {
         stable,
         [windows, { connected: true, databaseMigration: 72 }],
         2,
+        true,
       ),
     ).toContain("does not support yet");
     // A WSL backend still starting has no client entry, so its database is unchecked.
-    expect(localSwitchBlockReason(nightly, stable, [windows], 2)).toBe(
-      "its server is not connected, so its database cannot be checked",
+    expect(localSwitchBlockReason(nightly, stable, [windows], 2, true)).toBe(
+      "This app cannot switch: its server is not connected, so its database cannot be checked.",
     );
     // A cached head from a disconnected server proves nothing.
     expect(
-      localSwitchBlockReason(nightly, stable, [{ connected: false, databaseMigration: 69 }], 1),
-    ).toBe("its server is not connected, so its database cannot be checked");
-    expect(localSwitchBlockReason("0.1.3", stable, [], 1)).toBeNull();
+      localSwitchBlockReason(
+        nightly,
+        stable,
+        [{ connected: false, databaseMigration: 69 }],
+        1,
+        true,
+      ),
+    ).toBe(
+      "This app cannot switch: its server is not connected, so its database cannot be checked.",
+    );
+    expect(localSwitchBlockReason("0.1.3", stable, [], 1, true)).toBeNull();
+    // A primary backend still starting has no entry or bootstrap yet, unless Local environment is off.
+    expect(localSwitchBlockReason(nightly, stable, [], 0, true)).toBe(
+      "This app cannot switch: its server is not connected, so its database cannot be checked.",
+    );
+    expect(localSwitchBlockReason(nightly, stable, [], 0, false)).toBeNull();
   });
 });
 
@@ -320,21 +346,18 @@ describe("runUpdateEverything", () => {
     const calls: string[] = [];
     const result = await runUpdateEverything({
       downloadLocal: async () => false,
-      updateProviders: async () => {
-        calls.push("providers");
-      },
       updateServers: async () => {
         calls.push("servers");
       },
     });
 
-    expect(calls).toEqual(["providers", "servers"]);
+    expect(calls).toEqual(["servers"]);
     expect(result.localReady).toBe(false);
   });
 });
 
 describe("describeUpdateEverything", () => {
-  it("gives each machine one row with its T3 Code and provider updates", () => {
+  it("gives each machine one row with its T3 Code update", () => {
     const id = EnvironmentId.make;
     const { rows } = describeUpdateEverything({
       localVersion: "1.1.0",
@@ -350,25 +373,18 @@ describe("describeUpdateEverything", () => {
           targetVersion: "1.1.0",
         },
       ],
-      providerMachines: [
-        { environmentId: id("npm"), label: "bb-1", providers: ["Codex", "Claude"] },
-        { environmentId: id("local"), label: "Mainbook", providers: ["Codex"] },
-        { environmentId: id("manual"), label: "alvin", providers: ["Claude"] },
-      ],
       skipped: [
         { environmentId: id("manual"), label: "alvin", reason: "needs a manual update" },
         { environmentId: id("offline"), label: "TheoRoom", reason: "not connected" },
       ],
     });
 
-    expect(
-      rows.map(({ label, app, skipped, providers }) => [label, app, skipped, providers]),
-    ).toEqual([
-      ["Mainbook", "this-app", null, ["Codex"]],
-      ["Mainbook WSL", "this-app", null, []],
-      ["bb-1", "server", null, ["Codex", "Claude"]],
-      ["alvin", null, "needs a manual update", ["Claude"]],
-      ["TheoRoom", null, "not connected", []],
+    expect(rows.map(({ label, app, skipped }) => [label, app, skipped])).toEqual([
+      ["Mainbook", "this-app", null],
+      ["Mainbook WSL", "this-app", null],
+      ["bb-1", "server", null],
+      ["alvin", null, "needs a manual update"],
+      ["TheoRoom", null, "not connected"],
     ]);
   });
 });
@@ -379,7 +395,6 @@ describe("describeUpdateCapsule", () => {
       machine: {
         environmentId: EnvironmentId.make("remote"),
         label: "remote",
-        updatesProviders: false,
         server: {
           environmentId: EnvironmentId.make("remote"),
           serverLabel: "remote",
@@ -390,7 +405,6 @@ describe("describeUpdateCapsule", () => {
         startedAt: 0,
         result: "failed" as const,
         failure: "offline",
-        providerFailure: null,
       },
       status: "failed" as const,
     };

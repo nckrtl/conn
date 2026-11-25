@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { threadSyncLabel, type ThreadSyncPhase } from "../../threadSync";
 import { cn } from "~/lib/utils";
-import { NoticeText } from "./ComposerBannerStack";
+import { useMessages } from "gt-react";
 
 /** A line of thread state for the end of the timeline. */
 export interface ThreadNowItem {
@@ -14,9 +14,12 @@ export interface ThreadNowItem {
   readonly actions?: ReactNode;
 }
 
-/** Matches ThreadStatusLine, so every line at the end of the timeline reads as one family. */
+/**
+ * Matches ThreadStatusLine and the work rows above (WorkLog): a 24px icon slot 2px in, so icons
+ * and text line up with the timeline's tool rows.
+ */
 const lineClassName = cn(
-  "mx-auto flex w-full min-w-0 max-w-(--chat-content-max-width) items-center gap-1.5 px-1 pb-2 text-ui text-muted-foreground [&_svg]:size-3.5 [&_svg]:shrink-0",
+  "mx-auto flex w-full min-w-0 max-w-(--chat-content-max-width) items-center gap-1.5 px-0.5 pb-2 text-ui text-muted-foreground [&_svg]:size-4 [&_svg]:shrink-0",
   // A details button must not make its line taller than the others.
   "[&_[data-slot=popover-trigger]]:-my-1.5",
   // Inline actions keep their text size but get a finger-sized hit area on touch.
@@ -39,17 +42,10 @@ function ThreadNowLine({
       className={cn(lineClassName, "items-baseline")}
       data-thread-now-line="true"
     >
-      <span aria-hidden className="flex size-3.5 shrink-0 self-center items-center justify-center">
+      <span aria-hidden className="flex w-6 shrink-0 self-center items-center justify-center">
         {item.icon}
       </span>
-      {/* Title and detail read as one line that gives way before the actions, so Stop stays
-          reachable; when it is cut, its details button shows all of it. */}
-      <NoticeText
-        detailsLabel={
-          typeof item.title === "string" ? `Show details: ${item.title}` : "Show details"
-        }
-        className="min-w-0 truncate"
-      >
+      <span className="min-w-0 truncate">
         {item.title}
         {item.description ? (
           <>
@@ -59,7 +55,7 @@ function ThreadNowLine({
             </span>
           </>
         ) : null}
-      </NoticeText>
+      </span>
       {item.actions ? (
         <span className="ms-1.5 flex shrink-0 items-baseline gap-2.5">{item.actions}</span>
       ) : null}
@@ -68,10 +64,13 @@ function ThreadNowLine({
 }
 
 function ThreadSyncLine({ phase }: { readonly phase: ThreadSyncPhase }) {
+  const m = useMessages();
   return (
     <div className={lineClassName} role="status" data-composer-sync-status={phase}>
-      <RefreshCwIcon aria-hidden />
-      <span className="truncate">{threadSyncLabel(phase)}</span>
+      <span aria-hidden className="flex w-6 shrink-0 items-center justify-center">
+        <RefreshCwIcon />
+      </span>
+      <span className="truncate">{threadSyncLabel(phase, m)}</span>
     </div>
   );
 }

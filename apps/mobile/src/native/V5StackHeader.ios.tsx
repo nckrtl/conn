@@ -3,6 +3,7 @@ import type {
   NativeStackHeaderItemMenu,
   NativeStackNavigationOptions,
 } from "@react-navigation/native-stack";
+import { useGT } from "gt-react-native";
 import { isValidElement, useEffect, useRef } from "react";
 import { StyleSheet, useWindowDimensions } from "react-native";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
@@ -23,6 +24,7 @@ import {
   type HeaderBarButtonItemWithMenu,
   type HeaderBarButtonSearchBarPlacementItem,
 } from "react-native-screens";
+import { connHeaderIcon } from "./connHeaderIcon";
 
 // UIKit's bar margins, and the width of a glass bar button.
 const BAR_MARGINS = 32;
@@ -54,11 +56,13 @@ function convertIcon(
     | HeaderBarButtonItemWithMenu["icon"],
 ) {
   if (!icon) return undefined;
-  if (icon.type === "image")
-    return icon.tinted === false
-      ? { type: "imageSource" as const, imageSource: icon.source }
-      : { type: "templateSource" as const, templateSource: icon.source };
-  return icon;
+  // Conn: SF names become the icon set's template images (connHeaderIcon).
+  const resolved = icon.type === "sfSymbol" ? connHeaderIcon(icon.name) : icon;
+  if (resolved.type === "image")
+    return resolved.tinted === false
+      ? { type: "imageSource" as const, imageSource: resolved.source }
+      : { type: "templateSource" as const, templateSource: resolved.source };
+  return resolved;
 }
 
 function convertMenu(menu: MenuInput, id: string): StackHeaderMenuIOS {
@@ -70,6 +74,7 @@ function convertMenu(menu: MenuInput, id: string): StackHeaderMenuIOS {
         {
           ...convertMenu({ items: item.items }, childId),
           title: "label" in item ? item.label : item.title,
+          icon: convertIcon(item.icon),
           displayInline:
             "inline" in item
               ? item.inline
@@ -161,6 +166,7 @@ export function V5StackHeader(props: {
   readonly searchIdentifier?: string;
 }) {
   const { options } = props;
+  const gt = useGT();
   const theme = useMobileNavigationTheme();
   const nativeMetrics = useNativeLayoutMetrics();
   const deviceType = useDeviceType();
@@ -209,10 +215,9 @@ export function V5StackHeader(props: {
         // code reads the title only as the button's accessibility label there.
         searchFieldAccessory: filterInSearchField,
         ...(filterInSearchField ? { title: "Filter" } : {}),
-        icon: {
-          type: "sfSymbol",
-          name: mailSearch.filterSystemImageName ?? "line.3.horizontal.decrease",
-        },
+        icon: convertIcon(
+          connHeaderIcon(mailSearch.filterSystemImageName ?? "line.3.horizontal.decrease"),
+        ),
         menu: convertMenu(mailSearch.filterMenu, "filter-menu"),
       });
     if (bottomSearch) {
@@ -232,7 +237,7 @@ export function V5StackHeader(props: {
         type: "item",
         id: mailSearch.composeButtonId ?? "compose",
         identifier: "workspace-trailing-action",
-        icon: { type: "sfSymbol", name: mailSearch.composeSystemImageName ?? "square.and.pencil" },
+        icon: convertIcon(connHeaderIcon(mailSearch.composeSystemImageName ?? "square.and.pencil")),
         onPress: mailSearch.onComposePress,
       });
   }
@@ -256,8 +261,8 @@ export function V5StackHeader(props: {
     const compose: HeaderItem = {
       type: "item",
       id: "workspace-compose",
-      title: "New task",
-      icon: { type: "sfSymbol", name: "square.and.pencil" },
+      title: gt("New task"),
+      icon: convertIcon(connHeaderIcon("square.and.pencil")),
       onPress: props.onCompose,
     };
     if (trailing.length)
@@ -277,8 +282,8 @@ export function V5StackHeader(props: {
       {
         type: "item",
         id: "dismiss-keyboard",
-        title: "Dismiss keyboard",
-        icon: { type: "sfSymbol", name: "keyboard.chevron.compact.down" },
+        title: gt("Dismiss keyboard"),
+        icon: convertIcon(connHeaderIcon("keyboard.chevron.compact.down")),
         onPress: () => void KeyboardController.dismiss(),
         // The folded bar is short; keep this out of the overflow menu.
         visibilityPriority: "high",
@@ -370,7 +375,11 @@ export function V5StackHeader(props: {
                 fontSize={bodyText.fontSize * fontScale}
                 allowToolbarIntegration={searchOptions?.allowToolbarIntegration ?? true}
                 placement={bottomSearch ? "integrated" : (searchOptions?.placement ?? "automatic")}
-                placeholder={mailSearch?.placeholder ?? searchOptions?.placeholder ?? "Search"}
+                placeholder={
+                  mailSearch?.placeholder ??
+                  searchOptions?.placeholder ??
+                  gt("Search", { $context: "search field placeholder" })
+                }
                 onFocus={(event) => {
                   searchOptions?.onFocus?.(event);
                 }}

@@ -6,6 +6,7 @@ import {
   subagentGroupSummary,
   summarizeSubagentStatuses,
 } from "@t3tools/client-runtime/state/subagent-display";
+import { useGT, useMessages } from "gt-react";
 import { memo, use, useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -57,6 +58,8 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
   row: Extract<TimelineRow, { kind: "event" }>;
 }) {
   const ctx = use(TimelineRowCtx);
+  const gt = useGT();
+  const m = useMessages();
   const groupId = `subagent-group:${row.id}`;
   const [expanded, setExpanded] = useState(() =>
     ctx.workGroupViewState.expandedEntries.has(groupId),
@@ -79,9 +82,14 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
       completedAt: live?.completedAt ?? item.completedAt,
     };
   });
-  const summary = subagentGroupSummary(agents);
-  const label = `${members.length} ${members.length === 1 ? "subagent" : "subagents"}`;
-  const statusSummary = summarizeSubagentStatuses(agents.map(({ status }) => status));
+  const summary = subagentGroupSummary(agents, m);
+  const label = gt("{count, plural, one {{count} subagent} other {{count} subagents}}", {
+    count: members.length,
+  });
+  const statusSummary = summarizeSubagentStatuses(
+    agents.map(({ status }) => status),
+    m,
+  );
   const toggleExpanded = (open: boolean) => {
     ctx.onToggleWorkEntry(row.id, expanded);
     if (open) ctx.workGroupViewState.expandedEntries.add(groupId);
@@ -144,7 +152,7 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
         {/* Virtualized rows must settle before disclosure scroll anchoring resumes. */}
         <CollapsiblePanel animate={false}>
           {expanded ? (
-            <div className="mt-1 mb-1 rounded-lg border border-(--shell-divider)! bg-(--shell-highlight) p-1">
+            <div className="mt-1 mb-1 flex flex-col gap-3">
               {members.map((item) => (
                 <V2LifecycleRow
                   environmentId={ctx.activeThreadEnvironmentId}

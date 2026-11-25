@@ -62,8 +62,8 @@ const labelled = (entry: ProviderReplayEntry, label: string): ProviderReplayEntr
   entry.type === "runtime_exit" ? entry : { ...entry, label };
 /** MCP rules are last-match-wins; allow this thread after denying all T3 servers. */
 const mcpRules = (name: string) => [
-  { action: "t3-code-*", resource: "*", effect: "deny" },
-  { action: `t3-code-thread_${name}_*`, resource: "*", effect: "allow" },
+  { action: "conn-*", resource: "*", effect: "deny" },
+  { action: `conn-thread_${name}_*`, resource: "*", effect: "allow" },
 ];
 const FULL_ACCESS = [{ action: "*", resource: "*", effect: "allow" }];
 
@@ -139,7 +139,7 @@ const sessionInfo = (directory: string, permissions: ReadonlyArray<unknown>, tit
 });
 
 const instructionsWritten: ReadonlyArray<ProviderReplayEntry> = [
-  out("session.instructions.entry.put", { sessionID: SESSION, key: "t3-code", value: "<any>" }),
+  out("session.instructions.entry.put", { sessionID: SESSION, key: "conn", value: "<any>" }),
   reply("session.instructions.entry.put", null),
 ];
 
@@ -346,7 +346,7 @@ describe("OpenCode 2 through the orchestrator", () => {
         );
 
         assert.lengthOf(projection.providerThreads, 1);
-      }).pipe(Effect.scoped),
+      }),
   );
 
   it.effect("rewrites the session's rules when the thread's mode changes between turns", () =>
@@ -397,7 +397,7 @@ describe("OpenCode 2 through the orchestrator", () => {
         ["completed", "completed", "completed"],
       );
       assert.lengthOf(projection.providerThreads, 1);
-    }).pipe(Effect.scoped),
+    }),
   );
 
   it.effect("denies edits outside the plan directory in plan mode and lifts it after", () =>
@@ -439,7 +439,7 @@ describe("OpenCode 2 through the orchestrator", () => {
         projection.runs.map((run) => run.status),
         ["completed", "completed"],
       );
-    }).pipe(Effect.scoped),
+    }),
   );
 
   it.effect("forks from an earlier turn before the next turn's user message", () =>

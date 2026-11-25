@@ -3,9 +3,49 @@ import { useStore } from "zustand";
 import { ChatCanvasContext } from "./ChatCanvasContext";
 import type { ChatCanvasPreview } from "./chatCanvasLayout";
 import { resolveChatCanvasModel, type ChatCanvasStore } from "./canvasStore";
-import { selectThreadPanelOpen, useRightPanelStore } from "../../rightPanelStore";
+import {
+  selectActiveRightPanel,
+  selectThreadPanelOpen,
+  useRightPanelStore,
+} from "../../rightPanelStore";
+import { cn } from "~/lib/utils";
 import { observeResize } from "../../lib/observeResize";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+
+function panelWidthTransitions(element: HTMLElement) {
+  const panels = element
+    .closest("[data-panel-animations]")
+    ?.querySelectorAll('[data-slot="sidebar-gap"], [data-preview-panel-mode="inline"]');
+  return Array.from(panels ?? []).flatMap((panel) =>
+    panel
+      .getAnimations()
+      .filter(
+        (animation): animation is CSSTransition =>
+          animation instanceof CSSTransition &&
+          animation.transitionProperty === "width" &&
+          animation.playState === "running",
+      ),
+  );
+}
+
+// Sample only the layout panels; seeking unrelated transitions can change their lifecycle.
+function measureTransitionWidths(element: HTMLElement, transitions: CSSTransition[]) {
+  if (transitions.length === 0) return null;
+  const times = transitions.map((animation) => animation.currentTime);
+  // Opposite panel transitions can reach their widest points at different times.
+  for (const animation of transitions) {
+    const end = Number(animation.effect?.getComputedTiming().endTime ?? 0);
+    animation.currentTime = 0;
+    const startWidth = element.clientWidth;
+    animation.currentTime = end;
+    if (startWidth < element.clientWidth) animation.currentTime = 0;
+  }
+  const narrowestWidth = element.clientWidth;
+  transitions.forEach((animation, index) => {
+    animation.currentTime = times[index] ?? null;
+  });
+  return { transitions, narrowestWidth };
+}
 
 export function ChatCanvas({
   store,
@@ -36,7 +76,34 @@ export function ChatCanvas({
     if (!element || !probe) return;
     const findBar =
       detailsCardTopInset > 0 ? element.querySelector<HTMLElement>("[data-thread-find-bar]") : null;
+    let disposed = false;
+    // Seeking forces layout, so it runs once when a transition starts, not every frame.
+    let transitionWidths: ReturnType<typeof measureTransitionWidths> = null;
     const measure = () => {
+      const width = element.clientWidth;
+      const transitions = panelWidthTransitions(element);
+      if (
+        transitions.length !== (transitionWidths?.transitions.length ?? 0) ||
+        transitions.some((animation, index) => animation !== transitionWidths?.transitions[index])
+      ) {
+        const settling = measureTransitionWidths(element, transitions);
+        if (settling && transitionWidths) {
+          settling.narrowestWidth = Math.min(
+            settling.narrowestWidth,
+            transitionWidths.narrowestWidth,
+          );
+        }
+        transitionWidths = settling;
+        // The last resize can arrive while the transitions still count as running.
+        if (settling) {
+          void Promise.allSettled(settling.transitions.map((animation) => animation.finished)).then(
+            () => {
+              if (disposed || transitionWidths !== settling) return;
+              measure();
+            },
+          );
+        }
+      }
       const canvasBounds = element.getBoundingClientRect();
       const findBarBounds = findBar?.getBoundingClientRect();
       const styles = getComputedStyle(probe);
@@ -49,7 +116,8 @@ export function ChatCanvas({
                 bottom: findBarBounds ? findBarBounds.bottom - canvasBounds.top : 0,
               }
             : null,
-        width: element.clientWidth,
+        width,
+        narrowestWidth: transitionWidths?.narrowestWidth ?? width,
         height: element.clientHeight,
         padding: Number.parseFloat(styles.paddingLeft),
         maxChatWidth: Number.parseFloat(styles.width),
@@ -65,12 +133,21 @@ export function ChatCanvas({
     if (findBar) observed.push(findBar);
     if (composerOverlayElement) observed.push(composerOverlayElement);
     if (timelineElement) observed.push(timelineElement);
-    return observeResize(observed, measure);
+    const stopObserving = observeResize(observed, measure);
+    return () => {
+      disposed = true;
+      stopObserving();
+    };
   }, [store, composerOverlayElement, timelineElement, detailsCardTopInset]);
   const detailsCardInlineOpen = useRightPanelStore((state) =>
     threadRef === null
       ? false
       : selectThreadPanelOpen(state.threadPanelVisibilityByThreadKey, threadRef, "inline"),
+  );
+  // Conn: beside the Tasks app the chat may narrow, so Thread details stays inline beside it.
+  const tasksPanelActive = useRightPanelStore(
+    (state) =>
+      threadRef !== null && selectActiveRightPanel(state.byThreadKey, threadRef) === "tasks",
   );
   const model = resolveChatCanvasModel({
     measurements,
@@ -110,7 +187,10 @@ export function ChatCanvas({
         <div
           ref={widthProbeRef}
           aria-hidden
-          className="pointer-events-none invisible absolute h-0 w-(--chat-content-max-width) min-w-[40rem] box-content ps-3 sm:ps-12"
+          className={cn(
+            "pointer-events-none invisible absolute h-0 w-(--chat-content-max-width) box-content ps-3",
+            tasksPanelActive ? "min-w-64 sm:ps-6" : "min-w-[40rem] sm:ps-12",
+          )}
         />
         {children}
       </div>

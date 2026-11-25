@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import {
-  getProviderStatusBannerKey,
+  dismissProviderStatusBannerForSession,
+  getProviderStatusDismissalKey,
   getProviderStatusMessage,
+  isProviderStatusBannerDismissedForSession,
   shouldShowProviderStatusBanner,
 } from "./ProviderStatusBanner";
 
@@ -26,87 +28,73 @@ const provider: ServerProvider = {
   },
 };
 
-describe("compatibility banners", () => {
-  it("shows and dismisses a warning on a healthy provider, then clears it after policy relaxation", () => {
-    expect(shouldShowProviderStatusBanner(provider, null)).toBe(true);
-    expect(shouldShowProviderStatusBanner(provider, getProviderStatusBannerKey(provider))).toBe(
-      false,
-    );
-    expect(
-      shouldShowProviderStatusBanner(
-        { ...provider, version: "1.0.1" },
-        getProviderStatusBannerKey(provider),
-      ),
-    ).toBe(true);
-    const relaxed: ServerProvider = {
-      ...provider,
-      compatibilityAdvisory: {
-        ...provider.compatibilityAdvisory!,
-        status: "supported",
-        message: null,
-      },
-    };
-    expect(getProviderStatusBannerKey(relaxed)).toBeNull();
-    expect(getProviderStatusBannerKey({ ...provider, status: "disabled" })).toBeNull();
-    expect(
-      getProviderStatusBannerKey({
-        ...provider,
-        compatibilityAdvisory: { ...provider.compatibilityAdvisory!, status: "graceful" },
-      }),
-    ).toBeNull();
-  });
-
-  it("shows downgrade guidance instead of a broken OpenCode inventory timeout", () => {
-    const message = "This provider version is known to be incompatible. Use 1.14.19.";
+describe("compatibility advisories", () => {
+  it("never raise the banner or replace the provider's own status message", () => {
+    expect(shouldShowProviderStatusBanner(provider, false)).toBe(false);
     const broken: ServerProvider = {
       ...provider,
       driver: ProviderDriverKind.make("opencode"),
-      version: "2.0.3",
       status: "error",
       auth: { status: "unknown" },
       message: "Failed to load OpenCode provider inventory: Timed out waiting for server start.",
       compatibilityAdvisory: {
         status: "broken",
-        message,
+        message: "This provider version is known to be incompatible. Use 1.14.19.",
         recommendedVersion: "1.14.19",
         recommendedRange: ">=1.14.19 <2.0.0",
       },
     };
-    expect(shouldShowProviderStatusBanner(broken, null)).toBe(true);
-    const timeoutOnly: ServerProvider = {
-      ...broken,
-      compatibilityAdvisory: {
-        ...broken.compatibilityAdvisory!,
-        status: "supported",
-        message: null,
-      },
+    expect(shouldShowProviderStatusBanner(broken, false)).toBe(true);
+    expect(getProviderStatusMessage(broken)).toBe(broken.message);
+  });
+
+  it("says Orbit installs a CLI that is missing from PATH", () => {
+    const { message: _message, ...missing } = {
+      ...provider,
+      installed: false,
+      status: "error" as const,
+      message: undefined,
     };
-    expect(shouldShowProviderStatusBanner(broken, getProviderStatusBannerKey(timeoutOnly))).toBe(
-      true,
+    expect(getProviderStatusMessage(missing)).toBe(
+      "Codex is not on this environment's PATH. Orbit installs it.",
     );
-    expect(shouldShowProviderStatusBanner(broken, getProviderStatusBannerKey(broken))).toBe(false);
+  });
+});
+
+describe("banner dismissal", () => {
+  const { compatibilityAdvisory: _advisory, ...healthy } = provider;
+  const failing: ServerProvider = {
+    ...healthy,
+    instanceId: ProviderInstanceId.make("codex-dismissal"),
+    status: "error",
+    message: "Could not start Codex CLI.",
+  };
+
+  it("keeps a dismissed status hidden in other views until the status changes", () => {
+    const key = getProviderStatusDismissalKey("environment-a", failing);
+    expect(isProviderStatusBannerDismissedForSession(key)).toBe(false);
+
+    dismissProviderStatusBannerForSession(key);
+
     expect(
-      shouldShowProviderStatusBanner(
-        {
-          ...broken,
-          compatibilityAdvisory: { ...broken.compatibilityAdvisory!, message: "Use 1.14.20." },
-        },
-        getProviderStatusBannerKey(broken),
+      isProviderStatusBannerDismissedForSession(
+        getProviderStatusDismissalKey("environment-a", failing),
       ),
     ).toBe(true);
-    expect(getProviderStatusMessage(broken)).toBe(message);
     expect(
-      getProviderStatusMessage({
-        ...broken,
-        compatibilityAdvisory: {
-          ...broken.compatibilityAdvisory!,
-          status: "supported",
-          message: null,
-        },
-      }),
-    ).toBe(broken.message);
-    expect(getProviderStatusMessage({ ...broken, auth: { status: "unauthenticated" } })).toBe(
-      broken.message,
-    );
+      isProviderStatusBannerDismissedForSession(
+        getProviderStatusDismissalKey("environment-a", { ...failing, message: "Codex exited." }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a dismissal to the environment it was taken in", () => {
+    dismissProviderStatusBannerForSession(getProviderStatusDismissalKey("environment-c", failing));
+
+    expect(
+      isProviderStatusBannerDismissedForSession(
+        getProviderStatusDismissalKey("environment-d", failing),
+      ),
+    ).toBe(false);
   });
 });

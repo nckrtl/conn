@@ -7,9 +7,12 @@ import type {
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
+import { msg } from "gt-react";
 
 import { APP_VERSION } from "./branding";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import { m, type MessageResolver } from "./i18n/messages";
+import { appName } from "@t3tools/shared/appName";
 
 export interface VersionMismatch {
   readonly clientVersion: string;
@@ -55,6 +58,7 @@ function versionCore(version: string): string {
 export function resolveVersionMismatch(
   serverVersion: string | null | undefined,
   clientVersion: string = APP_VERSION,
+  resolve: MessageResolver = m,
 ): VersionMismatch | null {
   const normalizedClientVersion = normalizeVersion(clientVersion);
   const normalizedServerVersion = normalizeVersion(serverVersion);
@@ -81,14 +85,19 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
+    hint: resolve(
+      msg("Version mismatch. Try syncing the client and server to the same {appName} version.", {
+        appName: appName(),
+      }),
+    ),
   };
 }
 
 export function resolveServerConfigVersionMismatch(
   serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+  resolve: MessageResolver = m,
 ): VersionMismatch | null {
-  return resolveVersionMismatch(serverConfig?.environment.serverVersion);
+  return resolveVersionMismatch(serverConfig?.environment.serverVersion, APP_VERSION, resolve);
 }
 
 /** The update path the connected server offers, or null when it only
@@ -120,9 +129,13 @@ export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
 ): string {
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (installation?.kind === "npm-global") {
-    const prefix = `'${installation.prefix.replaceAll("'", "'\\''")}'`;
-    return `npm install --global --prefix ${prefix} t3@${targetVersion}`;
+    return `npm install --global --prefix ${quote(installation.prefix)} t3@${targetVersion}`;
+  }
+  if (installation?.kind === "t3-launcher") {
+    // An inherited T3CODE_HOME would otherwise send the update to a home the launcher is not in.
+    return `${quote(installation.launcher)} update --base-dir ${quote(installation.baseDir)} ${targetVersion}`;
   }
   const runner =
     installation?.kind === "pnpm-dlx" ? "pnpm dlx" : installation?.kind === "bunx" ? "bunx" : "npx";

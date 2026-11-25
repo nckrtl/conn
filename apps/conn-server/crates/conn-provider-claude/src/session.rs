@@ -1,0 +1,3394 @@
+//! [`ClaudeSession`]: one provider session, at most one live SDK query.
+//!
+//! A query is the SDK's `query()` in the shared helper process ([`crate::helper`]); the SDK
+//! starts and drives the `claude` CLI. The query opens lazily on the first turn (as T3 opens
+//! its SDK query then), and again after it ended, went idle, or the thread, working directory
+//! or launch options changed. A driver task per query reads its events, feeds the [`Mapper`],
+//! and forwards provider events and callback answers in order. An idle watcher per query ends
+//! it after [`ClaudeConfig::idle_timeout`]; the next turn resumes the conversation. State sits
+//! behind one `std` mutex that is never held across an `.await`.
+
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use conn_contract::{ProviderSessionId, ProviderThread, from_json, to_json};
+use conn_provider::{
+    AwaitBackgroundTasksInput, BoxFuture, Closed, EnsureThreadInput, ForkThreadInput,
+    InterruptInput, McpServer, ProviderError, ProviderEvent, ProviderResult, ResumeThreadInput,
+    RollbackTarget, RollbackThreadInput, RuntimePolicy, RuntimeRequestResponse, Session,
+    SteerInput, StopTaskInput, ThreadSnapshot, TurnInput, TurnStatus,
+};
+use serde_json::{Map, Value, json};
+use tokio::sync::{mpsc, watch};
+
+use crate::DRIVER;
+use crate::attachments;
+use crate::catalog;
+use crate::helper::{Helper, QueryEnd, QueryEvent, QueryHandle};
+use crate::ids::{self, Env, SystemEnv};
+use crate::launch::{
+    self, BypassAvailability, ClaudeConfig, PolicyInput, QueryInput, QueryPolicy, T3_MCP_SERVER,
+};
+use crate::mapper::{Mapper, Out};
+use crate::protocol::{
+    CanUseTool, ControlRequest, Delivery, Elicitation, Inbound, UserDialog, user_message_value,
+};
+
+/// T3's `appliedSessionTitles`, which its adapter keeps for all sessions: the title last applied
+/// to each native session, so a turn renames it only when the thread title changed. One entry
+/// per thread the provider ran.
+pub(crate) type AppliedTitles = Arc<Mutex<HashMap<String, String>>>;
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// T3 gives `renameSession` 10 s.
+const RENAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// `CLAUDE_BOOT_TIMEOUT`: the SDK leaves boot unbounded.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// `CLAUDE_MCP_REGISTRATION_TIMEOUT`.
+const MCP_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(90);
+/// `CLAUDE_T3_MCP_TOOL_TIMEOUT_MS`.
+const MCP_TOOL_TIMEOUT_MS: u64 = 65 * 60 * 1000;
+/// How long a closing query may take: the SDK's 2 s grace, SIGTERM, then SIGKILL after 5 s.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long T3's `interruptTurn` waits for the SDK's `interrupt` (`"10 seconds"`).
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `CLAUDE_STOP_CONFIRM_TIMEOUT_MS`: how long an interrupt waits for the CLI to exit.
+const STOP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a workflow `stopTask` may wait for the SDK (T3's `"15 seconds"`).
+const WORKFLOW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+/// The helper's session-file calls (T3's worker timeout).
+const FUNCTION_TIMEOUT: Duration = Duration::from_secs(30);
+const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+pub const EVENT_CAPACITY: usize = 256;
+const LOGGED_SKIPS_CAP: usize = 64;
+
+pub struct ClaudeSession {
+    id: ProviderSessionId,
+    inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for ClaudeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeSession")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+struct Inner {
+    /// The provider instance (`providerInstanceId` on threads).
+    instance_id: String,
+    config: ClaudeConfig,
+    helper: Helper,
+    state: Mutex<State>,
+    /// The provider's `AppliedTitles`, shared by its sessions.
+    applied_titles: AppliedTitles,
+    /// Runs turn starts and interrupts one at a time, as T3's effect outbox runs a thread's
+    /// effects: a turn sent after a Stop starts once the interrupted CLI has exited.
+    turn_control: tokio::sync::Mutex<()>,
+    /// Wakes a start the engine abandoned ([`State::abandoned_run`]).
+    abandon: tokio::sync::Notify,
+    /// [`STOP_CONFIRM_TIMEOUT`]; shorter in tests.
+    stop_confirm_timeout: Duration,
+    retry_budget: Duration,
+}
+
+struct State {
+    mapper: Mapper<SystemEnv>,
+    goal_stop_check: Option<conn_provider::GoalStopCheck>,
+    events: Option<mpsc::Sender<ProviderEvent>>,
+    live: Option<Live>,
+    generation: u64,
+    /// Native ids that have a conversation on disk, so the next query uses `resume`.
+    resumable: HashSet<String>,
+    mcp_servers: Vec<McpServer>,
+    /// Inline attachment bytes sent so far (`claudeAttachmentBudget`).
+    attachment_budget: attachments::Budget,
+    attachment_thread: Option<String>,
+    /// The running turn's prompt effort, for its steers.
+    turn_prompt_effort: Option<String>,
+    /// `resolveBypassAvailability`, cached per working directory (T3's `bypassCache`).
+    bypass_cache: Option<(Option<String>, BypassAvailability)>,
+    closed: bool,
+    /// The run whose start Stop abandoned (`abandon_turn_start`). One is enough: a thread
+    /// starts one turn at a time, and a stale id matches no later run.
+    abandoned_run: Option<String>,
+    logged_skips: HashSet<String>,
+    /// Live output tails per Bash call (`taskOutputTails`); the mapper caps them per turn.
+    tails: HashMap<String, crate::tail::Tail>,
+    /// MCP app notes in Claude's history, and those the running turn offered.
+    app_context: AppContextState,
+}
+
+/// Notes by key: text and the offer that sent it.
+type Notes = HashMap<String, (String, u64)>;
+/// A note an offer replaced: its key and what it held before, if anything.
+type Replaced = (String, Option<(String, u64)>);
+
+/// MCP app notes by native thread (T3's `deliveredAppContext` and `appContextOffered`).
+/// A turn's offer enters the history only when the turn completes; compaction, a
+/// conversation reset and a rollback drop the history's notes. Each offer has an id until
+/// the SDK answers it: a refusal takes back that offer's notes wherever they went, even
+/// into a completed turn's history, unless a newer offer replaced them. The maps hold only
+/// the thread's bounded app context entries.
+#[derive(Default)]
+struct AppContextState {
+    delivered: Option<(String, Notes)>,
+    offered: Option<(String, Notes)>,
+    /// Offers the SDK has not answered: the notes each replaced in `offered`.
+    pending: HashMap<u64, Vec<Replaced>>,
+    next_offer: u64,
+}
+
+impl AppContextState {
+    /// The entries the native thread has not yet seen with their current text. A steer also
+    /// counts what its running turn offered.
+    fn unseen<'a>(
+        &self,
+        native: &str,
+        entries: &'a [conn_provider::AppContextEntry],
+        with_offer: bool,
+    ) -> Vec<&'a conn_provider::AppContextEntry> {
+        let offered = self.offered.as_ref().filter(|_| with_offer);
+        let seen = offered
+            .or(self.delivered.as_ref())
+            .filter(|(id, _)| id == native)
+            .map(|(_, seen)| seen);
+        entries
+            .iter()
+            .filter(|e| seen.and_then(|seen| seen.get(&e.key)).map(|(t, _)| t) != Some(&e.text))
+            .collect()
+    }
+
+    /// Records a message that carries notes as offered: a turn's first message starts the
+    /// turn's offer, a steer replaces it with the app's current notes (T3's `commitOffer`).
+    /// Returns the offer's id for the SDK's answer.
+    fn offer(
+        &mut self,
+        native: String,
+        entries: &[conn_provider::AppContextEntry],
+        starts_turn: bool,
+    ) -> u64 {
+        self.next_offer += 1;
+        let id = self.next_offer;
+        if starts_turn || self.offered.as_ref().is_none_or(|(n, _)| *n != native) {
+            self.offered = Some((native, Notes::new()));
+        }
+        let mut replaced = Vec::new();
+        if let Some((_, notes)) = self.offered.as_mut() {
+            let removed: Vec<String> = notes
+                .keys()
+                .filter(|key| !entries.iter().any(|e| &e.key == *key))
+                .cloned()
+                .collect();
+            for key in removed {
+                let prior = notes.remove(&key);
+                replaced.push((key, prior));
+            }
+            for entry in entries {
+                if notes.get(&entry.key).map(|(t, _)| t) != Some(&entry.text) {
+                    let prior = notes.insert(entry.key.clone(), (entry.text.clone(), id));
+                    replaced.push((entry.key.clone(), prior));
+                }
+            }
+        }
+        self.pending.insert(id, replaced);
+        id
+    }
+
+    /// The SDK took the message.
+    fn accepted(&mut self, offer: u64) {
+        self.pending.remove(&offer);
+    }
+
+    /// The SDK refused the message: its notes go back to what they were, in the turn's offer
+    /// and in a history a completed turn already wrote them to.
+    fn refused(&mut self, offer: u64) {
+        let Some(replaced) = self.pending.remove(&offer) else {
+            return;
+        };
+        // A note this offer removed comes back unless a newer offer followed.
+        let latest = offer == self.next_offer;
+        for map in [self.offered.as_mut(), self.delivered.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            for (key, prior) in &replaced {
+                let current = map.1.get(key);
+                if current.is_some_and(|(_, id)| *id == offer)
+                    || (current.is_none() && prior.is_some() && latest)
+                {
+                    match prior {
+                        Some(prior) => {
+                            map.1.insert(key.clone(), prior.clone());
+                        }
+                        None => {
+                            map.1.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn turn_ended(&mut self, completed: bool) {
+        if let Some(offered) = self.offered.take()
+            && completed
+        {
+            self.delivered = Some(offered);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.delivered = None;
+        self.offered = None;
+        self.pending.clear();
+    }
+}
+
+/// Prepends MCP app notes to the prompt as quoted app data (`withClaudeAppContext`). A slash
+/// command runs only as a plain-text prompt, so its notes wait for the next turn. Returns
+/// whether it added any.
+fn with_app_context(content: Value, entries: &[&conn_provider::AppContextEntry]) -> (Value, bool) {
+    if entries.is_empty() || content.as_str().is_some_and(|text| text.starts_with('/')) {
+        return (content, false);
+    }
+    let mut blocks: Vec<Value> = entries
+        .iter()
+        .map(|e| json!({"type": "text", "text": format!("<external_{0}>{1}</external_{0}>", e.key, e.text)}))
+        .collect();
+    match content {
+        Value::String(text) => blocks.push(json!({"type": "text", "text": text})),
+        Value::Array(parts) => blocks.extend(parts),
+        other => blocks.push(other),
+    }
+    (Value::Array(blocks), true)
+}
+
+struct WorkflowStopGuard {
+    inner: Arc<Inner>,
+    thread: Value,
+    task_id: String,
+    accepted: bool,
+}
+
+impl Drop for WorkflowStopGuard {
+    fn drop(&mut self) {
+        if !self.accepted {
+            self.inner
+                .lock()
+                .mapper
+                .workflow_stop(&self.thread, &self.task_id, false);
+        }
+    }
+}
+
+struct Live {
+    query: QueryHandle,
+    generation: u64,
+    stopping: Arc<AtomicBool>,
+    /// Becomes true when the query's `end` arrived.
+    ended: watch::Receiver<bool>,
+    native_thread_id: String,
+    app_thread_id: String,
+    cwd: Option<String>,
+    policy: QueryPolicy,
+    /// The permission mode now in force (a denied ExitPlanMode can leave `plan`).
+    permission_mode: String,
+    /// The mode the CLI reported in its first `init` (T3's `openedPermissionMode`).
+    opened_permission_mode: String,
+    received_init: bool,
+    emitted: VecDeque<String>,
+    check_sign_ins: bool,
+    announced_sign_ins: HashSet<String>,
+    mcp_apps_capable: bool,
+    model: String,
+    effort: Option<String>,
+    selection_settings: Map<String, Value>,
+    /// The MCP servers this query got; a different list needs `setMcpServers`.
+    mcp_servers: Vec<McpServer>,
+    /// `allowedTools` is a launch option: gaining or losing the T3 server needs a new query.
+    t3_mcp: bool,
+    /// The device text is part of the system prompt: a change needs a new query.
+    device_tools: bool,
+    restart_needed: bool,
+    last_activity: Instant,
+    /// Since when background work keeps this idle query alive.
+    held_since: Option<Instant>,
+    /// Where Claude Code writes task output (`claudeTaskOutputRoot`), from the CLI's environment.
+    task_output_root: std::path::PathBuf,
+    /// `workflowFilesRoot`: where this query's CLI writes workflow transcripts.
+    workflow_files_root: std::path::PathBuf,
+}
+
+impl ClaudeSession {
+    pub(crate) fn open(
+        id: ProviderSessionId,
+        instance_id: &str,
+        config: ClaudeConfig,
+        helper: Helper,
+        events: mpsc::Sender<ProviderEvent>,
+        mcp_servers: Vec<McpServer>,
+        applied_titles: AppliedTitles,
+    ) -> Self {
+        let mapper = Mapper::new(SystemEnv, id.as_str());
+        let inner = Arc::new(Inner {
+            instance_id: instance_id.to_string(),
+            config,
+            helper,
+            applied_titles,
+            state: Mutex::new(State {
+                mapper,
+                goal_stop_check: None,
+                events: Some(events),
+                live: None,
+                generation: 0,
+                resumable: HashSet::new(),
+                // Registered with `setMcpServers` once the first query is initialized, as
+                // T3's query runner does, so taking them at open sends the same.
+                mcp_servers,
+                attachment_budget: attachments::Budget::default(),
+                attachment_thread: None,
+                turn_prompt_effort: None,
+                bypass_cache: None,
+                closed: false,
+                abandoned_run: None,
+                logged_skips: HashSet::new(),
+                tails: HashMap::new(),
+                app_context: AppContextState::default(),
+            }),
+            turn_control: tokio::sync::Mutex::new(()),
+            abandon: tokio::sync::Notify::new(),
+            stop_confirm_timeout: STOP_CONFIRM_TIMEOUT,
+            retry_budget: Duration::from_secs(600),
+        });
+        Self { id, inner }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_retry_budget(mut self, budget: Duration) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().retry_budget = budget;
+        self
+    }
+
+    /// A session whose interrupt waits `timeout` for the CLI to exit.
+    #[cfg(test)]
+    pub(crate) fn with_stop_confirm_timeout(mut self, timeout: Duration) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.stop_confirm_timeout = timeout;
+        }
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_query(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .live
+            .as_ref()
+            .map(|l| l.query.id().to_string())
+    }
+}
+
+impl Inner {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        crate::lock(&self.state)
+    }
+
+    /// Sends events and callback answers in order. Holds no lock.
+    async fn deliver(self: &Arc<Self>, query: Option<&QueryHandle>, outs: Vec<Out>) {
+        if outs.is_empty() {
+            return;
+        }
+        let events = self.lock().events.clone();
+        for out in outs {
+            match out {
+                Out::Event(mut event) => {
+                    if let ProviderEvent::AppThreadCreated {
+                        app_thread,
+                        create_only: None,
+                    } = &event
+                        && let Some(live) = self
+                            .lock()
+                            .live
+                            .as_ref()
+                            .filter(|l| l.app_thread_id == app_thread.id.as_str())
+                    {
+                        crate::lock(&self.applied_titles)
+                            .insert(live.native_thread_id.clone(), app_thread.title.clone());
+                    }
+                    if let ProviderEvent::ProviderThreadUpdated { provider_thread } = &mut event {
+                        let state = self.lock();
+                        let budget = state.attachment_budget;
+                        let same = state.attachment_thread == native_thread_id(provider_thread);
+                        drop(state);
+                        if same && (budget.bytes > 0 || budget.pages > 0) {
+                            let mut row = to_json(provider_thread);
+                            row["nativeMetadata"]["claudeAttachmentBudget"] = budget.metadata();
+                            if let Ok(updated) = from_json(row) {
+                                *provider_thread = updated;
+                            }
+                        }
+                    }
+                    if let Some(events) = &events {
+                        let _ = events.send(event).await;
+                    }
+                }
+                Out::Write(line) => {
+                    if let (Some(query), Some((id, result))) = (query, callback_answer(&line)) {
+                        query.answer(&id, result).await;
+                    }
+                }
+                Out::TailOutput {
+                    tool_use_id,
+                    thread_id,
+                    item_id,
+                    session_id,
+                    task_id,
+                } => {
+                    let Some(events) = &events else { continue };
+                    let mut state = self.lock();
+                    let Some(root) = state.live.as_ref().map(|l| l.task_output_root.clone()) else {
+                        continue;
+                    };
+                    let target = crate::tail::Target {
+                        root,
+                        session_id,
+                        task_id,
+                        thread_id,
+                        item_id,
+                    };
+                    if let Some(tail) = crate::tail::spawn(target, events.clone()) {
+                        state.tails.insert(tool_use_id, tail);
+                    }
+                }
+                Out::StopTail { tool_use_id } => {
+                    let tail = self.lock().tails.remove(&tool_use_id);
+                    if let Some(tail) = tail {
+                        tail.finish().await;
+                    }
+                }
+                Out::StopTask { task_id } => {
+                    // `stopTask` only on a live query that is not already stopping.
+                    let query = {
+                        let state = self.lock();
+                        state
+                            .live
+                            .as_ref()
+                            .filter(|l| !l.stopping.load(Ordering::Relaxed) && !*l.ended.borrow())
+                            .map(|l| l.query.clone())
+                    };
+                    if let Some(query) = query {
+                        // An unanswered stop must not hold the turn's settlement.
+                        tokio::spawn(async move {
+                            let _ = query
+                                .call("stopTask", json!([task_id]), WORKFLOW_STOP_TIMEOUT)
+                                .await;
+                        });
+                    }
+                }
+                Out::ReadMemberTranscript(member) => {
+                    let root = self
+                        .lock()
+                        .live
+                        .as_ref()
+                        .map(|l| l.workflow_files_root.clone());
+                    if let Some(delay) = member.delay {
+                        // The flush wait runs on its own timer, so this driver keeps draining
+                        // its query and the shared SDK router never blocks on it.
+                        let inner = Arc::downgrade(self);
+                        let query = query.cloned();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            if let Some(inner) = inner.upgrade() {
+                                inner.import_member(query.as_ref(), member, root).await;
+                            }
+                        });
+                        continue;
+                    }
+                    self.import_member(query, member, root).await;
+                }
+                Out::Skipped(kind) => {
+                    let mut state = self.lock();
+                    // Kinds come from the CLI; remember a bounded number of them.
+                    let new = state.logged_skips.len() < LOGGED_SKIPS_CAP
+                        && state.logged_skips.insert(kind.clone());
+                    drop(state);
+                    if new {
+                        eprintln!("conn-provider-claude: skipped SDK message kind `{kind}`");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads a member transcript off the runtime thread and shows what it gained. Boxed as
+    /// `Send`: it and `deliver` call each other, and the flush timer spawns it.
+    fn import_member<'a>(
+        self: &'a Arc<Self>,
+        query: Option<&'a QueryHandle>,
+        member: crate::mapper::MemberTranscript,
+        root: Option<std::path::PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let answers = match root {
+                Some(root) => {
+                    let job = member.clone();
+                    tokio::task::spawn_blocking(move || read_member_transcript(&job, &root))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            };
+            let outs = self.lock().mapper.member_transcript(member, answers);
+            self.deliver(query, outs).await;
+        })
+    }
+
+    fn start_abandoned(&self, run_id: &str) -> bool {
+        self.lock().abandoned_run.as_deref() == Some(run_id)
+    }
+
+    /// Ends once the engine abandoned `run_id`'s start.
+    async fn until_abandoned(&self, run_id: &str) {
+        loop {
+            let notified = self.abandon.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.start_abandoned(run_id) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Runs `work` unless the engine abandons `run_id`'s start first; then `work` is dropped
+    /// and the result is [`abandoned_error`].
+    async fn unless_abandoned<T>(
+        &self,
+        run_id: &str,
+        work: impl std::future::Future<Output = ProviderResult<T>>,
+    ) -> ProviderResult<T> {
+        tokio::select! {
+            result = work => result,
+            () = self.until_abandoned(run_id) => Err(abandoned_error()),
+        }
+    }
+
+    fn bound_query(&self, thread: &ProviderThread) -> ProviderResult<QueryHandle> {
+        let native = native_thread_id(thread);
+        self.lock()
+            .live
+            .as_ref()
+            .filter(|l| native.as_deref() == Some(l.native_thread_id.as_str()) && l.query.is_open())
+            .map(|l| l.query.clone())
+            .ok_or(ProviderError::SessionStopped)
+    }
+
+    fn mcp_app_query(&self, thread: &conn_contract::ProviderThread) -> ProviderResult<QueryHandle> {
+        let native = native_thread_id(thread);
+        let state = self.lock();
+        let live = state
+            .live
+            .as_ref()
+            .filter(|live| {
+                native.as_deref() == Some(live.native_thread_id.as_str()) && live.query.is_open()
+            })
+            .ok_or(ProviderError::SessionStopped)?;
+        if !live.mcp_apps_capable {
+            return Err(ProviderError::Protocol {
+                detail: "This Claude process does not support MCP Apps.".into(),
+            });
+        }
+        Ok(live.query.clone())
+    }
+
+    fn live_query(&self) -> ProviderResult<QueryHandle> {
+        self.lock()
+            .live
+            .as_ref()
+            .map(|l| l.query.clone())
+            .ok_or(ProviderError::SessionStopped)
+    }
+
+    async fn call(&self, method: &str, args: Value, timeout: Duration) -> ProviderResult<Value> {
+        self.live_query()?.call(method, args, timeout).await
+    }
+
+    /// `setMcpServers`, as the T3 query runner calls it after `initializationResult`.
+    /// Credentials stay out of argv. Servers that fail to connect are logged by name only.
+    async fn set_mcp_servers(&self, servers: &[McpServer]) -> ProviderResult<()> {
+        let mut map = Map::new();
+        for server in servers {
+            let headers: Map<String, Value> = server
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect();
+            map.insert(
+                server.name.clone(),
+                json!({"type": "http", "url": server.url, "headers": headers, "timeout": MCP_TOOL_TIMEOUT_MS}),
+            );
+        }
+        let answer = self
+            .call("setMcpServers", json!([map]), MCP_REGISTRATION_TIMEOUT)
+            .await;
+        let failed: Vec<String> = match &answer {
+            Ok(value) => value["errors"]
+                .as_object()
+                .map(|e| e.keys().cloned().collect())
+                .unwrap_or_default(),
+            Err(ProviderError::Failed { detail, .. }) if detail.ends_with("no answer in time") => {
+                return Err(failed_err(
+                    "set_mcp_servers",
+                    "Claude did not register the MCP servers in time.",
+                ));
+            }
+            Err(ProviderError::SessionStopped) => return Err(ProviderError::SessionStopped),
+            Err(_) => servers.iter().map(|s| s.name.clone()).collect(),
+        };
+        if !failed.is_empty() {
+            eprintln!(
+                "conn-provider-claude: MCP servers unavailable: {}",
+                failed.join(", ")
+            );
+        }
+        // A Claude session loads its servers once: without `conn` the thread would keep no
+        // conn tools. One reconnect per registration, so a failure never loops.
+        if failed.iter().any(|name| name == T3_MCP_SERVER) {
+            let reconnected = self
+                .call(
+                    "reconnectMcpServer",
+                    json!([T3_MCP_SERVER]),
+                    MCP_REGISTRATION_TIMEOUT,
+                )
+                .await;
+            match reconnected {
+                Ok(_) => eprintln!("conn-provider-claude: MCP server {T3_MCP_SERVER} reconnected"),
+                Err(ProviderError::SessionStopped) => return Err(ProviderError::SessionStopped),
+                Err(_) => eprintln!(
+                    "conn-provider-claude: MCP server {T3_MCP_SERVER} is still unavailable"
+                ),
+            }
+        }
+        if let Some(live) = &mut self.lock().live {
+            live.mcp_servers = servers.to_vec();
+        }
+        Ok(())
+    }
+}
+
+/// A mapper reply (a CLI `control_response` line) as a callback answer.
+fn callback_answer(line: &str) -> Option<(String, Result<Value, String>)> {
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    let response = value.get_mut("response")?;
+    let id = response.get("request_id")?.as_str()?.to_string();
+    if response.get("subtype").and_then(Value::as_str) == Some("success") {
+        Some((
+            id,
+            Ok(response
+                .get_mut("response")
+                .map(Value::take)
+                .unwrap_or(Value::Null)),
+        ))
+    } else {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("control request failed")
+            .to_string();
+        Some((id, Err(error)))
+    }
+}
+
+/// An SDK callback as the CLI control request the mapper reads. The SDK passes the request's
+/// fields renamed (`can_use_tool` → `canUseTool(toolName, input, {toolUseID, ...})`).
+fn callback_request(kind: &str, args: &Value) -> Option<ControlRequest> {
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
+    match kind {
+        "canUseTool" => {
+            let options = args.get("options").unwrap_or(&Value::Null);
+            Some(ControlRequest::CanUseTool(CanUseTool {
+                tool_name: text(args, "toolName").unwrap_or_default(),
+                input: args.get("input").cloned().unwrap_or(Value::Null),
+                tool_use_id: text(options, "toolUseID").unwrap_or_default(),
+                permission_suggestions: options.get("suggestions").cloned(),
+                decision_reason: text(options, "decisionReason"),
+                matched_ask_rule: options.get("matchedAskRule").cloned(),
+                title: text(options, "title"),
+                display_name: text(options, "displayName"),
+                description: text(options, "description"),
+                blocked_path: text(options, "blockedPath"),
+                agent_id: text(options, "agentID"),
+            }))
+        }
+        "elicitation" => Some(ControlRequest::Elicitation(Elicitation {
+            mcp_server_name: text(args, "serverName").unwrap_or_default(),
+            message: text(args, "message").unwrap_or_default(),
+            mode: text(args, "mode"),
+            requested_schema: args.get("requestedSchema").cloned(),
+            title: text(args, "title"),
+            display_name: text(args, "displayName"),
+        })),
+        "userDialog" => Some(ControlRequest::UserDialog(UserDialog {
+            dialog_kind: text(args, "dialogKind").unwrap_or_default(),
+            payload: args.get("payload").cloned().unwrap_or(Value::Null),
+            tool_use_id: text(args, "toolUseID"),
+        })),
+        _ => None,
+    }
+}
+
+/// The bytes one member transcript read takes at most (T3 drains 512 KiB reads unbounded).
+const MEMBER_TRANSCRIPT_BYTE_CAP: u64 = 8 * 1024 * 1024;
+
+/// Reads a settled member's transcript under `root`.
+pub(crate) fn read_member_transcript(
+    member: &crate::mapper::MemberTranscript,
+    root: &std::path::Path,
+) -> Option<crate::mapper::MemberAnswers> {
+    let file = member.dir.join(format!("agent-{}.jsonl", member.agent_id));
+    read_contained_tail(root, &file, MEMBER_TRANSCRIPT_BYTE_CAP, member.cursor)
+        .map(|(text, cursor)| crate::mapper::transcript_answers(&text, cursor))
+}
+
+/// `readContainedWorkflowFile` with `fromOffset`: the whole lines an absolute `.jsonl` file
+/// gained since `cursor`, whose real path stays inside `root`, and the cursor after them. Past
+/// `cap` bytes the read keeps the last whole lines, so the final answer stays. `None` when the
+/// file is missing, outside `root`, or not a regular file.
+fn read_contained_tail(
+    root: &std::path::Path,
+    file: &std::path::Path,
+    cap: u64,
+    cursor: crate::mapper::TranscriptCursor,
+) -> Option<(String, crate::mapper::TranscriptCursor)> {
+    use std::io::{Read, Seek, SeekFrom};
+    if !file.is_absolute() || file.extension()? != "jsonl" {
+        return None;
+    }
+    let root = std::fs::canonicalize(root).ok()?;
+    let resolved = std::fs::canonicalize(file).ok()?;
+    if !resolved.starts_with(&root) || resolved.extension()? != "jsonl" {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A leaf swapped for a symlink since the check fails to open; a FIFO cannot block.
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let mut handle = options.open(&resolved).ok()?;
+    let meta = handle.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let identity = None;
+    let base = if identity.is_some() && cursor.identity == identity && cursor.offset <= meta.len() {
+        cursor.offset
+    } else {
+        0
+    };
+    let start = base.max(meta.len().saturating_sub(cap));
+    handle.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    handle.take(cap).read_to_end(&mut bytes).ok()?;
+    let first = if start > base {
+        bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |at| at + 1)
+    } else {
+        0
+    };
+    let end = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1)
+        .max(first);
+    let lines = bytes.get(first..end).unwrap_or_default();
+    let offset = start.saturating_add(u64::try_from(end).ok()?);
+    Some((
+        String::from_utf8_lossy(lines).into_owned(),
+        crate::mapper::TranscriptCursor { offset, identity },
+    ))
+}
+
+/// Claude can answer the root request by launching a forked skill. A parentless
+/// progress or completion frame can still belong to background work from an earlier turn.
+fn clears_unanswered_request(frame: &Value) -> bool {
+    if !frame["parent_tool_use_id"].is_null() {
+        return false;
+    }
+    let subtype = frame["subtype"].as_str().unwrap_or_default();
+    frame["type"] != "system"
+        || !subtype.starts_with("task_")
+        || subtype == "task_started" && frame["spawn_depth"].as_f64().unwrap_or(1.0) <= 1.0
+}
+
+/// The driver: one per query, ends after the query's `End`.
+async fn drive(
+    inner: Arc<Inner>,
+    generation: u64,
+    query: QueryHandle,
+    mut rx: mpsc::Receiver<QueryEvent>,
+    ended: watch::Sender<bool>,
+    stopping: Arc<AtomicBool>,
+) {
+    let mut flush_at = None;
+    let mut retry_at = None;
+    let mut request_at = None;
+    let budget = inner.retry_budget;
+    loop {
+        let dirty = {
+            let state = inner.lock();
+            state.generation == generation && state.mapper.has_dirty_streams()
+        };
+        let read = async {
+            if dirty {
+                let at =
+                    *flush_at.get_or_insert_with(|| tokio::time::Instant::now() + FLUSH_INTERVAL);
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(at) => {
+                        flush_at = None;
+                        let outs = {
+                            let mut state = inner.lock();
+                            if state.generation != generation { return None; }
+                            state.mapper.flush()
+                        };
+                        inner.deliver(Some(&query), outs).await;
+                        None
+                    }
+                    event = rx.recv() => Some(event),
+                }
+            } else {
+                flush_at = None;
+                Some(rx.recv().await)
+            }
+        };
+        let deadline = retry_at.into_iter().chain(request_at).min();
+        let event = match deadline {
+            Some(at) => match tokio::time::timeout_at(at, read).await {
+                Ok(event) => event,
+                Err(_) => {
+                    let outs = {
+                        let mut state = inner.lock();
+                        if state.generation != generation {
+                            return;
+                        }
+                        if let Some(live) = &mut state.live {
+                            live.restart_needed = true;
+                        }
+                        state.mapper.expire_request()
+                    };
+                    inner.deliver(Some(&query), outs).await;
+                    query.abort().await;
+                    retry_at = None;
+                    request_at = None;
+                    continue;
+                }
+            },
+            None => read.await,
+        };
+        let Some(event) = event else { continue };
+        let message = match event {
+            Some(QueryEvent::Message(value)) => {
+                let goal_updates = inner.lock().mapper.observe_goal(&value);
+                inner.deliver(Some(&query), goal_updates).await;
+                if matches!(value["type"].as_str(), Some("assistant" | "user"))
+                    && value["parent_tool_use_id"].is_null()
+                    && let Some(uuid) = value["uuid"].as_str()
+                    && let Some(live) = inner
+                        .lock()
+                        .live
+                        .as_mut()
+                        .filter(|l| l.generation == generation)
+                {
+                    if live.emitted.len() == 256 {
+                        live.emitted.pop_front();
+                    }
+                    live.emitted.push_back(uuid.to_owned());
+                }
+                if inner.lock().mapper.turn_active() {
+                    if (value["type"] == "system"
+                        && value["subtype"] == "status"
+                        && value["status"] == "requesting")
+                        || (value["type"] == "command_lifecycle"
+                            && value["state"] == "started"
+                            && inner.lock().mapper.is_turn_prompt(&value["command_uuid"]))
+                    {
+                        request_at = Some(tokio::time::Instant::now() + budget);
+                    } else if clears_unanswered_request(&value) {
+                        request_at = None;
+                    }
+                }
+                if value["type"] == "system" && value["subtype"] == "init" {
+                    note_init(&mut inner.lock(), generation, &value);
+                }
+                // The conversation lost the turns that carried app notes.
+                if value["type"] == "conversation_reset"
+                    || (value["type"] == "system" && value["subtype"] == "compact_boundary")
+                {
+                    inner.lock().app_context.reset();
+                }
+                if value["type"] == "result"
+                    && inner
+                        .lock()
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.generation == generation && l.check_sign_ins)
+                {
+                    let statuses = query
+                        .call("mcpServerStatus", json!([]), Duration::from_secs(2))
+                        .await
+                        .unwrap_or(Value::Null);
+                    let outs = {
+                        let mut state = inner.lock();
+                        let mut names = Vec::new();
+                        if let Some(live) =
+                            state.live.as_mut().filter(|l| l.generation == generation)
+                        {
+                            let servers = statuses.as_array().into_iter().flatten();
+                            live.check_sign_ins = false;
+                            for server in servers {
+                                let Some(name) = server["name"].as_str() else {
+                                    continue;
+                                };
+                                match server["status"].as_str() {
+                                    Some("connected") => {
+                                        live.announced_sign_ins.remove(name);
+                                    }
+                                    Some("pending") => live.check_sign_ins = true,
+                                    Some("needs-auth")
+                                        if server["scope"] != "claudeai"
+                                            && live.announced_sign_ins.len() < 256
+                                            && live.announced_sign_ins.insert(name.to_owned()) =>
+                                    {
+                                        names.push(name)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        state.mapper.mcp_sign_in_notices(&names)
+                    };
+                    inner.deliver(Some(&query), outs).await;
+                }
+                let mut message = Inbound::from_value(value);
+                if let Inbound::System(msg) = &mut message
+                    && msg.subtype == "task_started"
+                    && let (Some(task), Some(tool)) = (&msg.task_id, &msg.tool_use_id)
+                {
+                    let lookup = {
+                        let state = inner.lock();
+                        state
+                            .live
+                            .as_ref()
+                            .filter(|l| {
+                                l.generation == generation
+                                    && state.mapper.needs_launch_lookup(task, tool)
+                            })
+                            .map(|l| {
+                                (
+                                    l.native_thread_id.clone(),
+                                    l.cwd.clone(),
+                                    l.workflow_files_root
+                                        .parent()
+                                        .map(|p| p.to_string_lossy().into_owned()),
+                                )
+                            })
+                    };
+                    if let Some((native, cwd, home)) = lookup {
+                        let mut options = json!({"limit":1});
+                        if let Some(cwd) = cwd {
+                            options["dir"] = json!(cwd);
+                        }
+                        if let Ok(messages) = inner
+                            .helper
+                            .function(
+                                "getSubagentMessages",
+                                json!([native, task, options]),
+                                home.as_deref(),
+                                FUNCTION_TIMEOUT,
+                            )
+                            .await
+                        {
+                            msg.recovered_launch = messages
+                                .get(0)
+                                .and_then(|m| m["parent_tool_use_id"].as_str())
+                                .filter(|id| *id != tool)
+                                .map(str::to_owned);
+                        }
+                    }
+                }
+                message
+            }
+            Some(QueryEvent::Request { id, kind, .. }) if kind == "stopHook" => {
+                let check = {
+                    let state = inner.lock();
+                    state
+                        .mapper
+                        .active_goal()
+                        .then(|| state.goal_stop_check.clone())
+                        .flatten()
+                };
+                let hold = match check {
+                    Some(check) => check().await,
+                    None => false,
+                };
+                query
+                    .answer(
+                        &id,
+                        Ok(if hold {
+                            json!({"continue": false})
+                        } else {
+                            json!({})
+                        }),
+                    )
+                    .await;
+                continue;
+            }
+            Some(QueryEvent::Request { id, kind, args }) => match callback_request(&kind, &args) {
+                Some(request) => Inbound::ControlRequest {
+                    request_id: id,
+                    request,
+                },
+                None => {
+                    query
+                        .answer(&id, Err(format!("unsupported callback {kind}")))
+                        .await;
+                    continue;
+                }
+            },
+            Some(QueryEvent::Cancel { id }) => Inbound::ControlCancel { request_id: id },
+            Some(QueryEvent::End(end)) => {
+                on_end(&inner, generation, &end, stopping.load(Ordering::Relaxed)).await;
+                let _ = ended.send(true);
+                return;
+            }
+            None => {
+                on_end(
+                    &inner,
+                    generation,
+                    &QueryEnd {
+                        helper_error: Some("the Claude helper stopped".into()),
+                        ..QueryEnd::default()
+                    },
+                    stopping.load(Ordering::Relaxed),
+                )
+                .await;
+                let _ = ended.send(true);
+                return;
+            }
+        };
+        let outs = {
+            let mut state = inner.lock();
+            if state.generation != generation {
+                continue;
+            }
+            touch(&mut state, Some(generation));
+            let outs = state.mapper.handle(message);
+            if state.mapper.retry_active() {
+                retry_at.get_or_insert_with(|| tokio::time::Instant::now() + budget);
+            } else {
+                retry_at = None;
+            }
+            if !state.mapper.turn_active() {
+                request_at = None;
+            }
+            if let Some(status) = outs.iter().find_map(|out| match out {
+                Out::Event(ProviderEvent::TurnTerminal(terminal)) => Some(terminal.status),
+                _ => None,
+            }) {
+                state
+                    .app_context
+                    .turn_ended(status == TurnStatus::Completed);
+            }
+            outs
+        };
+        inner.deliver(Some(&query), outs).await;
+    }
+}
+
+/// The first `init` of a query tells the mode the CLI opened in.
+fn note_init(state: &mut State, generation: u64, init: &Value) {
+    if let Some(live) = state.live.as_mut().filter(|l| l.generation == generation)
+        && let Some(id) = init["session_id"].as_str().filter(|id| !id.is_empty())
+        && id != live.native_thread_id
+    {
+        let old = std::mem::replace(&mut live.native_thread_id, id.to_owned());
+        state.resumable.remove(&old);
+        state.resumable.insert(id.to_owned());
+        state.app_context.reset();
+        state.attachment_budget = attachments::Budget::default();
+        state.attachment_thread = Some(id.to_owned());
+    }
+    if let Some(live) = state
+        .live
+        .as_mut()
+        .filter(|l| l.generation == generation && !l.received_init)
+    {
+        live.received_init = true;
+        live.check_sign_ins = init["mcp_servers"].as_array().is_some_and(|servers| {
+            servers.iter().any(|s| {
+                matches!(s["status"].as_str(), Some("needs-auth" | "pending"))
+                    && s["name"]
+                        .as_str()
+                        .is_some_and(|n| !n.starts_with("claude.ai "))
+            })
+        });
+        live.mcp_apps_capable = [
+            "mcp_tool_ui_meta_v1",
+            "mcp_read_resource_v1",
+            "mcp_call_result_not_for_model_v1",
+        ]
+        .iter()
+        .all(|required| {
+            init.get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|capabilities| capabilities.iter().any(|value| value == required))
+        });
+        if let Some(mode) = init["permissionMode"].as_str() {
+            live.opened_permission_mode = mode.to_string();
+        }
+    }
+}
+
+/// Marks the live query (of `generation`, if given) as active now.
+fn touch(state: &mut State, generation: Option<u64>) {
+    if let Some(live) = state
+        .live
+        .as_mut()
+        .filter(|l| generation.is_none_or(|g| l.generation == g))
+    {
+        live.last_activity = Instant::now();
+        live.held_since = None;
+    }
+}
+
+/// Ends the query after `timeout` without a turn or output. Background work (a running
+/// subagent, output held for a continuation) holds it up to `max_hold`, as T3's session
+/// manager does with `hasPendingBackgroundWork`.
+async fn idle_watch(inner: Arc<Inner>, generation: u64, timeout: Duration, max_hold: Duration) {
+    loop {
+        let wait = {
+            let mut state = inner.lock();
+            let busy = state.mapper.turn_active();
+            let background = state.mapper.has_pending_background_work();
+            let Some(live) = state.live.as_mut().filter(|l| l.generation == generation) else {
+                return;
+            };
+            let idle_for = live.last_activity.elapsed();
+            if busy {
+                Some(timeout)
+            } else if idle_for < timeout {
+                Some(timeout - idle_for)
+            } else if background
+                && live.held_since.get_or_insert_with(Instant::now).elapsed() < max_hold
+            {
+                Some(timeout.min(max_hold))
+            } else {
+                None
+            }
+        };
+        match wait {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => break,
+        }
+    }
+    let live = {
+        let mut state = inner.lock();
+        match &state.live {
+            Some(l) if l.generation == generation => state.live.take(),
+            _ => return,
+        }
+    };
+    if let Some(live) = live {
+        end_query(&inner.helper, live).await;
+    }
+}
+
+/// Closes a query and waits for its end, then stops the helper if nothing else uses it.
+async fn end_query(helper: &Helper, live: Live) {
+    let Live {
+        query, mut ended, ..
+    } = live;
+    query.close().await;
+    if tokio::time::timeout(CLOSE_TIMEOUT, ended.wait_for(|done| *done))
+        .await
+        .is_err()
+    {
+        eprintln!("conn-provider-claude: a Claude query did not end in time");
+    }
+    helper.stop_if_idle().await;
+}
+
+/// The T3 query runner's teardown of an interrupted open: the host aborts the query (prompt
+/// stream ended, SIGKILL, up to 10 s for the exit, dispose), and `end` follows.
+async fn abort_query(helper: &Helper, live: Live) {
+    live.stopping.store(true, Ordering::Relaxed);
+    let Live {
+        query, mut ended, ..
+    } = live;
+    query.abort().await;
+    if tokio::time::timeout(CLOSE_TIMEOUT, ended.wait_for(|done| *done))
+        .await
+        .is_err()
+    {
+        eprintln!("conn-provider-claude: an aborted Claude query did not end in time");
+    }
+    helper.stop_if_idle().await;
+}
+
+/// What an abandoned start returns; the engine already ended the run.
+fn abandoned_error() -> ProviderError {
+    failed_err(
+        "start_turn",
+        "Stop ended the turn before Claude started it.",
+    )
+}
+
+async fn on_end(inner: &Arc<Inner>, generation: u64, end: &QueryEnd, stopping: bool) {
+    let outs = {
+        let mut state = inner.lock();
+        let current = state
+            .live
+            .as_ref()
+            .is_some_and(|l| l.generation == generation);
+        let expected = state.closed || stopping;
+        if current {
+            state.live = None;
+            let detail = end_detail(end);
+            state.mapper.on_exit(expected, &detail)
+        } else {
+            state.mapper.end_process_subagents(generation, expected)
+        }
+    };
+    inner.deliver(None, outs).await;
+    // The query ended by itself (crash, bad resume id): the helper may now be idle.
+    inner.helper.stop_if_idle().await;
+}
+
+/// What the user sees for a query that ended mid-turn. stderr and the SDK's error message
+/// can hold private text, so only known lines and the SDK's telemetry message are passed on,
+/// as the TS adapter does (`claudeProcessExitFailure`).
+fn end_detail(end: &QueryEnd) -> String {
+    if let Some(helper) = &end.helper_error {
+        return helper.clone();
+    }
+    let known = end
+        .stderr
+        .iter()
+        .flat_map(|s| s.lines())
+        .chain(
+            end.error
+                .iter()
+                .filter_map(|e| e["message"].as_str())
+                .flat_map(str::lines),
+        )
+        .find(|l| l.contains("No conversation found with session ID"));
+    if let Some(line) = known {
+        return format!("Claude exited: {}", line.trim());
+    }
+    if let Some(telemetry) = end
+        .error
+        .as_ref()
+        .and_then(|e| e["telemetryMessage"].as_str())
+    {
+        return format!("{telemetry}.");
+    }
+    let exit = end
+        .exit
+        .as_ref()
+        .map(|e| match (e["code"].as_i64(), e["signal"].as_str()) {
+            (_, Some(signal)) => format!("signal {signal}"),
+            (Some(code), None) => format!("exit code {code}"),
+            _ => "unknown exit".into(),
+        })
+        .unwrap_or_else(|| "no exit status".into());
+    format!("The Claude process exited unexpectedly ({exit}).")
+}
+
+/// `compileClaudeModelSelection`: API model id, effort, settings and the prompt effort.
+fn model_selection(
+    selection: &conn_contract::ModelSelection,
+    config: &ClaudeConfig,
+) -> (String, Option<String>, Map<String, Value>) {
+    let mut compiled = config
+        .custom_models
+        .compile(&to_json(selection), &config.model_manifest);
+    let model = compiled.api_model_id.as_str();
+    if ["opus", "sonnet", "haiku", "fable"].contains(&model)
+        && selection.model.as_str().is_some_and(|s| s.trim() == model)
+    {
+        compiled.settings.insert(
+            "env".into(),
+            json!({format!("ANTHROPIC_DEFAULT_{}_MODEL", model.to_ascii_uppercase()): model}),
+        );
+    }
+    (compiled.api_model_id, compiled.effort, compiled.settings)
+}
+
+/// Whether a live selection change may also change the API model.
+#[derive(Clone, Copy, Debug)]
+enum ModelChange {
+    Never,
+    WhenOpenedInMode,
+}
+
+/// The runtime policy as T3's Claude adapter reads it: modes, `approvalPolicy` and the
+/// `sandboxPolicy` kind (`sandboxPolicyKindForClaudeRuntimePolicy`,
+/// `readOnlyPolicyAllowsGlobalReads`).
+#[derive(Debug)]
+struct OwnedPolicyInput {
+    runtime_mode: String,
+    interaction_mode: String,
+    /// The approval policy when it is a string; `Some("")` for any other set value (an object
+    /// such as `granular`), which T3 treats as "set, not never".
+    approval_policy: Option<String>,
+    sandbox: Option<&'static str>,
+    read_only_global_reads: bool,
+}
+
+impl OwnedPolicyInput {
+    fn new(policy: &RuntimePolicy) -> Self {
+        let runtime = to_json(&policy.runtime_mode);
+        let interaction = to_json(&policy.interaction_mode);
+        let approval_policy = policy
+            .approval_policy
+            .as_ref()
+            .map(|v| v.as_str().unwrap_or_default().to_string());
+        let sandbox_type = policy
+            .sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str);
+        let sandbox = match sandbox_type {
+            Some("dangerFullAccess") => Some("dangerFullAccess"),
+            Some("externalSandbox") => Some("externalSandbox"),
+            Some("readOnly") => Some("readOnly"),
+            Some("workspaceWrite") => Some("workspaceWrite"),
+            _ => None,
+        };
+        let read_only_global_reads = sandbox == Some("readOnly")
+            && policy
+                .sandbox_policy
+                .as_ref()
+                .and_then(|v| v.get("access"))
+                .and_then(|a| a.get("type"))
+                .and_then(Value::as_str)
+                == Some("fullAccess");
+        Self {
+            runtime_mode: runtime.as_str().unwrap_or("full-access").to_string(),
+            interaction_mode: interaction.as_str().unwrap_or("default").to_string(),
+            approval_policy,
+            sandbox,
+            read_only_global_reads,
+        }
+    }
+
+    fn input(&self) -> PolicyInput<'_> {
+        PolicyInput {
+            runtime_mode: &self.runtime_mode,
+            interaction_mode: &self.interaction_mode,
+            approval_policy: self.approval_policy.as_deref(),
+            sandbox: self.sandbox,
+            read_only_global_reads: self.read_only_global_reads,
+        }
+    }
+
+    /// `interactionMode === "plan" && approvalPolicy === "never"`: the permission callback
+    /// denies every tool that would ask.
+    fn plan_without_approvals(&self) -> bool {
+        self.interaction_mode == "plan" && self.approval_policy.as_deref() == Some("never")
+    }
+}
+
+/// The policy without settings (no bypass check): for live mode changes.
+fn plain_policy(policy: &RuntimePolicy) -> QueryPolicy {
+    launch::query_policy(
+        &OwnedPolicyInput::new(policy).input(),
+        BypassAvailability::default(),
+    )
+}
+
+fn native_thread_id(thread: &ProviderThread) -> Option<String> {
+    to_json(thread)["nativeThreadRef"]["nativeId"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The message to resume at after a rollback (`getNativeConversationHeadId`).
+fn conversation_head(thread: &Value) -> Option<String> {
+    thread["nativeConversationHeadRef"]["nativeId"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// A turn cursor the CLI can resume at: an assistant message uuid, not the `turn:` stand-in.
+fn turn_cursor(turn: &Value) -> Option<String> {
+    let id = turn["nativeTurnRef"]["nativeId"].as_str()?;
+    (!id.starts_with("turn:")).then(|| id.to_string())
+}
+
+fn failed_err(operation: &'static str, detail: impl Into<String>) -> ProviderError {
+    ProviderError::Failed {
+        operation,
+        detail: detail.into(),
+    }
+}
+
+fn same_selection(
+    live: &Live,
+    model: &str,
+    effort: &Option<String>,
+    settings: &Map<String, Value>,
+) -> bool {
+    live.model == model && &live.effort == effort && &live.selection_settings == settings
+}
+
+/// What a turn must do before it offers the prompt.
+enum Plan {
+    Reuse {
+        set_selection: bool,
+        set_mode: Option<String>,
+        set_mcp: bool,
+    },
+    Launch(Box<QueryInput>),
+}
+
+/// `claudeSdkBypassSettings`: keep the disable switches only when they say `disable`.
+fn sdk_bypass_settings(mut settings: Value) -> Value {
+    if let Some(map) = settings.as_object_mut() {
+        if map.get("disableAutoMode") != Some(&json!("disable")) {
+            map.remove("disableAutoMode");
+        }
+        if let Some(permissions) = map.get_mut("permissions").and_then(Value::as_object_mut) {
+            for key in ["disableBypassPermissionsMode", "disableAutoMode"] {
+                if permissions.get(key) != Some(&json!("disable")) {
+                    permissions.remove(key);
+                }
+            }
+        }
+    }
+    settings
+}
+
+/// `claudeBypassAvailability`.
+fn availability(settings: &Value) -> BypassAvailability {
+    let disable = json!("disable");
+    BypassAvailability {
+        bypass_disabled: settings["permissions"]["disableBypassPermissionsMode"] == disable,
+        auto_disabled: settings["disableAutoMode"] == disable
+            || settings["permissions"]["disableAutoMode"] == disable,
+    }
+}
+
+/// Reads a settings file; a missing file is `{}`, an unreadable one an error (T3).
+fn read_settings(path: &std::path::Path) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+impl ClaudeSession {
+    /// The process environment the CLI gets, with the entrypoint from Claude's settings.
+    async fn environment(&self, thread_id: &str, resume: bool) -> Map<String, Value> {
+        let config = self.inner.config.clone();
+        let thread_id = thread_id.to_string();
+        let built = tokio::task::spawn_blocking(move || {
+            // The login shell's PATH reaches the CLI as T3's `process.env` does.
+            let host = conn_support::login_env::child_env();
+            let draft = launch::query_env(&config, &thread_id, resume, host.clone(), None);
+            let entry = launch::settings_entrypoint(&launch::config_dir(&config, &draft));
+            launch::query_env(&config, &thread_id, resume, host, entry)
+        })
+        .await;
+        built.unwrap_or_default()
+    }
+
+    /// `resolveBypassAvailability` for this working directory: Claude's effective settings
+    /// (through the SDK's `resolveSettings`), the custom home's settings and the remote ones.
+    /// A failure counts as bypass disabled, as in T3.
+    async fn bypass_availability(&self, cwd: Option<&str>) -> BypassAvailability {
+        if let Some((cached_cwd, availability)) = &self.inner.lock().bypass_cache
+            && cached_cwd.as_deref() == cwd
+        {
+            return *availability;
+        }
+        let config = &self.inner.config;
+        let custom_home = config.home_path.is_some()
+            || config
+                .instance_env
+                .iter()
+                .any(|(k, _)| k == "CLAUDE_CONFIG_DIR");
+        let env = self.environment("", false).await;
+        let home = launch::config_dir(config, &env);
+        let files = tokio::task::spawn_blocking(move || {
+            let remote = read_settings(&home.join("remote-settings.json"))?;
+            let own = if custom_home {
+                read_settings(&home.join("settings.json"))?
+            } else {
+                json!({})
+            };
+            Ok::<_, String>((remote, own))
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        let result = match files {
+            Ok((remote, own)) => {
+                let mut options = json!({
+                    "settingSources": if custom_home { json!(["project", "local"]) } else { json!(["user", "project", "local"]) },
+                    "serverManagedSettings": sdk_bypass_settings(remote.clone()),
+                });
+                if let Some(cwd) = cwd {
+                    options["cwd"] = json!(cwd);
+                }
+                self.inner
+                    .helper
+                    .function("resolveSettings", json!([options]), None, FUNCTION_TIMEOUT)
+                    .await
+                    .map(|resolved| {
+                        let sources = [&resolved["effective"], &own, &remote].map(availability);
+                        BypassAvailability {
+                            bypass_disabled: sources.iter().any(|s| s.bypass_disabled),
+                            auto_disabled: sources.iter().any(|s| s.auto_disabled),
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(availability) => {
+                self.inner.lock().bypass_cache = Some((cwd.map(str::to_string), availability));
+                availability
+            }
+            Err(detail) => {
+                eprintln!(
+                    "conn-provider-claude: could not read Claude's bypass settings: {detail}"
+                );
+                BypassAvailability {
+                    bypass_disabled: true,
+                    auto_disabled: false,
+                }
+            }
+        }
+    }
+
+    /// `queryPolicyForTurn`.
+    async fn turn_policy(&self, policy: &RuntimePolicy) -> QueryPolicy {
+        let plain = plain_policy(policy);
+        if plain.permission_mode != "bypassPermissions" {
+            return plain;
+        }
+        let availability = self.bypass_availability(policy.cwd.as_deref()).await;
+        launch::query_policy(&OwnedPolicyInput::new(policy).input(), availability)
+    }
+
+    /// Ensures a query for the turn's thread, with its model, effort, mode and MCP servers.
+    /// Returns the policy in force.
+    async fn prepare(&self, input: &TurnInput) -> ProviderResult<QueryPolicy> {
+        let inner = &self.inner;
+        let native = native_thread_id(&input.provider_thread)
+            .ok_or_else(|| failed_err("start_turn", "provider thread has no native Claude id"))?;
+        let (model, effort, selection_settings) =
+            model_selection(&input.model_selection, &inner.config);
+        // `resolveSettings` may wait for the SDK host to launch; nothing is open yet.
+        let run_id = input.run_id.as_str();
+        let policy = self
+            .inner
+            .unless_abandoned(run_id, async {
+                Ok(self.turn_policy(&input.runtime_policy).await)
+            })
+            .await?;
+        let cwd = input.runtime_policy.cwd.clone();
+        let thread = to_json(&input.provider_thread);
+        let title = to_json(&input.app_thread)["title"]
+            .as_str()
+            .map(str::to_string);
+        // A resume keeps the native session's stored title: start from the one recorded.
+        if let Some(recorded) = thread["nativeMetadata"]["title"].as_str() {
+            crate::lock(&inner.applied_titles)
+                .entry(native.clone())
+                .or_insert_with(|| recorded.to_owned());
+        }
+
+        let transcript = {
+            let state = inner.lock();
+            state
+                .live
+                .as_ref()
+                .filter(|l| {
+                    l.native_thread_id == native
+                        && !l.emitted.is_empty()
+                        && conversation_head(&thread).is_none()
+                        && !state.mapper.has_pending_background_work()
+                })
+                .map(|l| {
+                    (
+                        l.workflow_files_root.clone(),
+                        l.native_thread_id.clone(),
+                        l.emitted.clone(),
+                    )
+                })
+        };
+        let extended = match transcript {
+            Some((root, id, emitted)) => tokio::task::spawn_blocking(move || {
+                crate::transcript::extended(&root, &id, &emitted)
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false),
+            None => false,
+        };
+        let (plan, old) = {
+            let mut state = inner.lock();
+            if state.closed {
+                return Err(ProviderError::SessionStopped);
+            }
+            let t3_mcp = state.mcp_servers.iter().any(|s| s.name == T3_MCP_SERVER);
+            let device_tools = state
+                .mcp_servers
+                .iter()
+                .any(|s| s.name == T3_MCP_SERVER && s.device_tools);
+            let reusable = state.live.as_ref().is_some_and(|l| {
+                (!extended || state.mapper.has_pending_background_work())
+                    && l.query.is_open()
+                    && !l.restart_needed
+                    && l.native_thread_id == native
+                    && l.cwd == cwd
+                    && l.policy == policy
+                    && l.t3_mcp == t3_mcp
+                    && l.device_tools == device_tools
+                    && (same_selection(l, &model, &effort, &selection_settings)
+                        // canApplyClaudeSelectionLive, and a model change only when the CLI
+                        // opened in the policy's mode (T3's openedPermissionMode check).
+                        || (l.selection_settings.get("alwaysThinkingEnabled")
+                            == selection_settings.get("alwaysThinkingEnabled")
+                            && l.selection_settings.get("env") == selection_settings.get("env")
+                            && (effort.is_some() || l.effort.is_none())
+                            && (l.model == model
+                                || l.opened_permission_mode == policy.permission_mode)))
+            });
+            if let Some(live) = state.live.as_ref().filter(|_| reusable) {
+                let plan = Plan::Reuse {
+                    set_selection: live.model != model
+                        || live.effort != effort
+                        || live.selection_settings != selection_settings,
+                    // A denied ExitPlanMode leaves Claude in plan mode; restore only from plan.
+                    set_mode: (live.permission_mode == "plan"
+                        && live.policy.permission_mode != "plan")
+                        .then(|| live.policy.permission_mode.clone()),
+                    set_mcp: live.mcp_servers != state.mcp_servers,
+                };
+                (plan, None)
+            } else {
+                // A persisted turn requires resume, also after an idle release.
+                // `hasPersistedProviderTurn`: nativeThreadHasTurns ?? providerTurnOrdinal > 1.
+                let resume = state.resumable.contains(&native)
+                    || input
+                        .native_thread_has_turns
+                        .unwrap_or(input.provider_turn_ordinal > 1)
+                    || conversation_head(&thread).is_some();
+                let read_only =
+                    OwnedPolicyInput::new(&input.runtime_policy).sandbox == Some("readOnly");
+                let query = QueryInput {
+                    thread_id: input.thread_id.as_str().into(),
+                    native_thread_id: native.clone(),
+                    resume,
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    selection_settings: selection_settings.clone(),
+                    allowed_tools: launch::mcp_allowed_tools(&policy, t3_mcp, read_only),
+                    policy: policy.clone(),
+                    cwd: cwd.clone(),
+                    resume_at: conversation_head(&thread),
+                    title: title.clone(),
+                    t3_mcp,
+                    device_tools,
+                    prompt_suggestions: false,
+                };
+                (Plan::Launch(Box::new(query)), state.live.take())
+            }
+        };
+        if let Some(old) = old {
+            end_query(&inner.helper, old).await;
+        }
+
+        match plan {
+            Plan::Launch(query) => {
+                let fresh = !query.resume;
+                self.launch(*query, run_id).await?;
+                // A new session's spawn applied this turn's title (`title` in its options).
+                if let (true, Some(title)) = (fresh, &title) {
+                    crate::lock(&inner.applied_titles).insert(native.clone(), title.clone());
+                }
+            }
+            Plan::Reuse {
+                set_selection,
+                set_mode,
+                set_mcp,
+            } => {
+                if set_selection {
+                    self.apply_live_selection(&model, effort.as_deref(), &selection_settings)
+                        .await?;
+                }
+                if let Some(mode) = set_mode {
+                    let restored = match inner
+                        .call("setPermissionMode", json!([mode]), CONTROL_TIMEOUT)
+                        .await
+                    {
+                        Ok(_) => mode,
+                        Err(_) if mode == "bypassPermissions" => {
+                            inner
+                                .call("setPermissionMode", json!(["default"]), CONTROL_TIMEOUT)
+                                .await?;
+                            "default".to_string()
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if let Some(live) = &mut inner.lock().live {
+                        live.permission_mode = restored;
+                    }
+                }
+                if set_mcp {
+                    let servers = inner.lock().mcp_servers.clone();
+                    inner.set_mcp_servers(&servers).await?;
+                }
+            }
+        }
+        // `claude --resume` shows the native title. A failed or late rename forgets the applied
+        // title, so the next turn sends it again; the turn goes on either way.
+        if let Some(title) = title {
+            let applied = crate::lock(&inner.applied_titles).get(&native) == Some(&title);
+            if !applied {
+                let renamed = inner
+                    .call("renameSession", json!([title]), RENAME_TIMEOUT)
+                    .await
+                    .is_ok();
+                let mut applied = crate::lock(&inner.applied_titles);
+                if renamed {
+                    applied.insert(native.clone(), title);
+                } else {
+                    applied.remove(&native);
+                }
+            }
+        }
+        let mut state = inner.lock();
+        state.resumable.insert(native);
+        touch(&mut state, None);
+        state.mapper.set_policy_asks(launch::asks_user(&policy));
+        state.mapper.set_plan_without_approvals(
+            OwnedPolicyInput::new(&input.runtime_policy).plan_without_approvals(),
+        );
+        Ok(policy)
+    }
+
+    /// `applySelectionLive`: `setModel` when the model changed, then `applyFlagSettings`.
+    async fn apply_live_selection(
+        &self,
+        model: &str,
+        effort: Option<&str>,
+        settings: &Map<String, Value>,
+    ) -> ProviderResult<()> {
+        let model_changed = self
+            .inner
+            .lock()
+            .live
+            .as_ref()
+            .is_some_and(|l| l.model != model);
+        if model_changed {
+            self.inner
+                .call("setModel", json!([model]), CONTROL_TIMEOUT)
+                .await?;
+        }
+        let mut flags = Map::new();
+        if let Some(effort) = effort {
+            flags.insert("effortLevel".into(), json!(effort));
+        }
+        flags.insert(
+            "fastMode".into(),
+            settings.get("fastMode").cloned().unwrap_or(Value::Null),
+        );
+        flags.insert(
+            "ultracode".into(),
+            settings.get("ultracode").cloned().unwrap_or(Value::Null),
+        );
+        self.inner
+            .call("applyFlagSettings", json!([flags]), CONTROL_TIMEOUT)
+            .await?;
+        if let Some(live) = &mut self.inner.lock().live {
+            live.model = model.to_string();
+            live.effort = effort.map(str::to_string);
+            live.selection_settings = settings.clone();
+        }
+        Ok(())
+    }
+
+    /// Applies a selection to the live query when T3 would (`canApplyClaudeSelectionLive`, a
+    /// different `queryIdentity`), and returns whether it did. `model_change` allows a new API
+    /// model too: a steer may change it when the CLI opened in the turn's mode; a selection sent
+    /// on its own (`applyModelSelection`) may not, so a model change waits for the next turn.
+    /// `native` limits it to the live query of that native thread.
+    async fn apply_selection(
+        &self,
+        selection: &conn_contract::ModelSelection,
+        native: Option<&str>,
+        model_change: ModelChange,
+    ) -> ProviderResult<bool> {
+        let (model, effort, settings) = model_selection(selection, &self.inner.config);
+        let live_change = {
+            let state = self.inner.lock();
+            state.live.as_ref().is_some_and(|live| {
+                let same_identity = live.model == model
+                    && live.effort == effort
+                    && live.selection_settings == settings;
+                let can_apply = live.selection_settings.get("alwaysThinkingEnabled")
+                    == settings.get("alwaysThinkingEnabled")
+                    && live.selection_settings.get("env") == settings.get("env")
+                    && (effort.is_some() || live.effort.is_none());
+                let model_ok = live.model == model
+                    || match model_change {
+                        ModelChange::Never => false,
+                        ModelChange::WhenOpenedInMode => {
+                            live.opened_permission_mode == live.policy.permission_mode
+                        }
+                    };
+                live.query.is_open()
+                    && native.is_none_or(|n| n == live.native_thread_id)
+                    && !same_identity
+                    && can_apply
+                    && model_ok
+            })
+        };
+        if live_change {
+            self.apply_live_selection(&model, effort.as_deref(), &settings)
+                .await?;
+        }
+        Ok(live_change)
+    }
+
+    /// The provider's continuation turn: replays the output held for it.
+    async fn start_continuation(&self, input: TurnInput) -> ProviderResult<()> {
+        let (outs, query) = {
+            let mut state = self.inner.lock();
+            if state.mapper.turn_active() {
+                return Err(failed_err("start_turn", "a turn is running"));
+            }
+            let Some(live) = &state.live else {
+                return Err(ProviderError::SessionStopped);
+            };
+            let query = live.query.clone();
+            let mode = live.permission_mode.clone();
+            (state.mapper.begin_continuation(&input, &mode), query)
+        };
+        self.inner.deliver(Some(&query), outs).await;
+        Ok(())
+    }
+
+    async fn start_turn_inner(&self, input: TurnInput) -> ProviderResult<()> {
+        // T3 emits the provider turn right after `query()`, which returns at once. Ours opens
+        // the query through the SDK host, and on a cold start the host first has to launch
+        // (about 3.5 s, also for `resolveSettings`). With no live query the turn opens now, so
+        // the client shows it running as T3's does; what the CLI receives does not change.
+        // With a live query the host is up, and frames of that query must not reach the new
+        // turn before `prepare` decided to keep or close it, so the turn opens after it.
+        let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
+        let models = catalog::turn_models(
+            &self.inner.config.model_manifest,
+            now,
+            &self.inner.config.custom_models,
+        );
+        let config = self.inner.config.clone();
+        let cwd = input.runtime_policy.cwd.clone();
+        let selected = to_json(&input.model_selection);
+        let compact_window = tokio::task::spawn_blocking(move || {
+            launch::usage_compact_window(&config, cwd.as_deref(), &selected)
+        })
+        .await
+        .unwrap_or_default();
+        let early = {
+            let mut state = self.inner.lock();
+            if state.mapper.turn_active() {
+                return Err(failed_err(
+                    "start_turn",
+                    "the previous turn is still running",
+                ));
+            }
+            let stored = attachments::Budget::restore(&to_json(&input.provider_thread));
+            let native = native_thread_id(&input.provider_thread);
+            if state.attachment_thread == native {
+                state.attachment_budget.bytes = stored.bytes.max(state.attachment_budget.bytes);
+                state.attachment_budget.pages = stored.pages.max(state.attachment_budget.pages);
+            } else {
+                state.attachment_budget = stored;
+                state.attachment_thread = native;
+            }
+            state.mapper.set_catalog(models);
+            state.mapper.auto_compact_window = compact_window;
+            if state.live.is_none() && !state.closed {
+                let mode = plain_policy(&input.runtime_policy).permission_mode;
+                Some(state.mapper.begin_turn(&input, &mode))
+            } else {
+                None
+            }
+        };
+        let opened_early = early.is_some();
+        if let Some(outs) = early {
+            self.inner.deliver(None, outs).await;
+        }
+        let run_id = input.run_id.as_str();
+        // T3 reads the attachments before it opens the query (`ClaudeAdapterV2` startTurn).
+        let effort = self
+            .inner
+            .config
+            .custom_models
+            .compile(
+                &to_json(&input.model_selection),
+                &self.inner.config.model_manifest,
+            )
+            .prompt_effort;
+        let text = catalog::prompt_text(&input.message.text, effort.as_deref());
+        let original_budget = self.inner.lock().attachment_budget;
+        let prepared = match self
+            .inner
+            .unless_abandoned(run_id, async {
+                self.content(
+                    &text,
+                    &input.message.attachments,
+                    input.runtime_policy.cwd.clone(),
+                )
+                .await
+            })
+            .await
+        {
+            Ok(content) => self.prepare(&input).await.map(|policy| (content, policy)),
+            Err(error) => Err(error),
+        };
+        let (content, policy) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.inner.lock().attachment_budget = original_budget;
+                if opened_early {
+                    let outs = if self.inner.start_abandoned(run_id) {
+                        // The engine ended the run; the early turn ends as Stop ends a turn.
+                        self.inner.lock().mapper.abandon_start()
+                    } else {
+                        self.inner.lock().mapper.fail_start(&error.to_string())
+                    };
+                    self.inner.deliver(None, outs).await;
+                }
+                return Err(error);
+            }
+        };
+        self.inner.lock().turn_prompt_effort = effort.clone();
+        let inner = &self.inner;
+        let (outs, query, uuid, content, offer) = {
+            let mut state = inner.lock();
+            let query = state
+                .live
+                .as_ref()
+                .map(|l| l.query.clone())
+                .ok_or(ProviderError::SessionStopped)?;
+            let mode = state
+                .live
+                .as_ref()
+                .map_or(policy.permission_mode.clone(), |l| {
+                    l.permission_mode.clone()
+                });
+            let outs = if opened_early {
+                state.mapper.set_permission_mode(&mode);
+                Vec::new()
+            } else {
+                state.mapper.begin_turn(&input, &mode)
+            };
+            let uuid = SystemEnv.uuid();
+            state.mapper.set_prompt_uuid(&uuid);
+            let native = state
+                .live
+                .as_ref()
+                .map(|l| l.native_thread_id.clone())
+                .unwrap_or_default();
+            let unseen = state.app_context.unseen(&native, &input.app_context, false);
+            let (content, offered) = with_app_context(content, &unseen);
+            state.app_context.offered = None;
+            let offer = offered.then(|| state.app_context.offer(native, &input.app_context, true));
+            (outs, query, uuid, content, offer)
+        };
+        inner.deliver(Some(&query), outs).await;
+        let offered = query
+            .input(
+                user_message_value(content, &uuid, Delivery::Turn),
+                CONTROL_TIMEOUT,
+            )
+            .await;
+        if let Err(error) = offered {
+            let outs = {
+                let mut state = inner.lock();
+                state.attachment_budget = original_budget;
+                if let Some(offer) = offer {
+                    state.app_context.refused(offer);
+                }
+                state
+                    .mapper
+                    .on_exit(false, "The Claude process stopped before the turn started.")
+            };
+            inner.deliver(None, outs).await;
+            return Err(error);
+        }
+        if let Some(offer) = offer {
+            inner.lock().app_context.accepted(offer);
+        }
+        Ok(())
+    }
+
+    /// The prompt content with attachments. Files are read off the runtime thread.
+    async fn content(
+        &self,
+        text: &str,
+        list: &[conn_contract::ChatAttachment],
+        cwd: Option<String>,
+    ) -> ProviderResult<Value> {
+        let dir = self.inner.config.attachments_dir.clone();
+        let initial = self.inner.lock().attachment_budget;
+        let (text, list) = (text.to_owned(), list.to_vec());
+        let config = self.inner.config.clone();
+        let (content, budget) = tokio::task::spawn_blocking(move || {
+            let mut budget = initial;
+            let mut content =
+                attachments::prompt_content(&text, &list, dir.as_deref(), &mut budget)?;
+            if crate::skills::has_mention(&text) && !text.trim_start().starts_with("/goal") {
+                let skills =
+                    crate::skills::discover(&config, cwd.as_deref().map(std::path::Path::new));
+                if let Some((leading, command)) = crate::skills::dispatch(&text, &skills) {
+                    let mut blocks = content.as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        if let Some(leading) = leading {
+                            blocks.push(json!({"type":"text","text":leading}));
+                        }
+                    } else if let Some(last) = blocks.last_mut()
+                        && let Some(path_text) =
+                            last["text"].as_str().and_then(|s| s.strip_prefix(&text))
+                    {
+                        last["text"] = json!(
+                            format!("{}{path_text}", leading.as_deref().unwrap_or("")).trim()
+                        );
+                    }
+                    blocks.push(json!({"type":"text","text":command}));
+                    content = json!(blocks);
+                }
+            }
+            Ok::<_, String>((content, budget))
+        })
+        .await
+        .map_err(|e| failed_err("attachment", e.to_string()))?
+        .map_err(|detail| ProviderError::Protocol { detail })?;
+        self.inner.lock().attachment_budget = budget;
+        Ok(content)
+    }
+
+    async fn launch(&self, input: QueryInput, run_id: &str) -> ProviderResult<()> {
+        let inner = &self.inner;
+        let env = self.environment(&input.thread_id, input.resume).await;
+        // T3 resolves a relative CLAUDE_CODE_TMPDIR against the real cwd; this uses the cwd
+        // as given (it differs only through a symlinked cwd and a relative value).
+        let cwd_path = input.cwd.as_deref().map(std::path::Path::new);
+        let task_output_root = crate::tail::output_root(&env, cwd_path);
+        let workflow_files_root = launch::workflow_files_root(&env, cwd_path);
+        // `launchArgs`: files read off the runtime thread; a value the CLI would refuse fails
+        // the start, as T3's query runner does.
+        let (args, cwd) = (inner.config.launch_args.clone(), input.cwd.clone());
+        let applied =
+            tokio::task::spawn_blocking(move || crate::launch_args::apply(&args, cwd.as_deref()))
+                .await
+                .map_err(|e| failed_err("start_turn", e.to_string()))?
+                .map_err(|e| failed_err("start_turn", e))?;
+        let options = launch::query_options(&inner.config, &input, env, &applied);
+        // T3's `openQuery` gives every turn's query its `onStop` hook, and a session with the
+        // device tools its SubagentStart hook.
+        let mut command = json!({"stopHook": true});
+        if let Some(device) = launch::device_text(&inner.config, &input) {
+            command["subagentStartContext"] = json!(device);
+        }
+        let mut query = inner.helper.open(options, command)?;
+        let Some(rx) = query.take_events() else {
+            return Err(failed_err("start_turn", "the query has no event stream"));
+        };
+        let handle = query.handle();
+        let (ended_tx, ended) = watch::channel(false);
+        let stopping = Arc::new(AtomicBool::new(false));
+        let generation = {
+            let mut state = inner.lock();
+            state.generation += 1;
+            let generation = state.generation;
+            state.mapper.new_process(generation);
+            state.live = Some(Live {
+                query: handle.clone(),
+                generation,
+                stopping: stopping.clone(),
+                ended,
+                app_thread_id: input.thread_id.clone(),
+                native_thread_id: input.native_thread_id.clone(),
+                cwd: input.cwd.clone(),
+                permission_mode: input.policy.permission_mode.clone(),
+                opened_permission_mode: input.policy.permission_mode.clone(),
+                received_init: false,
+                emitted: VecDeque::new(),
+                check_sign_ins: false,
+                announced_sign_ins: HashSet::new(),
+                mcp_apps_capable: false,
+                policy: input.policy.clone(),
+                model: input.model.clone(),
+                effort: input.effort.clone(),
+                selection_settings: input.selection_settings.clone(),
+                mcp_servers: Vec::new(),
+                t3_mcp: input.t3_mcp,
+                device_tools: input.device_tools,
+                restart_needed: false,
+                last_activity: Instant::now(),
+                held_since: None,
+                task_output_root,
+                workflow_files_root,
+            });
+            generation
+        };
+        tokio::spawn(drive(
+            inner.clone(),
+            generation,
+            handle.clone(),
+            rx,
+            ended_tx,
+            stopping,
+        ));
+        if let Some(timeout) = inner.config.idle_timeout {
+            tokio::spawn(idle_watch(
+                inner.clone(),
+                generation,
+                timeout,
+                inner.config.idle_max_hold,
+            ));
+        }
+        // As T3: only a query with MCP servers waits for boot, then registers them.
+        let servers = inner.lock().mcp_servers.clone();
+        if servers.is_empty() {
+            return Ok(());
+        }
+        let boot = async {
+            let mut result = handle
+                .call("initializationResult", json!([]), BOOT_TIMEOUT)
+                .await
+                .map(|_| ());
+            if matches!(&result, Err(ProviderError::Failed { .. })) {
+                // T3 ignores a failed initialization here; the message stream reports it.
+                result = Ok(());
+            }
+            if result.is_ok() {
+                result = inner.set_mcp_servers(&servers).await;
+            }
+            result.map(|()| false)
+        };
+        // A Stop during the boot interrupts it, as T3's worker interrupts `openQuery`.
+        let result = tokio::select! {
+            result = boot => result,
+            () = inner.until_abandoned(run_id) => Ok(true),
+        };
+        if let Ok(true) = result {
+            let live = inner.lock().live.take();
+            if let Some(live) = live {
+                abort_query(&inner.helper, live).await;
+            }
+            return Err(abandoned_error());
+        }
+        if let Err(error) = result {
+            let live = inner.lock().live.take();
+            if let Some(live) = live {
+                end_query(&inner.helper, live).await;
+            }
+            return Err(match error {
+                ProviderError::SessionStopped => failed_err(
+                    "start_turn",
+                    "Claude ended before it registered the MCP servers (an unknown resume id, a bad option, or no credentials)",
+                ),
+                other => other,
+            });
+        }
+        Ok(())
+    }
+
+    /// Ends the live query if it serves `native`; the next turn starts a new one.
+    async fn release(&self, native: &str) {
+        let live = {
+            let mut state = self.inner.lock();
+            if state
+                .live
+                .as_ref()
+                .is_some_and(|l| l.native_thread_id == native)
+            {
+                state.live.take()
+            } else {
+                None
+            }
+        };
+        if let Some(live) = live {
+            live.stopping.store(true, Ordering::Relaxed);
+            end_query(&self.inner.helper, live).await;
+        }
+    }
+
+    fn require_idle(&self, operation: &'static str) -> ProviderResult<()> {
+        if self.inner.lock().mapper.turn_active() {
+            return Err(ProviderError::Protocol {
+                detail: format!("Claude cannot {operation} while a turn is running."),
+            });
+        }
+        Ok(())
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` the SDK's session-file functions must read, when it is not the
+    /// helper's own (T3 runs those in a worker then).
+    fn function_config_dir(&self) -> Option<String> {
+        let config = &self.inner.config;
+        if let Some(home) = &config.home_path {
+            return Some(home.to_string_lossy().into_owned());
+        }
+        config
+            .instance_env
+            .iter()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .map(|(_, v)| launch::expand_home(v).to_string_lossy().into_owned())
+    }
+}
+
+fn new_thread(
+    instance_id: &str,
+    session: &str,
+    app_thread_id: Value,
+    native: &str,
+    owner: Value,
+    forked_from: Value,
+    head: Value,
+) -> Value {
+    let now = SystemEnv.now();
+    json!({
+        "id": ids::provider_thread_id(DRIVER, native),
+        "driver": DRIVER,
+        "providerInstanceId": instance_id,
+        "providerSessionId": session,
+        "appThreadId": app_thread_id,
+        "ownerNodeId": owner,
+        "nativeThreadRef": {"driver": DRIVER, "nativeId": native, "strength": "strong"},
+        "nativeConversationHeadRef": head,
+        "status": "idle",
+        "firstRunOrdinal": null,
+        "lastRunOrdinal": null,
+        "handoffIds": [],
+        "forkedFrom": forked_from,
+        "createdAt": now,
+        "updatedAt": now,
+    })
+}
+
+impl Session for ClaudeSession {
+    fn start_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+    ) -> BoxFuture<'_, ProviderResult<Option<String>>> {
+        Box::pin(async move {
+            let query = self.inner.bound_query(&thread)?;
+            let reply = query
+                .call("mcpAuthenticate", json!([server]), CONTROL_TIMEOUT)
+                .await
+                .map_err(|_| {
+                    failed_err(
+                        "mcp_sign_in",
+                        format!("Claude could not start sign-in to {server}"),
+                    )
+                })?;
+            Ok(reply.as_str().map(str::to_owned))
+        })
+    }
+
+    fn complete_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+        callback_url: String,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let query = self.inner.bound_query(&thread)?;
+            let statuses = query
+                .call("mcpServerStatus", json!([]), CONTROL_TIMEOUT)
+                .await
+                .map_err(|_| failed_err("mcp_sign_in", "Could not check the MCP server status"))?;
+            if statuses.as_array().is_some_and(|s| {
+                s.iter()
+                    .any(|entry| entry["name"] == server && entry["status"] == "connected")
+            }) {
+                return Ok(());
+            }
+            query
+                .call(
+                    "mcpSubmitOAuthCallbackUrl",
+                    json!([server, callback_url]),
+                    CONTROL_TIMEOUT,
+                )
+                .await
+                .map_err(|_| {
+                    failed_err("mcp_sign_in", "Claude did not accept the callback address")
+                })?;
+            query
+                .call("reconnectMcpServer", json!([server]), CONTROL_TIMEOUT)
+                .await
+                .map_err(|_| {
+                    failed_err(
+                        "mcp_sign_in",
+                        format!("Signed in, but {server} did not reconnect"),
+                    )
+                })?;
+            Ok(())
+        })
+    }
+
+    fn set_goal_stop_check(&self, check: conn_provider::GoalStopCheck) {
+        self.inner.lock().goal_stop_check = Some(check);
+    }
+
+    fn provider_session_id(&self) -> &ProviderSessionId {
+        &self.id
+    }
+
+    fn mcp_app_request(
+        &self,
+        input: conn_provider::mcp_apps::Request,
+    ) -> BoxFuture<'_, ProviderResult<Value>> {
+        Box::pin(async move {
+            use conn_provider::mcp_apps::{self, Operation};
+            let query = self.inner.mcp_app_query(&input.provider_thread)?;
+            let statuses = query
+                .call_without_timeout("mcpServerStatus", json!([]))
+                .await
+                .map_err(|_| ProviderError::Protocol {
+                    detail: "Failed to list Claude MCP tools.".into(),
+                })?;
+            require_unambiguous_server(&statuses, &input.server)?;
+            let tools = statuses
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|status| {
+                    status.get("name").and_then(Value::as_str) == Some(input.server.as_str())
+                })
+                .and_then(|status| status.get("tools"))
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            match input.operation {
+                Operation::ListTools => {
+                    let rules = query
+                        .call_without_timeout("listPermissionRules", json!([]))
+                        .await
+                        .ok();
+                    Ok(Value::Array(
+                        tools
+                            .iter()
+                            .map(|tool| mcp_apps::claude_tool(tool, rules.as_ref()))
+                            .collect(),
+                    ))
+                }
+                Operation::CallTool { tool, arguments } => {
+                    let name = mcp_apps::claude_name(&input.server, &tool);
+                    let same_name = tools
+                        .iter()
+                        .filter(|t| {
+                            t.get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| mcp_apps::claude_name(&input.server, t) == name)
+                        })
+                        .count();
+                    if same_name > 1 {
+                        return Err(ProviderError::Protocol {
+                            detail:
+                                "Another tool on this MCP server has the same Claude tool name."
+                                    .into(),
+                        });
+                    }
+                    let rules = query.call_without_timeout("listPermissionRules",json!([])).await.map_err(|_| ProviderError::Protocol {detail:format!("Claude's permission rules could not be read, so {name} was not called.")})?;
+                    if mcp_apps::rules_cover(&rules, &["deny"]) {
+                        return Err(ProviderError::Protocol {
+                            detail: format!(
+                                "A Claude deny rule may cover {name}, so it was not called."
+                            ),
+                        });
+                    }
+                    let result = query
+                        .call_without_timeout(
+                            "callMcpTool",
+                            json!([{"tool":name,"arguments":arguments}]),
+                        )
+                        .await
+                        .map_err(|_| ProviderError::Protocol {
+                            detail: "Claude MCP tool call failed.".into(),
+                        })?;
+                    Ok(mcp_apps::call_result(&result))
+                }
+                Operation::ReadResource { uri } => query
+                    .call_without_timeout("readMcpResource", json!([input.server, uri]))
+                    .await
+                    .map_err(|_| ProviderError::Protocol {
+                        detail: "Claude MCP resource read failed.".into(),
+                    }),
+            }
+        })
+    }
+
+    fn read_mcp_app_document(
+        &self,
+        input: conn_provider::mcp_apps::Request,
+    ) -> BoxFuture<'_, ProviderResult<Value>> {
+        Box::pin(async move {
+            let conn_provider::mcp_apps::Operation::ReadResource { uri } = input.operation else {
+                return Err(ProviderError::Unsupported {
+                    operation: "read_mcp_app_document",
+                });
+            };
+            self.inner
+                .mcp_app_query(&input.provider_thread)?
+                .call(
+                    "readMcpResource",
+                    json!([input.server, uri]),
+                    CONTROL_TIMEOUT,
+                )
+                .await
+        })
+    }
+
+    fn mcp_app_source(
+        &self,
+        item: Value,
+    ) -> BoxFuture<'_, ProviderResult<Option<conn_provider::mcp_apps::Source>>> {
+        Box::pin(async move {
+            use conn_provider::mcp_apps;
+            let Some(name) = item
+                .get("toolName")
+                .and_then(Value::as_str)
+                .filter(|n| n.starts_with("mcp__") && !n.starts_with("mcp__conn__"))
+            else {
+                return Ok(None);
+            };
+            if item.get("runId").is_none_or(Value::is_null)
+                || item.get("status").and_then(Value::as_str) != Some("completed")
+            {
+                return Ok(None);
+            }
+            let query = {
+                let state = self.inner.lock();
+                let Some(live) = state
+                    .live
+                    .as_ref()
+                    .filter(|live| live.query.is_open() && live.mcp_apps_capable)
+                else {
+                    return Ok(None);
+                };
+                live.query.clone()
+            };
+            let statuses = query
+                .call("mcpServerStatus", json!([]), CONTROL_TIMEOUT)
+                .await?;
+            let mut found = None;
+            let mut matched = false;
+            for status in statuses.as_array().into_iter().flatten() {
+                if status.get("status").and_then(Value::as_str) != Some("connected") {
+                    continue;
+                }
+                let Some(server) = status.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                for tool in status
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(tool_name) = tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if mcp_apps::claude_name(server, tool_name) != name {
+                        continue;
+                    }
+                    if matched {
+                        return Ok(None);
+                    }
+                    matched = true;
+                    require_unambiguous_server(&statuses, server)?;
+                    let Some(uri) =
+                        mcp_apps::resource_uri(tool.get("_meta").unwrap_or(&Value::Null))
+                    else {
+                        continue;
+                    };
+                    found = Some(mcp_apps::Source {
+                        server: server.into(),
+                        tool: tool_name.into(),
+                        resource_uri: uri.into(),
+                    });
+                }
+            }
+            Ok(found)
+        })
+    }
+
+    fn ensure_thread(
+        &self,
+        input: EnsureThreadInput,
+    ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
+        Box::pin(async move {
+            if let Some(existing) = input.existing_provider_thread
+                && native_thread_id(&existing).is_some()
+            {
+                let mut thread = to_json(&existing);
+                thread["providerSessionId"] = json!(self.id.as_str());
+                return from_json(thread).map_err(|e| failed_err("ensure_thread", e.to_string()));
+            }
+            let native = SystemEnv.uuid();
+            let thread = new_thread(
+                &self.inner.instance_id,
+                self.id.as_str(),
+                json!(input.thread_id.as_str()),
+                &native,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            );
+            from_json(thread).map_err(|e| failed_err("ensure_thread", e.to_string()))
+        })
+    }
+
+    fn resume_thread(
+        &self,
+        input: ResumeThreadInput,
+    ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
+        Box::pin(async move {
+            let native = native_thread_id(&input.provider_thread).ok_or_else(|| {
+                failed_err("resume_thread", "provider thread has no native Claude id")
+            })?;
+            let mut thread = to_json(&input.provider_thread);
+            // A fork's transcript exists from the moment `forkSession` made it.
+            self.inner.lock().resumable.insert(native);
+            thread["providerSessionId"] = json!(self.id.as_str());
+            thread["status"] = json!("idle");
+            thread["updatedAt"] = json!(SystemEnv.now());
+            from_json(thread).map_err(|e| failed_err("resume_thread", e.to_string()))
+        })
+    }
+
+    /// A message the provider asked for (`createdBy: agent`, `creationSource: provider`) starts
+    /// a turn that shows the output Claude already holds, and sends no prompt
+    /// (`isClaudeProviderContinuationTurn`).
+    fn start_turn(&self, input: TurnInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let _serial = self.inner.turn_control.lock().await;
+            let run_id = input.run_id.as_str().to_owned();
+            let result = if self.inner.start_abandoned(&run_id) {
+                Err(abandoned_error())
+            } else if input.message.is_provider_continuation() {
+                self.start_continuation(input).await
+            } else {
+                self.start_turn_inner(input).await
+            };
+            let mut state = self.inner.lock();
+            if state.abandoned_run.as_deref() == Some(run_id.as_str()) {
+                state.abandoned_run = None;
+            }
+            result
+        })
+    }
+
+    /// Stop ended the run before Claude started its turn: a start in flight stops where it
+    /// waits. Reading attachments or launching the SDK host, nothing is open yet. Waiting for
+    /// the CLI's boot or `setMcpServers`, the query is torn down as T3's query runner does
+    /// (prompt stream ended, SIGKILL, up to 10 s for the exit, dispose). Takes no lock that a
+    /// start holds.
+    fn abandon_turn_start(&self, input: conn_provider::AbandonTurnStartInput) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.inner.lock().abandoned_run = Some(input.run_id.as_str().to_owned());
+            self.inner.abandon.notify_waiters();
+        })
+    }
+
+    fn steer_turn(&self, input: SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            // A cold-start turn shows as running before its query exists; a steer waits for
+            // the start, as T3's steer always finds the query its provider turn came with.
+            let _serial = self.inner.turn_control.lock().await;
+            // The steer's own selection when it applies live, else the running turn's (T3's
+            // liveSteerSelection).
+            let live_selection = match &input.model_selection {
+                Some(selection) => self
+                    .apply_selection(selection, None, ModelChange::WhenOpenedInMode)
+                    .await?
+                    .then_some(selection),
+                None => None,
+            };
+            let effort = match live_selection {
+                Some(selection) => {
+                    self.inner
+                        .config
+                        .custom_models
+                        .compile(&to_json(selection), &self.inner.config.model_manifest)
+                        .prompt_effort
+                }
+                None => self.inner.lock().turn_prompt_effort.clone(),
+            };
+            let text = catalog::prompt_text(&input.message.text, effort.as_deref());
+            let cwd = self.inner.lock().live.as_ref().and_then(|l| l.cwd.clone());
+            let original_budget = self.inner.lock().attachment_budget;
+            let content = self.content(&text, &input.message.attachments, cwd).await?;
+            let uuid = SystemEnv.uuid();
+            let (query, outs, content, offer) = {
+                let mut state = self.inner.lock();
+                let Some(query) = state.live.as_ref().map(|l| l.query.clone()) else {
+                    state.attachment_budget = original_budget;
+                    return Err(ProviderError::SessionStopped);
+                };
+                if state.mapper.active_turn_id() != Some(input.provider_turn_id.as_str()) {
+                    state.attachment_budget = original_budget;
+                    return Err(failed_err("steer_turn", "that turn is not running"));
+                }
+                touch(&mut state, None);
+                let outs = state
+                    .mapper
+                    .steer_sent(&uuid, input.message.message_id.as_str());
+                if outs.is_empty() {
+                    state.attachment_budget = original_budget;
+                    return Err(failed_err(
+                        "steer_turn",
+                        "the Claude turn already has 64 pending steers",
+                    ));
+                }
+                let native = state
+                    .live
+                    .as_ref()
+                    .map(|l| l.native_thread_id.clone())
+                    .unwrap_or_default();
+                let unseen = state.app_context.unseen(&native, &input.app_context, true);
+                let (content, offered) = with_app_context(content, &unseen);
+                // Recorded as it goes out, so a turn that ends before the SDK answers still
+                // counts it; a refusal takes it back.
+                let offer =
+                    offered.then(|| state.app_context.offer(native, &input.app_context, false));
+                (query, outs, content, offer)
+            };
+            self.inner.deliver(Some(&query), outs).await;
+            let offered = query
+                .input(
+                    user_message_value(content, &uuid, Delivery::Steer),
+                    CONTROL_TIMEOUT,
+                )
+                .await;
+            if let Err(error) = offered {
+                let outs = {
+                    let mut state = self.inner.lock();
+                    state.attachment_budget = original_budget;
+                    if let Some(offer) = offer {
+                        state.app_context.refused(offer);
+                    }
+                    state.mapper.steer_failed(&uuid)
+                };
+                self.inner.deliver(None, outs).await;
+                return Err(error);
+            }
+            if let Some(offer) = offer {
+                self.inner.lock().app_context.accepted(offer);
+            }
+            Ok(())
+        })
+    }
+
+    /// `ClaudeAdapterV2.interruptTurn` for the running turn: the SDK's `interrupt` (at most
+    /// 10 s), then `close` (the CLI's stdin ends; the SDK sends SIGTERM after 2 s and SIGKILL
+    /// 5 s later), then up to 10 s for the CLI to exit. The next turn resumes in a new CLI.
+    /// When the CLI does not exit in time the turn stays open: `InterruptTimeout`, and the
+    /// user decides with Force stop.
+    fn interrupt_turn(&self, input: InterruptInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let _serial = self.inner.turn_control.lock().await;
+            let (query, mut ended) = {
+                let mut state = self.inner.lock();
+                if state.mapper.active_turn_id() != Some(input.provider_turn_id.as_str()) {
+                    return Ok(());
+                }
+                let Some(live) = &state.live else {
+                    return Ok(());
+                };
+                let pair = (live.query.clone(), live.ended.clone());
+                state.mapper.mark_interrupted();
+                pair
+            };
+            if !*ended.borrow() {
+                let sent = tokio::time::timeout(
+                    INTERRUPT_TIMEOUT,
+                    query.call("interrupt", json!([]), CONTROL_TIMEOUT),
+                )
+                .await;
+                // Teardown can close the CLI between the check and the write.
+                if let Ok(Err(e)) = sent
+                    && !*ended.borrow()
+                {
+                    return Err(e);
+                }
+                query.close().await;
+            }
+            // A dropped sender means the driver is gone, so the query ended too.
+            let wait = self.inner.stop_confirm_timeout;
+            let exited = tokio::time::timeout(wait, ended.wait_for(|done| *done))
+                .await
+                .is_ok();
+            if exited {
+                return Ok(());
+            }
+            eprintln!("conn-provider-claude: the interrupted Claude query did not exit in time");
+            Err(ProviderError::InterruptTimeout {
+                timeout_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            })
+        })
+    }
+
+    /// `interruptTurn` with `requestRuntimeRestart` and no current turn: closes the thread's
+    /// idle query (its background work ends with the CLI) and clears the wake and roster
+    /// state, as T3 does. The next turn resumes in a new CLI.
+    fn stop_background_work(&self, input: InterruptInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let _serial = self.inner.turn_control.lock().await;
+            let Some(native) = native_thread_id(&input.provider_thread) else {
+                return Ok(());
+            };
+            let live = {
+                let mut state = self.inner.lock();
+                if state.mapper.turn_active() {
+                    return Ok(());
+                }
+                match &state.live {
+                    Some(live) if live.native_thread_id == native => state.live.take(),
+                    _ => None,
+                }
+            };
+            if let Some(live) = live {
+                live.stopping.store(true, Ordering::Relaxed);
+                end_query(&self.inner.helper, live).await;
+            }
+            let outs = self.inner.lock().mapper.stop_background_work();
+            self.inner.deliver(None, outs).await;
+            Ok(())
+        })
+    }
+
+    /// `ClaudeAdapterV2.applyModelSelection`: effort and settings apply to the live query of
+    /// this thread; a new model waits for the next turn. A failed update is logged, as T3 does.
+    fn apply_model_selection(
+        &self,
+        thread: ProviderThread,
+        selection: conn_contract::ModelSelection,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let Some(native) = native_thread_id(&thread) else {
+                return Ok(());
+            };
+            if let Err(e) = self
+                .apply_selection(&selection, Some(&native), ModelChange::Never)
+                .await
+            {
+                eprintln!("conn-provider-claude: the live selection change failed: {e}");
+            }
+            Ok(())
+        })
+    }
+
+    fn apply_runtime_policy(
+        &self,
+        _thread: ProviderThread,
+        policy: RuntimePolicy,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let next = plain_policy(&policy);
+            {
+                let mut state = self.inner.lock();
+                let Some(live) = &mut state.live else {
+                    return Ok(());
+                };
+                if live.policy == next {
+                    return Ok(());
+                }
+                // The policy key is part of the query: like T3, a change opens a new query on
+                // the next turn. A plain mode change between asking modes applies live.
+                let live_change = next.permission_mode != "bypassPermissions"
+                    && live.policy.permission_mode != "bypassPermissions"
+                    && next.tools == live.policy.tools
+                    && next.allowed_tools == live.policy.allowed_tools;
+                if !live_change {
+                    live.restart_needed = true;
+                    return Err(ProviderError::Unsupported {
+                        operation: "apply_runtime_policy",
+                    });
+                }
+            }
+            let mode = next.permission_mode.clone();
+            self.inner
+                .call("setPermissionMode", json!([mode]), CONTROL_TIMEOUT)
+                .await?;
+            let mut state = self.inner.lock();
+            if let Some(live) = &mut state.live {
+                live.permission_mode = mode.clone();
+                live.policy = next.clone();
+            }
+            state.mapper.set_permission_mode(&mode);
+            state.mapper.set_policy_asks(launch::asks_user(&next));
+            state.mapper.set_plan_without_approvals(
+                OwnedPolicyInput::new(&policy).plan_without_approvals(),
+            );
+            Ok(())
+        })
+    }
+
+    fn respond_to_runtime_request(
+        &self,
+        input: RuntimeRequestResponse,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let (outs, query) = {
+                let mut state = self.inner.lock();
+                let query = state.live.as_ref().map(|l| l.query.clone());
+                let Some(query) = query else {
+                    return Err(ProviderError::SessionStopped);
+                };
+                (state.mapper.respond(&input)?, query)
+            };
+            self.inner.deliver(Some(&query), outs).await;
+            Ok(())
+        })
+    }
+
+    fn set_mcp_servers(&self, servers: Vec<McpServer>) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let live_update = {
+                let mut state = self.inner.lock();
+                state.mcp_servers = servers.clone();
+                let t3 = servers.iter().any(|s| s.name == T3_MCP_SERVER);
+                match &mut state.live {
+                    // The T3 allow rule is a launch option; a change waits for a new query.
+                    Some(live) if live.t3_mcp != t3 => {
+                        live.restart_needed = true;
+                        false
+                    }
+                    Some(live) => live.mcp_servers != servers,
+                    None => false,
+                }
+            };
+            if live_update {
+                self.inner.set_mcp_servers(&servers).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn rollback_thread(
+        &self,
+        input: RollbackThreadInput,
+    ) -> BoxFuture<'_, ProviderResult<ThreadSnapshot>> {
+        Box::pin(async move {
+            self.require_idle("roll back")?;
+            // The rewound history may no longer hold the turns that carried app notes.
+            self.inner.lock().app_context.reset();
+            let thread = to_json(&input.provider_thread);
+            let native = native_thread_id(&input.provider_thread).ok_or_else(|| {
+                failed_err("rollback_thread", "provider thread has no native Claude id")
+            })?;
+            self.release(&native).await;
+            let rolled = match input.target {
+                RollbackTarget::ThreadStart { .. }
+                    if thread["nativeMetadata"]["forkHeadMessageId"].is_string() =>
+                {
+                    let mut rolled = thread.clone();
+                    rolled["nativeConversationHeadRef"] = json!({"driver": DRIVER,
+                        "nativeId": thread["nativeMetadata"]["forkHeadMessageId"], "strength": "weak"});
+                    rolled["providerSessionId"] = json!(self.id.as_str());
+                    rolled["lastRunOrdinal"] = Value::Null;
+                    rolled["status"] = json!("idle");
+                    rolled["updatedAt"] = json!(SystemEnv.now());
+                    self.inner.lock().resumable.insert(native);
+                    rolled
+                }
+                RollbackTarget::ThreadStart { .. } => {
+                    // A new native session; the old transcript stays on disk.
+                    let mut fresh = new_thread(
+                        &self.inner.instance_id,
+                        self.id.as_str(),
+                        thread["appThreadId"].clone(),
+                        &SystemEnv.uuid(),
+                        thread["ownerNodeId"].clone(),
+                        thread["forkedFrom"].clone(),
+                        Value::Null,
+                    );
+                    fresh["handoffIds"] = thread["handoffIds"].clone();
+                    fresh
+                }
+                RollbackTarget::ProviderTurn {
+                    app_run_ordinal,
+                    provider_turn,
+                    ..
+                } => {
+                    let target = to_json(&provider_turn);
+                    let later_turns = input.provider_thread_turns.iter().any(|t| {
+                        let t = to_json(t);
+                        t["ordinal"].as_i64() > target["ordinal"].as_i64()
+                            && t["providerThreadId"] == thread["id"]
+                    });
+                    let head = match turn_cursor(&target) {
+                        Some(cursor) => {
+                            json!({"driver": DRIVER, "nativeId": cursor, "strength": "weak"})
+                        }
+                        None if !later_turns => Value::Null,
+                        None => {
+                            return Err(failed_err(
+                                "rollback_thread",
+                                "no Claude message cursor was recorded for that turn",
+                            ));
+                        }
+                    };
+                    let mut rolled = thread.clone();
+                    rolled["providerSessionId"] = json!(self.id.as_str());
+                    rolled["nativeConversationHeadRef"] = head;
+                    rolled["status"] = json!("idle");
+                    rolled["lastRunOrdinal"] = json!(app_run_ordinal);
+                    rolled["updatedAt"] = json!(SystemEnv.now());
+                    self.inner.lock().resumable.insert(native);
+                    rolled
+                }
+            };
+            Ok(ThreadSnapshot {
+                provider_thread: from_json(rolled)
+                    .map_err(|e| failed_err("rollback_thread", e.to_string()))?,
+                provider_turns: Vec::new(),
+                messages: Vec::new(),
+                reasoning_message_ids: Vec::new(),
+                runtime_requests: Vec::new(),
+            })
+        })
+    }
+
+    /// The SDK's `forkSession` copies the source transcript (up to the fork turn) into a new
+    /// session, as T3 does; the new thread resumes that session on its first turn.
+    fn fork_thread(&self, input: ForkThreadInput) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
+        Box::pin(async move {
+            self.require_idle("fork")?;
+            let source = to_json(&input.source_provider_thread);
+            let source_native =
+                native_thread_id(&input.source_provider_thread).ok_or_else(|| {
+                    failed_err("fork_thread", "provider thread has no native Claude id")
+                })?;
+            self.release(&source_native).await;
+            let up_to = match &input.provider_turn_id {
+                None => conversation_head(&source),
+                Some(turn_id) => {
+                    let mut turns: Vec<Value> = input
+                        .source_provider_turns
+                        .iter()
+                        .map(to_json)
+                        .filter(|t| t["providerThreadId"] == source["id"])
+                        .collect();
+                    turns.sort_by_key(|t| t["ordinal"].as_i64());
+                    let index = turns
+                        .iter()
+                        .position(|t| t["id"] == json!(turn_id.as_str()))
+                        .ok_or_else(|| {
+                            failed_err("fork_thread", "the fork turn is not on that thread")
+                        })?;
+                    match turns.get(index).and_then(turn_cursor) {
+                        Some(cursor) => Some(cursor),
+                        None if index + 1 == turns.len() => conversation_head(&source),
+                        None => {
+                            return Err(failed_err(
+                                "fork_thread",
+                                "no Claude message cursor was recorded for that turn",
+                            ));
+                        }
+                    }
+                }
+            };
+            let options = match &up_to {
+                Some(id) => json!({"upToMessageId": id}),
+                None => json!({}),
+            };
+            let config_dir = self.function_config_dir();
+            let forked = self
+                .inner
+                .helper
+                .function(
+                    "forkSession",
+                    json!([source_native, options]),
+                    config_dir.as_deref(),
+                    FUNCTION_TIMEOUT,
+                )
+                .await?;
+            let native = forked["sessionId"]
+                .as_str()
+                .ok_or_else(|| failed_err("fork_thread", "forkSession returned no session id"))?
+                .to_string();
+            self.inner.lock().resumable.insert(native.clone());
+            let mut forked_from = json!({"providerThreadId": source["id"]});
+            if let Some(turn_id) = &input.provider_turn_id {
+                forked_from["providerTurnId"] = json!(turn_id.as_str());
+            }
+            let mut thread = new_thread(
+                &self.inner.instance_id,
+                self.id.as_str(),
+                json!(input.target_thread_id.as_str()),
+                &native,
+                input
+                    .owner_node_id
+                    .as_ref()
+                    .map_or(Value::Null, |n| json!(n.as_str())),
+                forked_from,
+                Value::Null,
+            );
+            if let Some(head) = forked["headMessageId"].as_str() {
+                thread["nativeMetadata"]["forkHeadMessageId"] = json!(head);
+            }
+            if let Some(budget) = source["nativeMetadata"].get("claudeAttachmentBudget") {
+                thread["nativeMetadata"]["claudeAttachmentBudget"] = budget.clone();
+            }
+            from_json(thread).map_err(|e| failed_err("fork_thread", e.to_string()))
+        })
+    }
+
+    fn stop_task(&self, input: StopTaskInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let row = to_json(&input.provider_thread);
+            let query = {
+                let mut state = self.inner.lock();
+                let native = native_thread_id(&input.provider_thread);
+                let live = state
+                    .live
+                    .as_ref()
+                    .filter(|l| {
+                        !*l.ended.borrow() && native.as_deref() == Some(l.native_thread_id.as_str())
+                    })
+                    .map(|l| l.query.clone());
+                let valid =
+                    live.is_some() && state.mapper.workflow_stop(&row, &input.task_id, true);
+                if !valid {
+                    return Err(failed_err(
+                        "stop_task",
+                        "No running native task belongs to this provider thread",
+                    ));
+                }
+                live.ok_or(ProviderError::SessionStopped)?
+            };
+            let mut guard = WorkflowStopGuard {
+                inner: self.inner.clone(),
+                thread: row,
+                task_id: input.task_id.clone(),
+                accepted: false,
+            };
+            if let Err(error) = query
+                .call("stopTask", json!([input.task_id]), WORKFLOW_STOP_TIMEOUT)
+                .await
+            {
+                return Err(failed_err(
+                    "stop_task",
+                    format!("Claude task stop request failed: {error}"),
+                ));
+            }
+            guard.accepted = true;
+            Ok(())
+        })
+    }
+
+    fn has_pending_background_work(&self) -> bool {
+        self.inner.lock().mapper.has_pending_background_work()
+    }
+
+    /// `awaitBackgroundTasks`: marks the roster's tasks the agent waits on, and sends the
+    /// roster so the thread stays working.
+    fn await_background_tasks(
+        &self,
+        input: AwaitBackgroundTasksInput,
+    ) -> BoxFuture<'_, ProviderResult<Vec<String>>> {
+        Box::pin(async move {
+            let thread = to_json(&input.provider_thread);
+            let (matched, outs) = self.inner.lock().mapper.await_background_tasks(
+                &thread,
+                &input.task_ids,
+                input.awaited,
+            );
+            self.inner.deliver(None, outs).await;
+            Ok(matched)
+        })
+    }
+
+    fn close(&self) -> BoxFuture<'_, Closed> {
+        Box::pin(async move {
+            let live = {
+                let mut state = self.inner.lock();
+                state.closed = true;
+                state.mapper.begin_close();
+                state.live.take()
+            };
+            if let Some(live) = live {
+                live.stopping.store(true, Ordering::Relaxed);
+                end_query(&self.inner.helper, live).await;
+            }
+            // A turn still open ends as interrupted; then the event channel closes.
+            let outs = self
+                .inner
+                .lock()
+                .mapper
+                .on_exit(true, "The session closed.");
+            self.inner.deliver(None, outs).await;
+            let mut state = self.inner.lock();
+            state.events = None;
+            state.tails.clear();
+            // Each session runs its own Claude query; the SDK host holds no MCP client.
+            Closed::RuntimeStopped
+        })
+    }
+}
+
+fn require_unambiguous_server(statuses: &Value, server: &str) -> ProviderResult<()> {
+    let prefix = conn_provider::mcp_apps::claude_prefix(server);
+    if statuses
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("name").and_then(Value::as_str))
+        .any(|name| {
+            name != server && {
+                let other = conn_provider::mcp_apps::claude_prefix(name);
+                prefix.starts_with(&other) || other.starts_with(&prefix)
+            }
+        })
+    {
+        return Err(ProviderError::Protocol {
+            detail: "Another MCP server's tool names overlap this app's server.".into(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `readContainedWorkflowFile`: absolute paths only, the real path inside the root, a
+    /// regular file, and with a cap the whole lines at the end.
+    #[test]
+    fn only_a_root_task_start_clears_the_unanswered_request_watch() {
+        let start = json!({"type":"system","subtype":"task_started","task_id":"forked-skill"});
+        assert!(
+            clears_unanswered_request(&start),
+            "the native default spawn depth is one"
+        );
+        let mut frame = start;
+        frame["spawn_depth"] = json!(1);
+        assert!(clears_unanswered_request(&frame));
+        frame["spawn_depth"] = json!(2);
+        assert!(
+            !clears_unanswered_request(&frame),
+            "an earlier background agent can launch a nested task"
+        );
+        frame["spawn_depth"] = json!(1);
+        frame["parent_tool_use_id"] = json!("other-agent");
+        assert!(!clears_unanswered_request(&frame));
+        frame["parent_tool_use_id"] = Value::Null;
+        for subtype in ["task_progress", "task_notification"] {
+            frame["subtype"] = json!(subtype);
+            assert!(
+                !clears_unanswered_request(&frame),
+                "{subtype} can belong to a previous turn"
+            );
+        }
+        assert!(clears_unanswered_request(
+            &json!({"type":"system","subtype":"status","status":null})
+        ));
+    }
+
+    #[test]
+    fn member_transcripts_are_read_from_their_tail_inside_the_root() {
+        use crate::mapper::TranscriptCursor;
+        let dir = std::env::temp_dir().join(format!("conn-claude-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("projects");
+        std::fs::create_dir_all(root.join("dir.jsonl")).unwrap();
+        let file = root.join("agent-a1.jsonl");
+        std::fs::write(&file, "first\nsecond\nthird\npartial").unwrap();
+        let start = TranscriptCursor::default();
+        let text = |read: Option<(String, TranscriptCursor)>| read.map(|(text, _)| text);
+        let (whole, cursor) = read_contained_tail(&root, &file, 1024, start).unwrap();
+        assert_eq!(whole, "first\nsecond\nthird\n");
+        // The cap cuts into "second": the read starts at the next whole line.
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 18, start)),
+            Some("third\n".to_owned())
+        );
+        // From the cursor: only what was flushed since, and the partial line once it is whole.
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 1024, cursor)),
+            Some(String::new())
+        );
+        std::fs::write(&file, "first\nsecond\nthird\npartial\nmore\n").unwrap();
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 1024, cursor)),
+            Some("partial\nmore\n".to_owned())
+        );
+        assert_eq!(
+            read_contained_tail(
+                &root,
+                std::path::Path::new("projects/agent-a1.jsonl"),
+                1024,
+                start
+            ),
+            None
+        );
+        assert_eq!(
+            read_contained_tail(&root, &root.join("dir.jsonl"), 1024, start),
+            None
+        );
+        let outside = dir.join("outside.jsonl");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.jsonl")).unwrap();
+        assert_eq!(
+            read_contained_tail(&root, &root.join("link.jsonl"), 1024, start),
+            None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn callbacks_become_the_control_requests_the_mapper_reads() {
+        let args = json!({
+            "toolName": "Bash",
+            "input": {"command": "ls"},
+            "options": {"toolUseID": "toolu_1", "blockedPath": "/x", "suggestions": [{"type": "addRules"}], "requestId": "r1"},
+        });
+        let Some(ControlRequest::CanUseTool(request)) = callback_request("canUseTool", &args)
+        else {
+            panic!("not a can_use_tool request");
+        };
+        assert_eq!(request.tool_name, "Bash");
+        assert_eq!(request.tool_use_id, "toolu_1");
+        assert_eq!(request.blocked_path.as_deref(), Some("/x"));
+        assert!(request.permission_suggestions.is_some());
+        assert!(callback_request("hook", &args).is_none());
+    }
+
+    #[test]
+    fn mapper_replies_become_callback_answers() {
+        let ok = crate::protocol::control_success("r1", json!({"behavior": "allow"}));
+        assert_eq!(
+            callback_answer(&ok),
+            Some(("r1".into(), Ok(json!({"behavior": "allow"}))))
+        );
+        let err = crate::protocol::control_error("r2", "no");
+        assert_eq!(callback_answer(&err), Some(("r2".into(), Err("no".into()))));
+    }
+
+    #[test]
+    fn bypass_settings_read_like_t3() {
+        let remote = json!({"permissions": {"disableBypassPermissionsMode": "disable", "allow": []}, "disableAutoMode": false});
+        let sdk = sdk_bypass_settings(remote.clone());
+        assert_eq!(
+            sdk,
+            json!({"permissions": {"disableBypassPermissionsMode": "disable", "allow": []}})
+        );
+        assert_eq!(
+            availability(&remote),
+            BypassAvailability {
+                bypass_disabled: true,
+                auto_disabled: false
+            }
+        );
+    }
+
+    fn runtime_policy(value: Value) -> RuntimePolicy {
+        from_json(value).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn approval_and_sandbox_policy_are_read_like_t3() {
+        // READ_ONLY_NEVER_POLICY of T3's fixtures: dontAsk, read-only tools, allowed globally.
+        let read_only = runtime_policy(json!({
+            "runtimeMode": "full-access", "interactionMode": "default", "cwd": null,
+            "approvalPolicy": "never",
+            "sandboxPolicy": {"type": "readOnly", "access": {"type": "fullAccess"}},
+        }));
+        let policy = plain_policy(&read_only);
+        assert_eq!(policy.permission_mode, "dontAsk");
+        assert_eq!(
+            policy.tools,
+            launch::Tools::List(vec!["Read".into(), "Glob".into(), "Grep".into()])
+        );
+        assert!(policy.allowed_tools.is_some());
+        assert!(!policy.install_permission_callback);
+
+        // RESTRICTED_GRANULAR_POLICY: an object approval policy counts as "set, not never".
+        let granular = runtime_policy(json!({
+            "runtimeMode": "full-access", "interactionMode": "default", "cwd": null,
+            "approvalPolicy": {"granular": {"rules": true}},
+            "sandboxPolicy": {"type": "readOnly", "access": {"type": "restricted"}},
+        }));
+        let policy = plain_policy(&granular);
+        assert_eq!(policy.permission_mode, "default");
+        assert_eq!(policy.allowed_tools, None);
+        assert!(policy.install_permission_callback);
+
+        // No override: the runtime mode alone decides, as before.
+        let plain = runtime_policy(
+            json!({"runtimeMode": "full-access", "interactionMode": "default", "cwd": null}),
+        );
+        assert_eq!(plain_policy(&plain).permission_mode, "bypassPermissions");
+
+        let plan_never = runtime_policy(json!({
+            "runtimeMode": "full-access", "interactionMode": "plan", "cwd": null,
+            "approvalPolicy": "never",
+        }));
+        assert!(OwnedPolicyInput::new(&plan_never).plan_without_approvals());
+        assert!(!OwnedPolicyInput::new(&plain).plan_without_approvals());
+    }
+
+    #[test]
+    fn end_details_keep_private_text_out() {
+        let end = QueryEnd {
+            error: Some(
+                json!({"message": "exit 1: secret stderr", "telemetryMessage": "Claude Code process exited with code 1"}),
+            ),
+            ..QueryEnd::default()
+        };
+        assert_eq!(end_detail(&end), "Claude Code process exited with code 1.");
+        let missing = QueryEnd {
+            stderr: Some("No conversation found with session ID: abc\n".into()),
+            ..QueryEnd::default()
+        };
+        assert!(end_detail(&missing).contains("No conversation found"));
+    }
+}

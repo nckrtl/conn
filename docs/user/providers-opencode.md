@@ -1,7 +1,7 @@
 # OpenCode
 
-Install and authenticate OpenCode on the machine running your environment, then
-enable it in **Settings > Providers**. See [provider setup](./install.md#providers).
+Orbit installs and updates OpenCode on the machine running your environment.
+Authenticate it there, then enable it in **Settings > Providers**. See [provider setup](./install.md#providers).
 T3 Code requires OpenCode 1.14.19 or newer, including when you connect an existing
 OpenCode server.
 
@@ -11,10 +11,8 @@ T3 Code supports OpenCode 2.0.18 and newer. It detects the version on its own, s
 the same provider settings work for OpenCode 1.x and 2.x. OpenCode 1.x shows
 **Limited support** in its provider settings.
 
-OpenCode 2 is a separate package, `@opencode/cli`. To move from 1.x, install it
-yourself, for example `npm install -g @opencode/cli`. Then refresh provider status.
-T3 Code's update button updates whichever package you have installed. It never
-switches a 1.x install to 2.x.
+OpenCode 2 is a separate package, `@opencode/cli`. Orbit decides which package an
+environment runs. After it switches, refresh provider status.
 
 OpenCode 2 converts the shared OpenCode database to its own format the first time it
 runs. Don't run OpenCode 1.x and 2.x side by side on the same machine. Threads you
@@ -41,7 +39,12 @@ settings. T3 Code uses only that configured password for an external server; it
 does not forward a local `OPENCODE_SERVER_PASSWORD`. If connection or version checks
 fail, check the URL, credentials, and OpenCode version, then refresh provider status.
 
-After a lost connection, send another prompt to reconnect to the same OpenCode
+T3 Code does not update or restart an external server. After Orbit updates
+OpenCode, that server can still report the previous version until it restarts.
+
+T3 Code waits for a local server it started to recover after a lost connection.
+You can stop the turn while it reconnects. If the server exits or an external
+connection cannot be restored, send another prompt to resume the same OpenCode
 session.
 
 ## Approvals
@@ -68,6 +71,10 @@ cached while the local helper is running. Let it sit for 30 seconds without mode
 refreshes or text-generation work, then refresh again to reload the files. Repeated
 refreshes keep the helper alive. An external server may need its own reload or
 restart before T3 Code can see configuration changes.
+
+Models defined in a project's own `opencode.json` appear only in that project's
+model picker, after T3 Code reads the project's catalog the first time the picker
+opens there.
 
 Existing threads keep their selected model and options even when it disappears
 from the catalog. If OpenCode rejects that model, select an available one and retry.

@@ -1,8 +1,10 @@
+import { startPaletteThreadDrag } from "./CommandPalette.drag";
 import { useLegendListRef } from "~/hooks/useLegendListRef";
 import { type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { ChevronRightIcon } from "lucide-react";
 import { type ReactNode, type RefObject, useState } from "react";
+import { T } from "gt-react";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { shortcutLabelForCommand } from "../keybindings";
@@ -39,9 +41,11 @@ function CommandPaletteEmptyState(props: { emptyStateMessage?: string; isActions
   return (
     <div className="py-10 text-center text-sm text-muted-foreground">
       {props.emptyStateMessage ??
-        (props.isActionsOnly
-          ? "No matching actions."
-          : "No matching commands, projects, or threads.")}
+        (props.isActionsOnly ? (
+          <T>No matching actions.</T>
+        ) : (
+          <T>No matching commands, projects, or threads.</T>
+        ))}
     </div>
   );
 }
@@ -77,7 +81,15 @@ export function CommandPaletteResults(props: CommandPaletteResultsProps) {
   );
 }
 
-export function scrollCommandPaletteRowIntoView(list: LegendListRef | null, rowIndex: number) {
+export function scrollCommandPaletteRowIntoView(
+  list: LegendListRef | null,
+  rowIndex: number,
+  isFirstItem: boolean,
+) {
+  if (isFirstItem) {
+    void list?.scrollToOffset({ offset: 0, animated: false });
+    return;
+  }
   void list?.scrollIndexIntoView({
     index: rowIndex,
     animated: false,
@@ -241,6 +253,19 @@ function CommandPaletteResultRow(props: {
       {...(props.index === undefined ? {} : { index: props.index })}
       value={props.item.value}
       active={props.isActive}
+      {...(props.item.kind === "action" && props.item.checked !== undefined
+        ? { "aria-checked": props.item.checked }
+        : {})}
+      onPointerDown={(event) => {
+        if (props.item.threadRef) {
+          startPaletteThreadDrag(
+            event.nativeEvent,
+            props.item.threadRef,
+            props.item.searchTitle ??
+              (typeof props.item.title === "string" ? props.item.title : "Thread"),
+          );
+        }
+      }}
       onMouseDown={(event) => {
         event.preventDefault();
       }}
@@ -248,9 +273,11 @@ function CommandPaletteResultRow(props: {
         props.onExecuteItem(props.item);
       }}
     >
-      <CommandPaletteTitleIcon>{props.item.icon}</CommandPaletteTitleIcon>
+      <CommandPaletteTitleIcon>
+        <span className={cn("flex", props.item.dimmed && "opacity-48")}>{props.item.icon}</span>
+      </CommandPaletteTitleIcon>
       {props.item.description || props.item.threadContentMatch ? (
-        <span className="flex min-w-0 flex-1 flex-col">
+        <span className={cn("flex min-w-0 flex-1 flex-col", props.item.dimmed && "opacity-64")}>
           <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">
             {props.item.titleLeadingContent}
             <CommandPaletteTitle item={props.item} />
@@ -267,7 +294,12 @@ function CommandPaletteResultRow(props: {
           ) : null}
         </span>
       ) : (
-        <span className="flex min-w-0 flex-1 items-center gap-1.5 text-sm text-foreground">
+        <span
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-1.5 text-sm text-foreground",
+            props.item.dimmed && "opacity-64",
+          )}
+        >
           {props.item.titleLeadingContent}
           <CommandPaletteTitle item={props.item} />
         </span>

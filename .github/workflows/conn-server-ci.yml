@@ -1,0 +1,104 @@
+name: Conn Server CI
+
+# The production x86_64-unknown-linux-musl binary that Orbit runs, on a GitHub-hosted runner.
+# Format, Clippy, tests, cargo-deny and the canary run once in conn-server-checks.yml.
+
+on:
+  pull_request:
+    paths: &paths
+      - apps/conn-server/**
+      - .github/workflows/conn-server-ci.yml
+      - .github/workflows/conn-server-checks.yml
+  push:
+    branches:
+      - "sync/**"
+    paths: *paths
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conn-server-ci-${{ github.event_name == 'workflow_run' && format('after-ci-{0}', github.run_id) || github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same as `channel` in apps/conn-server/rust-toolchain.toml; tools/check.sh fails when they differ.
+  RUST_TOOLCHAIN: "1.99.1"
+
+defaults:
+  run:
+    working-directory: apps/conn-server
+
+jobs:
+  musl:
+    name: Linux musl release build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          sparse-checkout: |
+            /apps/conn-server/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-musl
+
+      # musl-gcc compiles the bundled SQLite.
+      - name: Install musl tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+
+      - name: Restore Cargo
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/conn-server/target
+          key: conn-server-musl-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('apps/conn-server/Cargo.lock') }}
+          restore-keys: conn-server-musl-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Build
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p conn-server
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
+      - name: Binary size
+        run: |
+          binary=target/x86_64-unknown-linux-musl/release/conn-server
+          bytes="$(stat -c %s "$binary")"
+          file "$binary"
+          printf 'conn-server (x86_64-unknown-linux-musl): %s bytes\n' "$bytes"
+          printf '**conn-server** x86_64-unknown-linux-musl: %s bytes (%s MiB)\n' "$bytes" \
+            "$(awk "BEGIN { printf \"%.2f\", $bytes / 1048576 }")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conn-server-x86_64-unknown-linux-musl
+          path: apps/conn-server/target/x86_64-unknown-linux-musl/release/conn-server
+          retention-days: 1
+      - name: Save Cargo on main
+        if: github.event_name == 'workflow_run' && inputs.source_sha != '' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/conn-server/target
+          key: conn-server-musl-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('apps/conn-server/Cargo.lock') }}

@@ -1,4 +1,4 @@
-import { annotationMetadata } from "./hooks";
+import { annotationMetadata, hostCapture } from "./hooks";
 import { annotationCanMove, finishActiveDraft, requestAnnotationMove } from "./outside-click";
 import { deepElementFromPoint, isAnnotationUi, isElementFixed } from "./dom";
 import { identifyElement } from "./identify";
@@ -10,6 +10,7 @@ import {
   draft,
   finishing,
   hover,
+  hoverLabelHidden,
   shakeToken,
   dictationSettings,
 } from "./state";
@@ -41,6 +42,8 @@ let currentPathname = "";
 let annotationGeneration = 0;
 let pendingPlacement: AnnotationDraft | null = null;
 let cancelScreenshot: (() => void) | null = null;
+/** Host captures started on mousedown, before the popup paints over the page. */
+const earlyShots = new WeakMap<AnnotationDraft, Promise<string | undefined>>();
 const DICTATION_START_LIMIT_MS = 3000;
 
 function persist(): void {
@@ -109,6 +112,13 @@ function clearPendingPlacement(): void {
 function scheduleDraftScreenshot(target: AnnotationDraft): void {
   cancelScreenshot?.();
   const scroll = { x: window.scrollX, y: window.scrollY };
+  // A host copies composited pixels off the main thread, so take them now, before the
+  // popup paints or the page reacts to the click (closing menus, moving focus).
+  if (hostCapture()) {
+    cancelScreenshot = null;
+    void attachDraftScreenshot(target, scroll);
+    return;
+  }
   let cancelled = false;
   let idle = 0;
   // Two frames: the popup has painted and its effects, including dictation, have started.
@@ -151,7 +161,7 @@ async function attachDraftScreenshot(
     return;
   }
 
-  const screenshot = await captureAnnotationScreenshot(target, scroll);
+  const screenshot = await (earlyShots.get(target) ?? captureAnnotationScreenshot(target, scroll));
 
   if (!screenshot) {
     return;
@@ -650,6 +660,7 @@ export function setAnnotationMode(active: boolean): void {
     clearPendingPlacement();
     draft.value = null;
     hover.value = null;
+    hoverLabelHidden.value = false;
     releaseMicrophone();
     return;
   }
@@ -661,7 +672,14 @@ export function setAnnotationMode(active: boolean): void {
   ) {
     void warmMicrophone();
   }
+  warmHostCapture();
   void pullResolvedAnnotations();
+}
+
+/** A page's first composited-pixel copy is slow; pay for it now, not on the first click. */
+function warmHostCapture(): void {
+  const capture = hostCapture();
+  if (capture) void capture({ x: 0, y: 0, width: 1, height: 1 }).catch(() => undefined);
 }
 
 export function toggleAnnotationMode(): void {
@@ -689,9 +707,11 @@ export function handleDocumentMouseDown(event: MouseEvent): void {
   // Host UIs can act on mousedown (for example, list rows that navigate): consume it first.
   consumeAnnotationGesture(event);
 
-  if (draft.value) {
+  if (draft.value && !annotationCanMove()) {
     return;
   }
+
+  hoverLabelHidden.value = true;
 
   const nextDraft = draftFromPoint(event.clientX, event.clientY);
 
@@ -700,8 +720,12 @@ export function handleDocumentMouseDown(event: MouseEvent): void {
     return;
   }
 
-  // Capturing here would delay the popup; the click schedules it once the popup is open.
   pendingPlacement = nextDraft;
+  // A host copy runs off the main thread. Start it now, while no popup covers the page;
+  // it hides the overlay until the copy is taken, and the click opens the popup.
+  if (hostCapture()) {
+    earlyShots.set(nextDraft, captureAnnotationScreenshot(nextDraft));
+  }
 }
 
 export function handleDocumentClick(event: MouseEvent): void {
@@ -714,7 +738,8 @@ export function handleDocumentClick(event: MouseEvent): void {
 
   if (draft.value) {
     consumeAnnotationGesture(event);
-    const next = draftFromPoint(event.clientX, event.clientY);
+    const next = pendingPlacement ?? draftFromPoint(event.clientX, event.clientY);
+    pendingPlacement = null;
     if (next && requestAnnotationMove(next)) return;
     shakeDraft();
     return;
@@ -742,6 +767,10 @@ export function handleDocumentClick(event: MouseEvent): void {
 }
 
 export function handleMouseMove(event: MouseEvent): void {
+  if (event.buttons === 0 && hoverLabelHidden.value) {
+    hoverLabelHidden.value = false;
+  }
+
   if (!annotationMode.value || (draft.value && !annotationCanMove())) {
     hover.value = null;
     return;

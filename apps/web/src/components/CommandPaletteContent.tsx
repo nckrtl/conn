@@ -1,3 +1,4 @@
+import { T } from "gt-react";
 import { ArrowDownIcon, ArrowUpIcon } from "lucide-react";
 import { type ComponentProps, type ReactNode, type RefObject } from "react";
 
@@ -46,14 +47,15 @@ type CommandPaletteContentProps = Omit<ComponentProps<typeof Command>, "children
   readonly inputAccessory?: ReactNode;
   readonly inputProps: ComponentProps<typeof CommandInput>;
   readonly pendingSelectionRef?: RefObject<PendingInputSelection | null>;
-  readonly panelSize?: "list" | "tall-list" | "fill";
+  /** `fixed-list` keeps the list's full height, so a palette page does not jump as rows change. */
+  readonly panelSize?: "list" | "tall-list" | "fill" | "fixed-list";
   readonly showBackHint?: boolean;
   readonly testId?: string;
 };
 
 export function CommandPaletteContent({
   children,
-  escapeLabel = "Close",
+  escapeLabel,
   footerActionLabel,
   footerTrailing,
   inputAccessory,
@@ -85,13 +87,15 @@ export function CommandPaletteContent({
               ? "flex min-h-0 flex-1 flex-col"
               : panelSize === "tall-list"
                 ? "max-h-[min(34rem,76vh)]"
-                : "flex max-h-[min(28rem,70vh)] min-h-0 flex-col"
+                : panelSize === "fixed-list"
+                  ? "flex h-[min(28rem,70vh)] min-h-0 flex-col"
+                  : "flex max-h-[min(28rem,70vh)] min-h-0 flex-col"
           }
         >
           {children}
         </CommandPanel>
         <CommandFooter className="max-sm:flex-col max-sm:items-start">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
             <KbdGroup>
               <Kbd>
                 <ArrowUpIcon />
@@ -99,7 +103,9 @@ export function CommandPaletteContent({
               <Kbd>
                 <ArrowDownIcon />
               </Kbd>
-              <span>Navigate</span>
+              <span>
+                <T>Navigate</T>
+              </span>
             </KbdGroup>
             {footerActionLabel !== undefined ? (
               <KbdGroup>
@@ -110,12 +116,14 @@ export function CommandPaletteContent({
             {showBackHint ? (
               <KbdGroup>
                 <Kbd>Backspace</Kbd>
-                <span>Back</span>
+                <span>
+                  <T>Back</T>
+                </span>
               </KbdGroup>
             ) : null}
             <KbdGroup>
               <Kbd>Esc</Kbd>
-              <span>{escapeLabel}</span>
+              <span>{escapeLabel ?? <T>Close</T>}</span>
             </KbdGroup>
           </div>
           {footerTrailing}

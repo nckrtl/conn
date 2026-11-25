@@ -118,7 +118,7 @@ describe("Pi MCP tool results", () => {
     ] as const;
     const result = { content, structuredContent: { count: 2 }, _meta: { private: true } };
     const bridge = await loadMcpBridge({ modern: true, result });
-    const tool = bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot")!;
+    const tool = bridge.tools.find((tool) => tool.name === "mcp__conn__preview_snapshot")!;
     const output = await tool.execute("snapshot", {});
     assert.deepEqual(output.content, [
       content[0],
@@ -176,30 +176,21 @@ describe("Pi MCP tool exposure", () => {
     const prompt = await start!({ systemPrompt: "Pi system prompt" }, discoveryContext);
     assert.include(prompt?.systemPrompt ?? "", "orchestrator_capabilities");
     assert.equal(bridge.servers.length, 0);
-    assert.equal(bridge.tools.length, 8);
+    assert.equal(bridge.tools.length, 4);
     assert.deepEqual(bridge.getActiveTools(), ["read", "tool_search"]);
     assert.deepEqual(
       bridge.tools
         .filter((tool) => tool.exposure !== "hidden")
         .map((tool) => [tool.name, tool.exposure]),
       [
-        ["mcp__t3-code__orchestrator_capabilities", "direct"],
-        ["mcp__t3-code__delegate_task", "direct"],
-        ["mcp__t3-code__task_status", "direct"],
-        ["mcp__t3-code__preview_snapshot", "deferred"],
-      ],
-    );
-    assert.deepEqual(
-      bridge.tools.filter((tool) => tool.exposure === "hidden").map((tool) => tool.name),
-      [
-        "mcp__t3_code__orchestrator_capabilities",
-        "mcp__t3_code__delegate_task",
-        "mcp__t3_code__task_status",
-        "mcp__t3_code__preview_snapshot",
+        ["mcp__conn__orchestrator_capabilities", "direct"],
+        ["mcp__conn__delegate_task", "direct"],
+        ["mcp__conn__task_status", "direct"],
+        ["mcp__conn__preview_snapshot", "deferred"],
       ],
     );
     const result = await bridge.tools
-      .find((tool) => tool.name === "mcp__t3-code__preview_snapshot")!
+      .find((tool) => tool.name === "mcp__conn__preview_snapshot")!
       .execute("call-1", { depth: 2 });
     assert.equal(result.content[0]?.text, "browser snapshot");
     assert.equal(bridge.requests.at(-1)?.method, "tools/call");
@@ -209,27 +200,27 @@ describe("Pi MCP tool exposure", () => {
     const bridge = await loadMcpBridge({
       modern: true,
       toolSearchAvailable: true,
-      allowsTool: (name) => name !== "mcp__t3-code__delegate_task",
+      allowsTool: (name) => name !== "mcp__conn__delegate_task",
     });
     const event = { systemPrompt: "" };
     await bridge.handlers.get("session_start")!(event, discoveryContext);
     const gatewayContext = { model: { api: "openai-completions" }, ui: { notify: assert.fail } };
     await bridge.handlers.get("model_select")!(event, gatewayContext);
-    bridge.restoreActiveTools(["read", "mcp__t3-code__task_status"]);
+    bridge.restoreActiveTools(["read", "mcp__conn__task_status"]);
     await bridge.handlers.get("session_tree")!(event, gatewayContext);
     assert.deepEqual(bridge.getActiveTools(), [
       "read",
-      "mcp__t3-code__task_status",
+      "mcp__conn__task_status",
       "tool_search",
-      "mcp__t3-code__orchestrator_capabilities",
-      "mcp__t3-code__preview_snapshot",
+      "mcp__conn__orchestrator_capabilities",
+      "mcp__conn__preview_snapshot",
     ]);
     await bridge.handlers.get("model_select")!(event, discoveryContext);
     assert.equal(
-      bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot")?.exposure,
+      bridge.tools.find((tool) => tool.name === "mcp__conn__preview_snapshot")?.exposure,
       "deferred",
     );
-    assert.include(bridge.getActiveTools(), "mcp__t3-code__preview_snapshot");
+    assert.include(bridge.getActiveTools(), "mcp__conn__preview_snapshot");
   });
 
   it.each(["legacy Pi", "disabled tool search"])(
@@ -250,7 +241,7 @@ describe("Pi MCP tool exposure", () => {
           .filter((tool) => tool.exposure !== "hidden")
           .every((tool) => tool.exposure === undefined || tool.exposure === "direct"),
       );
-      const tool = bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot");
+      const tool = bridge.tools.find((tool) => tool.name === "mcp__conn__preview_snapshot");
       assert.isDefined(tool);
       const controller = new AbortController();
       const result = await tool!.execute("call-1", { depth: 2 }, controller.signal);
@@ -314,7 +305,7 @@ describe("Pi tool discovery permissions", () => {
           },
         },
       };
-      for (const prefix of ["mcp__t3-code__", "mcp__t3_code__"]) {
+      for (const prefix of ["mcp__conn__", "mcp__conn__"]) {
         assert.isUndefined(
           await hook({ toolName: prefix + "orchestrator_capabilities", input: {} }, ctx),
         );
@@ -330,8 +321,7 @@ describe("Pi tool discovery permissions", () => {
       assert.equal(confirmations.length, 4);
       bridge.setBridgeSourcePath("/user/extensions/replacement.ts");
       assert.equal(
-        (await hook({ toolName: "mcp__t3-code__orchestrator_capabilities", input: {} }, ctx))
-          ?.block,
+        (await hook({ toolName: "mcp__conn__orchestrator_capabilities", input: {} }, ctx))?.block,
         true,
       );
       assert.equal(
@@ -387,18 +377,47 @@ describe("Pi tool discovery permissions", () => {
         },
       },
     };
-    assert.isUndefined(
-      await toolCall!({ toolName: "tool_search", input: { query: "preview_snapshot" } }, ctx),
-    );
+    for (const builtinPath of ["builtin:tool-search", "<builtin:tool-search>"]) {
+      searchPath = builtinPath;
+      assert.isUndefined(
+        await toolCall!({ toolName: "tool_search", input: { query: "preview_snapshot" } }, ctx),
+      );
+    }
     assert.equal(confirmations.length, 0);
-    const result = await toolCall!({ toolName: "mcp__t3-code__preview_snapshot", input: {} }, ctx);
+    const result = await toolCall!({ toolName: "mcp__conn__preview_snapshot", input: {} }, ctx);
     assert.equal(result?.block, true);
-    assert.deepEqual(confirmations, ["Allow mcp__t3-code__preview_snapshot?"]);
+    assert.deepEqual(confirmations, ["Allow mcp__conn__preview_snapshot?"]);
 
     searchPath = "/extensions/custom-search.ts";
     const replaced = await toolCall!({ toolName: "tool_search", input: {} }, ctx);
     assert.equal(replaced?.block, true);
     assert.equal(confirmations.at(-1), "Allow tool_search?");
+  });
+
+  it("gives long inputs that differ past the shown text different confirmation details", async () => {
+    const bridge = await loadMcpBridge({ runtimeMode: "approval-required" });
+    const hook = bridge.handlers.get("tool_call") as unknown as (
+      event: { toolName: string; input: unknown },
+      ctx: { ui: { confirm: (title: string, detail: string) => Promise<boolean> } },
+    ) => Promise<{ block: true; reason: string } | undefined>;
+    const details: string[] = [];
+    const ctx = {
+      ui: {
+        confirm: async (_title: string, detail: string) => {
+          details.push(detail);
+          return true;
+        },
+      },
+    };
+    const filler = "a".repeat(4_100);
+    await hook({ toolName: "bash", input: { command: filler + "\necho one" } }, ctx);
+    await hook({ toolName: "bash", input: { command: filler + "\necho two" } }, ctx);
+    await hook({ toolName: "bash", input: { command: "ls" } }, ctx);
+    const [first, second, short] = details;
+    assert.equal(first!.slice(0, 4_000), second!.slice(0, 4_000));
+    assert.notEqual(first, second);
+    assert.match(first!, /\n\.\.\. \d+ more characters not shown \(sha256 [0-9a-f]{64}\)$/);
+    assert.equal(short, JSON.stringify({ command: "ls" }, null, 2));
   });
 });
 

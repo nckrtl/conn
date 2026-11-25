@@ -12,10 +12,13 @@ packages/*/dist
 .env
 .env.local
 build/
+# The Conn Server's SDK host keeps its build manifest in a folder named build.
+!/apps/conn-server/helpers/sdk-host/build/
 .logs/
 release/
 release-mock/
 .t3
+.conn
 .idea/
 apps/web/.playwright
 apps/web/playwright-report
@@ -38,6 +41,7 @@ apps/mobile/.android-cache/
 artifacts/app-store/screenshots/
 artifacts/mobile-e2e/
 artifacts/mobile-behavior/
+scripts/.e2e/
 .github/pr-assets/
 native/**/target/
 node_modules/
@@ -48,3 +52,10 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+
+/packages/ssh/.ssh-launcher-test-*/
+.t3-mobile-lab
+.lab-shots/
+
+# Cargo build output of the repo-root crates/ workspace.
+/target/

@@ -2,12 +2,19 @@ import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  provisionalPairingsInCatalog,
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
   StoredOrchestrationShellSnapshot,
   StoredOrchestrationThreadSnapshot,
   decodeOrDiscardOrchestrationCache,
   putRemoteDpopTokenInCatalog,
+  putConnectionCredentialInCatalog,
   registerConnectionInCatalog,
+  catalogRoutes,
+  learnConnectionLabelInCatalog,
+  provisionalPairingId,
+  recoverProvisionalPairings,
+  settleProvisionalPairingInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
   setConnectionEnabledInCatalog,
@@ -19,6 +26,7 @@ import {
   makeThreadCacheWriteOrder,
 } from "@t3tools/client-runtime/platform";
 import { TokenStore } from "@t3tools/client-runtime/authorization";
+import { msg } from "gt-react";
 import {
   ConnectionTransientError,
   ConnectionBlockedError,
@@ -34,13 +42,18 @@ import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3too
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import { m } from "../i18n/messages";
+import { isAdditionalDesktopWindow } from "../lib/desktopWindowContext";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
 
 const DATABASE_NAME = "t3code:connection-runtime";
@@ -93,38 +106,52 @@ const encodeStoredServerConfig = Schema.encodeEffect(StoredServerConfigJson);
 const decodeStoredVcsRefs = Schema.decodeUnknownEffect(StoredVcsRefsJson);
 const encodeStoredVcsRefs = Schema.encodeEffect(StoredVcsRefsJson);
 
-function catalogError(operation: string, cause: unknown) {
+const CATALOG_FAILURE = {
+  open: msg("Could not open the local connection catalog: {cause}"),
+  read: msg("Could not read the local connection catalog: {cause}"),
+  write: msg("Could not write the local connection catalog: {cause}"),
+  remove: msg("Could not remove the local connection catalog: {cause}"),
+  decode: msg("Could not decode the local connection catalog: {cause}"),
+  encode: msg("Could not encode the local connection catalog: {cause}"),
+  load: msg("Could not load the local connection catalog: {cause}"),
+  save: msg("Could not save the local connection catalog: {cause}"),
+  "save pull request routing permissions in": msg(
+    "Could not save pull request routing permissions in the local connection catalog: {cause}",
+  ),
+};
+
+function catalogError(operation: keyof typeof CATALOG_FAILURE, cause: unknown) {
   return new ConnectionTransientError({
     reason: "remote-unavailable",
-    detail: `Could not ${operation} the local connection catalog: ${String(cause)}`,
+    detail: m(CATALOG_FAILURE[operation], { cause: String(cause) }),
   });
 }
 
-function persistenceError(
-  operation:
-    | "list-targets"
-    | "list-disabled-targets"
-    | "register-connection"
-    | "set-connection-routes"
-    | "remove-connection"
-    | "set-connection-enabled"
-    | "load-shell"
-    | "save-shell"
-    | "load-thread"
-    | "save-thread"
-    | "remove-thread"
-    | "load-server-config"
-    | "save-server-config"
-    | "load-vcs-refs"
-    | "save-vcs-refs"
-    | "remove-vcs-refs"
-    | "clear-vcs-refs"
-    | "clear-environment",
-  cause: unknown,
-) {
+const PERSISTENCE_FAILURE = {
+  "list-targets": msg("Could not list targets: {cause}"),
+  "list-disabled-targets": msg("Could not list disabled targets: {cause}"),
+  "register-connection": msg("Could not register connection: {cause}"),
+  "set-connection-routes": msg("Could not set connection routes: {cause}"),
+  "remove-connection": msg("Could not remove connection: {cause}"),
+  "set-connection-enabled": msg("Could not set connection enabled: {cause}"),
+  "load-shell": msg("Could not load shell: {cause}"),
+  "save-shell": msg("Could not save shell: {cause}"),
+  "load-thread": msg("Could not load thread: {cause}"),
+  "save-thread": msg("Could not save thread: {cause}"),
+  "remove-thread": msg("Could not remove thread: {cause}"),
+  "load-server-config": msg("Could not load server config: {cause}"),
+  "save-server-config": msg("Could not save server config: {cause}"),
+  "load-vcs-refs": msg("Could not load vcs refs: {cause}"),
+  "save-vcs-refs": msg("Could not save vcs refs: {cause}"),
+  "remove-vcs-refs": msg("Could not remove vcs refs: {cause}"),
+  "clear-vcs-refs": msg("Could not clear vcs refs: {cause}"),
+  "clear-environment": msg("Could not clear environment: {cause}"),
+};
+
+function persistenceError(operation: keyof typeof PERSISTENCE_FAILURE, cause: unknown) {
   return new Persistence.ConnectionPersistenceError({
     operation,
-    message: `Could not ${operation.replaceAll("-", " ")}: ${String(cause)}`,
+    message: m(PERSISTENCE_FAILURE[operation], { cause: String(cause) }),
   });
 }
 
@@ -132,7 +159,9 @@ const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* (
   return yield* Effect.callback<IDBDatabase, ConnectionTransientError>((resume) => {
     if (typeof indexedDB === "undefined") {
       resume(
-        Effect.fail(catalogError("open", "IndexedDB is unavailable in this browser context.")),
+        Effect.fail(
+          catalogError("open", m(msg("IndexedDB is unavailable in this browser context."))),
+        ),
       );
       return;
     }
@@ -161,7 +190,9 @@ const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* (
         }
       });
       request.addEventListener("error", () => {
-        resume(Effect.fail(catalogError("open", request.error ?? "Unknown IndexedDB error")));
+        resume(
+          Effect.fail(catalogError("open", request.error ?? m(msg("Unknown IndexedDB error")))),
+        );
       });
       request.addEventListener("success", () => {
         resume(Effect.succeed(request.result));
@@ -245,7 +276,11 @@ function readDatabaseValueOnConnection(database: IDBDatabase, storeName: string,
     try {
       const request = database.transaction(storeName, "readonly").objectStore(storeName).get(key);
       request.addEventListener("error", () => {
-        resume(Effect.fail(catalogError("read", request.error ?? "Unknown IndexedDB read error")));
+        resume(
+          Effect.fail(
+            catalogError("read", request.error ?? m(msg("Unknown IndexedDB read error"))),
+          ),
+        );
       });
       request.addEventListener("success", () => {
         resume(Effect.succeed(request.result));
@@ -268,7 +303,9 @@ function writeDatabaseValueOnConnection(
       // Commit failures can fire abort without error; every failed write fires abort.
       transaction.addEventListener("abort", () => {
         resume(
-          Effect.fail(catalogError("write", transaction.error ?? "Unknown IndexedDB write error")),
+          Effect.fail(
+            catalogError("write", transaction.error ?? m(msg("Unknown IndexedDB write error"))),
+          ),
         );
       });
       transaction.addEventListener("complete", () => {
@@ -292,7 +329,7 @@ function removeDatabaseValueOnConnection(
       transaction.addEventListener("abort", () => {
         resume(
           Effect.fail(
-            catalogError("remove", transaction.error ?? "Unknown IndexedDB remove error"),
+            catalogError("remove", transaction.error ?? m(msg("Unknown IndexedDB remove error"))),
           ),
         );
       });
@@ -317,7 +354,7 @@ function removeDatabaseValuesInRangeOnConnection(
       transaction.addEventListener("abort", () => {
         resume(
           Effect.fail(
-            catalogError("remove", transaction.error ?? "Unknown IndexedDB cursor error"),
+            catalogError("remove", transaction.error ?? m(msg("Unknown IndexedDB cursor error"))),
           ),
         );
       });
@@ -327,7 +364,9 @@ function removeDatabaseValuesInRangeOnConnection(
       const request = transaction.objectStore(storeName).openCursor(range);
       request.addEventListener("error", () => {
         resume(
-          Effect.fail(catalogError("remove", request.error ?? "Unknown IndexedDB cursor error")),
+          Effect.fail(
+            catalogError("remove", request.error ?? m(msg("Unknown IndexedDB cursor error"))),
+          ),
         );
       });
       request.addEventListener("success", () => {
@@ -362,7 +401,9 @@ function saveQueryOnConnection(
       const transaction = database.transaction(QUERY_STORE_NAME, "readwrite");
       transaction.addEventListener("abort", () => {
         resume(
-          Effect.fail(catalogError("write", transaction.error ?? "Unknown IndexedDB write error")),
+          Effect.fail(
+            catalogError("write", transaction.error ?? m(msg("Unknown IndexedDB write error"))),
+          ),
         );
       });
       transaction.addEventListener("complete", () => {
@@ -479,6 +520,7 @@ const encodeCatalog = Effect.fn("web.connectionStorage.encodeCatalog")(function*
 });
 
 export interface CatalogBackend {
+  readonly sharedAcrossWindows?: boolean;
   readonly read: Effect.Effect<string | null, ConnectionTransientError>;
   readonly write: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
   readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
@@ -488,6 +530,7 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
   const bridge = window.desktopBridge;
   if (bridge !== undefined) {
     return {
+      sharedAcrossWindows: true,
       read: Effect.tryPromise({
         try: () => bridge.getConnectionCatalog(),
         catch: (cause) => catalogError("load", cause),
@@ -503,7 +546,7 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
               : Effect.fail(
                   catalogError(
                     "save",
-                    "Desktop secure storage is unavailable in this system context.",
+                    m(msg("Desktop secure storage is unavailable in this system context.")),
                   ),
                 ),
           ),
@@ -523,6 +566,7 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
 
 interface CatalogStore {
   readonly read: Effect.Effect<ConnectionCatalogDocumentType, ConnectionTransientError>;
+  readonly readStartupPairings: Effect.Effect<ReadonlySet<string>, ConnectionTransientError>;
   readonly update: (
     transform: (catalog: ConnectionCatalogDocumentType) => ConnectionCatalogDocumentType,
   ) => Effect.Effect<void, ConnectionTransientError>;
@@ -533,10 +577,11 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
 ) {
   const state = yield* Ref.make<Option.Option<ConnectionCatalogDocumentType>>(Option.none());
   const lock = yield* Semaphore.make(1);
+  const startupPairings = yield* Deferred.make<ReadonlySet<string>>();
 
-  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* () {
+  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* (fresh = false) {
     const cached = yield* Ref.get(state);
-    if (Option.isSome(cached)) {
+    if (!fresh && Option.isSome(cached)) {
       return cached.value;
     }
     const raw = yield* backend.read;
@@ -570,24 +615,52 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
         ),
       );
     }
+    // A write can load the catalog before startup recovery retries. Capture the IDs first.
+    if (!(yield* Deferred.isDone(startupPairings))) {
+      yield* Deferred.succeed(startupPairings, provisionalPairingsInCatalog(catalog));
+    }
     yield* Ref.set(state, Option.some(catalog));
     return catalog;
   });
 
-  const read = lock.withPermits(1)(loadUnlocked());
+  // A desktop renderer's cached snapshot cannot safely be the basis of a catalog write
+  // after another window has paired or replaced a route.
+  const withCatalogLock = <A>(effect: Effect.Effect<A, ConnectionTransientError>) => {
+    const locks = backend.sharedAcrossWindows ? globalThis.navigator?.locks : undefined;
+    return locks === undefined
+      ? effect
+      : Effect.context<never>().pipe(
+          Effect.flatMap((context) =>
+            Effect.tryPromise({
+              try: (signal) =>
+                locks.request("conn:connection-catalog", { signal }, () =>
+                  Effect.runPromiseExitWith(context)(effect),
+                ),
+              catch: (cause) => catalogError("write", cause),
+            }),
+          ),
+          Effect.flatMap(Exit.match({ onFailure: Effect.failCause, onSuccess: Effect.succeed })),
+        );
+  };
+  const read = lock.withPermits(1)(withCatalogLock(loadUnlocked()));
+  const readStartupPairings = read.pipe(Effect.andThen(Deferred.await(startupPairings)));
   const update: CatalogStore["update"] = Effect.fn("web.connectionStorage.updateCatalog")(
     function* (transform) {
       yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          const next = transform(yield* loadUnlocked());
-          yield* backend.write(yield* encodeCatalog(next));
-          yield* Ref.set(state, Option.some(next));
-        }),
+        withCatalogLock(
+          Effect.gen(function* () {
+            const current = yield* loadUnlocked(backend.sharedAcrossWindows === true);
+            const next = transform(current);
+            if (next === current) return;
+            yield* backend.write(yield* encodeCatalog(next));
+            yield* Ref.set(state, Option.some(next));
+          }),
+        ),
       );
     },
   );
 
-  return { read, update } satisfies CatalogStore;
+  return { read, readStartupPairings, update } satisfies CatalogStore;
 });
 
 // The stored names predate the rename and stay, so a tab still on an older version and an
@@ -675,7 +748,7 @@ export function makeBrowserPullRequestRoutingPermissions(
       if (connectionKey === null)
         return yield* new ConnectionBlockedError({
           reason: "configuration",
-          detail: "This environment does not have a saved connection endpoint.",
+          detail: m(msg("This environment does not have a saved connection endpoint.")),
         });
       return yield* write(
         entry.target.environmentId,
@@ -717,7 +790,11 @@ export const layer = Layer.effectContext(
       makeDatabaseHandle(),
       (owned) => owned.close,
     );
-    const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
+    const backend = makeCatalogBackend(database);
+    const catalog = yield* makeCatalogStore(backend);
+    if (backend.sharedAcrossWindows && !isAdditionalDesktopWindow()) {
+      yield* recoverProvisionalPairings(catalog);
+    }
     const pullRequestRoutingPermissions = makeBrowserPullRequestRoutingPermissions();
     // Remembers each thread row's encoding, so a save only encodes rows that changed.
     const encodeStoredShellSnapshot = makeStoredShellSnapshotEncoder({
@@ -729,22 +806,73 @@ export const layer = Layer.effectContext(
     });
     const threadWriteOrder = makeThreadCacheWriteOrder();
 
+    // Keep registry startup pending while desktop secure storage is inaccessible so its
+    // layer stays alive for recovery. A successful read is cached for subsequent lists.
+    const readTargets = backend.sharedAcrossWindows
+      ? catalog.read.pipe(Effect.retry({ schedule: Schedule.spaced("2 seconds") }))
+      : catalog.read;
     const targetStore = Persistence.ConnectionTargetStore.of({
-      list: catalog.read.pipe(
-        Effect.map((document) => document.targets),
+      list: readTargets.pipe(
+        Effect.map((document) =>
+          document.targets.filter((target) => provisionalPairingId(target) === undefined),
+        ),
         Effect.mapError((cause) => persistenceError("list-targets", cause)),
       ),
-      listDisabled: catalog.read.pipe(
+      listDisabled: readTargets.pipe(
         Effect.map((document) => document.disabledEnvironmentIds),
         Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
       ),
     });
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
       register: Effect.fn("Persistence.ConnectionRegistrationStore.register")(
-        function (registration, routes) {
-          return catalog
-            .update((document) => registerConnectionInCatalog(document, registration, routes))
-            .pipe(Effect.mapError((cause) => persistenceError("register-connection", cause)));
+        function* (registration, routes) {
+          let stored = false;
+          yield* catalog
+            .update((document) => {
+              const next = registerConnectionInCatalog(document, registration, routes);
+              stored = next !== document;
+              return next;
+            })
+            .pipe(Effect.mapError((error) => persistenceError("register-connection", error)));
+          return stored;
+        },
+      ),
+      settleProvisionalPairing: Effect.fn(
+        "Persistence.ConnectionRegistrationStore.settleProvisionalPairing",
+      )(function* (environmentId, installId, keep) {
+        let routes: ReturnType<typeof catalogRoutes> = [];
+        let promoted = false;
+        yield* catalog
+          .update((document) => {
+            const next = settleProvisionalPairingInCatalog(
+              document,
+              installId,
+              keep,
+              environmentId,
+            );
+            promoted = keep && next !== document;
+            routes = catalogRoutes(next, environmentId);
+            return next;
+          })
+          .pipe(Effect.mapError((error) => persistenceError("remove-connection", error)));
+        return { routes, promoted };
+      }),
+      learnLabel: Effect.fn("Persistence.ConnectionRegistrationStore.learnLabel")(
+        function* (environmentId, expected, label) {
+          let updated: ReturnType<typeof catalogRoutes> = [];
+          yield* catalog
+            .update((document) => {
+              const result = learnConnectionLabelInCatalog(
+                document,
+                environmentId,
+                expected,
+                label,
+              );
+              updated = result.updated;
+              return result.document;
+            })
+            .pipe(Effect.mapError((error) => persistenceError("set-connection-routes", error)));
+          return updated;
         },
       ),
       setRoutes: Effect.fn("Persistence.ConnectionRegistrationStore.setRoutes")(
@@ -800,14 +928,15 @@ export const layer = Layer.effectContext(
             ),
           ),
         ),
-      put: (connectionId, credential) =>
-        catalog.update((document) => ({
-          ...document,
-          credentials: replaceCatalogValue(document.credentials, (value) => value.connectionId, {
+      put: (connectionId, credential, expectedProvisionalPairingId) =>
+        catalog.update((document) =>
+          putConnectionCredentialInCatalog(
+            document,
             connectionId,
             credential,
-          }),
-        })),
+            expectedProvisionalPairingId,
+          ),
+        ),
       remove: (connectionId) =>
         catalog.update((document) => ({
           ...document,

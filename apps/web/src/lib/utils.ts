@@ -1,23 +1,11 @@
 import { MessageId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { isMacPlatform } from "@t3tools/shared/keybindings";
-import { type CxOptions, cx } from "class-variance-authority";
 import * as Hex from "effect/encoding/Hex";
-import { extendTailwindMerge } from "tailwind-merge";
+import { msg } from "gt-react";
 import { DraftId } from "../composerDraftStore";
+import { m, type MessageResolver } from "../i18n/messages";
 
-// Register extra font sizes and background images so tailwind-merge does not
-// treat text-2xs or bg-composer-seam-below as colors.
-const twMerge = extendTailwindMerge({
-  extend: {
-    theme: { text: ["ui", "2xs", "3xs", "4xs", "5xs"] },
-    classGroups: { "bg-image": [{ bg: ["composer-seam-below", "composer-seam-above"] }] },
-  },
-});
-
-export function cn(...inputs: CxOptions) {
-  return twMerge(cx(inputs));
-}
-
+export { cn } from "./cn";
 export { isMacPlatform };
 
 export function isWindowsPlatform(platform: string): boolean {
@@ -28,14 +16,14 @@ export function normalizeSearchText(value: string): string {
   return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-export function getLocalFileManagerName(platform: string): string {
+export function getLocalFileManagerName(platform: string, resolve: MessageResolver = m): string {
   if (isMacPlatform(platform)) {
     return "Finder";
   }
   if (isWindowsPlatform(platform)) {
-    return "File Explorer";
+    return resolve(msg("File Explorer", { $context: "the Windows file manager app" }));
   }
-  return "Files";
+  return resolve(msg("Files", { $context: "the Linux file manager app" }));
 }
 
 export function randomUUID(): string {

@@ -1,8 +1,8 @@
 /**
- * Records an fx ACP replay transcript through the real orchestrator and
- * FxAdapterV2, teeing only the protocol logger. Run from apps/server with
- * fx 0.0.13 on PATH (or T3_FX_BIN); HOME stays the user's real login:
+ * Records an fx ACP replay transcript through the real orchestrator and FxAdapterV2.
+ * Run from apps/server with fx on PATH (or T3_FX_BIN), signed in under HOME:
  *   node scripts/record-fx-acp-replay-fixture.ts --scenario simple
+ * fx 0.0.14+ saves each recorded mode as the default in ~/.fx/settings.json; restore it after.
  */
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -41,7 +41,7 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const HOME_PLACEHOLDER = "/home/fx-replay";
 const FX_INSTANCE_ID = ProviderInstanceId.make("fx");
-const T3_INSTRUCTIONS_BODY = /<t3_code_instructions>\n[\s\S]*?\n<\/t3_code_instructions>/u;
+const T3_INSTRUCTIONS_BODY = /<conn_instructions>\n[\s\S]*?\n<\/conn_instructions>/u;
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu;
 const TOKEN = /\b(?:sk-|gho_|ghp_|xai-|vercel_)[A-Za-z0-9_-]{8,}\b/gu;
 
@@ -214,7 +214,7 @@ function normalizeOutboundFrame(frame: Record<string, unknown>, runtimeInstructi
                   ...part,
                   text: part.text.replace(
                     T3_INSTRUCTIONS_BODY,
-                    "<t3_code_instructions>\n<any>\n</t3_code_instructions>",
+                    "<conn_instructions>\n<any>\n</conn_instructions>",
                   ),
                 }
               : part,

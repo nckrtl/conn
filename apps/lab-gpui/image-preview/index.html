@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Image message · Conn GPUI lab</title>
+    <link rel="stylesheet" href="./preview.css" />
+  </head>
+  <body>
+    <main>
+      <p class="reply" aria-label="Preceding reply" contenteditable="plaintext-only">
+        The Conn GPUI dev instance was already running. I brought it to the front and verified it’s
+        the active app.
+      </p>
+      <figure>
+        <figcaption aria-label="Image caption" contenteditable="plaintext-only">
+          This thread in Conn GPUI is showing a really weird long text with a like a circle outline
+          going through it.
+        </figcaption>
+        <img
+          src="./handoff.webp"
+          width="1110"
+          height="1134"
+          alt="Conn thread showing the provider handoff transcript beneath the fork marker"
+        />
+      </figure>
+      <p class="reply" aria-label="Following reply" contenteditable="plaintext-only">
+        The screenshot shows a provider handoff transcript under the fork marker. I’ll trace how
+        GPUI renders that row and check what Conn normally shows there.
+      </p>
+      <details>
+        <summary>Adjust preview</summary>
+        <form>
+          <label
+            >Bubble width
+            <input type="range" name="width" min="40" max="100" value="80" data-unit="%" /><output
+              >80%</output
+            ></label
+          >
+          <label
+            >Image inset <input type="range" name="image-inset" min="1" max="16" value="3" /><output
+              >3px</output
+            ></label
+          >
+          <label
+            >Text padding <input type="range" name="inset" min="0" max="32" value="16" /><output
+              >16px</output
+            ></label
+          >
+          <label
+            >Caption gap <input type="range" name="gap" min="0" max="32" value="8" /><output
+              >8px</output
+            ></label
+          >
+          <label
+            >Bubble radius <input type="range" name="radius" min="0" max="32" value="14" /><output
+              >14px</output
+            ></label
+          >
+          <label
+            >Image radius
+            <input type="range" name="image-radius" min="0" max="32" value="11" /><output
+              >11px</output
+            ></label
+          >
+          <button type="reset">Reset preview</button>
+        </form>
+      </details>
+      <nav aria-label="Image layout examples">
+        <a href="/?thread=image-layouts&amp;panel=none">Compare 1, 2, 3 and 5 images</a><br />
+        12 images · <a href="/?thread=twelve-images&amp;panel=none&amp;columns=3">3 columns</a> ·
+        <a href="/?thread=twelve-images&amp;panel=none&amp;columns=4">4 columns</a> ·
+        <a href="/?thread=twelve-images&amp;panel=none&amp;stage=composer">In composer</a>
+      </nav>
+    </main>
+    <script>
+      const bubble = document.querySelector("figure");
+      const copy = Array.from(document.querySelectorAll("[contenteditable]"), (element) => {
+        const original = element.textContent.trim().replace(/\s+/g, " ");
+        element.textContent = original;
+        return { element, original };
+      });
+      const form = document.querySelector("form");
+      function apply(input) {
+        const value = input.value + (input.dataset.unit || "px");
+        bubble.style.setProperty("--" + input.name, value);
+        input.parentElement.querySelector("output").value = value;
+      }
+      form.addEventListener("input", ({ target }) => {
+        apply(target);
+        if (target.name === "radius" || target.name === "image-inset") {
+          const imageRadius = form.elements["image-radius"];
+          imageRadius.valueAsNumber = Math.max(
+            0,
+            form.elements.radius.valueAsNumber - form.elements["image-inset"].valueAsNumber,
+          );
+          apply(imageRadius);
+        }
+      });
+      form.addEventListener("reset", () => {
+        for (const { element, original } of copy) element.textContent = original;
+        requestAnimationFrame(() => form.querySelectorAll("input").forEach(apply));
+      });
+    </script>
+  </body>
+</html>

@@ -1,5 +1,7 @@
 import { APP_BASE_NAME } from "../branding";
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
+import { glyphSvgMarkup } from "../icons/glyphMarkup";
+import { checkGlyph, copyGlyph } from "../icons/glyphs.generated";
 
 const FALLBACK_TRIAGE_COMMAND = "npx t3 triage";
 const DOWNLOAD_URL = "https://t3.codes/download";
@@ -152,12 +154,8 @@ function isRepeatFailure(now: number) {
   }
 }
 
-const icon = (paths: string) =>
-  `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
-const COPY_ICON = icon(
-  '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
-);
-const CHECK_ICON = icon('<path d="M20 6 9 17l-5-5"/>');
+const COPY_ICON = glyphSvgMarkup(copyGlyph, 'width="14" height="14" aria-hidden="true"');
+const CHECK_ICON = glyphSvgMarkup(checkGlyph, 'width="14" height="14" aria-hidden="true"');
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -298,9 +296,11 @@ export function showBootError(error: unknown) {
   const copyCommand = element("button", {
     className: "boot-error-icon",
     type: "button",
+    // oxlint-disable-next-line t3code/no-untranslated-copy -- boot failure page renders before the i18n runtime loads
     title: "Copy command",
     innerHTML: COPY_ICON,
   });
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- boot failure page renders before the i18n runtime loads
   copyCommand.setAttribute("aria-label", "Copy command");
   copyCommand.addEventListener("click", () =>
     copyText(
@@ -308,7 +308,9 @@ export function showBootError(error: unknown) {
       () => {
         copyCommand.innerHTML = CHECK_ICON;
         copyCommand.title = "Copied";
+        // oxlint-disable-next-line t3code/no-untranslated-copy -- boot failure page renders before the i18n runtime loads
         copyCommand.setAttribute("aria-label", "Copied");
+        // oxlint-disable-next-line t3code/no-untranslated-copy -- boot failure page renders before the i18n runtime loads
         announce("Copied to clipboard.");
       },
       (hint) => {
@@ -334,6 +336,7 @@ export function showBootError(error: unknown) {
       details,
       () => {
         copyDetails.textContent = "Copied";
+        // oxlint-disable-next-line t3code/no-untranslated-copy -- boot failure page renders before the i18n runtime loads
         announce("Copied to clipboard.");
       },
       (hint) => {
@@ -345,6 +348,7 @@ export function showBootError(error: unknown) {
 
   const issue = new URL(ISSUE_URL);
   issue.searchParams.set("template", "bug_report.yml");
+  // oxlint-disable-next-line t3code/no-hardcoded-app-name -- issue title on the upstream tracker
   issue.searchParams.set("title", "T3 Code failed to start");
   issue.searchParams.set("area", "apps/web");
   issue.searchParams.set("version", `${environment.version} (${environment.channel})`);

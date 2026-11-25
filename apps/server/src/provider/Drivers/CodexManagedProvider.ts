@@ -55,7 +55,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
     accentColor,
     continuationGroupKey: continuationIdentity.continuationKey,
   });
-  const setup = { canAuthenticate: true, canInstall: true };
+  const setup = { canAuthenticate: true, canInstall: false };
   const runtimePaths = {
     homePath: runtime.homeLayout.sharedHomePath,
     shadowHomePath: runtime.homeLayout.mode === "authOverlay" ? runtime.homePath : null,
@@ -73,13 +73,13 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
   const check = Effect.gen(function* () {
     const base = yield* pending;
     if (!enabled) return base;
-    const executable = yield* runtime.installation.resolve().pipe(Effect.option);
+    const executable = yield* runtime.resolveExecutable.pipe(Effect.option);
     if (Option.isNone(executable))
       return {
         ...base,
         installed: false,
         models: [],
-        message: "Set up Codex to get started.",
+        message: "Codex is not installed on this environment's PATH. Orbit installs it.",
         auth: { status: "unauthenticated" as const },
       };
     const saved = yield* runtime.auth.read.pipe(Effect.orElseSucceed(() => Option.none()));
@@ -242,8 +242,10 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
   const resolveRuntime = runtime.auth.controller.withAccess!(runtime.resolve);
   // Launch settings bind the refresh command to the signed-in profile. The registry
   // already wraps openSession in withAccess, so resolve without re-entering it.
+  const models = snapshot.getSnapshot.pipe(Effect.map((value) => value.models));
   const orchestrationAdapter = yield* createCodexAdapterV2(input, {
     onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+    models,
     resolveRuntime: runtime.resolve,
   }).pipe(
     Effect.mapError(
@@ -259,7 +261,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
   const nativeGeneration = yield* makeCodexTextGeneration(
     config,
     undefined,
-    snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
+    models,
     resolveRuntime,
   );
   const protect = <A>(operation: string, effect: Effect.Effect<A, TextGenerationError>) =>

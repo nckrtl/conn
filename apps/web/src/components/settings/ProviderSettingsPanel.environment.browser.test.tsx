@@ -8,6 +8,7 @@ import {
   type ServerProvider,
   type UnifiedSettings,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import { AsyncResult, type Atom } from "effect/reactivity";
 import type { ReactNode } from "react";
@@ -29,7 +30,6 @@ const state = vi.hoisted(() => ({
   updateEnvironmentIds: [] as string[],
   mutationEnvironmentIds: [] as string[],
   refresh: vi.fn(),
-  updateProvider: vi.fn(),
   uninstall: vi.fn(),
   acceptUrlAuth: vi.fn(),
   updateSettings: vi.fn(),
@@ -49,7 +49,6 @@ vi.mock(import("../../state/server"), async (original) => {
   state.providerAuthQuery = providerAuth;
   const commandLabels = {
     refreshProviders: "refresh",
-    updateProvider: "update",
     uninstallAcpRegistryManagedBinary: "uninstall",
     acceptAcpRegistryUrlAuth: "accept-url-auth",
   } as const;
@@ -76,7 +75,6 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
   useAtomCommand: ((command: { label?: string }) =>
     ({
       refresh: state.refresh,
-      update: state.updateProvider,
       uninstall: state.uninstall,
       "accept-url-auth": state.acceptUrlAuth,
     })[command.label ?? ""] ?? vi.fn()) as never,
@@ -164,10 +162,6 @@ vi.mock(import("./UsageProviderSettings"), async (original) => ({
   ...(await original()),
   UsageProviderSettings: (() => null) as never,
 }));
-vi.mock(import("../ProviderUpdatesAction"), async (original) => ({
-  ...(await original()),
-  ProviderUpdatesAction: (() => null) as never,
-}));
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { EnvironmentProviderSettings } from "./ProviderSettingsPanel";
@@ -189,15 +183,6 @@ function provider(): ServerProvider {
     models: [{ slug: "chosen", name: "Chosen", isCustom: false, capabilities: null }],
     slashCommands: [],
     skills: [],
-    versionAdvisory: {
-      status: "behind_latest",
-      currentVersion: "1.0.0",
-      latestVersion: "1.1.0",
-      updateCommand: "pnpm add -g @openai/codex@latest",
-      canUpdate: true,
-      checkedAt: "2026-07-24T12:00:00.000Z",
-      message: "Update available.",
-    },
   };
 }
 
@@ -242,7 +227,6 @@ async function setup() {
   state.mutateProviderInstance.mockReset().mockResolvedValue(AsyncResult.success({}));
   state.confirm.mockReset().mockResolvedValue(false);
   state.refresh.mockReset().mockResolvedValue(AsyncResult.success(undefined));
-  state.updateProvider.mockReset().mockResolvedValue(AsyncResult.success(undefined));
   state.uninstall.mockReset().mockResolvedValue(AsyncResult.success({}));
   state.acceptUrlAuth.mockReset().mockResolvedValue(AsyncResult.success({ accepted: true }));
   await setProviders([]);
@@ -282,6 +266,104 @@ describe("EnvironmentProviderSettings routing", () => {
       },
       {},
     );
+  });
+
+  it.each([false, true])(
+    "builds a custom model save on the last one before its config echo (replied %s)",
+    async (replied) => {
+      await setup();
+      const first = { slug: "model-a", name: "Original A" };
+      const second = { slug: "model-b", name: "Original B" };
+      const stored = (customModels: ReadonlyArray<{ slug: string; name: string }>) => ({
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [customId]: { driver: ProviderDriverKind.make("codex"), config: { customModels } },
+        },
+      });
+      state.settings = stored([first, second]);
+      const replies: Array<() => void> = [];
+      state.mutateProviderInstance.mockImplementation(
+        () => new Promise((resolve) => replies.push(() => resolve(AsyncResult.success({})))),
+      );
+      await using screen = await render(panel({ targetInstanceId: customId }));
+      const rename = async (slug: string, name: string) => {
+        await userEvent.click(screen.getByRole("button", { name: `Edit ${slug}`, exact: true }));
+        await userEvent.fill(
+          screen.getByRole("textbox", { name: "Display name", exact: true }),
+          name,
+        );
+        await userEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+      };
+
+      await rename("model-a", "Entered A");
+      if (replied) await act(() => replies[0]!());
+      await rename("model-b", "Entered B");
+
+      expect(state.mutateProviderInstance.mock.calls[1]?.[0]).toEqual({
+        operation: "upsert",
+        instanceId: customId,
+        instance: {
+          driver: ProviderDriverKind.make("codex"),
+          config: {
+            customModels: [
+              { ...first, name: "Entered A" },
+              { ...second, name: "Entered B" },
+            ],
+          },
+        },
+      });
+
+      // The first save's echo lands after both replied, ahead of the second's.
+      await act(() => replies.forEach((reply) => reply()));
+      state.settings = stored([{ ...first, name: "Entered A" }, second]);
+      await screen.rerender(panel({ targetInstanceId: customId }));
+      await rename("model-a", "Again A");
+      expect(state.mutateProviderInstance.mock.calls[2]?.[0].instance.config.customModels).toEqual([
+        { ...first, name: "Again A" },
+        { ...second, name: "Entered B" },
+      ]);
+    },
+  );
+
+  it("preserves a failed model draft for retry without including it in another edit", async () => {
+    await setup();
+    const first = { slug: "model-a", name: "Original A" };
+    const second = { slug: "model-b", name: "Original B" };
+    state.settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [customId]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { customModels: [first, second] },
+        },
+      },
+    };
+    state.mutateProviderInstance
+      .mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("Save failed"))))
+      .mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("Still offline"))));
+    await using screen = await render(panel({ targetInstanceId: customId }));
+    await screen.getByRole("button", { name: "Edit model-a", exact: true }).click();
+    const displayName = screen.getByRole("textbox", { name: "Display name", exact: true });
+    await userEvent.fill(displayName, "Entered A");
+    const save = screen.getByRole("button", { name: "Save", exact: true });
+    await save.click();
+    await expect.element(save).toBeEnabled();
+    await expect.element(displayName).toHaveValue("Entered A");
+    await save.click();
+    await expect.element(save).toBeEnabled();
+    expect(state.mutateProviderInstance.mock.calls[1]?.[0].instance.config.customModels).toEqual([
+      { ...first, name: "Entered A" },
+      second,
+    ]);
+    await screen.getByRole("button", { name: "Cancel", exact: true }).click();
+    await screen.getByRole("button", { name: "Edit model-b", exact: true }).click();
+    await userEvent.fill(displayName, "Entered B");
+    await save.click();
+    await expect.element(displayName).not.toBeInTheDocument();
+    expect(state.mutateProviderInstance.mock.calls[2]?.[0].instance.config.customModels).toEqual([
+      first,
+      { ...second, name: "Entered B" },
+    ]);
   });
 
   it("routes explicit ACP browser authentication consent to the selected environment", async () => {
@@ -347,7 +429,7 @@ describe("EnvironmentProviderSettings routing", () => {
       {
         ...provider(),
         auth: { status: "unauthenticated" },
-        setup: { canAuthenticate: true, canInstall: true },
+        setup: { canAuthenticate: true, canInstall: false },
       },
     ]);
     await using _screen = await render(panel({ targetInstanceId: codexId }));
@@ -366,6 +448,49 @@ describe("EnvironmentProviderSettings routing", () => {
       },
       {},
     );
+  });
+});
+
+describe("EnvironmentProviderSettings provider list", () => {
+  it("selects a provider when its row is clicked near the edge", async () => {
+    await setup();
+    await setProviders([provider()]);
+    await using _screen = await render(panel());
+    const select = page.getByRole("button", { name: "Select Claude" });
+    await expect.element(select).toHaveAttribute("aria-pressed", "false");
+    const row = page.elementLocator(select.element().closest('[data-slot="settings-row"]')!);
+
+    await userEvent.click(row, { position: { x: 3, y: 3 } });
+
+    await expect.element(select).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("EnvironmentProviderSettings account email", () => {
+  it("keeps the real email until the hide blur finishes", async () => {
+    await setup();
+    const email = "developer@example.com";
+    await setProviders([{ ...provider(), auth: { status: "authenticated", email } }]);
+    await using _screen = await render(panel({ targetInstanceId: codexId }));
+    const toggle = page.getByRole("button", { name: "Toggle account email visibility" });
+    const button = toggle.element() as HTMLButtonElement;
+
+    await act(() => button.click());
+    for (const animation of button.getAnimations()) animation.finish();
+    await expect.element(toggle).toHaveTextContent(email);
+
+    await act(() => button.click());
+    const blur = button
+      .getAnimations()
+      .find(
+        (animation) =>
+          animation instanceof CSSTransition && animation.transitionProperty === "filter",
+      )!;
+    blur.pause();
+    expect(button.textContent).toBe(email);
+
+    await act(() => blur.finish());
+    await expect.element(toggle).not.toHaveTextContent(email);
   });
 });
 

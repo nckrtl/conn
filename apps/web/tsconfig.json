@@ -7,12 +7,11 @@
     "erasableSyntaxOnly": false,
     "verbatimModuleSyntax": false,
     "jsx": "react-jsx",
-    "lib": ["ES2023", "ESNext.Disposable", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023", "ES2024.Promise", "ESNext.Disposable", "DOM", "DOM.Iterable"],
     "paths": {
       "~/*": ["./src/*"],
-      // Conn: Lucide imports render Conn's Phosphor icons (src/icons/lucide-react.ts).
-      "lucide-react": ["./src/icons/lucide-react.ts"],
-      "lucide": ["./src/icons/lucide.ts"]
+      // Conn: Lucide imports render Conn's Superheroicons glyphs (src/icons/lucide-react.ts).
+      "lucide-react": ["./src/icons/lucide-react.ts"]
     },
     "plugins": [
       {
@@ -33,10 +32,12 @@
     "vite",
     "vite.config.ts",
     "vercel.ts",
+    "gt.config.json",
     "test",
     "scripts/verify-built-boot.ts",
     "scripts/warm-dep-cache.ts",
     "../../scripts/lib/public-config.ts",
+    "../../scripts/lib/tagged-source-version.ts",
     "../../scripts/lib/third-party-licenses.ts"
   ]
 }

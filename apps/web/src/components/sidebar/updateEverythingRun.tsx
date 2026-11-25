@@ -1,11 +1,20 @@
 import { useAtomValue } from "@effect/atom-react";
-import { serverUpdateStateAtom } from "@t3tools/client-runtime/state/server";
-import { EnvironmentId } from "@t3tools/contracts";
+import { AVAILABLE_CONNECTION_STATE } from "@t3tools/client-runtime/connection";
+import {
+  nudgeReconnectDuringUpdateRestart,
+  serverUpdateStateAtom,
+} from "@t3tools/client-runtime/state/server";
+import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { AsyncResult, Atom } from "effect/reactivity";
+import * as Stream from "effect/Stream";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { msg } from "gt-react";
 
 import { APP_VERSION } from "~/branding";
+import { environmentCatalog } from "~/connection/catalog";
+import { m } from "~/i18n/messages";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { desktopUpdateStateAtom } from "~/state/desktopUpdate";
 import { serverEnvironment } from "~/state/server";
@@ -20,6 +29,7 @@ import {
   type UpdateEverythingRun,
   type UpdateRunMachine,
 } from "./updateEverything.logic";
+import { appName } from "@t3tools/shared/appName";
 
 const updateEverythingRunAtom = Atom.make<UpdateEverythingRun | null>(null).pipe(
   Atom.keepAlive,
@@ -45,10 +55,7 @@ function updateRunMachines(update: (machine: UpdateRunMachine) => UpdateRunMachi
 export function settleUpdateRunMachine(
   environmentId: EnvironmentId,
   failure: string | null,
-  {
-    serverUpdated = false,
-    providerFailure,
-  }: { readonly serverUpdated?: boolean; readonly providerFailure?: string | null } = {},
+  { serverUpdated = false }: { readonly serverUpdated?: boolean } = {},
 ): void {
   updateRunMachines((machine) =>
     machine.environmentId === environmentId
@@ -57,9 +64,15 @@ export function settleUpdateRunMachine(
           result: failure === null ? "done" : "failed",
           failure,
           ...(serverUpdated ? { server: null } : {}),
-          ...(providerFailure === undefined ? {} : { providerFailure }),
         }
       : machine,
+  );
+}
+
+function runsVersion(config: ServerConfig | null, targetVersion: string): boolean {
+  return (
+    config !== null &&
+    resolveVersionMismatch(config.environment.serverVersion, targetVersion) === null
   );
 }
 
@@ -70,28 +83,38 @@ export function retryFailedUpdateRunServers(
   ) => Promise<ServerUpdateOutcome>,
 ): void {
   const failed = (appAtomRegistry.get(updateEverythingRunAtom)?.machines ?? []).flatMap(
-    (machine) =>
-      machine.result === "failed" && machine.server !== null
-        ? [{ target: machine.server, providerFailure: machine.providerFailure }]
-        : [],
+    (machine) => (machine.result === "failed" && machine.server !== null ? [machine.server] : []),
   );
-  const targets = failed.map(({ target }) => target);
-  const retried = new Set(targets.map((target) => target.environmentId));
+  const pending: typeof failed = [];
+  for (const target of failed) {
+    // The host rejects a same-version update; a server that came back on the target is done.
+    if (
+      runsVersion(
+        appAtomRegistry.get(serverEnvironment.configValueAtom(target.environmentId)),
+        target.targetVersion,
+      )
+    ) {
+      settleUpdateRunMachine(target.environmentId, null, { serverUpdated: true });
+    } else {
+      pending.push(target);
+    }
+  }
+  const retried = new Set(pending.map((target) => target.environmentId));
   const startedAt = Date.now();
   updateRunMachines((machine) =>
     retried.has(machine.environmentId)
       ? { ...machine, result: null, failure: null, startedAt }
       : machine,
   );
-  for (const { target, providerFailure } of failed) {
+  for (const target of pending) {
     void update(target, { quiet: true }).then((outcome) =>
       settleUpdateRunMachine(
         target.environmentId,
         outcome.status === "updated"
-          ? providerFailure
+          ? null
           : outcome.status === "failed"
             ? outcome.message
-            : "Could not start the update",
+            : m(msg("Could not start the update")),
         { serverUpdated: outcome.status === "updated" },
       ),
     );
@@ -170,7 +193,6 @@ const SavedResult = Schema.Struct({
   savedAt: Schema.Number,
   localVersion: Schema.NullOr(Schema.String),
   updatedServers: Schema.Number,
-  updatedProviders: Schema.Number,
   failures: Schema.Array(Schema.String),
   handedOff: Schema.optional(Schema.Array(HandedOffServer)),
 });
@@ -202,7 +224,6 @@ export function saveUpdateEverythingResult(result: UpdateEverythingResult): void
         savedAt: Date.now(),
         localVersion: result.localVersion,
         updatedServers: result.updatedServers,
-        updatedProviders: result.updatedProviders,
         failures: result.failures,
         handedOff,
       } satisfies typeof SavedResult.Type),
@@ -255,13 +276,11 @@ function followHandedOffServers(servers: ReadonlyArray<HandedOffServer>): void {
     machines: servers.map((server) => ({
       environmentId: server.environmentId,
       label: server.label,
-      updatesProviders: false,
       server: null,
       handedOffVersion: server.targetVersion,
       startedAt: server.startedAt,
       result: null,
       failure: null,
-      providerFailure: null,
     })),
   }));
   let remaining = servers.length;
@@ -285,36 +304,47 @@ function followHandedOffServers(servers: ReadonlyArray<HandedOffServer>): void {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      stopReconnectNudge();
       queueMicrotask(() => unsubscribe());
       appAtomRegistry.set(stateAtom, { status: "idle" });
       releaseState();
       settleUpdateRunMachine(server.environmentId, failure);
       if (failure === null) updatedServers += 1;
-      else failures.push(`${server.label}: ${failure}`);
+      else failures.push(m(msg("{machine}: {failure}", { machine: server.label, failure })));
       remaining -= 1;
       if (remaining === 0) {
         showUpdateEverythingResult({
           localVersion: null,
           updatedServers,
-          updatedProviders: 0,
           failures,
           restarting: [],
         });
       }
     };
     const timer = setTimeout(
-      () => settle(`Not back after ${HANDOFF_TIMEOUT_MS / 60_000} minutes`),
+      () =>
+        settle(
+          m(msg("Not back after {minutes} minutes", { minutes: HANDOFF_TIMEOUT_MS / 60_000 })),
+        ),
       server.startedAt + HANDOFF_TIMEOUT_MS - Date.now(),
+    );
+    const stopReconnectNudge = Effect.runCallback(
+      nudgeReconnectDuringUpdateRestart({
+        stateChanges: AtomRegistry.toStream(
+          appAtomRegistry,
+          environmentCatalog.stateAtom(server.environmentId),
+        ).pipe(
+          Stream.map((state) => AsyncResult.getOrElse(state, () => AVAILABLE_CONNECTION_STATE)),
+        ),
+        retryNow: Effect.promise(() =>
+          environmentCatalog.retryNow.run(appAtomRegistry, server.environmentId),
+        ).pipe(Effect.asVoid),
+      }),
     );
     const unsubscribe = appAtomRegistry.subscribe(
       serverEnvironment.configValueAtom(server.environmentId),
       (config) => {
-        if (
-          config !== null &&
-          resolveVersionMismatch(config.environment.serverVersion, server.targetVersion) === null
-        ) {
-          settle(null);
-        }
+        if (runsVersion(config, server.targetVersion)) settle(null);
       },
       { immediate: true },
     );
@@ -341,8 +371,13 @@ export function startDesktopUpdateLaunchNotice(): () => void {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Update did not apply",
-          description: `T3 Code is still on ${APP_VERSION}. Install ${notAppliedVersion} again from the update button.`,
+          title: m(msg("Update did not apply")),
+          description: m(
+            msg(
+              "{appName} is still on {current}. Install {version} again from the update button.",
+              { appName: appName(), current: APP_VERSION, version: notAppliedVersion },
+            ),
+          ),
         }),
       );
     },

@@ -88,13 +88,25 @@ export const PreviewAutomationProfile = Schema.Struct({
 });
 export type PreviewAutomationProfile = typeof PreviewAutomationProfile.Type;
 
+const VISIBLE_DESCRIPTION =
+  "True while a client shows this tab: a streamed live view, or the desktop app's own browser panel.";
+
+/** Why the tab shows the browser's error page instead of the page it tried to load. */
+export const PreviewAutomationLoadError = Schema.Struct({
+  url: Schema.String,
+  code: Schema.Int,
+  description: Schema.String,
+});
+export type PreviewAutomationLoadError = typeof PreviewAutomationLoadError.Type;
+
 export const PreviewAutomationStatus = Schema.Struct({
   available: Schema.Boolean,
-  visible: Schema.Boolean,
+  visible: Schema.Boolean.annotate({ description: VISIBLE_DESCRIPTION }),
   tabId: Schema.NullOr(PreviewTabId),
   url: Schema.NullOr(Schema.String),
   title: Schema.NullOr(Schema.String),
   loading: Schema.Boolean,
+  loadError: Schema.optional(PreviewAutomationLoadError),
   control: Schema.optional(
     Schema.Struct({
       owner: PreviewAutomationTabOwner,
@@ -140,7 +152,7 @@ export const PreviewAutomationStatus = Schema.Struct({
         openerTabId: Schema.optional(PreviewTabId),
         owner: Schema.optional(PreviewAutomationTabOwner),
         ownedByCaller: Schema.optional(Schema.Boolean),
-        visible: Schema.optional(Schema.Boolean),
+        visible: Schema.optional(Schema.Boolean.annotate({ description: VISIBLE_DESCRIPTION })),
         profileId: Schema.optional(BrowserProfileId),
         host: Schema.optional(Schema.String),
         runtime: Schema.optional(Schema.Literals(["server", "desktop"])),
@@ -276,7 +288,9 @@ export type PreviewAutomationResizeInput = typeof PreviewAutomationResizeInput.T
 export const PreviewAutomationResizeResult = Schema.Struct({
   tabId: PreviewTabId,
   setting: PreviewViewportSetting,
-  viewport: PreviewRenderedViewportSize,
+  viewport: Schema.optional(PreviewRenderedViewportSize).annotate({
+    description: "Viewport size after the resize. Omitted when it could not be measured.",
+  }),
 });
 export type PreviewAutomationResizeResult = typeof PreviewAutomationResizeResult.Type;
 
@@ -489,11 +503,6 @@ export const PreviewAutomationEvaluateInput = Schema.Struct({
     .check(Schema.isNonEmpty())
     .check(Schema.isMaxLength(64_000)),
   awaitPromise: Schema.optional(Schema.Boolean.annotate({ description: "Default true." })),
-  returnByValue: Schema.optional(
-    Schema.Boolean.annotate({
-      description: "False returns a ref. Default true.",
-    }),
-  ),
 });
 export type PreviewAutomationEvaluateInput = typeof PreviewAutomationEvaluateInput.Type;
 
@@ -566,6 +575,7 @@ export const PreviewAutomationSnapshot = Schema.Struct({
   url: Schema.String,
   title: Schema.String,
   loading: Schema.Boolean,
+  loadError: Schema.optional(PreviewAutomationLoadError),
   visibleText: Schema.String,
   interactiveElements: Schema.Array(PreviewAutomationElement),
   accessibilityTree: Schema.Unknown,
@@ -585,10 +595,18 @@ export const PreviewAutomationSnapshot = Schema.Struct({
 });
 export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;
 
+// pixelsRequired is false when the caller discards the screenshot; hosts that ignore it still return a PNG.
 export const PreviewAutomationSnapshotInput = Schema.Struct({
   fullScreenshot: Schema.optional(Schema.Boolean),
+  pixelsRequired: Schema.optional(Schema.Boolean),
 });
 export type PreviewAutomationSnapshotInput = typeof PreviewAutomationSnapshotInput.Type;
+
+export const PreviewAutomationSnapshotMetadata = Schema.Struct({
+  ...PreviewAutomationSnapshot.fields,
+  screenshot: Schema.Struct({ width: Schema.Int, height: Schema.Int }),
+});
+export type PreviewAutomationSnapshotMetadata = typeof PreviewAutomationSnapshotMetadata.Type;
 
 export const PreviewAutomationRecordingStatus = Schema.Struct({
   tabId: PreviewTabId,
@@ -727,7 +745,7 @@ export class PreviewAutomationUnavailableError extends Schema.TaggedError<Previe
   }
 }
 
-/** A `t3-code` MCP tool was called with a credential that does not carry its capability. */
+/** A `conn` MCP tool was called with a credential that does not carry its capability. */
 export class McpCapabilityUnavailableError extends Schema.TaggedError<McpCapabilityUnavailableError>()(
   "McpCapabilityUnavailableError",
   {
@@ -821,22 +839,41 @@ export class PreviewAutomationTabNotFoundError extends Schema.TaggedError<Previe
   }
 }
 
+export const PreviewAutomationSnapshotStage = Schema.Literals([
+  "metrics",
+  "frames",
+  "page state",
+  "screenshot",
+  "accessibility tree",
+]);
+
+export const PreviewAutomationTimeoutDetail = Schema.Struct({
+  timeoutMs: Schema.Int.check(Schema.isGreaterThan(0)),
+  pendingStages: Schema.Array(PreviewAutomationSnapshotStage).check(Schema.isMaxLength(5)),
+});
+
 export class PreviewAutomationTimeoutError extends Schema.TaggedError<PreviewAutomationTimeoutError>()(
   "PreviewAutomationTimeoutError",
   {
     ...PreviewAutomationRequestErrorFields,
     ...PreviewAutomationOptionalRemoteDiagnosticFields,
+    pendingStages: Schema.optional(PreviewAutomationTimeoutDetail.fields.pendingStages),
     reason: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
     const summary = `Preview automation ${this.operation} timed out after ${this.timeoutMs}ms.`;
-    return this.reason === undefined ? summary : `${summary} ${this.reason}`;
+    const stages = this.pendingStages?.length
+      ? ` Waiting for: ${this.pendingStages.join(", ")}.`
+      : "";
+    const reason = this.reason === undefined ? "" : ` ${this.reason}`;
+    return `${summary}${stages}${reason}`;
   }
 }
 
 export const PreviewAutomationControlReason = Schema.Literals([
   "agentMismatch",
+  "unclaimedTab",
   "humanControl",
   "tabRequired",
   "closed",
@@ -857,6 +894,8 @@ export class PreviewAutomationControlInterruptedError extends Schema.TaggedError
   override get message(): string {
     if (this.reason === "agentMismatch")
       return "This browser tab belongs to another agent session or a human. Open your own tab.";
+    if (this.reason === "unclaimedTab")
+      return "This tab has no agent owner. Ask the user to close it in the browser panel.";
     if (this.reason === "humanControl")
       return "A human controls this browser tab. Wait until they release control.";
     if (this.reason === "tabRequired")
@@ -864,7 +903,7 @@ export class PreviewAutomationControlInterruptedError extends Schema.TaggedError
     if (this.reason === "dialogPending")
       return "A browser dialog is pending. Read preview_status and resolve it with preview_dialog.";
     if (this.reason === "tabLimit")
-      return "Too many server browser tabs are open. Close one with t3_preview_close, or reuse a tabId from preview_status tabs.";
+      return "Too many server browser tabs are open. Close one with conn_preview_close, or reuse a tabId from preview_status tabs.";
     if (this.reason === "closed") return "This browser tab is closed. Call preview_open.";
     if (this.reason === "interrupted")
       return "Browser control changed. Take a fresh snapshot before trying again.";

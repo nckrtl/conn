@@ -224,6 +224,8 @@ export const PreviewOpenInput = Schema.Struct({
   profileId: Schema.optional(BrowserProfileId),
   /** Omit for a desktop tab. `server` requires the `serverBrowser` capability. */
   runtime: Schema.optional(PreviewRuntime),
+  colorScheme: Schema.optional(PreviewAppearancePreference),
+  zoomFactor: Schema.optional(PreviewZoomFactor),
   /** Set by agent opens that should float for viewers; see the snapshot field. */
   reveal: Schema.optional(Schema.Boolean),
 });
@@ -401,7 +403,7 @@ export class PreviewStopLocalServerError extends Schema.TaggedError<PreviewStopL
       case "not-found":
         return "This server is no longer running.";
       case "shared-group":
-        return "This server shares a process group with T3 Code, an agent, or a terminal shell, so it can't be stopped on its own.";
+        return "This server shares a process group with Conn, an agent, or a terminal shell, so it can't be stopped on its own.";
       case "unsupported":
         return "Stopping servers is not supported on this environment's platform.";
       case "signal-failed":

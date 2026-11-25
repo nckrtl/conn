@@ -14,6 +14,7 @@ export * as ProfileStore from "./profileStore.ts";
 export * from "./routes.ts";
 export { type RouteCheck } from "./driver.ts";
 export * as EnvironmentRegistry from "./registry.ts";
+export * from "./parking.ts";
 // Flat so consumers' inferred types can name them.
 export { EnvironmentNotRegisteredError, PlatformEnvironmentRemovalError } from "./registry.ts";
 export * as EnvironmentSupervisor from "./supervisor.ts";

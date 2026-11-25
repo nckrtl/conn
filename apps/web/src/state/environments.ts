@@ -9,6 +9,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import { environmentCatalog } from "../connection/catalog";
+import { visibleCatalogValueAtom } from "../connection/visibleCatalog";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   environmentPresentations,
@@ -40,7 +41,7 @@ function projectEnvironmentPresentation(
 }
 
 export function useEnvironments() {
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const catalog = useAtomValue(visibleCatalogValueAtom);
   const networkStatus = useAtomValue(environmentCatalog.networkStatusValueAtom);
   const presentationById = useAtomValue(environmentPresentations.presentationsAtom);
 
@@ -59,6 +60,12 @@ export function useEnvironments() {
 /** Provider statuses change on every push, so they live apart from the presentations. */
 export function useEnvironmentProviders() {
   return useAtomValue(environmentPresentations.providersByEnvironmentAtom);
+}
+
+export function readEnvironmentProviders(environmentId: EnvironmentId) {
+  return appAtomRegistry
+    .get(environmentPresentations.providersByEnvironmentAtom)
+    .get(environmentId);
 }
 
 export function usePrimaryEnvironmentId(): EnvironmentId | null {
@@ -105,6 +112,10 @@ export function useEnvironmentIdentities() {
 
 export function usePullRequestsSupported() {
   return useAtomValue(environmentSummaries.pullRequestsSupportedAtom);
+}
+
+export function useIssuesSupported() {
+  return useAtomValue(environmentSummaries.issuesSupportedAtom);
 }
 
 export function useEnvironmentMachines() {

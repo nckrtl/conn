@@ -1,3 +1,5 @@
+import { msg } from "gt-i18n";
+import { MarkedText, translatableMessage } from "../errors/translatable.ts";
 import {
   ORCHESTRATION_PROTOCOL_VERSION,
   type EnvironmentId,
@@ -33,6 +35,7 @@ import {
   routeHttpBaseUrl,
   usableRoutes,
 } from "./routes.ts";
+import { appName } from "@t3tools/shared/appName";
 
 // A v1 host restarting into v2 runs migrations before its descriptor answers again.
 const OUTDATED_HOST_RESTART_TIMEOUT = Duration.minutes(4);
@@ -43,6 +46,7 @@ export class OutdatedHostUpdateError extends Schema.TaggedError<OutdatedHostUpda
   {
     environmentId: Schema.String,
     message: Schema.String,
+    i18nMessage: Schema.optionalKey(MarkedText),
   },
 ) {}
 
@@ -108,7 +112,12 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
     ) {
       return yield* new OutdatedHostUpdateError({
         environmentId,
-        message: `Update T3 Code on ${descriptor.label} manually; it cannot update itself.`,
+        ...translatableMessage(
+          msg("Update {appName} on {host} manually; it cannot update itself.", {
+            appName: appName(),
+            host: descriptor.label,
+          }),
+        ),
       });
     }
 
@@ -229,7 +238,12 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
     if (Option.isNone(resumed)) {
       return yield* new OutdatedHostUpdateError({
         environmentId,
-        message: `${descriptor.label} did not come back on a compatible T3 Code version.`,
+        ...translatableMessage(
+          msg("{host} did not come back on a compatible {appName} version.", {
+            appName: appName(),
+            host: descriptor.label,
+          }),
+        ),
       });
     }
 

@@ -14,6 +14,7 @@ import {
   reorderWorkspaces,
   meansAllProjects,
   validateWorkspaceDraft,
+  workspaceCoversProjectRef,
   workspaceNameKey,
   workspaceProjectRefs,
   type Workspace,
@@ -39,6 +40,8 @@ interface WorkspaceStoreState {
   deleteWorkspace: (id: string) => void;
   /** Adds a project ref ("<environmentId>:<projectId>") to the selected workspace, if any. */
   addProjectToActiveWorkspace: (projectRef: string) => void;
+  /** Adds a project ref to the workspace with this id, if it exists. */
+  addProjectToWorkspace: (workspaceId: string, projectRef: string) => void;
   moveWorkspace: (id: string, targetId: string) => void;
 }
 
@@ -174,15 +177,17 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
         const next = reorderWorkspaces(current, id, targetId);
         if (next !== current) set({ workspaces: [...next] });
       },
-      addProjectToActiveWorkspace: (projectRef) =>
+      addProjectToActiveWorkspace: (projectRef) => {
+        const { activeWorkspaceId, addProjectToWorkspace } = get();
+        if (activeWorkspaceId !== null) addProjectToWorkspace(activeWorkspaceId, projectRef);
+      },
+      addProjectToWorkspace: (workspaceId, projectRef) =>
         set((state) => {
-          const active = state.workspaces.find(
-            (workspace) => workspace.id === state.activeWorkspaceId,
-          );
-          if (!active || active.projectRefs?.includes(projectRef)) return state;
+          const target = state.workspaces.find((workspace) => workspace.id === workspaceId);
+          if (!target || target.projectRefs?.includes(projectRef)) return state;
           return {
             workspaces: state.workspaces.map((workspace) =>
-              workspace === active
+              workspace === target
                 ? { ...workspace, projectRefs: [...(workspace.projectRefs ?? []), projectRef] }
                 : workspace,
             ),
@@ -271,6 +276,18 @@ useWorkspaceStore.subscribe((state, previous) => {
   onOtherWindowStorageChange(WORKSPACE_STORAGE_KEY, () => {
     void useWorkspaceStore.persist.rehydrate();
   });
+}
+
+/**
+ * Adds a project ref to a workspace unless it already lists the project. Null (all projects) or a
+ * workspace that no longer exists changes nothing.
+ */
+export function keepProjectInWorkspace(workspaceId: string | null, projectRef: string): void {
+  const state = useWorkspaceStore.getState();
+  const target = state.workspaces.find((workspace) => workspace.id === workspaceId);
+  if (target === undefined) return;
+  if (workspaceCoversProjectRef(target, state.availableProjects, projectRef)) return;
+  state.addProjectToWorkspace(target.id, projectRef);
 }
 
 /** The selected workspace, or null for all projects. */

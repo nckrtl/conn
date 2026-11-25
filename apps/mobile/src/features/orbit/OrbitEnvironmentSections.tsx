@@ -1,4 +1,8 @@
-import type { EnvironmentProvider } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  orbitSignedInText,
+  type EnvironmentProvider,
+  type OrbitGatewayEnvironment,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, TextInput, View } from "react-native";
 
@@ -11,10 +15,12 @@ import { ConnectionSheetButton } from "./OrbitSheetButton";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import {
   chooseOrbitProfile,
+  connectOrbitEnvironment,
   refreshOrbitGateway,
   setEnvironmentProvider,
   useOrbitGateway,
 } from "./orbitGatewayStore";
+import { appName } from "@t3tools/shared/appName";
 
 const PROVIDER_OPTIONS: ReadonlyArray<{
   readonly provider: EnvironmentProvider;
@@ -130,9 +136,7 @@ export function OrbitEnvironmentSections() {
                 (gateway.phase === "error" ? "Gateway unreachable" : "Connecting…")}
             </Text>
             <Text className="text-sm text-foreground-muted">
-              {gateway.node
-                ? `Signed in to gateway.orbit as ${gateway.node.wireguardIp}`
-                : "gateway.orbit, over WireGuard"}
+              {gateway.node ? orbitSignedInText(gateway.node) : "gateway.orbit, over WireGuard"}
             </Text>
           </View>
           {gateway.phase === "loading" ? (
@@ -206,7 +210,7 @@ export function OrbitEnvironmentSections() {
         <SettingsSection title={`${profile.name}'s workspaces`}>
           {gateway.workspaces.length === 0 ? (
             <Text className="p-4 text-sm text-foreground-muted">
-              No workspaces yet. Create them in T3 Code on the desktop.
+              No workspaces yet. Create them in {appName()} on the desktop.
             </Text>
           ) : (
             gateway.workspaces.map((workspace, index) => (
@@ -247,17 +251,58 @@ export function OrbitEnvironmentSections() {
                   {environment.url.replace(/^https?:\/\//, "")}
                 </Text>
               </View>
-              <Text className="text-sm text-foreground-muted">
-                {environment.status === "session_expired"
-                  ? "Registration expired"
-                  : connected.has(environment.environmentId)
-                    ? "Paired"
-                    : "Pairing…"}
-              </Text>
+              <OrbitServerStatus
+                environment={environment}
+                connected={connected.has(environment.environmentId)}
+                revoked={gateway.revokedEnvironmentIds.includes(environment.environmentId)}
+              />
             </View>
           ))}
         </SettingsSection>
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * Conn: a Gateway server's state on this phone. Host servers pair by themselves; a clone (an
+ * Instance's server) pairs only when the user connects it here.
+ */
+function OrbitServerStatus(props: {
+  readonly environment: OrbitGatewayEnvironment;
+  readonly connected: boolean;
+  /** Conn: Orbit revoked this phone's pairing; only Connect pairs it again. */
+  readonly revoked: boolean;
+}) {
+  const { environment } = props;
+  const [connecting, setConnecting] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const status =
+    environment.status === "session_expired"
+      ? "Registration expired"
+      : environment.powerState === "stopped"
+        ? "Asleep"
+        : props.revoked && !connecting
+          ? null
+          : props.connected
+            ? "Paired"
+            : environment.instanceId === null || connecting
+              ? "Pairing…"
+              : null;
+  if (status !== null) return <Text className="text-sm text-foreground-muted">{status}</Text>;
+
+  const connect = async () => {
+    setConnecting(true);
+    setFailed(false);
+    setFailed(!(await connectOrbitEnvironment(environment)));
+    setConnecting(false);
+  };
+  return (
+    <View className="flex-row items-center gap-3">
+      <Text className="text-sm text-foreground-muted">
+        {failed ? "Could not pair" : props.revoked ? "Revoked in Orbit" : "Not connected"}
+      </Text>
+      <ConnectionSheetButton compact icon="link" label="Connect" onPress={() => void connect()} />
     </View>
   );
 }

@@ -5,7 +5,8 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { RenderErrorBoundary } from "~/components/RenderErrorBoundary";
 import { useOpenInPreferredEditor } from "~/editorPreferences";
-import { createTerminalOrbitTransport } from "~/orbit/orbitTransport";
+import { chooseOrbitToolTransport } from "~/orbit/desktopOrbitTransport";
+import { useOrbitInstance } from "~/orbit/environmentProvider";
 import { useProject, useThreadShell } from "~/state/entities";
 import { serverEnvironment } from "~/state/server";
 
@@ -36,18 +37,28 @@ function useThreadProject(threadRef: ScopedThreadRef) {
   return useProject(thread ? scopeProjectRef(thread.environmentId, thread.projectId) : null);
 }
 
-/** Orbit calls run on the thread's machine, from its project folder (see ~/orbit/orbitTransport.ts). */
+/**
+ * Orbit calls run from the desktop app for a thread in an Orbit Instance, else on the thread's
+ * machine from its project folder (see ~/orbit/desktopOrbitTransport.ts).
+ */
 function useOrbitSource(threadRef: ScopedThreadRef, pageUrl: string): OrbitSource | null {
   const project = useThreadProject(threadRef);
   const domain = hostname(pageUrl);
   const environmentId = project?.environmentId ?? null;
   const cwd = project?.workspaceRoot ?? null;
+  const orbitInstanceId = useOrbitInstance(environmentId)?.instanceId ?? null;
   if (!environmentId || !cwd || !domain) return null;
+  const choice = chooseOrbitToolTransport({
+    environmentId,
+    cwd,
+    orbitInstanceId,
+    send: window.desktopBridge?.orbitToolSend,
+  });
   // The module cache keeps one source per key, so its identity is stable across renders.
-  const key = `${environmentId}\u0000${cwd}\u0000${domain}`;
+  const key = `${choice.kind}\u0000${environmentId}\u0000${cwd}\u0000${domain}`;
   let source = orbitSources.get(key);
   if (!source) {
-    source = gatewayOrbitSource(createTerminalOrbitTransport({ environmentId, cwd }), domain);
+    source = gatewayOrbitSource(choice.transport, domain);
     orbitSources.set(key, source);
   }
   return source;

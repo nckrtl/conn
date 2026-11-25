@@ -41,7 +41,10 @@ export type AppBarMenuItem =
     };
 
 export interface AppBarMenu {
+  /** The menu's name; with `untitled` it is only the button's accessibility label. */
   readonly title: string;
+  /** iOS: the open menu shows no title line. */
+  readonly untitled?: boolean;
   readonly icon: AppSymbolName;
   readonly status?: string;
   readonly separateBackground?: boolean;
@@ -78,7 +81,10 @@ export interface AppBarProps {
   readonly titleContent?: ReactNode;
   readonly subtitle?: string | null;
   readonly actions?: ReadonlyArray<AppBarAction>;
-  /** Pull-to-refresh is the gesture on both platforms; Android also lists this in the overflow menu. */
+  /**
+   * Pull-to-refresh is the gesture on both platforms. Android also lists this in the overflow
+   * menu, or shows it as a button in a bottom sheet, where the sheet owns the pull.
+   */
   readonly refresh?: Pick<AppBarAction, "accessibilityLabel" | "disabled" | "onPress">;
   readonly menus?: ReadonlyArray<AppBarMenu>;
   readonly search?: AppBarSearch;
@@ -100,6 +106,8 @@ export interface AppBarProps {
    * button, on both platforms.
    */
   readonly onClose?: () => void;
+  /** iOS: where the close button sits. Defaults to the bar's start; system sheets end the bar. */
+  readonly closePlacement?: "leading" | "trailing";
   /** Defaults to "Close". */
   readonly closeAccessibilityLabel?: string;
   /** A sheet's confirm button, last in the bar. */

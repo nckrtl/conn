@@ -6,10 +6,12 @@ import * as Random from "effect/Random";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
+import { appBrand } from "../branding/appBrand.ts";
 
 // AppImage mounts change each run; the launcher must mount the image itself.
 const { logInfo, logWarning } = makeComponentLogger("desktop-cli-shim");
 
+// oxlint-disable-next-line t3code/no-hardcoded-app-name -- marker that identifies shims already on disk
 export const MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
 
 const SERVER_ENTRY = "apps/server/dist/bin.mjs";
@@ -19,7 +21,7 @@ const shellWord = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 const cmdText = (value: string) => value.replaceAll("%", "%%");
 const cmdWord = (value: string) => `"${cmdText(value)}"`;
 
-const MOVED = "T3 Code has moved or been removed. Open the app once to update this command.";
+const MOVED = `${appBrand.name} has moved or been removed. Open the app once to update this command.`;
 
 export type CliShimTarget =
   | { readonly kind: "appimage"; readonly appImage: string; readonly executableName: string }
@@ -90,12 +92,13 @@ export const renderCliShim = (input: {
     ...header,
     // Extract-and-run would make the runtime start the app instead of mounting it.
     "unset APPIMAGE_EXTRACT_AND_RUN",
-    // The runtime stays mounted until killed; traps unmount it because background jobs ignore Ctrl-C.
+    // Its own session keeps a group signal (Ctrl-C, SSH hangup) from unmounting it under the
+    // running server; the traps unmount it after. Without setsid the extract fallback runs.
     "work=$(mktemp -d) || exit 1",
-    '"$app" --appimage-mount >"$work/mount" 2>/dev/null &',
+    'setsid "$app" --appimage-mount >"$work/mount" 2>/dev/null &',
     "mounter=$!",
     `trap 'kill "$mounter" 2>/dev/null; rm -rf "$work"' EXIT`,
-    "trap 'exit 130' INT TERM",
+    "trap 'exit 130' INT TERM HUP",
     "mount=",
     'while kill -0 "$mounter" 2>/dev/null; do',
     '  mount=$(head -n 1 "$work/mount")',
@@ -108,6 +111,8 @@ export const renderCliShim = (input: {
     '  (cd "$work" && "$app" --appimage-extract >/dev/null) || { echo "Could not open $app." >&2; exit 1; }',
     '  mount="$work/squashfs-root"',
     "fi",
+    // The runtime sets this when it launches the app; the CLI skips its path-keyed compile cache on it.
+    'export APPIMAGE="$app"',
     run("$mount"),
     "",
   ].join("\n");

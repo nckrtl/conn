@@ -1,13 +1,15 @@
 import type { AuthClientPresentationMetadata } from "@t3tools/contracts";
 import * as Device from "expo-device";
 import { Platform } from "react-native";
+import { appName } from "@t3tools/shared/appName";
 
 export function authClientMetadata(appVersion?: string): AuthClientPresentationMetadata {
   const osMajorVersion = Number.parseInt(Device.osVersion?.split(".")[0] ?? "", 10);
   const deviceModel = Device.modelName?.trim();
 
   return {
-    label: "T3 Code Mobile",
+    // oxlint-disable-next-line t3code/no-untranslated-copy -- product name
+    label: `${appName()} Mobile`,
     deviceType:
       Device.deviceType === Device.DeviceType.TABLET
         ? "tablet"

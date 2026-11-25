@@ -12,7 +12,8 @@ import * as Upload from "../../../assets/AttachmentUpload.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { newCommandId, readThread, unavailable } from "../../threadAccess.ts";
+import { isThreadManagementError, threadManagementFailure } from "../../OrchestratorMcpService.ts";
+import { dispatchFailure, newCommandId, readThread, unavailable } from "../../threadAccess.ts";
 import { AttachmentToolkit } from "./tools.ts";
 
 export function resolveAttachmentReferences(
@@ -50,7 +51,7 @@ export const layer = McpToolAccess.toLayer(
     return {
       // A pending upload belongs to its caller until a send claims it, so
       // linked callers may stage the uploads their own sends need.
-      t3_attachment_prepare_upload: McpToolAccess.writes(
+      conn_attachment_prepare_upload: McpToolAccess.writes(
         (input) =>
           Effect.gen(function* () {
             const result = yield* Upload.issueAttachmentUploadUrl(input.upload).pipe(
@@ -62,11 +63,14 @@ export const layer = McpToolAccess.toLayer(
               if (now - entry.issuedAt > UPLOAD_OWNER_TTL_MS) uploadOwners.delete(id);
             }
             uploadOwners.set(result.attachmentId, { owner: yield* uploadOwner, issuedAt: now });
-            return result;
+            const { origin } = yield* McpInvocationContext.McpInvocationContext;
+            return origin === undefined
+              ? result
+              : { ...result, uploadUrl: `${origin}${result.relativeUrl}` };
           }),
         { linkedCallers: "allowed" },
       ),
-      t3_attachment_discard: McpToolAccess.writes(
+      conn_attachment_discard: McpToolAccess.writes(
         (input) =>
           Effect.gen(function* () {
             if (uploadOwners.get(input.attachmentId)?.owner !== (yield* uploadOwner)) {
@@ -81,7 +85,7 @@ export const layer = McpToolAccess.toLayer(
           }),
         { linkedCallers: "allowed" },
       ),
-      t3_thread_send_attachments: McpToolAccess.writesThreads(
+      conn_thread_send_attachments: McpToolAccess.writesThreads(
         (input) => [input.threadId],
         (input) =>
           Effect.gen(function* () {
@@ -115,7 +119,9 @@ export const layer = McpToolAccess.toLayer(
                       code: "orchestration_error",
                       message: error.message,
                     })
-                  : unavailable(),
+                  : isThreadManagementError(error)
+                    ? threadManagementFailure(error)
+                    : dispatchFailure(error),
               ),
             );
             return {

@@ -1,0 +1,698 @@
+//! `/mcp`: the T3 tool server that agents inside a thread, and outside callers such as Orbit's
+//! Swamp, call over MCP's Streamable HTTP transport. `README.md` maps the TypeScript boundary
+//! this reproduces.
+//!
+//! - [`McpService::handle`] serves one HTTP request for an authenticated [`Caller`].
+//! - [`McpService::issue_thread_credential`] gives a provider the `conn` server entry for
+//!   one thread: URL, `Authorization` header, and the shapes Claude and Codex take.
+//! - [`McpService::resolve_thread_token`] turns a bearer token back into its thread.
+//!
+//! The tool definitions come from `apps/server` (`tools/gen-tools.mjs` → `src/catalog.jsonl`);
+//! the handlers are ours, on the [`Engine`] trait.
+
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+
+use conn_engine::Engine;
+use serde_json::Value;
+
+mod catalog;
+mod credentials;
+mod exposure;
+mod input;
+mod http_limits {
+    include!("http-limits.rs");
+}
+pub use http_limits::MAX_MCP_BODY_BYTES;
+mod links;
+mod peers;
+mod remote_tasks;
+mod sessions;
+pub mod snapshot;
+mod time;
+mod tools;
+mod transport;
+mod view;
+mod worktrees;
+
+pub use credentials::ThreadCredentialRequest;
+pub use peers::{
+    LINKS_OFF_HERE, LinkAsk, LinkInfo, PeerCall, PeerFailure, PeerLimits, PeerSender, Peers,
+};
+pub use transport::Reply;
+pub use worktrees::WorktreeConfig;
+
+/// What the service needs from the server around it.
+pub struct McpConfig {
+    /// Where the server listens. Every credential carries `/mcp` at this address, so bind
+    /// the listener before the service exists.
+    pub listen_address: SocketAddr,
+    pub preview: Option<conn_preview::tabs::Preview>,
+    pub engine: Arc<dyn Engine>,
+    /// The same attachment store used by client RPC and HTTP uploads.
+    pub files: Option<Arc<conn_files::Files>>,
+    /// Worktree defaults, git status and setup terminals.
+    pub worktrees: Option<WorktreeConfig>,
+    pub environment_id: String,
+    /// The environment's label; it can change while the server runs.
+    pub label: Label,
+    pub server_version: String,
+    /// `ExecutionEnvironmentDescriptor.platform`: `{os, arch}`.
+    pub platform: Value,
+    /// `ServerProvider` entries (`ServerConfig.providers`), read on each capabilities call.
+    pub providers: Arc<dyn Fn() -> Vec<Value> + Send + Sync>,
+    /// Recheck an instance when its model or availability snapshot refuses a batch target.
+    pub refresh_provider: Option<ProviderRefresh>,
+    /// Outside callers get thread links through this app, as Copy thread's do.
+    pub hosted_app_url: String,
+    /// Scheduled tasks; without it the scheduled task tools answer that they are not served.
+    pub scheduled_tasks: Option<conn_features::scheduled::ScheduledTasks>,
+    /// Annotations; without it the annotation tools answer that they are not served.
+    pub annotations: Option<conn_features::annotations::Annotations>,
+    /// The store also used by secrets.answerRequest.
+    pub secrets: Option<conn_features::secrets::SecretRequests>,
+    pub test_logins: Option<conn_features::test_logins::TestLogins>,
+    /// The broker also used by panels.requests and panels.respond.
+    pub panels: Option<conn_features::panels::PanelBroker>,
+    /// Linked environments; without it every tool stays in this environment.
+    pub peers: Option<Arc<dyn Peers>>,
+    /// The server settings, for the environment preference tools.
+    pub settings: Option<SettingsPort>,
+    /// Device hosts; without them the device tools answer that device access is off.
+    pub devices: Option<conn_devices::Devices>,
+    /// The server's GitHub pull request panel; without it the watch and guide tools answer
+    /// as T3 does when no host can be read.
+    pub pull_requests: Option<PullRequestHost>,
+    /// `sourceControl.cloneRepository` (`SourceControlRepositoryService`), for
+    /// `conn_project_clone`; without it the tool answers that the operation could not run.
+    pub clone_repository: Option<MethodHost>,
+}
+
+/// Reads and patches the server settings (`ServerSettingsService`).
+#[derive(Clone)]
+pub struct SettingsPort {
+    pub read: Arc<dyn Fn() -> SettingsMap + Send + Sync>,
+    /// Applies a `ServerSettingsPatch`; returns the settings after it.
+    pub update: SettingsUpdate,
+}
+
+pub type SettingsMap = serde_json::Map<String, Value>;
+pub type SettingsUpdate = Arc<
+    dyn Fn(Value) -> conn_engine::BoxFuture<'static, Result<SettingsMap, String>> + Send + Sync,
+>;
+
+impl std::fmt::Debug for SettingsPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsPort").finish_non_exhaustive()
+    }
+}
+
+/// One call into the server's pull request panel: `(operation, input)` to the result, or the
+/// contract failure (`PullRequestUnavailableError`, `PullRequestOperationError`, ...). The
+/// operations are `watchSummary`, `locateProject` and `reviewGuide`.
+/// One server method: its contract input, and its result or contract error.
+pub type MethodHost =
+    Arc<dyn Fn(Value) -> conn_engine::BoxFuture<'static, Result<Value, Value>> + Send + Sync>;
+
+pub type PullRequestHost = Arc<
+    dyn Fn(&'static str, Value) -> conn_engine::BoxFuture<'static, Result<Value, Value>>
+        + Send
+        + Sync,
+>;
+
+/// A label read on each use, so a renamed environment answers with its new name.
+#[derive(Clone)]
+pub struct Label(Arc<dyn Fn() -> String + Send + Sync>);
+
+impl Label {
+    pub fn live(read: impl Fn() -> String + Send + Sync + 'static) -> Self {
+        Self(Arc::new(read))
+    }
+
+    pub fn get(&self) -> String {
+        (self.0)()
+    }
+}
+
+impl From<String> for Label {
+    fn from(label: String) -> Self {
+        Self::live(move || label.clone())
+    }
+}
+
+impl From<&str> for Label {
+    fn from(label: &str) -> Self {
+        label.to_owned().into()
+    }
+}
+
+impl std::fmt::Debug for Label {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+pub type ProviderRefresh = Arc<dyn Fn(String) -> conn_engine::BoxFuture<'static, ()> + Send + Sync>;
+
+impl std::fmt::Debug for McpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpConfig")
+            .field("environment_id", &self.environment_id)
+            .field("label", &self.label)
+            .field("server_version", &self.server_version)
+            .field("platform", &self.platform)
+            .field("hosted_app_url", &self.hosted_app_url)
+            .finish_non_exhaustive()
+    }
+}
+
+pub const DEFAULT_HOSTED_APP_URL: &str = "https://app.t3.codes";
+
+/// `/mcp` at the listen address. An unspecified address (`0.0.0.0`) becomes loopback: agents
+/// run on this machine.
+fn endpoint(address: SocketAddr) -> String {
+    let host = match address.ip() {
+        ip if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+    };
+    format!("http://{host}:{}/mcp", address.port())
+}
+
+/// Who calls. The route authenticates; the service only reads this.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Caller {
+    /// An agent T3 started, with the token [`McpService::issue_thread_credential`] issued.
+    Thread(ThreadCaller),
+    /// A bearer session from outside a thread: a paired device, `t3 auth session issue`.
+    Client(ClientCaller),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadCaller {
+    pub thread_id: String,
+    pub provider_session_id: String,
+    pub provider_instance_id: String,
+    /// Captured when the provider session starts, not re-read on each call.
+    pub preview: bool,
+    /// The `device` capability, captured the same way.
+    pub device: bool,
+    /// A delegated child: it hands its work back to its parent.
+    pub subagent: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClientCaller {
+    pub session_id: String,
+    /// `None`: read-only. Otherwise the broadest runtime mode it may start threads in.
+    pub max_runtime_mode: Option<&'static str>,
+    /// The client's name, as it registered or paired.
+    pub label: String,
+    /// Another environment's peer link: what it starts here carries its session as
+    /// `linkOrigin`, and below full access it changes only that work.
+    pub linked: bool,
+    /// Narrower modes the client asked for on this request (`T3-Mode-Limit`): runtime,
+    /// interaction.
+    pub narrowed: Option<(&'static str, &'static str)>,
+    /// A native bearer session's scopes (`None` for an MCP OAuth client, whose access level
+    /// decides). Tools that change settings or links check them, as the RPC methods do.
+    pub scopes: Option<Vec<String>>,
+}
+
+impl ClientCaller {
+    /// `AuthMcpClientAccess`.
+    pub fn access(&self) -> &'static str {
+        self.max_runtime_mode.unwrap_or("read-only")
+    }
+}
+
+impl Caller {
+    /// Keys idempotent writes and MCP sessions to the credential, as TS `requestNamespace` does.
+    pub(crate) fn namespace(&self) -> String {
+        match self {
+            Caller::Thread(thread) => thread.provider_session_id.clone(),
+            Caller::Client(client) => format!("client:{}", client.session_id),
+        }
+    }
+}
+
+/// The `conn` MCP server entry a provider passes to its CLI for one thread.
+#[derive(Clone, PartialEq)]
+pub struct McpServerEntry {
+    pub thread_id: String,
+    pub provider_session_id: String,
+    pub url: String,
+    /// The full header value: `Bearer <token>`.
+    pub authorization: String,
+}
+
+impl std::fmt::Debug for McpServerEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerEntry")
+            .field("thread_id", &self.thread_id)
+            .field("provider_session_id", &self.provider_session_id)
+            .field("url", &self.url)
+            .field("authorization", &"<redacted>")
+            .finish()
+    }
+}
+
+/// T3 waits can block for an hour; providers' own MCP timeouts must stay above that.
+pub const TOOL_TIMEOUT_SECS: u64 = 65 * 60;
+pub const SERVER_NAME: &str = "conn";
+
+/// What T3 appends to an agent's system prompt when it has the `conn` server
+/// (`T3_CODE_ORCHESTRATION_INSTRUCTIONS`), generated by `tools/gen-tools.mjs`.
+pub const AGENT_INSTRUCTIONS: &str = include_str!("instructions.txt");
+
+/// What T3's Claude adapter appends after [`AGENT_INSTRUCTIONS`]: its own texts, in its order
+/// (`CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS + CLAUDE_SEND_TO_USER_INSTRUCTIONS` at the pin),
+/// without the device-tool text. Generated by `tools/gen-tools.mjs`.
+pub const CLAUDE_INSTRUCTIONS: &str = include_str!("claude-instructions.txt");
+
+/// `T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH`: Claude's device text, after
+/// [`CLAUDE_INSTRUCTIONS`] (between newlines) and as the SubagentStart hook's context, when the
+/// session has the device tools.
+pub const DEVICE_INSTRUCTIONS: &str = include_str!("device-instructions.txt");
+
+/// One tool's advertised definition, as one JSON line whose keys keep the contract's order.
+/// The `t3 thread` CLI prints results in that order, as the T3 CLI does after decoding them.
+pub fn tool_definition(name: &str) -> Option<&'static str> {
+    catalog::line(name)
+}
+
+/// Whether `value` has the shape `tool`'s advertised output schema requires: the types,
+/// required fields and literals it names (excess fields are allowed, as an Effect struct
+/// decode allows them). A tool that advertises no output schema accepts any value. A result
+/// forwarded from a linked environment is checked with this, as `PeerMcpClient` decodes it
+/// with the tool's success schema.
+pub fn tool_result_matches(tool: &str, value: &serde_json::Value) -> bool {
+    if catalog::tool(tool).is_none() {
+        return false;
+    }
+    match catalog::result_schema(tool) {
+        Some(schema) => catalog::conforms(&schema, value, tool).is_ok(),
+        None => true,
+    }
+}
+
+impl McpServerEntry {
+    /// One `mcpServers` entry for Claude (`--mcp-config '{"mcpServers":{"conn": …}}'` or the
+    /// SDK's `mcpServers`), as `claudeMcpQueryOverrides` builds it.
+    pub fn claude_server(&self) -> Value {
+        serde_json::json!({
+            "type": "http",
+            "url": self.url,
+            "headers": { "Authorization": self.authorization },
+            "timeout": TOOL_TIMEOUT_SECS * 1000,
+        })
+    }
+
+    /// The `--mcp-config` JSON for the Claude CLI.
+    pub fn claude_mcp_config(&self) -> Value {
+        serde_json::json!({ "mcpServers": { SERVER_NAME: self.claude_server() } })
+    }
+}
+
+pub struct McpService {
+    config: McpConfig,
+    credentials: Mutex<credentials::Credentials>,
+    sessions: Mutex<sessions::Sessions>,
+    exposure: Mutex<exposure::Exposure>,
+    /// Threads whose own agent asked to settle them when the active run completes.
+    settling: Mutex<std::collections::HashSet<String>>,
+    endpoint: String,
+    upload_owners: Mutex<tools::attachments::UploadOwners>,
+    handoffs: Mutex<std::collections::HashSet<String>>,
+    /// Whether each calling thread's project is on a forge (`forgeOfThread`): read per request,
+    /// kept a minute, at most 1,000 threads.
+    forges: Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
+    /// Followers of tasks that run in linked environments.
+    remote: Arc<remote_tasks::Followers>,
+}
+
+impl std::fmt::Debug for McpService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The credentials and sessions hold agent tokens.
+        f.debug_struct("McpService")
+            .field("config", &self.config)
+            .field("endpoint", &self.endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A launch's started setup script ([`McpService::start_launch_setup`]).
+#[derive(Debug)]
+pub struct LaunchSetup {
+    pub name: String,
+    pub command: String,
+    pub terminal_id: String,
+    /// The script's `async` flag (`script.async !== false`): the agent starts without
+    /// waiting for it.
+    pub background: bool,
+    /// The exit code, or `None` when the terminal ended first.
+    pub completion: tokio::sync::oneshot::Receiver<Option<i64>>,
+}
+
+impl McpService {
+    pub async fn run_worktree_setup(
+        &self,
+        thread: &str,
+        path: &str,
+        project: &Value,
+    ) -> Result<(), String> {
+        let Some(config) = &self.config.worktrees else {
+            return Ok(());
+        };
+        tools::worktree::setup(config, thread, project, path).await?;
+        Ok(())
+    }
+
+    /// A worktree launch's setup script, as T3's launch preparation runs it
+    /// (`ThreadLaunchService.prepareInBackground` → `runForThread` with `observeCompletion`):
+    /// the project's `runOnWorktreeCreate` script in terminal `setup-<id>`, followed to its
+    /// end, its output lines handed to `on_line`. `None` when the project has no such script,
+    /// or when `link_origin` is fenced (`skipped-for-link`): the script is the user's own
+    /// code, and a link below full access grants only Conn's tools.
+    pub async fn start_launch_setup(
+        &self,
+        thread: &str,
+        project_id: &str,
+        link_origin: Option<&Value>,
+        path: &str,
+        on_line: Box<dyn FnMut(String) + Send>,
+    ) -> Result<Option<LaunchSetup>, String> {
+        let Some(config) = &self.config.worktrees else {
+            return Ok(None);
+        };
+        if link_origin.is_some_and(peers::link_origin_is_fenced) {
+            return Ok(None);
+        }
+        let shell = self
+            .config
+            .engine
+            .shell_snapshot()
+            .await
+            .map_err(|_| "The project list could not be read.".to_owned())?;
+        let project = shell["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["id"] == project_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Project was not found for setup script execution for thread '{thread}' in '{path}'."
+                )
+            })?;
+        let run = tools::worktree::start_project_script(
+            config,
+            thread,
+            &project,
+            path,
+            tools::worktree::ScriptTrigger::Setup,
+            Some(tools::worktree::Observe {
+                on_line: Some(on_line),
+            }),
+        )
+        .await?;
+        let (Some(completion), "started") = (
+            run.completion,
+            run.started["status"].as_str().unwrap_or_default(),
+        ) else {
+            return Ok(None);
+        };
+        let text = |key: &str| run.started[key].as_str().unwrap_or_default().to_owned();
+        Ok(Some(LaunchSetup {
+            name: text("scriptName"),
+            terminal_id: text("terminalId"),
+            command: run.command,
+            background: run.is_async,
+            completion,
+        }))
+    }
+
+    /// Closes a launch's setup terminal when its launch failed or was cancelled: no thread
+    /// is left to show it.
+    pub fn discard_launch_setup(&self, thread: &str, terminal_id: &str) {
+        if let Some(terminals) = self
+            .config
+            .worktrees
+            .as_ref()
+            .and_then(|c| c.terminals.clone())
+        {
+            terminals.close(conn_contract::TerminalCloseInput {
+                thread_id: thread.to_owned(),
+                terminal_id: Some(terminal_id.to_owned()),
+                delete_history: Some(true),
+            });
+        }
+    }
+
+    /// The live thread, while the settlement named by `settled_at` (its committed `settledAt`)
+    /// is still its own: not undone, replaced by a later one, or deleted since.
+    async fn settled_thread(&self, thread_id: &str, settled_at: &str) -> Option<Value> {
+        let projection = self
+            .config
+            .engine
+            .get_thread_projection(thread_id.into())
+            .await
+            .ok()?;
+        let thread = &projection["thread"];
+        (thread["deletedAt"].is_null()
+            && thread["settledOverride"] == "settled"
+            && thread["settledAt"] == settled_at)
+            .then(|| thread.clone())
+    }
+
+    /// The committed `settledAt` of a live, settled thread.
+    pub async fn current_settlement(&self, thread_id: &str) -> Option<String> {
+        let projection = self
+            .config
+            .engine
+            .get_thread_projection(thread_id.into())
+            .await
+            .ok()?;
+        let thread = &projection["thread"];
+        let settled_at = thread["settledAt"].as_str()?;
+        (thread["deletedAt"].is_null() && thread["settledOverride"] == "settled")
+            .then(|| settled_at.to_owned())
+    }
+
+    /// Whether `settled_at` still names the thread's settlement (`cleanUpSettledThread`'s
+    /// first check, before it closes terminals).
+    pub async fn is_current_settlement(&self, thread_id: &str, settled_at: &str) -> bool {
+        self.settled_thread(thread_id, settled_at).await.is_some()
+    }
+
+    /// `cleanUpSettledThread` after `closeOnSettle` (`ThreadSettlementService.ts:700`): a live
+    /// thread still in the settlement named by `settled_at` runs its project's `runOnSettle`
+    /// script in its own worktree. The host calls it once per settlement, on the engine's
+    /// transition to settled. Shared checkouts are skipped: a root checkout, and a delegate in
+    /// its parent's worktree. Returns the started script, if one started.
+    pub async fn run_settle_script(&self, thread_id: &str, settled_at: &str) -> Option<Value> {
+        let config = self.config.worktrees.as_ref()?;
+        let engine = &self.config.engine;
+        let thread = self.settled_thread(thread_id, settled_at).await?;
+        let path = thread["worktreePath"].as_str()?.to_owned();
+        let probe = std::path::PathBuf::from(&path);
+        if !tokio::task::spawn_blocking(move || probe.exists())
+            .await
+            .ok()?
+        {
+            return None;
+        }
+        // Read again after the worktree I/O: only the same live settlement runs a script.
+        let thread = self.settled_thread(thread_id, settled_at).await?;
+        if thread["lineage"]["relationshipToParent"] == "subagent"
+            && let Some(parent) = thread["lineage"]["parentThreadId"].as_str()
+            && let Ok(parent) = engine.get_thread_projection(parent.into()).await
+            && parent["thread"]["worktreePath"] == path.as_str()
+        {
+            return None;
+        }
+        let shell = engine.shell_snapshot().await.ok()?;
+        let project = shell["projects"]
+            .as_array()?
+            .iter()
+            .find(|p| p["id"] == thread["projectId"] && p["deletedAt"].is_null())?
+            .clone();
+        // A restart runs a settle close again when its row had not settled: the record of
+        // this settlement's start keeps the script to one run.
+        match engine.claim_settle_script(thread_id, settled_at).await {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => {
+                eprintln!("settle script for {thread_id}: {error}");
+                return None;
+            }
+        }
+        let run = tools::worktree::run_project_script(
+            config,
+            thread_id,
+            &project,
+            &path,
+            tools::worktree::ScriptTrigger::Settle,
+        )
+        .await;
+        match run {
+            Ok(started) if started["status"] == "started" => Some(started),
+            Ok(_) => None,
+            Err(error) => {
+                eprintln!("settle script for {thread_id}: {error}");
+                None
+            }
+        }
+    }
+
+    pub fn new(config: McpConfig) -> Arc<Self> {
+        let endpoint = endpoint(config.listen_address);
+        Arc::new(Self {
+            config,
+            credentials: Mutex::new(credentials::Credentials::default()),
+            sessions: Mutex::new(sessions::Sessions::default()),
+            exposure: Mutex::new(exposure::Exposure::default()),
+            settling: Mutex::new(std::collections::HashSet::new()),
+            endpoint,
+            upload_owners: Mutex::new(tools::attachments::UploadOwners::default()),
+            handoffs: Mutex::new(std::collections::HashSet::new()),
+            forges: Mutex::new(std::collections::HashMap::new()),
+            remote: Arc::default(),
+        })
+    }
+
+    /// A fresh credential for one provider session of a thread. The provider passes the
+    /// entry to its CLI; revoke it with [`Self::revoke_provider_session`] when the session ends.
+    pub fn issue_thread_credential(&self, request: ThreadCredentialRequest) -> McpServerEntry {
+        let (token, caller) = self.lock_credentials().issue(request);
+        McpServerEntry {
+            thread_id: caller.thread_id,
+            provider_session_id: caller.provider_session_id,
+            url: self.endpoint.clone(),
+            authorization: format!("Bearer {token}"),
+        }
+    }
+
+    pub fn resolve_thread_token(&self, token: &str) -> Option<ThreadCaller> {
+        self.lock_credentials().resolve(token)
+    }
+
+    /// Keeps a thread's tokens alive while its provider still runs turns.
+    pub fn touch_thread(&self, thread_id: &str) {
+        self.lock_credentials().touch(thread_id);
+    }
+
+    /// Whether the credential of `provider_session_id` still works and was issued for what
+    /// `request` asks (T3's `prepareMcpSession` reuse check).
+    pub fn thread_credential_fits(
+        &self,
+        provider_session_id: &str,
+        request: &ThreadCredentialRequest,
+    ) -> bool {
+        self.lock_credentials().fits(provider_session_id, request)
+    }
+
+    pub fn revoke_provider_session(&self, provider_session_id: &str) {
+        self.lock_credentials()
+            .revoke(|caller| caller.provider_session_id == provider_session_id);
+    }
+
+    pub fn revoke_thread(&self, thread_id: &str) {
+        self.lock_credentials()
+            .revoke(|caller| caller.thread_id == thread_id);
+    }
+
+    /// Serves one `/mcp` request. `body` is the raw request body.
+    pub async fn handle(
+        self: &Arc<Self>,
+        caller: Caller,
+        method: &http::Method,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Reply {
+        transport::handle(self, caller, method, headers, body).await
+    }
+
+    /// Whether Linked environments is on here, read per request.
+    /// `hiddenWithoutForge` for this caller: false only when a thread's project is on no forge
+    /// the server reads. Outside clients, unknown threads and failed reads keep the tools.
+    pub(crate) async fn forge_shown(&self, caller: &Caller) -> bool {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+        const CAPACITY: usize = 1_000;
+        let Caller::Thread(thread) = caller else {
+            return true;
+        };
+        let now = std::time::Instant::now();
+        if let Some((shown, at)) = lock(&self.forges).get(&thread.thread_id)
+            && now.duration_since(*at) < TTL
+        {
+            return *shown;
+        }
+        let shown = self.read_forge(&thread.thread_id).await;
+        let mut forges = lock(&self.forges);
+        if forges.len() >= CAPACITY {
+            forges.retain(|_, (_, at)| now.duration_since(*at) < TTL);
+        }
+        if forges.len() >= CAPACITY
+            && let Some(oldest) = forges
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(id, _)| id.clone())
+        {
+            forges.remove(&oldest);
+        }
+        forges.insert(thread.thread_id.clone(), (shown, now));
+        shown
+    }
+
+    async fn read_forge(&self, thread_id: &str) -> bool {
+        let Some(host) = self.config.pull_requests.clone() else {
+            return true;
+        };
+        let Ok(projection) = self
+            .config
+            .engine
+            .get_thread_projection(conn_contract::ThreadId::from(thread_id))
+            .await
+        else {
+            return true;
+        };
+        let project = projection["thread"]["projectId"].clone();
+        if project.is_null() {
+            return true;
+        }
+        match host("servesProject", serde_json::json!({"projectId": project})).await {
+            Ok(Value::Bool(shown)) => shown,
+            _ => true,
+        }
+    }
+
+    pub(crate) fn links_enabled(&self) -> bool {
+        self.config.peers.as_ref().is_some_and(|p| p.enabled())
+    }
+
+    fn lock_credentials(&self) -> std::sync::MutexGuard<'_, credentials::Credentials> {
+        crate::lock(&self.credentials)
+    }
+
+    fn lock_sessions(&self) -> std::sync::MutexGuard<'_, sessions::Sessions> {
+        crate::lock(&self.sessions)
+    }
+}
+
+/// 32 bytes from the OS, hex encoded.
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    getrandom::fill(&mut buf).expect("OS random source");
+    conn_support::hex::hex(&buf)
+}
+/// Locks a std mutex. A poisoned lock means a thread panicked while it held the lock: a bug.
+/// With `panic = "abort"` a release build stops at the panic itself.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("conn-mcp lock poisoned")
+}
+
+#[cfg(test)]
+mod tests;

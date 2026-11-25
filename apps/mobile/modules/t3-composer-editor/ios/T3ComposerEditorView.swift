@@ -1,7 +1,8 @@
 import ExpoModulesCore
 import UIKit
+import UniformTypeIdentifiers
 
-private struct ComposerTokenPayload: Decodable {
+private struct ComposerTokenPayload: Decodable, Equatable {
   let type: String
   let source: String
   let label: String
@@ -9,8 +10,16 @@ private struct ComposerTokenPayload: Decodable {
   let accent: String?
   let tintsIcon: Bool?
   let detail: String?
-  let start: Int
-  let end: Int
+  var start: Int
+  var end: Int
+
+  func rendersLike(_ other: Self) -> Bool {
+    var moved = other
+    moved.start = start
+    moved.end = end
+    // String == accepts canonically equivalent sources, but their UTF-16 lengths differ.
+    return moved == self && source.utf16.elementsEqual(other.source.utf16)
+  }
 }
 
 private struct ComposerSelectionPayload: Decodable, Equatable {
@@ -38,12 +47,12 @@ private enum ComposerEnterBehavior: String {
 }
 
 private final class ComposerTextAttachment: NSTextAttachment {
-  let source: String
-  let label: String
+  let token: ComposerTokenPayload
+  var source: String { token.source }
+  var label: String { token.label }
 
-  init(source: String, label: String, image: UIImage, size: CGSize, baselineOffset: CGFloat) {
-    self.source = source
-    self.label = label
+  init(token: ComposerTokenPayload, image: UIImage, size: CGSize, baselineOffset: CGFloat) {
+    self.token = token
     super.init(data: nil, ofType: nil)
     self.image = image
     bounds = CGRect(x: 0, y: baselineOffset, width: size.width, height: size.height)
@@ -80,7 +89,6 @@ private final class ComposerTextView: UITextView {
   var onPasteContext: (([String: String]) -> Void)?
   var onPasteText: ((String, NSRange) -> Void)?
   var clipboardFragment = ""
-  var onAttributedMutation: (() -> Void)?
   var onSubmit: ((Bool) -> Void)?
   var isReadOnly = false
   var textPasteThresholdBytes = 0
@@ -242,8 +250,9 @@ private final class ComposerTextView: UITextView {
         return
       }
     }
+    // pasteboard.string is only the first item; super.paste inserts every text item.
     if !bypassTextPasteInterception,
-       let text = pasteboard.string, shouldInterceptTextPaste(text) {
+       let text = pasteboard.strings?.joined(), shouldInterceptTextPaste(text) {
       onPasteText?(text, selectedRange)
       return
     }
@@ -301,18 +310,28 @@ private final class ComposerTextView: UITextView {
   func loadImages(from providers: [NSItemProvider]) {
     let group = DispatchGroup()
     let lock = NSLock()
-    var images = [UIImage?](repeating: nil, count: providers.count)
+    var images = [(data: Data, fileExtension: String)?](repeating: nil, count: providers.count)
 
     for (index, provider) in providers.enumerated() {
       group.enter()
-      provider.loadObject(ofClass: UIImage.self) { object, _ in
-        defer { group.leave() }
-        guard let image = object as? UIImage else {
-          return
-        }
+      let store = { (image: (data: Data, fileExtension: String)?) in
         lock.lock()
         images[index] = image
         lock.unlock()
+        group.leave()
+      }
+      let loadPNG = {
+        _ = provider.loadObject(ofClass: UIImage.self) { object, _ in
+          store((object as? UIImage)?.pngData().map { ($0, "png") })
+        }
+      }
+      // Decoding a GIF to UIImage keeps only its first frame, so pass its bytes through.
+      if provider.hasItemConformingToTypeIdentifier(UTType.gif.identifier) {
+        _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.gif.identifier) { data, _ in
+          if let data { store((data, "gif")) } else { loadPNG() }
+        }
+      } else {
+        loadPNG()
       }
     }
 
@@ -320,7 +339,9 @@ private final class ComposerTextView: UITextView {
       guard let self, !self.isReadOnly else {
         return
       }
-      let urls = images.compactMap { $0 }.compactMap(Self.writeTemporaryImage)
+      let urls = images.compactMap { $0 }.compactMap {
+        Self.writeTemporaryImage($0.data, fileExtension: $0.fileExtension)
+      }
       if !urls.isEmpty {
         self.onPasteImages?(urls)
       }
@@ -342,9 +363,7 @@ private final class ComposerTextView: UITextView {
       return super.cut(sender)
     }
     copy(sender)
-    textStorage.replaceCharacters(in: selectedRange, with: "")
-    selectedRange = NSRange(location: selectedRange.location, length: 0)
-    onAttributedMutation?()
+    replaceDisplayRange(selectedRange)
   }
 
   func serializedText() -> String {
@@ -400,9 +419,10 @@ private final class ComposerTextView: UITextView {
   }
 
   private static func writeTemporaryImage(_ image: UIImage) -> String? {
-    guard let data = image.pngData() else {
-      return nil
-    }
+    image.pngData().flatMap { writeTemporaryImage($0, fileExtension: "png") }
+  }
+
+  private static func writeTemporaryImage(_ data: Data, fileExtension: String) -> String? {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent(pastedImageDirectoryName, isDirectory: true)
     do {
@@ -411,7 +431,7 @@ private final class ComposerTextView: UITextView {
         withIntermediateDirectories: true
       )
       removeStaleTemporaryImages(in: directory)
-      let url = directory.appendingPathComponent("\(UUID().uuidString).png")
+      let url = directory.appendingPathComponent("\(UUID().uuidString).\(fileExtension)")
       try data.write(to: url, options: .atomic)
       return url.absoluteString
     } catch {
@@ -458,9 +478,9 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     text: "#262626",
     placeholder: "#8e8e93"
   )
-  private var fontFamily = "DMSans-Regular"
-  private var fontSize: CGFloat = 14
-  private var lineHeight: CGFloat = 20
+  private var fontFamily = "System"
+  private var fontSize: CGFloat = 16
+  private var lineHeight: CGFloat = 23
   private var contentInsetVertical: CGFloat = 0
   private var singleLineCentered = false
   private var shouldAutoFocus = false
@@ -506,7 +526,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     textView.keyboardDismissMode = .interactive
     textView.alwaysBounceVertical = false
     textView.showsVerticalScrollIndicator = true
-    textView.adjustsFontForContentSizeCategory = true
+    // Conn: JS sends font sizes already scaled for Dynamic Type; UIKit must not scale them again.
+    textView.adjustsFontForContentSizeCategory = false
     if #available(iOS 26.0, *) {
       // UIKit can attach a nearby bar's scroll edge effect to this text view; its backdrop
       // then draws over the typed text while the caret stays visible.
@@ -543,9 +564,6 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
         "selection": ["start": selection.start, "end": selection.end],
       ])
     }
-    textView.onAttributedMutation = { [weak self] in
-      self?.emitTextChange()
-    }
     textView.onSubmit = { [weak self] alternate in
       self?.onComposerSubmit(["alternate": alternate])
     }
@@ -556,10 +574,19 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     addSubview(textView)
 
     placeholderLabel.numberOfLines = 0
-    placeholderLabel.adjustsFontForContentSizeCategory = true
+    placeholderLabel.adjustsFontForContentSizeCategory = false
     addSubview(placeholderLabel)
     applyTypography()
     applyTheme()
+    // JS sends the new scaled size and line height as props after a text size change; this
+    // only rebuilds the current document in place until those props arrive. The pod targets
+    // iOS 16.4, so the trait API needs an availability check.
+    if #available(iOS 17.0, *) {
+      registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: T3ComposerEditorView, _: UITraitCollection) in
+        view.applyTypography()
+        view.applyControlledDocument(force: true)
+      }
+    }
   }
 
   @objc private func openContext(_ recognizer: UITapGestureRecognizer) {
@@ -723,8 +750,12 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     hasControlledDocument = true
     if tokensJson != document.tokensJson {
       tokensJson = document.tokensJson
-      tokens = decode([ComposerTokenPayload].self, from: document.tokensJson) ?? []
-      tokensNeedRebuild = true
+      let nextTokens = decode([ComposerTokenPayload].self, from: document.tokensJson) ?? []
+      // Rebuild only when a chip on screen would look different: typing before a chip moves its
+      // offsets, and Undo restores the chip it removed. A rebuild there makes iOS autocorrect
+      // behind the caret, and replacing the text drops UIKit's Redo.
+      tokensNeedRebuild = tokensNeedRebuild || !nextTokens.elementsEqual(renderedChipTokens(), by: { $0.rendersLike($1) })
+      tokens = nextTokens
     }
     let previousSelection = sourceSelection()
     value = document.value
@@ -748,6 +779,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
 
   func setPlaceholder(_ placeholder: String) {
     placeholderLabel.text = placeholder
+    textView.accessibilityLabel = placeholder
     setNeedsLayout()
   }
 
@@ -1028,8 +1060,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private func makeAttachmentString(_ token: ComposerTokenPayload) -> NSAttributedString {
     let color = token.accent.flatMap { UIColor(composerHex: $0) }
       ?? UIColor(composerHex: theme.text) ?? .label
-    let chipFont = UIFont(name: "DMSans-Medium", size: fontSize)
-      ?? UIFont.systemFont(ofSize: fontSize, weight: .medium)
+    // Conn: chips use the system font, like the rest of the composer.
+    let chipFont = UIFont.systemFont(ofSize: fontSize, weight: .medium)
     let icon = token.iconUri.flatMap(iconImage(for:)).map {
       token.tintsIcon == true ? Self.tinted($0, color: color) : $0
     }
@@ -1041,8 +1073,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       font: chipFont
     )
     let attachment = ComposerTextAttachment(
-      source: token.source,
-      label: token.label,
+      token: token,
       image: image,
       size: image.size,
       baselineOffset: chipFont.ascender - image.size.height
@@ -1342,9 +1373,22 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     }
   }
 
+  private func renderedChipTokens() -> [ComposerTokenPayload] {
+    var rendered: [ComposerTokenPayload] = []
+    textView.textStorage.enumerateAttribute(
+      .attachment,
+      in: NSRange(location: 0, length: textView.textStorage.length)
+    ) { value, _, _ in
+      if let attachment = value as? ComposerTextAttachment {
+        rendered.append(attachment.token)
+      }
+    }
+    return rendered
+  }
+
   private func documentMatchesExpectedTokens() -> Bool {
     let source = value as NSString
-    let expectedSources = tokens.compactMap { token -> String? in
+    let expectedChips = tokens.compactMap { token -> (Int, String)? in
       guard token.start >= 0,
             token.end > token.start,
             token.end <= source.length,
@@ -1353,18 +1397,22 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
             ) == token.source else {
         return nil
       }
-      return token.source
+      return (token.start, token.source)
     }
-    var renderedSources: [String] = []
+    var renderedChips: [(Int, String)] = []
+    var sourceOffset = 0
     textView.attributedText.enumerateAttribute(
       .attachment,
       in: NSRange(location: 0, length: textView.attributedText.length)
-    ) { value, _, _ in
+    ) { value, range, _ in
       if let attachment = value as? ComposerTextAttachment {
-        renderedSources.append(attachment.source)
+        renderedChips.append((sourceOffset, attachment.source))
+        sourceOffset += (attachment.source as NSString).length
+      } else {
+        sourceOffset += range.length
       }
     }
-    return renderedSources == expectedSources
+    return renderedChips.elementsEqual(expectedChips, by: ==)
   }
 }
 

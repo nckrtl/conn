@@ -17,6 +17,8 @@ import { Route as GuestRouteImport } from './routes/guest'
 import { Route as PairRouteImport } from './routes/pair'
 import { Route as WelcomeRouteImport } from './routes/welcome'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
+import { Route as ChatOrbitPanelRouteImport } from './routes/_chat._orbitPanel'
+import { Route as ChatIssuesRouteImport } from './routes/_chat.issues'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
@@ -24,6 +26,7 @@ import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
+import { Route as ChatOrbitStartIdRouteImport } from './routes/_chat.orbit.$startId'
 import { Route as ChatSettingsAboutRouteImport } from './routes/_chat.settings.about'
 import { Route as ChatSettingsAccessRouteImport } from './routes/_chat.settings.access'
 import { Route as ChatSettingsAppearanceRouteImport } from './routes/_chat.settings.appearance'
@@ -53,6 +56,9 @@ import { Route as ChatSettingsThreadsRouteImport } from './routes/_chat.settings
 import { Route as ChatSettingsVoiceRouteImport } from './routes/_chat.settings.voice'
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
 import { Route as ThreadsEnvironmentIdThreadIdRouteImport } from './routes/threads.$environmentId.$threadId'
+import { Route as ChatOrbitPanelOrbitConnectionRouteImport } from './routes/_chat._orbitPanel.orbit.connection'
+import { Route as ChatOrbitPanelOrbitInstancesRouteImport } from './routes/_chat._orbitPanel.orbit.instances'
+import { Route as ChatOrbitPanelOrbitProfileRouteImport } from './routes/_chat._orbitPanel.orbit.profile'
 
 const ChatRoute = ChatRouteImport.update({
   id: '/_chat',
@@ -93,6 +99,15 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatOrbitPanelRoute = ChatOrbitPanelRouteImport.update({
+  id: '/_orbitPanel',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatIssuesRoute = ChatIssuesRouteImport.update({
+  id: '/issues',
+  path: '/issues',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatNewRoute = ChatNewRouteImport.update({
   id: '/new',
   path: '/new',
@@ -127,6 +142,11 @@ const ChatEnvironmentIdThreadIdRoute =
 const ChatDraftDraftIdRoute = ChatDraftDraftIdRouteImport.update({
   id: '/draft/$draftId',
   path: '/draft/$draftId',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatOrbitStartIdRoute = ChatOrbitStartIdRouteImport.update({
+  id: '/orbit/$startId',
+  path: '/orbit/$startId',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatSettingsAboutRoute = ChatSettingsAboutRouteImport.update({
@@ -279,6 +299,24 @@ const ThreadsEnvironmentIdThreadIdRoute =
     path: '/threads/$environmentId/$threadId',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ChatOrbitPanelOrbitConnectionRoute =
+  ChatOrbitPanelOrbitConnectionRouteImport.update({
+    id: '/orbit/connection',
+    path: '/orbit/connection',
+    getParentRoute: () => ChatOrbitPanelRoute,
+  } as any)
+const ChatOrbitPanelOrbitInstancesRoute =
+  ChatOrbitPanelOrbitInstancesRouteImport.update({
+    id: '/orbit/instances',
+    path: '/orbit/instances',
+    getParentRoute: () => ChatOrbitPanelRoute,
+  } as any)
+const ChatOrbitPanelOrbitProfileRoute =
+  ChatOrbitPanelOrbitProfileRouteImport.update({
+    id: '/orbit/profile',
+    path: '/orbit/profile',
+    getParentRoute: () => ChatOrbitPanelRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
@@ -288,6 +326,7 @@ export interface FileRoutesByFullPath {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/issues': typeof ChatIssuesRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
@@ -295,6 +334,7 @@ export interface FileRoutesByFullPath {
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/orbit/$startId': typeof ChatOrbitStartIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
@@ -324,6 +364,9 @@ export interface FileRoutesByFullPath {
   '/settings/voice': typeof ChatSettingsVoiceRoute
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
+  '/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
+  '/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
+  '/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
 }
 export interface FileRoutesByTo {
   '/approve-agent': typeof ApproveAgentRoute
@@ -332,14 +375,16 @@ export interface FileRoutesByTo {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/': typeof ChatIndexRoute
+  '/issues': typeof ChatIssuesRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
   '/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
-  '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/orbit/$startId': typeof ChatOrbitStartIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
@@ -369,6 +414,9 @@ export interface FileRoutesByTo {
   '/settings/voice': typeof ChatSettingsVoiceRoute
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
+  '/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
+  '/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
+  '/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -379,6 +427,8 @@ export interface FileRoutesById {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/_chat/_orbitPanel': typeof ChatOrbitPanelRouteWithChildren
+  '/_chat/issues': typeof ChatIssuesRoute
   '/_chat/new': typeof ChatNewRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/settings': typeof ChatSettingsRouteWithChildren
@@ -387,6 +437,7 @@ export interface FileRoutesById {
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/_chat/orbit/$startId': typeof ChatOrbitStartIdRoute
   '/_chat/settings/about': typeof ChatSettingsAboutRoute
   '/_chat/settings/access': typeof ChatSettingsAccessRoute
   '/_chat/settings/appearance': typeof ChatSettingsAppearanceRoute
@@ -416,6 +467,9 @@ export interface FileRoutesById {
   '/_chat/settings/voice': typeof ChatSettingsVoiceRoute
   '/_chat/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
+  '/_chat/_orbitPanel/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
+  '/_chat/_orbitPanel/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
+  '/_chat/_orbitPanel/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -427,6 +481,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/issues'
     | '/new'
     | '/pull-requests'
     | '/settings'
@@ -434,6 +489,7 @@ export interface FileRouteTypes {
     | '/projects/$projectKey'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
+    | '/orbit/$startId'
     | '/settings/about'
     | '/settings/access'
     | '/settings/appearance'
@@ -463,6 +519,9 @@ export interface FileRouteTypes {
     | '/settings/voice'
     | '/settings/worktrees'
     | '/threads/$environmentId/$threadId'
+    | '/orbit/connection'
+    | '/orbit/instances'
+    | '/orbit/profile'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/approve-agent'
@@ -471,14 +530,16 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/'
+    | '/issues'
     | '/new'
     | '/pull-requests'
     | '/settings'
     | '/usage'
     | '/projects/$projectKey'
-    | '/'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
+    | '/orbit/$startId'
     | '/settings/about'
     | '/settings/access'
     | '/settings/appearance'
@@ -508,6 +569,9 @@ export interface FileRouteTypes {
     | '/settings/voice'
     | '/settings/worktrees'
     | '/threads/$environmentId/$threadId'
+    | '/orbit/connection'
+    | '/orbit/instances'
+    | '/orbit/profile'
   id:
     | '__root__'
     | '/_chat'
@@ -517,6 +581,8 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/_chat/_orbitPanel'
+    | '/_chat/issues'
     | '/_chat/new'
     | '/_chat/pull-requests'
     | '/_chat/settings'
@@ -525,6 +591,7 @@ export interface FileRouteTypes {
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
+    | '/_chat/orbit/$startId'
     | '/_chat/settings/about'
     | '/_chat/settings/access'
     | '/_chat/settings/appearance'
@@ -554,6 +621,9 @@ export interface FileRouteTypes {
     | '/_chat/settings/voice'
     | '/_chat/settings/worktrees'
     | '/threads/$environmentId/$threadId'
+    | '/_chat/_orbitPanel/orbit/connection'
+    | '/_chat/_orbitPanel/orbit/instances'
+    | '/_chat/_orbitPanel/orbit/profile'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -626,6 +696,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/_orbitPanel': {
+      id: '/_chat/_orbitPanel'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof ChatOrbitPanelRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/issues': {
+      id: '/_chat/issues'
+      path: '/issues'
+      fullPath: '/issues'
+      preLoaderRoute: typeof ChatIssuesRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/new': {
       id: '/_chat/new'
       path: '/new'
@@ -673,6 +757,13 @@ declare module '@tanstack/react-router' {
       path: '/draft/$draftId'
       fullPath: '/draft/$draftId'
       preLoaderRoute: typeof ChatDraftDraftIdRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/orbit/$startId': {
+      id: '/_chat/orbit/$startId'
+      path: '/orbit/$startId'
+      fullPath: '/orbit/$startId'
+      preLoaderRoute: typeof ChatOrbitStartIdRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/settings/about': {
@@ -878,8 +969,45 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsEnvironmentIdThreadIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_chat/_orbitPanel/orbit/connection': {
+      id: '/_chat/_orbitPanel/orbit/connection'
+      path: '/orbit/connection'
+      fullPath: '/orbit/connection'
+      preLoaderRoute: typeof ChatOrbitPanelOrbitConnectionRouteImport
+      parentRoute: typeof ChatOrbitPanelRoute
+    }
+    '/_chat/_orbitPanel/orbit/instances': {
+      id: '/_chat/_orbitPanel/orbit/instances'
+      path: '/orbit/instances'
+      fullPath: '/orbit/instances'
+      preLoaderRoute: typeof ChatOrbitPanelOrbitInstancesRouteImport
+      parentRoute: typeof ChatOrbitPanelRoute
+    }
+    '/_chat/_orbitPanel/orbit/profile': {
+      id: '/_chat/_orbitPanel/orbit/profile'
+      path: '/orbit/profile'
+      fullPath: '/orbit/profile'
+      preLoaderRoute: typeof ChatOrbitPanelOrbitProfileRouteImport
+      parentRoute: typeof ChatOrbitPanelRoute
+    }
   }
 }
+
+interface ChatOrbitPanelRouteChildren {
+  ChatOrbitPanelOrbitConnectionRoute: typeof ChatOrbitPanelOrbitConnectionRoute
+  ChatOrbitPanelOrbitInstancesRoute: typeof ChatOrbitPanelOrbitInstancesRoute
+  ChatOrbitPanelOrbitProfileRoute: typeof ChatOrbitPanelOrbitProfileRoute
+}
+
+const ChatOrbitPanelRouteChildren: ChatOrbitPanelRouteChildren = {
+  ChatOrbitPanelOrbitConnectionRoute: ChatOrbitPanelOrbitConnectionRoute,
+  ChatOrbitPanelOrbitInstancesRoute: ChatOrbitPanelOrbitInstancesRoute,
+  ChatOrbitPanelOrbitProfileRoute: ChatOrbitPanelOrbitProfileRoute,
+}
+
+const ChatOrbitPanelRouteWithChildren = ChatOrbitPanelRoute._addFileChildren(
+  ChatOrbitPanelRouteChildren,
+)
 
 interface ChatSettingsRouteChildren {
   ChatSettingsAboutRoute: typeof ChatSettingsAboutRoute
@@ -948,6 +1076,8 @@ const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
 )
 
 interface ChatRouteChildren {
+  ChatOrbitPanelRoute: typeof ChatOrbitPanelRouteWithChildren
+  ChatIssuesRoute: typeof ChatIssuesRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatSettingsRoute: typeof ChatSettingsRouteWithChildren
@@ -955,9 +1085,12 @@ interface ChatRouteChildren {
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
+  ChatOrbitStartIdRoute: typeof ChatOrbitStartIdRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatOrbitPanelRoute: ChatOrbitPanelRouteWithChildren,
+  ChatIssuesRoute: ChatIssuesRoute,
   ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatSettingsRoute: ChatSettingsRouteWithChildren,
@@ -965,6 +1098,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
+  ChatOrbitStartIdRoute: ChatOrbitStartIdRoute,
 }
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)

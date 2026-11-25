@@ -1,3 +1,4 @@
+import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import {
   foldSearchQuery,
   PALETTE_SECONDARY_LIMIT,
@@ -19,22 +20,34 @@ import {
   type AddProjectRemoteSourceReadiness,
 } from "@t3tools/client-runtime/operations/projects";
 import {
+  type ScopedThreadRef,
   type EnvironmentId,
   type ProjectId,
   type EnvironmentMachineKind,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type OrbitInstanceDescriptor,
   type SourceControlDiscoveryResult,
   type SourceControlRepositoryInfo,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
+import {
+  startableOrbitProject,
+  type OrbitGatewayEnvironment,
+  type OrbitGatewayProjectCheck,
+  type OrbitGatewayProjectListing,
+} from "@t3tools/client-runtime/orbit-gateway";
+import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { type ReactNode } from "react";
+import { msg } from "gt-react";
+import { m, type MessageResolver } from "../i18n/messages";
+import type { OrbitDraftTarget } from "../orbit/orbitDraft";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
-import { isSidebarHiddenThread } from "./Sidebar.logic";
 
 export const RECENT_THREAD_LIMIT = 12;
+const NO_THREAD_KEYS: ReadonlySet<string> = new Set();
 export const ITEM_ICON_CLASS = "size-4 text-icon-muted";
 export const ADDON_ICON_CLASS = "size-4";
 
@@ -44,12 +57,15 @@ export function buildLinkedThreadActionItems(
     icon: ReactNode;
     runThread: (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) => Promise<void>;
   },
+  resolve: MessageResolver = m,
 ): CommandPaletteActionItem[] {
   return input.threads.map((thread) => ({
     kind: "action",
     value: `thread:${input.environmentId}:${thread.id}`,
-    title: thread.title || "Untitled thread",
-    description: thread.archivedAt === null ? "Linked thread" : "Archived thread",
+    threadRef: { environmentId: input.environmentId, threadId: thread.id },
+    title: thread.title || resolve(msg("Untitled thread")),
+    description:
+      thread.archivedAt === null ? resolve(msg("Linked thread")) : resolve(msg("Archived thread")),
     searchTerms: [input.query, thread.title],
     icon: input.icon,
     run: () => input.runThread({ environmentId: input.environmentId, id: thread.id }),
@@ -73,6 +89,8 @@ export type SearchOverlayMode = "command" | "files" | "content";
 
 export type CommandPaletteOpenIntent =
   | { readonly kind: "add-project" | "new-thread-in" | "change-theme" }
+  /** Conn: the Instance step of an Orbit draft's Project, from the composer's Instance chip. */
+  | { readonly kind: "orbit-instances"; readonly target: OrbitDraftTarget }
   | {
       readonly kind: "search";
       readonly query: string;
@@ -101,6 +119,7 @@ export type CommandPaletteUiAction =
   | { readonly _tag: "OpenAddProject" }
   | { readonly _tag: "OpenNewThreadIn" }
   | { readonly _tag: "OpenChangeTheme" }
+  | { readonly _tag: "OpenOrbitInstances"; readonly target: OrbitDraftTarget }
   | {
       readonly _tag: "OpenChildSearch";
       readonly mode: "files" | "content";
@@ -158,6 +177,8 @@ export function reduceCommandPaletteUiState(
       return openWithIntent({ kind: "new-thread-in" });
     case "OpenChangeTheme":
       return openWithIntent({ kind: "change-theme" });
+    case "OpenOrbitInstances":
+      return openWithIntent({ kind: "orbit-instances", target: action.target });
   }
 }
 
@@ -194,10 +215,13 @@ export interface CommandPaletteItem {
   readonly timestamp?: string;
   /** Thread rows rank by this, with use history, instead of by `searchTerms`. */
   readonly threadSearch?: ThreadSearchSubject;
+  readonly threadRef?: ScopedThreadRef;
   /** Shown in place of the description when the match is not in the title. */
   readonly matchHint?: SearchMatchHint;
   readonly icon: ReactNode;
   readonly disabled?: boolean;
+  /** Greyed out but still selectable, e.g. an Orbit Project in which threads cannot start yet. */
+  readonly dimmed?: boolean;
   readonly titleLeadingContent?: ReactNode;
   readonly titleTrailingContent?: ReactNode;
   readonly shortcutCommand?: KeybindingCommand;
@@ -210,6 +234,8 @@ export interface CommandPaletteActionItem extends CommandPaletteItem {
   readonly run: () => Promise<void>;
   /** A pin toggle on the row, also reached with the pin shortcut while the row is highlighted. */
   readonly pin?: CommandPaletteItemPin;
+  /** Set on toggle rows; exposed to assistive technology as `aria-checked`. */
+  readonly checked?: boolean;
 }
 
 export interface CommandPaletteItemPin {
@@ -348,15 +374,20 @@ export type CommandPaletteMode = "root" | "root-browse" | "submenu" | "submenu-b
 
 export type CommandPaletteProject = Project & { readonly displayName: string };
 
-export function buildCommandPaletteProjectMetadata(input: {
-  readonly projects: ReadonlyArray<Pick<Project, "environmentId" | "title" | "workspaceRoot">>;
-  readonly locationByEnvironmentId: ReadonlyMap<EnvironmentId, { readonly label: string }>;
-}) {
+export function buildCommandPaletteProjectMetadata(
+  input: {
+    readonly projects: ReadonlyArray<Pick<Project, "environmentId" | "title" | "workspaceRoot">>;
+    readonly locationByEnvironmentId: ReadonlyMap<EnvironmentId, { readonly label: string }>;
+  },
+  resolve: MessageResolver = m,
+) {
   const searchTerms: string[] = [];
   const environmentLabels = new Set<string>();
 
   for (const project of input.projects) {
-    const label = input.locationByEnvironmentId.get(project.environmentId)?.label ?? "Remote";
+    const label =
+      input.locationByEnvironmentId.get(project.environmentId)?.label ??
+      resolve(msg("Remote", { $context: "machine location" }));
     searchTerms.push(project.title, project.workspaceRoot, label);
     environmentLabels.add(label);
   }
@@ -420,21 +451,33 @@ export type BuildThreadActionItemsThread = Pick<
     updatedAt: string;
   };
 
-export function buildThreadActionItems<TThread extends BuildThreadActionItemsThread>(input: {
-  threads: ReadonlyArray<TThread>;
-  activeThread?: Pick<Thread, "environmentId" | "id">;
-  projectByKey: ReadonlyMap<string, Pick<Project, "title">>;
-  icon: ReactNode;
-  renderLeadingContent?: (thread: TThread) => ReactNode;
-  renderTrailingContent?: (thread: TThread) => ReactNode;
-  renderDescription?: (thread: TThread, meta: { projectTitle: string | undefined }) => ReactNode;
-  runThread: (thread: TThread) => Promise<void>;
-  /** Makes the environment searchable; pass it only with two or more environments. */
-  environmentLabelOf?: (thread: TThread) => string | null;
-}): CommandPaletteActionItem[] {
+export function buildThreadActionItems<TThread extends BuildThreadActionItemsThread>(
+  input: {
+    threads: ReadonlyArray<TThread>;
+    activeThread?: Pick<Thread, "environmentId" | "id">;
+    projectByKey: ReadonlyMap<string, Pick<Project, "title">>;
+    icon: ReactNode;
+    renderLeadingContent?: (thread: TThread) => ReactNode;
+    renderTrailingContent?: (thread: TThread) => ReactNode;
+    renderDescription?: (thread: TThread, meta: { projectTitle: string | undefined }) => ReactNode;
+    runThread: (thread: TThread) => Promise<void>;
+    /** Makes the environment searchable; pass it only with two or more environments. */
+    environmentLabelOf?: (thread: TThread) => string | null;
+    /** Tasks linked environments run for a listed thread; they open from under that thread. */
+    delegatedUnderParent?: ReadonlySet<string>;
+  },
+  resolve: MessageResolver = m,
+): CommandPaletteActionItem[] {
+  const delegatedUnderParent = input.delegatedUnderParent ?? NO_THREAD_KEYS;
   // Callers order these: recents by last use, search results by rank.
   const visibleThreads = input.threads.filter(
-    (thread) => thread.archivedAt === null && !isSidebarHiddenThread(thread),
+    (thread) =>
+      thread.archivedAt === null &&
+      !isShownUnderParent(
+        { environmentId: thread.environmentId, threadId: thread.id },
+        thread.lineage,
+        delegatedUnderParent,
+      ),
   );
 
   return visibleThreads.map((thread) => {
@@ -453,7 +496,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       thread.id === input.activeThread?.id &&
       thread.environmentId === input.activeThread.environmentId;
     if (isCurrent) {
-      descriptionParts.push("Current thread");
+      descriptionParts.push(resolve(msg("Current thread")));
     }
 
     const leadingContent = input.renderLeadingContent?.(thread);
@@ -466,6 +509,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       {
         kind: "action" as const,
         value: `thread:${thread.environmentId}:${thread.id}`,
+        threadRef: { environmentId: thread.environmentId, threadId: thread.id },
         searchTerms: [thread.title],
         threadSearch: threadSearchSubject(
           {
@@ -480,6 +524,8 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
         description,
         timestamp: formatRelativeTimeLabel(
           thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
+          undefined,
+          resolve,
         ),
         icon: input.icon,
       },
@@ -541,31 +587,37 @@ function scorePaletteItem(
  * Equal match classes put commands before threads, so "new" runs "New thread".
  * Server message matches stay in a final group so late results cannot move earlier rows.
  */
-export function filterCommandPaletteGroups(input: {
-  activeGroups: ReadonlyArray<CommandPaletteGroup>;
-  query: string;
-  isInSubmenu: boolean;
-  /** Submenu options join the root search, and a submenu with no match falls back to it. */
-  allOptions?: {
-    readonly rootGroups: ReadonlyArray<CommandPaletteGroup>;
-    readonly nestedItems: ReadonlyArray<CommandPaletteActionItem>;
-  };
-  projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
-  settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
-  threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
-  /** Threads whose messages match, best first; threads already listed are skipped. */
-  threadMessageItems?: ReadonlyArray<CommandPaletteActionItem>;
-  now?: number;
-}): CommandPaletteGroup[] {
+export function filterCommandPaletteGroups(
+  input: {
+    activeGroups: ReadonlyArray<CommandPaletteGroup>;
+    query: string;
+    isInSubmenu: boolean;
+    /** Submenu options join the root search, and a submenu with no match falls back to it. */
+    allOptions?: {
+      readonly rootGroups: ReadonlyArray<CommandPaletteGroup>;
+      readonly nestedItems: ReadonlyArray<CommandPaletteActionItem>;
+    };
+    projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+    settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
+    threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+    /** Threads whose messages match, best first; threads already listed are skipped. */
+    threadMessageItems?: ReadonlyArray<CommandPaletteActionItem>;
+    now?: number;
+  },
+  resolve: MessageResolver = m,
+): CommandPaletteGroup[] {
   if (input.allOptions && input.isInSubmenu) {
     const { allOptions, ...submenuInput } = input;
-    const scoped = filterCommandPaletteGroups(submenuInput);
+    const scoped = filterCommandPaletteGroups(submenuInput, resolve);
     if (scoped.length > 0 || input.query.trim().length === 0) return scoped;
-    return filterCommandPaletteGroups({
-      ...input,
-      activeGroups: allOptions.rootGroups,
-      isInSubmenu: false,
-    });
+    return filterCommandPaletteGroups(
+      {
+        ...input,
+        activeGroups: allOptions.rootGroups,
+        isInSubmenu: false,
+      },
+      resolve,
+    );
   }
 
   const isActionsFilter = input.query.startsWith(">");
@@ -594,28 +646,28 @@ export function filterCommandPaletteGroups(input: {
     if (input.allOptions && input.allOptions.nestedItems.length > 0) {
       searchableGroups.push({
         value: "nested-search",
-        label: "Suggestions",
+        label: resolve(msg("Suggestions")),
         items: input.allOptions.nestedItems,
       });
     }
     if (input.threadSearchItems.length > 0) {
       searchableGroups.push({
         value: "threads-search",
-        label: "Threads",
+        label: resolve(msg("Threads")),
         items: input.threadSearchItems,
       });
     }
     if (input.projectSearchItems.length > 0) {
       searchableGroups.push({
         value: "projects-search",
-        label: "Projects",
+        label: resolve(msg("Projects")),
         items: input.projectSearchItems,
       });
     }
     if (input.settingsSearchItems && input.settingsSearchItems.length > 0) {
       searchableGroups.push({
         value: "settings-search",
-        label: "Settings",
+        label: resolve(msg("Settings")),
         items: input.settingsSearchItems,
       });
     }
@@ -657,7 +709,10 @@ export function filterCommandPaletteGroups(input: {
   const messageItems = (input.threadMessageItems ?? []).filter((item) => !listed.has(item.value));
   return messageItems.length === 0
     ? groups
-    : [...groups, { value: "threads-messages", label: "In messages", items: messageItems }];
+    : [
+        ...groups,
+        { value: "threads-messages", label: resolve(msg("In messages")), items: messageItems },
+      ];
 }
 
 /** Every option inside a submenu as one row, e.g. "New thread in t3code" or "Change theme: Dracula". */
@@ -689,15 +744,18 @@ export function buildNestedSearchItems(
   });
 }
 
-export function buildBrowseGroups(input: {
-  browseEntries: ReadonlyArray<FilesystemBrowseEntry>;
-  browseQuery: string;
-  canBrowseUp: boolean;
-  upIcon: ReactNode;
-  directoryIcon: ReactNode;
-  browseUp: () => void | Promise<void>;
-  browseTo: (name: string) => void | Promise<void>;
-}): CommandPaletteGroup[] {
+export function buildBrowseGroups(
+  input: {
+    browseEntries: ReadonlyArray<FilesystemBrowseEntry>;
+    browseQuery: string;
+    canBrowseUp: boolean;
+    upIcon: ReactNode;
+    directoryIcon: ReactNode;
+    browseUp: () => void | Promise<void>;
+    browseTo: (name: string) => void | Promise<void>;
+  },
+  resolve: MessageResolver = m,
+): CommandPaletteGroup[] {
   const items: CommandPaletteActionItem[] = [];
 
   if (input.canBrowseUp) {
@@ -728,7 +786,7 @@ export function buildBrowseGroups(input: {
     });
   }
 
-  return [{ value: "directories", label: "Directories", items }];
+  return [{ value: "directories", label: resolve(msg("Directories")), items }];
 }
 
 export function filterPinnedBrowseEntries(input: {
@@ -743,9 +801,14 @@ export function filterPinnedBrowseEntries(input: {
     ? ""
     : input.filterQuery;
   const { visibleEntries } = filterFilesystemBrowseEntries(input.browseEntries, visibleFilterQuery);
+  const normalizedFilterQuery = input.filterQuery.normalize("NFC");
+  const normalizedMatches = input.browseEntries.filter((entry) =>
+    namesMatch(entry.name.normalize("NFC"), normalizedFilterQuery),
+  );
   const exactEntry =
     input.filterQuery.length > 0
-      ? (input.browseEntries.find((entry) => namesMatch(entry.name, input.filterQuery)) ?? null)
+      ? (input.browseEntries.find((entry) => namesMatch(entry.name, input.filterQuery)) ??
+        (normalizedMatches.length === 1 ? normalizedMatches[0] : null))
       : null;
   return { visibleEntries, exactEntry };
 }
@@ -760,34 +823,40 @@ export function getCommandPaletteMode(input: {
   return input.isBrowsing ? "root-browse" : "root";
 }
 
-export function buildRootGroups(input: {
-  actionItems: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
-  recentThreadItems: ReadonlyArray<CommandPaletteActionItem>;
-}): CommandPaletteGroup[] {
+export function buildRootGroups(
+  input: {
+    actionItems: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
+    recentThreadItems: ReadonlyArray<CommandPaletteActionItem>;
+  },
+  resolve: MessageResolver = m,
+): CommandPaletteGroup[] {
   const groups: CommandPaletteGroup[] = [];
   if (input.actionItems.length > 0) {
-    groups.push({ value: "actions", label: "Actions", items: input.actionItems });
+    groups.push({ value: "actions", label: resolve(msg("Actions")), items: input.actionItems });
   }
   if (input.recentThreadItems.length > 0) {
     groups.push({
       value: "recent-threads",
-      label: "Recent Threads",
+      label: resolve(msg("Recent Threads")),
       items: input.recentThreadItems,
     });
   }
   return groups;
 }
 
-export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {
+export function getCommandPaletteInputPlaceholder(
+  mode: CommandPaletteMode,
+  resolve: MessageResolver = m,
+): string {
   switch (mode) {
     case "root":
-      return "Search commands, projects, and threads...";
+      return resolve(msg("Search commands, projects, and threads..."));
     case "root-browse":
-      return "Enter project path (e.g. ~/projects/my-app)";
+      return resolve(msg("Enter project path (e.g. ~/projects/my-app)"));
     case "submenu":
-      return "Search...";
+      return resolve(msg("Search..."));
     case "submenu-browse":
-      return "Enter path (e.g. ~/projects/my-app)";
+      return resolve(msg("Enter path (e.g. ~/projects/my-app)"));
   }
 }
 
@@ -828,38 +897,35 @@ export type AddProjectCloneFlow =
       readonly remoteUrl: string;
     };
 
-export function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string | null {
+export function remoteProjectInputPlaceholder(
+  flow: AddProjectCloneFlow | null,
+  resolve: MessageResolver = m,
+): string | null {
   if (!flow) return null;
   if (flow.step === "confirm") return null;
   if (flow.source === "url") {
-    return "Enter Git clone URL";
+    return resolve(msg("Enter Git clone URL"));
   }
-  return `Enter ${addProjectRemoteSourceLabel(flow.source)} repository (${addProjectRemoteSourcePathHint(flow.source)})`;
+  return resolve(
+    msg("Enter {source} repository ({hint})", {
+      source: addProjectRemoteSourceLabel(flow.source, resolve),
+      hint: addProjectRemoteSourcePathHint(flow.source, resolve),
+    }),
+  );
 }
 
 export function buildPaletteRemoteSourceReadiness(
   discovery: SourceControlDiscoveryResult | null,
+  resolve: MessageResolver = m,
 ): AddProjectRemoteSourceReadiness {
-  const readiness = buildAddProjectRemoteSourceReadiness(discovery);
-  return (source) => {
-    const entry = readiness(source);
-    return entry.hint === null
-      ? entry
-      : {
-          ...entry,
-          hint: entry.hint.replace(
-            "Open source control settings",
-            "Open Settings -> Source control",
-          ),
-        };
-  };
+  return buildAddProjectRemoteSourceReadiness(discovery, resolve);
 }
 
-export function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-  return "An error occurred.";
+export function errorMessage(error: unknown, resolve: MessageResolver = m): string {
+  return (
+    (error instanceof Error ? errorDisplayMessage(error, resolve) : null) ??
+    resolve(msg("An error occurred."))
+  );
 }
 
 const OVERLAY_MODE_BY_COMMAND = {
@@ -903,4 +969,115 @@ export function newThreadNoProjectIndex(
   }
   const pinnedCount = projects.filter((entry) => entry.pinned).length;
   return Math.min(pinnedCount + 1, projects.length);
+}
+
+/**
+ * Conn: the Orbit Projects of the New thread list in the desktop app in Orbit mode. `off` leaves the list
+ * as it was; the others are the states the design shows under the local projects.
+ */
+export type OrbitPaletteProjectsState =
+  | { readonly status: "off" }
+  | { readonly status: "loading" }
+  | { readonly status: "unreachable" }
+  | {
+      readonly status: "loaded";
+      readonly projects: ReadonlyArray<OrbitGatewayProjectListing>;
+      /** The Gateway's environment list: the Instance step's rows and the counts. */
+      readonly environments: ReadonlyArray<OrbitGatewayEnvironment>;
+    };
+
+export interface OrbitPaletteProjectRow {
+  readonly id: number;
+  readonly slug: string;
+  readonly name: string;
+  readonly instanceCount: number;
+  readonly nodeName: string | null;
+  /** Such as `.nckrtl.test`; null when Orbit sent none. */
+  readonly domainSuffix: string | null;
+  /** False for a Project in which threads cannot start yet; its row stays selectable. */
+  readonly startable: boolean;
+  /** Why threads cannot start, when Orbit said; null otherwise. */
+  readonly reason: string | null;
+  /** Orbit's start checks in its order; null when the Gateway sent none. */
+  readonly checks: ReadonlyArray<OrbitGatewayProjectCheck> | null;
+}
+
+/** Orbit refuses `default` as a clone name; it is the Project's default Instance, never a target. */
+const ORBIT_DEFAULT_INSTANCE_NAME = "default";
+
+/** The Project's Instances in the Gateway's environment list, the default never counted. */
+export function orbitProjectInstanceCount(
+  projectId: number,
+  environments: ReadonlyArray<
+    Pick<OrbitGatewayEnvironment, "instanceId" | "projectId" | "instanceName">
+  >,
+): number {
+  const instanceIds = new Set<number>();
+  for (const environment of environments) {
+    if (environment.projectId !== projectId || environment.instanceId === null) continue;
+    if (environment.instanceName === ORBIT_DEFAULT_INSTANCE_NAME) continue;
+    instanceIds.add(environment.instanceId);
+  }
+  return instanceIds.size;
+}
+
+/** Projects in which threads can start come first, so many greyed rows do not bury them. */
+export function buildOrbitPaletteProjectRows(
+  state: OrbitPaletteProjectsState,
+): OrbitPaletteProjectRow[] {
+  if (state.status !== "loaded") return [];
+  const rows = state.projects.map((project) => ({
+    id: project.id,
+    slug: project.slug,
+    name: project.name,
+    instanceCount: orbitProjectInstanceCount(project.id, state.environments),
+    nodeName: project.nodeName,
+    domainSuffix: project.instanceDomainSuffix,
+    startable: startableOrbitProject(project) !== null,
+    // `cloneable_reason` is a code such as instance.default_missing; only a check's message reads.
+    reason: oneLineReason(project.checks?.find((check) => check.status === "fail")?.message),
+    checks: project.checks,
+  }));
+  return rows.filter((row) => row.startable).concat(rows.filter((row) => !row.startable));
+}
+
+const REASON_MAX_LENGTH = 80;
+
+function oneLineReason(message: string | null | undefined): string | null {
+  const line = message?.split("\n")[0]?.trim();
+  if (!line) return null;
+  const characters = Array.from(line);
+  return characters.length > REASON_MAX_LENGTH
+    ? `${characters.slice(0, REASON_MAX_LENGTH - 1).join("")}…`
+    : line;
+}
+
+export function orbitPaletteProjectSubline(row: OrbitPaletteProjectRow): string {
+  if (!row.startable) {
+    return row.reason
+      ? `orbit · cannot start threads: ${row.reason}`
+      : "orbit · cannot start threads yet";
+  }
+  if (row.instanceCount === 0) return "orbit · no instances";
+  return `orbit · ${row.instanceCount} instance${row.instanceCount === 1 ? "" : "s"}`;
+}
+
+/**
+ * The environments whose project rows leave the New thread list: clones collapse into their Orbit
+ * Project's row. While the list loads or fails every clone row goes, since only local projects
+ * show then; once loaded, a clone of a Project the list leaves out keeps its row.
+ */
+export function collapsedOrbitCloneEnvironmentIds(
+  state: OrbitPaletteProjectsState,
+  clones: Readonly<Record<string, Pick<OrbitInstanceDescriptor, "projectId" | "instanceName">>>,
+): ReadonlySet<string> {
+  if (state.status === "off") return new Set();
+  const listed =
+    state.status === "loaded" ? new Set(state.projects.map((project) => project.id)) : null;
+  const collapsed = new Set<string>();
+  for (const [environmentId, clone] of Object.entries(clones)) {
+    if (clone.instanceName === ORBIT_DEFAULT_INSTANCE_NAME) continue;
+    if (listed === null || listed.has(clone.projectId)) collapsed.add(environmentId);
+  }
+  return collapsed;
 }

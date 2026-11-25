@@ -1,0 +1,978 @@
+//! The engine API: the three calls a Conn client makes to work with threads.
+//!
+//! | RPC method                        | Engine call             |
+//! |-----------------------------------|-------------------------|
+//! | `orchestration.dispatchCommand`   | [`Engine::dispatch`]     |
+//! | `orchestration.subscribeShell`    | [`Engine::subscribe_shell`]  |
+//! | `orchestration.subscribeThread`   | [`Engine::subscribe_thread`] |
+//!
+//! Commands, stream items and errors are the contract types from `conn-contract`, so the
+//! server passes them through without knowing their shape. The engine owns the event store,
+//! the projections, and the providers it drives (`conn-provider`).
+//!
+//! [`SqliteEngine`] implements it on SQLite. The three stream and dispatch signatures are
+//! fixed; the other methods back `orchestration.launchThread`, `getThreadProjection` and the
+//! HTTP snapshots, and use JSON until `conn-contract` has their types.
+
+#![recursion_limit = "256"]
+
+use std::{future::Future, pin::Pin};
+
+mod attention;
+mod background;
+mod background_wait;
+mod calls;
+mod checkpoint;
+pub mod citations;
+mod clock;
+mod commands;
+mod composer_context;
+mod effect_worker;
+pub use commands::{completed_without_result, provider_stop_reason_id};
+mod engine;
+mod feedback;
+mod guard;
+mod handoff;
+mod mcp_apps;
+mod merge_back;
+mod thread_locks;
+
+/// Locks a std mutex. A poisoned lock means a thread panicked while it held the lock: a bug.
+/// With `panic = "abort"` a release build stops at the panic itself.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("conn-engine lock poisoned")
+}
+
+#[cfg(test)]
+mod engine_tests;
+#[cfg(any(test, feature = "fake-provider"))]
+pub mod fake;
+mod families;
+mod fold;
+mod fork;
+mod fresh;
+mod history;
+mod html_cleanup;
+mod limit_recovery;
+mod link_requests;
+mod outbox;
+mod outline;
+mod output;
+mod projects;
+mod provider_handoff;
+mod pull_requests;
+mod push;
+mod reads;
+mod restart;
+mod rollback;
+mod runner;
+mod secret_requests;
+mod settlement;
+mod shell;
+mod store;
+mod streaming;
+mod streams;
+mod t3_import;
+mod thread_find;
+mod time;
+mod titles;
+mod transcript;
+pub use conn_provider::tool_output;
+mod visibility;
+
+pub use attention::{AttentionOutboxRow, RELEASED_COMPLETION_GRACE_MS};
+pub use background_wait::{BackgroundWait, BackgroundWaitError};
+pub use clock::{Clock, ManualClock, SystemClock};
+pub use engine::{
+    CleanupThreads, CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, IdleTimeout,
+    ProjectConfig, RuntimePolicyOverride, STORE_IN_USE, SqliteEngine,
+};
+pub use families::{delegated_task_result, monitor_runs};
+pub use fold::{SearchField, field_holds_words, fold, fold_field, fold_search_query, match_fields};
+pub use guard::{
+    CommitDecision, CommitGate, DispatchGuard, GuardRule, OwnedMessage, is_frozen_message,
+};
+pub use restart::RestartPolicy;
+pub use streaming::ResponseStreamingMode;
+pub use t3_import::{
+    ImportProgress, ImportReport, import_t3_state, import_t3_state_with_progress, open_t3_read_only,
+};
+
+/// What a [`TitleGenerator`] titles: the first message of a new thread, or a whole thread whose
+/// title the user asked to regenerate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TitleRequest {
+    pub thread_id: String,
+    /// The thread's project, whose settings may choose another model.
+    pub project_id: Option<String>,
+    /// The folder the thread works in, for a generator that reads linked files.
+    pub cwd: Option<String>,
+    /// The project's title, which a good thread title does not repeat.
+    pub project_title: Option<String>,
+    pub kind: TitleKind,
+}
+
+/// One finished message: its role, text and attachments (`ChatAttachment` objects).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TitleMessage {
+    pub role: String,
+    pub text: String,
+    pub attachments: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TitleKind {
+    /// The thread's first user message.
+    Initial { message: TitleMessage },
+    /// The current title and the thread's finished user and assistant messages, oldest
+    /// first. The generator chooses what fits (`formatThreadTitleContext`).
+    Regenerate {
+        previous_title: String,
+        messages: Vec<TitleMessage>,
+    },
+}
+
+/// Where a turn starts or ends, for a [`TurnObserver`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnPoint {
+    pub thread_id: String,
+    pub run_id: String,
+    /// 1 for the thread's first run; checkpoint `n` is the workspace after run `n`.
+    pub run_ordinal: u64,
+    pub root_node_id: String,
+    /// The folder the turn works in: the thread's worktree, else its project root.
+    pub cwd: Option<String>,
+}
+
+/// Watches turns start and end; the hook for per-turn git checkpoints (`getTurnDiff`,
+/// `getFullThreadDiff`, restore).
+///
+/// [`TurnObserver::turn_started`] runs after the run is `running` and before the provider
+/// gets the message, and the turn waits for it: a baseline taken there holds no change of this
+/// turn. [`TurnObserver::turn_ended`] runs after the run's final status is committed, once per
+/// run that started (`completed`, `interrupted`, `failed` or `cancelled`), off the turn's path.
+/// A failing observer must log and return; it cannot fail the turn. Wire one with
+/// [`EngineConfig::turn_observer`].
+pub trait TurnObserver: Send + Sync {
+    fn turn_started(&self, point: TurnPoint) -> BoxFuture<'_, ()>;
+    fn turn_ended(&self, point: TurnPoint, status: String) -> BoxFuture<'_, ()>;
+}
+
+/// The server's services the engine calls out to. Every method has a no-op default, so a test
+/// or a server without the service passes nothing. Wire one with [`EngineConfig::host`].
+pub trait EngineHost: Send + Sync {
+    /// MCP servers for a provider session about to open, and the key that revokes them.
+    fn agent_tools(&self, _session: AgentSession) -> Option<AgentTools> {
+        None
+    }
+
+    /// Whether the tools issued under `key` are still valid and fit `session` (T3's
+    /// `prepareMcpSession` reuse check), so a shared process's next session may keep them.
+    fn agent_tools_fit(&self, _session: &AgentSession, _key: &str) -> bool {
+        false
+    }
+
+    /// A provider session closed: revoke what [`EngineHost::agent_tools`] issued under `key`.
+    fn session_closed(&self, _key: &str) {}
+
+    /// A live provider session ended, whether or not it revoked agent tools: a folder it held
+    /// may be free now.
+    fn session_released(&self) {}
+
+    /// The host handle a new provider session gets for its agent's file and terminal
+    /// callbacks (`ProviderHost`). `None`: the server offers none (today's server).
+    fn provider_host(&self, _session: AgentSession) -> Option<conn_provider::HostHandle> {
+        None
+    }
+
+    /// `resolveProjectProviderInstanceEnabled` from the server's settings: whether a command
+    /// may start work on `instance_id` in `project_id`. A disabled one refuses the command at
+    /// dispatch, as T3's `assertDispatchTargetEnabled` does. The default allows all.
+    fn provider_instance_enabled(&self, _project_id: Option<&str>, _instance_id: &str) -> bool {
+        true
+    }
+
+    /// Whether a queued run may start on `instance_id`, by T3's queue rule
+    /// (`startNextQueuedRun`): only an explicit project override or a machine entry disables
+    /// it. Default: the dispatch rule.
+    fn queue_instance_enabled(&self, project_id: Option<&str>, instance_id: &str) -> bool {
+        self.provider_instance_enabled(project_id, instance_id)
+    }
+
+    /// Reloads settings whose last load failed in a way that may have passed, before work is
+    /// admitted against them (T3 keeps a failed settings load for no time). Off the runtime
+    /// thread when it reads files.
+    fn refresh_settings(&self) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// `responseStreamingMode` of `project_id` (`resolveProjectSettings`): how streamed
+    /// assistant text is stored. The default is T3's default, `paragraph`.
+    fn usage_limit_preferences(&self) -> (bool, bool) {
+        (false, false)
+    }
+
+    fn response_streaming_mode(&self, _project_id: Option<&str>) -> ResponseStreamingMode {
+        ResponseStreamingMode::Paragraph
+    }
+
+    /// Copies a message's pending uploads to the thread before the message is written. The
+    /// result replaces the command's `attachments`; an error refuses the command.
+    fn claim_attachments(
+        &self,
+        _thread_id: String,
+        attachments: Value,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(std::future::ready(Ok(attachments)))
+    }
+
+    /// The message that claimed `attachments` was refused: remove the copies.
+    fn release_attachments(&self, _attachments: Value) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// Refuses an edit that keeps a saved file which is gone (another client's edit dropped
+    /// and removed it). Pending uploads are the claim's to check.
+    fn check_retained_attachments(&self, _attachments: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// One line per claimed attachment naming its readable path, for a question's answer
+    /// (`appendUserInputAttachmentPaths`). An error refuses the answer.
+    fn attachment_references(
+        &self,
+        _attachments: Value,
+    ) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
+    }
+
+    /// The file count and image budget for a whole question response, before any copy
+    /// (`validateAttachmentLimits`). An error refuses the answer.
+    fn check_attachment_limits(&self, _attachments: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// Removes thread files no message or answer names any more (`attachment.cleanup`).
+    fn delete_attachments(&self, _ids: Vec<String>) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// Stores a bounded, sandboxed MCP App document as a thread attachment.
+    fn snapshot_mcp_app(
+        &self,
+        _thread: String,
+        _source: conn_provider::mcp_apps::Source,
+        _contents: Value,
+    ) -> BoxFuture<'_, Result<Option<Value>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Creates a git worktree for `launchThread` with a `worktree` strategy.
+    fn provision_worktree(
+        &self,
+        _request: WorktreeRequest,
+    ) -> BoxFuture<'_, Result<ProvisionedWorktree, String>> {
+        Box::pin(std::future::ready(Err(
+            "This server cannot create worktrees.".to_owned(),
+        )))
+    }
+
+    /// A worktree launch committed its thread and handed off its first run, if any: its
+    /// setup's agent stage ends now, as T3 marks it done once the launch is prepared, even
+    /// when the provider then fails before a turn starts.
+    fn launch_committed(&self, _thread_id: &str) {}
+
+    /// A worktree made for a command that the engine then refused (`refused` holds why) or
+    /// that an earlier attempt had already accepted (`None`): remove it, then its branch. An
+    /// `Err` says what stayed: the branch goes only once its worktree is gone.
+    fn discard_worktree(
+        &self,
+        _thread_id: String,
+        _project_root: String,
+        _worktree: ProvisionedWorktree,
+        _refused: Option<String>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// Asks the worktree setup running for `thread_id` to stop, as T3 interrupts a launch's
+    /// preparation at shutdown. The setup removes what it made and fails. The default has
+    /// nothing to stop.
+    fn cancel_preparation(&self, _thread_id: &str) {}
+
+    /// `restoreMissingWorktree` at turn start: recreates the thread's missing managed worktree
+    /// from its branch. The caller holds the worktree's lease. `true` when it is a checkout
+    /// again; the default restores nothing.
+    fn restore_worktree(&self, _worktree: ThreadWorktree) -> BoxFuture<'_, bool> {
+        Box::pin(std::future::ready(false))
+    }
+
+    /// The branch checked out in `cwd` (`GitWorkflowService.currentBranch`): `None` when HEAD
+    /// is detached, the folder is no checkout, or git fails. A project-folder launch that
+    /// names no branch records it. The default knows none.
+    fn current_branch(&self, _cwd: &str) -> BoxFuture<'_, Option<String>> {
+        Box::pin(std::future::ready(None))
+    }
+
+    /// Removes HTML pages whose owning thread and visible forks no longer use them.
+    fn cleanup_html_attachments(&self, _ids: Vec<(String, String)>) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// A thread was archived, deleted or settled; end what it holds open (terminals).
+    /// The effect settles once the returned future ends, so a replayed close finishes its
+    /// cleanup (a deleted thread's scheduled tasks) before its row settles. An error is tried
+    /// again, then recorded on the row (`failed`).
+    fn thread_closed(
+        &self,
+        _thread_id: &str,
+        _reason: ThreadClose,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// A remote task of `thread_id` now owes its thread in a linked environment a stop.
+    fn remote_task_changed(&self, _thread_id: &str, _task_id: &str) {}
+}
+
+/// A provider session asking for agent tools.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentSession {
+    pub thread_id: String,
+    pub project_id: Option<String>,
+    pub provider_instance_id: String,
+    /// The thread is a delegated child (`lineage.relationshipToParent: subagent`).
+    pub subagent: bool,
+}
+
+/// What [`EngineHost::agent_tools`] grants one provider session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentTools {
+    pub servers: Vec<conn_provider::McpServer>,
+    /// Passed back to [`EngineHost::session_closed`].
+    pub key: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorktreeRequest {
+    pub thread_id: String,
+    /// The project, for its settings overrides (`worktreeSubmodules`).
+    pub project_id: Option<String>,
+    /// The link that starts the thread (`linkOrigin`). A link below full access runs no
+    /// setup script (`linkOriginIsFenced`).
+    pub link_origin: Option<Value>,
+    /// Whether the checkout runs the project's setup script. A launch does; a `worktree`
+    /// delegate does not: its child runs the script while its run waits in `preparing`.
+    pub run_setup: bool,
+    pub project_root: String,
+    pub base_ref: String,
+    pub branch: Option<String>,
+    pub start_from_origin: bool,
+    pub missing_base: conn_vcs::setup::MissingBase,
+}
+
+/// A thread's worktree as a terminal needs it (`getThreadShell` in T3's
+/// `prepareTerminalLaunch`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadWorktree {
+    pub worktree_path: String,
+    pub branch: Option<String>,
+    /// The thread's project's workspace root.
+    pub project_root: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProvisionedWorktree {
+    pub path: String,
+    pub branch: String,
+}
+
+/// The query of `GET /api/orchestration/shell` (`answerShellSnapshot`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HttpShellQuery {
+    pub omit_idle_subagents: bool,
+    pub omit_older_settled: bool,
+    pub resume_from: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadClose {
+    Archived,
+    Deleted,
+    /// A settlement: the thread was not settled before. `settled_at` is the committed
+    /// `settledAt`, which names this settlement.
+    Settled {
+        settled_at: String,
+    },
+    /// A settle of a thread that already was, which keeps its `settledAt`: its terminals close
+    /// again, but the settlement's one-time cleanup (the settle script) does not run again.
+    SettledAgain {
+        settled_at: String,
+    },
+    /// A settle close an earlier build stored without its settlement (`"settled"`). Its
+    /// terminals close, but nothing shows whether its settle script ran, so it does not run.
+    SettledUnnamed,
+}
+
+/// Asks a small model for a thread title (`generateTitle`, `regenerateTitle`). The engine
+/// keeps the seed title when this fails. Wire one with [`EngineConfig::title_generator`].
+pub trait TitleGenerator: Send + Sync {
+    fn generate(&self, request: TitleRequest) -> BoxFuture<'_, Result<String, String>>;
+}
+
+use conn_contract::{
+    Command, DispatchCommandError, DispatchCommandResult, GetShellSnapshotError,
+    GetThreadProjectionError, ShellStreamItem, SubscribeShellInput, SubscribeThreadInput, ThreadId,
+    ThreadStreamItem,
+};
+use serde_json::Value;
+use tokio::sync::mpsc;
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The `_tag` a refused dispatch's `cause` carries when the thread was archived before the
+/// send was admitted: T3's `ThreadManagementThreadArchivedError`.
+pub const THREAD_ARCHIVED_ERROR: &str = "ThreadManagementThreadArchivedError";
+
+/// Why a thread may not receive a send from an agent or a schedule, as `sendToThread` checks
+/// it (`ThreadManagementService.ts:872`): an archived thread receives no message. `thread` is
+/// a projection's `thread`. Both the `/mcp` send and the scheduled-task runner ask this.
+pub fn send_refusal(thread: &Value) -> Option<String> {
+    (!thread["archivedAt"].is_null()).then(|| {
+        format!(
+            "Thread {} is archived and cannot receive messages.",
+            thread["id"].as_str().unwrap_or_default()
+        )
+    })
+}
+
+/// A live stream for one client subscription.
+///
+/// Items arrive in order. An `Err` item ends the stream with that typed error; a closed
+/// channel ends it successfully. Dropping the receiver unsubscribes. Use a small bound
+/// (16 is plenty): the server forwards items only as fast as the client acknowledges them.
+pub type Subscription<T, E> = mpsc::Receiver<Result<T, E>>;
+
+/// Why an engine call failed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EngineError<E> {
+    /// A typed contract error. The client receives it as a `Fail` exit.
+    Rejected(E),
+    /// A bug or broken invariant. The client receives it as a `Die` exit.
+    Internal(String),
+}
+
+pub trait Engine: Send + Sync {
+    /// The project's provider policy, before selecting an instance by driver.
+    fn provider_instance_enabled(&self, _project_id: &str, _instance_id: &str) -> bool {
+        true
+    }
+    /// Records, durably, that the settle script of `thread_id`'s settlement `settled_at`
+    /// starts: `true` the first time, `false` once any process recorded it.
+    fn claim_settle_script<'a>(
+        &'a self,
+        _thread_id: &'a str,
+        _settled_at: &'a str,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(std::future::ready(Ok(true)))
+    }
+
+    /// Whether a command already committed; retries must use its recorded target.
+    fn has_receipt<'a>(&'a self, _command_id: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(std::future::ready(Ok(false)))
+    }
+
+    /// The status in a command's original run.created event, including a replayed receipt.
+    fn created_run_status<'a>(
+        &'a self,
+        _command_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>, String>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+
+    /// Decides, persists and applies one command. Resolves once its events are committed,
+    /// with the sequence of the last event, so a client can wait for it on its streams.
+    fn dispatch(
+        &self,
+        command: Command,
+    ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>>;
+
+    /// [`Engine::dispatch`] with an ownership check that runs atomically with the command
+    /// ([`DispatchGuard`]). A replay of an accepted command ID is refused. An engine that
+    /// cannot check refuses every guarded command.
+    fn dispatch_guarded(
+        &self,
+        _command: Command,
+        _guard: DispatchGuard,
+        _commit_gate: Option<std::sync::Arc<dyn CommitGate>>,
+    ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>> {
+        Box::pin(std::future::ready(Err(EngineError::Internal(
+            "this engine cannot check command ownership".into(),
+        ))))
+    }
+
+    /// Whether a thread with this ID was ever deleted, so its ID may carry an earlier
+    /// thread's rows. An engine that cannot tell answers `true`.
+    fn thread_ever_deleted(&self, _thread_id: &str) -> BoxFuture<'_, Result<bool, String>> {
+        Box::pin(std::future::ready(Ok(true)))
+    }
+
+    /// Every thread's committed `command_execution` item updates and run updates, from now on,
+    /// as `(thread id, event)` (the part of T3's `streamDomainEvents` the pull request watch
+    /// reads). An engine without them answers an error.
+    fn subscribe_command_events(
+        &self,
+    ) -> BoxFuture<'_, Result<mpsc::Receiver<(String, Value)>, String>> {
+        Box::pin(std::future::ready(Err(
+            "this engine has no command events".to_owned()
+        )))
+    }
+
+    /// The shell stream: projects and thread summaries. Starts with a `snapshot` item (or
+    /// replays from `afterSequence`), then `synchronized`, then live updates.
+    fn subscribe_shell(
+        &self,
+        input: SubscribeShellInput,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Subscription<ShellStreamItem, GetShellSnapshotError>,
+            EngineError<GetShellSnapshotError>,
+        >,
+    >;
+
+    /// One thread's stream: a `snapshot` of its projection (or a replay from
+    /// `afterSequence`), then `synchronized`, then live `event` items.
+    fn subscribe_thread(
+        &self,
+        input: SubscribeThreadInput,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Subscription<ThreadStreamItem, GetThreadProjectionError>,
+            EngineError<GetThreadProjectionError>,
+        >,
+    >;
+
+    /// `orchestration.launchThread`: creates a thread and sends its first message in one call,
+    /// which is how a client starts a new thread. Input `OrchestrationV2ThreadLaunchInput`,
+    /// result `OrchestrationV2ThreadLaunchResult`, error `OrchestrationV2ThreadLaunchError`.
+    fn launch_thread(&self, input: Value) -> BoxFuture<'_, Result<Value, EngineError<Value>>> {
+        self.launch_thread_with(input, conn_vcs::setup::MissingBase::Fail)
+    }
+
+    /// [`Engine::launch_thread`] for a trusted caller that says what a `worktree` strategy's
+    /// missing base does. Only the scheduler passes [`MissingBase::FallBack`](
+    /// conn_vcs::setup::MissingBase::FallBack), for a saved strategy that outlived its base;
+    /// a client's launch names its base now and fails without it.
+    fn launch_thread_with(
+        &self,
+        _input: Value,
+        _missing_base: conn_vcs::setup::MissingBase,
+    ) -> BoxFuture<'_, Result<Value, EngineError<Value>>> {
+        unsupported("orchestration.launchThread")
+    }
+
+    /// `orchestration.getThreadProjection`: `OrchestrationV2ThreadProjection`.
+    fn get_thread_projection(
+        &self,
+        _thread_id: ThreadId,
+    ) -> BoxFuture<'_, Result<Value, EngineError<GetThreadProjectionError>>> {
+        unsupported("orchestration.getThreadProjection")
+    }
+
+    /// The thread's worktree, from its stored row; `None` for a thread without one.
+    fn thread_worktree(
+        &self,
+        _thread_id: &str,
+    ) -> BoxFuture<'_, Result<Option<ThreadWorktree>, String>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+
+    /// Holds the workspace lock that turn preparation and checkpoint capture take for the
+    /// folder `root` (`withWorkspaceLease`). `None` when this engine takes none.
+    fn workspace_lease<'a>(
+        &'a self,
+        _root: &'a str,
+    ) -> BoxFuture<'a, Option<conn_vcs::locks::WorkspaceLock<'a>>> {
+        Box::pin(std::future::ready(None))
+    }
+
+    /// `GET /api/orchestration/shell`: `OrchestrationV2ShellSnapshot`.
+    fn shell_snapshot(&self) -> BoxFuture<'_, Result<Value, EngineError<GetShellSnapshotError>>> {
+        unsupported("the shell snapshot")
+    }
+
+    /// `GET /api/orchestration/shell` with the client's query: `None` when the shell stream
+    /// can resume from `resume_from` (the client keeps its rows), else the snapshot trimmed as
+    /// a fresh `subscribeShell` with the same options trims it.
+    fn http_shell_snapshot(
+        &self,
+        _options: HttpShellQuery,
+    ) -> BoxFuture<'_, Result<Option<Value>, EngineError<GetShellSnapshotError>>> {
+        unsupported("the shell snapshot")
+    }
+
+    /// Live project summaries, without loading thread projections.
+    fn projects_snapshot(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<Value>, EngineError<GetShellSnapshotError>>> {
+        Box::pin(async move {
+            let shell = self.shell_snapshot().await?;
+            Ok(shell
+                .get("projects")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default())
+        })
+    }
+
+    /// The unary and stream RPC methods [`Engine::call`] and [`Engine::open_stream`] serve, by
+    /// tag. The server registers each one; the rest answer "not supported".
+    fn methods(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// A unary method from [`Engine::methods`] (`projects.mutate`, `orchestration.searchThreads`,
+    /// ...). Input and output are the contract's JSON for that tag; `Rejected` holds the
+    /// method's typed error.
+    fn call(
+        &self,
+        method: &str,
+        _input: Value,
+    ) -> BoxFuture<'_, Result<Value, EngineError<Value>>> {
+        let method = method.to_owned();
+        Box::pin(async move {
+            Err(EngineError::Internal(format!(
+                "this engine does not support {method}"
+            )))
+        })
+    }
+
+    /// A stream method from [`Engine::methods`], with the same JSON rules as [`Engine::call`].
+    fn open_stream(
+        &self,
+        method: &str,
+        _input: Value,
+    ) -> BoxFuture<'_, Result<Subscription<Value, Value>, EngineError<Value>>> {
+        let method = method.to_owned();
+        Box::pin(async move {
+            Err(EngineError::Internal(format!(
+                "this engine does not support {method}"
+            )))
+        })
+    }
+
+    /// Records a link card (`link_request.record`) without exposing an internal command
+    /// through client dispatch.
+    fn record_link_request(&self, _input: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Link requests are not supported.".into()
+        )))
+    }
+
+    /// `thread.pull-request-watch.sync`: what the server's watch loop read, and its wake. Not a
+    /// client command, so it never goes through [`Engine::dispatch`].
+    fn sync_pull_request_watch(&self, _command: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Pull request watches are not supported.".into(),
+        )))
+    }
+
+    /// Records a secret card without exposing an internal command through client dispatch.
+    fn record_secret_request(&self, _input: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Secret requests are not supported.".into(),
+        )))
+    }
+
+    /// A task in a linked environment (`delegated_task.remote.request`, `.complete`, `.stop`):
+    /// internal commands, so they never go through [`Engine::dispatch`]. `Err` when the engine
+    /// refused it or it changed nothing; the caller reads the task to learn which.
+    fn remote_task(&self, _command: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Tasks in linked environments are not supported.".into(),
+        )))
+    }
+
+    /// `cancelDelegatedTask`: Stop for a task's child thread (`threadId`), recording the task
+    /// (`parentThreadId`, `taskId`) as cancelled in the same write. Refused, with `code`
+    /// `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied`, when the child
+    /// or a thread under it runs above `modeLimit`. An internal command, so it never goes
+    /// through [`Engine::dispatch`].
+    fn cancel_delegated_task(
+        &self,
+        _command: Value,
+    ) -> BoxFuture<'_, Result<(), EngineError<Value>>> {
+        unsupported("cancelling a delegated task")
+    }
+
+    /// The thread's subagent rows alone (`getThreadRecords(threadId, ["subagents"])`), for a
+    /// follower that must not load the thread's whole history.
+    fn subagent_rows(&self, _thread_id: &str) -> BoxFuture<'_, Result<Vec<Value>, String>> {
+        Box::pin(std::future::ready(Ok(vec![])))
+    }
+
+    /// `(parentThreadId, taskId)` of each remote task a follower still owes something, at most
+    /// `limit` (`getOpenRemoteDelegatedTasks`).
+    fn open_remote_tasks(
+        &self,
+        _limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<(String, String)>, String>> {
+        Box::pin(std::future::ready(Ok(vec![])))
+    }
+
+    /// Closes every provider session before the server exits, so no provider process, nor a
+    /// tool it started, outlives the server.
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// Marks that shutdown began, at the signal, before the server drains its connections and
+    /// calls [`Engine::shutdown`]. From then on a provider session that ends ends no run: under
+    /// systemd the stop signal reaches the provider processes too, and a run they leave open
+    /// is continued by the next start, as T3 does.
+    fn begin_shutdown(&self) {}
+
+    /// `GET /api/orchestration/threads/:threadId`: `OrchestrationV2ThreadDetailSnapshot`, or
+    /// `None` for an unknown thread (404).
+    fn thread_snapshot(
+        &self,
+        _thread_id: ThreadId,
+    ) -> BoxFuture<'_, Result<Option<Value>, EngineError<GetThreadProjectionError>>> {
+        unsupported("the thread snapshot")
+    }
+
+    /// `GET /api/orchestration/threads/:threadId/transcript`: the encoded
+    /// `OrchestrationV2ThreadTranscript`, or why there is none. `limit` caps the file the
+    /// client builds from it; the read stops at the first row past it.
+    fn thread_transcript(
+        &self,
+        _thread_id: ThreadId,
+        _environment_id: String,
+        _limit: u64,
+    ) -> BoxFuture<'_, Result<ThreadTranscript, EngineError<GetThreadProjectionError>>> {
+        unsupported("the thread transcript")
+    }
+
+    /// `GET /api/orchestration/threads/:threadId/history`: the page before `cursor`
+    /// (`OrchestrationV2ThreadHistoryPage`), as T3's `getThreadHistoryPage` without work
+    /// folding. `conversation_only` is `view=conversation`.
+    fn thread_history_page(
+        &self,
+        _thread_id: ThreadId,
+        _cursor: String,
+        _through_entry_id: Option<String>,
+        _view: HistoryView,
+    ) -> BoxFuture<'_, Result<ThreadHistory, EngineError<GetThreadProjectionError>>> {
+        unsupported("thread history pages")
+    }
+
+    /// Compact whole-thread prompt index in timeline order.
+    fn thread_outline(
+        &self,
+        _thread_id: ThreadId,
+    ) -> BoxFuture<
+        '_,
+        Result<Option<conn_contract::ThreadOutline>, EngineError<GetThreadProjectionError>>,
+    > {
+        unsupported("the thread outline")
+    }
+
+    /// One bounded window around a visible prompt, including an inherited fork prompt.
+    fn thread_window(
+        &self,
+        _thread_id: ThreadId,
+        _entry_id: String,
+    ) -> BoxFuture<'_, Result<Option<Value>, EngineError<GetThreadProjectionError>>> {
+        unsupported("the thread window")
+    }
+
+    /// `ThreadManagementService.awaitBackgroundTasks`: the live session of the thread's
+    /// active provider thread marks (`awaited`) or clears these background task ids. Answers
+    /// the matched and unmatched ids; see [`BackgroundWaitError`] for the refusals.
+    fn await_background_tasks(
+        &self,
+        _thread_id: ThreadId,
+        _task_ids: Vec<String>,
+        _awaited: bool,
+    ) -> BoxFuture<'_, Result<BackgroundWait, BackgroundWaitError>> {
+        Box::pin(std::future::ready(Err(BackgroundWaitError::Unavailable)))
+    }
+}
+
+/// The outcome of [`Engine::thread_transcript`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ThreadTranscript {
+    /// The JSON body, ready to send.
+    Body(Vec<u8>),
+    /// No such thread, or it was deleted.
+    NotFound,
+    /// The file would pass the limit (`thread_transcript_too_large`).
+    TooLarge,
+}
+
+/// Row selection for a paged thread history read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryView {
+    Timeline,
+    Conversation,
+    /// User and assistant rows for the native offline cache.
+    Messages,
+}
+
+/// The outcome of [`Engine::thread_history_page`].
+#[derive(Debug, PartialEq)]
+pub enum ThreadHistory {
+    /// The page.
+    Page(Value),
+    /// No such thread, or it was deleted (`thread_not_found`).
+    NotFound,
+    /// The cursor does not decode (`invalid_history_cursor`).
+    InvalidCursor,
+}
+
+fn unsupported<T: Send + 'static, E: Send + 'static>(
+    what: &'static str,
+) -> BoxFuture<'static, Result<T, EngineError<E>>> {
+    Box::pin(async move {
+        Err(EngineError::Internal(format!(
+            "this engine does not support {what}"
+        )))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conn_contract::{from_json, to_json};
+    use serde_json::json;
+    use std::sync::Mutex;
+    use tokio::sync::broadcast;
+
+    /// A toy engine: every command becomes one shell update.
+    struct ToyEngine {
+        sequence: Mutex<u64>,
+        live: broadcast::Sender<ShellStreamItem>,
+    }
+
+    impl Engine for ToyEngine {
+        fn dispatch(
+            &self,
+            command: Command,
+        ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>>
+        {
+            Box::pin(async move {
+                if to_json(&command)["type"] != "thread.create" {
+                    return Err(EngineError::Rejected(
+                        from_json(json!({"_tag": "OrchestrationV2DispatchCommandError",
+                            "commandId": "c", "commandType": "x", "message": "toy"}))
+                        .unwrap(),
+                    ));
+                }
+                let sequence = {
+                    let mut s = self.sequence.lock().unwrap();
+                    *s += 1;
+                    *s
+                };
+                // A real engine sends `thread.updated` with the full summary.
+                let item = json!({"kind": "thread.removed", "sequence": sequence,
+                                  "location": "active", "threadId": to_json(&command)["threadId"]});
+                let _ = self.live.send(from_json(item).unwrap());
+                Ok(from_json(json!({ "sequence": sequence })).unwrap())
+            })
+        }
+
+        fn subscribe_shell(
+            &self,
+            _input: SubscribeShellInput,
+        ) -> BoxFuture<
+            '_,
+            Result<
+                Subscription<ShellStreamItem, GetShellSnapshotError>,
+                EngineError<GetShellSnapshotError>,
+            >,
+        > {
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel(16);
+                let mut live = self.live.subscribe();
+                tokio::spawn(async move {
+                    for item in [
+                        json!({"kind": "snapshot-required"}),
+                        json!({"kind": "synchronized"}),
+                    ] {
+                        if tx.send(Ok(from_json(item).unwrap())).await.is_err() {
+                            return;
+                        }
+                    }
+                    while let Ok(item) = live.recv().await {
+                        if tx.send(Ok(item)).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+                Ok(rx)
+            })
+        }
+
+        fn subscribe_thread(
+            &self,
+            _input: SubscribeThreadInput,
+        ) -> BoxFuture<
+            '_,
+            Result<
+                Subscription<ThreadStreamItem, GetThreadProjectionError>,
+                EngineError<GetThreadProjectionError>,
+            >,
+        > {
+            Box::pin(async {
+                Err(EngineError::Rejected(
+                    from_json(json!({"_tag": "OrchestrationV2GetThreadProjectionError",
+                                "threadId": "t", "message": "toy"}))
+                    .unwrap(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_stream_shows_a_dispatched_thread() {
+        let engine: Box<dyn Engine> = Box::new(ToyEngine {
+            sequence: Mutex::new(0),
+            live: broadcast::channel(16).0,
+        });
+        let mut shell = engine
+            .subscribe_shell(from_json(json!({})).unwrap())
+            .await
+            .unwrap();
+        let kind = |item: Result<ShellStreamItem, _>| to_json(&item.unwrap())["kind"].clone();
+        assert_eq!(kind(shell.recv().await.unwrap()), "snapshot-required");
+        assert_eq!(kind(shell.recv().await.unwrap()), "synchronized");
+
+        let command = json!({
+            "type": "thread.create", "commandId": "c1", "threadId": "t1", "projectId": "p1",
+            "title": "T", "modelSelection": {"instanceId": "claudeAgent", "model": "m"},
+            "runtimeMode": "full-access", "interactionMode": "default", "branch": null,
+            "worktreePath": null, "createdBy": "user", "creationSource": "web",
+        });
+        let result = engine.dispatch(from_json(command).unwrap()).await.unwrap();
+        assert_eq!(to_json(&result), json!({"sequence": 1}));
+        let update = to_json(&shell.recv().await.unwrap().unwrap());
+        assert_eq!(update["threadId"], "t1");
+
+        let bad = json!({"type": "thread.stop", "commandId": "c2", "threadId": "t1"});
+        assert!(matches!(
+            engine.dispatch(from_json(bad).unwrap()).await,
+            Err(EngineError::Rejected(_))
+        ));
+    }
+}
+
+mod workflows;
+
+/// The deciders of the host syncs, for the link sweep's check against T3
+/// (`examples/pr_link_sync_cases.rs`).
+pub mod pull_request_sync {
+    pub use crate::pull_requests::{decide as decide_link, decide_branch_sync, decide_link_sync};
+}

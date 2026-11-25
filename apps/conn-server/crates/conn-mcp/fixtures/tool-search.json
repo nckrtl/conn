@@ -1,0 +1,93 @@
+{
+  "initiallyListed": [
+    "orchestrator_capabilities",
+    "delegate_task",
+    "task_status",
+    "tool_search"
+  ],
+  "retainedSessions": 256,
+  "cases": [
+    {
+      "query": "CONN_WORKFLOW_STOP",
+      "names": [
+        "conn_workflow_stop"
+      ]
+    },
+    {
+      "query": "thread",
+      "names": [
+        "create_threads",
+        "conn_thread_list",
+        "conn_thread_read",
+        "conn_thread_update",
+        "conn_thread_send",
+        "conn_thread_wait",
+        "conn_thread_interrupt",
+        "conn_thread_search",
+        "conn_thread_configure",
+        "conn_thread_transfer"
+      ]
+    },
+    {
+      "query": "project",
+      "names": [
+        "conn_project_list",
+        "conn_project_read",
+        "conn_project_create",
+        "conn_project_update",
+        "conn_project_delete",
+        "conn_project_clone",
+        "preview_cdp_endpoint",
+        "annotations_list",
+        "list_scheduled_tasks",
+        "create_threads"
+      ]
+    },
+    {
+      "query": "thread thread",
+      "names": [
+        "create_threads",
+        "conn_thread_list",
+        "conn_thread_read",
+        "conn_thread_update",
+        "conn_thread_send",
+        "conn_thread_wait",
+        "conn_thread_interrupt",
+        "conn_thread_search",
+        "conn_thread_configure",
+        "conn_thread_transfer"
+      ]
+    },
+    {
+      "query": "conn_thread_read",
+      "names": [
+        "conn_thread_read",
+        "conn_workflow_stop",
+        "conn_thread_launch"
+      ]
+    },
+    {
+      "query": "@!!",
+      "names": []
+    },
+    {
+      "query": "tool_search",
+      "names": []
+    },
+    {
+      "query": "environment, schedule",
+      "names": [
+        "schedule_task",
+        "list_scheduled_tasks",
+        "delete_scheduled_task",
+        "conn_environment_links",
+        "conn_environment_link",
+        "conn_environment_unlink",
+        "run_scheduled_task_now",
+        "conn_environment_read",
+        "conn_environment_preferences_update",
+        "preview_navigate"
+      ]
+    }
+  ]
+}

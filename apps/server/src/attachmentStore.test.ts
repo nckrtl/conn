@@ -158,7 +158,7 @@ describe("threadHtmlRenderAttachmentIds", () => {
     const own = createAttachmentId("thread-a", "html")!;
     const other = createAttachmentId("thread-b", "html")!;
     const render = (attachmentId: string, extra = {}) => ({
-      toolName: "mcp__t3-code__html_render",
+      toolName: "mcp__conn__html_render",
       output: [
         {
           type: "text",
@@ -171,7 +171,22 @@ describe("threadHtmlRenderAttachmentIds", () => {
         render(own),
         render(other),
         render(createAttachmentId("thread-a", "html")!, { isError: true }),
-        { toolName: "mcp__t3-code__html_preview", output: render(own).output },
+        { toolName: "mcp__conn__html_preview", output: render(own).output },
+      ]),
+    ).toEqual([own]);
+  });
+
+  it("includes pages an OpenCode Code Mode execute script returned", () => {
+    const own = createAttachmentId("thread-a", "html")!;
+    expect(
+      threadHtmlRenderAttachmentIds("thread-a", [
+        {
+          toolName: "execute",
+          output: JSON.stringify({
+            htmlRender: { attachmentId: own, title: "x", height: 300 },
+            message: "Shown to the reader above your reply.",
+          }),
+        },
       ]),
     ).toEqual([own]);
   });

@@ -115,6 +115,15 @@ export function workspaceProjectRefs(
   ]);
 }
 
+/** True when a project ref is listed while the workspace is selected; "all" (null) lists every one. */
+export function workspaceCoversProjectRef(
+  workspace: Workspace | null,
+  projects: readonly WorkspaceProject[],
+  projectRef: string,
+): boolean {
+  return workspaceProjectRefs(workspace, projects)?.has(projectRef) ?? true;
+}
+
 /** Folds case and diacritics and keeps letters and digits, the way Rooms matches names. */
 export function workspaceNameKey(name: string): string {
   return name

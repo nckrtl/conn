@@ -35,7 +35,7 @@ The orchestration tools share the existing authenticated HTTP MCP endpoint:
 http://127.0.0.1:<server-port>/mcp
 ```
 
-The provider-visible server key is `t3-code`. The endpoint registers both the
+The provider-visible server key is `conn`. The endpoint registers both the
 preview toolkit and the orchestration toolkit.
 
 Before `ProviderSessionManager` opens a new V2 provider session, it asks
@@ -63,12 +63,14 @@ Codex gets T3's MCP server in each thread's `thread/start`, `thread/resume`,
 and `thread/fork` config, with the provider-session token in an
 `Authorization` header. The same server is registered twice:
 
-- `t3-code`: every tool except `t3_thread_wait`.
-- `t3-code-direct`: only `t3_thread_wait`, with `omit_tools_from = ["code_mode", "deferred"]`.
+- `conn`: every tool except `conn_thread_wait` and `delegate_task`.
+- `conn-direct`: only `conn_thread_wait` and `delegate_task`, with
+  `omit_tools_from = ["code_mode", "deferred"]`.
 
-Code Mode runs a nested call as part of a script, so the model keeps working
-while a blocking wait runs. The second entry makes the wait a direct tool call,
-like Codex's own wait tools. Codex reports calls as `<server>.<tool>`, so
+Code Mode yields a script after about 30 seconds, so the model polls a blocking
+`conn_thread_wait` or `delegate_task` with `mode: "wait"`, resending its context
+on each poll. The second entry makes both direct tool calls, like Codex's own
+wait tools. Codex reports calls as `<server>.<tool>`, so
 `packages/shared/src/t3McpToolPresentation.ts` must resolve both server names.
 Tool display and pending-work detection depend on it.
 
@@ -79,7 +81,7 @@ Claude receives an HTTP MCP server in its query options:
 ```ts
 {
   mcpServers: {
-    "t3-code": {
+    "conn": {
       type: "http",
       url: "http://127.0.0.1:<port>/mcp",
       headers: {
@@ -89,7 +91,7 @@ Claude receives an HTTP MCP server in its query options:
   },
   allowedTools: [
     // existing allowed tools
-    "mcp__t3-code__*",
+    "mcp__conn__*",
   ],
 }
 ```
@@ -164,8 +166,8 @@ T3_MCP_URL=http://127.0.0.1:<port>/mcp
 T3_MCP_BEARER_TOKEN=<provider-session-token>
 ```
 
-The extension preserves public names under `mcp__t3-code__` for saved loadouts
-and tool selectors. Modern Pi also receives hidden `mcp__t3_code__` aliases,
+The extension preserves public names under `mcp__conn__` for saved loadouts
+and tool selectors. Modern Pi also receives hidden `mcp__conn__` aliases,
 which reserve the normalized namespace against configured MCP servers without
 adding declarations or search results. On Pi 0.99+,
 `orchestrator_capabilities`, `delegate_task`, and `task_status` remain directly
@@ -200,7 +202,7 @@ provider selection model-visible without allowing a request that cannot run.
 `OrchestratorToolkit` in
 [`toolkits/orchestrator/tools.ts`](../../apps/server/src/mcp/toolkits/orchestrator/tools.ts)
 is the authoritative list of orchestration tools. The sections below cover
-delegation and thread tools. `t3_thread_launch` is documented with them but
+delegation and thread tools. `conn_thread_launch` is documented with them but
 registered by the project toolkit in
 [`toolkits/project/tools.ts`](../../apps/server/src/mcp/toolkits/project/tools.ts).
 
@@ -230,30 +232,30 @@ any catalog model.
 Creates a T3-owned child thread and immediately dispatches the supplied task
 prompt.
 
+The [shared contract](../../packages/contracts/src/orchestratorMcp.ts) is authoritative for
+inputs and results, including target options and linked-environment fields.
+
 ```ts
-type DelegateTaskInput = {
-  task: string;
-  target?: {
-    providerInstanceId?: string;
-    driverKind?: string;
-    model?: string;
-  };
-  title?: string;
-  role?: "implementation" | "research" | "review" | "design" | "test" | "general";
-  mode?: "async" | "wait";
-  timeoutMs?: number;
-  clientRequestId?: string;
-  runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
-  interactionMode?: "inherit" | "plan" | "default";
-};
+import type {
+  OrchestratorMcpDelegateTaskInput as DelegateTaskInput,
+  OrchestratorMcpDelegateTaskResult as DelegateTaskResult,
+} from "@t3tools/contracts";
 ```
 
-Provider, model, runtime mode, and interaction mode inherit from the parent
-when omitted. A driver-only target inherits the parent's provider instance
+For local delegation, provider, model, runtime mode, and interaction mode inherit
+from the parent when omitted. A driver-only target inherits the parent's provider instance
 when it can run child tasks, and otherwise selects an available instance of
 that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
+
+Set `target.options` using the options returned by `orchestrator_capabilities`, such as
+`{effort: "max"}`. Supplied values override inherited selections; `{}` or `[]` clears them.
+For local delegation, use `isolation: "worktree"` for a separate prepared checkout from
+the parent's commit; the default `"shared"` uses the parent's checkout. Uncommitted parent
+edits are not copied. A linked-environment target (`target.environmentId`) runs in the remote
+project's checkout and rejects worktree isolation. To launch an isolated thread there, use
+`conn_thread_launch` with `environmentId` and a worktree `workspaceStrategy`.
 
 A provider runs a runtime mode it does not offer as `approval-required`, so a
 child would ask for approval on every command. `orchestrator_capabilities`
@@ -266,7 +268,7 @@ Each independent delegated review round uses a new `delegate_task` call with the
 original brief, prior findings, responses, and unresolved objections. Track each
 round by its own `taskId` and use a distinct `clientRequestId` per round, stable
 across retries of that round.
-A follow-up that needs the same child's conversation goes through `t3_thread_send`
+A follow-up that needs the same child's conversation goes through `conn_thread_send`
 on its `childThreadId`. After the original task completes, that follow-up runs as a
 fresh task in the child thread; it does not reopen the completed task or change its
 published result.
@@ -278,61 +280,46 @@ provider session. The request becomes the V2 command
 `mode: "async"` returns the current durable state immediately.
 `mode: "wait"` waits for the task result, including nested work and completion follow-ups, or until
 the timeout expires. A wait timeout does not cancel the child; the result sets
-`waitTimedOut: true`, and the caller can continue with `task_status`. A pending blocking
-question also ends the wait with `hasPendingQuestion: true` and `waitTimedOut: false`.
-If `hasPendingQuestion`, pass `threadId=childThreadId` to `t3_pending_request` with
+`waitTimedOut: true`. When the result includes `next`, completion wakes the parent:
+do not wait on the task or poll it; continue other work, and end the turn when none is
+left. A pending blocking question also ends the wait with `hasPendingQuestion: true` and
+`waitTimedOut: false`.
+If `hasPendingQuestion`, pass `threadId=childThreadId` to `conn_pending_request` with
 action `list`, `read` (with `requestId`), or `respond`, or ask the user; the task's completion still wakes this thread. A pending live approval for the
 task's own unfinished work also ends the wait. Its identity appears in `pendingApproval`;
 it grants no approval authority. Read the fresh full request in the child thread before
 responding, since the durable record can outlive its provider callback. Async questions
 do not end the wait.
 
-```ts
-type DelegateTaskResult = {
-  taskId: string;
-  childThreadId: string;
-  childRunId: string | null;
-  childNodeId: string;
-  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
-  workState: "working" | "waiting_for_children" | "result_available";
-  hasPendingChildRuns: boolean;
-  providerInstanceId: string;
-  model: string | null;
-  summary: string | null;
-  resultContextTransferId: string | null;
-  latestTerminalRunId: string | null;
-  latestTerminalStatus: "completed" | "failed" | "cancelled" | "interrupted" | null;
-  latestTerminalSummary: string | null;
-  latestTerminalResultContextTransferId: string | null;
-  hasPendingQuestion: boolean;
-  pendingApproval: {
-    requestId: string;
-    kind: "command" | "file-read" | "file-change" | "mcp-elicitation" | "permission";
-    runId: string;
-  } | null;
-  waitTimedOut: boolean;
-};
-```
-
 ### `task_status`
 
 Reads a delegated task from the parent thread's durable projection. A task ID
 from another parent thread is rejected. `childRunId` identifies the original
-run. `workState` distinguishes active work, a finished turn waiting for children,
-and an available result. The task remains nonterminal until its known work
-finishes. Its published `summary` and result transfer then remain stable across
-later follow-ups. `hasPendingChildRuns` reports later queued or executing turns;
-`latestTerminal*` exposes later executed, non-monitor results without replacing
-the published task result.
+run. `status: "starting"` means the child's provider has not started its turn
+yet, so a task that stays there has not begun work. A task in a linked
+environment reads its run's status there for this. `workState` distinguishes
+active work, a finished turn waiting for children, and an available result. The
+task remains nonterminal until its known work finishes. Its published `summary`
+and result transfer then remain stable across later follow-ups.
+`hasPendingChildRuns` reports later queued or executing turns; `latestTerminal*`
+exposes later executed, non-monitor results without replacing the published task
+result.
 
 ### `task_cancel`
 
-Stops the child thread with the internal `thread.stop` command, then stops every
-task the child delegated, and disposes automatic parent delivery. Like a user Stop,
-`thread.stop` interrupts the running turn, holds queued turns, and ends pull request
-watches. A nonterminal task with no interruptible run is rejected. A terminal task
-returns its existing status, and its child thread still stops, including later
-runs and watch wakes. Published task results remain available. It accepts an
+Stops every task the child delegated, then the child thread with the internal
+`thread.stop` command, cancels the task's own queued turn, and disposes automatic
+parent delivery. Like a user Stop, `thread.stop` interrupts the running turn, holds
+queued turns, and ends pull request watches. The task's own queued turn is cancelled
+even if Stop already held it, so a task that is only queued can be cancelled; other
+queued turns in the child stay held for Resume. A nonterminal task is rejected when
+it has no interruptible run, no queued turn of its own, and its finished turn no
+longer waits on background work or delegated tasks. Once a cancelled task's turn
+ends, a completed result settles as `interrupted` and a failed one stays `failed`. A
+terminal task returns its existing status, and its child thread still stops,
+including later runs and watch wakes. In both cases, a follow-up that lost its child
+run but still shows as running on the parent is cancelled there and reported as
+`cancelled`. Published task results remain available. It accepts an
 optional cancellation reason.
 
 ### `create_threads`
@@ -340,28 +327,17 @@ optional cancellation reason.
 Creates between one and twenty ordinary top-level T3 threads:
 
 ```ts
-type CreateThreadsInput = {
-  threads: Array<{
-    prompt?: string;
-    title?: string;
-    target?: {
-      providerInstanceId?: string;
-      driverKind?: string;
-      model?: string;
-    };
-    runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
-    interactionMode?: "inherit" | "plan" | "default";
-  }>;
-  clientRequestId?: string;
-};
+import type { OrchestratorMcpCreateThreadsInput as CreateThreadsInput } from "@t3tools/contracts";
 ```
 
 Each entry independently resolves provider, model, and modes. The new threads
 inherit the parent's project, branch, and worktree path, but they have no
 sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle.
+without a prompt remain idle. `create_threads` is local-only: `target.environmentId` and
+`target.projectId` are ignored even though the shared target contract accepts them. Use
+`conn_thread_launch` with `environmentId` and `projectId` to select another environment or project.
 
-### `t3_thread_launch`
+### `conn_thread_launch`
 
 Launches one ordinary top-level thread through the app's launch service. Use an
 explicit `workspaceStrategy` to create a new worktree (`worktree` with `baseRef`),
@@ -372,29 +348,37 @@ this binding.
 
 Pass the task in `message`. Project, model, and modes inherit when omitted;
 workspace does not. `scratch: true` launches without a project, in a folder of
-its own under the environment's Scratch project. For stacked PRs, use the parent branch as `baseRef` with
+its own under the environment's Scratch project. A new worktree with `startFromOrigin` omitted follows the new-worktree setting. For stacked PRs, use the parent branch as `baseRef` with
 `startFromOrigin: false`. The new thread may not run with broader runtime or
 interaction modes than the caller. As for `delegate_task`, a runtime mode the
 provider does not offer is refused, and an inherited or default one steps down
 to the broadest mode it offers. Launch has no retry key, so inspect existing threads after a failed or lost response before
 launching again. `create_threads` remains the batch option for a shared checkout.
 
-### `t3_thread_list`
+### `conn_thread_list`
 
 Lists durable thread shells in one project, newest first: `projectId` when
 given, else the calling thread's project. Callers can filter by title, run
 status, and whether app-owned sub-agent threads are included. Results are
 bounded and offset-paginated. Deleted threads are never listed.
 
-### `t3_thread_read`
+### `conn_thread_read`
 
 Reads the durable state, recent runs, and visible timeline of any thread in
 the environment by thread ID. A deleted thread returns `thread_not_found`. The
 default `messages` view returns user messages, assistant
 messages, and proposed plans. The `activity` view also returns summarized tool,
 reasoning, checkpoint, handoff, and runtime-request items. Large item text is
-bounded and reports whether it was truncated. `afterPosition` and
-`nextPosition` support incremental reads.
+bounded and reports whether it was truncated. An agent in a T3 thread that
+reads without a cursor gets the newest items, and `beforePosition=earlierPosition`
+reads older ones. Client callers (the CLI, linked environments, outside MCP
+clients) start at the oldest item instead, because the CLI and linked
+environments on older versions read that way and follow only `hasMore`.
+`afterPosition=-1` starts any read at the oldest item, and
+`afterPosition=nextPosition` reads newer items. The server stops adding items once the result reaches about 30,000 characters and
+reports the rest through `earlierPosition` or `hasMore`. Claude Code saves MCP
+results over its token limit to a file instead of showing them, so a read has
+to fit whatever `limit` an agent asks for.
 
 Thread and message results include required `createdBy` and `creationSource`
 provenance. MCP-created threads and user-role messages use `createdBy: "agent"`
@@ -416,19 +400,25 @@ gets the link Copy thread copies, `https://app.t3.codes/threads/<environmentId>/
 on the server's `T3CODE_HOSTED_APP_URL`, for threads in this environment. The
 hosted app offers the desktop app, the mobile app, or itself.
 
-List and read results report `snoozed` and `snoozedUntil`, and
-`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
+List and read results report `snoozed`, `snoozedUntil`, and `pinned`, and
+`conn_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
 wakes early only when it has a pending request or fails after snoozing. Completed
 runs, background wakes, and delegated completions keep it snoozed.
 
-### `t3_thread_update`
+They also report `blockedOnThreadWait` and `pendingBackgroundTasks`, the shell
+fields behind the sidebar's Waiting label, so an agent can see what a thread
+still waits on after its run completed. A subagent or `background_task` holds
+the thread. A command or monitor holds it only with `awaited: true`, since agents
+often leave a dev server running.
+
+### `conn_thread_update`
 
 Updates metadata for the calling thread or any other thread in the environment.
-The typed actions are `rename`, `regenerate_title`, `link_pull_request`, and
-`unlink_pull_request`. A link input supplies the repository, number, and URL;
-the server records the target thread's project ID. Branch and workspace changes
-are outside this tool.
+The typed actions are `rename`, which requires `title`, and `regenerate_title`,
+which rejects one. Pull request links go through the separate
+`link_pull_request` and `unlink_pull_request` tools. Branch and workspace
+changes are outside this tool.
 
 The result includes the command ID and durable event sequence together with the
 resultant title, title-regeneration marker, and linked pull request. Reusing a
@@ -436,7 +426,7 @@ resultant title, title-regeneration marker, and linked pull request. Reusing a
 receipt. Thread list and read results expose the linked pull request, and thread
 detail also exposes an in-flight title regeneration.
 
-### `t3_thread_send`
+### `conn_thread_send`
 
 Sends a message to any ordinary or delegated thread in the environment:
 
@@ -445,20 +435,25 @@ Sends a message to any ordinary or delegated thread in the environment:
 - `queue` creates a separate follow-up run after active work;
 - `steer` requires a steerable active provider turn; and
 - `restart` requires an active provider turn and uses the orchestrator's
-  interrupt-and-restart path.
+  interrupt-and-restart path. On a provider that can stop a turn and queue
+  messages but not restart a turn with new input, it stops the turn and queues
+  the message ahead of other queued messages; an unheld delegated-task result
+  that survives the stop still runs first. It is rejected when neither path
+  applies: the provider cannot stop a turn, Stop has already reached the turn,
+  or the turn or the new message is `/compact` or `/logout`.
 
 The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries.
 
-### `t3_thread_wait`
+### `conn_thread_wait`
 
 Waits for a selected run to become `completed`, `failed`, `cancelled`,
 `interrupted`, or `rolled_back`. Without `runId`, it pins the latest run at call
 time; an idle thread returns immediately. A timeout reports the latest durable
 status and does not cancel work.
 
-### `t3_thread_interrupt`
+### `conn_thread_interrupt`
 
 Interrupts a selected active run through the normal V2 `run.interrupt` command.
 Without `runId`, it selects the newest interruptible run. A terminal run is

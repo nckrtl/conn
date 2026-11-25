@@ -1,10 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { MISSING_FILE_ACCESS_MESSAGE } from "@t3tools/client-runtime/state/assets";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Image } from "expo-image";
+import { T, useGT } from "gt-react-native";
 import { createContext, useContext, useId, useState } from "react";
 import { fetch } from "expo/fetch";
 import { parse, SvgAst, type JsxAST } from "react-native-svg";
@@ -20,13 +20,22 @@ import { useMediaActions } from "../../state/mediaActions";
 import type { MediaActionsSource } from "../../lib/mediaActionsSource";
 import { useAssetUrlState } from "../../state/assets";
 import { WorkspaceMutationIdContext } from "./workspaceMutationIdContext";
+import { ZoomableImagePressable } from "./ZoomableImagePressable";
 import { assetImageCacheKey } from "../../lib/assetImageSource";
+import { filePreviewSourceIdentifier } from "../../lib/filePreviewGallery";
 import {
   MARKDOWN_IMAGE_MAX_WIDTH,
   type MarkdownImageDisplaySize,
   resolveMarkdownImageDisplaySize,
   resolveSvgImageSize,
 } from "./markdownImageSize";
+
+// Card-face frame: a hairline border plus padding keep the picture's own edge off the feed.
+const FRAME_CLASS_NAME =
+  "overflow-hidden rounded-[10px] border border-card-face-border border-t-card-face-edge bg-card-face";
+const FRAME_PADDING = 3;
+const FRAME_INSET = FRAME_PADDING + 1;
+const FRAME_IMAGE_RADIUS = 6;
 
 /** Use known feed width immediately; later image measurement would move already-positioned rows. */
 export const MarkdownImageAvailableWidthContext = createContext(0);
@@ -90,6 +99,7 @@ const noSvgDocumentAtom = Atom.make(AsyncResult.initial<SvgDocument, SvgLoadErro
 export function ThreadMarkdownImageView(props: {
   readonly uri: string | null;
   readonly sourceKey: string;
+  readonly sourceIdentifier?: string;
   readonly cacheKey?: string | undefined;
   readonly unavailable: boolean;
   readonly unavailableDetail?: string | undefined;
@@ -99,8 +109,10 @@ export function ThreadMarkdownImageView(props: {
   readonly actionsSource?: MediaActionsSource;
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }) {
+  const gt = useGT();
   const withGallery = useFilePreviewGallery();
-  const sourceIdentifier = useId();
+  const localSourceIdentifier = useId();
+  const sourceIdentifier = props.sourceIdentifier ?? localSourceIdentifier;
   const mediaActions = useMediaActions(props.actionsSource);
   const contextWidth = useContext(MarkdownImageAvailableWidthContext);
   const [measuredWidth, setMeasuredWidth] = useState(0);
@@ -127,7 +139,7 @@ export function ThreadMarkdownImageView(props: {
       : resolveMarkdownImageDisplaySize({
           sourceWidth: sourceSize.width,
           sourceHeight: sourceSize.height,
-          availableWidth,
+          availableWidth: availableWidth - FRAME_INSET * 2,
         });
   const failed =
     props.unavailable ||
@@ -135,7 +147,9 @@ export function ThreadMarkdownImageView(props: {
     AsyncResult.isFailure(svg);
   const placeholderWidth: ViewStyle["width"] =
     availableWidth > 0 ? Math.min(availableWidth, MARKDOWN_IMAGE_MAX_WIDTH) : "100%";
-  const frameStyle: ViewStyle = displaySize ?? { width: placeholderWidth, aspectRatio: 16 / 9 };
+  const frameStyle: ViewStyle = displaySize
+    ? { width: displaySize.width + FRAME_INSET * 2, height: displaySize.height + FRAME_INSET * 2 }
+    : { width: placeholderWidth, aspectRatio: 16 / 9 };
 
   return (
     <View
@@ -146,18 +160,18 @@ export function ThreadMarkdownImageView(props: {
         <MediaActionsMenu media={mediaActions}>
           <Pressable
             accessibilityRole="imagebutton"
-            accessibilityLabel={props.alt ?? "Markdown image"}
+            accessibilityLabel={props.alt ?? gt("Markdown image")}
             accessibilityHint={
-              mediaActions.actions.length > 0 ? "Touch and hold for media actions" : undefined
+              mediaActions.actions.length > 0 ? gt("Touch and hold for media actions") : undefined
             }
-            className="items-center justify-center rounded-[10px] bg-md-code-bg"
+            className={`items-center justify-center ${FRAME_CLASS_NAME}`}
             style={frameStyle}
           >
             {failed ? (
               <Text className="px-3 text-center text-xs text-foreground-muted">
                 {props.unavailableDetail
-                  ? `Image unavailable. ${props.unavailableDetail}`
-                  : "Image unavailable"}
+                  ? gt("Image unavailable. {detail}", { detail: props.unavailableDetail })
+                  : gt("Image unavailable")}
               </Text>
             ) : (
               <AppActivityIndicator />
@@ -167,51 +181,47 @@ export function ThreadMarkdownImageView(props: {
       ) : (
         <PresentationSource identifier={sourceIdentifier} style={{ alignSelf: "flex-start" }}>
           <MediaActionsMenu media={mediaActions}>
-            <Pressable
+            <ZoomableImagePressable
+              key={props.sourceKey}
               accessibilityRole="imagebutton"
-              accessibilityLabel={props.alt ?? "Markdown image"}
+              accessibilityLabel={props.alt ?? gt("Markdown image")}
               accessibilityHint={
-                mediaActions.actions.length > 0 ? "Touch and hold for media actions" : undefined
+                mediaActions.actions.length > 0 ? gt("Touch and hold for media actions") : undefined
               }
               onPress={() =>
                 props.onPressPreview(
                   withGallery({
                     kind: "image",
                     uri: props.uri!,
-                    name: props.actionsSource?.name ?? props.alt ?? "Image",
+                    name: props.actionsSource?.name ?? props.alt ?? gt("Image"),
                     sourceIdentifier,
                     actionsSource: props.actionsSource,
                   }),
                 )
               }
-              style={{ alignSelf: "flex-start" }}
+              className={FRAME_CLASS_NAME}
+              style={{ alignSelf: "flex-start", padding: FRAME_PADDING, ...frameStyle }}
             >
-              <View
-                className="items-center justify-center overflow-hidden rounded-[10px] bg-md-code-bg"
-                style={frameStyle}
-              >
-                {props.format === "svg" ? (
-                  <ThreadMarkdownSvg ast={svgDocument?.ast ?? null} />
-                ) : (
-                  <ThreadMarkdownImageRequest
-                    key={props.sourceKey}
-                    uri={props.uri}
-                    cacheKey={props.cacheKey}
-                    onLoad={(size) =>
-                      // Only the first decode counts: later loads report the bitmap
-                      // downsampled for the current frame (969 vs 970 wide), so keeping
-                      // them resizes the frame, which reloads the image, and so on.
-                      setDecoded((current) =>
-                        current?.sourceKey === props.sourceKey
-                          ? current
-                          : { sourceKey: props.sourceKey, size },
-                      )
-                    }
-                    onError={() => setFailure({ uri: props.uri, failed: true })}
-                  />
-                )}
-              </View>
-            </Pressable>
+              {props.format === "svg" ? (
+                <ThreadMarkdownSvg ast={svgDocument?.ast ?? null} />
+              ) : (
+                <ThreadMarkdownImageRequest
+                  uri={props.uri}
+                  cacheKey={props.cacheKey}
+                  onLoad={(size) =>
+                    // Only the first decode counts: later loads report the bitmap
+                    // downsampled for the current frame (969 vs 970 wide), so keeping
+                    // them resizes the frame, which reloads the image, and so on.
+                    setDecoded((current) =>
+                      current?.sourceKey === props.sourceKey
+                        ? current
+                        : { sourceKey: props.sourceKey, size },
+                    )
+                  }
+                  onError={() => setFailure({ uri: props.uri, failed: true })}
+                />
+              )}
+            </ZoomableImagePressable>
           </MediaActionsMenu>
         </PresentationSource>
       )}
@@ -244,7 +254,12 @@ function ThreadMarkdownImageRequest(props: {
           props.onLoad(event.source);
         }}
         onError={props.onError}
-        style={{ width: "100%", height: "100%", opacity: loaded ? 1 : 0 }}
+        style={{
+          width: "100%",
+          height: "100%",
+          borderRadius: FRAME_IMAGE_RADIUS,
+          opacity: loaded ? 1 : 0,
+        }}
       />
       {loaded ? null : <ThreadMarkdownImageLoading />}
     </>
@@ -257,7 +272,9 @@ function ThreadMarkdownImageLoading() {
       pointerEvents="none"
       style={[StyleSheet.absoluteFill, { alignItems: "center", justifyContent: "center" }]}
     >
-      <Text className="text-xs text-foreground-muted">Loading image…</Text>
+      <Text className="text-xs text-foreground-muted">
+        <T>Loading image…</T>
+      </Text>
     </View>
   );
 }
@@ -281,6 +298,7 @@ export function ThreadMarkdownImage(props: {
   readonly actionsSource?: MediaActionsSource;
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }) {
+  const gt = useGT();
   const withGallery = useFilePreviewGallery();
   const workspaceMutationId = useContext(WorkspaceMutationIdContext);
   const assetUrl = useAssetUrlState(
@@ -310,10 +328,15 @@ export function ThreadMarkdownImage(props: {
           : undefined
       }
       sourceKey={sourceKey}
+      sourceIdentifier={filePreviewSourceIdentifier({
+        kind: "image",
+        environmentId: props.environmentId,
+        resource: props.resource,
+      })}
       unavailable={assetUrl._tag === "Failure"}
       unavailableDetail={
         assetUrl._tag === "Failure" && assetUrl.reason === "missing-file-access"
-          ? MISSING_FILE_ACCESS_MESSAGE
+          ? gt("This connection cannot read host files. Pair again with a new link to view it.")
           : undefined
       }
       knownSize={assetUrl._tag === "Success" ? assetUrl.imageDimensions : undefined}

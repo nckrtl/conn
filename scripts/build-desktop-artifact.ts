@@ -57,6 +57,7 @@ import {
 import { resolveForkBrand } from "../apps/desktop/src/branding/forkBrand.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { resolveTaggedSourceVersion } from "./lib/tagged-source-version.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -2250,6 +2251,13 @@ export const copyDirectoryPreservingSymlinks = Effect.fn("copyDirectoryPreservin
 
 export const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSelfContained")(
   function* (input: { readonly asarPath: string; readonly verbose: boolean }) {
+    // A PR preview's bundle is untrusted and this job may hold signing secrets, so never run it.
+    if (yield* Config.Boolean("T3CODE_DESKTOP_UNTRUSTED_BUNDLE").pipe(Config.withDefault(false))) {
+      yield* Effect.log(
+        "[desktop-artifact] Skipped the bundle self-check for an untrusted bundle.",
+      );
+      return;
+    }
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
@@ -2766,21 +2774,28 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
 }
 
 /**
- * The splash logo a brand replaces in the packaged web client, or undefined to keep upstream's.
- * Only the stable channel: nightly keeps its own artwork.
+ * The splash logo, favicons and manifest icons a brand replaces in the packaged web client; empty
+ * keeps upstream's. Only the stable channel: nightly keeps its own artwork.
  */
-export function resolveDesktopWebIconOverride(
+export function resolveDesktopWebIconOverrides(
   webAssetBrand: WebAssetBrand,
   brand: AppBrand = UPSTREAM_APP_BRAND,
-): IconOverride | undefined {
-  const source = brand.icons.prod.appleTouchPng;
-  if (webAssetBrand !== "production" || source === UPSTREAM_APP_BRAND.icons.prod.appleTouchPng) {
-    return undefined;
-  }
-  return {
-    sourceRelativePath: source,
-    targetRelativePath: "apps/server/dist/client/apple-touch-icon.png",
-  };
+): ReadonlyArray<IconOverride> {
+  if (webAssetBrand !== "production") return [];
+  const targets = {
+    appleTouchPng: "apple-touch-icon.png",
+    webFaviconIco: "favicon.ico",
+    webFavicon16Png: "favicon-16x16.png",
+    webFavicon32Png: "favicon-32x32.png",
+    webIcon192Png: "icon-192x192.png",
+    webIcon512Png: "icon-512x512.png",
+  } as const;
+  return Object.entries(targets).flatMap(([key, target]) => {
+    const source = brand.icons.prod[key as keyof typeof targets];
+    return source === UPSTREAM_APP_BRAND.icons.prod[key as keyof typeof targets]
+      ? []
+      : [{ sourceRelativePath: source, targetRelativePath: `apps/server/dist/client/${target}` }];
+  });
 }
 
 export function resolveDesktopBuildIconAssets(
@@ -2983,10 +2998,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          // Match Electron's WM_CLASS from setDesktopName so docks use this launcher.
+          StartupWMClass: "com.t3tools.T3Code",
         },
       },
     };
+    // electron-updater replaces an installed AppImage in place only when its name has no x.y.z version.
+    if (buildConfig.publish) {
+      buildConfig.appImage = {
+        artifactName:
+          updateChannel === "nightly" ? "T3-Code-Nightly-${arch}.${ext}" : "T3-Code-${arch}.${ext}",
+      };
+    }
     buildConfig.deb = {
       // FPM runs outside the staged app directory, so source paths must be absolute.
       fpm: [
@@ -3636,6 +3659,34 @@ export const validateMacPackagedPayload = Effect.fn("desktopArtifact.validateMac
   },
 );
 
+export class LinuxPackagedAppMissingError extends Schema.TaggedError<LinuxPackagedAppMissingError>()(
+  "LinuxPackagedAppMissingError",
+  { stageDistDir: Schema.String },
+) {
+  override get message(): string {
+    return `Expected electron-builder to leave resources/app.asar under ${this.stageDistDir}/linux*-unpacked.`;
+  }
+}
+
+export const validateLinuxPackagedPayload = Effect.fn(
+  "desktopArtifact.validateLinuxPackagedPayload",
+)(function* (input: { readonly stageDistDir: string; readonly verbose?: boolean }) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const asarPaths = (yield* fs.readDirectory(input.stageDistDir))
+    .filter((entry) => entry.startsWith("linux") && entry.endsWith("-unpacked"))
+    .map((entry) => path.join(input.stageDistDir, entry, "resources/app.asar"));
+  if (asarPaths.length === 0) {
+    return yield* new LinuxPackagedAppMissingError({ stageDistDir: input.stageDistDir });
+  }
+  for (const asarPath of asarPaths) {
+    yield* verifyPackagedBundleIsSelfContained({ asarPath, verbose: input.verbose ?? false });
+  }
+  yield* Effect.log(
+    `[desktop-artifact] Validated Linux payload (${String(asarPaths.length)} app bundle(s)).`,
+  );
+});
+
 const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(function* (
   options: ResolvedBuildOptions,
 ) {
@@ -3714,7 +3765,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       }),
   });
 
-  const appVersion = options.version ?? serverPackageJson.version;
+  const appVersion =
+    options.version ?? resolveTaggedSourceVersion(repoRoot, serverPackageJson.version);
   const iconAssets = resolveDesktopBuildIconAssets(
     appVersion,
     resolveForkBrand(loadRepoEnv({ repoRoot })),
@@ -3807,18 +3859,16 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);
   yield* applyWebBrandAssets(webAssetBrand, "apps/server/dist/client");
   yield* Effect.log(`[desktop-artifact] Applied ${webAssetBrand} web client branding.`);
-  const webIconOverride = resolveDesktopWebIconOverride(
+  const webIconOverrides = resolveDesktopWebIconOverrides(
     webAssetBrand,
     resolveForkBrand(loadRepoEnv({ repoRoot })),
   );
-  if (webIconOverride !== undefined) {
+  for (const override of webIconOverrides) {
     yield* fs.copyFile(
-      path.join(repoRoot, webIconOverride.sourceRelativePath),
-      path.join(repoRoot, webIconOverride.targetRelativePath),
+      path.join(repoRoot, override.sourceRelativePath),
+      path.join(repoRoot, override.targetRelativePath),
     );
-    yield* Effect.log(
-      `[desktop-artifact] Applied ${webIconOverride.sourceRelativePath} splash logo.`,
-    );
+    yield* Effect.log(`[desktop-artifact] Applied ${override.sourceRelativePath}.`);
   }
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
 
@@ -4150,6 +4200,14 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       }),
       verbose: options.verbose,
     });
+  }
+  // The probe runs on the host Node, so a cross-arch build skips it.
+  if (
+    options.platform === "linux" &&
+    hostPlatform === "linux" &&
+    options.arch === (yield* HostProcess.Architecture)
+  ) {
+    yield* validateLinuxPackagedPayload({ stageDistDir, verbose: options.verbose });
   }
   // x64 builds on arm64 runners; the arm64 check covers the shared JS bundle.
   if (options.platform === "mac" && options.arch === "arm64" && hostPlatform === "darwin") {

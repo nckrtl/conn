@@ -1,5 +1,6 @@
 import { vaultwardenSetup } from "./methods/vaultwarden.ts";
 import { vaultLogins, vaultFill } from "./methods/vaultLogins.ts";
+import { startFileDrag } from "./methods/fileDrag.ts";
 import * as Effect from "effect/Effect";
 
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
@@ -7,6 +8,7 @@ import * as DesktopIpc from "./DesktopIpc.ts";
 import { installNotificationBadge } from "./methods/notificationBadge.ts";
 import { apiSend } from "./methods/apiRequest.ts";
 import { orbitGatewaySend } from "./methods/orbitGateway.ts";
+import { orbitToolSend } from "./methods/orbitTool.ts";
 import { databaseRun } from "./methods/database.ts";
 import { vaultDatabases } from "./methods/vault.ts";
 import { mcpConnect, mcpDisconnect, mcpRequest } from "./methods/mcp.ts";
@@ -48,9 +50,11 @@ import {
   installRelayTelemetryEnabled,
   getSystemLocale,
   getPreferredSystemLanguages,
+  getPrimaryPasteEnabled,
   getWindowFullscreenState,
   openExternal,
   readMedia,
+  restartAudioService,
   openSystemSettings,
   checkSystemPermission,
   pasteAsText,
@@ -59,6 +63,7 @@ import {
   probeRemoteEditors,
   revealWindow,
   pickFolder,
+  toLocalBackendPath,
   pickProjectFavicon,
   pickThemeFiles,
   setTheme,
@@ -110,6 +115,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* installRelayTelemetryEnabled();
   yield* ipc.handleSync(getSystemLocale);
   yield* ipc.handleSync(getPreferredSystemLanguages);
+  yield* ipc.handleSync(getPrimaryPasteEnabled);
   yield* ipc.handleSync(getWindowFullscreenState);
   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
   yield* ipc.handleSync(getLocalEnvironmentEnabled);
@@ -117,6 +123,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(getHostEnvironmentId);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
 
+  yield* ipc.handle(startFileDrag);
+  yield* ipc.handle(restartAudioService);
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
   yield* ipc.handle(getLocalThemes);
@@ -155,6 +163,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setWslOnly);
 
   yield* ipc.handle(pickFolder);
+  yield* ipc.handle(toLocalBackendPath);
   yield* ipc.handle(pickProjectFavicon);
   yield* ipc.handle(pickThemeFiles);
   yield* ipc.handle(setTheme);
@@ -173,6 +182,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(probeRemoteEditors);
   yield* ipc.handle(apiSend);
   yield* ipc.handle(orbitGatewaySend);
+  yield* ipc.handle(orbitToolSend);
   yield* ipc.handle(databaseRun);
   yield* ipc.handle(vaultDatabases);
   yield* ipc.handle(vaultwardenSetup);

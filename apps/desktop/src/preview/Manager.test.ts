@@ -1,12 +1,18 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - The dictation relay needs a real HTTP listener.
+import * as NodeHttp from "node:http";
+import type * as NodeNet from "node:net";
+
 import { it as effectIt } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
+  DesktopPreviewFindResultEvent,
   DesktopPreviewRecordingInputEvent,
   PreviewAnnotationPayload,
   PreviewAnnotationRect,
 } from "@t3tools/contracts";
+import { EnvironmentId, PreviewTabId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
 import { app, shell } from "electron";
@@ -31,7 +37,9 @@ import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts"
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
+import { DesktopTabRunner } from "./DesktopTabRunner.ts";
 import * as PreviewManager from "./Manager.ts";
+import { ANNOTATOR_DICTATION_CHANNEL } from "./GuestProtocol.ts";
 import * as PreviewPasskeys from "./Passkeys.ts";
 
 describe("fitPictureInPictureContentSize", () => {
@@ -205,6 +213,7 @@ const layerBrowserSession = Layer.succeed(
     isPartition: (partition) => partition.startsWith("persist:t3code-preview-"),
     getSession: () => Effect.succeed(previewSession as unknown as Electron.Session),
     clearCookies: () => Effect.void,
+    cookiesCleared: () => Effect.void,
     clearCache: () => Effect.void,
   }),
 );
@@ -348,6 +357,47 @@ const makeTestPreviewWebContents = (
     capturePage,
   } as unknown as TestPreviewWebContents;
 };
+
+const makeStillImage = (pixels = "fresh-png") => ({
+  toPNG: () => Buffer.from(pixels),
+  toJPEG: () => Buffer.from(pixels),
+  getSize: () => ({ width: 100, height: 80 }),
+});
+
+const makeTestStillImageWebContents = (...args: Parameters<typeof makeTestPreviewWebContents>) => {
+  const wc = makeTestPreviewWebContents(...args);
+  Object.assign(wc, { isDevToolsOpened: () => false });
+  holdStillImagePaint(wc, Promise.resolve());
+  return wc;
+};
+
+const holdStillImagePaint = (
+  wc: TestPreviewWebContents,
+  paint: Promise<void> | Array<Promise<void>>,
+) => {
+  vi.mocked(wc.debugger.sendCommand).mockImplementation(async (method) => {
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+    if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+    if (method === "Runtime.evaluate") {
+      await (Array.isArray(paint) ? paint.shift() : paint);
+      return { result: { value: true } };
+    }
+    return undefined;
+  });
+};
+
+const setupStill = (manager: PreviewManager.PreviewManager["Service"], paint = Promise.resolve()) =>
+  Effect.gen(function* () {
+    const image = makeStillImage();
+    const capturePage = vi.fn<() => Promise<typeof image>>().mockResolvedValue(image);
+    const wc = makeTestStillImageWebContents(capturePage);
+    holdStillImagePaint(wc, paint);
+    fromId.mockReturnValue(wc);
+    yield* manager.createTab("tab_still");
+    yield* manager.registerWebview("tab_still", wc.id);
+    yield* manager.setColorScheme("tab_still", "system");
+    return { image, capturePage, wc, capture: manager.captureScreenshot("tab_still") };
+  });
 
 const setupRecordingRaceTabs = (manager: PreviewManager.PreviewManager["Service"]) =>
   Effect.gen(function* () {
@@ -576,6 +626,32 @@ describe("PreviewManager", () => {
     webviewSend.mockClear();
   });
 
+  effectIt.effect("preserves recording artifacts saved in the same millisecond", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const stored = new Map<string, Uint8Array>();
+        const save = (path: string, bytes: Uint8Array) => {
+          stored.set(path, Uint8Array.from(bytes));
+          return undefined;
+        };
+        writeFile.mockImplementationOnce(save).mockImplementationOnce(save);
+        const firstBytes = new Uint8Array([1, 2, 3]);
+        const secondBytes = new Uint8Array([4, 5, 6]);
+        const [first, second] = yield* Effect.all(
+          [
+            manager.saveRecording("tab_first", "video/webm", firstBytes),
+            manager.saveRecording("tab_second", "video/webm", secondBytes),
+          ],
+          { concurrency: "unbounded" },
+        );
+
+        expect(first.path).not.toBe(second.path);
+        expect(stored.get(first.path)).toEqual(firstBytes);
+        expect(stored.get(second.path)).toEqual(secondBytes);
+      }),
+    ),
+  );
+
   effectIt.effect.each([false, true])(
     "preserves simultaneous same-name downloads with an existing destination: %s",
     (existing) =>
@@ -618,7 +694,10 @@ describe("PreviewManager", () => {
                 attach: () => {},
                 detach: () => {},
                 setShown: () => {},
+                setCaptureDrawn: () => {},
+                loadFailed: () => {},
                 humanStartedDownload: () => true,
+                agentLedPage: () => false,
                 placeDownload: () => true,
                 rememberFilledSecret: () => {},
               }),
@@ -672,7 +751,7 @@ describe("PreviewManager", () => {
         if (existing) {
           expect(yield* fs.readFileString(`${downloads}/report.txt`)).toBe("existing download");
         }
-      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)), Effect.scoped),
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   effectIt.effect.each([
@@ -889,6 +968,137 @@ describe("PreviewManager", () => {
       ),
   );
 
+  effectIt.effect.each([
+    "navigate",
+    "reload",
+    "goBack",
+    "goForward",
+    "refresh",
+    "hardReload",
+  ] as const)("%s stops a page script that never yields before it navigates", (operation) =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const preview = makeFaviconWebContents();
+        // As in Chromium: the hung renderer answers nothing, and a terminate reaches it only
+        // while no navigation is pending.
+        let stopped = false;
+        const probed = yield* Deferred.make<void>();
+        const navigatedAfterStop: Array<boolean> = [];
+        const navigated = () => {
+          navigatedAfterStop.push(stopped);
+        };
+        const sendCommand = async (method: string) => {
+          if (method === "Runtime.evaluate") {
+            Deferred.doneUnsafe(probed, Effect.void);
+            await new Promise(() => {});
+          }
+          if (method === "Runtime.terminateExecution") stopped = true;
+        };
+        Object.assign(preview.webContents, {
+          getURL: () => "http://localhost:5173/busy",
+          reload: navigated,
+          reloadIgnoringCache: navigated,
+          loadURL: async () => navigated(),
+          navigationHistory: {
+            canGoBack: () => true,
+            canGoForward: () => true,
+            goBack: navigated,
+            goForward: navigated,
+          },
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand,
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+        });
+        fromId.mockReturnValue(preview.webContents);
+        yield* manager.createTab("tab_busy");
+        yield* manager.registerWebview("tab_busy", 42);
+
+        const leaving = yield* (
+          operation === "navigate"
+            ? manager.navigate("tab_busy", "http://localhost:5173/next")
+            : operation === "reload"
+              ? manager.navigate("tab_busy", "http://localhost:5173/busy")
+              : manager[operation]("tab_busy")
+        ).pipe(Effect.forkChild);
+        const probing = yield* Effect.raceFirst(
+          Deferred.await(probed).pipe(Effect.as(true)),
+          Fiber.await(leaving).pipe(Effect.as(false)),
+        );
+        if (probing) yield* TestClock.adjust(1_000);
+        yield* Fiber.join(leaving);
+
+        expect(navigatedAfterStop).toEqual([true]);
+      }),
+    ),
+  );
+
+  effectIt.effect("keeps mouse back and forward buttons inside the preview tab", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const preview = makeFaviconWebContents();
+        const goBack = vi.fn();
+        const goForward = vi.fn();
+        const send = vi.fn();
+        let canGoBack = false;
+        Object.assign(preview.webContents, {
+          navigationHistory: {
+            canGoBack: () => canGoBack,
+            canGoForward: () => true,
+            goBack,
+            goForward,
+          },
+          getZoomFactor: () => 2,
+          send,
+        });
+        fromId.mockReturnValue(preview.webContents);
+        yield* manager.createTab("tab_mouse_navigation");
+        yield* manager.registerWebview("tab_mouse_navigation", 42);
+
+        // Electron reports thumb buttons as "back"/"forward" for every frame of the guest, iframes included.
+        const beforeMouse = preview.listeners.get("before-mouse-event");
+        expect(beforeMouse, "guest has no before-mouse-event listener").toBeDefined();
+        const press = (type: "mouseDown" | "mouseUp", button: string) => {
+          const preventDefault = vi.fn();
+          beforeMouse!({ preventDefault } as never, { type, button, x: 10, y: 10 } as never);
+          return preventDefault;
+        };
+
+        // At the start of tab history the press is still swallowed, or the host app goes back instead.
+        expect(press("mouseDown", "back")).toHaveBeenCalledOnce();
+        expect(press("mouseUp", "back")).toHaveBeenCalledOnce();
+        expect(goBack).not.toHaveBeenCalled();
+
+        canGoBack = true;
+        expect(press("mouseDown", "back")).toHaveBeenCalledOnce();
+        expect(goBack).not.toHaveBeenCalled();
+        expect(press("mouseUp", "back")).toHaveBeenCalledOnce();
+        expect(goBack).toHaveBeenCalledOnce();
+        expect(press("mouseDown", "forward")).toHaveBeenCalledOnce();
+        expect(press("mouseUp", "forward")).toHaveBeenCalledOnce();
+        expect(goForward).toHaveBeenCalledOnce();
+        for (const button of ["left", "right"]) {
+          expect(press("mouseDown", button)).not.toHaveBeenCalled();
+          expect(press("mouseUp", button)).not.toHaveBeenCalled();
+        }
+        expect(goBack).toHaveBeenCalledOnce();
+        expect(goForward).toHaveBeenCalledOnce();
+        // The guest replays dropped presses for human input and recordings, in CSS px.
+        expect(send.mock.calls.filter(([channel]) => channel === "preview:thumb-press")).toEqual([
+          ["preview:thumb-press", "down", 5, 5, 3],
+          ["preview:thumb-press", "up", 5, 5, 3],
+          ["preview:thumb-press", "down", 5, 5, 3],
+          ["preview:thumb-press", "up", 5, 5, 3],
+          ["preview:thumb-press", "down", 5, 5, 4],
+          ["preview:thumb-press", "up", 5, 5, 4],
+        ]);
+      }),
+    ),
+  );
+
   effectIt.effect("keeps editing and forwarded shortcuts in whichever tab holds focus", () =>
     withManager((manager) =>
       Effect.gen(function* () {
@@ -955,6 +1165,150 @@ describe("PreviewManager", () => {
         );
         expect(agentPreventDefault).not.toHaveBeenCalled();
         expect(send).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
+  effectIt.effect.each([
+    ["darwin", true],
+    ["linux", false],
+    ["win32", false],
+  ] as const)(
+    "lets the page and its iframes claim the find and zoom shortcuts before the host acts on %s",
+    ([platform, usesMeta]) =>
+      withManager(
+        (manager) =>
+          Effect.gen(function* () {
+            const preview = makeFaviconWebContents();
+            const send = vi.fn();
+            const mainFrame = { processId: 1, routingId: 1 };
+            Object.assign(preview.webContents, {
+              hostWebContents: { isDestroyed: () => false, send },
+              mainFrame,
+              focusedFrame: mainFrame,
+            });
+            fromId.mockReturnValue(preview.webContents);
+            yield* manager.createTab("tab_page_find");
+            yield* manager.registerWebview("tab_page_find", 42);
+            yield* manager.setForwardedShortcuts([
+              { command: "preview.find", shortcut: parseKeybindingShortcut("mod+f")! },
+              { command: "preview.zoomIn", shortcut: parseKeybindingShortcut("mod+=")! },
+            ]);
+            const beforeInput = preview.listeners.get("before-input-event")!;
+            const keepsZoom = vi.fn();
+            beforeInput(
+              { preventDefault: keepsZoom } as never,
+              {
+                type: "keyDown",
+                key: "=",
+                code: "Equal",
+                meta: usesMeta,
+                control: !usesMeta,
+                shift: false,
+                alt: false,
+              } as never,
+            );
+            expect(keepsZoom).not.toHaveBeenCalled();
+            const findKey = {
+              type: "keyDown",
+              key: "f",
+              code: "KeyF",
+              meta: usesMeta,
+              control: !usesMeta,
+            };
+            const preventDefault = vi.fn();
+
+            beforeInput(
+              { preventDefault } as never,
+              { ...findKey, shift: false, alt: false } as never,
+            );
+            expect(preventDefault).not.toHaveBeenCalled();
+            expect(send).not.toHaveBeenCalled();
+
+            const ipcOn = (preview.webContents as Electron.WebContents).ipc.on as ReturnType<
+              typeof vi.fn
+            >;
+            const pageUnhandledShortcut = ipcOn.mock.calls.find(
+              ([channel]) => channel === "preview:page-unhandled-shortcut",
+            )![1];
+            pageUnhandledShortcut(
+              {},
+              {
+                key: "f",
+                code: "KeyF",
+                metaKey: usesMeta,
+                ctrlKey: !usesMeta,
+                shiftKey: false,
+                altKey: false,
+              },
+            );
+            expect(send).toHaveBeenCalledExactlyOnceWith("desktop:menu-action", "preview.find");
+
+            Object.assign(preview.webContents, { focusedFrame: { processId: 1, routingId: 2 } });
+            beforeInput(
+              { preventDefault } as never,
+              { ...findKey, shift: false, alt: false } as never,
+            );
+            expect(preventDefault).not.toHaveBeenCalled();
+            expect(send).toHaveBeenCalledOnce();
+
+            Object.assign(preview.webContents, { focusedFrame: mainFrame });
+            yield* manager.setForwardedShortcuts([
+              { command: "preview.find", shortcut: parseKeybindingShortcut("ctrl+alt+8")! },
+            ]);
+            pageUnhandledShortcut(
+              {},
+              {
+                key: "[",
+                code: "Digit8",
+                metaKey: false,
+                ctrlKey: true,
+                shiftKey: false,
+                altKey: true,
+              },
+            );
+            expect(send).toHaveBeenCalledTimes(usesMeta ? 2 : 1);
+          }),
+        platform,
+      ),
+  );
+
+  effectIt.effect("searches the guest page and reports its match counts", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const preview = makeFaviconWebContents();
+        const findInPage = vi.fn();
+        const stopFindInPage = vi.fn();
+        Object.assign(preview.webContents, { findInPage, stopFindInPage });
+        fromId.mockReturnValue(preview.webContents);
+        yield* manager.createTab("tab_find");
+        yield* manager.registerWebview("tab_find", 42);
+        const reported = yield* Deferred.make<DesktopPreviewFindResultEvent>();
+        yield* manager.subscribeFindResults((event) => Deferred.succeed(reported, event));
+
+        yield* manager.findInPage("tab_find", "needle", { forward: true, newSession: true });
+        expect(findInPage).toHaveBeenCalledExactlyOnceWith("needle", {
+          forward: true,
+          findNext: true,
+        });
+
+        preview.listeners.get("found-in-page")!(
+          {} as never,
+          {
+            requestId: 1,
+            activeMatchOrdinal: 2,
+            matches: 5,
+            finalUpdate: true,
+          } as never,
+        );
+        expect(yield* Deferred.await(reported)).toEqual({
+          tabId: "tab_find",
+          activeMatchOrdinal: 2,
+          matches: 5,
+        });
+
+        yield* manager.stopFindInPage("tab_find");
+        expect(stopFindInPage).toHaveBeenCalledExactlyOnceWith("clearSelection");
       }),
     ),
   );
@@ -1480,6 +1834,46 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.live("relays dictation for a tab whose URLs were set before its first guest", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const requests: string[] = [];
+        const server = yield* Effect.acquireRelease(
+          Effect.promise(
+            () =>
+              new Promise<NodeHttp.Server>((resolve) => {
+                const listening = NodeHttp.createServer((request, response) => {
+                  requests.push(request.url ?? "");
+                  response.end();
+                }).listen(0, "127.0.0.1", () => resolve(listening));
+              }),
+          ),
+          (listening) => Effect.sync(() => listening.close()),
+        );
+        const { port } = server.address() as NodeNet.AddressInfo;
+        const guest = makeAttachingGuest(49);
+        fromId.mockReturnValue(guest.wc);
+        yield* manager.createTab("tab_first_dictation");
+        yield* manager.setAnnotationDictation("tab_first_dictation", {
+          startUrl: `http://127.0.0.1:${port}/dictate`,
+          stopUrl: null,
+        });
+        yield* manager.prepareWebview(guest.wc);
+        yield* manager.registerWebview("tab_first_dictation", 49);
+
+        const handle = (guest.wc.ipc.handle as ReturnType<typeof vi.fn>).mock.calls.find(
+          ([channel]) => channel === ANNOTATOR_DICTATION_CHANNEL,
+        )?.[1] as (event: unknown, action: string, session: string) => Promise<unknown>;
+        const result = yield* Effect.promise(() =>
+          handle({ senderFrame: { url: "http://localhost:5173/" } }, "start", "draft_1"),
+        );
+
+        expect(result).toBe(true);
+        expect(requests).toEqual(["/dictate/start"]);
+      }),
+    ),
+  );
+
   effectIt.effect("skips a guest destroyed while another guest's session opens", () =>
     withManager((manager) =>
       Effect.gen(function* () {
@@ -1692,6 +2086,30 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("captures final pixels after warmup fails and paint readiness settles", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const paint = Promise.withResolvers<void>();
+        const { capturePage, wc, capture } = yield* setupStill(manager, paint.promise);
+        capturePage
+          .mockRejectedValueOnce(new Error("UnknownVizError"))
+          .mockRejectedValueOnce(new Error("UnknownVizError"))
+          .mockRejectedValueOnce(new Error("UnknownVizError"))
+          .mockResolvedValue(makeStillImage("final-png"));
+        const fiber = yield* capture.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust(300);
+        expect(capturePage).toHaveBeenCalledTimes(3);
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false]]);
+        paint.resolve();
+        const artifact = yield* Fiber.join(fiber);
+        expect(capturePage).toHaveBeenCalledTimes(4);
+        expect(writeFile.mock.calls).toEqual([[artifact.path, Buffer.from("final-png")]]);
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false], [true]]);
+      }),
+    ),
+  );
+
   effectIt.effect("preserves both screenshots of the same site in the same millisecond", () =>
     withManager((manager) =>
       Effect.gen(function* () {
@@ -1705,6 +2123,8 @@ describe("PreviewManager", () => {
         const capturePage = vi
           .fn<() => Promise<ReturnType<typeof pngImage>>>()
           .mockResolvedValueOnce(pngImage(firstPng))
+          .mockResolvedValueOnce(pngImage(firstPng))
+          .mockResolvedValueOnce(pngImage(secondPng))
           .mockResolvedValueOnce(pngImage(secondPng));
         fromId.mockReturnValue(makeTestPreviewWebContents(capturePage));
         yield* manager.createTab("tab_1");
@@ -1721,6 +2141,115 @@ describe("PreviewManager", () => {
           [first.path, firstPng],
           [second.path, secondPng],
         ]);
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "waits for paint before capturing and restores rendering after overlapping requests",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const paints = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+          const pendingPaints = paints.map((paint) => paint.promise);
+          const { image, capturePage, wc, capture } = yield* setupStill(manager);
+          holdStillImagePaint(wc, pendingPaints);
+          const first = Promise.withResolvers<typeof image>();
+          const second = Promise.withResolvers<typeof image>();
+          capturePage
+            .mockResolvedValueOnce(makeStillImage("discarded-warmup"))
+            .mockResolvedValueOnce(makeStillImage("discarded-warmup"))
+            .mockReturnValueOnce(first.promise)
+            .mockReturnValueOnce(second.promise);
+          const hostThrottling = vi.fn();
+          yield* manager.addWindow({
+            isDestroyed: () => false,
+            once: vi.fn(),
+            webContents: { setBackgroundThrottling: hostThrottling },
+          } as never);
+          const one = yield* capture.pipe(Effect.forkChild({ startImmediately: true }));
+          const two = yield* capture.pipe(Effect.forkChild({ startImmediately: true }));
+          yield* TestClock.adjust(0);
+          expect(capturePage).toHaveBeenCalledTimes(2);
+          expect(pendingPaints).toHaveLength(0);
+          expect(writeFile).not.toHaveBeenCalled();
+          expect(hostThrottling.mock.calls).toEqual([[false]]);
+          expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false]]);
+          paints.forEach((paint) => paint.resolve());
+          yield* TestClock.adjust(0);
+          expect(capturePage).toHaveBeenCalledTimes(4);
+          first.resolve(image);
+          yield* Fiber.join(one);
+          expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false]]);
+          second.resolve(image);
+          yield* Fiber.join(two);
+          const saved = writeFile.mock.calls.map(([, bytes]) => bytes);
+          expect(saved).toEqual([image.toPNG(), image.toPNG()]);
+          expect(hostThrottling.mock.calls).toEqual([[false], [true]]);
+          expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false], [true]]);
+        }),
+      ),
+  );
+
+  effectIt.effect("keeps picture-in-picture rendering after a still image completes", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const { image, capturePage, wc, capture } = yield* setupStill(manager);
+        const pending = Promise.withResolvers<typeof image>();
+        capturePage
+          .mockResolvedValueOnce(image)
+          .mockResolvedValueOnce(makeStillImage("discarded-warmup"))
+          .mockReturnValueOnce(pending.promise);
+        const { pictureInPictureWindow } = makeTestPictureInPictureWindow();
+        browserWindowConstructor.mockImplementation(function () {
+          return pictureInPictureWindow;
+        });
+        yield* manager.openPictureInPicture("tab_still");
+        const still = yield* capture.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust(0);
+        expect(capturePage).toHaveBeenCalledTimes(3);
+        expect(writeFile).not.toHaveBeenCalled();
+        pending.resolve(image);
+        yield* Fiber.join(still);
+        expect(writeFile.mock.calls.map((call) => call[1])).toEqual([Buffer.from("fresh-png")]);
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false]]);
+        yield* manager.closePictureInPicture("tab_still");
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false], [true]]);
+      }),
+    ),
+  );
+
+  effectIt.effect("keeps a pending still image rendering when recording ends", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const { image, capturePage, wc, capture } = yield* setupStill(manager);
+        const pending = Promise.withResolvers<typeof image>();
+        capturePage.mockResolvedValueOnce(image).mockReturnValue(pending.promise);
+        yield* manager.startRecording("tab_still");
+        const fiber = yield* capture.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust(0);
+        yield* manager.stopRecording("tab_still");
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false]]);
+        pending.resolve(image);
+        yield* Fiber.join(fiber);
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false], [true]]);
+      }),
+    ),
+  );
+
+  effectIt.effect("saves available pixels when paint readiness never settles", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const paint = Promise.withResolvers<void>();
+        const { capturePage, wc, capture } = yield* setupStill(manager, paint.promise);
+        const first = yield* Effect.exit(capture).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* TestClock.adjust(1_001);
+        expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true);
+        expect(capturePage).toHaveBeenCalledTimes(2);
+        expect(writeFile.mock.calls.map((call) => call[1])).toEqual([Buffer.from("fresh-png")]);
+        expect(wc.setBackgroundThrottling.mock.calls).toEqual([[false], [true]]);
       }),
     ),
   );
@@ -2174,7 +2703,7 @@ describe("PreviewManager", () => {
       expect(yield* nextType).toBe("attached");
       yield* manager.closeTab("tab_1");
       expect(yield* nextType).toBe("detached");
-    }).pipe(Effect.provide(managerLayer()), Effect.scoped),
+    }).pipe(Effect.provide(managerLayer())),
   );
 
   effectIt.effect(
@@ -2231,9 +2760,200 @@ describe("PreviewManager", () => {
           }),
         );
         expect(yield* Queue.take(capturing)).toBe(true);
+        yield* manager.setCaptureDrawn("tab_1", true);
         screenshot.resolve({ data: "" });
         expect(yield* Queue.take(capturing)).toBe(false);
+      }).pipe(Effect.provide(managerLayer())),
+  );
+
+  effectIt.effect(
+    "opens a new-tab link in the background only when the agent's input led to it",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+        const serverTab = { threadId: "thread-1", tabId: "server-tab-1" };
+        const contents = Object.assign(
+          makeTestPreviewWebContents(async () => {
+            throw new Error("unused");
+          }, 42),
+          {
+            isDevToolsOpened: () => false,
+            getUserAgent: () => "Electron",
+            focusedFrame: null,
+          },
+        );
+        fromId.mockReturnValue(contents);
+        const manager = yield* PreviewManager.PreviewManager;
+        const openLinks = yield* Queue.unbounded<boolean>();
+        yield* manager.subscribeOpenLinks(({ background }) =>
+          Queue.offer(openLinks, background).pipe(Effect.asVoid),
+        );
+        const attached = yield* Deferred.make<void>();
+        yield* host.events.pipe(
+          Stream.runForEach((line) =>
+            new TextDecoder().decode(line).includes('"type":"attached"')
+              ? Deferred.succeed(attached, undefined)
+              : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+        yield* manager.createTab("tab_1", { serverTab });
+        yield* manager.registerWebview("tab_1", 42);
+        yield* Deferred.await(attached);
+        const openWindow = vi.mocked(contents.setWindowOpenHandler).mock.calls[0]![0];
+        const openBlankLink = Effect.suspend(() => {
+          openWindow({
+            url: "https://example.com/next",
+            disposition: "foreground-tab",
+          } as Electron.HandlerDetails);
+          return Queue.take(openLinks);
+        });
+
+        expect(yield* openBlankLink).toBe(false);
+
+        yield* host.handleCommandLine(
+          JSON.stringify({
+            type: "cdp",
+            ...serverTab,
+            message: JSON.stringify({
+              id: 1,
+              method: "Runtime.evaluate",
+              params: { expression: "document.querySelector('a').click()" },
+              sessionId: "t3-preview-page",
+            }),
+          }),
+        );
+        expect(yield* openBlankLink).toBe(true);
+
+        // A person clicking in the guest itself gives it a focused frame.
+        Object.assign(contents, { focusedFrame: {} });
+        expect(yield* openBlankLink).toBe(false);
+
+        yield* manager.closeTab("tab_1");
+        yield* manager.createTab("tab_1");
+        yield* manager.registerWebview("tab_1", 42);
+        using _attach = vi.spyOn(DesktopTabRunner.prototype, "attach").mockResolvedValue(undefined);
+        yield* manager.connectTabHost({
+          runtimeTabId: "tab_1",
+          connectionId: "connection-1",
+          binding: {
+            environmentId: EnvironmentId.make("environment-1"),
+            threadId: ThreadId.make("thread-1"),
+            tabId: PreviewTabId.make("server-tab-1"),
+            deviceName: "Desktop",
+            snapshot: {
+              threadId: ThreadId.make("thread-1"),
+              tabId: PreviewTabId.make("server-tab-1"),
+              runtime: "desktop",
+              navStatus: { _tag: "Idle" },
+              canGoBack: false,
+              canGoForward: false,
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          },
+        });
+        const openHostedLink = vi.mocked(contents.setWindowOpenHandler).mock.lastCall![0];
+        for (const focused of [false, true]) {
+          Object.assign(contents, { focusedFrame: focused ? {} : null });
+          openHostedLink({
+            url: "https://example.com/next",
+            disposition: "foreground-tab",
+          } as Electron.HandlerDetails);
+          expect(yield* Queue.take(openLinks)).toBe(!focused);
+        }
       }).pipe(Effect.provide(managerLayer()), Effect.scoped),
+  );
+
+  effectIt.effect("reports early and subsequent load failures for the current guest", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+      const serverTab = { threadId: "thread-1", tabId: "server-tab-1" };
+      const lines = yield* Queue.unbounded<string>();
+      yield* host.events.pipe(
+        Stream.runForEach((line) => Queue.offer(lines, new TextDecoder().decode(line))),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const makeGuest = (id: number) => {
+        const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+        const wc = Object.assign(
+          makeTestPreviewWebContents(
+            async () => ({
+              toJPEG: () => Buffer.from("jpeg"),
+              getSize: () => ({ width: 100, height: 80 }),
+            }),
+            id,
+          ),
+          {
+            isDevToolsOpened: () => false,
+            getUserAgent: () => "Electron",
+            ipc: { on: vi.fn(), off: vi.fn(), handle: vi.fn(), removeHandler: vi.fn() },
+            once: vi.fn(),
+            on: (event: string, listener: (...args: unknown[]) => void) => {
+              listeners.set(event, [...(listeners.get(event) ?? []), listener]);
+            },
+          },
+        );
+        const emit = (event: string, ...args: unknown[]) => {
+          for (const listener of listeners.get(event) ?? []) listener(...args);
+        };
+        return {
+          wc,
+          emit,
+          fail: (url: string) =>
+            emit("did-fail-load", {}, -202, "ERR_CERT_AUTHORITY_INVALID", url, true),
+        };
+      };
+      const initial = makeGuest(42);
+      const replacement = makeGuest(43);
+      const manager = yield* PreviewManager.PreviewManager;
+      const statuses: PreviewManager.PreviewNavStatus[] = [];
+      yield* manager.subscribeStateChanges((_tabId, state) =>
+        Effect.sync(() => {
+          statuses.push(state.navStatus);
+        }),
+      );
+      yield* manager.createTab("tab_1", { serverTab });
+      yield* manager.prepareWebview(initial.wc);
+      yield* manager.prepareWebview(replacement.wc);
+      initial.fail("https://first.local/");
+      initial.emit("did-start-navigation", { isMainFrame: false, isSameDocument: false });
+      initial.emit("did-start-loading");
+      replacement.fail("https://second.local/");
+      const failure = (url: string) => ({
+        type: "loadFailed",
+        ...serverTab,
+        url,
+        code: -202,
+        description: "ERR_CERT_AUTHORITY_INVALID",
+      });
+
+      fromId.mockReturnValue(initial.wc);
+      yield* manager.registerWebview("tab_1", 42);
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "attached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual(failure("https://first.local/"));
+
+      fromId.mockReturnValue(replacement.wc);
+      yield* manager.registerWebview("tab_1", 43);
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "detached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "attached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual(failure("https://second.local/"));
+
+      // A callback queued by the old guest must not report a failure for its replacement.
+      initial.fail("https://stale.local/");
+      replacement.fail("https://current.local/");
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual(failure("https://current.local/"));
+      expect(statuses).not.toContainEqual(expect.objectContaining({ url: "https://stale.local/" }));
+
+      const retried = makeGuest(44);
+      yield* manager.prepareWebview(retried.wc);
+      retried.fail("https://retry.local/");
+      retried.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+      fromId.mockReturnValue(retried.wc);
+      yield* manager.registerWebview("tab_1", 44);
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "detached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "attached", ...serverTab });
+      expect(statuses.at(-1)?.kind).toBe("Success");
+    }).pipe(Effect.provide(managerLayer())),
   );
 
   effectIt.effect("discards a screenshot that resolves after its guest is replaced", () =>
@@ -2391,6 +3111,116 @@ describe("PreviewManager", () => {
         expect(grants).toEqual([{ video: { routingId: 42 } }]);
 
         yield* manager.stopRecording("tab_race_b");
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "publishes human ownership only on transitions while retaining every recording press",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          let humanInput: ((input: unknown) => void) | undefined;
+          const contents = makeTestPreviewWebContents(async () => ({
+            toJPEG: () => Buffer.from("frame"),
+            getSize: () => ({ width: 800, height: 600 }),
+          }));
+          contents.ipc.on = (channel, callback) => {
+            if (channel === "preview:human-input")
+              humanInput = (input) => callback({} as Electron.IpcMainEvent, input);
+            return contents.ipc;
+          };
+          fromId.mockReturnValue(contents);
+          yield* manager.createTab("tab_human");
+          yield* manager.registerWebview("tab_human", 42);
+          yield* manager.startRecording("tab_human", {
+            showKeyPresses: true,
+            showMousePresses: true,
+          });
+          const controllers: string[] = [];
+          const feedback = yield* Queue.unbounded<void>();
+          webviewSend.mockImplementation((channel) => {
+            if (channel === "preview:recording-controller") Queue.offerUnsafe(feedback, undefined);
+          });
+          yield* manager.subscribeStateChanges((_tabId, state) =>
+            Effect.sync(() => {
+              controllers.push(state.controller);
+            }),
+          );
+          for (const press of [
+            { kind: "pointer", x: 10, y: 20, button: 0 },
+            { kind: "pointer", x: 30, y: 40, button: 0 },
+            { kind: "key", key: "a", code: "KeyA" },
+          ]) {
+            humanInput?.(press);
+            yield* Queue.take(feedback);
+          }
+          expect(controllers).toEqual(["human"]);
+          expect(
+            webviewSend.mock.calls.filter(
+              ([channel]) => channel === "preview:recording-controller",
+            ),
+          ).toEqual([
+            ["preview:recording-controller", "human", { x: 10, y: 20 }],
+            ["preview:recording-controller", "human", { x: 30, y: 40 }],
+            ["preview:recording-controller", "human", undefined],
+          ]);
+          yield* TestClock.adjust(750);
+          expect(controllers).toEqual(["human", "none"]);
+        }),
+      ),
+  );
+
+  effectIt.effect("keeps human ownership until the last input's idle deadline", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let humanInput: ((input: unknown) => void) | undefined;
+        const contents = makeTestPreviewWebContents(async () => ({
+          toJPEG: () => Buffer.from("frame"),
+          getSize: () => ({ width: 800, height: 600 }),
+        }));
+        contents.ipc.on = (channel, callback) => {
+          if (channel === "preview:human-input")
+            humanInput = (input) => callback({} as Electron.IpcMainEvent, input);
+          return contents.ipc;
+        };
+        fromId.mockReturnValue(contents);
+        yield* manager.createTab("tab_idle");
+        yield* manager.registerWebview("tab_idle", 42);
+        const controllers: string[] = [];
+        yield* manager.subscribeStateChanges((_tabId, state) =>
+          Effect.sync(() => {
+            controllers.push(state.controller);
+          }),
+        );
+        const press = () => humanInput?.({ kind: "key", key: "a", code: "KeyA" });
+        press();
+        yield* TestClock.adjust(500);
+        press();
+        yield* TestClock.adjust(749);
+        expect(controllers).toEqual(["human"]);
+        yield* TestClock.adjust(1);
+        expect(controllers).toEqual(["human", "none"]);
+
+        press();
+        yield* TestClock.adjust(500);
+        const staleInput = humanInput;
+        const replacement = makeTestPreviewWebContents(
+          async () => ({
+            toJPEG: () => Buffer.from("frame"),
+            getSize: () => ({ width: 800, height: 600 }),
+          }),
+          43,
+        );
+        replacement.ipc.on = contents.ipc.on;
+        contents.isDestroyed = () => true;
+        fromId.mockImplementation((id) => (id === 43 ? replacement : null));
+        yield* manager.registerWebview("tab_idle", 43);
+        expect(controllers.at(-1)).toBe("none");
+        const count = controllers.length;
+        staleInput?.({ kind: "key", key: "b", code: "KeyB" });
+        yield* TestClock.adjust(750);
+        expect(controllers).toHaveLength(count);
       }),
     ),
   );

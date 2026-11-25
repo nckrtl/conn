@@ -2,9 +2,11 @@ import type { ChatComposerProps } from "./ChatComposer";
 import type { PromptUltrathink } from "./TraitsPicker";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { type AppModelOption } from "../../modelSelection";
+import { useGT, useMessages } from "gt-react";
 import { CircleAlertIcon } from "lucide-react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerControl } from "./ComposerControl";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   ComposerFooterModeControls,
   ComposerModelPicker,
@@ -41,6 +43,7 @@ const MODEL_TRIGGER_STATES = "data-popup-open:bg-accent data-popup-open:text-for
 
 export function ComposerControlsBar(props: {
   environmentId: EnvironmentId;
+  workspaceCwd: string | null;
   routeKind: ChatComposerProps["routeKind"];
   routeThreadRef: ChatComposerProps["routeThreadRef"];
   draftId: ChatComposerProps["draftId"];
@@ -64,6 +67,7 @@ export function ComposerControlsBar(props: {
   restingHiddenBlockCount: number;
   iconOnlyBlockCount: number;
   showProviderUnavailable: boolean;
+  usesInstanceDefaultModel: boolean;
   providerSetupInstanceId: ProviderInstanceId | undefined;
   onOpenProviderSetup: ChatComposerProps["onOpenProviderSetup"];
   providerCatalogPending: boolean;
@@ -108,6 +112,7 @@ export function ComposerControlsBar(props: {
     restingHiddenBlockCount: measuredHiddenBlockCount,
     iconOnlyBlockCount,
     showProviderUnavailable,
+    usesInstanceDefaultModel,
     providerSetupInstanceId,
     onOpenProviderSetup,
     providerCatalogPending,
@@ -144,6 +149,8 @@ export function ComposerControlsBar(props: {
     measuredHiddenBlockCount,
   });
   const controlSize = composerControlsCollapsed ? "xs" : "sm";
+  const gt = useGT();
+  const m = useMessages();
   const applyThreadModelPick = useApplyThreadModelPick();
   const applyRouteThreadModelPick = useStableCallback(() => applyThreadModelPick(routeThreadRef));
   const traitsInput = resolveComposerTraitsInput({
@@ -160,7 +167,7 @@ export function ComposerControlsBar(props: {
     promptUltrathink,
     onPromptEdit,
   });
-  const effort = describeComposerEffort(traitsInput, props.effortDisplay, controlSize);
+  const effort = describeComposerEffort(traitsInput, props.effortDisplay, controlSize, m);
   const restingBlockDefs = showModeBlock
     ? [
         {
@@ -183,6 +190,7 @@ export function ComposerControlsBar(props: {
   const composerModelPicker = (
     <ComposerModelPicker
       environmentId={environmentId}
+      workspaceCwd={props.workspaceCwd}
       compact={false}
       isComposerOwned
       // The trigger grows away from this edge when its model or effort label changes.
@@ -256,11 +264,31 @@ export function ComposerControlsBar(props: {
       className="shrink-0"
     >
       <CircleAlertIcon className="size-4" />
-      {providerSetupInstanceId ? "Open provider settings" : "No provider available"}
+      {providerSetupInstanceId ? gt("Open provider settings") : gt("No provider available")}
     </ComposerControl>
   ) : (
     <>
-      {composerModelPicker}
+      {usesInstanceDefaultModel ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                tabIndex={0}
+                data-orbit-instance-default-model="true"
+                className="inline-flex h-7 shrink-0 items-center rounded-sm px-2 text-muted-foreground text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              />
+            }
+          >
+            Instance default model
+          </TooltipTrigger>
+          <TooltipPopup>
+            No connected environment lends a model list here. The new Instance starts this thread
+            with its own default model.
+          </TooltipPopup>
+        </Tooltip>
+      ) : (
+        composerModelPicker
+      )}
 
       <>
         {restingBlockDefs.map((def, index) => {

@@ -91,12 +91,34 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     };
     let environment = cx.config().environment_id.as_str();
     let tab = str_arg(args, "tabId");
-    // Deliberate divergence from T3 (see `conn_preview::relay`): the desktop's integrated browser
+    // Deliberate divergence from T3 (see `conn_preview::relay`): a desktop's integrated browser
     // is the agent's default. A call that names no tab goes to the thread's desktop tab, and when
-    // a desktop is connected but has no tab for the thread yet, one is opened in its Browser panel
-    // first. The server's own browser serves only a thread without a desktop, or a call that names
-    // a server tab. Recordings need the server's browser, so they never default to a desktop.
-    let default_to_desktop = !matches!(name, "preview_recording_start" | "preview_recording_stop");
+    // a desktop that hosts agent tabs (it advertised `hostsAgentTabs`) has no tab for the thread
+    // yet, one is opened in its Browser panel first. A desktop that does not host tabs (the
+    // Electron app) is never asked: the server's own browser serves at once. The server's browser
+    // also serves a call that names a server tab. Recordings need the server's browser, and a
+    // CDP endpoint is useless to a server-side agent when it points at a desktop-local page, so
+    // neither defaults to a desktop.
+    let default_to_desktop = !matches!(
+        name,
+        "preview_recording_start" | "preview_recording_stop" | "preview_cdp_endpoint"
+    );
+    if name == "preview_cdp_endpoint"
+        && tab.is_some_and(|tab| {
+            preview
+                .desktop_tabs(environment, &caller.thread_id)
+                .iter()
+                .any(|hosted| hosted.tab == tab)
+        })
+    {
+        // T3's desktop runner: its endpoint cannot be reached from the agent's server.
+        return Err(ToolError::Preview {
+            tag: "PreviewAutomationExecutionError",
+            message:
+                "Preview automation cdpEndpoint failed: Not supported on desktop tabs: cdpEndpoint."
+                    .into(),
+        });
+    }
     if tab.is_none()
         && default_to_desktop
         && !matches!(name, "preview_status" | "conn_preview_close")
@@ -448,14 +470,16 @@ async fn desktop_first(
 /// How long a call waits for a desktop tab it asked the desktop to open.
 const DESKTOP_TAB_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// With a desktop connected and no desktop tab on the thread, asks the desktop to open its
-/// Browser panel (without taking the window's focus) and waits for the tab it makes to register.
-/// Without a desktop, or if it does not answer, nothing changes: the server's browser serves.
+/// With a connected desktop that hosts agent tabs and no desktop tab on the thread, asks that
+/// desktop to open its Browser panel (without taking the window's focus) and waits for the tab it
+/// makes to register. Without such a desktop, nothing is sent and nothing waits: a desktop that
+/// does not advertise tab hosting (the Electron app) opens an empty panel and never registers a
+/// tab. If the desktop does not answer, nothing changes either: the server's browser serves.
 async fn open_desktop_tab(cx: &Cx<'_>, preview: &Preview, environment: &str, thread: &str) {
     if !preview.desktop_tabs(environment, thread).is_empty() {
         return;
     }
-    let Some(panels) = cx.config().panels.as_ref().filter(|p| p.has_desktop()) else {
+    let Some(panels) = cx.config().panels.as_ref().filter(|p| p.has_tab_host()) else {
         return;
     };
     let request = AgentPanelRequest {
@@ -470,7 +494,11 @@ async fn open_desktop_tab(cx: &Cx<'_>, preview: &Preview, environment: &str, thr
         mcp_call: None,
         focus_window: false,
     };
-    if panels.show(request, DESKTOP_TAB_WAIT).await.is_err() {
+    if panels
+        .show_to_tab_hosts(request, DESKTOP_TAB_WAIT)
+        .await
+        .is_err()
+    {
         return;
     }
     let deadline = tokio::time::Instant::now() + DESKTOP_TAB_WAIT;

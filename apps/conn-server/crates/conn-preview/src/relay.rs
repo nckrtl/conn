@@ -14,7 +14,8 @@
 //! newest registered one. The server's own browser serves a call only when no desktop hosts a
 //! tab for the thread, or when the agent names a server tab explicitly (a `tabId` no desktop
 //! hosts). Callers that want a page when no desktop tab exists yet open one first (see
-//! `conn-mcp`'s preview tool); recordings never default to a desktop (`desktop_default`).
+//! `conn-mcp`'s preview tool); recordings and CDP endpoints never default to a desktop
+//! (`desktop_default`).
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
@@ -329,6 +330,14 @@ impl Relay {
         call: RelayCall<'_>,
     ) -> Option<Result<Relayed, RelayFailure>> {
         let key = agent_key(call.environment_id, call.agent, call.thread);
+        // Whatever the caller says, recordings and CDP endpoints are served by the server's own
+        // browser when no tab is named: a desktop tab can neither record for the agent nor give
+        // it an endpoint it can reach.
+        let desktop_default = call.desktop_default
+            && !matches!(
+                call.operation,
+                "recordingStart" | "recordingStop" | "cdpEndpoint"
+            );
         let (receiver, context) = {
             let mut guard = lock(&self.0);
             let state = &mut *guard;
@@ -359,7 +368,7 @@ impl Relay {
             // it current. Here the desktop is the default: the thread's newest registered tab
             // serves an agent that has no current one (never for `open`, which the caller turns
             // into a navigation first).
-            let newest = (call.tab.is_none() && call.desktop_default && call.operation != "open")
+            let newest = (call.tab.is_none() && desktop_default && call.operation != "open")
                 .then(|| {
                     hosts.iter().rev().find(|h| {
                         h.thread == call.thread && h.environment_id == call.environment_id
@@ -368,14 +377,14 @@ impl Relay {
                 .flatten();
             // A server-only call (recordings) with no named tab never follows the agent's current
             // desktop tab either: only the server's browser can serve it.
-            let current = if call.tab.is_some() || !call.desktop_default {
+            let current = if call.tab.is_some() || !desktop_default {
                 None
             } else {
                 assigned_host.or(newest)
             };
             let Some(host) = explicit.or(current) else {
                 if call.update_current_tab
-                    && call.desktop_default
+                    && desktop_default
                     && let Some(i) = assigned
                 {
                     state.assignments.remove(i);

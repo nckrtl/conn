@@ -449,15 +449,44 @@ async fn agent_preview_calls_reach_the_desktop_tab_a_host_registered() {
     assert_eq!(opened["isError"], false, "{opened}");
     assert_eq!(opened["structuredContent"]["tabId"], tab.as_str());
 
-    // What the desktop cannot do answers as T3's runner does, and does not hang.
+    // A CDP endpoint never defaults to a desktop tab: the server-side agent could not reach it.
+    // Without a tab it is the server's browser that answers (it has no tab here); a named
+    // desktop tab answers as T3's runner does. Neither reaches the page, and neither hangs.
+    let before = page.calls.load(Ordering::SeqCst);
     let endpoint = agent.call("preview_cdp_endpoint", json!({})).await;
     assert_eq!(endpoint["isError"], true);
     assert!(
         endpoint["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("Preview automation cdpEndpoint failed on client desktop-"),
+            .starts_with("No active preview tab was found for cdpEndpoint"),
         "{endpoint}"
+    );
+    let endpoint = agent
+        .call("preview_cdp_endpoint", json!({"tabId": tab.as_str()}))
+        .await;
+    assert_eq!(endpoint["isError"], true);
+    assert!(
+        endpoint["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Not supported on desktop tabs"),
+        "{endpoint}"
+    );
+    // A recording without a tab goes to the server's browser too, never to the desktop's page.
+    let recording = agent.call("preview_recording_start", json!({})).await;
+    assert_eq!(recording["isError"], true);
+    assert!(
+        recording["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("No active preview tab was found for recordingStart"),
+        "{recording}"
+    );
+    assert_eq!(
+        page.calls.load(Ordering::SeqCst),
+        before,
+        "the page was not touched"
     );
 
     // A tab no desktop hosts is a server tab: it stays on the server, away from the page.

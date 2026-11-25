@@ -266,9 +266,22 @@ struct VaultwardenForm {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Whether the edit dialog has the stored password and OTP secret yet. They load through an async
+/// reveal, and the fields stay empty until it answers, so empty is not "the user cleared it".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecretsLoad {
+    /// A new login: there is nothing stored to load.
+    NotStored,
+    Loading,
+    Loaded,
+    /// The reveal failed: the fields hold only what the user types.
+    Failed,
+}
+
 /// Active Add / Edit Test login modal dialog (`TestLoginDialog.tsx`).
 struct TestLoginDialogState {
     editing_id: Option<String>,
+    secrets: SecretsLoad,
     url: Entity<InputState>,
     username: Entity<InputState>,
     password: Entity<InputState>,
@@ -787,6 +800,11 @@ impl PasswordsView {
         }
 
         self.test_login_dialog = Some(TestLoginDialogState {
+            secrets: if editing_id.is_some() {
+                SecretsLoad::Loading
+            } else {
+                SecretsLoad::NotStored
+            },
             editing_id: editing_id.clone(),
             url,
             username,
@@ -799,30 +817,52 @@ impl PasswordsView {
         });
         self._test_login_reveal_task = None;
 
-        // Editing loads the stored secrets into the form (`TestLoginDialog.tsx`).
-        if let (Some(id), Some(server)) = (editing_id, self.server.clone()) {
+        // Editing loads the stored secrets into the form (`TestLoginDialog.tsx`). Save waits for
+        // this; if it fails, the fields are never sent empty (`update_test_login_input`).
+        if let Some(id) = editing_id {
+            let Some(server) = self.server.clone() else {
+                // Nothing can load them, and nothing can save either.
+                if let Some(dialog) = &mut self.test_login_dialog {
+                    dialog.secrets = SecretsLoad::Failed;
+                }
+                cx.notify();
+                return;
+            };
             let window_handle = window.window_handle();
             self._test_login_reveal_task = Some(cx.spawn(async move |this, cx| {
                 let result = server.reveal_test_login(id.clone()).await;
-                if let Ok(secrets) = result {
-                    let _ = cx.update_window(window_handle, |_, window, cx| {
-                        let _ = this.update(cx, |view, cx| {
-                            let Some(dialog) = view.test_login_dialog.as_ref() else {
-                                return;
-                            };
-                            if dialog.editing_id.as_deref() != Some(id.as_str()) {
-                                return;
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        let Some(dialog) = view.test_login_dialog.as_mut() else {
+                            return;
+                        };
+                        if dialog.editing_id.as_deref() != Some(id.as_str()) {
+                            return;
+                        }
+                        match result {
+                            Ok(secrets) => {
+                                dialog.password.update(cx, |state, cx| {
+                                    state.set_value(secrets.password, window, cx);
+                                });
+                                dialog.otp_secret.update(cx, |state, cx| {
+                                    state.set_value(
+                                        secrets.otp_secret.unwrap_or_default(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                dialog.secrets = SecretsLoad::Loaded;
                             }
-                            dialog.password.update(cx, |state, cx| {
-                                state.set_value(secrets.password, window, cx);
-                            });
-                            dialog.otp_secret.update(cx, |state, cx| {
-                                state.set_value(secrets.otp_secret.unwrap_or_default(), window, cx);
-                            });
-                            cx.notify();
-                        });
+                            Err(err) => {
+                                dialog.secrets = SecretsLoad::Failed;
+                                dialog.error = Some(format!(
+                                    "Could not load the stored password and OTP secret ({err}). Saving keeps them unless you type new ones."
+                                ));
+                            }
+                        }
+                        cx.notify();
                     });
-                }
+                });
             }));
         }
 
@@ -841,9 +881,14 @@ impl PasswordsView {
         let password = dialog.password.read(cx).value().to_string();
         let label = dialog.label.read(cx).value().to_string();
         let otp_secret = dialog.otp_secret.read(cx).value().to_string();
-        if dialog.saving || url.trim().is_empty() || username.trim().is_empty() {
+        if dialog.saving
+            || dialog.secrets == SecretsLoad::Loading
+            || url.trim().is_empty()
+            || username.trim().is_empty()
+        {
             return;
         }
+        let secrets = dialog.secrets;
         let editing_id = dialog.editing_id.clone();
 
         if let Some(dialog) = &mut self.test_login_dialog {
@@ -856,18 +901,9 @@ impl PasswordsView {
         cx.spawn(async move |this, cx| {
             let result = if let Some(id) = editing_id.clone() {
                 server
-                    .update_test_login(UpdateTestLoginInput {
-                        id,
-                        url: Some(url),
-                        username: Some(username),
-                        password: Some(password),
-                        label: Some(label),
-                        otp_secret: Some(if otp_secret.is_empty() {
-                            None
-                        } else {
-                            Some(otp_secret)
-                        }),
-                    })
+                    .update_test_login(update_test_login_input(
+                        id, url, username, label, password, otp_secret, secrets,
+                    ))
                     .await
             } else {
                 server
@@ -1640,6 +1676,7 @@ impl PasswordsView {
             "Save test login"
         };
         let can_save = !dialog.saving
+            && dialog.secrets != SecretsLoad::Loading
             && !dialog.url.read(cx).value().trim().is_empty()
             && !dialog.username.read(cx).value().trim().is_empty();
 
@@ -1982,6 +2019,30 @@ fn clear_vaultwarden_form_inputs(
         &form.master_password,
     ] {
         input.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+    }
+}
+
+/// The update an edit dialog sends. The password and OTP fields hold the stored values only once
+/// the reveal has loaded them; after a failed reveal an empty field means "never loaded", not
+/// "cleared", so it is left out and the server keeps the stored value.
+fn update_test_login_input(
+    id: String,
+    url: String,
+    username: String,
+    label: String,
+    password: String,
+    otp_secret: String,
+    secrets: SecretsLoad,
+) -> UpdateTestLoginInput {
+    let revealed = secrets != SecretsLoad::Failed;
+    UpdateTestLoginInput {
+        id,
+        url: Some(url),
+        username: Some(username),
+        label: Some(label),
+        password: (revealed || !password.is_empty()).then_some(password),
+        otp_secret: (revealed || !otp_secret.is_empty())
+            .then(|| (!otp_secret.is_empty()).then_some(otp_secret)),
     }
 }
 

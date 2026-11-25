@@ -20,7 +20,10 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use super::{BoxFuture, LocalPasswordsBackend, PasswordsView, ServerPasswordsBackend};
+use super::{
+    BoxFuture, LocalPasswordsBackend, PasswordsView, SecretsLoad, ServerPasswordsBackend,
+    update_test_login_input,
+};
 use crate::theme::apply_kit_theme;
 
 #[derive(Clone)]
@@ -95,6 +98,10 @@ struct FakeServerBackend {
     autofill_patches: Arc<Mutex<Vec<Value>>>,
     autofill_error: Arc<Mutex<Option<String>>>,
     last_update: Arc<Mutex<Option<UpdateTestLoginInput>>>,
+    update_calls: Arc<AtomicUsize>,
+    /// When set, the next reveal waits for this answer.
+    reveal_gate:
+        Arc<Mutex<Option<futures::channel::oneshot::Receiver<Result<TestLoginSecrets, String>>>>>,
 }
 
 impl FakeServerBackend {
@@ -108,7 +115,16 @@ impl FakeServerBackend {
             autofill_patches: Arc::new(Mutex::new(Vec::new())),
             autofill_error: Arc::new(Mutex::new(None)),
             last_update: Arc::new(Mutex::new(None)),
+            update_calls: Arc::new(AtomicUsize::new(0)),
+            reveal_gate: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Makes the next reveal wait; the returned sender answers it.
+    fn hold_reveal(&self) -> futures::channel::oneshot::Sender<Result<TestLoginSecrets, String>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        *self.reveal_gate.lock().expect("lock") = Some(rx);
+        tx
     }
 }
 
@@ -139,6 +155,7 @@ impl ServerPasswordsBackend for FakeServerBackend {
         &self,
         input: UpdateTestLoginInput,
     ) -> BoxFuture<Result<TestLoginSummary, String>> {
+        self.update_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_update.lock().expect("lock") = Some(input.clone());
         let mut items = self.items.lock().expect("lock");
         let Some(existing) = items.iter_mut().find(|item| item.id == input.id) else {
@@ -169,6 +186,11 @@ impl ServerPasswordsBackend for FakeServerBackend {
     }
 
     fn reveal_test_login(&self, _id: String) -> BoxFuture<Result<TestLoginSecrets, String>> {
+        if let Some(gate) = self.reveal_gate.lock().expect("lock").take() {
+            return Box::pin(
+                async move { gate.await.unwrap_or_else(|_| Err("cancelled".to_owned())) },
+            );
+        }
         let secrets = self.reveal_secret.lock().expect("lock").clone();
         Box::pin(async move { Ok(secrets) })
     }
@@ -645,6 +667,166 @@ fn test_logins_empty_add_list_edit_and_delete(cx: &mut TestAppContext) {
         has(cx, window, "No test logins yet"),
         "returns to empty state after delete"
     );
+}
+
+fn stored_login() -> TestLoginSummary {
+    TestLoginSummary {
+        id: "login-1".to_owned(),
+        label: "Admin".to_owned(),
+        url: "http://myapp.test/login".to_owned(),
+        username: "admin@myapp.test".to_owned(),
+        has_otp: true,
+        created_at: "2026-11-25T12:00:00Z".to_owned(),
+        created_by: TestLoginSummaryCreatedBy::User,
+    }
+}
+
+fn open_edit_dialog(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<PasswordsView>,
+    login: TestLoginSummary,
+) {
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_test_login_dialog(Some(login), window, cx);
+        });
+    })
+    .expect("window");
+    cx.run_until_parked();
+}
+
+fn submit(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<PasswordsView>) {
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| view.submit_test_login(window, cx));
+    })
+    .expect("window");
+    cx.run_until_parked();
+}
+
+/// Save before the stored password has loaded must not blank the stored password and OTP: Save
+/// is off until the reveal answers, then it sends what the reveal loaded.
+#[gpui_kit::test]
+fn edit_dialog_save_waits_for_the_reveal(cx: &mut TestAppContext) {
+    let local = Arc::new(FakeLocalBackend::new());
+    let server = Arc::new(FakeServerBackend::new(vec![stored_login()]));
+    let (window, view) = mount(cx, Arc::clone(&local), Some(Arc::clone(&server)));
+    cx.update(|cx| view.update(cx, |view, cx| view.on_open(cx)));
+    cx.run_until_parked();
+
+    let reveal = server.hold_reveal();
+    open_edit_dialog(cx, window, &view, stored_login());
+    assert_eq!(
+        cx.update(|cx| view.read(cx).test_login_dialog.as_ref().map(|d| d.secrets)),
+        Some(SecretsLoad::Loading)
+    );
+
+    // Save while the reveal is pending: nothing is sent, the dialog stays open and idle.
+    submit(cx, window, &view);
+    assert_eq!(
+        server.update_calls.load(Ordering::SeqCst),
+        0,
+        "Save sent an update before the reveal"
+    );
+    assert!(cx.update(|cx| view.read(cx).has_open_dialog()));
+    assert!(
+        cx.update(|cx| !view
+            .read(cx)
+            .test_login_dialog
+            .as_ref()
+            .expect("dialog")
+            .saving),
+        "the dialog is not stuck saving"
+    );
+
+    reveal
+        .send(Ok(TestLoginSecrets {
+            password: "revealed-password".to_owned(),
+            otp_secret: Some("JBSWY3DPEHPK3PXP".to_owned()),
+        }))
+        .expect("the reveal is waiting");
+    cx.run_until_parked();
+    submit(cx, window, &view);
+    let sent = server
+        .last_update
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("update sent");
+    assert_eq!(sent.password.as_deref(), Some("revealed-password"));
+    assert_eq!(sent.otp_secret, Some(Some("JBSWY3DPEHPK3PXP".to_owned())));
+}
+
+/// A reveal that fails never sends empty password or OTP values: they stay out of the update, and
+/// anything the user types still goes.
+#[gpui_kit::test]
+fn edit_dialog_after_a_failed_reveal_never_overwrites_the_secrets(cx: &mut TestAppContext) {
+    let local = Arc::new(FakeLocalBackend::new());
+    let server = Arc::new(FakeServerBackend::new(vec![stored_login()]));
+    let (window, view) = mount(cx, Arc::clone(&local), Some(Arc::clone(&server)));
+    cx.update(|cx| view.update(cx, |view, cx| view.on_open(cx)));
+    cx.run_until_parked();
+
+    let reveal = server.hold_reveal();
+    open_edit_dialog(cx, window, &view, stored_login());
+    reveal
+        .send(Err("vault locked".to_owned()))
+        .expect("the reveal is waiting");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| view.read(cx).test_login_dialog.as_ref().map(|d| d.secrets)),
+        Some(SecretsLoad::Failed)
+    );
+    assert!(has(cx, window, "Edit test login"));
+
+    // Change only the label.
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| {
+            let dialog = view.test_login_dialog.as_ref().expect("dialog");
+            dialog
+                .label
+                .update(cx, |s, cx| s.set_value("Admin 2".to_owned(), window, cx));
+        });
+    })
+    .expect("window");
+    submit(cx, window, &view);
+    let sent = server
+        .last_update
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("update sent");
+    assert_eq!(sent.label.as_deref(), Some("Admin 2"));
+    assert_eq!(sent.password, None, "an unloaded password is not sent");
+    assert_eq!(sent.otp_secret, None, "an unloaded OTP secret is not sent");
+}
+
+#[test]
+fn the_update_leaves_out_secrets_that_never_loaded() {
+    let input = |password: &str, otp: &str, secrets| {
+        update_test_login_input(
+            "id".into(),
+            "http://a.test".into(),
+            "u".into(),
+            "l".into(),
+            password.into(),
+            otp.into(),
+            secrets,
+        )
+    };
+    // Loaded: the fields are the stored values, and an emptied OTP clears it.
+    let loaded = input("pw", "", SecretsLoad::Loaded);
+    assert_eq!(loaded.password.as_deref(), Some("pw"));
+    assert_eq!(loaded.otp_secret, Some(None));
+    let loaded = input("pw", "JBSW", SecretsLoad::Loaded);
+    assert_eq!(loaded.otp_secret, Some(Some("JBSW".to_owned())));
+    // Failed reveal: empty means never loaded, so nothing is sent for it.
+    let failed = input("", "", SecretsLoad::Failed);
+    assert_eq!((failed.password, failed.otp_secret), (None, None));
+    // Failed reveal with new values typed: those go.
+    let typed = input("new-pw", "NEWOTP", SecretsLoad::Failed);
+    assert_eq!(typed.password.as_deref(), Some("new-pw"));
+    assert_eq!(typed.otp_secret, Some(Some("NEWOTP".to_owned())));
 }
 
 #[gpui_kit::test]

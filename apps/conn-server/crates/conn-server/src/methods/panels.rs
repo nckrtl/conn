@@ -16,7 +16,7 @@ pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
     table.stream("panels.requests", move |ctx, input: DesktopPanelSubscription| {
         let broker = broker.clone();
         async move {
-            let mut requests = broker.subscribe_for(ctx.connection_id, input.files_thread, input.files_only).map_err(|e| Failure::die(e.message))?;
+            let mut requests = broker.subscribe_with(ctx.connection_id, input.files_thread, input.files_only, input.hosts_agent_tabs).map_err(|e| Failure::die(e.message))?;
             let (tx, rx) = mpsc::channel(1);
             tokio::spawn(async move {
                 loop { tokio::select! {
@@ -151,6 +151,41 @@ mod tests {
             );
         }
         assert!(respond(CallContext::default(),json!({"requestId":"😀".repeat(64),"ok":true,"deviceName":"x".repeat(200),"error":"x".repeat(8192)})).await.is_ok());
+    }
+    /// Only a subscription that says `hostsAgentTabs` (the GPUI host) counts as a tab host. The
+    /// Electron app's subscription, with `deviceName` alone, does not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_a_subscription_that_advertises_tab_hosting_is_a_tab_host() {
+        let broker = conn_features::panels::PanelBroker::default();
+        let mut table = MethodTable::new();
+        register(
+            &mut table,
+            &Deps {
+                panels: Some(broker.clone()),
+                ..Deps::default()
+            },
+        );
+        let Some(Handler::Stream(subscribe)) = table.get("panels.requests") else {
+            panic!("stream registered");
+        };
+        let _electron = subscribe(CallContext::default(), json!({"deviceName":"Mac"}))
+            .await
+            .unwrap();
+        assert!(broker.has_desktop() && !broker.has_tab_host());
+        let _files_link = subscribe(
+            CallContext::default(),
+            json!({"deviceName":"Mac","filesThread":"t","filesOnly":true,"hostsAgentTabs":true}),
+        )
+        .await
+        .unwrap();
+        assert!(!broker.has_tab_host(), "a Files-only link hosts no tabs");
+        let _gpui = subscribe(
+            CallContext::default(),
+            json!({"deviceName":"Mac","hostsAgentTabs":true}),
+        )
+        .await
+        .unwrap();
+        assert!(broker.has_tab_host());
     }
     #[tokio::test(flavor = "current_thread")]
     async fn rpc_delivers_the_request_and_the_first_response_finishes_the_wait() {

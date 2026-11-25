@@ -844,6 +844,10 @@ impl Connection {
             panel: conn_contract::AgentPanelSubscribeInput { device_name },
             files_thread,
             files_only,
+            // This client's app hosts agent browser tabs (`preview::host`), so the server may
+            // ask it to open its Browser panel for an agent that has no tab yet. The Electron
+            // desktop sends no such flag, and the server never asks it.
+            hosts_agent_tabs: !files_only,
         };
         let _ = self.cmd_tx.send(Command::SubscribePanelRequests(input));
     }

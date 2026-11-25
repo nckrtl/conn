@@ -234,6 +234,37 @@ async fn a_recording_does_not_follow_the_agents_current_desktop_tab() {
     );
 }
 
+/// The relay itself keeps recordings and CDP endpoints off the desktop when no tab is named,
+/// even for a caller that allows the desktop default.
+#[tokio::test]
+async fn recordings_and_cdp_endpoints_without_a_tab_stay_on_the_server_whatever_the_caller_says() {
+    let relay = Relay::default();
+    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let mut feed = relay.requests("s", &id).unwrap();
+    // A current desktop tab exists, and the thread's newest tab is this one.
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(call("snapshot", None, true)).await });
+    let event = request(&mut feed).await;
+    answer(
+        &relay,
+        "s",
+        &event,
+        json!({"ok":true,"result":{"tabId":"tab"}}),
+    );
+    assert!(task.await.unwrap().unwrap().is_ok());
+    for operation in ["recordingStart", "recordingStop", "cdpEndpoint"] {
+        assert!(
+            relay.invoke(call(operation, None, true)).await.is_none(),
+            "{operation} reached the desktop"
+        );
+    }
+    assert_eq!(
+        relay.default_tab("env", "thread", "agent").as_deref(),
+        Some("tab"),
+        "the agent keeps its current desktop tab"
+    );
+}
+
 #[tokio::test]
 async fn recordings_stay_off_desktop_tabs() {
     let relay = Relay::default();

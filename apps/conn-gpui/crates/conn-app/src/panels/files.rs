@@ -1120,7 +1120,7 @@ impl FilesPanel {
         .detach();
     }
 
-    /// One round button of the preview toolbar's group; a pressed toggle brightens its glyph.
+    /// A round preview toolbar button; a pressed toggle brightens its glyph.
     fn toolbar_button(
         &self,
         id: &'static str,
@@ -1129,7 +1129,7 @@ impl FilesPanel {
         icon: &'static str,
         pressed: bool,
         on_press: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    ) -> impl IntoElement {
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let hover_bg = to_hsla(self.tokens.shell_highlight);
         let color = if pressed {
             to_hsla(self.tokens.foreground)
@@ -1315,26 +1315,31 @@ impl FilesPanel {
         if let Some(path) = self.preview.path() {
             row = row
                 .child(
+                    self.toolbar_button(
+                        "files-back-to-tree",
+                        "panel.files.back",
+                        "Back to files",
+                        "superhero/chevron-left.svg",
+                        false,
+                        cx.listener(|_, _, _, cx| cx.emit(FilesEvent::RevealFolder)),
+                    )
+                    .size(px(TOOLBAR_HEIGHT_PX))
+                    .flex_shrink_0()
+                    .border_1()
+                    .border_color(control_border)
+                    .bg(to_hsla(self.tokens.shell_control)),
+                )
+                .child(
                     h_flex()
                         .flex_1()
                         .min_w_0()
                         .h(px(TOOLBAR_HEIGHT_PX))
                         .items_center()
-                        .pl(px(3.))
-                        .pr(px(9.))
-                        .gap(px(6.))
+                        .px(px(9.))
                         .rounded_full()
                         .border_1()
                         .border_color(control_border)
                         .bg(to_hsla(self.tokens.shell_field))
-                        .child(self.toolbar_button(
-                            "files-back-to-tree",
-                            "panel.files.back",
-                            "Back to files",
-                            "superhero/chevron-left.svg",
-                            false,
-                            cx.listener(|_, _, _, cx| cx.emit(FilesEvent::RevealFolder)),
-                        ))
                         .child(self.render_breadcrumbs(path, fg, muted, cx)),
                 )
                 .children(self.render_crumb_menu(path, cx))

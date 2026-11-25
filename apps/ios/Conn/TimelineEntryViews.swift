@@ -630,6 +630,7 @@ private struct WorkLogRow: View {
     let size: CGFloat
     @Environment(\.connTheme) private var theme
     @State private var open = false
+    @ScaledMetric(relativeTo: .body) private var detailCodeSize: CGFloat = ThreadText.codeSize - 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -661,11 +662,13 @@ private struct WorkLogRow: View {
             }
             .buttonStyle(.plain)
             if open, let detail {
+                // A step smaller than code blocks, with 1.6x lines, flush with the row's left edge.
+                let detailSize = monospaced ? detailCodeSize : size * 0.9
                 Text(detail)
-                    .font(monospaced ? .system(size: ThreadText.codeSize, design: .monospaced) : .system(size: size * 0.9))
+                    .font(monospaced ? .system(size: detailSize, design: .monospaced) : .system(size: detailSize))
+                    .lineHeight(.exact(points: detailSize * 1.6))
                     .foregroundStyle(theme.mutedForeground)
                     .textSelection(.enabled)
-                    .padding(.leading, 26)
                     .padding(.bottom, 10)
             }
         }

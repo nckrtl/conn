@@ -2192,7 +2192,11 @@ impl Inner {
         let result = self
             .write(move |tx| {
                 let item = &draft.payload;
-                let Some(id) = item["id"].as_str() else {
+                let (Some(id), Some(run_id), Some(native_thread)) = (
+                    item["id"].as_str(),
+                    item["runId"].as_str(),
+                    item["providerThreadId"].as_str(),
+                ) else {
                     return Ok(false);
                 };
                 let Some(previous) = tx.entity(&draft.thread_id, "turnItems", id)? else {
@@ -2201,7 +2205,6 @@ impl Inner {
                 if previous["runId"] != item["runId"]
                     || previous["type"] != item["type"]
                     || previous["providerThreadId"] != item["providerThreadId"]
-                    || Some(provider_thread.as_str()) != item["providerThreadId"].as_str()
                     || !matches!(
                         previous["status"].as_str(),
                         Some("pending" | "running" | "waiting")
@@ -2209,7 +2212,22 @@ impl Inner {
                 {
                     return Ok(false);
                 }
-                draft.run_id = item["runId"].as_str().map(str::to_owned);
+                if native_thread != provider_thread {
+                    // A native subagent item lives on the parent timeline but identifies the
+                    // child's provider thread. Its spawning run identifies the parent session.
+                    if item["type"] != "subagent"
+                        || !item["childThreadId"].is_string()
+                        || previous["childThreadId"] != item["childThreadId"]
+                        || !tx
+                            .entity(&draft.thread_id, "runs", run_id)?
+                            .is_some_and(|owner| {
+                                owner["providerThreadId"].as_str() == Some(provider_thread.as_str())
+                            })
+                    {
+                        return Ok(false);
+                    }
+                }
+                draft.run_id = Some(run_id.to_owned());
                 tx.append(draft)?;
                 Ok(true)
             })

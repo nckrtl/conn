@@ -13,17 +13,15 @@ use gpui_kit::{
     px, size,
 };
 
-use super::empty::split_lines;
 use super::store::{DatabaseStore, name_placeholder};
 use super::{DISCONNECTED, DatabasePanel};
 use crate::panels::chrome;
+use crate::panels::empty_state::split_lines;
 
 const PANEL_WIDTH_PX: f32 = 520.0;
 const PANEL_HEIGHT_PX: f32 = 700.0;
 const PROJECT: &str = "project-1";
 const NO_ENV_DESCRIPTION: &str = "This project's .env has no DB_CONNECTION. Connect a database to browse its tables and run read-only queries.";
-const DISCONNECTED_DESCRIPTION: &str =
-    "Pick a connection to browse its tables and run read-only queries.";
 
 /// What the panel starts with.
 #[derive(Clone, Copy, Default)]
@@ -205,8 +203,7 @@ fn without_env_or_vault_the_empty_state_is_a_centred_block_near_the_top(cx: &mut
     assert_eq!(add.size.height, px(32.0));
     assert!((add.center().x - px(PANEL_WIDTH_PX / 2.0)).abs() < px(0.5));
     assert!(add.top() > mark.bottom());
-    assert!(!shown(cx, window, "db-empty-connections"));
-    assert!(!shown(cx, window, "db-empty-vault"));
+    assert!(!shown(cx, window, "db-pick"));
     // Nothing is open, so the toolbar offers Add where Refresh would be, and no Disconnect.
     assert!(shown(cx, window, "db-add-btn"));
     assert!(!shown(cx, window, "db-refresh-btn"));
@@ -214,7 +211,7 @@ fn without_env_or_vault_the_empty_state_is_a_centred_block_near_the_top(cx: &mut
 }
 
 #[gpui_kit::test]
-fn a_disconnected_project_with_an_env_database_lists_it_and_asks_for_a_pick(
+fn a_disconnected_project_with_an_env_database_lists_it_and_shows_no_empty_state(
     cx: &mut TestAppContext,
 ) {
     let scenario = Scenario {
@@ -223,19 +220,20 @@ fn a_disconnected_project_with_an_env_database_lists_it_and_asks_for_a_pick(
     };
     let (window, panel, _folder) = open_panel(cx, scenario, "dark-ocean");
     assert_eq!(selected_id(cx, &panel).as_deref(), Some("env"));
-    assert!(!shown(cx, window, "db-empty"));
+    assert!(!shown(cx, window, "db-pick"));
     cx.update(|cx| panel.update(cx, |panel, cx| panel.disconnect(cx)));
     frames(cx, window);
-    assert!(shown(cx, window, "db-empty"));
-    assert!(labelled(cx, window, DISCONNECTED_DESCRIPTION));
-    assert!(!labelled(cx, window, NO_ENV_DESCRIPTION));
+    assert!(shown(cx, window, "db-pick"));
+    assert!(!shown(cx, window, "db-empty"), "a database exists");
+    assert!(!labelled(cx, window, "No database connected"));
+    assert!(!shown(cx, window, "db-empty-add"));
     assert!(labelled(cx, window, "Connections"));
-    assert!(shown(cx, window, "db-empty-row-env"));
-    assert!(!shown(cx, window, "db-empty-vault"));
+    assert!(shown(cx, window, "db-pick-row-env"));
+    assert!(!shown(cx, window, "db-pick-vault"));
 }
 
 #[gpui_kit::test]
-fn the_empty_state_lists_connections_then_vault_databases(cx: &mut TestAppContext) {
+fn the_list_starts_16px_below_the_toolbar_and_has_no_add_button(cx: &mut TestAppContext) {
     let scenario = Scenario {
         env: true,
         saved: 1,
@@ -244,23 +242,25 @@ fn the_empty_state_lists_connections_then_vault_databases(cx: &mut TestAppContex
     let (window, panel, _folder) = open_panel(cx, scenario, "dark-ocean");
     cx.update(|cx| panel.update(cx, |panel, cx| panel.disconnect(cx)));
     frames(cx, window);
-    assert!(labelled(cx, window, "Connections"));
-    assert!(labelled(cx, window, "Vault"));
-    assert!(!labelled(cx, window, "Or pick one from Vault"));
-    let connections = bounds(cx, window, "db-empty-connections");
-    let vault = bounds(cx, window, "db-empty-vault");
+    let toolbar = bounds(cx, window, "db-toolbar");
+    let connections = bounds(cx, window, "db-pick-connections");
+    let vault = bounds(cx, window, "db-pick-vault");
+    assert_eq!(connections.top() - toolbar.bottom(), px(16.0));
     assert_eq!(connections.size.width, px(300.0));
     assert_eq!(vault.size.width, px(300.0));
     assert!((connections.center().x - px(PANEL_WIDTH_PX / 2.0)).abs() < px(0.5));
-    // 16px between the two lists, and 32px from the button above the first.
-    let add = bounds(cx, window, "db-empty-add");
-    assert_eq!(connections.top() - add.bottom(), px(32.0));
     assert_eq!(vault.top() - connections.bottom(), px(16.0));
+    assert!(labelled(cx, window, "Connections"));
+    assert!(labelled(cx, window, "Vault"));
+    assert!(!labelled(cx, window, "Or pick one from Vault"));
+    // The toolbar's + adds a connection, so there is no button under the list.
+    assert!(!shown(cx, window, "db-empty-add"));
+    assert!(shown(cx, window, "db-add-btn"));
     for id in [
-        "db-empty-row-env",
-        "db-empty-row-manual-1",
-        "db-empty-row-vault:1",
-        "db-empty-row-vault:2",
+        "db-pick-row-env",
+        "db-pick-row-manual-1",
+        "db-pick-row-vault:1",
+        "db-pick-row-vault:2",
     ] {
         let row = bounds(cx, window, id);
         assert_eq!(row.size.width, px(300.0), "{id}");
@@ -269,24 +269,28 @@ fn the_empty_state_lists_connections_then_vault_databases(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn with_only_vault_databases_the_heading_offers_vault(cx: &mut TestAppContext) {
+fn with_only_vault_databases_the_list_has_just_the_vault_heading(cx: &mut TestAppContext) {
     let scenario = Scenario {
         vault: 1,
         ..Scenario::default()
     };
     let (window, _panel, _folder) = open_panel(cx, scenario, "dark-ocean");
-    assert!(labelled(cx, window, "Or pick one from Vault"));
+    assert!(!shown(cx, window, "db-empty"));
+    assert!(labelled(cx, window, "Vault"));
+    assert!(!labelled(cx, window, "Or pick one from Vault"));
     assert!(!labelled(cx, window, "Connections"));
-    assert!(!shown(cx, window, "db-empty-connections"));
-    assert!(shown(cx, window, "db-empty-row-vault:1"));
-    let add = bounds(cx, window, "db-empty-add");
-    let vault = bounds(cx, window, "db-empty-vault");
-    assert_eq!(vault.top() - add.bottom(), px(32.0));
+    assert!(!shown(cx, window, "db-pick-connections"));
+    assert!(shown(cx, window, "db-pick-row-vault:1"));
+    let toolbar = bounds(cx, window, "db-toolbar");
+    let vault = bounds(cx, window, "db-pick-vault");
+    assert_eq!(vault.top() - toolbar.bottom(), px(16.0));
+    assert!(!shown(cx, window, "db-empty-add"));
 }
 
 #[gpui_kit::test]
-fn a_locked_vault_keeps_its_unlock_row_in_the_empty_state(cx: &mut TestAppContext) {
+fn a_locked_vault_keeps_its_unlock_row_in_the_list(cx: &mut TestAppContext) {
     let (window, panel, _folder) = open_panel(cx, Scenario::default(), "dark-ocean");
+    assert!(shown(cx, window, "db-empty"), "nothing known yet");
     cx.update(|cx| {
         panel.update(cx, |panel, cx| {
             panel.vault_status = Some(conn_desktop::vault::VaultErrorKind::Locked);
@@ -294,11 +298,12 @@ fn a_locked_vault_keeps_its_unlock_row_in_the_empty_state(cx: &mut TestAppContex
         })
     });
     frames(cx, window);
-    assert!(labelled(cx, window, "Or pick one from Vault"));
-    assert!(shown(cx, window, "db-empty-unlock-vault"));
-    click(cx, window, "db-empty-unlock-vault");
+    assert!(!shown(cx, window, "db-empty"));
+    assert!(labelled(cx, window, "Vault"));
+    assert!(shown(cx, window, "db-pick-unlock-vault"));
+    click(cx, window, "db-pick-unlock-vault");
     assert!(cx.update(|cx| panel.read(cx).allow_unlock_next));
-    // An unavailable Vault shows nothing to pick.
+    // An unavailable Vault holds nothing to pick, so the project is empty again.
     cx.update(|cx| {
         panel.update(cx, |panel, cx| {
             panel.vault_status = Some(conn_desktop::vault::VaultErrorKind::Unavailable);
@@ -306,7 +311,8 @@ fn a_locked_vault_keeps_its_unlock_row_in_the_empty_state(cx: &mut TestAppContex
         })
     });
     frames(cx, window);
-    assert!(!shown(cx, window, "db-empty-vault"));
+    assert!(!shown(cx, window, "db-pick-vault"));
+    assert!(shown(cx, window, "db-empty"));
 }
 
 #[gpui_kit::test]
@@ -320,12 +326,12 @@ fn clicking_a_row_connects(cx: &mut TestAppContext) {
     cx.update(|cx| panel.update(cx, |panel, cx| panel.disconnect(cx)));
     frames(cx, window);
     assert_eq!(selected_id(cx, &panel), None);
-    click(cx, window, "db-empty-row-manual-1");
+    click(cx, window, "db-pick-row-manual-1");
     assert_eq!(selected_id(cx, &panel).as_deref(), Some("manual-1"));
-    assert!(!shown(cx, window, "db-empty"));
+    assert!(!shown(cx, window, "db-pick"));
     assert!(shown(cx, window, "db-disconnect-btn"));
     click(cx, window, "db-disconnect-btn");
-    click(cx, window, "db-empty-row-env");
+    click(cx, window, "db-pick-row-env");
     assert_eq!(selected_id(cx, &panel).as_deref(), Some("env"));
 }
 
@@ -357,7 +363,7 @@ fn disconnect_clears_the_selection_and_stays_cleared(cx: &mut TestAppContext) {
     assert!(disconnect.left() >= run.right(), "after Run");
     click(cx, window, "db-disconnect-btn");
     assert_eq!(selected_id(cx, &panel), None);
-    assert!(shown(cx, window, "db-empty"));
+    assert!(shown(cx, window, "db-pick"));
     assert!(!shown(cx, window, "db-disconnect-btn"));
     // A refresh, a reload of the `.env`, and a restart through the saved file keep it cleared.
     cx.update(|cx| panel.update(cx, |panel, cx| panel.refresh(cx)));
@@ -384,7 +390,7 @@ fn disconnect_clears_the_selection_and_stays_cleared(cx: &mut TestAppContext) {
         "the .env database is still there"
     );
     assert_eq!(selected_id(cx, &panel), None);
-    assert!(shown(cx, window, "db-empty"));
+    assert!(shown(cx, window, "db-pick"));
 }
 
 #[gpui_kit::test]
@@ -508,6 +514,7 @@ fn the_name_placeholder_is_my_database_until_a_database_is_typed() {
 ///
 /// `CONN_DB_SHOTS_DIR=<dir> cargo test -p conn-app render_design_screenshots -- --ignored`
 #[test]
+#[cfg(target_os = "macos")]
 #[ignore = "writes PNGs; set CONN_DB_SHOTS_DIR"]
 fn render_design_screenshots() {
     let Some(dir) = std::env::var_os("CONN_DB_SHOTS_DIR") else {
@@ -516,7 +523,8 @@ fn render_design_screenshots() {
     let dir = Path::new(&dir);
     std::fs::create_dir_all(dir).expect("an output folder");
     let mut ctx = gpui_kit::HeadlessAppContext::with_platform(
-        gpui_kit::platform::current_platform(true).text_system(),
+        // `current_platform(true)` needs the main thread, which libtest does not give a test.
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
         std::sync::Arc::new(crate::superhero::AppAssets),
         gpui_kit::platform::current_headless_renderer,
     );
@@ -579,7 +587,7 @@ fn render_design_screenshots() {
         // (a) no .env, no Vault.
         set(&mut ctx, bare_folder.path(), &|_, _| {});
         shoot(&mut ctx, "a-empty-no-env");
-        // (b) .env, a saved connection and Vault databases, disconnected.
+        // (b) .env, a saved connection and Vault databases, disconnected: the plain list.
         set(&mut ctx, env_folder.path(), &|panel, cx| {
             panel
                 .store
@@ -588,13 +596,13 @@ fn render_design_screenshots() {
             panel.finish_vault_load_for_test(token, (1..=2).map(vault_connection).collect(), cx);
             panel.disconnect(cx);
         });
-        shoot(&mut ctx, "b-empty-connections-and-vault");
-        // (c) Vault only.
+        shoot(&mut ctx, "b-pick-connections-and-vault");
+        // (c) Vault only: the list with just the Vault heading.
         set(&mut ctx, bare_folder.path(), &|panel, cx| {
             let token = panel.begin_vault_load_for_test();
             panel.finish_vault_load_for_test(token, vec![vault_connection(1)], cx);
         });
-        shoot(&mut ctx, "c-empty-vault-only");
+        shoot(&mut ctx, "c-pick-vault-only");
         // (d) a connection open: the toolbar with Disconnect.
         set(&mut ctx, env_folder.path(), &|_, _| {});
         shoot(&mut ctx, "d-connected-toolbar");

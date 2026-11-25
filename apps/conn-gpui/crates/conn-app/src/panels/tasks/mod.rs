@@ -7,6 +7,8 @@ mod charts;
 mod detail;
 mod format;
 mod insights;
+#[cfg(test)]
+mod notice_tests;
 
 use crate::a11y::ConnA11yExt as _;
 use std::cell::Cell;
@@ -659,11 +661,12 @@ impl TasksPanel {
 }
 
 impl Render for TasksPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let entity = cx.entity();
 
         let body = if let Some(reason) = &self.unavailable_reason {
             render_notice(
+                window,
                 &self.tokens,
                 "superhero/unplug.svg",
                 "Tasks are unavailable",
@@ -750,11 +753,18 @@ impl Render for TasksPanel {
                         .into_any_element(),
                     ListLoadState::Error(error) => {
                         let notice = tasks_error_notice(error.reason);
-                        let icon = match notice.kind {
-                            ErrorNoticeKind::Access => "superhero/lock.svg",
-                            ErrorNoticeKind::Unavailable => "superhero/unplug.svg",
+                        // The lab locks "No access" and "Tasks are turned off in Orbit" alike.
+                        let icon = if notice.kind == ErrorNoticeKind::Access
+                            || matches!(
+                                error.reason,
+                                conn_desktop::orbit::TasksErrorReason::ExtensionDisabled
+                            ) {
+                            "superhero/lock.svg"
+                        } else {
+                            "superhero/unplug.svg"
                         };
                         render_notice(
+                            window,
                             &self.tokens,
                             icon,
                             notice.title,
@@ -765,6 +775,7 @@ impl Render for TasksPanel {
                         )
                     }
                     ListLoadState::Ready(page) if page.tasks.is_empty() => render_notice(
+                        window,
                         &self.tokens,
                         "superhero/checklist.svg",
                         "No tasks",

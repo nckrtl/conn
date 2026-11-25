@@ -1,6 +1,8 @@
 //! Environment-wide pull request inbox for the project rail.
 use std::collections::{HashMap, HashSet};
 
+use std::rc::Rc;
+
 use conn_client::Connection;
 use conn_contract::{
     PullRequestListCursors, PullRequestListEntry, PullRequestListInput, PullRequestListState,
@@ -22,9 +24,10 @@ use gpui_kit::{
 
 use super::{
     host_diff::{self, CodeFileEntry},
-    logic::{describe_rpc_error, format_relative_time, now_epoch_ms},
+    logic::{describe_rpc_error, format_relative_time, now_epoch_ms, unavailable_notice},
 };
 use crate::a11y::ConnA11yExt as _;
+use crate::panels::empty_state::{self, EmptyAction, EmptyState, render_empty_state};
 use crate::panels::{color::to_hsla, header::superhero_icon};
 use crate::sidebar::render_project_monogram;
 
@@ -139,6 +142,10 @@ pub(in crate::panels) struct PullRequestInbox {
     stats: HashMap<(String, String, i64), (i64, i64)>,
     next: PullRequestListCursors,
     error: Option<String>,
+    /// The list call itself failed, as opposed to some projects in it.
+    request_failed: bool,
+    /// A list call has finished, so an empty list is real and not just not-yet-loaded.
+    loaded: bool,
     truncated: bool,
     loading: bool,
     filter: Filter,
@@ -170,6 +177,8 @@ impl PullRequestInbox {
             stats: HashMap::new(),
             next: PullRequestListCursors::new(),
             error: None,
+            request_failed: false,
+            loaded: false,
             truncated: false,
             loading: false,
             filter: Filter::default(),
@@ -194,6 +203,8 @@ impl PullRequestInbox {
         self.stats.clear();
         self.next.clear();
         self.error = None;
+        self.request_failed = false;
+        self.loaded = false;
         self.loading = false;
         self.expanded = None;
         self.truncated = false;
@@ -223,6 +234,7 @@ impl PullRequestInbox {
         }
         self.loading = true;
         self.error = None;
+        self.request_failed = false;
         let gen_id = self.generation;
         let input = PullRequestListInput {
             state: PullRequestListState::All,
@@ -246,6 +258,7 @@ impl PullRequestInbox {
                 panel.loading = false;
                 match result {
                     Ok(page) => {
+                        panel.loaded = true;
                         if !more {
                             panel.rows.clear();
                             panel.stats.clear();
@@ -277,7 +290,10 @@ impl PullRequestInbox {
                             );
                         }
                     }
-                    Err(error) => panel.error = Some(describe_rpc_error(&error).1),
+                    Err(error) => {
+                        panel.request_failed = true;
+                        panel.error = Some(describe_rpc_error(&error).1);
+                    }
                 }
                 cx.notify();
             });
@@ -538,8 +554,108 @@ impl PullRequestInbox {
         result.into_any_element()
     }
 }
+/// What fills the whole inbox instead of the list.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum InboxNotice {
+    /// No Conn server to ask.
+    NoServer,
+    /// The list call failed with this message.
+    Failed(String),
+    /// A list call finished and found nothing.
+    NoPullRequests,
+}
+
+/// Which whole-panel state the inbox shows, if any: from what it holds and what it has loaded.
+pub(super) fn inbox_notice(
+    has_connection: bool,
+    request_failed: bool,
+    loaded: bool,
+    loading: bool,
+    has_rows: bool,
+    error: Option<&str>,
+) -> Option<InboxNotice> {
+    if !has_connection {
+        Some(InboxNotice::NoServer)
+    } else if request_failed && !has_rows && !loading {
+        Some(InboxNotice::Failed(error.unwrap_or_default().to_owned()))
+    } else if loaded && !has_rows && error.is_none() && !loading {
+        Some(InboxNotice::NoPullRequests)
+    } else {
+        None
+    }
+}
+
+/// The empty state for a notice. A failure gets "Try again" when `retry` is given.
+pub(super) fn notice_state(
+    notice: &InboxNotice,
+    retry: Option<Rc<dyn Fn(&mut Window, &mut gpui_kit::App)>>,
+) -> EmptyState {
+    let (icon, title, description) = match notice {
+        InboxNotice::NoServer => (
+            "superhero/unplug.svg",
+            "Pull requests unavailable",
+            "Connect to a Conn server to browse pull requests.",
+        ),
+        InboxNotice::Failed(message) => {
+            let (icon, title) = unavailable_notice(message);
+            (icon, title, message.as_str())
+        }
+        InboxNotice::NoPullRequests => (
+            "superhero/pull-request.svg",
+            "No pull requests",
+            "Pull requests from this workspace's repositories show here.",
+        ),
+    };
+    let actions = retry
+        .filter(|_| matches!(notice, InboxNotice::Failed(_)))
+        .map(|on_click| EmptyAction {
+            id: SharedString::from("pr-inbox-retry"),
+            ax_id: SharedString::from("panel.pull-requests.retry"),
+            label: SharedString::from("Try again"),
+            icon: Some("superhero/refresh.svg"),
+            on_click,
+        })
+        .into_iter()
+        .collect();
+    EmptyState {
+        id: "pr-inbox-empty",
+        ax_id: "panel.pull-requests.empty",
+        label: "Pull requests",
+        icon,
+        title: SharedString::from(title.to_owned()),
+        description: empty_state::plain(description),
+        actions,
+    }
+}
+
+impl PullRequestInbox {
+    /// The inbox's whole-panel state, in the shared empty-state design. `None` when there is a
+    /// list to show.
+    fn render_empty(&self, window: &Window, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        let notice = inbox_notice(
+            self.connection.is_some(),
+            self.request_failed,
+            self.loaded,
+            self.loading,
+            !self.rows.is_empty(),
+            self.error.as_deref(),
+        )?;
+        let entity = cx.entity();
+        let retry: Rc<dyn Fn(&mut Window, &mut gpui_kit::App)> = Rc::new(move |_, cx| {
+            entity.update(cx, |panel, cx| panel.load(false, cx));
+        });
+        Some(render_empty_state(
+            window,
+            &self.tokens,
+            notice_state(&notice, Some(retry)),
+        ))
+    }
+}
 impl Render for PullRequestInbox {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if let Some(empty) = self.render_empty(window, cx) {
+            return empty;
+        }
         let tokens = &self.tokens;
         let muted = to_hsla(tokens.muted_foreground);
         let border = to_hsla(tokens.shell_divider_header);
@@ -611,9 +727,7 @@ impl Render for PullRequestInbox {
             rows = rows.child(self.row(pr, now, cx));
             count += 1;
         }
-        if self.connection.is_none() {
-            rows = rows.child("Connect to a Conn server to browse pull requests.");
-        } else if let Some(error) = &self.error {
+        if let Some(error) = &self.error {
             rows = rows.child(div().p(px(12.)).text_color(muted).child(error.clone()));
         } else if self.loading {
             rows = rows.child("Loading pull requests…");
@@ -691,6 +805,7 @@ impl Render for PullRequestInbox {
                         self.rows.len()
                     )),
             )
+            .into_any_element()
     }
 }
 

@@ -53,40 +53,55 @@ async function captureWithHost(rect: AnnotationRect): Promise<string | undefined
     return undefined;
   }
 
-  const reveal = hideOverlayFromScreen();
-  try {
+  const host = document.getElementById(ANNOTATION_HOST_ID);
+  if (host) hideOverlay(host);
+  let active = true;
+  let limit: number | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    limit = window.setTimeout(() => resolve(undefined), OVERLAY_HIDE_LIMIT_MS);
+  });
+  const current = () => active && document.getElementById(ANNOTATION_HOST_ID) === host;
+  const copy = async () => {
     await nextPaint();
+    if (!current()) return undefined;
     const image = await capture(rect);
-    return typeof image === "string" ? image : await blobToDataUrl(image);
+    return current() ? image : undefined;
+  };
+  let image: Blob | string | undefined;
+  try {
+    image = await Promise.race([copy(), timeout]);
   } catch {
     return undefined;
   } finally {
-    reveal();
+    active = false;
+    window.clearTimeout(limit);
+    if (host) revealOverlay(host);
+  }
+  if (!image) return undefined;
+  try {
+    return typeof image === "string" ? image : await blobToDataUrl(image);
+  } catch {
+    return undefined;
   }
 }
 
-let overlayHides = 0;
+const overlayHides = new WeakMap<HTMLElement, number>();
 const OVERLAY_HIDE_LIMIT_MS = 1000;
 
-/**
- * A host copies the screen, so the open popup and other overlay boxes would show in it.
- * Opacity, not visibility, so the popup's textarea keeps focus. `paintHighlight` redraws the outline.
- */
-function hideOverlayFromScreen(): () => void {
-  const host = document.getElementById(ANNOTATION_HOST_ID);
-  if (!host) return () => undefined;
-  overlayHides++;
+// Opacity keeps the popup's textarea focused while the host copies the screen.
+function hideOverlay(host: HTMLElement) {
+  overlayHides.set(host, (overlayHides.get(host) ?? 0) + 1);
   host.style.opacity = "0";
-  let revealed = false;
-  const reveal = () => {
-    if (revealed) return;
-    revealed = true;
-    window.clearTimeout(limit);
-    overlayHides--;
-    if (overlayHides === 0) host.style.removeProperty("opacity");
-  };
-  const limit = window.setTimeout(reveal, OVERLAY_HIDE_LIMIT_MS);
-  return reveal;
+}
+
+function revealOverlay(host: HTMLElement) {
+  const remaining = (overlayHides.get(host) ?? 1) - 1;
+  if (remaining > 0) {
+    overlayHides.set(host, remaining);
+  } else {
+    overlayHides.delete(host);
+    host.style.removeProperty("opacity");
+  }
 }
 
 /** Resolves once a frame with the latest DOM state has been composited. */

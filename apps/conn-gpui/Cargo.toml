@@ -119,6 +119,8 @@ strip = true
 # conn-gpui also paces frames with CVDisplayLink instead of CAMetalDisplayLink (window.rs, at
 # `metal_frames`): under the Metal link, frames drawn during key dispatch stayed off screen until
 # the next mouse event (2026-11-21, reproduced in nick-vm). CONN_GPUI_METAL_DISPLAY_LINK=1 opts back in.
+# `start_window_move` also moves the window itself when macOS 27.2 refuses the native drag
+# (window.rs, `ManualWindowMove`).
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # gpui-pre-apple 0.3.11 as published, plus conn-gpui's variable-font weights
 # (vendor/gpui-pre-apple/src/text_system.rs, `weight_variation`): GPUI picks the best-matching loaded

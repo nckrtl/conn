@@ -30,6 +30,8 @@ struct ThreadView: View {
     @State private var pageExhausted = false
     @State private var userScrolling = false
     @State private var stickToBottom = true
+    /// When this thread opened. Content that lands during the push jumps to the end unanimated.
+    @State private var openedAt = Date.distantPast
     @State private var settled: Bool
     @State private var showingRename = false
     @State private var renameDraft = ""
@@ -496,6 +498,7 @@ struct ThreadView: View {
             } onCancel: { feed.cancel() }
         }
         .task(id: threadId) {
+            openedAt = Date()
             store.openThread(threadId)
         }
         .task(id: "\(threadId)|\(store.providersRevision)|\(snapshot?.modelLabel ?? "")") {
@@ -629,8 +632,13 @@ struct ThreadView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
-        .onChange(of: scrollFingerprint) { _, _ in
-            if stickToBottom && readingWindow == nil {
+        .onChange(of: scrollFingerprint) { old, _ in
+            guard stickToBottom && readingWindow == nil else { return }
+            // The first snapshot and the updates right after opening are not new messages: an
+            // animated scroll there ran during the push and looked like the thread scrolling down.
+            if old == "loading" || Date().timeIntervalSince(openedAt) < 1 {
+                proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            } else {
                 withAnimation(Kit.Motion.fast) {
                     proxy.scrollTo("timeline-bottom", anchor: .bottom)
                 }

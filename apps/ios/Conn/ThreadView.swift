@@ -43,7 +43,7 @@ struct ThreadView: View {
     /// The step whose single-choice pick is about to move on (mobile's 200 ms).
     @State private var advancingStep: Int?
     @State private var advanceTask: Task<Void, Never>?
-    @State private var viewHeight: CGFloat = 800
+    @State private var viewSize: CGSize = .zero
 
     private var composer: ComposerDraft { store.composerDraft(.thread(threadId)) }
     private var draft: String {
@@ -85,7 +85,7 @@ struct ThreadView: View {
     /// An approval gives up height to the feed: at most 560pt, at least 160pt, and never more
     /// than the screen leaves above the composer (`derivePendingUserInputMaxHeight`).
     private var approvalMaxHeight: CGFloat {
-        min(560, max(160, viewHeight - 140))
+        min(560, max(160, viewSize.height - 140))
     }
 
     private var pendingApprovals: [FfiPendingApproval] {
@@ -109,7 +109,7 @@ struct ThreadView: View {
 
     /// The panel leaves some of the feed in view above itself (`QUESTION_PANEL_FEED_PEEK`).
     private var questionMaxHeight: CGFloat {
-        min(560, max(160, viewHeight - 140 - 96))
+        min(560, max(160, viewSize.height - 140 - 96))
     }
 
     private func setQuestionStep(_ step: Int, for question: FfiPendingQuestion) {
@@ -335,11 +335,11 @@ struct ThreadView: View {
                         return
                     }
                     stickToBottom = false
-                    let visible = viewport.frames.filter { $0.value.minY >= 0 && $0.value.minY < viewHeight }
+                    let visible = viewport.frames.filter { $0.value.minY >= 0 && $0.value.minY < viewSize.height }
                         .min { $0.value.minY < $1.value.minY }
                     readingWindow = current
                     if let visible {
-                        let fraction = visible.value.minY / max(1, viewHeight - visible.value.height)
+                        let fraction = visible.value.minY / max(1, viewSize.height - visible.value.height)
                         prependAnchor = UnitPoint(x: 0.5, y: min(1, fraction))
                         scrollTarget = visible.key
                     }
@@ -364,251 +364,11 @@ struct ThreadView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if let error = store.lastError, !error.isEmpty {
-                        KitNotice(error, icon: .warning, tone: .error)
-                    }
-
-                    if let snapshot {
-                        if canReadEarlier {
-                            Button("Earlier messages") { readHistory() }
-                                .disabled(paging)
-                                .font(.kitDetail)
-                        }
-                        if let setup, setup.threadId == threadId, readingWindow == nil { ThreadWorktreeCard(setup: setup) }
-                        if snapshot.entries.isEmpty {
-                            Text(store.status == .connected ? "No messages in this thread yet." : "No saved messages for this thread.")
-                                .font(.kitDetail)
-                                .foregroundStyle(theme.mutedForeground)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 48)
-                        } else {
-                            let items = renderItems(for: snapshot)
-                            let anchorCandidates = Set(items.prefix(12).map(\.id))
-                            ForEach(items) { item in
-                                Group {
-                                    switch item {
-                                    case let .workGroup(group, entries):
-                                        WorkGroupCard(group: group, entries: entries)
-                                    case let .entry(entry):
-                                        TimelineEntryRow(
-                                            threadId: threadId,
-                                            entry: entry,
-                                            store: store,
-                                            detail: snapshot.feedDetails[entry.entryId],
-                                            interactive: readingWindow == nil && store.status == .connected,
-                                            onOpenThread: onOpenThread,
-                                            onTemplate: onTemplate
-                                        )
-                                    }
-                                }
-                                .background {
-                                    if anchorCandidates.contains(item.id) {
-                                        GeometryReader { geometry in
-                                            Color.clear.preference(
-                                                key: TimelineFrames.self,
-                                                value: [item.id: geometry.frame(in: .named("timeline-viewport"))]
-                                            )
-                                        }
-                                    }
-                                }
-                                .id(item.id)
-                            }
-                        }
-
-                        if snapshot.working && store.status == .connected && pendingApprovals.isEmpty && pendingQuestion == nil {
-                            HStack(spacing: Kit.Space.m) {
-                                // Mobile's `RunFoldWorking` is plain text, never a spinner.
-                                Text("Working…")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(theme.mutedForeground)
-                            }
-                            .padding(.top, Kit.Space.xs)
-                        }
-                    } else {
-                        HStack(spacing: Kit.Space.m) {
-                            KitStatusIcon(.working, size: 16, label: "Loading")
-                            Text("Loading timeline…")
-                                .font(.kitDetail)
-                                .foregroundStyle(theme.mutedForeground)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 48)
-                    }
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id("timeline-bottom")
-                }
-                .scrollTargetLayout()
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                // The stack gap and bottom anchor already contribute 13 of the 14 points.
-                .padding(.bottom, 1)
+            VStack(spacing: 0) {
+                timeline(proxy)
+                composerArea(proxy)
             }
             .background(theme.background.ignoresSafeArea())
-            .defaultScrollAnchor(.bottom, for: .alignment)
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .coordinateSpace(name: "timeline-viewport")
-            .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
-            .onScrollPhaseChange { _, phase, context in
-                if phase == .interacting { userScrolling = true }
-                if phase == .idle {
-                    if userScrolling { stickToBottom = TimelineEdges(context.geometry).nearEnd }
-                    userScrolling = false
-                    if requestedByScroll {
-                        requestedByScroll = false
-                        readHistory()
-                    }
-                }
-            }
-            .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
-                if userScrolling {
-                    stickToBottom = edges.nearEnd
-                    if edges.top < previous.top && !paging { requestedByScroll = true }
-                }
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .onChange(of: scrollFingerprint) { _, _ in
-                if stickToBottom && readingWindow == nil {
-                    withAnimation(Kit.Motion.fast) {
-                        proxy.scrollTo("timeline-bottom", anchor: .bottom)
-                    }
-                }
-            }
-            .onChange(of: scrollTarget) { _, target in
-                if let target {
-                    proxy.scrollTo(target, anchor: prependAnchor ?? (target == "timeline-bottom" ? .bottom : .top))
-                    prependAnchor = nil
-                    scrollTarget = nil
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    if snapshot != nil && (!stickToBottom || readingWindow != nil) {
-                        Button {
-                            UISelectionFeedbackGenerator().selectionChanged()
-                            latest()
-                        } label: {
-                            ThreadGlyph(name: "chevron-down", size: 16)
-                                .foregroundStyle(theme.foreground)
-                                .frame(width: 38.5, height: 38.5)
-                                .glassEffect(.regular.interactive(), in: .circle)
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .frame(maxWidth: .infinity)
-                        .accessibilityLabel("Jump to latest")
-                        .accessibilityIdentifier("thread.scrollToEnd")
-                    }
-                  VStack(alignment: .leading, spacing: 10.5) {
-                    if let historyNotice {
-                        Text(historyNotice).font(.kitDetail)
-                    }
-                    if store.showsOffline && !store.showsSavedConnectionAlert {
-                        OfflinePill().frame(maxWidth: .infinity)
-                    }
-                    // Conn mobile pins the first pending approval above the composer.
-                    if let approval = pendingApprovals.first {
-                        HeightCappedScroll(maxHeight: approvalMaxHeight) {
-                            PendingApprovalCard(
-                                approval: approval,
-                                remaining: pendingApprovals.count,
-                                responding: respondingApprovalId == approval.requestId
-                            ) { decision in
-                                respond(to: approval, with: decision)
-                            }
-                        }
-                        .modifier(ComposerDeck(remaining: pendingApprovals.count))
-                        .id(approval.requestId)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-                    if let question = pendingQuestion, let panel = questionPanelModel {
-                        PendingUserInputCard(
-                            question: question,
-                            panel: panel,
-                            responding: respondingUserInputId == question.requestId,
-                            advancing: advancingStep == Int(panel.step),
-                            maxHeight: questionMaxHeight,
-                            onSelectOption: { value in
-                                selectQuestionOption(value, question: question, panel: panel)
-                            },
-                            onStepChange: { step in
-                                UISelectionFeedbackGenerator().selectionChanged()
-                                setQuestionStep(step, for: question)
-                            },
-                            onSubmit: { submitQuestion(question) },
-                            onDismiss: { dismissQuestion(question) }
-                        )
-                        .modifier(ComposerDeck(remaining: question.questions.count - Int(panel.step)))
-                        .id(question.requestId)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-                  }
-                  // Cards: `px-[14px] pb-[7px] gap-2.5` (2pt more than the composer's 12).
-                  .padding(.horizontal, 2)
-                  .padding(.bottom, overlayHasCards ? 7 : 0)
-
-                    ConnComposerPill(
-                        placeholder: questionPanelModel?.composerPlaceholder
-                            ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
-                        draft: composer,
-                        limits: store.composerLimits,
-                        allowsAttachments: questionPanelModel == nil,
-                        isBusy: isWorking && !hasDraft && questionPanelModel == nil,
-                        canSend: composerCanSend,
-                        onSend: {
-                            if let question = pendingQuestion, let panel = questionPanelModel {
-                                if hasDraft {
-                                    answerQuestion(with: draft, question: question, panel: panel)
-                                } else {
-                                    runAnswerAction(question: question, panel: panel)
-                                }
-                            } else {
-                                sendDraft(scrollProxy: proxy)
-                            }
-                        },
-                        onStop: {
-                            Task {
-                                await store.stopThread(threadId: threadId)
-                            }
-                        },
-                        trailing: {
-                            HStack(spacing: 4) {
-                                if isWorking && (hasDraft || questionPanelModel != nil) {
-                                    Button {
-                                        Task {
-                                            await store.stopThread(threadId: threadId)
-                                        }
-                                    } label: {
-                                        ThreadGlyph(name: "stop", size: 13)
-                                            .foregroundStyle(theme.destructive)
-                                            .frame(width: 28, height: 28)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Stop")
-                                }
-                                ConnComposerModelChip(
-                                    driver: modelPicker?.selectedDriver,
-                                    modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel
-                                ) {
-                                    showingModelPicker = true
-                                }
-                            }
-                        }
-                    )
-                    .id(ObjectIdentifier(composer))
-                    .disabled(store.status != .connected || readingWindow != nil)
-                    .accessibilityIdentifier("thread.composer")
-                }
-                // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
-                .padding(.horizontal, 12)
-                .padding(.bottom, 2)
-            }
-            .scrollEdgeEffectHidden(true, for: .top)
-            .scrollEdgeEffectHidden(true, for: .bottom)
         }
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -636,9 +396,7 @@ struct ThreadView: View {
                     }
                 }
                 .lineLimit(1)
-                .containerRelativeFrame(.horizontal) { width, _ in
-                    max(0, width - 2 * (16 + 44 + 8))
-                }
+                .frame(width: viewSize.width > 136 ? viewSize.width - 136 : nil)
                 .foregroundStyle(theme.foreground)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
@@ -657,7 +415,7 @@ struct ThreadView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewHeight = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { viewSize = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)
         .onChange(of: pendingQuestion?.requestId) { _, current in
@@ -735,6 +493,260 @@ struct ThreadView: View {
             historyRequest = UUID()
             store.closeThread(threadId)
         }
+    }
+
+    private func timeline(_ proxy: ScrollViewProxy) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                if let error = store.lastError, !error.isEmpty {
+                    KitNotice(error, icon: .warning, tone: .error)
+                }
+
+                if let snapshot {
+                    if canReadEarlier {
+                        Button("Earlier messages") { readHistory() }
+                            .disabled(paging)
+                            .font(.kitDetail)
+                    }
+                    if let setup, setup.threadId == threadId, readingWindow == nil { ThreadWorktreeCard(setup: setup) }
+                    if snapshot.entries.isEmpty {
+                        Text(store.status == .connected ? "No messages in this thread yet." : "No saved messages for this thread.")
+                            .font(.kitDetail)
+                            .foregroundStyle(theme.mutedForeground)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 48)
+                    } else {
+                        let items = renderItems(for: snapshot)
+                        let anchorCandidates = Set(items.prefix(12).map(\.id))
+                        ForEach(items) { item in
+                            Group {
+                                switch item {
+                                case let .workGroup(group, entries):
+                                    WorkGroupCard(group: group, entries: entries)
+                                case let .entry(entry):
+                                    TimelineEntryRow(
+                                        threadId: threadId,
+                                        entry: entry,
+                                        store: store,
+                                        detail: snapshot.feedDetails[entry.entryId],
+                                        interactive: readingWindow == nil && store.status == .connected,
+                                        onOpenThread: onOpenThread,
+                                        onTemplate: onTemplate
+                                    )
+                                }
+                            }
+                            .background {
+                                if anchorCandidates.contains(item.id) {
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(
+                                            key: TimelineFrames.self,
+                                            value: [item.id: geometry.frame(in: .named("timeline-viewport"))]
+                                        )
+                                    }
+                                }
+                            }
+                            .id(item.id)
+                        }
+                    }
+
+                    if snapshot.working && store.status == .connected && pendingApprovals.isEmpty && pendingQuestion == nil {
+                        HStack(spacing: Kit.Space.m) {
+                            // Mobile's `RunFoldWorking` is plain text, never a spinner.
+                            Text("Working…")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(theme.mutedForeground)
+                        }
+                        .padding(.top, Kit.Space.xs)
+                    }
+                } else {
+                    HStack(spacing: Kit.Space.m) {
+                        KitStatusIcon(.working, size: 16, label: "Loading")
+                        Text("Loading timeline…")
+                            .font(.kitDetail)
+                            .foregroundStyle(theme.mutedForeground)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
+                }
+
+                Color.clear
+                    .frame(height: 1)
+                    .id("timeline-bottom")
+            }
+            .scrollTargetLayout()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            // The stack gap and bottom anchor already contribute 13 of the 14 points.
+            .padding(.bottom, 1)
+        }
+        .background(theme.background.ignoresSafeArea())
+        .defaultScrollAnchor(.bottom, for: .alignment)
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .coordinateSpace(name: "timeline-viewport")
+        .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
+        .onScrollPhaseChange { _, phase, context in
+            if phase == .interacting { userScrolling = true }
+            if phase == .idle {
+                if userScrolling { stickToBottom = TimelineEdges(context.geometry).nearEnd }
+                userScrolling = false
+                if requestedByScroll {
+                    requestedByScroll = false
+                    readHistory()
+                }
+            }
+        }
+        .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
+            if userScrolling {
+                stickToBottom = edges.nearEnd
+                if edges.top < previous.top && !paging { requestedByScroll = true }
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .onChange(of: scrollFingerprint) { _, _ in
+            if stickToBottom && readingWindow == nil {
+                withAnimation(Kit.Motion.fast) {
+                    proxy.scrollTo("timeline-bottom", anchor: .bottom)
+                }
+            }
+        }
+        .onChange(of: scrollTarget) { _, target in
+            if let target {
+                proxy.scrollTo(target, anchor: prependAnchor ?? (target == "timeline-bottom" ? .bottom : .top))
+                prependAnchor = nil
+                scrollTarget = nil
+            }
+        }
+        .scrollEdgeEffectHidden(true, for: .top)
+        .scrollEdgeEffectHidden(true, for: .bottom)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
+            if old != new && stickToBottom && readingWindow == nil {
+                proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            }
+        }
+    }
+
+    private func composerArea(_ proxy: ScrollViewProxy) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if snapshot != nil && (!stickToBottom || readingWindow != nil) {
+                Button {
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    latest()
+                } label: {
+                    ThreadGlyph(name: "chevron-down", size: 16)
+                        .foregroundStyle(theme.foreground)
+                        .frame(width: 38.5, height: 38.5)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("Jump to latest")
+                .accessibilityIdentifier("thread.scrollToEnd")
+            }
+          VStack(alignment: .leading, spacing: 10.5) {
+            if let historyNotice {
+                Text(historyNotice).font(.kitDetail)
+            }
+            if store.showsOffline && !store.showsSavedConnectionAlert {
+                OfflinePill().frame(maxWidth: .infinity)
+            }
+            // Conn mobile pins the first pending approval above the composer.
+            if let approval = pendingApprovals.first {
+                HeightCappedScroll(maxHeight: approvalMaxHeight) {
+                    PendingApprovalCard(
+                        approval: approval,
+                        remaining: pendingApprovals.count,
+                        responding: respondingApprovalId == approval.requestId
+                    ) { decision in
+                        respond(to: approval, with: decision)
+                    }
+                }
+                .modifier(ComposerDeck(remaining: pendingApprovals.count))
+                .id(approval.requestId)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            if let question = pendingQuestion, let panel = questionPanelModel {
+                PendingUserInputCard(
+                    question: question,
+                    panel: panel,
+                    responding: respondingUserInputId == question.requestId,
+                    advancing: advancingStep == Int(panel.step),
+                    maxHeight: questionMaxHeight,
+                    onSelectOption: { value in
+                        selectQuestionOption(value, question: question, panel: panel)
+                    },
+                    onStepChange: { step in
+                        UISelectionFeedbackGenerator().selectionChanged()
+                        setQuestionStep(step, for: question)
+                    },
+                    onSubmit: { submitQuestion(question) },
+                    onDismiss: { dismissQuestion(question) }
+                )
+                .modifier(ComposerDeck(remaining: question.questions.count - Int(panel.step)))
+                .id(question.requestId)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+          }
+          // Cards: `px-[14px] pb-[7px] gap-2.5` (2pt more than the composer's 12).
+          .padding(.horizontal, 2)
+          .padding(.bottom, overlayHasCards ? 7 : 0)
+
+            ConnComposerPill(
+                placeholder: questionPanelModel?.composerPlaceholder
+                    ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
+                draft: composer,
+                limits: store.composerLimits,
+                allowsAttachments: questionPanelModel == nil,
+                isBusy: isWorking && !hasDraft && questionPanelModel == nil,
+                canSend: composerCanSend,
+                onSend: {
+                    if let question = pendingQuestion, let panel = questionPanelModel {
+                        if hasDraft {
+                            answerQuestion(with: draft, question: question, panel: panel)
+                        } else {
+                            runAnswerAction(question: question, panel: panel)
+                        }
+                    } else {
+                        sendDraft(scrollProxy: proxy)
+                    }
+                },
+                onStop: {
+                    Task {
+                        await store.stopThread(threadId: threadId)
+                    }
+                },
+                trailing: {
+                    HStack(spacing: 4) {
+                        if isWorking && (hasDraft || questionPanelModel != nil) {
+                            Button {
+                                Task {
+                                    await store.stopThread(threadId: threadId)
+                                }
+                            } label: {
+                                ThreadGlyph(name: "stop", size: 13)
+                                    .foregroundStyle(theme.destructive)
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Stop")
+                        }
+                        ConnComposerModelChip(
+                            driver: modelPicker?.selectedDriver,
+                            modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel
+                        ) {
+                            showingModelPicker = true
+                        }
+                    }
+                }
+            )
+            .id(ObjectIdentifier(composer))
+            .disabled(store.status != .connected || readingWindow != nil)
+            .accessibilityIdentifier("thread.composer")
+        }
+        // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
+        .padding(.horizontal, 12)
+        .padding(.bottom, 2)
     }
 
     private func sendDraft(scrollProxy: ScrollViewProxy) {

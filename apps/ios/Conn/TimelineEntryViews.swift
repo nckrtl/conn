@@ -1,6 +1,15 @@
 import DesignKit
 import SwiftUI
 
+/// "Worked for" / "Working for": a one-line label in a paragraph's place. Message lines carry the
+/// 1.6 line height's extra room under them, so the label adds the same room below itself; then the
+/// gap to what follows reads as a paragraph gap.
+enum FoldRow {
+    static func leading(_ size: CGFloat) -> CGFloat {
+        max(0, size * 1.6 - UIFont.systemFont(ofSize: size).lineHeight)
+    }
+}
+
 /// The thread feed's spacing between items (messages, cards, work groups).
 enum ThreadFeed {
     static let spacing: CGFloat = 30
@@ -33,6 +42,7 @@ struct WorkGroupCard: View {
             if group.hasActive {
                 // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
                 WorkingFoldLabel(since: startedAt, size: size)
+                    .padding(.bottom, FoldRow.leading(size))
             } else {
                 Button {
                     withAnimation(Kit.Motion.fast) {
@@ -51,6 +61,7 @@ struct WorkGroupCard: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.bottom, FoldRow.leading(size))
             }
 
             if expanded && !group.hasActive {
@@ -61,6 +72,8 @@ struct WorkGroupCard: View {
                     return false
                 }
                 VStack(alignment: .leading, spacing: 0) {
+                    // Rules open and close the expanded log, and split its rows.
+                    Rectangle().fill(threadDividerColor(theme, appearance)).frame(height: 1)
                     ForEach(Array(steps.enumerated()), id: \.element.entryId) { index, entry in
                         if index > 0 {
                             Rectangle()
@@ -88,11 +101,9 @@ struct WorkGroupCard: View {
                             EmptyView()
                         }
                     }
+                    Rectangle().fill(threadDividerColor(theme, appearance)).frame(height: 1)
                 }
             }
-
-            // No closing rule: the message follows the last row by the same paragraph gap that
-            // separates "Worked for" from the first row.
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
@@ -118,7 +129,7 @@ struct WorkingFold: View {
         let gap = size * 0.85
         // No rule under "Working for": the live row follows a paragraph gap below.
         WorkingFoldLabel(since: since, size: size)
-            .padding(.bottom, gap)
+            .padding(.bottom, gap + FoldRow.leading(size))
     }
 }
 
@@ -274,6 +285,7 @@ struct TimelineEntryRow: View {
     let onOpenThread: (String, String?) -> Void
     let onTemplate: (String) -> Void
     @Environment(\.connTheme) private var theme
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
 
     var body: some View {
         switch detail {
@@ -297,7 +309,9 @@ struct TimelineEntryRow: View {
             ThreadMessage(text: text, date: date, agent: agent, files: files,
                           detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
         case let .assistant(_, markdown, streaming, timestamp, _, status):
-            VStack(alignment: .leading, spacing: 6) {
+            // The copy and time row sits a paragraph gap under the text, less its own 24 pt row's
+            // inset above the time glyphs.
+            VStack(alignment: .leading, spacing: messageSize * 0.85 - 1) {
                 MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
                 if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
                 else {

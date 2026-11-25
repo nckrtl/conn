@@ -2415,8 +2415,6 @@ pub(super) mod tests {
                 completed_at: None,
                 required: None,
                 placeholder: None,
-                started_at: None,
-                completed_at: None,
             };
 
         assert_eq!(classify_checks(&[]), None);
@@ -2700,8 +2698,6 @@ pub(super) mod tests {
             completed_at: None,
             required: Some(true),
             placeholder: None,
-            started_at: None,
-            completed_at: None,
         };
         let thread = PullRequestReviewThread {
             id: "th-1".to_owned(),

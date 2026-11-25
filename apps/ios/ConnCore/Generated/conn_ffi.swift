@@ -10927,6 +10927,11 @@ public struct FfiThreadSummary: Equatable, Hashable {
      * warning ("limited") instead of an error.
      */
     public var usageLimited: Bool
+    /**
+     * The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
+     * the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
+     */
+    public var provider: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10938,7 +10943,11 @@ public struct FfiThreadSummary: Equatable, Hashable {
         /**
          * The failure is a usage limit (`lastErrorClass: usage_limit`), which mobile shows as a
          * warning ("limited") instead of an error.
-         */usageLimited: Bool) {
+         */usageLimited: Bool, 
+        /**
+         * The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
+         * the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
+         */provider: String?) {
         self.orderGroup = orderGroup
         self.orderKey = orderKey
         self.orderTimeMs = orderTimeMs
@@ -10955,6 +10964,7 @@ public struct FfiThreadSummary: Equatable, Hashable {
         self.unread = unread
         self.failureMessage = failureMessage
         self.usageLimited = usageLimited
+        self.provider = provider
     }
 
     
@@ -10988,7 +10998,8 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
                 pinned: FfiConverterBool.read(from: &buf), 
                 unread: FfiConverterBool.read(from: &buf), 
                 failureMessage: FfiConverterOptionString.read(from: &buf), 
-                usageLimited: FfiConverterBool.read(from: &buf)
+                usageLimited: FfiConverterBool.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -11009,6 +11020,7 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
         FfiConverterBool.write(value.unread, into: &buf)
         FfiConverterOptionString.write(value.failureMessage, into: &buf)
         FfiConverterBool.write(value.usageLimited, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
     }
 }
 

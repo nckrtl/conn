@@ -10,7 +10,6 @@ struct InboxView: View {
     let onSelectThread: (String, String) -> Void
 
     @Environment(\.connTheme) private var theme
-    @State private var pagingOlder = false
     @State private var renameOwner: CoreStore?
     @State private var renamingThread: FfiThreadSummary?
     @State private var renameDraft = ""
@@ -65,7 +64,7 @@ struct InboxView: View {
                 if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
             }
         }
-        let rows = inboxRows()
+        let rows = inboxRows(owners: owners)
         let active = rows.filter { !$0.thread.settled }
         let settled = rows.filter { $0.thread.settled }
         let paged = owners.filter { ($0.shell?.olderSettledCount ?? 0) > 0 }
@@ -83,7 +82,7 @@ struct InboxView: View {
                         Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
                         ForEach(store.linked.keys.sorted(), id: \.self) { scope in
                             Text(store.linked[scope]?.displayName ?? scope).tag(Optional(scope))
-                                .accessibilityIdentifier("inbox.environment." + (store.linked[scope]?.fleetID ?? scope))
+                                .accessibilityIdentifier("inbox.environment." + (store.linked[scope]?.fleetID ?? store.linked[scope]?.environmentId ?? scope))
                         }
                     }
                     .pickerStyle(.inline)
@@ -140,18 +139,9 @@ struct InboxView: View {
                         }
                         if !paged.isEmpty {
                             Button("Load older threads") {
-                                guard !pagingOlder else { return }
-                                pagingOlder = true
-                                Task {
-                                    defer { pagingOlder = false }
-                                    await withTaskGroup(of: Void.self) { group in
-                                        for owner in paged where owner.status == .connected {
-                                            group.addTask { await owner.loadOlder() }
-                                        }
-                                    }
-                                }
+                                for owner in paged { owner.loadOlder() }
                             }
-                            .disabled(pagingOlder || !paged.contains { $0.status == .connected })
+                            .disabled(!paged.contains(where: \.canLoadOlder))
                         }
                     }
                 }
@@ -298,22 +288,23 @@ struct InboxView: View {
         .padding(.vertical, 80)
     }
 
-    private func inboxRows() -> [ScopedRow] {
+    private func inboxRows(owners: [CoreStore]) -> [ScopedRow] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var seen = Set<String>()
         var rows: [ScopedRow] = []
-        for owner in store.inboxOwners {
+        for owner in owners {
             guard let snapshot = owner.shell else { continue }
-            seen.formUnion(snapshot.hiddenThreadIds)
+            let hidden = Set(snapshot.hiddenThreadIds)
             let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0) })
             for thread in snapshot.threads where seen.insert(thread.id).inserted {
-                guard environmentFilter == nil || owner.scope == environmentFilter else { continue }
+                if query.isEmpty && hidden.contains(thread.id) { continue }
                 guard selectedProjectFilter == nil || thread.sidebarProjectKey == selectedProjectFilter else { continue }
                 let project = projects[thread.projectId]
                 if !query.isEmpty && ![thread.title, thread.branch, thread.orbitProjectSlug ?? project?.title]
                     .compactMap({ $0 }).contains(where: { $0.lowercased().contains(query) }) { continue }
                 rows.append(ScopedRow(thread: thread, owner: owner, project: project))
             }
+            seen.formUnion(hidden)
         }
         return rows.sorted {
             let lhs = $0.thread, rhs = $1.thread

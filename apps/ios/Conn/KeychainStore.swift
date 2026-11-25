@@ -20,10 +20,6 @@ enum KeychainStore {
     private static let environmentIdAccount = "environment-id"
 
     static func loadSession(scope: String = "") -> StoredSession? {
-        if let encoded = read(account: sessionAccount + scope),
-           let session = try? JSONDecoder().decode(StoredSession.self, from: Data(encoded.utf8)) {
-            return session
-        }
         #if DEBUG && targetEnvironment(simulator)
         if scope.isEmpty, let fixture = ProcessInfo.processInfo.environment["CONN_TEST_SAVED_SESSION"],
            let session = try? JSONDecoder().decode(StoredSession.self, from: Data(fixture.utf8)),
@@ -31,6 +27,10 @@ enum KeychainStore {
             return session
         }
         #endif
+        if let encoded = read(account: sessionAccount + scope),
+           let session = try? JSONDecoder().decode(StoredSession.self, from: Data(encoded.utf8)) {
+            return session
+        }
         guard let serverURL = read(account: serverURLAccount + scope),
               let bearerToken = read(account: bearerTokenAccount + scope),
               !serverURL.isEmpty,

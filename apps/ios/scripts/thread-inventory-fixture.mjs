@@ -1,5 +1,5 @@
 // bun apps/ios/scripts/thread-inventory-fixture.mjs <task simulator UDID>
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,12 @@ const read = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), "
 const fixture = read("../../../crates/conn-state/tests/fixtures/sidebar_inventory.json");
 const base = read("../../../crates/conn-state/tests/fixtures/shell_thread_updates.json")[0].thread;
 const marker = { kind: "synchronized" };
-const childProjectTest = process.argv[3] === "child-project";
+const scenario = process.argv[3] ?? "inventory";
+const childProjectTest = scenario === "child-project";
+const sleepingTest = scenario === "sleeping";
+let fleetState = "running";
+const releaseDiscovery = Promise.withResolvers();
+let sleepingConnectionAttempts = 0;
 const followUp = Promise.withResolvers();
 const row = (fields) => ({
   ...base, title: fields.id, lineage: { rootThreadId: fields.id }, ...fields,
@@ -20,7 +25,7 @@ function childProjectRequest(ws, frame) {
   if (frame._tag !== "Request") return false;
   const parent = row({ id: "parent", projectId: "parent-project" });
   const child = row({
-    id: "child", projectId: "child-project", title: "Artifact child",
+    id: "child", projectId: "child-project", title: "Artifact child", branch: "child-only-branch",
     delegatedFrom: { threadId: parent.id, environmentId: "primary", title: parent.title },
     lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationshipToParent: "subagent" },
   });
@@ -70,10 +75,10 @@ function childProjectRequest(ws, frame) {
 function environment(name) {
   let socket, requestId, receiveSubscription, receiveAck;
   const threads = new Map();
-  let pageRequest, pageRequests = 0;
+  let pageRequest, expectedCursor, pageRequests = 0;
   const pageReady = Promise.withResolvers();
   let replay = false, seq = 0, socketId = 0;
-  const rows = fixture[name].map(row);
+  const rows = (fixture[name] ?? []).map(row);
   const ready = () => new Promise((resolve) => { receiveSubscription = resolve; });
   function send(values) {
     socket.send(JSON.stringify({ _tag: "Chunk", requestId, values }));
@@ -87,8 +92,13 @@ function environment(name) {
     hostname: "127.0.0.1", port: 0,
     fetch(req, server) {
       const path = new URL(req.url).pathname;
+      if (name === "linked" && sleepingTest && fleetState !== "running") {
+        sleepingConnectionAttempts++;
+        return new Response(null, { status: 503 });
+      }
       if (path === "/ws" && server.upgrade(req, { data: { id: ++socketId } })) return;
       if (path.endsWith("/outline")) return Response.json({ snapshotSequence: seq, markers: [] });
+      if (path === "/api/auth/session") return Response.json({ authenticated: true });
       if (path === "/oauth/token") return Response.json({ access_token: "fixture" });
       if (path === "/.well-known/t3/environment") return Response.json({ environmentId: name });
       return new Response(null, { status: 404 });
@@ -106,11 +116,12 @@ function environment(name) {
               send([snapshot([row({ id: "transient-" + name })])]);
               receiveAck = receiveSubscription;
             } else {
-              send([snapshot([row({ id: "old-" + name })]), marker]);
+              const id = name === "witness" ? "witness-" + fleetState : "old-" + name;
+              send([snapshot([row({ id })]), marker]);
             }
           }
           if (frame.tag === "orchestration.getOlderSettledThreads") {
-            pageRequest = { ws, id: frame.id };
+            pageRequest = { ws, id: frame.id, cursor: frame.payload.before.settledAt };
             pageRequests++;
             pageReady.resolve();
           }
@@ -130,10 +141,11 @@ function environment(name) {
     hold() { replay = true; return ready(); },
     interrupt() { const next = ready(); socket.close(); return next; },
     commit() { send([snapshot(rows), marker]); },
-    startPaging() {
+    startPaging(before = "2026-11-24T00:00:00Z") {
+      expectedCursor = before;
       const item = snapshot(rows.filter((t) => t.id === "b"));
       item.snapshot.olderSettled = {
-        before: "2026-11-24T00:00:00Z", asOfSequence: seq,
+        before, asOfSequence: seq,
         counts: [{ projectId: base.projectId, count: 2 }],
       };
       send([item, marker]);
@@ -141,6 +153,7 @@ function environment(name) {
     async finishPage() {
       await pageReady.promise;
       if (pageRequests !== 1) throw new Error(name + " received " + pageRequests + " page requests");
+      if (pageRequest.cursor !== expectedCursor) throw new Error(name + " paged from stale cursor " + pageRequest.cursor);
       const hours = name === "primary" ? ["10", "08"] : ["11", "09"];
       const threads = hours.map((hour) => row({
         id: "page-" + hour, settledAt: "2026-11-23T" + hour + ":00:00Z",
@@ -166,12 +179,67 @@ function environment(name) {
 }
 
 const primary = environment("primary"), linked = environment("linked");
+const witness = sleepingTest ? environment("witness") : null;
 let held;
+function simulatorSupportDirectory() {
+  const dir = execFileSync("xcrun", ["simctl", "get_app_container", device, "com.nckrtl.conn.ios", "data"], { encoding: "utf8" }).trim();
+  return dir + "/Library/Application Support";
+}
+
+async function waitForSavedInventories() {
+  const dir = simulatorSupportDirectory();
+  const expected = new Set(["old-primary", "old-linked"]);
+  const deadline = Date.now() + 10000;
+  while (expected.size) {
+    for (const name of readdirSync(dir).filter((name) => name === "thread-cache" || name.startsWith("thread-cache-"))) {
+      try {
+        const saved = JSON.parse(readFileSync(dir + "/" + name + "/shell.json", "utf8"));
+        if (saved.threads.some((t) => t.id === "old-" + saved.environmentId)) expected.delete("old-" + saved.environmentId);
+      } catch (err) { if (err.code !== "ENOENT") throw err; }
+    }
+    if (!expected.size) return;
+    if (Date.now() >= deadline) throw new Error("Missing cached rows: " + [...expected].join(", "));
+    await Bun.sleep(25);
+  }
+}
+
 const control = Bun.serve({
   hostname: "127.0.0.1", port: 0, idleTimeout: 60,
   async fetch(req) {
     const step = new URL(req.url).pathname.slice(1);
     switch (step) {
+      case "api/v1/conn/me":
+        return Response.json({ data: { id: 1, name: "phone", wireguard_ip: "127.0.0.1" } });
+      case "api/v1/conn/environments": {
+        if (fleetState === "stopped") await releaseDiscovery.promise;
+        const registration = (id, server) => ({
+          environment_id: id, label: id, url: server.url, status: "registered", roles: [],
+        });
+        const data = [registration("primary", primary), registration("witness", witness)];
+        if (fleetState !== "removed") data.push({
+          ...registration("linked", linked), instance_id: 19, instance_name: "Linked instance", power_state: fleetState,
+        });
+        return Response.json({ data });
+      }
+      case "api/v1/conn/environments/linked/pairings":
+      case "api/v1/conn/environments/witness/pairings": {
+        const id = step.split("/").at(-2);
+        if (id === "linked" && fleetState !== "running") {
+          sleepingConnectionAttempts++;
+          return new Response(null, { status: 403 });
+        }
+        return Response.json({ data: {
+          pairing_url: (id === "linked" ? linked : witness).url + "#token=test", pairing: { environment_id: id },
+        } });
+      }
+      case "saved": await waitForSavedInventories(); break;
+      case "sleep": fleetState = "stopped"; break;
+      case "discover-sleeping": releaseDiscovery.resolve(); break;
+      case "remove-machine": fleetState = "removed"; break;
+      case "api/v1/instances/19/wake":
+        sleepingConnectionAttempts++;
+        return new Response(null, { status: 403 });
+      case "sleeping-connection-attempts": return new Response(String(sleepingConnectionAttempts));
       case "follow-up-project": return new Response(await followUp.promise);
       case "hold": held = Promise.all([primary.hold(), linked.hold()]); break;
       case "staged": await held; break;
@@ -179,12 +247,13 @@ const control = Bun.serve({
       case "interrupt": await linked.interrupt(); break;
       case "linked": linked.commit(); break;
       case "start-pages": primary.startPaging(); linked.startPaging(); break;
+      case "interrupt-paging": await primary.interrupt(); break;
+      case "resume-paging": primary.startPaging("2026-11-24T01:00:00Z"); break;
       case "primary-page": await primary.finishPage(); break;
       case "linked-page": await linked.finishPage(); break;
       case "backfill": {
         primary.backfill("d");
-        const dir = execFileSync("xcrun", ["simctl", "get_app_container", device, "com.nckrtl.conn.ios", "data"], { encoding: "utf8" }).trim();
-        const db = new Database(dir + "/Library/Application Support/thread-cache/messages.sqlite3", { readonly: true });
+        const db = new Database(simulatorSupportDirectory() + "/thread-cache/messages.sqlite3", { readonly: true });
         try {
           const deadline = Date.now() + 10000;
           const query = db.query("SELECT count(*) AS n FROM messages WHERE environment = 'primary' AND thread = 'd'");
@@ -210,10 +279,13 @@ const control = Bun.serve({
 
 const device = process.argv[2];
 if (!device) throw new Error("Pass the task simulator UDID");
+const test = { inventory: "testAtomicThreadInventory", "child-project": "testChildArtifactFollowUpProject",
+  sleeping: "testSavedSleepingMachineInventory" }[scenario];
+if (!test) throw new Error("Unknown inventory scenario " + scenario);
 const child = spawn("xcodebuild", ["test", "-project", "apps/ios/Conn.xcodeproj", "-scheme", "Conn",
   "-destination", "id=" + device, "-derivedDataPath", "apps/ios/build/DerivedData",
   "-parallel-testing-enabled", "NO",
-  "-only-testing:ConnUITests/ConnSpikeUITests/" + (childProjectTest ? "testChildArtifactFollowUpProject" : "testAtomicThreadInventory"),
+  "-only-testing:ConnUITests/ConnSpikeUITests/" + test,
   "CODE_SIGN_IDENTITY=-"], { cwd: root, stdio: "inherit", env: { ...process.env,
     TEST_RUNNER_CONN_INVENTORY_FIXTURE: control.url.href,
     TEST_RUNNER_CONN_PAIRING_URL: primary.url + "#token=test",

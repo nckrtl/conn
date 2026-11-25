@@ -2555,7 +2555,9 @@ impl ChatView {
                 SharedString::from(format!("chat.message.queued.{id}")),
                 format!("Queued message: {preview}"),
             )
-            .bg(hsla(self.tokens.shell_raised))
+            // Half-transparent over the timeline: a darker fill than a sent bubble, so a queued
+            // message reads as not yet sent.
+            .bg(hsla_alpha(self.tokens.shell_raised, QUEUED_BUBBLE_FILL_ALPHA))
             .border_1()
             .border_dashed()
             .border_color(bubble_border);
@@ -2572,7 +2574,12 @@ impl ChatView {
             },
             window,
             cx,
-        );
+        )
+        // Dimmed text, set after the body's own colour so it wins.
+        .text_color(hsla_alpha(
+            self.tokens.message_foreground,
+            QUEUED_TEXT_ALPHA,
+        ));
 
         let mut actions = div()
             .flex()
@@ -2871,13 +2878,21 @@ impl ChatView {
                     hsla(self.tokens.muted_foreground),
                 ));
 
+            // The divider only separates the header from its expanded work-log rows. Collapsed,
+            // the message follows the header directly, so the line stays transparent (same 1px,
+            // so expanding does not shift the layout).
+            let fold_divider = if manually_expanded {
+                hsla(self.tokens.shell_divider)
+            } else {
+                gpui_kit::transparent_black()
+            };
             let header = div()
                 .w_full()
                 .min_w_0()
                 .pt(px(4.0))
                 .pb(px(8.0))
                 .border_b_1()
-                .border_color(hsla(self.tokens.shell_divider))
+                .border_color(fold_divider)
                 .child(div().flex().flex_row().items_center().child(fold_btn));
 
             container = container.child(header);
@@ -4240,10 +4255,10 @@ mod worked_label_tests {
             "Worked",
             "missing duration"
         );
-        assert_eq!(format_fold_label(Some(50), false, false), "Worked for 50ms");
+        assert_eq!(format_fold_label(Some(50), false, false), "Worked for 1s");
         assert_eq!(
             format_fold_label(Some(7_500), false, false),
-            "Worked for 7.5s"
+            "Worked for 8s"
         );
         assert_eq!(
             format_fold_label(Some(2_000), false, false),
@@ -4379,3 +4394,8 @@ mod notice_icon_tests {
         assert_eq!(notice_icon("Something else"), icons::INFO);
     }
 }
+
+/// Fill opacity of a queued message's bubble over the timeline (a sent bubble is opaque).
+const QUEUED_BUBBLE_FILL_ALPHA: f32 = 0.45;
+/// Text opacity of a queued message, so it reads as not yet sent.
+const QUEUED_TEXT_ALPHA: f32 = 0.6;

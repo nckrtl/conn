@@ -2771,10 +2771,11 @@ fn user_message_preserves_attachments_steer_and_timestamps() {
     );
 
     // Conn's `formatDuration`.
-    assert_eq!(format_duration(0), "1ms");
-    assert_eq!(format_duration(450), "450ms");
+    assert_eq!(format_duration(0), "1s", "never below one second");
+    assert_eq!(format_duration(450), "1s");
     assert_eq!(format_duration(2_000), "2s");
-    assert_eq!(format_duration(7_500), "7.5s");
+    assert_eq!(format_duration(7_400), "7s", "whole seconds under a minute");
+    assert_eq!(format_duration(7_500), "8s");
     assert_eq!(format_duration(59_600), "1m", "unit chosen after rounding");
     assert_eq!(format_duration(134_000), "2m 14s");
     assert_eq!(format_duration(3_725_000), "1h 2m 5s");

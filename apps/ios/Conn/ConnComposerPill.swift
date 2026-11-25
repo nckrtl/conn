@@ -42,7 +42,7 @@ struct ConnComposerPill<Trailing: View>: View {
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
-        .modifier(ThreadControlSurface(shape: shape))
+        .glassEffect(.regular, in: shape)
     }
 
     /// Mobile's send button: a 30pt primary circle with `arrow.up` 16 semibold in a 44pt target.
@@ -130,20 +130,5 @@ struct ProviderIcon: View {
                 .frame(width: size, height: size)
                 .foregroundStyle(theme.mutedForeground)
         }
-    }
-}
-
-struct ThreadControlSurface<S: InsettableShape>: ViewModifier {
-    let shape: S
-    @Environment(\.connTheme) private var theme
-
-    func body(content: Content) -> some View {
-        content
-            .background {
-                shape.fill(theme.footerSurface)
-                    .background(.ultraThinMaterial, in: shape)
-                    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-            }
-            .overlay { shape.strokeBorder(theme.border, lineWidth: 0.5).allowsHitTesting(false) }
     }
 }

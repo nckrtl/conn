@@ -1433,6 +1433,92 @@ final class ConnSpikeUITests: XCTestCase {
     }
 
     /// Writes the running app's accessibility tree to `CONN_DUMP_PATH` (layout debugging).
+    /// The workspace bar is one row: settings circle, tab pill, new-thread circle, level and not overlapping.
+    func testWorkspaceBarRowLayout() throws {
+        guard let pairing = ProcessInfo.processInfo.environment["CONN_PAIRING_URL"], !pairing.isEmpty else {
+            throw XCTSkip("Set CONN_PAIRING_URL to run against an isolated, seeded Conn server")
+        }
+        continueAfterFailure = true
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        let url = app.textFields["pairing.urlField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 10))
+        url.tap()
+        url.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+
+        let bar = app.tabBars.firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 25))
+        let settings = app.buttons["workspace.settingsButton"]
+        let newThread = app.buttons["inbox.newThreadButton"]
+        let tabs = ["threads", "tasks", "pullRequests"].map { bar.buttons["workspace.tab.\($0)"] }
+        let search = bar.buttons["workspace.searchButton"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5) && newThread.exists)
+
+        func capture(_ name: String) {
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = name
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+
+        func checkRow(_ name: String) {
+            // The tab bar element is the system's full-width container. The visible pill is the four
+            // tab items plus the pill's 4pt inner inset.
+            let items = (tabs + [search]).map(\.frame)
+            let b = items.dropFirst().reduce(items[0]) { $0.union($1) }.insetBy(dx: -4, dy: -4)
+            let s = settings.frame, n = newThread.frame
+            let named = [("settings", s), ("pill", b), ("new", n)] + (tabs + [search]).map { ($0.identifier, $0.frame) }
+            let report = named
+                .map { "\($0.0): x \($0.1.minX)–\($0.1.maxX) y \($0.1.minY)–\($0.1.maxY) h \($0.1.height)" }
+                .joined(separator: "\n")
+            let note = XCTAttachment(string: report)
+            note.name = name + "-frames"
+            note.lifetime = .keepAlways
+            add(note)
+            XCTAssertEqual(s.minY, b.minY, accuracy: 1, name + " settings minY\n" + report)
+            XCTAssertEqual(s.maxY, b.maxY, accuracy: 1, name + " settings maxY\n" + report)
+            XCTAssertEqual(n.minY, b.minY, accuracy: 1, name + " new minY\n" + report)
+            XCTAssertEqual(n.maxY, b.maxY, accuracy: 1, name + " new maxY\n" + report)
+            XCTAssertEqual(s.height, b.height, accuracy: 1, name + " height\n" + report)
+            XCTAssertEqual(n.height, b.height, accuracy: 1, name + " height\n" + report)
+            XCTAssertLessThanOrEqual(s.maxX, b.minX, name + " settings overlaps bar\n" + report)
+            XCTAssertLessThanOrEqual(b.maxX, n.minX, name + " new overlaps bar\n" + report)
+            for tab in tabs + [search] {
+                XCTAssertTrue(tab.isHittable, name + " " + tab.identifier + " is not hittable")
+                XCTAssertTrue(b.contains(tab.frame), name + " " + tab.identifier + " is outside the bar")
+            }
+            XCTAssertTrue(settings.isHittable && newThread.isHittable, name + " circles are not hittable")
+        }
+
+        for appearance in ["light", "dark"] {
+            XCUIDevice.shared.appearance = appearance == "dark" ? .dark : .light
+            for (name, tab) in zip(["threads", "tasks", "pullRequests"], tabs) {
+                tab.tap()
+                XCTAssertTrue(tab.wait(for: \.isSelected, toEqual: true, timeout: 5))
+                RunLoop.current.run(until: Date().addingTimeInterval(1))
+                checkRow(appearance + "-" + name)
+                capture(appearance + "-inbox-tab-" + name)
+            }
+            search.tap()
+            XCTAssertTrue(app.textFields["workspace.searchField"].waitForExistence(timeout: 5))
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+            capture(appearance + "-inbox-tab-search")
+            app.buttons["workspace.cancelSearch"].tap()
+            XCTAssertTrue(tabs[2].wait(for: \.isSelected, toEqual: true, timeout: 5))
+            tabs[0].tap()
+        }
+
+        // Both circles still act.
+        newThread.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["thread.composer"].waitForExistence(timeout: 10)
+            || app.navigationBars.buttons["Back"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons["Back"].tap()
+        settings.tap()
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 10))
+    }
+
     func testDumpHierarchy() throws {
         guard let path = ProcessInfo.processInfo.environment["CONN_DUMP_PATH"] else {
             throw XCTSkip("Set CONN_DUMP_PATH")

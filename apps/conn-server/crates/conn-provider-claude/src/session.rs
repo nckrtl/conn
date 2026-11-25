@@ -1916,14 +1916,11 @@ impl ClaudeSession {
         // With a live query the host is up, and frames of that query must not reach the new
         // turn before `prepare` decided to keep or close it, so the turn opens after it.
         let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
-        let models = self
-            .inner
-            .config
-            .custom_models
-            .scope(catalog::current_provider_models(
-                &self.inner.config.model_manifest,
-                now,
-            ));
+        let models = catalog::turn_models(
+            &self.inner.config.model_manifest,
+            now,
+            &self.inner.config.custom_models,
+        );
         let config = self.inner.config.clone();
         let cwd = input.runtime_policy.cwd.clone();
         let selected = to_json(&input.model_selection);

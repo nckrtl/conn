@@ -555,6 +555,23 @@ pub struct ContinuationRequest {
     pub delivery: Option<String>,
 }
 
+/// Evidence from a registered native command's structured completion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeCommandEvidence {
+    pub exit_code: Option<i64>,
+    pub output: NativeCommandOutput,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeCommandOutput {
+    #[default]
+    Absent,
+    /// Replaces provisional tool text with the first native output.
+    Initial,
+    /// A later native snapshot extends confirmed output.
+    Extended,
+}
+
 /// `ProviderAdapterV2Event` `steer.updated` status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -879,13 +896,12 @@ pub enum ProviderEvent {
     MessageUpdated { message: ConversationMessage },
     #[serde(rename = "turn_item.updated")]
     TurnItemUpdated { turn_item: TurnItem },
-    /// A Grok task snapshot reported a nonzero exit for its registered command.
-    /// Keep its native provenance inside the process; public replays use the normal item.
+    /// Private evidence for terminal corrections. Public replays use the normal item.
     #[serde(rename = "turn_item.updated", skip_deserializing)]
-    GrokCommandFailed {
+    NativeCommandExit {
         turn_item: TurnItem,
         #[serde(skip)]
-        exit_code: i64,
+        evidence: NativeCommandEvidence,
     },
     #[serde(rename = "mcp_app.capture")]
     McpAppCapture {

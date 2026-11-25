@@ -72,8 +72,6 @@ pub enum Out {
     ReadMemberTranscript(MemberTranscript),
 }
 
-const DEFAULT_CONTEXT_TOKENS: u64 = 200_000;
-const LONG_CONTEXT_TOKENS: u64 = 1_000_000;
 /// Frames held for a continuation turn the engine has not started yet.
 const WAKE_FRAME_CAP: usize = 512;
 /// Steers in flight in one turn.
@@ -284,6 +282,7 @@ struct Turn {
     app_thread: Value,
     instance_id: String,
     root_model: String,
+    context: crate::catalog::ModelContext,
     auto_compact_window: Option<u64>,
     /// Steers written but not yet taken: prompt uuid → message id.
     pending_steers: Vec<(String, String)>,
@@ -308,10 +307,16 @@ struct Turn {
 }
 
 impl Turn {
-    fn set_compact_threshold(&self, usage: &mut Value, max_tokens: u64) {
+    fn context_tokens(&self, reported: &HashMap<String, u64>) -> Option<u64> {
+        self.context
+            .catalog_window
+            .or_else(|| reported.get(&self.context.api_model_id).copied())
+    }
+
+    fn set_compact_threshold(&self, usage: &mut Value, max_tokens: Option<u64>) {
         if let Some(window) = self
             .auto_compact_window
-            .filter(|window| *window < max_tokens)
+            .filter(|window| max_tokens.is_none_or(|max| *window < max))
         {
             usage["autoCompactThreshold"] = json!(window - 33_000);
         }
@@ -605,6 +610,7 @@ impl<E: Env> Mapper<E> {
                 .as_str()
                 .unwrap_or(DRIVER)
                 .to_string(),
+            context: crate::catalog::model_context(&self.catalog, &selection),
             auto_compact_window: self.auto_compact_window,
             root_model: selection["model"].as_str().unwrap_or("").to_string(),
             pending_steers: Vec::new(),
@@ -785,11 +791,7 @@ impl<E: Env> Mapper<E> {
                 turn.stream_blocks.clear();
                 if let Some(usage) = message.usage {
                     turn.usage = Some((message.id, usage, now_ms));
-                    let max = context_tokens(
-                        &self.context_windows,
-                        &turn.root_model,
-                        turn.model.as_deref(),
-                    );
+                    let max = turn.context_tokens(&self.context_windows);
                     emit_usage(turn, max, &now, out);
                 } else {
                     turn.usage = None;
@@ -808,11 +810,7 @@ impl<E: Env> Mapper<E> {
                     if delta.iterations.is_some() {
                         usage.iterations = delta.iterations;
                     }
-                    let max = context_tokens(
-                        &self.context_windows,
-                        &turn.root_model,
-                        turn.model.as_deref(),
-                    );
+                    let max = turn.context_tokens(&self.context_windows);
                     emit_usage(turn, max, &now, out);
                 }
             }
@@ -940,11 +938,7 @@ impl<E: Env> Mapper<E> {
                 .is_some_and(|(id, _, _)| *id == message_id);
             if !same {
                 turn.usage = Some((message_id, usage, now_ms));
-                let max = context_tokens(
-                    &self.context_windows,
-                    &turn.root_model,
-                    turn.model.as_deref(),
-                );
+                let max = turn.context_tokens(&self.context_windows);
                 emit_usage(turn, max, &now, out);
             }
         }
@@ -1088,9 +1082,6 @@ impl<E: Env> Mapper<E> {
             _ => {}
         }
         let now = self.env.now();
-        let max_tokens = |turn: &Turn, windows: &HashMap<String, u64>| {
-            context_tokens(windows, &turn.root_model, turn.model.as_deref())
-        };
         let Some(turn) = &mut self.turn else {
             return;
         };
@@ -1194,7 +1185,7 @@ impl<E: Env> Mapper<E> {
                     let after = post.round() as u64;
                     item["afterTokenCount"] = json!(after);
                     let mut provider_turn = provider_turn(turn, "running", None, false);
-                    let max_tokens = max_tokens(turn, &self.context_windows);
+                    let max_tokens = turn.context_tokens(&self.context_windows);
                     provider_turn["tokenUsage"] = json!({
                         "usedTokens": after,
                         "maxTokens": max_tokens,
@@ -1286,10 +1277,12 @@ impl<E: Env> Mapper<E> {
         // A result that reports a context window not seen before refreshes the usage row.
         let mut new_window = false;
         if let Some(Value::Object(models)) = &msg.model_usage {
-            for (model, usage) in models.iter().take(16) {
-                if let Some(window) = usage.get("contextWindow").and_then(Value::as_u64)
+            for (model, usage) in models {
+                if let Some(window) = usage
+                    .get("contextWindow")
+                    .and_then(Value::as_f64)
+                    .map(|n| n.round() as u64)
                     && window > 0
-                    && (self.context_windows.len() < 16 || self.context_windows.contains_key(model))
                 {
                     new_window |=
                         self.context_windows.insert(model.clone(), window) != Some(window);
@@ -1302,11 +1295,7 @@ impl<E: Env> Mapper<E> {
             return;
         };
         if new_window && turn.usage.is_some() {
-            let max = context_tokens(
-                &self.context_windows,
-                &turn.root_model,
-                turn.model.as_deref(),
-            );
+            let max = turn.context_tokens(&self.context_windows);
             emit_usage(turn, max, &now, out);
         }
         let steer_abort = matches!(
@@ -2442,7 +2431,7 @@ fn provider_turn(turn: &Turn, status: &str, completed_at: Option<&str>, settled:
 }
 
 /// `emitContextUsage` → `provider_turn.updated` with `tokenUsage`.
-fn emit_usage(turn: &Turn, max_tokens: u64, now: &str, out: &mut Vec<Out>) {
+fn emit_usage(turn: &Turn, max_tokens: Option<u64>, now: &str, out: &mut Vec<Out>) {
     let Some((_, usage, requested_ms)) = &turn.usage else {
         return;
     };
@@ -3105,32 +3094,7 @@ fn turn_token_usage(
     });
     usage
 }
-
 const AUTH_FAILED_TEXT: &str = "Claude could not authenticate. For subscription login, run `claude auth login` on this environment's machine, then start a new thread. For API-key authentication, check this instance's configured credentials.";
-
-/// `claudeContextWindow`: the selected model's window from the catalog (the bundled
-/// `model-manifest.json` profiles, copied for the current models), else what the CLI reported
-/// for the model it ran, else 1M for `[1m]` slugs, else 200k.
-fn context_tokens(windows: &HashMap<String, u64>, selected: &str, ran: Option<&str>) -> u64 {
-    let catalog = match selected.trim_end_matches("[1m]") {
-        "claude-opus-5-5" | "claude-opus-5" | "claude-sonnet-5-5" | "claude-sonnet-5"
-        | "claude-haiku-5-5" => Some(LONG_CONTEXT_TOKENS),
-        "claude-haiku-4-5" => Some(DEFAULT_CONTEXT_TOKENS),
-        "claude-sonnet-4-6" | "claude-opus-4-6" => Some(if selected.ends_with("[1m]") {
-            LONG_CONTEXT_TOKENS
-        } else {
-            DEFAULT_CONTEXT_TOKENS
-        }),
-        _ => None,
-    };
-    catalog
-        .or_else(|| ran.and_then(|m| windows.get(m).copied()))
-        .unwrap_or(if selected.ends_with("[1m]") {
-            LONG_CONTEXT_TOKENS
-        } else {
-            DEFAULT_CONTEXT_TOKENS
-        })
-}
 
 /// The latest reset among the blocked windows, or null if any is unknown.
 fn usage_reset_at(limits: &LimitState) -> Value {

@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use conn_provider::{NativeCommandEvidence, NativeCommandOutput};
 use serde_json::{Value, json};
 
 use super::{Mapper, Out, content_display_text};
@@ -42,6 +43,8 @@ pub(crate) const INJECTED_REPORT_WAIT: std::time::Duration = std::time::Duration
 pub(super) struct CommandEnd {
     status: TaskStatus,
     output: Option<String>,
+    exit_code: Option<i64>,
+    native_output: bool,
 }
 
 /// The background part of `ActiveAcpTurn`.
@@ -1184,10 +1187,10 @@ impl<E: Env> Mapper<E> {
         }
         // `backgroundCommandTurn`: a detached command's completed turn, else the live one.
         let detached = self.detached_turn_of(&life.task_id);
-        let (status, output) = match detached {
+        let (status, output, evidence) = match detached {
             Some(seq) => self
                 .with_detached(seq, |m| m.record_command_end(&life))
-                .unwrap_or((life.status, life.output.clone())),
+                .unwrap_or((life.status, life.output.clone(), None)),
             None => self.record_command_end(&life),
         };
         if status != TaskStatus::Running
@@ -1210,7 +1213,7 @@ impl<E: Env> Mapper<E> {
                     self.finish_registered_background_tool(&life.task_id, status, output, &mut out)
                 }
             }
-            if let Some(exit_code) = life.exit_code.filter(|code| *code != 0) {
+            if let Some(evidence) = evidence {
                 return out
                     .into_iter()
                     .enumerate()
@@ -1218,9 +1221,9 @@ impl<E: Env> Mapper<E> {
                         Out::Event(conn_provider::ProviderEvent::TurnItemUpdated {
                             turn_item: conn_contract::TurnItem::CommandExecution(command),
                         }) if index >= first_command_row && command.monitor != Some(true) => {
-                            Out::Event(conn_provider::ProviderEvent::GrokCommandFailed {
+                            Out::Event(conn_provider::ProviderEvent::NativeCommandExit {
                                 turn_item: conn_contract::TurnItem::CommandExecution(command),
-                                exit_code,
+                                evidence,
                             })
                         }
                         other => other,
@@ -1231,46 +1234,85 @@ impl<E: Env> Mapper<E> {
         out
     }
 
-    /// A command's end, recorded on the turn that owns its row: the reported output, else the
-    /// known one; a missing exit code cannot undo a known failure.
-    fn record_command_end(&mut self, life: &Lifecycle) -> (TaskStatus, Option<String>) {
-        let mut status = life.status;
-        let mut output = life.output.clone();
-        if status != TaskStatus::Running
-            && let Some(turn) = self.turn.as_mut()
-            && (life
-                .report
-                .as_ref()
-                .is_some_and(|report| report.kind == WorkKind::Command)
-                || turn.bg.command_end(&life.task_id).is_some())
+    /// Retain the first native exit code and monotonic native output. Tool ACKs can
+    /// contain provisional display text before the first structured snapshot.
+    fn record_command_end(
+        &mut self,
+        life: &Lifecycle,
+    ) -> (TaskStatus, Option<String>, Option<NativeCommandEvidence>) {
+        let Some(turn) = self.turn.as_mut() else {
+            return (life.status, life.output.clone(), None);
+        };
+        if life.status == TaskStatus::Running
+            || (turn.bg.command_end(&life.task_id).is_none()
+                && !life
+                    .report
+                    .as_ref()
+                    .is_some_and(|report| report.kind == WorkKind::Command))
         {
-            let previous = turn.bg.command_end(&life.task_id).cloned().flatten();
-            let tool_output = turn
-                .bg
-                .tool_of_task
-                .get(&life.task_id)
-                .and_then(|id| turn.tools.get(id))
-                .map(output_text);
-            output = life
-                .output
-                .clone()
-                .or_else(|| previous.as_ref().and_then(|p| p.output.clone()))
-                .or(tool_output);
-            if previous
-                .as_ref()
-                .is_some_and(|p| p.status == TaskStatus::Failed)
-            {
-                status = TaskStatus::Failed;
-            }
-            turn.bg.set_command_end(
-                &life.task_id,
-                Some(CommandEnd {
-                    status,
-                    output: output.clone(),
-                }),
-            );
+            return (life.status, life.output.clone(), None);
         }
-        (status, output)
+        let previous = turn.bg.command_end(&life.task_id).and_then(Option::as_ref);
+        let previous_code = previous.and_then(|p| p.exit_code);
+        let was_failed = previous
+            .as_ref()
+            .is_some_and(|p| p.status == TaskStatus::Failed);
+        let status = if was_failed {
+            TaskStatus::Failed
+        } else {
+            life.status
+        };
+        // A later success cannot reverse a failure. An absent exit code can still
+        // carry more output for the earlier terminal status.
+        let contradictory = life.exit_code.is_some_and(|code| {
+            (was_failed && code == 0) || previous_code.is_some_and(|prior| prior != code)
+        });
+        if contradictory && let Some(prior) = previous {
+            return (prior.status, prior.output.clone(), None);
+        }
+        let mut output = previous
+            .as_ref()
+            .and_then(|p| p.output.clone())
+            .or_else(|| {
+                turn.bg
+                    .tool_of_task
+                    .get(&life.task_id)
+                    .and_then(|id| turn.tools.get(id))
+                    .map(output_text)
+            });
+        let confirmed = previous
+            .as_ref()
+            .is_some_and(|p| p.native_output && p.status == status);
+        let evidence_output = match life.output.as_deref().filter(|s| !s.is_empty()) {
+            Some(native) if !confirmed => {
+                output = Some(native.to_owned());
+                NativeCommandOutput::Initial
+            }
+            Some(native)
+                if output
+                    .as_deref()
+                    .is_some_and(|old| native.len() > old.len() && native.starts_with(old)) =>
+            {
+                output = Some(native.to_owned());
+                NativeCommandOutput::Extended
+            }
+            _ => NativeCommandOutput::Absent,
+        };
+        turn.bg.set_command_end(
+            &life.task_id,
+            Some(CommandEnd {
+                status,
+                output: output.clone(),
+                exit_code: life.exit_code.or(previous_code),
+                native_output: confirmed || evidence_output != NativeCommandOutput::Absent,
+            }),
+        );
+        let evidence = (life.exit_code.is_some() || evidence_output != NativeCommandOutput::Absent)
+            .then_some(NativeCommandEvidence {
+                exit_code: life.exit_code,
+                output: evidence_output,
+            });
+        (status, output, evidence)
     }
 
     #[cfg(test)]
@@ -1325,6 +1367,8 @@ impl<E: Env> Mapper<E> {
                 &completion.task_id,
                 Some(CommandEnd {
                     status: completion.status,
+                    native_output: false,
+                    exit_code: None,
                     output: Some(output_text(&hydrated)),
                 }),
             );

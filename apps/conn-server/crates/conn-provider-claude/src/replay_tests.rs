@@ -1502,3 +1502,90 @@ fn explicit_compaction_window_reaches_normal_and_post_compaction_usage() {
         }
     }
 }
+
+#[test]
+fn custom_model_usage_waits_for_its_reported_capacity() {
+    let config = crate::ClaudeConfig::default().with_instance(Some(&json!({"config":{
+        "customModels":["orbit-model", "sonnet"], "autoCompactWindow":"300000",
+    }})));
+    let models = crate::catalog::turn_models(&config.model_manifest, 0, &config.custom_models);
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.set_catalog(models);
+    mapper.auto_compact_window = config.auto_compact_window;
+
+    let frame = || {
+        Inbound::from_value(
+            json!({"type":"assistant","uuid":"root","parent_tool_use_id":null,
+        "message":{"id":"assistant","model":"upstream-deployment","content":[],"usage":{"input_tokens":54}}}),
+        )
+    };
+    let result = |capacities| {
+        Inbound::from_value(json!({"type":"result","subtype":"success","is_error":false,
+        "modelUsage":capacities,"usage":{},"result":"ok","num_turns":1,"total_cost_usd":0}))
+    };
+    let usage = |outputs: Vec<Out>| {
+        outputs
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Event(ProviderEvent::ProviderTurnUpdated { provider_turn, .. }) => {
+                    to_json(&provider_turn).get("tokenUsage").cloned()
+                }
+                _ => None,
+            })
+            .expect("a context usage update")
+    };
+    let cases = [
+        // The deployment name on an assistant message does not identify the selected API model.
+        (
+            "orbit-model",
+            json!(null),
+            json!({"upstream-deployment":{"contextWindow":200000}, "orbit-model":{"contextWindow":500000}}),
+            json!(500000),
+        ),
+        // A preceding result's capacity persists across turns on the same session.
+        (
+            "orbit-model",
+            json!(500000),
+            json!({"orbit-model":{"contextWindow":250000}}),
+            json!(250000),
+        ),
+        // Custom aliases shadow the stock catalog entry and start with unknown capacity.
+        (
+            "sonnet",
+            json!(null),
+            json!({"sonnet":{"contextWindow":300000}}),
+            json!(300000),
+        ),
+        // Included models keep their catalog capacity when the result supplies a different one.
+        (
+            "claude-haiku-5-5",
+            json!(1000000),
+            json!({"claude-haiku-5-5":{"contextWindow":199999}}),
+            json!(1000000),
+        ),
+    ];
+    for (i, (slug, initial_max, reported, final_max)) in (1..).zip(cases) {
+        let mut input = turn_input(i, &provider_thread("compact"), "test", "full-access");
+        input.model_selection.model = json!(slug);
+        mapper.begin_turn(&input, "default");
+        let start = usage(mapper.handle(frame()));
+        assert_eq!(
+            start.get("maxTokens"),
+            Some(&initial_max),
+            "{slug} first message"
+        );
+        assert_eq!(
+            start.get("autoCompactThreshold"),
+            Some(&json!(267_000)),
+            "{slug} first message"
+        );
+        let updated = usage(mapper.handle(result(reported)));
+        assert_eq!(updated.get("maxTokens"), Some(&final_max), "{slug} result");
+        let threshold = (final_max.as_u64().unwrap() > 300_000).then(|| json!(267_000));
+        assert_eq!(
+            updated.get("autoCompactThreshold"),
+            threshold.as_ref(),
+            "{slug} result"
+        );
+    }
+}

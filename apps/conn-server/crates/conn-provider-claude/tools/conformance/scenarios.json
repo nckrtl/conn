@@ -15,6 +15,14 @@
       ]
     },
     {
+      "name": "custom_model_unknown_context",
+      "runtimeMode": "full-access",
+      "instance": { "config": { "customModels": ["orbit-model"], "autoCompactWindow": "300000" } },
+      "expectedFirstContext": { "maxTokens": null, "autoCompactThreshold": 267000 },
+      "scripts": ["e01_turn"],
+      "steps": [{ "turn": "Reply with exactly: pong", "model": "orbit-model" }]
+    },
+    {
       "name": "custom_alias_compact_window",
       "runtimeMode": "full-access",
       "instance": {

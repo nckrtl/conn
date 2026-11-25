@@ -263,6 +263,7 @@ async fn scenario(root: &std::path::Path, run: &Run, model: &str, spec: &Value) 
     let mut app_thread = THREAD.to_string();
     let mut turns: Vec<Value> = Vec::new();
     let mut n = 0;
+    let mut first_context = None;
     'steps: for step in spec["steps"].as_array().into_iter().flatten() {
         if step["reopen"] == json!(true) {
             session.close().await;
@@ -382,6 +383,20 @@ async fn scenario(root: &std::path::Path, run: &Run, model: &str, spec: &Value) 
                 }
                 Some("provider_turn.updated") => {
                     let turn = event["providerTurn"].clone();
+                    if spec.get("expectedFirstContext").is_some()
+                        && first_context.is_none()
+                        && let Some(usage) = turn["tokenUsage"].as_object()
+                    {
+                        first_context = Some(Value::Object(
+                            usage
+                                .iter()
+                                .filter(|(key, _)| {
+                                    matches!(key.as_str(), "maxTokens" | "autoCompactThreshold")
+                                })
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                        ));
+                    }
                     if let Some(change) = live_selection
                         .as_ref()
                         .filter(|_| turn["tokenUsage"].is_object())
@@ -438,6 +453,13 @@ async fn scenario(root: &std::path::Path, run: &Run, model: &str, spec: &Value) 
         }
     }
     session.close().await;
+    if let Some(expected) = spec.get("expectedFirstContext") {
+        assert_eq!(
+            first_context.as_ref(),
+            Some(expected),
+            "{name} first token usage"
+        );
+    }
     if let (Some(file), Some(_)) = (&settings_file, spec.get("claudeSettings")) {
         let _ = std::fs::remove_file(file);
     }

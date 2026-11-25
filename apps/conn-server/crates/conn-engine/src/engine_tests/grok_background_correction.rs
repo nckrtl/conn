@@ -1,5 +1,5 @@
 use super::*;
-use conn_provider::ProviderEvent;
+use conn_provider::{NativeCommandEvidence, NativeCommandOutput, ProviderEvent};
 
 fn command_row(row: &Value, status: &str, output: &str, native_exit: Option<i64>) -> ProviderEvent {
     let mut item = row.clone();
@@ -10,11 +10,38 @@ fn command_row(row: &Value, status: &str, output: &str, native_exit: Option<i64>
     }
     let turn_item = from_json(item).unwrap();
     match native_exit {
-        Some(exit_code) => ProviderEvent::GrokCommandFailed {
+        Some(exit_code) => ProviderEvent::NativeCommandExit {
             turn_item,
-            exit_code,
+            evidence: NativeCommandEvidence {
+                exit_code: Some(exit_code),
+                output: if output.is_empty() {
+                    NativeCommandOutput::Absent
+                } else {
+                    NativeCommandOutput::Initial
+                },
+            },
         },
         None => ProviderEvent::TurnItemUpdated { turn_item },
+    }
+}
+
+fn structured_row(
+    row: &Value,
+    status: &str,
+    output: &str,
+    code: Option<i64>,
+    origin: NativeCommandOutput,
+) -> ProviderEvent {
+    let ProviderEvent::TurnItemUpdated { turn_item } = command_row(row, status, output, None)
+    else {
+        unreachable!()
+    };
+    ProviderEvent::NativeCommandExit {
+        turn_item,
+        evidence: NativeCommandEvidence {
+            exit_code: code,
+            output: origin,
+        },
     }
 }
 
@@ -69,6 +96,20 @@ async fn native_grok_exit_corrects_its_original_command_while_the_next_run_is_ac
     let row = json!({"id":"original-tool","threadId":"t1","runId":"run:t1:1","nodeId":null,
         "providerThreadId":provider_thread,"providerTurnId":"turn:run:t1:1","nativeItemRef":{"driver":"grok","nativeId":"call-shell","strength":"strong"},"parentItemId":null,"ordinal":8,
         "type":"command_execution","input":"dev-server","status":"running","title":null,"startedAt":"2026-01-01T00:00:00Z","completedAt":null,"updatedAt":"2026-01-01T00:00:01Z"});
+    let mut success_row = row.clone();
+    success_row["id"] = json!("successful-tool");
+    success_row["nativeItemRef"]["nativeId"] = json!("call-success");
+    let mut output_only = row.clone();
+    output_only["id"] = json!("output-only-tool");
+    output_only["nativeItemRef"]["nativeId"] = json!("call-output-only");
+    let mut code_only = row.clone();
+    code_only["id"] = json!("code-only-tool");
+    code_only["nativeItemRef"]["nativeId"] = json!("call-code-only");
+    for seeded in [&success_row, &output_only, &code_only] {
+        tx.send(command_row(seeded, "running", "", None))
+            .await
+            .unwrap();
+    }
     tx.send(command_row(&row, "running", "", None))
         .await
         .unwrap();
@@ -146,6 +187,87 @@ async fn native_grok_exit_corrects_its_original_command_while_the_next_run_is_ac
     tx.send(command_row(&row, "failed", "unrelated error", Some(2)))
         .await
         .unwrap();
+    tx.send(command_row(&row, "completed", "stale success", Some(0)))
+        .await
+        .unwrap();
+    for (seeded, id, code) in [
+        (&success_row, "successful-tool", Some(0)),
+        (&output_only, "output-only-tool", None),
+    ] {
+        tx.send(command_row(seeded, "completed", "provisional ACK", None))
+            .await
+            .unwrap();
+        wait_for_item(&mut stream, id, "completed").await;
+        tx.send(structured_row(
+            seeded,
+            "completed",
+            "",
+            None,
+            NativeCommandOutput::Absent,
+        ))
+        .await
+        .unwrap();
+        tx.send(structured_row(
+            seeded,
+            "completed",
+            "final stdout\n",
+            code,
+            NativeCommandOutput::Initial,
+        ))
+        .await
+        .unwrap();
+        let correction = wait_for_item(&mut stream, id, "completed").await;
+        assert_eq!(correction["payload"]["output"], "final stdout\n");
+        assert_eq!(correction["payload"]["exitCode"], json!(code));
+        assert_eq!(correction["runId"], "run:t1:1");
+        for text in ["final stdout\n", "final", ""] {
+            tx.send(structured_row(
+                seeded,
+                "completed",
+                text,
+                code,
+                NativeCommandOutput::Extended,
+            ))
+            .await
+            .unwrap();
+        }
+        if code.is_some() {
+            // A code-less extension improves output without erasing the confirmed zero.
+            tx.send(structured_row(
+                seeded,
+                "completed",
+                "final stdout\ntail",
+                None,
+                NativeCommandOutput::Extended,
+            ))
+            .await
+            .unwrap();
+            let extension = wait_for_item(&mut stream, id, "completed").await;
+            assert_eq!(extension["payload"]["exitCode"], 0);
+            assert_eq!(extension["payload"]["output"], "final stdout\ntail");
+        }
+    }
+    tx.send(command_row(
+        &code_only,
+        "completed",
+        "already captured",
+        None,
+    ))
+    .await
+    .unwrap();
+    wait_for_item(&mut stream, "code-only-tool", "completed").await;
+    tx.send(structured_row(
+        &code_only,
+        "completed",
+        "",
+        Some(0),
+        NativeCommandOutput::Absent,
+    ))
+    .await
+    .unwrap();
+    let code_only_update = wait_for_item(&mut stream, "code-only-tool", "completed").await;
+    assert_eq!(code_only_update["payload"]["output"], "already captured");
+    assert_eq!(code_only_update["payload"]["exitCode"], 0);
     let mut current = row.clone();
     current["id"] = json!("barrier");
     current["runId"] = json!("run:t1:2");
@@ -168,6 +290,20 @@ async fn native_grok_exit_corrects_its_original_command_while_the_next_run_is_ac
         .db(|store| store.stored_events_after(0, 256))
         .await
         .unwrap();
+    for (id, expected_count, expected_output, code) in [
+        ("successful-tool", 4, "final stdout\ntail", Some(0)),
+        ("output-only-tool", 3, "final stdout\n", None),
+    ] {
+        let events: Vec<_> = history
+            .iter()
+            .map(|r| &r["event"])
+            .filter(|e| e["type"] == "turn-item.updated" && e["payload"]["id"] == id)
+            .collect();
+        assert_eq!(events.len(), expected_count, "{id}: {events:?}");
+        let last = &events.last().unwrap()["payload"];
+        assert_eq!(last["output"], expected_output);
+        assert_eq!(last["exitCode"], json!(code));
+    }
     let statuses: Vec<_> = history
         .iter()
         .map(|r| &r["event"])

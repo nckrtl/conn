@@ -1785,10 +1785,8 @@ impl Inner {
             }
             let active = live.active();
             let run_id = active.as_ref().map(|a| a.run_id.clone());
-            let native_command_failure = match &event {
-                ProviderEvent::GrokCommandFailed { exit_code, .. } if *exit_code != 0 => {
-                    Some(*exit_code)
-                }
+            let native_command_exit = match &event {
+                ProviderEvent::NativeCommandExit { evidence, .. } => Some(*evidence),
                 _ => None,
             };
             let mut translated = translate(&thread_id, active.as_ref(), event);
@@ -1889,7 +1887,7 @@ impl Inner {
                         .commit_inherited_background_item(
                             draft,
                             provider_thread,
-                            native_command_failure,
+                            native_command_exit,
                         )
                         .await
                     {
@@ -2196,7 +2194,7 @@ impl Inner {
         self: &Arc<Self>,
         mut draft: Draft,
         provider_thread: Option<String>,
-        native_command_failure: Option<i64>,
+        native_command_exit: Option<conn_provider::NativeCommandEvidence>,
     ) -> bool {
         let Some(provider_thread) = provider_thread else {
             return false;
@@ -2224,7 +2222,11 @@ impl Inner {
                     previous["status"].as_str(),
                     Some("pending" | "running" | "waiting")
                 );
-                if !open && !is_grok_command_correction(&previous, item, native_command_failure) {
+                if let Some(evidence) = native_command_exit {
+                    if !is_grok_command_correction(&previous, item, evidence, open) {
+                        return Ok(false);
+                    }
+                } else if !open {
                     return Ok(false);
                 }
                 if native_thread != provider_thread {
@@ -2243,12 +2245,22 @@ impl Inner {
                     }
                 }
                 draft.run_id = Some(run_id.to_owned());
-                if let Some(code) = native_command_failure {
-                    draft.payload["exitCode"] = json!(code);
-                    if draft.payload["output"].as_str().is_none_or(str::is_empty)
-                        && previous["output"].is_string()
+                if let Some(evidence) = native_command_exit {
+                    if let Some(code) = evidence.exit_code.or_else(|| previous["exitCode"].as_i64())
                     {
-                        draft.payload["output"] = previous["output"].clone();
+                        draft.payload["exitCode"] = json!(code);
+                    }
+                    let old = previous["output"].as_str().unwrap_or_default();
+                    let new = draft.payload["output"].as_str().unwrap_or_default();
+                    if evidence.output == conn_provider::NativeCommandOutput::Absent
+                        || new.is_empty()
+                        || (previous["status"] == draft.payload["status"] && old.starts_with(new))
+                    {
+                        if let Some(old) = previous.get("output") {
+                            draft.payload["output"] = old.clone();
+                        } else if let Some(row) = draft.payload.as_object_mut() {
+                            row.remove("output");
+                        }
                     }
                 }
                 tx.append(draft)?;
@@ -3125,10 +3137,14 @@ fn thread_load_key(
     .to_string()
 }
 
-fn is_grok_command_correction(previous: &Value, item: &Value, native_exit: Option<i64>) -> bool {
-    if native_exit.is_none()
-        || item["type"] != "command_execution"
-        || item["status"] != "failed"
+fn is_grok_command_correction(
+    previous: &Value,
+    item: &Value,
+    evidence: conn_provider::NativeCommandEvidence,
+    open: bool,
+) -> bool {
+    use conn_provider::NativeCommandOutput;
+    if item["type"] != "command_execution"
         || previous["monitor"] == true
         || item["monitor"] == true
         || item["nativeItemRef"]["driver"] != "grok"
@@ -3141,20 +3157,32 @@ fn is_grok_command_correction(previous: &Value, item: &Value, native_exit: Optio
     {
         return false;
     }
-    match previous["status"].as_str() {
-        Some("completed") => previous["exitCode"].is_null(),
-        Some("failed") => {
-            let Some(recorded_code) = previous["exitCode"].as_i64() else {
-                return true;
-            };
-            let old = previous["output"].as_str().unwrap_or_default();
-            Some(recorded_code) == native_exit
-                && item["output"]
-                    .as_str()
-                    .is_some_and(|new| new.len() > old.len() && new.starts_with(old))
-        }
-        _ => false,
+    let prior_status = previous["status"].as_str();
+    let status = item["status"].as_str();
+    let prior_exit = previous["exitCode"].as_i64();
+    let new_exit = evidence.exit_code;
+    if !matches!(status, Some("completed" | "failed"))
+        || (!open && !matches!(prior_status, Some("completed" | "failed")))
+        || (prior_status == Some("failed") && status != prior_status)
+        || new_exit.is_some_and(|code| (code == 0) != (status == Some("completed")))
+        || new_exit
+            .zip(prior_exit)
+            .is_some_and(|(new, old)| new != old)
+        || (!open && new_exit.is_none() && status != prior_status)
+    {
+        return false;
     }
+    let old = previous["output"].as_str().unwrap_or_default();
+    let new = item["output"].as_str().unwrap_or_default();
+    let richer = !new.is_empty()
+        && match evidence.output {
+            NativeCommandOutput::Absent => false,
+            NativeCommandOutput::Initial => new != old && !old.starts_with(new),
+            NativeCommandOutput::Extended => new.len() > old.len() && new.starts_with(old),
+        };
+    (open && (evidence.output != NativeCommandOutput::Absent || new_exit.is_some()))
+        || (new_exit.is_some() && prior_exit.is_none())
+        || richer
 }
 
 /// Maps one provider event to a domain event. Adding an event kind is one arm here.
@@ -3244,7 +3272,7 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
             Translated::Event(scoped("message.updated", to_json(&message)))
         }
         ProviderEvent::TurnItemUpdated { turn_item }
-        | ProviderEvent::GrokCommandFailed { turn_item, .. }
+        | ProviderEvent::NativeCommandExit { turn_item, .. }
         | ProviderEvent::McpAppCapture { turn_item, .. } => {
             Translated::Event(scoped("turn-item.updated", to_json(&turn_item)))
         }

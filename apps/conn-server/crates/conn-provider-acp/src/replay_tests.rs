@@ -73,7 +73,7 @@ pub(crate) struct Run {
     pub script: Arc<Mutex<Script>>,
     pub errors: Vec<String>,
     pub snapshots: Vec<conn_provider::ThreadSnapshot>,
-    pub confirmed_exits: Vec<(i64, Value)>,
+    pub confirmed_exits: Vec<(conn_provider::NativeCommandEvidence, Value)>,
 }
 
 /// T3's `release_replay_gate` after `finish_held_run`: a gate opens once its run ended.
@@ -209,12 +209,12 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
     let exits = confirmed.clone();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if let ProviderEvent::GrokCommandFailed {
+            if let ProviderEvent::NativeCommandExit {
                 turn_item,
-                exit_code,
+                evidence,
             } = &event
             {
-                crate::lock(&exits).push((*exit_code, conn_contract::to_json(turn_item)));
+                crate::lock(&exits).push((*evidence, conn_contract::to_json(turn_item)));
             }
             crate::lock(&sink).push(serde_json::to_value(&event).unwrap());
             signal.notify_one();
@@ -1778,43 +1778,71 @@ async fn grok_snapshots_keep_live_app_ids_and_respect_missing_load_capability() 
 }
 
 #[tokio::test]
-async fn grok_structured_nonzero_exit_identifies_the_original_command_after_a_sparse_completion() {
-    let mut fixture = read_golden("grok", "grok_background_bash");
-    let tape = fixture["transcripts"][0].as_array_mut().unwrap();
-    let at = tape
-        .iter()
-        .position(|r| r["frame"]["method"] == "_x.ai/task_completed")
-        .unwrap();
-    let mut failure = tape[at].clone();
-    let snapshot = tape[at]["frame"]["params"]["update"]["task_snapshot"]
-        .as_object_mut()
-        .unwrap();
-    snapshot.remove("exit_code");
-    snapshot.remove("output");
-    failure["frame"]["params"]["update"]["task_snapshot"]["exit_code"] = json!(1);
-    failure["frame"]["params"]["update"]["task_snapshot"]["output"] = json!("EADDRINUSE\n");
-    tape.insert(at + 1, failure);
-    let run = replay(&crate::flavor::GROK, &fixture).await;
-    assert!(run.errors.is_empty(), "{:?}", run.errors);
-    let script = crate::lock(&run.script);
-    assert!(script.complete(), "{:?}", script.failure);
-    let [(code, row)] = run.confirmed_exits.as_slice() else {
-        panic!("expected one native failure: {:?}", run.confirmed_exits)
-    };
-    assert_eq!(*code, 1);
-    assert_eq!(row["status"], "failed");
-    assert_eq!(row["output"], "EADDRINUSE\n");
-    let earlier = run
-        .events
-        .iter()
-        .find(|e| {
-            e["type"] == "turn_item.updated"
-                && e["turnItem"]["id"] == row["id"]
-                && e["turnItem"]["status"] == "completed"
-        })
-        .unwrap();
-    assert_eq!(earlier["turnItem"]["runId"], row["runId"]);
-    assert_eq!(earlier["turnItem"]["nativeItemRef"], row["nativeItemRef"]);
+async fn grok_structured_native_completions_distinguish_absent_zero_and_nonzero_exit_codes() {
+    use conn_provider::NativeCommandOutput;
+    for (code, status, output) in [
+        (Some(1), "failed", "EADDRINUSE\n"),
+        (Some(0), "completed", "all done\n"),
+        (None, "completed", "all done\n"),
+    ] {
+        let mut fixture = read_golden("grok", "grok_background_bash");
+        let tape = fixture["transcripts"][0].as_array_mut().unwrap();
+        let at = tape
+            .iter()
+            .position(|r| r["frame"]["method"] == "_x.ai/task_completed")
+            .unwrap();
+        let mut terminal = tape[at].clone();
+        let snapshot = tape[at]["frame"]["params"]["update"]["task_snapshot"]
+            .as_object_mut()
+            .unwrap();
+        snapshot.remove("exit_code");
+        snapshot.remove("output");
+        let snapshot = terminal["frame"]["params"]["update"]["task_snapshot"]
+            .as_object_mut()
+            .unwrap();
+        if let Some(code) = code {
+            snapshot.insert("exit_code".into(), json!(code));
+        } else {
+            snapshot.remove("exit_code");
+        }
+        snapshot.insert("output".into(), json!(output));
+        let mut empty = terminal.clone();
+        let empty_snapshot = empty["frame"]["params"]["update"]["task_snapshot"]
+            .as_object_mut()
+            .unwrap();
+        empty_snapshot.remove("exit_code");
+        empty_snapshot.insert("output".into(), json!(""));
+        let mut poorer = empty.clone();
+        poorer["frame"]["params"]["update"]["task_snapshot"]["output"] = json!(&output[..2]);
+        let mut duplicate = empty.clone();
+        duplicate["frame"]["params"]["update"]["task_snapshot"]["output"] = json!(output);
+        tape.splice(
+            at + 1..at + 1,
+            [empty.clone(), terminal, poorer, duplicate, empty],
+        );
+        let run = replay(&crate::flavor::GROK, &fixture).await;
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        let script = crate::lock(&run.script);
+        assert!(script.complete(), "{:?}", script.failure);
+        let [(evidence, row)] = run.confirmed_exits.as_slice() else {
+            panic!("expected one structured result: {:?}", run.confirmed_exits)
+        };
+        assert_eq!(evidence.exit_code, code);
+        assert_eq!(evidence.output, NativeCommandOutput::Initial);
+        assert_eq!(row["status"], status);
+        assert_eq!(row["output"], output);
+        let earlier = run
+            .events
+            .iter()
+            .find(|e| {
+                e["type"] == "turn_item.updated"
+                    && e["turnItem"]["id"] == row["id"]
+                    && e["turnItem"]["status"] == "completed"
+            })
+            .unwrap();
+        assert_eq!(earlier["turnItem"]["runId"], row["runId"]);
+        assert_eq!(earlier["turnItem"]["nativeItemRef"], row["nativeItemRef"]);
+    }
 }
 
 #[tokio::test(start_paused = true)]

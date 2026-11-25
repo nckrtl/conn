@@ -750,7 +750,7 @@ enum Recover {
 // The runner: ConnSession
 // ---------------------------------------------------------------------------
 
-#[derive(uniffi::Record)]
+#[derive(Debug, uniffi::Record)]
 pub struct FfiLinkedDiscovery {
     pub targets: Vec<crate::orbit::FfiOrbitEnvironment>,
     pub unresolved_endpoints: Vec<String>,
@@ -2016,8 +2016,7 @@ mod tests {
         restored.launch(Some(credential.clone()));
         read(&events);
         let targets =
-            futures::executor::block_on(restored.linked_nodes(primary_id.clone(), vec![], vec![]))
-                .unwrap();
+            futures::executor::block_on(restored.linked_nodes(primary_id, vec![], vec![])).unwrap();
         assert!(targets.targets.iter().any(|t| t.server_id == desktop_id));
         assert!(targets.unresolved_endpoints.is_empty());
         eprintln!(

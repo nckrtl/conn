@@ -19,6 +19,7 @@ struct ThreadView: View {
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
     @State private var showsOutline = false
+    private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
     @State private var historyNotice: String?
     @State private var scrollTarget: String?
@@ -407,7 +408,9 @@ struct ThreadView: View {
                     }
                 }
                 .lineLimit(1)
-                .frame(width: viewSize.width > 136 ? viewSize.width - 136 : nil)
+                .truncationMode(.tail)
+                // 16 from the screen edge, the 44 pt button, then a clear 16 pt gap on each side.
+                .frame(width: viewSize.width > Self.titleInset * 2 ? viewSize.width - Self.titleInset * 2 : nil)
                 .foregroundStyle(theme.foreground)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)

@@ -680,8 +680,8 @@ private struct WorkLogRow: View {
                              maxHeight: 320, codeSize: ThreadText.codeSize - 1)
                         .padding(.bottom, 10)
                 } else {
-                    // A step smaller than the thread text, with 1.6x lines, flush with the row's left edge.
-                    let detailSize = size * 0.9
+                    // The thread text size (15 pt on Polar), with 1.6x lines, flush with the row's left edge.
+                    let detailSize = size
                     Text(detail)
                         .font(.system(size: detailSize))
                         .lineHeight(.exact(points: detailSize * 1.6))

@@ -9,6 +9,7 @@ struct ModelPickerSheet: View {
     @Environment(\.connTheme) private var theme
     private enum Page: Hashable { case providers, models(String) }
     @State private var pages: [Page] = []
+    @State private var query = ""
     @State private var toggled: [String] = []
     @State private var pending: (instanceId: String, model: String)?
     @State private var picker: FfiModelPicker?
@@ -39,7 +40,7 @@ struct ModelPickerSheet: View {
                                 }
                                 if let section {
                                     Button { browse(section) } label: {
-                                        PhoneOptionRow(title: "Model", value: row?.label ?? "Select")
+                                        PhoneOptionRow(title: "Model", value: row.map { displayName($0.label, provider: section.label) } ?? "Select")
                                     }
                                 }
                                 if let row {
@@ -77,7 +78,7 @@ struct ModelPickerSheet: View {
                         Text(steer ? "Send follow-ups to the running turn." : "Send follow-ups after the running turn finishes.")
                             .font(.system(size: 13)).foregroundStyle(theme.mutedForeground).padding(.horizontal, 14)
                     }
-                }.padding(.horizontal, 14).padding(.top, 10)
+                }.padding(.horizontal, 14)
             }
             .buttonStyle(.plain).background(theme.background)
             .navigationDestination(for: Page.self) { page in
@@ -93,7 +94,9 @@ struct ModelPickerSheet: View {
                             }
                         case .models(let instance):
                             if let section = picker?.sections.first(where: { $0.instanceId == instance }) {
-                                ForEach(section.models, id: \.model) { row in
+                                let matches = section.models.filter { query.isEmpty || $0.label.localizedCaseInsensitiveContains(query) }
+                                if matches.isEmpty { Text("No models match your search.").foregroundStyle(theme.mutedForeground) }
+                                ForEach(matches, id: \.model) { row in
                                     Button {
                                         if !row.selected { optionChanges = [:] }
                                         pending = (row.instanceId, row.model)
@@ -101,7 +104,7 @@ struct ModelPickerSheet: View {
                                     } label: {
                                         HStack {
                                             ProviderIcon(driver: section.driver)
-                                            Text(row.label)
+                                            Text(displayName(row.label, provider: section.label))
                                             Spacer()
                                             if row.selected { ConnIcon("checkmark") }
                                         }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
@@ -109,9 +112,20 @@ struct ModelPickerSheet: View {
                                 }
                             }
                         }
-                    }.padding(.horizontal, 14).padding(.top, 10)
+                    }.padding(.horizontal, 14)
                 }.buttonStyle(.plain).background(theme.background)
-                    .navigationTitle(page == .providers ? "Provider" : "Model")
+                    .safeAreaInset(edge: .bottom) {
+                        if case .models = page {
+                            HStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass").foregroundStyle(theme.mutedForeground)
+                                TextField("Find a model", text: $query)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .accessibilityIdentifier("modelPicker.search")
+                            }.padding(.horizontal, 14).frame(height: 44)
+                                .background(theme.settingsGroup, in: Capsule()).padding(.horizontal, 14)
+                        }
+                    }
+                    .navigationTitle(pageTitle(page))
                     .navigationBarTitleDisplayMode(.inline)
             }
             .navigationTitle("Thread settings")
@@ -123,7 +137,7 @@ struct ModelPickerSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(picker?.hasPending == true || !optionChanges.isEmpty || steer != store.followUpSteers(threadId) ? "Save" : "Done") { commitAndClose() }
-                        .fontWeight(.semibold).foregroundStyle(Color.accentColor)
+                        .fontWeight(.semibold).foregroundStyle(.blue)
                         .disabled(saving)
                         .accessibilityIdentifier("modelPicker.confirm")
                 }.sharedBackgroundVisibility(.hidden)
@@ -184,7 +198,19 @@ struct ModelPickerSheet: View {
         }
     }
 
+    private func pageTitle(_ page: Page) -> String {
+        switch page {
+        case .providers: "Provider"
+        case .models(let instance): picker?.sections.first { $0.instanceId == instance }?.label ?? "Models"
+        }
+    }
+
+    private func displayName(_ model: String, provider: String) -> String {
+        model.hasPrefix(provider + " ") ? String(model.dropFirst(provider.count + 1)) : model
+    }
+
     private func browse(_ section: FfiModelPickerSection) {
+        query = ""
         if section.collapsed {
             if toggled.contains(section.instanceId) { toggled.removeAll { $0 == section.instanceId } }
             else { toggled.append(section.instanceId) }

@@ -51,7 +51,7 @@ private struct SettingsEnvironmentsDetailView: View {
 
     var body: some View {
         List {
-            Section("Connected Environment") {
+            Section("Connected environment") {
                 if let serverURL = store.serverURL {
                     LabeledContent("Server", value: serverURL)
                 }
@@ -61,14 +61,15 @@ private struct SettingsEnvironmentsDetailView: View {
                 Button {
                     store.reconnect()
                 } label: {
-                    Label("Reconnect", systemImage: "arrow.clockwise")
+                    Text("Reconnect")
                 }
                 Button(role: .destructive) {
                     store.disconnect()
                 } label: {
-                    Label("Disconnect", systemImage: "power")
+                    Text("Disconnect")
                 }
             }
+            .listRowBackground(theme.settingsGroup)
             Section("Linked environments") {
                 ForEach(store.linked.keys.sorted(), id: \.self) { id in
                     if let child = store.linked[id] {
@@ -83,7 +84,9 @@ private struct SettingsEnvironmentsDetailView: View {
                 }
                 Button("Link environment") { pairingURL = ""; adding = true }
             }
+            .listRowBackground(theme.settingsGroup)
         }
+        .contentMargins(.horizontal, 14, for: .scrollContent)
         .listStyle(.insetGrouped)
         .contentMargins(.top, 6, for: .scrollContent)
         .listSectionSpacing(24)

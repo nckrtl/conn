@@ -374,17 +374,7 @@ private struct ThreadListV2RowView: View {
             HStack(alignment: .center, spacing: titleGap) {
                 ProjectFaviconView(title: projectTitle, size: iconSize)
                     .opacity(settled ? 0.6 : 1)
-                    .overlay(alignment: .topTrailing) {
-                        // `StatusBadgeDot`: a 6pt dot in a 2pt screen-colored ring, 4pt past the corner.
-                        if let dotColor = statusDotColor {
-                            Circle()
-                                .fill(dotColor)
-                                .frame(width: 6, height: 6)
-                                .padding(2)
-                                .background(Circle().fill(theme.background))
-                                .offset(x: 4, y: -4)
-                        }
-                    }
+                    .projectStatusDot(statusDotColor)
 
                 Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
                     .font(.system(size: 16, weight: settled ? .regular : .medium))
@@ -562,4 +552,21 @@ private func wholeMinuteRelativeTime(from date: Date) -> String {
     if hours < 24 { return "\(hours)h" }
     let days = hours / 24
     return "\(days)d"
+}
+
+extension View {
+    func projectStatusDot(_ color: Color?) -> some View {
+        overlay(alignment: .topTrailing) {
+            if let color { ProjectStatusDot(color: color) }
+        }
+    }
+}
+
+private struct ProjectStatusDot: View {
+    let color: Color
+    @Environment(\.connTheme) private var theme
+    var body: some View {
+        Circle().fill(color).frame(width: 6, height: 6)
+            .padding(2).background(theme.background, in: Circle()).offset(x: 4, y: -4)
+    }
 }

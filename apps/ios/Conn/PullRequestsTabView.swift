@@ -80,18 +80,21 @@ struct PullRequestsTabView: View {
                 if loading { ProgressView() }
                 if let notice { Text(notice).foregroundStyle(.secondary).padding() }
                 if !loading && notice == nil && selected.isEmpty {
-                    Text(candidates.isEmpty && searchQuery.isEmpty ? "No open pull requests" : "No matching pull requests")
-                        .foregroundStyle(.secondary).padding()
+                    let empty = candidates.isEmpty && searchQuery.isEmpty
+                    VStack(spacing: 4) {
+                        Text(empty ? "No pull requests" : "No matching pull requests")
+                            .font(.system(size: 16, weight: .medium))
+                        if empty {
+                            Text("Pull requests from connected environments will appear here.")
+                                .font(.system(size: 15)).foregroundStyle(theme.mutedForeground)
+                        }
+                    }.multilineTextAlignment(.center).padding(.horizontal, 32).padding(.vertical, 40)
                 }
                 ForEach(selected) { row in
                     NavigationLink(value: WorkspaceRoute.pullRequest(row)) {
                         HStack(alignment: .top, spacing: 12) {
                             ProjectFaviconView(title: row.projectTitle, size: 20)
-                                .overlay(alignment: .topTrailing) {
-                                    Circle().fill(row.checksState == "failing" ? theme.destructive : row.checksState == "passing" ? theme.success : row.checksState == "pending" ? theme.warning : theme.mutedForeground)
-                                        .frame(width: 6, height: 6).padding(2)
-                                        .background(theme.background, in: Circle()).offset(x: 4, y: -4)
-                                }
+                                .projectStatusDot(statusColor(row))
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 6) {
                                     Text(row.title).font(.system(size: 16, weight: .medium)).lineLimit(1)
@@ -106,7 +109,7 @@ struct PullRequestsTabView: View {
                                 HStack(spacing: 6) {
                                     Text(["#" + String(row.number), row.author?.login, checkCounts[row.id] ?? row.status].compactMap { $0 }.joined(separator: " · "))
                                     Spacer(minLength: 4)
-                                    if let age = shortAge(row.updatedAt) { Text(age).monospacedDigit() }
+                                    if let age = shortAge(row.updatedAt) { Text(age + " ago").monospacedDigit() }
                                 }.font(.system(size: 13)).foregroundStyle(theme.mutedForeground).lineLimit(1)
                             }
                         }.padding(.vertical, 12).contentShape(Rectangle())
@@ -127,6 +130,16 @@ struct PullRequestsTabView: View {
         .background(theme.background)
         .refreshable { await load() }
         .task(id: store.environmentId) { await load() }
+    }
+
+    private func statusColor(_ row: PullRequestRow) -> Color {
+        if row.isDraft { return theme.mutedForeground }
+        switch row.checksState {
+        case "pending": return theme.info
+        case "failing": return theme.warning
+        case "passing": return theme.success
+        default: return theme.mutedForeground
+        }
     }
 
     private func load() async {

@@ -21,6 +21,7 @@ use gpui_kit::{
     TestSupportExt as _, Window, anchored, deferred, div, px,
 };
 use serde_json::Value;
+use std::time::Duration;
 
 use super::color::to_hsla;
 use super::header::superhero_icon;
@@ -34,6 +35,9 @@ const ROW_GAP_PX: f32 = 2.0;
 const PICKER_MAX_HEIGHT_PX: f32 = 280.0;
 const HEADING_HEIGHT_PX: f32 = 24.0;
 const NOTE_HEIGHT_PX: f32 = 30.0;
+/// A status line too long for one line wraps onto two.
+const NOTE_TALL_HEIGHT_PX: f32 = 46.0;
+const NOTE_ONE_LINE_CHARS: usize = 36;
 const LOGIN_HEIGHT_PX: f32 = 42.0;
 const LOGIN_PLAIN_HEIGHT_PX: f32 = 30.0;
 /// A rectangle larger than this is not a form field.
@@ -42,6 +46,55 @@ const MAX_ANCHOR_PX: f64 = 1_000_000.0;
 const MAX_SAFE_REVISION: u64 = 1 << 53;
 
 const VAULT_HEADING: &str = "Vault · this Mac";
+
+/// How long a lookup that never prompts may take. Vault answers a locked or unlocked list at
+/// once, so a longer wait means the relay is stuck.
+#[cfg(not(test))]
+const LOOKUP_DEADLINE: Duration = Duration::from_secs(10);
+/// How long an unlock may take: Vault's own prompt stays up for under two minutes.
+#[cfg(not(test))]
+const UNLOCK_DEADLINE: Duration = Duration::from_secs(125);
+#[cfg(test)]
+const LOOKUP_DEADLINE: Duration = Duration::from_millis(300);
+#[cfg(test)]
+const UNLOCK_DEADLINE: Duration = Duration::from_millis(600);
+/// The panel's own timer waits this much longer than the lookup's deadline, so the lookup's
+/// answer comes first and the timer only catches a lookup that never came back at all.
+const WATCHDOG_SLACK: Duration = Duration::from_secs(2);
+
+/// The longest a lookup may run before the picker gives up on it.
+pub(super) fn lookup_deadline(allow_unlock: bool) -> Duration {
+    if allow_unlock {
+        UNLOCK_DEADLINE
+    } else {
+        LOOKUP_DEADLINE
+    }
+}
+
+/// When the panel's own timer fires for a lookup.
+pub(super) fn watchdog_delay(allow_unlock: bool) -> Duration {
+    lookup_deadline(allow_unlock) + WATCHDOG_SLACK
+}
+
+/// What the picker shows when Vault does not answer in time.
+fn timed_out_response() -> VaultLoginsResponse {
+    VaultLoginsResponse {
+        status: VaultLoginsStatus::Error,
+        items: Vec::new(),
+        error: Some("Vault did not answer in time.".to_owned()),
+    }
+}
+
+/// Runs a Vault lookup under its deadline. A lookup that outlasts it is dropped, which stops the
+/// relay process, and reads as a Vault error the picker can show and retry.
+pub(super) async fn bounded_lookup(
+    allow_unlock: bool,
+    lookup: impl Future<Output = VaultLoginsResponse>,
+) -> VaultLoginsResponse {
+    tokio::time::timeout(lookup_deadline(allow_unlock), lookup)
+        .await
+        .unwrap_or_else(|_| timed_out_response())
+}
 
 /// Which sign-in fields the page shows. Booleans only; no values leave the page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -232,6 +285,7 @@ impl PickerRow {
                 username: Some(_), ..
             } => LOGIN_HEIGHT_PX,
             Self::Login { .. } => LOGIN_PLAIN_HEIGHT_PX,
+            Self::Note(text) if text.chars().count() > NOTE_ONE_LINE_CHARS => NOTE_TALL_HEIGHT_PX,
             Self::Note(_) | Self::Unlock { .. } => NOTE_HEIGHT_PX,
         }
     }
@@ -265,6 +319,8 @@ pub(super) struct InlineLogins {
     cursor: Option<usize>,
     loading: bool,
     status: Option<VaultLoginsStatus>,
+    /// What Vault said went wrong, for the error line.
+    error: Option<String>,
     items: Vec<VaultLoginItem>,
     /// Why the last pick did not fill, shown in the picker.
     feedback: Option<String>,
@@ -315,6 +371,7 @@ impl InlineLogins {
         self.loading = false;
         self.unlocking = false;
         self.status = None;
+        self.error = None;
         self.items.clear();
         self.feedback = None;
         self.generation += 1;
@@ -342,6 +399,7 @@ impl InlineLogins {
         self.loading = false;
         self.unlocking = false;
         self.status = Some(response.status);
+        self.error = response.error;
         self.items = response.items;
         if !self
             .cursor
@@ -351,6 +409,16 @@ impl InlineLogins {
             self.cursor = None;
         }
         true
+    }
+
+    /// The lookup `generation` has run out of time without an answer. Shows the error row so the
+    /// picker never sits on "Checking Vault…". Returns `true` when that changed what shows; a
+    /// lookup that already answered, or was replaced, is left alone.
+    pub(super) fn expire_lookup(&mut self, generation: u64) -> bool {
+        if !self.loading {
+            return false;
+        }
+        self.finish_lookup(generation, timed_out_response())
     }
 
     /// A fill ended without a value. Shows why, and keeps the picker up for another try.
@@ -377,16 +445,30 @@ impl InlineLogins {
             }
         }));
         if self.loading {
-            rows.push(PickerRow::Note("Checking Vault…".to_owned()));
+            // Wording of the Chrome extension's picker.
+            let text = if self.unlocking {
+                "Unlocking Vault…"
+            } else {
+                "Checking Vault…"
+            };
+            rows.push(PickerRow::Note(text.to_owned()));
         } else {
             match self.status {
                 Some(VaultLoginsStatus::Locked) => rows.push(PickerRow::Unlock { retry: false }),
-                Some(VaultLoginsStatus::Error) => rows.push(PickerRow::Unlock { retry: true }),
+                Some(VaultLoginsStatus::Error) => {
+                    rows.push(PickerRow::Note(
+                        self.error
+                            .clone()
+                            .filter(|error| !error.is_empty())
+                            .unwrap_or_else(|| "Vault could not answer.".to_owned()),
+                    ));
+                    rows.push(PickerRow::Unlock { retry: true });
+                }
                 Some(VaultLoginsStatus::Unavailable) => {
                     rows.push(PickerRow::Note("Vault is not installed".to_owned()));
                 }
                 Some(VaultLoginsStatus::Ok) if self.items.is_empty() => {
-                    rows.push(PickerRow::Note("No Vault logins for this site".to_owned()));
+                    rows.push(PickerRow::Note("No matching login.".to_owned()));
                 }
                 Some(VaultLoginsStatus::Ok) | None => {}
             }
@@ -601,11 +683,7 @@ pub(super) fn render_picker<T: 'static>(
                 ));
             }
             PickerRow::Unlock { retry } => {
-                let label = if retry {
-                    "Retry Vault…"
-                } else {
-                    "Unlock Vault…"
-                };
+                let label = if retry { "Try again" } else { "Unlock Vault" };
                 list = list.child(row_shell(
                     index,
                     "browser.vault.inline.unlock".to_owned(),
@@ -698,14 +776,24 @@ impl InlineLogins {
                     None => title,
                 },
                 PickerRow::Note(text) => text,
-                PickerRow::Unlock { retry: true } => "Retry Vault…".to_owned(),
-                PickerRow::Unlock { retry: false } => "Unlock Vault…".to_owned(),
+                PickerRow::Unlock { retry: true } => "Try again".to_owned(),
+                PickerRow::Unlock { retry: false } => "Unlock Vault".to_owned(),
             })
             .collect()
     }
 }
 
-/// Canned Vault answers for tests, by host. Tests never reach the real Vault.
+/// Canned Vault answers for tests, by host. Tests never reach the real Vault. A host named
+/// `hang.example` never answers, and `broken.example` answers with an error.
+#[cfg(test)]
+pub(super) async fn stub_lookup(url: String, allow_unlock: bool) -> VaultLoginsResponse {
+    if url.contains("hang.example") {
+        return std::future::pending().await;
+    }
+    stub_logins(&url, allow_unlock)
+}
+
+/// Canned Vault answers for tests, by host.
 #[cfg(test)]
 pub(super) fn stub_logins(url: &str, allow_unlock: bool) -> VaultLoginsResponse {
     let answer = |status, items| VaultLoginsResponse {
@@ -721,6 +809,13 @@ pub(super) fn stub_logins(url: &str, allow_unlock: bool) -> VaultLoginsResponse 
     };
     if url.contains("locked.example") && !allow_unlock {
         return answer(VaultLoginsStatus::Locked, Vec::new());
+    }
+    if url.contains("broken.example") {
+        return VaultLoginsResponse {
+            status: VaultLoginsStatus::Error,
+            items: Vec::new(),
+            error: Some("Vault could not answer. Open or update Vault and try again.".to_owned()),
+        };
     }
     if url.contains("unavailable.example") {
         return answer(VaultLoginsStatus::Unavailable, Vec::new());
@@ -821,6 +916,15 @@ mod tests {
                 ],
             ),
         ));
+        state
+    }
+
+    /// A picker on a locked Vault: the lookup came back `Locked`.
+    fn open_picker_locked() -> InlineLogins {
+        let mut state = InlineLogins::default();
+        assert!(state.apply_event(&event("focus", "username")));
+        let generation = state.begin_lookup(false).expect("a lookup starts");
+        assert!(state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[])));
         state
     }
 
@@ -1135,12 +1239,111 @@ mod tests {
         let generation = state.begin_lookup(false).expect("starts");
         assert_eq!(state.labels()[1], "Checking Vault…");
         state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[]));
-        assert_eq!(state.labels()[1], "Unlock Vault…");
+        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
         assert_eq!(state.action(1), Some(RowAction::Unlock));
 
         let generation = state.begin_lookup(true).expect("starts");
-        state.finish_lookup(generation, response(VaultLoginsStatus::Error, &[]));
-        assert_eq!(state.labels()[1], "Retry Vault…");
+        assert_eq!(
+            state.labels(),
+            [VAULT_HEADING, "Unlocking Vault…"],
+            "while Vault's own prompt is up there is nothing to click"
+        );
+        assert_eq!(state.action(1), None);
+        let mut failed = response(VaultLoginsStatus::Error, &[]);
+        failed.error = Some("Vault could not answer.".to_owned());
+        state.finish_lookup(generation, failed);
+        assert_eq!(
+            state.labels(),
+            [VAULT_HEADING, "Vault could not answer.", "Try again"]
+        );
+        assert_eq!(state.action(1), None, "the message is not a choice");
+        assert_eq!(state.action(2), Some(RowAction::Unlock));
+    }
+
+    #[test]
+    fn a_locked_answer_never_leaves_the_picker_loading() {
+        let mut state = open_picker_locked();
+        assert!(!state.loading);
+        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
+        // Asking again to unlock and being cancelled comes back as locked again.
+        let generation = state.begin_lookup(true).expect("an unlock starts");
+        assert!(state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[])));
+        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
+    }
+
+    #[test]
+    fn a_stale_answer_is_ignored_and_the_current_lookup_still_finishes() {
+        let mut state = InlineLogins::default();
+        state.apply_event(&event("focus", "username"));
+        let first = state.begin_lookup(false).expect("starts");
+        let unlock = state.begin_lookup(true).expect("an unlock goes ahead");
+        // The first answer is for a lookup the picker has moved on from.
+        assert!(!state.finish_lookup(first, response(VaultLoginsStatus::Locked, &[])));
+        assert_eq!(state.labels(), [VAULT_HEADING, "Unlocking Vault…"]);
+        // The one it waits for settles it, whatever came before.
+        assert!(state.finish_lookup(unlock, response(VaultLoginsStatus::Ok, &[])));
+        assert!(!state.loading);
+        assert_eq!(state.labels(), [VAULT_HEADING, "No matching login."]);
+    }
+
+    #[test]
+    fn a_lookup_that_never_answers_ends_in_an_error_to_retry() {
+        let mut state = InlineLogins::default();
+        state.apply_event(&event("focus", "username"));
+        let lost = state.begin_lookup(false).expect("starts");
+        assert_eq!(state.begin_lookup(false), None, "one is running");
+        assert!(
+            !state.expire_lookup(lost + 1),
+            "not the lookup it waits for"
+        );
+        assert!(state.expire_lookup(lost));
+        assert!(!state.loading);
+        assert_eq!(
+            state.labels(),
+            [VAULT_HEADING, "Vault did not answer in time.", "Try again"]
+        );
+        assert!(!state.expire_lookup(lost), "once only");
+        // Retry runs a new lookup, and the old one's late answer changes nothing.
+        let retry = state.begin_lookup(true).expect("a retry starts");
+        assert!(!state.finish_lookup(lost, response(VaultLoginsStatus::Ok, &[])));
+        assert!(state.finish_lookup(
+            retry,
+            response(VaultLoginsStatus::Ok, &[("a", "Example", None)])
+        ));
+        assert_eq!(state.labels()[1], "Example");
+    }
+
+    #[test]
+    fn an_answer_that_came_in_time_is_not_replaced_by_the_timer() {
+        let mut state = InlineLogins::default();
+        let generation = state.begin_lookup(false).expect("starts");
+        state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[]));
+        assert!(!state.expire_lookup(generation));
+        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
+    }
+
+    #[test]
+    fn a_long_error_line_gets_room_to_wrap() {
+        let short = PickerRow::Note("No matching login.".to_owned());
+        let long = PickerRow::Note(
+            "Vault could not answer. Open or update Vault and try again.".to_owned(),
+        );
+        assert!(long.height() > short.height());
+    }
+
+    #[tokio::test]
+    async fn a_lookup_past_its_deadline_reads_as_a_vault_error() {
+        let late = bounded_lookup(false, std::future::pending()).await;
+        assert_eq!(late.status, VaultLoginsStatus::Error);
+        assert_eq!(late.error.as_deref(), Some("Vault did not answer in time."));
+        let prompt = bounded_lookup(true, async { response(VaultLoginsStatus::Locked, &[]) }).await;
+        assert_eq!(
+            prompt.status,
+            VaultLoginsStatus::Locked,
+            "an answer in time passes"
+        );
+        assert!(lookup_deadline(true) > lookup_deadline(false));
+        assert!(watchdog_delay(false) > lookup_deadline(false));
     }
 
     #[test]
@@ -1148,7 +1351,7 @@ mod tests {
         let mut state = InlineLogins::default();
         let generation = state.begin_lookup(false).expect("starts");
         state.finish_lookup(generation, response(VaultLoginsStatus::Ok, &[]));
-        assert_eq!(state.labels()[1], "No Vault logins for this site");
+        assert_eq!(state.labels()[1], "No matching login.");
         assert_eq!(state.action(1), None);
         let generation = state.begin_lookup(false).expect("starts");
         state.finish_lookup(generation, response(VaultLoginsStatus::Unavailable, &[]));

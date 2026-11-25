@@ -204,12 +204,23 @@ fn arrow_keys_and_enter_pick_a_login_and_escape_closes_the_picker(cx: &mut TestA
 fn a_locked_vault_offers_unlock_and_unlocking_lists_the_logins(cx: &mut TestAppContext) {
     let (window, _app, page) = open_page(cx, "https://locked.example/");
     send(cx, &page, &field_event("focus", "username"));
+    assert_eq!(
+        labels(cx, &page),
+        vec!["Vault · this Mac", "Checking Vault…"],
+        "while Vault answers"
+    );
     settle(cx, &page, "the unlock row", |rows| {
-        rows.contains(&"Unlock Vault…".to_owned())
+        rows.contains(&"Unlock Vault".to_owned())
     });
+    assert_eq!(
+        labels(cx, &page),
+        vec!["Vault · this Mac", "Unlock Vault"],
+        "a locked answer leaves the loading state"
+    );
     render_frames(cx, window);
     assert!(row_exists(cx, window, "browser-vault-inline-1"));
 
+    // The click asks Vault again, now allowed to prompt: the stub answers with the list.
     let clicked = cx.update_window(window, |_, window, cx| {
         window.click("browser-vault-inline-1", cx);
     });
@@ -224,11 +235,61 @@ fn a_locked_vault_offers_unlock_and_unlocking_lists_the_logins(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+fn enter_on_the_unlock_row_unlocks(cx: &mut TestAppContext) {
+    let (_window, _app, page) = open_page(cx, "https://locked.example/");
+    send(cx, &page, &field_event("focus", "username"));
+    settle(cx, &page, "the unlock row", |rows| {
+        rows.contains(&"Unlock Vault".to_owned())
+    });
+    assert!(key(cx, &page, "down"), "the row can be walked to");
+    assert!(key(cx, &page, "enter"), "Enter on it is the picker's");
+    settle_logins(cx, &page);
+}
+
+#[gpui_kit::test]
+fn a_vault_error_says_so_and_offers_a_retry(cx: &mut TestAppContext) {
+    let (_window, _app, page) = open_page(cx, "https://broken.example/");
+    send(cx, &page, &field_event("focus", "username"));
+    settle(cx, &page, "the error", |rows| {
+        rows.contains(&"Try again".to_owned())
+    });
+    assert_eq!(
+        labels(cx, &page),
+        vec![
+            "Vault · this Mac",
+            "Vault could not answer. Open or update Vault and try again.",
+            "Try again",
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn a_vault_that_never_answers_ends_in_an_error_not_in_loading(cx: &mut TestAppContext) {
+    let (_window, _app, page) = open_page(cx, "https://hang.example/");
+    send(cx, &page, &field_event("focus", "username"));
+    assert_eq!(
+        labels(cx, &page),
+        vec!["Vault · this Mac", "Checking Vault…"]
+    );
+    settle(cx, &page, "the timeout", |rows| {
+        rows.contains(&"Try again".to_owned())
+    });
+    assert_eq!(
+        labels(cx, &page),
+        vec![
+            "Vault · this Mac",
+            "Vault did not answer in time.",
+            "Try again"
+        ]
+    );
+}
+
+#[gpui_kit::test]
 fn missing_and_empty_vaults_say_so_and_offer_no_pick(cx: &mut TestAppContext) {
     let (_window, _app, page) = open_page(cx, "about:blank");
     for (url, text) in [
         ("https://unavailable.example/", "Vault is not installed"),
-        ("https://empty.example/", "No Vault logins for this site"),
+        ("https://empty.example/", "No matching login."),
     ] {
         goto(cx, &page, url);
         send(cx, &page, &field_event("focus", "username"));

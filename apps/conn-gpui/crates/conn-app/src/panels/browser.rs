@@ -811,8 +811,13 @@ impl BrowserPanel {
         url: String,
         allow_unlock: bool,
     ) -> tokio::task::JoinHandle<VaultLoginsResponse> {
-        crate::live::RT
-            .spawn(async move { VaultClient::new().list_logins(&url, allow_unlock).await })
+        crate::live::RT.spawn(async move {
+            inline::bounded_lookup(
+                allow_unlock,
+                VaultClient::new().list_logins(&url, allow_unlock),
+            )
+            .await
+        })
     }
 
     /// Tests never reach the real Vault: canned answers by host.
@@ -821,7 +826,9 @@ impl BrowserPanel {
         url: String,
         allow_unlock: bool,
     ) -> tokio::task::JoinHandle<VaultLoginsResponse> {
-        crate::live::RT.spawn(async move { inline::stub_logins(&url, allow_unlock) })
+        crate::live::RT.spawn(async move {
+            inline::bounded_lookup(allow_unlock, inline::stub_lookup(url, allow_unlock)).await
+        })
     }
 
     /// Reads one field of a Vault login off the UI thread.
@@ -1004,6 +1011,21 @@ impl BrowserPanel {
             let response = Self::logins_or_error(task.await);
             let _ = this.update(cx, |panel, cx| {
                 if panel.inline_logins.finish_lookup(generation, response) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        // A timer of the panel's own, in case the lookup never comes back at all (its task is
+        // gone, or the runtime is stuck): the picker then shows an error to retry from, never
+        // "Checking Vault…" for good.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(inline::watchdog_delay(allow_unlock))
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.inline_logins.expire_lookup(generation) {
                     cx.notify();
                 }
             });

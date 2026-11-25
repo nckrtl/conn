@@ -5446,6 +5446,63 @@ public func FfiConverterTypeFfiComposerLimits_lower(_ value: FfiComposerLimits) 
 
 
 /**
+ * Conn's friendly label and icon for one of its own MCP tools.
+ */
+public struct FfiConnToolLabel: Equatable, Hashable {
+    public var displayName: String
+    public var icon: FfiConnToolIcon
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(displayName: String, icon: FfiConnToolIcon) {
+        self.displayName = displayName
+        self.icon = icon
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiConnToolLabel: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiConnToolLabel: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConnToolLabel {
+        return
+            try FfiConnToolLabel(
+                displayName: FfiConverterString.read(from: &buf), 
+                icon: FfiConverterTypeFfiConnToolIcon.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiConnToolLabel, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.displayName, into: &buf)
+        FfiConverterTypeFfiConnToolIcon.write(value.icon, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolLabel_lift(_ buf: RustBuffer) throws -> FfiConnToolLabel {
+    return try FfiConverterTypeFfiConnToolLabel.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolLabel_lower(_ value: FfiConnToolLabel) -> RustBuffer {
+    return FfiConverterTypeFfiConnToolLabel.lower(value)
+}
+
+
+/**
  * Canonical reference to a Conn conversation linked to an Orbit Task agent.
  */
 public struct FfiConversationRef: Equatable, Hashable {
@@ -12190,6 +12247,96 @@ public func FfiConverterTypeFfiComposerTarget_lower(_ value: FfiComposerTarget) 
 
 
 /**
+ * Which icon a Conn tool row draws (`conn_state::conn_tools::ConnToolIcon`).
+ */
+
+public enum FfiConnToolIcon: Equatable, Hashable {
+    
+    case connMark
+    case browser
+    case device
+    case pullRequest
+    case credential
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiConnToolIcon: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiConnToolIcon: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConnToolIcon
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConnToolIcon {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .connMark
+        
+        case 2: return .browser
+        
+        case 3: return .device
+        
+        case 4: return .pullRequest
+        
+        case 5: return .credential
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiConnToolIcon, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .connMark:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .browser:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .device:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .pullRequest:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .credential:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolIcon_lift(_ buf: RustBuffer) throws -> FfiConnToolIcon {
+    return try FfiConverterTypeFfiConnToolIcon.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolIcon_lower(_ value: FfiConnToolIcon) -> RustBuffer {
+    return FfiConverterTypeFfiConnToolIcon.lower(value)
+}
+
+
+
+/**
  * Connection lifecycle reported to [`crate::CoreListener::on_status`].
  */
 
@@ -16179,6 +16326,30 @@ fileprivate struct FfiConverterOptionTypeOfflineReader: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiConnToolLabel: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConnToolLabel?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiConnToolLabel.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiConnToolLabel.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiConversationRef: FfiConverterRustBuffer {
     typealias SwiftType = FfiConversationRef?
 
@@ -18149,6 +18320,18 @@ public func changedFileRows(files: [FfiTurnCheckpointFile], overrides: [String: 
     )
 })
 }
+/**
+ * The label desktop shows for a Conn MCP tool call (`mcp__conn__conn_thread_send`, any provider
+ * spelling), or `None` for other tools, which keep their own title.
+ */
+public func connToolLabel(title: String) -> FfiConnToolLabel?  {
+    return try!  FfiConverterOptionTypeFfiConnToolLabel.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_conn_tool_label(
+        FfiConverterString.lower(title),uniffiCallStatus
+    )
+})
+}
 public func highlightCode(source: String, language: String, theme: String) -> [[FfiCodeSpan]]  {
     return try!  FfiConverterSequenceSequenceTypeFfiCodeSpan.lift(try! rustCall() {
         uniffiCallStatus in
@@ -18353,6 +18536,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_func_changed_file_rows() != 50125) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_conn_tool_label() != 58499) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_func_highlight_code() != 49332) {

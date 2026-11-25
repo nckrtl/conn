@@ -1122,6 +1122,11 @@ RustBuffer uniffi_conn_ffi_fn_func_composer_restore_draft(RustBuffer current, Ru
 RustBuffer uniffi_conn_ffi_fn_func_changed_file_rows(RustBuffer files, RustBuffer overrides, int8_t expanded, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_CONN_TOOL_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_CONN_TOOL_LABEL
+RustBuffer uniffi_conn_ffi_fn_func_conn_tool_label(RustBuffer title, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_HIGHLIGHT_CODE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_HIGHLIGHT_CODE
 RustBuffer uniffi_conn_ffi_fn_func_highlight_code(RustBuffer source, RustBuffer language, RustBuffer theme, RustCallStatus *_Nonnull out_status
@@ -1467,6 +1472,12 @@ uint16_t uniffi_conn_ffi_checksum_func_composer_restore_draft(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CHANGED_FILE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CHANGED_FILE_ROWS
 uint16_t uniffi_conn_ffi_checksum_func_changed_file_rows(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CONN_TOOL_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CONN_TOOL_LABEL
+uint16_t uniffi_conn_ffi_checksum_func_conn_tool_label(void
     
 );
 #endif

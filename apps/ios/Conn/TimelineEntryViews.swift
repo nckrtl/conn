@@ -93,8 +93,7 @@ struct WorkGroupCard: View {
                     .frame(height: 1)
             }
         }
-        // The feed stacks items `ThreadFeed.spacing` apart; below this row only the paragraph gap.
-        .padding(.bottom, gap - ThreadFeed.spacing)
+        // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
         .onAppear { anchor() }
         .onChange(of: group.durationMs) { anchor() }

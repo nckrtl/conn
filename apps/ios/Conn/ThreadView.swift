@@ -19,6 +19,9 @@ struct ThreadView: View {
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
     @State private var showsOutline = false
+    @ScaledMetric(relativeTo: .body) private var feedTextSize: CGFloat = ThreadText.size
+    /// The paragraph gap below a fold row, less the feed spacing the stack already adds.
+    private var foldGap: CGFloat { feedTextSize * 0.85 - ThreadFeed.spacing }
     /// The last feed shown, kept while another thread covers this one.
     @State private var retainedSnapshot: FfiThreadSnapshot?
     private static let titleInset: CGFloat = 16 + 44 + 16
@@ -549,6 +552,11 @@ struct ThreadView: View {
                     } else {
                         let items = renderItems(for: snapshot)
                         let anchorCandidates = Set(items.prefix(12).map(\.id))
+                        // What follows a "Worked for" row sits a paragraph gap below it, not the
+                        // feed spacing. The row keeps its own height (a near-zero frame stops drawing).
+                        let afterFold = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
+                            if case .workGroup = pair.0 { return pair.1.id } else { return nil }
+                        })
                         ForEach(items) { item in
                             Group {
                                 switch item {
@@ -576,6 +584,7 @@ struct ThreadView: View {
                                     }
                                 }
                             }
+                            .padding(.top, afterFold.contains(item.id) ? foldGap : 0)
                             .id(item.id)
                         }
                     }
@@ -589,6 +598,8 @@ struct ThreadView: View {
                             }
                             LiveWorkRow(label: liveWork.label, glyph: liveWork.icon)
                         }
+                        // Under a running group's "Working for" row: the paragraph gap, as above.
+                        .padding(.top, snapshot.workGroups.contains(where: \.hasActive) ? foldGap : 0)
                         // The gap under the divider is the fold's own paragraph gap, as above it.
                     }
                 } else {

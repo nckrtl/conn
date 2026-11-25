@@ -31,9 +31,10 @@ struct MarkdownView: View {
     /// The feed's type scale, relative to the 15 pt the lab's pixel values were set at.
     private var feedScale: CGFloat { messageSize / ThreadText.size }
 
-    /// Lab `.m-feed .m-md > * + *` is 10.4; `.m-md p` and lists end in a 13 `--m-paragraph-gap`.
+    /// Lab `.m-feed .m-md > * + *` is 0.85 of the thread text; `.m-md p` and lists end in a 13
+    /// `--m-paragraph-gap`.
     private var blockSpacing: CGFloat {
-        if messageStyle != nil { return 10.4 * feedScale }
+        if messageStyle != nil { return 0.85 * messageSize }
         // Record bodies space their blocks one by one (recordGap).
         return recordStyle ? 0 : 13
     }
@@ -79,8 +80,8 @@ struct MarkdownView: View {
                 .lineHeight(messageStyle != nil ? bodyLineHeight : recordStyle ? .exact(points: 24) : nil)
                 .foregroundStyle(messageStyle != nil && level == 6 ? theme.mutedForeground : textColor)
                 .textSelection(.enabled)
-                // Lab: a heading after another block has a 20 margin in place of the 10.4 gap.
-                .padding(.top, messageStyle != nil ? (first ? 0 : 9.6 * feedScale) : recordStyle ? 0 : level <= 2 ? Kit.Space.xs : 0)
+                // Lab: a heading after another block has a 20/16 margin in place of the block gap.
+                .padding(.top, messageStyle != nil ? (first ? 0 : max(0, 20 * feedScale - blockSpacing)) : recordStyle ? 0 : level <= 2 ? Kit.Space.xs : 0)
 
         case let .paragraph(text):
             inlineMarkdownText(text)
@@ -92,7 +93,7 @@ struct MarkdownView: View {
         case let .codeBlock(language, code):
             // A code block gets 16 above and about 16 below in the feed, more than a paragraph's gap.
             CodeCard(code: code, language: language)
-                .padding(.top, messageStyle != nil && !first ? 16 - blockSpacing : 0)
+                .padding(.top, messageStyle != nil && !first ? max(0, 16 - blockSpacing) : 0)
                 .padding(.bottom, messageStyle != nil ? 6 : 0)
 
         case let .quote(text):
@@ -150,15 +151,38 @@ struct MarkdownView: View {
             }
 
         case let .list(items):
-            // Lab `.m-md ul/ol`: 22 in, `li` 6 apart, markers in the text colour (numbers 600).
+            // Lab `.m-md ul/ol`: `li` 6 apart, markers in the text colour (numbers 600). In the feed
+            // the marker's left edge is the paragraph's left edge and the text follows 8 later.
+            let numbered = items.contains { $0.marker != "•" }
+            let widest = items.map(\.marker).max { $0.count < $1.count } ?? ""
+            let disc = bodySize * 0.375
+            let xHeight = UIFont.systemFont(ofSize: bodySize).xHeight
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(items.indices, id: \.self) { i in
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(items[i].marker)
-                            .font(bodyFont)
-                            .fontWeight(items[i].marker == "•" ? .regular : .semibold)
+                    HStack(alignment: .firstTextBaseline, spacing: messageStyle != nil ? 8 : 4) {
+                        if messageStyle == nil {
+                            Text(items[i].marker)
+                                .font(bodyFont)
+                                .fontWeight(items[i].marker == "•" ? .regular : .semibold)
+                                .foregroundStyle(textColor)
+                                .frame(width: 18, alignment: .trailing)
+                        } else if numbered {
+                            // Every marker takes the widest one's width, so the item text lines up.
+                            ZStack(alignment: .leading) {
+                                Text(widest).hidden()
+                                Text(items[i].marker)
+                            }
+                            .font(.system(size: bodySize, weight: .semibold))
+                            .monospacedDigit()
                             .foregroundStyle(textColor)
-                            .frame(width: 18, alignment: .trailing)
+                            .fixedSize()
+                        } else {
+                            // A disc 0.375em across, centred on the first line's x-height: the
+                            // baseline guide sits half an x-height below the disc's centre.
+                            Circle().fill(textColor)
+                                .frame(width: disc, height: disc)
+                                .alignmentGuide(.firstTextBaseline) { $0.height / 2 + xHeight / 2 }
+                        }
                         inlineMarkdownText(items[i].text)
                             .font(bodyFont)
                             .foregroundStyle(textColor)
@@ -197,28 +221,42 @@ struct MarkdownView: View {
     }
 
     /// Inline Markdown in the lab's styles: bold is 600 in the full text colour, code is the
-    /// 0.85em mono chip (`.m-feed .m-md-code`: 10% text fill, `0.1em 0.35em` padding).
-    private func inlineMarkdownText(_ raw: String) -> Text {
+    /// 0.85em mono chip. In the feed the chip is a rounded fill drawn by `InlineCodeChipRenderer`
+    /// (`.m-feed .m-md-code`: 10% text fill, `0.1em 0.35em` padding, 1 pt border, 4 pt radius).
+    @ViewBuilder
+    private func inlineMarkdownText(_ raw: String) -> some View {
+        let built = inlineText(raw)
+        if built.hasChip {
+            // A renderer only on text that has a chip: other text keeps its native selection.
+            built.text.textRenderer(InlineCodeChipRenderer(
+                fill: theme.foreground.opacity(0.1), padX: built.padX, padY: built.padY
+            ))
+        } else {
+            built.text
+        }
+    }
+
+    private func inlineText(_ raw: String) -> (text: Text, hasChip: Bool, padX: CGFloat, padY: CGFloat) {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
-        guard let parsed = try? AttributedString(markdown: raw, options: options) else { return Text(raw) }
-        let codeSize = messageStyle != nil ? ThreadText.codeSize * feedScale : bodySize * 0.85
-        let chip = theme.foreground.opacity(0.1)
-        var out = AttributedString()
+        let codeSize = bodySize * 0.85
+        // `padding: 0.1em 0.35em` of the code size plus the 1 pt transparent border.
+        let padX = 0.35 * codeSize + 1
+        let padY = 0.1 * codeSize + 1
+        guard let parsed = try? AttributedString(markdown: raw, options: options) else {
+            return (Text(raw), false, padX, padY)
+        }
+        let chips = messageStyle != nil
+        var segments: [(text: AttributedString, chip: Bool)] = []
         for run in parsed.runs {
             var piece = AttributedString(parsed[run.range])
+            var chip = false
             if let intent = run.inlinePresentationIntent {
                 if intent.contains(.code) {
                     piece.font = .system(size: codeSize, design: .monospaced)
                     piece.foregroundColor = muted ? theme.mutedForeground : theme.codeForeground
-                    if messageStyle != nil {
-                        piece.backgroundColor = chip
-                        var pad = AttributedString("\u{2009}")
-                        pad.font = .system(size: codeSize)
-                        pad.backgroundColor = chip
-                        piece = pad + piece + pad
-                    }
+                    chip = chips
                 } else if intent.contains(.stronglyEmphasized) {
                     var rest = intent
                     rest.remove(.stronglyEmphasized)
@@ -227,9 +265,80 @@ struct MarkdownView: View {
                     if !muted, messageStyle == .assistant { piece.foregroundColor = theme.foreground }
                 }
             }
-            out += piece
+            segments.append((piece, chip))
         }
-        return Text(out)
+        // The chip's room is kerning, not characters, so copied text stays plain. The previous
+        // character carries the leading room and the chip's last character the trailing room.
+        for i in segments.indices where segments[i].chip {
+            if i > 0, !segments[i - 1].text.characters.isEmpty {
+                let last = segments[i - 1].text.index(segments[i - 1].text.endIndex, offsetByCharacters: -1)
+                segments[i - 1].text[last..<segments[i - 1].text.endIndex].kern = padX
+            }
+            let text = segments[i].text
+            if !text.characters.isEmpty {
+                let last = text.index(text.endIndex, offsetByCharacters: -1)
+                segments[i].text[last..<text.endIndex].kern = padX
+            }
+        }
+        // One Text per run: `customAttribute` marks the chip runs for the renderer. `+` on Text
+        // is deprecated in iOS 26, but it is the only way to carry per-run custom attributes.
+        var out = Text("")
+        for segment in segments {
+            let part = Text(segment.text)
+            out = out + (segment.chip ? part.customAttribute(InlineCodeChip()) : part)
+        }
+        return (out, segments.contains { $0.chip }, padX, padY)
+    }
+}
+
+/// Marks a run of inline code for `InlineCodeChipRenderer`.
+private struct InlineCodeChip: TextAttribute {}
+
+/// Draws a rounded fill behind each line fragment of an inline-code run, then the text. The fill
+/// reaches `padX` and `padY` past the glyphs (the kerning in `inlineText` reserved the room).
+/// A chip that wraps is padded at its first start only; it runs flush into the line break and the
+/// next line's fragment (the kerning room exists only at the chip's real ends).
+private struct InlineCodeChipRenderer: TextRenderer {
+    var fill: Color
+    var padX: CGFloat
+    var padY: CGFloat
+    var radius: CGFloat = 4
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        let lines = Array(layout)
+        // Per line: the chip's frame, whether it starts or ends the line.
+        var frames: [[(rect: CGRect, startsLine: Bool, endsLine: Bool)]] = []
+        for line in lines {
+            var found: [(rect: CGRect, startsLine: Bool, endsLine: Bool)] = []
+            let runs = Array(line)
+            var current: CGRect?
+            var currentStarts = false
+            for (index, run) in runs.enumerated() {
+                if run[InlineCodeChip.self] != nil {
+                    let rect = run.typographicBounds.rect
+                    if let existing = current { current = existing.union(rect) } else {
+                        current = rect
+                        currentStarts = index == 0
+                    }
+                } else if let rect = current {
+                    found.append((rect, currentStarts, false))
+                    current = nil
+                }
+            }
+            if let rect = current { found.append((rect, currentStarts, true)) }
+            frames.append(found)
+        }
+        for (lineIndex, line) in frames.enumerated() {
+            for chip in line {
+                let continuesFromPrevious = chip.startsLine && lineIndex > 0 && frames[lineIndex - 1].last?.endsLine == true
+                var rect = chip.rect.insetBy(dx: 0, dy: -padY)
+                // The leading room is the previous character's kerning, outside this run's bounds;
+                // the trailing room is this run's last character's kerning, inside its bounds.
+                if !continuesFromPrevious { rect.origin.x -= padX; rect.size.width += padX }
+                context.fill(Path(roundedRect: rect, cornerRadius: radius, style: .continuous), with: .color(fill))
+            }
+        }
+        for line in lines { context.draw(line) }
     }
 }
 

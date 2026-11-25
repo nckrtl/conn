@@ -39,7 +39,12 @@ struct ThreadAttachments: View {
         let images = files.filter { $0.isImage }
         let others = files.filter { !$0.isImage }
         VStack(alignment: .leading, spacing: 3) {
-            if !images.isEmpty {
+            if let only = images.first, images.count == 1 {
+                // One image takes the whole width at its own aspect ratio (lab `[data-count="1"]`).
+                AttachmentTile(file: only, store: store, thread: thread, single: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id([thread, store.attachmentEnvironment, String(store.identityEpoch)])
+            } else if !images.isEmpty {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: min(2, images.count)), spacing: 3) {
                     ForEach(images, id: \.self) { file in
                         AttachmentTile(file: file, store: store, thread: thread)
@@ -65,7 +70,10 @@ private struct AttachmentTile: View {
     let file: FfiAttachment
     let store: CoreStore
     let thread: String
+    /// The message's only image: full width at its own aspect ratio, at most `singleImageMaxHeight` tall.
+    var single = false
     @Environment(\.connTheme) private var theme
+    @State private var tileWidth: CGFloat = 0
     @State private var loaded: UIImage?
     @State private var preview: URL?
     @State private var directory: URL?
@@ -89,6 +97,15 @@ private struct AttachmentTile: View {
         return store.status == .connected ? loaded : nil
     }
 
+    private static let singleImageMaxHeight: CGFloat = 320
+
+    /// 4:3 in a grid. A single image keeps its own ratio, but never taller than the cap at this width.
+    private var imageRatio: CGFloat {
+        guard single, let image = thumbnail, image.size.height > 0 else { return 4 / 3 }
+        let natural = image.size.width / image.size.height
+        return tileWidth > 0 ? max(natural, tileWidth / Self.singleImageMaxHeight) : natural
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let player {
@@ -96,7 +113,9 @@ private struct AttachmentTile: View {
                     .onDisappear { player.pause() }
             } else if file.isImage {
                 Button { Task { await openFile() } } label: {
-                    Color.clear.aspectRatio(4 / 3, contentMode: .fit).overlay {
+                    Color.clear.aspectRatio(imageRatio, contentMode: .fit)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { tileWidth = $0 }
+                        .overlay {
                         if let image = thumbnail {
                             Image(uiImage: image).resizable().scaledToFill()
                         } else { fileLabel }

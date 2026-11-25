@@ -56,7 +56,9 @@ struct MessageFooter: View {
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {
-            if !trailingCopy { copyButton }
+            // Under an agent message the icon's left edge is the text's: the 14 pt glyph sits 5 pt
+            // inside its 24 pt tap target.
+            if !trailingCopy { copyButton.padding(.leading, -5) }
             if let date = threadDate(timestamp) { Text(date, style: .time).lineHeight(.exact(points: size * 16 / 13)) }
             if trailingCopy { copyButton }
         }.font(.system(size: size)).foregroundStyle(theme.mutedForeground)
@@ -124,7 +126,9 @@ struct ThreadMessage: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                             .padding(.horizontal, 13)
-                            .padding(.top, 7)
+                            // Lab `.m-user-bubble`: 12 above and below text-only (3 + 9 here); with
+                            // files or images the bottom is 7 above the attachment.
+                            .padding(.top, 9)
                             .padding(.bottom, files.isEmpty ? 9 : 7)
                     }
                     ForEach(metadata.reviews, id: \.contextId) { review in

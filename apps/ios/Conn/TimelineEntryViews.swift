@@ -37,7 +37,6 @@ struct WorkGroupCard: View {
                         .foregroundStyle(theme.mutedForeground)
                     Spacer()
                 }
-                .padding(.horizontal, 4)
                 .padding(.top, 4)
                 .contentShape(Rectangle())
             }

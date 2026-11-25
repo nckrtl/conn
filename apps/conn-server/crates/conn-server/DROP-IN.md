@@ -75,7 +75,8 @@ checksums. A branch build keeps artifacts for testing.
 
 After publication, **Propose Conn Server fleet pin** checks the tagged commit
 again. It downloads both archives and their published checksums, verifies the
-release metadata and generates the Orbit recipe, launch contract and convergence
+release metadata and binds the recorded version line to the Linux archive hash.
+The writer generates the Orbit recipe, launch contract and convergence
 fixture. The `orbit-nckrtl` GitHub App opens one PR per tag on
 `hardimpactdev/orbit:main`. To retry, dispatch the proposal workflow from main
 with the same published tag. The writer reuses the PR or its already pushed

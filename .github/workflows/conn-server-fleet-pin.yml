@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      version_output: ${{ steps.contract.outputs.line }}
+      contract: ${{ steps.contract.outputs.contract }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -64,8 +64,8 @@ jobs:
           TAG: ${{ needs.published.outputs.tag }}
           SOURCE_SHA: ${{ needs.published.outputs.sha }}
         run: |
-          line=$(bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --print-contract)
-          printf 'line=%s\n' "$line" >> "$GITHUB_OUTPUT"
+          contract=$(bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --print-contract)
+          printf 'contract=%s\n' "$contract" >> "$GITHUB_OUTPUT"
 
   propose:
     needs: [published, artifact_contract]
@@ -109,9 +109,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PIN_BODY: ${{ runner.temp }}/orbit-pin-pr.md
-          VERSION_OUTPUT: ${{ needs.artifact_contract.outputs.version_output }}
+          CONTRACT: ${{ needs.artifact_contract.outputs.contract }}
         run: |
-          bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --version-output "$VERSION_OUTPUT" --pr-body "$PIN_BODY"
+          bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --contract "$CONTRACT" --pr-body "$PIN_BODY"
           git diff --check
           if ! git diff --quiet; then
             bin/docs-impact --gate --base HEAD --pr-body-file "$PIN_BODY"

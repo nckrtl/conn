@@ -83,45 +83,54 @@ struct ModelPickerSheet: View {
             .buttonStyle(.plain).background(theme.background)
             .navigationDestination(for: Page.self) { page in
                 ScrollView {
-                    PhoneSettingsGroup {
-                        switch page {
-                        case .providers:
+                    switch page {
+                    case .providers:
+                        ModelListGroup {
                             ForEach(picker?.sections ?? [], id: \.instanceId) { section in
                                 Button { browse(section) } label: {
-                                    HStack { ProviderIcon(driver: section.driver); Text(section.label); Spacer(); ConnIcon("chevron.right") }
-                                        .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                                    ModelListRow(driver: section.driver, title: section.label, trailing: "chevron-right", trailingSize: 14)
                                 }.accessibilityIdentifier("modelPicker.provider." + section.instanceId)
                             }
-                        case .models(let instance):
-                            if let section = picker?.sections.first(where: { $0.instanceId == instance }) {
-                                let matches = section.models.filter { query.isEmpty || $0.label.localizedCaseInsensitiveContains(query) }
-                                if matches.isEmpty { Text("No models match your search.").foregroundStyle(theme.mutedForeground) }
-                                ForEach(matches, id: \.model) { row in
-                                    Button {
-                                        if !row.selected { optionChanges = [:] }
-                                        pending = (row.instanceId, row.model)
-                                        pages = []
-                                    } label: {
-                                        HStack {
-                                            ProviderIcon(driver: section.driver)
-                                            Text(displayName(row.label, provider: section.label))
-                                            Spacer()
-                                            if row.selected { ConnIcon("checkmark") }
-                                        }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                                    }.accessibilityIdentifier("modelPicker.model." + row.model)
+                        }
+                    case .models(let instance):
+                        if let section = picker?.sections.first(where: { $0.instanceId == instance }) {
+                            let matches = section.models.filter { query.isEmpty || $0.label.localizedCaseInsensitiveContains(query) }
+                            if matches.isEmpty {
+                                Text("No models match your search.").foregroundStyle(theme.mutedForeground).padding(.top, 10)
+                            } else {
+                                ModelListGroup {
+                                    ForEach(matches, id: \.model) { row in
+                                        Button {
+                                            if !row.selected { optionChanges = [:] }
+                                            pending = (row.instanceId, row.model)
+                                            pages = []
+                                        } label: {
+                                            ModelListRow(driver: section.driver, title: displayName(row.label, provider: section.label),
+                                                         trailing: row.selected ? "check" : nil, trailingSize: 16)
+                                        }.accessibilityIdentifier("modelPicker.model." + row.model)
+                                    }
                                 }
                             }
                         }
-                    }.padding(.horizontal, 14)
-                }.buttonStyle(.plain).background(theme.background)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .buttonStyle(.plain).background(theme.background)
+                .navigationBarBackButtonHidden()
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        SheetGlassButton(glyph: "chevron-left", label: "Back") { pages.removeLast() }
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                }
                     .safeAreaInset(edge: .bottom) {
                         if case .models = page {
-                            HStack(spacing: 8) {
-                                Image(systemName: "magnifyingglass").foregroundStyle(theme.mutedForeground)
+                            HStack(spacing: 6) {
+                                ThreadGlyph(name: "search", size: 16).foregroundStyle(theme.mutedForeground)
                                 TextField("Find a model", text: $query)
                                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                                     .accessibilityIdentifier("modelPicker.search")
-                            }.padding(.horizontal, 14).frame(height: 44)
+                            }.padding(.horizontal, 12).frame(height: 44)
                                 .glassEffect(.regular, in: .capsule).padding(.horizontal, 14)
                         }
                     }
@@ -132,12 +141,12 @@ struct ModelPickerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button { dismiss() } label: { Image(systemName: "xmark") }
-                        .accessibilityLabel("Cancel thread settings")
+                    SheetGlassButton(glyph: "close", label: "Cancel thread settings") { dismiss() }
                 }
+                .sharedBackgroundVisibility(.hidden)
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(picker?.hasPending == true || !optionChanges.isEmpty || steer != store.followUpSteers(threadId) ? "Save" : "Done") { commitAndClose() }
-                        .fontWeight(.semibold).foregroundStyle(.blue)
+                        .fontWeight(.semibold).foregroundStyle(theme.primary)
                         .disabled(saving)
                         .accessibilityIdentifier("modelPicker.confirm")
                 }.sharedBackgroundVisibility(.hidden)
@@ -216,5 +225,67 @@ struct ModelPickerSheet: View {
             else { toggled.append(section.instanceId) }
         }
         pages.append(.models(section.instanceId))
+    }
+}
+
+/// Lab `GlassButton`: a 44 pt glass circle with a 22 pt glyph (the sheet's close and back).
+struct SheetGlassButton: View {
+    let glyph: String
+    let label: String
+    let action: () -> Void
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            ThreadGlyph(name: glyph, size: 22)
+                .foregroundStyle(theme.foreground)
+                .frame(width: 44, height: 44)
+                .glassEffect(.regular.interactive(), in: .circle)
+        }
+        .accessibilityLabel(label)
+    }
+}
+
+/// Lab `.ios-model-list .ios-group`: a 16 pt group in the settings fill, rows apart by a 0.5 pt line.
+private struct ModelListGroup<Content: View>: View {
+    @Environment(\.connTheme) private var theme
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Group(subviews: content) { rows in
+                ForEach(rows.indices, id: \.self) { index in
+                    if index > 0 { Rectangle().fill(theme.border).frame(height: 0.5) }
+                    rows[index]
+                }
+            }
+        }
+        .background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.top, 10)
+    }
+}
+
+/// A provider or model row: icon, title at 16/500 and an optional trailing glyph, 10 apart, 44 high.
+private struct ModelListRow: View {
+    let driver: String?
+    let title: String
+    let trailing: String?
+    let trailingSize: CGFloat
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProviderIcon(driver: driver)
+            Text(title).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.foreground)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let trailing {
+                ThreadGlyph(name: trailing, size: trailingSize)
+                    .foregroundStyle(trailing == "check" ? theme.foreground : theme.mutedForeground)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .contentShape(Rectangle())
     }
 }

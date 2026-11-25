@@ -69,11 +69,14 @@ extension View {
     }
 }
 
+/// Lab `.m-card-action`: a 24 pt target with a 14 pt `copy` glyph that turns into a `check`
+/// (green on the code card) for a moment after copying.
 struct CopyTextButton: View {
     let label: String
     let text: String
     var message = false
     @State private var copied = false
+    @Environment(\.connTheme) private var theme
 
     var body: some View {
         Button {
@@ -81,13 +84,13 @@ struct CopyTextButton: View {
             copied = true
         } label: {
             Group {
-                if message && !copied {
-                    ThreadGlyph(name: "copy", size: 14)
+                if copied && !message {
+                    ThreadGlyph(name: "check", size: 14).foregroundStyle(theme.success)
                 } else {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    ThreadGlyph(name: copied ? "check" : "copy", size: 14)
                 }
             }
-            .frame(width: message ? 24 : 28, height: message ? 24 : 28)
+            .frame(width: 24, height: 24)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -118,28 +121,54 @@ struct CodeCard: View {
     let language: String?
     var title: String? = nil
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
     @State private var wrap = false
 
+    /// Lab `FENCE_DISPLAY_NAMES`; unlisted fences are capitalised, and no fence is "Text".
+    private static let names = [
+        "css": "CSS", "html": "HTML", "js": "JavaScript", "json": "JSON", "jsx": "JSX", "md": "Markdown",
+        "py": "Python", "rs": "Rust", "sh": "Shell", "ts": "TypeScript", "tsx": "TSX",
+        "typescript": "TypeScript", "javascript": "JavaScript", "yaml": "YAML", "yml": "YAML",
+        "cc": "C++", "cpp": "C++", "cxx": "C++", "cs": "C#", "csharp": "C#", "graphql": "GraphQL",
+        "objc": "Objective-C", "objectivec": "Objective-C", "php": "PHP", "rb": "Ruby", "scss": "SCSS",
+        "sql": "SQL", "toml": "TOML", "xml": "XML",
+    ]
+
     private var label: String {
-        guard let lang = language?.lowercased(), !lang.isEmpty else { return "Text" }
-        return ["sh":"Shell", "bash":"Shell", "rs":"Rust", "js":"JavaScript", "ts":"TypeScript",
-                "jsx":"JSX", "tsx":"TSX", "json":"JSON", "css":"CSS", "html":"HTML", "md":"Markdown",
-                "py":"Python", "yml":"YAML", "yaml":"YAML", "sql":"SQL", "txt":"Text"][lang] ?? lang.capitalized
+        guard let lang = language?.lowercased(), !["", "text", "txt", "plain", "plaintext"].contains(lang) else { return "Text" }
+        return Self.names[lang] ?? lang.prefix(1).uppercased() + lang.dropFirst()
+    }
+
+    /// Lab `.m-code-label[data-lang]`: only Rust and TypeScript carry a file icon, in their own colour.
+    private var fileIcon: (name: String, color: Color)? {
+        switch language?.lowercased() {
+        case "rs", "rust": ("file-rust", appearance == .light ? Color(red: 0.831, green: 0.463, blue: 0.157) : Color(red: 1, green: 0.639, blue: 0.349))
+        case "typescript", "ts", "tsx": ("file-typescript", appearance == .light ? Color(red: 0.102, green: 0.522, blue: 0.831) : Color(red: 0.412, green: 0.694, blue: 1))
+        default: nil
+        }
     }
 
     var body: some View {
         ThreadCard(code: true) {
-            ConnIcon("doc.text").font(.system(size: 14))
+            if let icon = fileIcon {
+                Image(icon.name).renderingMode(.template).resizable().scaledToFit()
+                    .frame(width: 14, height: 14).foregroundStyle(icon.color)
+            }
             Text(title ?? label)
             Spacer()
-            Button {
-                wrap.toggle()
-            } label: {
-                Image(systemName: "return").frame(width: 28, height: 28)
+            HStack(spacing: 2) {
+                Button {
+                    wrap.toggle()
+                } label: {
+                    ThreadGlyph(name: "wrap-lines", size: 16)
+                        .foregroundStyle(wrap ? theme.codeForeground : theme.mutedForeground)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Toggle word wrap")
+                .accessibilityValue(wrap ? "On" : "Off")
+                CopyTextButton(label: "Copy code", text: code)
             }
-            .accessibilityLabel("Toggle word wrap")
-            .accessibilityValue(wrap ? "On" : "Off")
-            CopyTextButton(label: "Copy code", text: code)
         } content: {
             if wrap {
                 source
@@ -150,9 +179,10 @@ struct CodeCard: View {
         .buttonStyle(.plain)
     }
 
+    /// Lab `.m-code-body`: `12.8 14.4` padding.
     private var source: some View {
         HighlightedSource(code: code, language: language ?? "")
-            .padding(.horizontal, 11).padding(.vertical, 9)
+            .padding(.horizontal, 14.4).padding(.vertical, 12.8)
     }
 }
 

@@ -123,12 +123,34 @@ struct PhoneSettingsGroup<Content: View>: View {
         VStack(spacing: 0) {
             Group(subviews: content) { rows in
                 ForEach(rows.indices, id: \.self) { index in
-                    if index > 0 { Divider().padding(.horizontal, 14) }
+                    if index > 0 { PhoneSettingsDivider().padding(.horizontal, 14) }
                     rows[index].frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                         .padding(.horizontal, 14)
                 }
             }
         }.background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+/// Lab `.ios-thread-options > * + *::before`: a 1 pt line in the text colour at 16%.
+struct PhoneSettingsDivider: View {
+    @Environment(\.connTheme) private var theme
+    var body: some View { Rectangle().fill(theme.foreground.opacity(0.16)).frame(height: 1) }
+}
+
+/// Lab `.ios-thread-options label::after`: a 6 pt box with a 1.5 pt right and bottom border,
+/// turned 45 degrees, which draws a small down chevron.
+private struct DropdownChevron: View {
+    @Environment(\.connTheme) private var theme
+    var body: some View {
+        Path { path in
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: 4.243, y: 4.243))
+            path.addLine(to: CGPoint(x: 8.485, y: 0))
+        }
+        .stroke(theme.mutedForeground, style: StrokeStyle(lineWidth: 1.5, lineCap: .square, lineJoin: .miter))
+        .frame(width: 8.5, height: 4.3)
+        .accessibilityHidden(true)
     }
 }
 
@@ -142,9 +164,15 @@ struct PhoneOptionRow: View {
         HStack(spacing: 8) {
             Text(title).foregroundStyle(theme.foreground)
             Spacer()
-            if let provider { ProviderIcon(driver: provider, size: 15) }
+            if let provider { ProviderIcon(driver: provider, size: 16) }
             if !value.isEmpty { Text(value).foregroundStyle(theme.mutedForeground).lineLimit(1) }
-            if !disclosure.isEmpty { Image(systemName: disclosure).font(.system(size: 12)).foregroundStyle(theme.mutedForeground) }
+            if disclosure == "chevron.right" {
+                ThreadGlyph(name: "chevron-right", size: 14).foregroundStyle(theme.mutedForeground)
+            } else if disclosure == "chevron.down" {
+                DropdownChevron()
+            } else if !disclosure.isEmpty {
+                Image(systemName: disclosure).font(.system(size: 12)).foregroundStyle(theme.mutedForeground)
+            }
         }.font(.system(size: 16)).frame(minHeight: 48).contentShape(Rectangle())
     }
 }

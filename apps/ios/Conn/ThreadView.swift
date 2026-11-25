@@ -390,9 +390,11 @@ struct ThreadView: View {
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
-                    Text(displayTitle).font(.headline.weight(.medium))
+                    // Lab `.m-header-title-text`: 17/22 at 600; `.m-header-subtitle`: 12/16, muted.
+                    Text(displayTitle).font(.system(size: 17, weight: .semibold)).lineHeight(.exact(points: 22))
                     if let displaySubtitle {
-                        Text(displaySubtitle).font(.caption).foregroundStyle(theme.mutedForeground)
+                        Text(displaySubtitle).font(.system(size: 12)).lineHeight(.exact(points: 16))
+                            .foregroundStyle(theme.mutedForeground)
                     }
                 }
                 .lineLimit(1)

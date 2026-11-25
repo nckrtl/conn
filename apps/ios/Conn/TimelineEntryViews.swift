@@ -629,7 +629,6 @@ private struct WorkLogRow: View {
     let size: CGFloat
     @Environment(\.connTheme) private var theme
     @State private var open = false
-    @ScaledMetric(relativeTo: .body) private var detailCodeSize: CGFloat = ThreadText.codeSize - 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -661,15 +660,62 @@ private struct WorkLogRow: View {
             }
             .buttonStyle(.plain)
             if open, let detail {
-                // A step smaller than code blocks, with 1.6x lines, flush with the row's left edge.
-                let detailSize = monospaced ? detailCodeSize : size * 0.9
-                Text(detail)
-                    .font(monospaced ? .system(size: detailSize, design: .monospaced) : .system(size: detailSize))
-                    .lineHeight(.exact(points: detailSize * 1.6))
-                    .foregroundStyle(theme.mutedForeground)
-                    .textSelection(.enabled)
-                    .padding(.bottom, 10)
+                if monospaced {
+                    // Tool output as a code card: no wrapping, sideways scrolling, capped height; JSON
+                    // pretty-printed (nested JSON strings decoded in place) and highlighted.
+                    let pretty = PrettyJSON.format(detail)
+                    CodeCard(code: pretty ?? detail, language: pretty == nil ? nil : "json",
+                             maxHeight: 320, codeSize: ThreadText.codeSize - 1)
+                        .padding(.bottom, 10)
+                } else {
+                    // A step smaller than the thread text, with 1.6x lines, flush with the row's left edge.
+                    let detailSize = size * 0.9
+                    Text(detail)
+                        .font(.system(size: detailSize))
+                        .lineHeight(.exact(points: detailSize * 1.6))
+                        .foregroundStyle(theme.mutedForeground)
+                        .textSelection(.enabled)
+                        .padding(.bottom, 10)
+                }
             }
+        }
+    }
+}
+
+/// Pretty-prints tool output that is JSON, with 2-space indents. A string value that is itself a JSON
+/// object or array (an MCP result's `content`, say) is decoded and printed in place, so no escaped
+/// quotes show. Anything that isn't JSON returns nil and shows as it is.
+enum PrettyJSON {
+    static func format(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first == "{" || first == "[", trimmed.utf8.count <= 256 * 1024,
+              let object = parse(trimmed) else { return nil }
+        let expanded = expand(object, depth: 0)
+        guard JSONSerialization.isValidJSONObject(expanded),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: expanded, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let pretty = String(data: data, encoding: .utf8) else { return nil }
+        return pretty
+    }
+
+    private static func parse(_ text: String) -> Any? {
+        try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed])
+    }
+
+    private static func expand(_ value: Any, depth: Int) -> Any {
+        guard depth < 8 else { return value }
+        switch value {
+        case let dict as [String: Any]:
+            return dict.mapValues { expand($0, depth: depth + 1) }
+        case let array as [Any]:
+            return array.map { expand($0, depth: depth + 1) }
+        case let string as String:
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let first = trimmed.first, first == "{" || first == "[",
+                  let inner = parse(trimmed), inner is [String: Any] || inner is [Any] else { return string }
+            return expand(inner, depth: depth + 1)
+        default:
+            return value
         }
     }
 }

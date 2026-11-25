@@ -120,6 +120,10 @@ struct CodeCard: View {
     let code: String
     let language: String?
     var title: String? = nil
+    /// Long output scrolls inside this height instead of growing the feed (work-log tool details).
+    var maxHeight: CGFloat? = nil
+    /// The code size; tool details sit a step below the thread's code blocks.
+    var codeSize: CGFloat = ThreadText.codeSize
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
     @State private var wrap = false
@@ -170,18 +174,31 @@ struct CodeCard: View {
                 CopyTextButton(label: "Copy code", text: code)
             }
         } content: {
-            if wrap {
-                source
+            if let maxHeight {
+                // Short output keeps its height; long output scrolls inside the cap.
+                ViewThatFits(in: .vertical) {
+                    lines
+                    ScrollView(.vertical) { lines }.frame(height: maxHeight)
+                }
+                .frame(maxHeight: maxHeight)
             } else {
-                ScrollView(.horizontal) { source.fixedSize(horizontal: true, vertical: false) }
+                lines
             }
         }
         .buttonStyle(.plain)
     }
 
+    @ViewBuilder private var lines: some View {
+        if wrap {
+            source
+        } else {
+            ScrollView(.horizontal) { source.fixedSize(horizontal: true, vertical: false) }
+        }
+    }
+
     /// Lab `.m-code-body`: `12.8 14.4` padding.
     private var source: some View {
-        HighlightedSource(code: code, language: language ?? "")
+        HighlightedSource(code: code, language: language ?? "", baseSize: codeSize)
             .padding(.horizontal, 14.4).padding(.vertical, 12.8)
     }
 }

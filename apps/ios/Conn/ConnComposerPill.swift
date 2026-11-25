@@ -88,7 +88,7 @@ struct ConnComposerPill<Trailing: View>: View {
                     .tint(theme.foreground)
                     .lineLimit(1...maxLines)
                     .padding(.vertical, 10)
-                    .padding(.leading, allowsAttachments && limits.images ? 0 : 12)
+                    .padding(.leading, 12)
                     .frame(maxWidth: .infinity, minHeight: Self.control, alignment: .leading)
                     .disabled(draft.sending)
 

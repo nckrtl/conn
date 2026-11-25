@@ -114,7 +114,14 @@ struct ThreadMessage: View {
             VStack(alignment: .trailing, spacing: 2) {
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
-                        MarkdownView(source: displayText, fillsWidth: !files.isEmpty || !metadata.reviews.isEmpty, messageStyle: .user).fixedSize(horizontal: false, vertical: true)
+                        ViewThatFits(in: .horizontal) {
+                            if files.isEmpty && metadata.reviews.isEmpty {
+                                MarkdownView(source: displayText, fillsWidth: false, messageStyle: .user)
+                                    .fixedSize()
+                            }
+                            MarkdownView(source: displayText, messageStyle: .user)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                             .padding(.horizontal, 13)
                             .padding(.top, 7)
                             .padding(.bottom, files.isEmpty ? 9 : 7)

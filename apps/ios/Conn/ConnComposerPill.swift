@@ -352,8 +352,9 @@ struct ProviderIcon: View {
 /// 24pt line is rebuilt from the font's own height: half the extra goes above and below each
 /// line as padding, and the rest sits between lines as `lineSpacing`.
 enum ComposerInputMetrics {
-    static let fontSize: CGFloat = 16
-    static let lineBox: CGFloat = 24
+    // Lab `.m-composer-input`: 15/22.
+    static let fontSize: CGFloat = 15
+    static let lineBox: CGFloat = 22
     static let keyboardExtraGap: CGFloat = 6
 
     static var naturalLineHeight: CGFloat { UIFont.systemFont(ofSize: fontSize).lineHeight }
@@ -362,12 +363,15 @@ enum ComposerInputMetrics {
     static func lineSpacing(natural: CGFloat) -> CGFloat { max(0, lineBox - natural) }
     private static func halfLeading(natural: CGFloat) -> CGFloat { lineSpacing(natural: natural) / 2 }
 
-    static func topInset(expanded _: Bool, natural: CGFloat? = nil) -> CGFloat {
-        10 + halfLeading(natural: natural ?? naturalLineHeight)
+    /// Collapsed: the line box centred in the 44 pt control. Expanded: the lab's 10 above, 2 below.
+    private static var collapsedPad: CGFloat { (44 - lineBox) / 2 }
+
+    static func topInset(expanded: Bool, natural: CGFloat? = nil) -> CGFloat {
+        (expanded ? 10 : collapsedPad) + halfLeading(natural: natural ?? naturalLineHeight)
     }
 
     static func bottomInset(expanded: Bool, natural: CGFloat? = nil) -> CGFloat {
-        (expanded ? 2 : 10) + halfLeading(natural: natural ?? naturalLineHeight)
+        (expanded ? 2 : collapsedPad) + halfLeading(natural: natural ?? naturalLineHeight)
     }
 
     /// Collapsed with a + keeps the glyph's own inset as the gap (lab `padding-inline-start: 2px`).

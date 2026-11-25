@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// One size for every piece of thread text, so prose, cards and footers stay in step (lab: `--thread-text`).
-/// These are the standard text size's values. Polar's one-step-smaller setting scales them to 14 pt
-/// and 11.4 pt for code, which is what the lab's 14 px and 11.5 px defaults show.
+/// These are the standard text size's values. Polar's one-step-smaller setting scales them to about
+/// 15 pt, 12.3 pt for code and timestamps, which is what the lab's 15 px default shows (Nick, 2026-11-25).
 enum ThreadText {
-    static let size: CGFloat = 16
+    static let size: CGFloat = 17
     /// Code blocks and inline code read a step smaller than prose (lab `.m-code-body`).
-    static let codeSize: CGFloat = 13
+    static let codeSize: CGFloat = 14
     /// Timestamps under messages sit a step below the thread text.
-    static let metaSize: CGFloat = 13
+    static let metaSize: CGFloat = 14
 }

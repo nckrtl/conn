@@ -139,18 +139,18 @@ final class VoiceDictationTests: XCTestCase {
     // MARK: Composer metrics
 
     func testCollapsedInputIsExactlyOneControlTallAndExpandedKeepsTheLabInsets() {
-        let natural: CGFloat = 19.09
+        let natural: CGFloat = 17.9
         let line = ComposerInputMetrics.lineBox
         XCTAssertEqual(
             ComposerInputMetrics.topInset(expanded: false, natural: natural) + natural
                 + ComposerInputMetrics.bottomInset(expanded: false, natural: natural), 44, accuracy: 0.001
         )
-        // A 24pt line box with 10 above and 2 below, as the lab's `padding: 10px 12px 2px`.
+        // A 22pt line box with 10 above and 2 below, as the lab's `padding: 10px 12px 2px`.
         XCTAssertEqual(
             ComposerInputMetrics.topInset(expanded: true, natural: natural) + natural
                 + ComposerInputMetrics.bottomInset(expanded: true, natural: natural), 10 + line + 2, accuracy: 0.001
         )
-        // Each extra line adds exactly one 24pt line pitch.
+        // Each extra line adds exactly one 22pt line pitch.
         XCTAssertEqual(natural + ComposerInputMetrics.lineSpacing(natural: natural), line, accuracy: 0.001)
     }
 

@@ -655,7 +655,7 @@ struct WorkspaceFilterIcon: View {
         // Lab `FilterPopover`: a 44pt glass circle with the 19pt filter glyph.
         ThreadGlyph(name: "filter", size: 19)
             .foregroundStyle(theme.foreground).frame(width: 44, height: 44)
-            .glassEffect(.conn(theme).interactive(), in: .circle)
+            .glassEffect(.regular.interactive(), in: .circle)
     }
 }
 
@@ -776,7 +776,7 @@ struct RecordChrome: ViewModifier {
                         }.buttonStyle(.plain).accessibilityLabel(name)
                             .accessibilityAddTraits(name == selection ? .isSelected : [])
                     }
-                }.padding(4).frame(width: 256).glassEffect(.conn(theme), in: .capsule).padding(.horizontal, 24).offset(y: 4)
+                }.padding(4).frame(width: 256).glassEffect(.regular, in: .capsule).padding(.horizontal, 24).offset(y: 4)
             }
     }
 }

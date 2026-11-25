@@ -393,7 +393,7 @@ struct ThreadView: View {
                         .flipsForRightToLeftLayoutDirection(true)
                         .foregroundStyle(theme.foreground)
                         .frame(width: 44, height: 44)
-                        .glassEffect(.conn(theme).interactive(), in: .circle)
+                        .glassEffect(.regular.interactive(), in: .circle)
                 }
                 .accessibilityLabel("Back")
             }
@@ -422,7 +422,7 @@ struct ThreadView: View {
                     ThreadGlyph(name: "more-horizontal", size: 22)
                         .foregroundStyle(theme.foreground)
                         .frame(width: 44, height: 44)
-                        .glassEffect(.conn(theme).interactive(), in: .circle)
+                        .glassEffect(.regular.interactive(), in: .circle)
                 }
                 .accessibilityLabel("More actions")
                 .accessibilityIdentifier("thread.moreButton")
@@ -855,7 +855,7 @@ struct ThreadView: View {
                         ThreadGlyph(name: "chevron-down", size: 16)
                             .foregroundStyle(theme.foreground)
                             .frame(width: 38.5, height: 38.5)
-                            .glassEffect(.conn(theme).interactive(), in: .circle)
+                            .glassEffect(.regular.interactive(), in: .circle)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -887,7 +887,7 @@ struct ThreadView: View {
             .padding(.horizontal, 12)
             // Mobile's 38.5pt control in a 44pt target, like the jump circle beside it.
             .frame(height: 38.5)
-            .glassEffect(.conn(theme).interactive(), in: .capsule)
+            .glassEffect(.regular.interactive(), in: .capsule)
             .frame(height: 44)
             .contentShape(Capsule())
         }

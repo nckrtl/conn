@@ -23,7 +23,7 @@ struct ThreadAgentsSheet: View {
             .scrollContentBackground(.hidden)
             // Keeps the system Liquid Glass but tints it with the screen colour, so the sheet reads
             // as dark as the glass buttons over the feed instead of as bright as the thread behind it.
-            .background(theme.background.opacity(ConnGlass.sheetTint).ignoresSafeArea())
+            .background(theme.background.opacity(0.7).ignoresSafeArea())
             .overlay {
                 if agents.isEmpty {
                     Text("No agents in this turn.")

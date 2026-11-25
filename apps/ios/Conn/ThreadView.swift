@@ -565,7 +565,7 @@ struct ThreadView: View {
                             if !snapshot.workGroups.contains(where: \.hasActive) {
                                 WorkingFold(since: runStartedAt(in: snapshot))
                             }
-                            LiveWorkRow(label: liveWork.label, systemImage: liveWork.icon)
+                            LiveWorkRow(label: liveWork.label, glyph: liveWork.icon)
                         }
                         .padding(.top, Kit.Space.xs)
                     }
@@ -750,16 +750,16 @@ struct ThreadView: View {
     /// What the running turn does now, for the live row: a running tool, the subagents it waits on,
     /// or thinking (mobile `liveToolActivitySummary`, `waitingOnSubagentsLabel`).
     private var liveWork: (label: String, icon: String) {
-        guard let snapshot else { return ("Thinking", "brain") }
+        guard let snapshot else { return ("Thinking", "thinking") }
         let last = snapshot.entries.last { if case .queuedUser = $0 { false } else { true } }
         if case let .tool(_, kind, title, _, .running, _, _, _)? = last {
-            return (title.isEmpty ? kind : title, "wrench.and.screwdriver")
+            return (title.isEmpty ? kind : title, "thinking")
         }
         let waiting = turnSubagents.filter { !$0.settled }.count
         if waiting > 0 {
-            return (waiting == 1 ? "Waiting on a subagent" : "Waiting on \(waiting) subagents", "brain")
+            return (waiting == 1 ? "Waiting on a subagent" : "Waiting on \(waiting) subagents", "thinking")
         }
-        return ("Thinking", "brain")
+        return ("Thinking", "thinking")
     }
 
     private func runStartedAt(in snapshot: FfiThreadSnapshot) -> Date {
@@ -842,7 +842,7 @@ struct ThreadView: View {
             }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "person.2")
+                ThreadGlyph(name: "users", size: 14)
                     .font(.system(size: 13))
                     .foregroundStyle(theme.mutedForeground)
                 Text(label)

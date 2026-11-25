@@ -135,14 +135,14 @@ struct WorkingFoldLabel: View {
 /// Conn's live row (`ThinkingTimelineRow`): an icon and a shimmering label, never a spinner.
 struct LiveWorkRow: View {
     let label: String
-    var systemImage = "brain"
+    /// Superheroicons `thinking`, as the lab and desktop (`icons::BRAIN`) draw it.
+    var glyph = "thinking"
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
     @Environment(\.connTheme) private var theme
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.system(size: 14))
+            ThreadGlyph(name: glyph, size: 16)
                 .foregroundStyle(theme.mutedForeground)
                 .frame(width: 24, height: 24)
             ShimmerText(label, size: size)

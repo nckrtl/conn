@@ -143,15 +143,17 @@ struct ConnComposerPill<Trailing: View>: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 2)
             .foregroundStyle(theme.foreground)
-            // The pill and the sheet are one Liquid Glass surface in two shapes. It is a background,
-            // not part of the layout. Keyboard up it reaches past the screens' side insets to the
-            // screen edges and runs `bottomBleed` below the box, behind the keyboard. The box, and
-            // so the controls, stay where the safe area puts them.
-            .background {
-                ComposerSurface(shape: shape, hairline: theme.border, sheet: keyboardUp)
-                    .padding(.horizontal, keyboardUp ? -ComposerSheet.screenInset : 0)
-                    .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)
-            }
+            // The pill and the sheet are one Liquid Glass surface in two shapes, applied to the
+            // content itself so the text and controls draw above the glass (as a separate background
+            // inside the screen's GlassEffectContainer, the glass drew over them). Keyboard up the
+            // frame grows to the screen edges and `bottomBleed` below the box, behind the keyboard,
+            // before the glass; the negative padding after it keeps the layout where it was.
+            .padding(.horizontal, keyboardUp ? ComposerSheet.screenInset : 0)
+            .padding(.bottom, keyboardUp ? ComposerSheet.bottomBleed : 0)
+            .glassEffect(.regular, in: shape)
+            .overlay(alignment: .top) { ComposerSheetEdge(shape: shape, color: theme.border, visible: keyboardUp) }
+            .padding(.horizontal, keyboardUp ? -ComposerSheet.screenInset : 0)
+            .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)
         }
         .animation(Self.spring, value: expanded)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
@@ -406,25 +408,20 @@ enum ComposerSheet {
     static var bottomBleed: CGFloat { bottomGutter + keyboardCover }
 }
 
-/// The composer's Liquid Glass, in the pill's shape or the sheet's. The glass never changes, so
-/// the pill morphs into the sheet as one material. As a sheet it gains a 0.5 pt top edge in the
-/// border colour: the lab's `inset 0 0.5px 0`.
-private struct ComposerSurface: View {
+/// The sheet's 0.5 pt top edge in the border colour (the lab's `inset 0 0.5px 0`), clipped to its corners.
+private struct ComposerSheetEdge: View {
     let shape: UnevenRoundedRectangle
-    let hairline: Color
-    let sheet: Bool
+    let color: Color
+    let visible: Bool
 
     var body: some View {
-        Color.clear
-            .glassEffect(.regular, in: shape)
-            .overlay(alignment: .top) {
-                Rectangle()
-                    .fill(hairline)
-                    .frame(height: 0.5)
-                    .opacity(sheet ? 1 : 0)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .clipShape(shape)
-            }
+        Rectangle()
+            .fill(color)
+            .frame(height: 0.5)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .clipShape(shape)
+            .opacity(visible ? 1 : 0)
+            .allowsHitTesting(false)
     }
 }
 

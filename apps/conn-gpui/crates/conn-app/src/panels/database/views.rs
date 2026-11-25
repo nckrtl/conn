@@ -163,12 +163,7 @@ pub(crate) fn render_connection_menu(
             list = list.child(menu_action(
                 "db-menu-unlock-vault",
                 "Unlock Vault…",
-                Box::new(|panel, _, cx| {
-                    panel.menu_open = false;
-                    panel.allow_unlock_next = true;
-                    panel.load_vault_databases(true, cx);
-                    cx.notify();
-                }),
+                Box::new(|panel, _, cx| panel.unlock_vault(cx)),
             ));
         }
         Some(VaultErrorKind::Error) => {
@@ -185,11 +180,7 @@ pub(crate) fn render_connection_menu(
             list = list.child(menu_action(
                 "db-menu-retry-vault",
                 "Retry Vault",
-                Box::new(|panel, _, cx| {
-                    panel.menu_open = false;
-                    panel.load_vault_databases(true, cx);
-                    cx.notify();
-                }),
+                Box::new(|panel, _, cx| panel.retry_vault(cx)),
             ));
         }
         _ => {}

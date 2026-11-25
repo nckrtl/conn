@@ -932,6 +932,9 @@ const codexMcpStartupNeedsSignIn = (payload: {
 
 /** A sign-in Codex started, waiting for its callback page on this machine to be opened. */
 interface CodexMcpSignIn {
+  /** The provider thread that started it; only that thread may finish it. */
+  readonly providerThreadId: string;
+  readonly authorizationUrl: string;
   readonly redirectUri: string;
   readonly state: string;
   readonly succeeded: Deferred.Deferred<boolean>;
@@ -2135,6 +2138,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const mcpStartupFailures = new Map<string, Map<string, CodexMcpStartupFailure>>();
         // By server name: the shared app-server signs a server in for every thread at once.
         const mcpSignIns = new Map<string, CodexMcpSignIn>();
+        // Codex's completion names only the server, so one native sign-in per server at a time.
+        const mcpSignInPermit = yield* Semaphore.make(1);
         const turnTokenUsageByThread = new Map<string, CodexTurnTokenUsageState>();
         const usageStateForThread = (nativeThreadId: string) => {
           let state = turnTokenUsageByThread.get(nativeThreadId);
@@ -8863,34 +8868,52 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 if (status.data.some((entry) => entry.runtimeStatus === "connected")) {
                   return { authorizationUrl: null };
                 }
-                // With the thread, Codex reconnects the server there once the sign-in succeeds.
-                const { authorizationUrl } = yield* ensureInitialized.pipe(
-                  Effect.andThen(
-                    withLoadedThread(
-                      providerThread,
-                      threadId,
-                      client.request("mcpServer/oauth/login", { name: server, threadId }),
-                    ),
-                  ),
+                return yield* mcpSignInPermit.withPermit(
+                  Effect.gen(function* () {
+                    // A retry reuses the open native sign-in: a second one would replace it, and
+                    // the first one's completion would then settle the second.
+                    const open = mcpSignIns.get(server);
+                    if (open !== undefined && !(yield* Deferred.isDone(open.succeeded))) {
+                      if (open.providerThreadId !== providerThread.id) {
+                        return yield* new ProviderMcpSignInError({
+                          server,
+                          detail: `A sign-in to ${server} is already open on another thread.`,
+                        });
+                      }
+                      return { authorizationUrl: open.authorizationUrl };
+                    }
+                    // With the thread, Codex reconnects the server there once the sign-in succeeds.
+                    const { authorizationUrl } = yield* ensureInitialized.pipe(
+                      Effect.andThen(
+                        withLoadedThread(
+                          providerThread,
+                          threadId,
+                          client.request("mcpServer/oauth/login", { name: server, threadId }),
+                        ),
+                      ),
+                    );
+                    const params = yield* Effect.try({
+                      try: () => new URL(authorizationUrl).searchParams,
+                      catch: () =>
+                        new ProviderMcpSignInError({
+                          server,
+                          detail: `Codex returned a sign-in page for ${server} that T3 Code can't open.`,
+                        }),
+                    });
+                    const redirectUri = params.get("redirect_uri");
+                    const state = params.get("state");
+                    if (redirectUri !== null && state !== null) {
+                      mcpSignIns.set(server, {
+                        providerThreadId: providerThread.id,
+                        authorizationUrl,
+                        redirectUri,
+                        state,
+                        succeeded: yield* Deferred.make<boolean>(),
+                      });
+                    }
+                    return { authorizationUrl };
+                  }),
                 );
-                const params = yield* Effect.try({
-                  try: () => new URL(authorizationUrl).searchParams,
-                  catch: () =>
-                    new ProviderMcpSignInError({
-                      server,
-                      detail: `Codex returned a sign-in page for ${server} that T3 Code can't open.`,
-                    }),
-                });
-                const redirectUri = params.get("redirect_uri");
-                const state = params.get("state");
-                if (redirectUri !== null && state !== null) {
-                  mcpSignIns.set(server, {
-                    redirectUri,
-                    state,
-                    succeeded: yield* Deferred.make<boolean>(),
-                  });
-                }
-                return { authorizationUrl };
               },
               Effect.mapError((cause) =>
                 isProviderMcpSignInError(cause)
@@ -8903,12 +8926,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
             complete: Effect.fn("CodexAdapterV2.mcpSignIn.complete")(function* ({
+              providerThread,
               server,
               callbackUrl,
             }) {
               const fail = (detail: string) => new ProviderMcpSignInError({ server, detail });
               const signIn = mcpSignIns.get(server);
               if (signIn === undefined) return yield* fail(`Start the sign-in to ${server} again.`);
+              // Another thread in this session must not take, or clear, this thread's result.
+              if (signIn.providerThreadId !== providerThread.id) {
+                return yield* fail(`The sign-in to ${server} was started on another thread.`);
+              }
               // A browser on this machine may already have opened Codex's callback page.
               let delivered = true;
               if (!(yield* Deferred.isDone(signIn.succeeded))) {

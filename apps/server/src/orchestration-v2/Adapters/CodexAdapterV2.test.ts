@@ -3383,6 +3383,114 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect(
+    "keeps one native Codex MCP sign-in per server, finished only by the thread that started it",
+    () =>
+      Effect.gen(function* () {
+        const nativeThreadId = "mcp-sign-in-retry-thread";
+        const status = (id: number): Array<CodexReplay.CodexAppServerReplayEntry> => [
+          {
+            type: "expect_outbound",
+            label: "mcpServerStatus/list",
+            frame: {
+              id,
+              method: "mcpServerStatus/list",
+              params: {
+                serverName: "linear",
+                threadId: nativeThreadId,
+                detail: "toolsAndAuthOnly",
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "mcpServerStatus/list",
+            frame: {
+              id,
+              result: {
+                data: [
+                  {
+                    name: "linear",
+                    runtimeStatus: "authenticationRequired",
+                    authStatus: "oAuth",
+                    tools: {},
+                    resources: [],
+                    resourceTemplates: [],
+                  },
+                ],
+              },
+            },
+          },
+        ];
+        const authorizationUrl =
+          "https://linear.example/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A50124%2Fcallback%2Fabc&state=s1";
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "codex-mcp-sign-in-retry",
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId: "unused",
+                prompt: "work",
+              }).slice(0, 5),
+              ...status(3),
+              // The only native sign-in: the replay rejects a second mcpServer/oauth/login.
+              {
+                type: "expect_outbound",
+                label: "mcpServer/oauth/login",
+                frame: {
+                  id: 4,
+                  method: "mcpServer/oauth/login",
+                  params: { name: "linear", threadId: nativeThreadId },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "mcpServer/oauth/login",
+                frame: { id: 4, result: { authorizationUrl } },
+              },
+              ...status(5),
+              {
+                type: "emit_inbound",
+                label: "mcpServer/oauthLogin/completed",
+                frame: {
+                  method: "mcpServer/oauthLogin/completed",
+                  params: { name: "linear", threadId: nativeThreadId, success: true },
+                },
+              },
+            ],
+          }),
+        );
+        const mcpSignIn = harness.runtime.mcpSignIn;
+        assert.isDefined(mcpSignIn);
+        const input = { providerThread: harness.providerThread, server: "linear" };
+        const callbackUrl = "127.0.0.1:50124/callback/abc?code=c1&state=s1";
+        assert.deepEqual(yield* mcpSignIn.start(input), { authorizationUrl });
+        // A second Start while the first is open gets the same page, not a new native attempt.
+        assert.deepEqual(yield* mcpSignIn.start(input), { authorizationUrl });
+        // Another thread in the same session can't take this thread's result.
+        const other = yield* mcpSignIn
+          .complete({
+            providerThread: { ...harness.providerThread, id: "other-provider-thread" as never },
+            server: "linear",
+            callbackUrl,
+          })
+          .pipe(Effect.flip);
+        assert.equal(other._tag, "ProviderMcpSignInError");
+        // The starting thread still finishes it.
+        yield* mcpSignIn.complete({ ...input, callbackUrl });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect.each(["before", "during"] as const)(
     "surfaces a user MCP server that fails to start %s the turn, with a sign-in when it needs one",
     (timing) =>

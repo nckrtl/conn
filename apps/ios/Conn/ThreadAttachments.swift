@@ -43,7 +43,7 @@ struct ThreadAttachments: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: min(2, images.count)), spacing: 3) {
                     ForEach(images, id: \.self) { file in
                         AttachmentTile(file: file, store: store, thread: thread)
-                            .id([thread, store.environmentId ?? "", String(store.identityEpoch)])
+                            .id([thread, store.attachmentEnvironment, String(store.identityEpoch)])
                     }
                 }
             }
@@ -78,8 +78,15 @@ private struct AttachmentTile: View {
     @State private var player: AVPlayer?
     private var video: Bool { file.mimeType.hasPrefix("video/") }
     private var thumbnailKey: String {
-        [store.environmentId ?? "", thread, file.id, file.name, file.mimeType, String(file.sizeBytes)]
+        [store.attachmentEnvironment, thread, file.id, file.name, file.mimeType, String(file.sizeBytes)]
             .map { "\($0.utf8.count):\($0)" }.joined()
+    }
+
+    private var thumbnail: UIImage? {
+        if store.offlineReader?.retainsThread(thread: thread) == true {
+            return loaded ?? store.imageThumbnails.image(thumbnailKey)
+        }
+        return store.status == .connected ? loaded : nil
     }
 
     var body: some View {
@@ -90,8 +97,7 @@ private struct AttachmentTile: View {
             } else if file.isImage {
                 Button { Task { await openFile() } } label: {
                     Color.clear.aspectRatio(4 / 3, contentMode: .fit).overlay {
-                        if store.offlineReader?.retainsThread(thread: thread) == true,
-                           let image = loaded ?? store.imageThumbnails.image(thumbnailKey) {
+                        if let image = thumbnail {
                             Image(uiImage: image).resizable().scaledToFill()
                         } else { fileLabel }
                     }.clipped()
@@ -121,16 +127,16 @@ private struct AttachmentTile: View {
         .task(id: "\(file.id)|\(attempt)|\(store.status == .connected)|\(String(describing: store.offlineReader.map(ObjectIdentifier.init)))") {
             do {
                 if file.isImage {
-                    guard let reader = store.offlineReader, reader.retainsThread(thread: thread),
-                          store.imageThumbnails.image(thumbnailKey) == nil else { return }
+                    guard let reader = store.offlineReader, thumbnail == nil else { return }
                     for pass in 0..<2 {
                         let bytes = try await reader.imageBytes(thread: thread, file: file, online: store.status == .connected)
                         try Task.checkCancellation()
                         let thumbnail = await Task.detached { AttachmentThumbnails.decode(bytes) }.value
                         try Task.checkCancellation()
-                        guard store.offlineReader === reader, reader.retainsThread(thread: thread) else { return }
+                        guard store.offlineReader === reader else { return }
                         if let thumbnail {
-                            store.imageThumbnails.insert(thumbnail, key: thumbnailKey)
+                            if reader.retainsThread(thread: thread) { store.imageThumbnails.insert(thumbnail, key: thumbnailKey) }
+                            else if store.status != .connected { return }
                             loaded = UIImage(cgImage: thumbnail)
                             failure = nil
                             return
@@ -194,7 +200,8 @@ private struct AttachmentTile: View {
             if file.isImage {
                 guard let reader = store.offlineReader else { throw URLError(.notConnectedToInternet) }
                 let bytes = try await reader.imageBytes(thread: thread, file: file, online: store.status == .connected)
-                guard store.offlineReader === reader, reader.retainsThread(thread: thread) else { throw URLError(.cancelled) }
+                guard store.identityEpoch == epoch, store.offlineReader === reader,
+                      reader.retainsThread(thread: thread) || store.status == .connected else { throw URLError(.cancelled) }
                 try bytes.write(to: local, options: .atomic)
             } else {
                 let url = try await store.assetURL(id: file.id, name: file.name, mime: file.mimeType)

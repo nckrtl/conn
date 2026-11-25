@@ -10,6 +10,14 @@ use sqlx::{Executor as _, SqlitePool};
 pub struct MessageCache(SqlitePool);
 
 impl MessageCache {
+    pub fn invalidate(&self) {
+        drop(self.0.close());
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
     /// Opens the local cache and creates its tables on first use.
     ///
     /// # Errors

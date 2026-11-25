@@ -28,6 +28,7 @@ conn-state.workspace = true
 conn-theme = { workspace = true, features = ["highlight"] }
 reqwest.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -38,7 +39,6 @@ url.workspace = true
 conn-state = { workspace = true, features = ["testkit"] }
 conn-wire.workspace = true
 futures.workspace = true
-tempfile.workspace = true
 tokio-tungstenite.workspace = true
 
 [lints]

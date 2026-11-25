@@ -413,6 +413,9 @@ impl<C: SessionCore> Machine<C> {
     }
 
     pub(crate) fn pair_manual(&mut self, server_url: String, pairing_code: String) -> Effects<C> {
+        self.identity_epoch += 1;
+        self.open_thread = None;
+        self.has_connected = false;
         self.saved = None;
         let mut fx = vec![Effect::Save(None), Effect::WipeCache];
         fx.extend(self.begin(
@@ -434,6 +437,7 @@ impl<C: SessionCore> Machine<C> {
     }
 
     pub(crate) fn sign_out(&mut self) -> Effects<C> {
+        self.identity_epoch += 1;
         let mut fx = self.connect_manually();
         self.saved = None;
         self.open_thread = None;
@@ -843,9 +847,9 @@ impl ConnSession {
                 let (Some(this), Some(dir)) = (self.this.upgrade(), self.cache_dir.clone()) else {
                     return;
                 };
-                if !self.claim_cache(id, &dir, &identity) {
+                let Some(dir) = self.claim_cache(id, &dir, &identity) else {
                     return;
-                }
+                };
                 self.orbit.handle().spawn(async move {
                     this.open_offline(id, &core, dir, identity).await;
                 });
@@ -857,7 +861,14 @@ impl ConnSession {
                 environment_id,
             } => core.expect_environment(environment_id),
             Effect::WipeCache => {
-                *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some((_, reader)) = self
+                    .offline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    reader.db.invalidate();
+                }
                 if let Some(dir) = &self.cache_dir {
                     let _ = std::fs::remove_dir_all(dir);
                 }
@@ -867,12 +878,12 @@ impl ConnSession {
 
     /// Makes the cache directory this attempt's server's, emptying it when it held another
     /// server's. Runs under the machine lock, so only the current attempt writes it.
-    fn claim_cache(&self, id: u64, dir: &std::path::Path, identity: &str) -> bool {
+    fn claim_cache(&self, id: u64, dir: &std::path::Path, identity: &str) -> Option<PathBuf> {
         let machine = self.machine.lock().unwrap_or_else(|e| e.into_inner());
         if !machine.is_current(id) {
-            return false;
+            return None;
         }
-        claim_cache_dir(dir, identity).is_ok()
+        claim_cache_dir(dir, identity).ok()
     }
 
     async fn open_offline(&self, id: u64, core: &ConnCore, dir: PathBuf, identity: String) {
@@ -1104,7 +1115,7 @@ impl ConnSession {
                 {
                     return None;
                 }
-                crate::offline::read_saved_shell(&dir, &identity).await
+                crate::offline::read_saved_shell(&cache_files(&dir).ok()?, &identity).await
             })
             .await
             .ok()
@@ -1121,8 +1132,11 @@ impl ConnSession {
                     .await
                     .ok()?
                     != identity
-                    || !dir.join("messages.sqlite3").is_file()
                 {
+                    return None;
+                }
+                let dir = cache_files(&dir).ok()?;
+                if !dir.join("messages.sqlite3").is_file() {
                     return None;
                 }
                 OfflineReader::open(dir, identity, None).await.ok()
@@ -1363,13 +1377,43 @@ impl CoreListener for AttemptListener {
 }
 
 /// Empties `dir` unless it already belongs to `identity`, then marks it as `identity`'s.
-fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<()> {
+fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<PathBuf> {
     let marker = dir.join(IDENTITY_FILE);
-    if std::fs::read_to_string(&marker).ok().as_deref() != Some(identity) && dir.exists() {
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(identity) {
+        return cache_files(dir);
+    }
+    if dir.exists() {
         std::fs::remove_dir_all(dir)?;
     }
     std::fs::create_dir_all(dir)?;
-    std::fs::write(marker, identity)
+    let files = tempfile::Builder::new()
+        .prefix("pairing-")
+        .tempdir_in(dir)?
+        .keep();
+    std::fs::write(
+        dir.join("generation"),
+        files
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(std::io::ErrorKind::InvalidData)?,
+    )?;
+    std::fs::write(marker, identity)?;
+    Ok(files)
+}
+
+fn cache_files(dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    match std::fs::read_to_string(dir.join("generation")) {
+        Ok(name)
+            if name.strip_prefix("pairing-").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            }) =>
+        {
+            Ok(dir.join(name))
+        }
+        Ok(_) => Err(std::io::ErrorKind::InvalidData.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(dir.to_owned()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Reads a server's Conn environment id (`/.well-known/t3/environment`).
@@ -1397,6 +1441,33 @@ mod tests {
     use crate::orbit::tests::{MockGateway, spawn_mock_conn_server, spawn_rejecting_server};
 
     const AUTH: &str = "The server rejected this device's sign-in.";
+
+    #[tokio::test]
+    async fn image_cache_reset_isolates_pairings_with_the_same_environment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let root = parent.path().join("cache");
+        let original = claim_cache_dir(&root, "env")?;
+        let reader = OfflineReader::open(original.clone(), "env".into(), None).await?;
+        reader
+            .db
+            .save_image("env", "thread", "version", b"old")
+            .await?;
+        assert_eq!(claim_cache_dir(&root, "env")?, original);
+        reader.db.invalidate();
+        std::fs::remove_dir_all(&root)?;
+        let replacement = claim_cache_dir(&root, "env")?;
+        assert_ne!(original, replacement);
+        assert!(reader.db.image("env", "thread", "version").await.is_err());
+        assert!(
+            OfflineReader::open(original, "env".into(), None)
+                .await
+                .is_err()
+        );
+        let fresh = OfflineReader::open(replacement, "env".into(), None).await?;
+        assert!(fresh.db.image("env", "thread", "version").await?.is_none());
+        Ok(())
+    }
 
     #[derive(Clone, Debug, Default)]
     struct FakeCore {
@@ -2294,7 +2365,11 @@ mod tests {
             "node-new",
             "the cache now belongs to the new Node"
         );
-        match std::fs::read(dir.join("shell.json")) {
+        match std::fs::read(
+            cache_files(&dir)
+                .expect("cache generation")
+                .join("shell.json"),
+        ) {
             Ok(bytes) => {
                 let shell = conn_state::environments::LinkedShellSnapshot::from_json(&bytes)
                     .expect("any shell already written must be a valid replacement snapshot");

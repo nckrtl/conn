@@ -1256,14 +1256,8 @@ impl FilesPanel {
             );
         }
 
-        h_flex()
-            .w_full()
-            .flex_shrink_0()
+        super::chrome::toolbar_row(&self.tokens)
             .p(px(TOOLBAR_PAD_PX))
-            .border_b_1()
-            .border_color(control_border)
-            .items_center()
-            .gap(px(8.0))
             .child(
                 // Soft search field (`InputGroup variant="soft"`): h-8, pill radius, --shell-field fill.
                 h_flex()
@@ -1305,14 +1299,7 @@ impl FilesPanel {
         let fg = to_hsla(self.tokens.foreground);
         let muted = to_hsla(self.tokens.muted_foreground);
         let control_border = to_hsla(self.tokens.shell_divider_header);
-        let mut row = h_flex()
-            .w_full()
-            .flex_shrink_0()
-            .p(px(TOOLBAR_PAD_PX))
-            .border_b_1()
-            .border_color(control_border)
-            .items_center()
-            .gap(px(8.));
+        let mut row = super::chrome::toolbar_row(&self.tokens).p(px(TOOLBAR_PAD_PX));
         if let Some(path) = self.preview.path() {
             row = row
                 .child(

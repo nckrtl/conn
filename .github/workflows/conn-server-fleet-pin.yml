@@ -60,6 +60,7 @@ jobs:
       - name: Read the released executable's launch contract
         id: contract
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.published.outputs.tag }}
           SOURCE_SHA: ${{ needs.published.outputs.sha }}
         run: |

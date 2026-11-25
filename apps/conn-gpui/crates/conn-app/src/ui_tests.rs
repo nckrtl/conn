@@ -30,7 +30,10 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+mod annotations_popover;
 pub(crate) mod details_tasks;
+mod floating_surfaces;
+mod preview_host;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;

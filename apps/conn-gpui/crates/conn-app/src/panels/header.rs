@@ -17,7 +17,7 @@ use gpui_kit::{
 
 use super::color::to_hsla;
 use crate::a11y::ConnA11yExt as _;
-use crate::panels::chrome::ConnTooltipExt as _;
+use crate::panels::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _};
 
 /// Header height (`--shell-header-height`, 44px).
 pub(crate) const HEADER_HEIGHT_PX: f32 = 44.0;
@@ -549,7 +549,7 @@ pub(crate) fn dropdown_glass_shadow(tokens: &Tokens) -> gpui_kit::BoxShadow {
     }
 }
 
-fn render_add_panel_menu(
+pub(crate) fn render_add_panel_menu(
     tokens: &Tokens,
     available_tabs: &[RightPanelTab],
     on_add_tab: Rc<dyn Fn(RightPanelTab, &mut Window, &mut App)>,
@@ -577,7 +577,7 @@ fn render_add_panel_menu(
         .border_1()
         .border_color(glass_border)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     for item in panel_menu_items(available_tabs) {
         let PanelMenuItem {

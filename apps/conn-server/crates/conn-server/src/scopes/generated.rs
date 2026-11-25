@@ -128,6 +128,8 @@ pub(super) const SCOPES: &[(&str, &str)] = &[
     ("provider.install.remove", "providers:manage"),
     ("provider.install.start", "providers:manage"),
     ("provider.install.subscribe", "orchestration:read"),
+    ("provider.mcpSignIn.complete", "providers:manage"),
+    ("provider.mcpSignIn.start", "providers:manage"),
     ("provider.uploadFeedback", "orchestration:operate"),
     ("pullRequests.activity", "orchestration:read"),
     ("pullRequests.changeBreakdown", "orchestration:read"),

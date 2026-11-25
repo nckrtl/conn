@@ -9,6 +9,13 @@ fn main() {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("acp-mcp-bridge")) {
         std::process::exit(conn_server::acp_mcp_bridge::main());
     }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("acp-mcp-call")) {
+        let args = std::env::args_os()
+            .skip(2)
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        std::process::exit(conn_server::cli::acp_mcp_call(&args));
+    }
     // Antigravity's `BROWSER`: reports a sign-in URL instead of opening a browser.
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(conn_provider_acp::BROWSER_SUBCOMMAND))
@@ -87,13 +94,17 @@ fn run_server() {
         model_manifest: options.model_manifest.clone(),
         status_notifier: options.status_notifier.clone(),
     };
-    // `claudeAgent`, `codex` and `antigravity`, and one more provider per `providerInstances`
-    // entry of these drivers, each with its entry's settings (`conn_server::instances`).
+    let grok = conn_provider_acp::AcpConfig {
+        workspace_cwd: Some(options.cwd.clone()),
+        attachments_dir: Some(options.state_dir.join("attachments")),
+        ..Default::default()
+    };
     let instances = Arc::new(conn_server::instances::Instances::new(
         &[
             conn_provider_claude::DRIVER,
             conn_provider_codex::DRIVER,
             conn_provider_acp::ANTIGRAVITY.driver,
+            conn_provider_acp::GROK.driver,
         ],
         Arc::new(
             move |id: &str, driver: &str, entry: Option<&serde_json::Value>| {
@@ -103,6 +114,13 @@ fn run_server() {
                         id.into(),
                         antigravity.clone(),
                         entry,
+                    ))
+                } else if driver == conn_provider_acp::GROK.driver {
+                    Arc::new(conn_provider_acp::AcpProvider::with_settings(
+                        id.into(),
+                        &conn_provider_acp::GROK,
+                        grok.clone(),
+                        conn_provider_acp::GrokSettings::from_instance(entry),
                     ))
                 } else if driver == conn_provider_claude::DRIVER {
                     Arc::new(ClaudeProvider::for_instance(
@@ -122,21 +140,7 @@ fn run_server() {
             },
         ),
     ));
-    // T3's default `grok` instance: off until `providerInstances.grok` enables it. It starts
-    // with the stored settings, so a Grok task due at start can run; the server's status task
-    // applies later changes and probes the CLI.
-    let grok: Arc<dyn Provider> = Arc::new(conn_provider_acp::AcpProvider::with_settings(
-        "grok".into(),
-        &conn_provider_acp::GROK,
-        conn_provider_acp::AcpConfig {
-            workspace_cwd: Some(options.cwd.clone()),
-            // The same store Claude and Codex read.
-            attachments_dir: Some(options.state_dir.join("attachments")),
-            ..Default::default()
-        },
-        conn_server::serve::stored_grok_settings(&options.state_dir),
-    ));
-    runtime.block_on(serve_with_instances(options, vec![grok], Some(instances)));
+    runtime.block_on(serve_with_instances(options, vec![], Some(instances)));
     // Dropping the tasks drops provider children, which kills them (`kill_on_drop`).
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
 }

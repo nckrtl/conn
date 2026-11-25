@@ -986,6 +986,189 @@ fn fork(command: &str, source_point: Value) -> Value {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_native_fork_refusal_recovers_the_selected_parent_history() {
+    let db = TempDb::new("fork-declined");
+    let repo = Repo::new("fork-declined");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").rejecting_fork(),
+        create_in(&repo, "t1", "create"),
+        &["kept parent message", "later parent message"],
+    )
+    .await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:1"})),
+    )
+    .await;
+    dispatch(&engine, message("t2", "after", "continue fork")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    let sent = provider.prompts.lock().unwrap();
+    assert!(!provider.forks.lock().unwrap().is_empty());
+    assert!(sent.last().unwrap().contains("kept parent message"));
+    assert!(!sent.last().unwrap().contains("later parent message"));
+}
+
+#[tokio::test]
+async fn an_ambiguous_fork_history_injection_replaces_the_native_thread_before_retry() {
+    let db = TempDb::new("fork-uncertain-injection");
+    let repo = Repo::new("fork-uncertain-injection");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent")
+            .with_driver("codex")
+            .rejecting_fork()
+            .losing_one_injection_reply(),
+        create_in(&repo, "t1", "create"),
+        &["kept external parent history", "outside the fork"],
+    )
+    .await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:1"})),
+    )
+    .await;
+    dispatch(&engine, message("t2", "lost", "lost turn")).await;
+    let ambiguous = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(ambiguous["runs"][0]["status"], "failed");
+    let pending = ambiguous["contextHandoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["delivery"]["status"] == "pending")
+        .unwrap();
+    let original = pending["delivery"]["nativeThreadId"].clone();
+    assert!(original.is_string());
+    dispatch(&engine, message("t2", "retry", "continue the fork")).await;
+    let recovered = run_to_end(&engine, "t2", "run:t2:2").await;
+    assert_eq!(
+        recovered["runs"][1]["status"], "completed",
+        "{}",
+        recovered["turnItems"]
+    );
+    let carried = recovered["contextHandoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == pending["id"])
+        .unwrap();
+    assert_eq!(carried["delivery"]["status"], "injected");
+    assert_ne!(carried["delivery"]["nativeThreadId"], original);
+    let injected = crate::lock(&provider.injected).clone();
+    assert_eq!(injected.len(), 2);
+    assert_ne!(injected[0].0, injected[1].0);
+    let history = injected[1].1.to_string();
+    assert!(
+        history.contains("kept external parent history"),
+        "{history}"
+    );
+    assert!(!history.contains("outside the fork"), "{history}");
+    dispatch(&engine, message("t2", "again", "again")).await;
+    assert_eq!(
+        run_to_end(&engine, "t2", "run:t2:3").await["runs"][2]["status"],
+        "completed"
+    );
+    assert_eq!(
+        crate::lock(&provider.injected).len(),
+        2,
+        "no repeat on the fresh native thread"
+    );
+    assert_eq!(
+        crate::lock(&provider.prompts)
+            .iter()
+            .filter(|p| p.ends_with("continue the fork"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_portable_fork_keeps_its_original_runs_after_a_parent_rollback_and_clear() {
+    let db = TempDb::new("fork-after-clear");
+    let repo = Repo::new("fork-after-clear");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent"),
+        create_in(&repo, "t1", "create"),
+        &["before clear"],
+    )
+    .await;
+    let mut fresh = message("t1", "fresh", "fresh parent context");
+    fresh["freshContext"] = json!(true);
+    dispatch(&engine, fresh).await;
+    run_to_end(&engine, "t1", "run:t1:2").await;
+    dispatch(&engine, message("t1", "discard", "absent at fork")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:3").await;
+    dispatch(
+        &engine,
+        rollback("rollback-before", &checkpoint_at(&p, 2), Some(false)),
+    )
+    .await;
+    until(&engine, |p| p["runs"][2]["status"] == "rolled_back").await;
+    dispatch(&engine, message("t1", "keep", "present at fork")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:4").await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:4"})),
+    )
+    .await;
+    dispatch(
+        &engine,
+        rollback("rollback-after", &checkpoint_at(&p, 2), Some(false)),
+    )
+    .await;
+    until(&engine, |p| p["runs"][3]["status"] == "rolled_back").await;
+    dispatch(&engine, message("t2", "continue", "resume the fork")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    let sent = provider.prompts.lock().unwrap();
+    let prompt = sent.last().unwrap();
+    assert!(
+        prompt.contains("fresh parent context") && prompt.contains("present at fork"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("before clear") && !prompt.contains("absent at fork"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn early_side_chat_gets_running_parent_activity_once_and_excludes_queued_work() {
+    let db = TempDb::new("early-side");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t1", "first", "hang")).await;
+    until_provider_turn(&mut stream).await;
+    dispatch(&engine, queued("queued", "invisible queued message")).await;
+    let mut side = fork("fork", json!({"type":"latest_stable"}));
+    side["sideChat"] = json!(true);
+    dispatch(&engine, side).await;
+    dispatch(&engine, message("t2", "question", "side question")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    dispatch(&engine, message("t2", "second", "next question")).await;
+    run_to_end(&engine, "t2", "run:t2:2").await;
+    let prompts = provider.prompts.lock().unwrap();
+    let first = &prompts[prompts.len() - 2];
+    assert!(
+        first.contains("in a side chat")
+            && first.contains("- User: hang")
+            && !first.contains("invisible queued message"),
+        "{first}"
+    );
+    assert_eq!(prompts.last().unwrap(), "next question");
+}
+#[tokio::test(flavor = "current_thread")]
 async fn a_fork_starts_from_the_source_run_with_a_native_fork() {
     let db = TempDb::new("fork");
     let repo = Repo::new("fork");
@@ -1644,6 +1827,56 @@ async fn rollback_asks_the_provider_instance_whether_it_can_roll_back() {
         "{}",
         p["thread"]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn portable_rollback_starts_a_new_native_conversation_with_only_kept_history() {
+    for driver in ["grok", "antigravity"] {
+        let db = TempDb::new(driver);
+        let repo = Repo::new(driver);
+        let (engine, provider) = with_turns(
+            &db,
+            &repo,
+            FakeProvider::new("claudeAgent")
+                .with_driver(driver)
+                .without_rollback(),
+            create_worktree_thread(&repo),
+            &["kept apples", "discarded pears"],
+        )
+        .await;
+        let p = projection(&engine, "t1").await;
+        dispatch(&engine, rollback("rb", &checkpoint_at(&p, 1), Some(false))).await;
+        until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+        let slash = if driver == "grok" {
+            "/review saved changes"
+        } else {
+            "/compact"
+        };
+        dispatch(&engine, message("t1", "command", slash)).await;
+        run_to_end(&engine, "t1", "run:t1:3").await;
+        assert_eq!(provider.prompts.lock().unwrap().last().unwrap(), slash);
+        dispatch(&engine, message("t1", "after", "next question")).await;
+        run_to_end(&engine, "t1", "run:t1:4").await;
+        dispatch(&engine, message("t1", "again", "later")).await;
+        run_to_end(&engine, "t1", "run:t1:5").await;
+        let prompts = provider.prompts.lock().unwrap();
+        assert_eq!(prompts.last().unwrap(), "later");
+        let prompt = &prompts[prompts.len() - 2];
+        assert!(
+            prompt.contains("kept apples") && prompt.contains("next question"),
+            "{driver}: {prompt}"
+        );
+        assert!(!prompt.contains("discarded pears"), "{driver}: {prompt}");
+        assert!(provider.rollbacks.lock().unwrap().is_empty());
+        assert!(
+            !provider
+                .resumes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id.contains("native:1 "))
+        );
+    }
 }
 
 fn refused_message<T, E: serde::Serialize>(result: Result<T, EngineError<E>>) -> String {

@@ -48,6 +48,47 @@ fn pending_background_tasks(
     if has_active_run {
         return Ok(vec![]);
     }
+    let (items, rolled_back) = background_items(tx, thread_id)?;
+    let pull_requests = thread["pullRequests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(crate::background::derive_pending_background_work(
+        &crate::background::BackgroundInput {
+            latest_run,
+            has_active_run,
+            provider_threads,
+            turn_items: &items,
+            active_provider_thread_id: thread["activeProviderThreadId"].as_str(),
+            rolled_back_run_ids: &rolled_back,
+            pull_requests: &pull_requests,
+        },
+    ))
+}
+
+/// Inspect the prior native conversation while its replacement run is starting.
+pub(crate) fn has_native_background_work(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    provider: &Value,
+) -> StoreResult<bool> {
+    if provider["pendingBackgroundTasks"]
+        .as_array()
+        .is_some_and(|tasks| !tasks.is_empty())
+    {
+        return Ok(true);
+    }
+    let (items, rolled_back) = background_items(tx, thread_id)?;
+    Ok(
+        crate::background::pending_background_items(&items, &rolled_back)
+            .any(|item| item["providerThreadId"] == provider["id"]),
+    )
+}
+
+fn background_items(
+    tx: &Tx<'_>,
+    thread_id: &str,
+) -> StoreResult<(Vec<Value>, std::collections::HashSet<String>)> {
     let read = |sql: &str| -> StoreResult<Vec<Value>> {
         let mut statement = tx.conn().prepare(sql).map_err(|e| format!("store: {e}"))?;
         let rows = statement
@@ -75,21 +116,7 @@ fn pending_background_tasks(
     .iter()
     .filter_map(|run| run["id"].as_str().map(str::to_owned))
     .collect();
-    let pull_requests = thread["pullRequests"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    Ok(crate::background::derive_pending_background_work(
-        &crate::background::BackgroundInput {
-            latest_run,
-            has_active_run,
-            provider_threads,
-            turn_items: &items,
-            active_provider_thread_id: thread["activeProviderThreadId"].as_str(),
-            rolled_back_run_ids: &rolled_back,
-            pull_requests: &pull_requests,
-        },
-    ))
+    Ok((items, rolled_back))
 }
 
 /// The latest run that started and the provider thread whose background work outlives it,
@@ -135,6 +162,26 @@ pub(crate) const IDLE_COMPACTION_MESSAGE_SQL: &str = "(json_extract(m.body, '$.r
   AND (json_extract(m.body, '$.idleCompaction') IS NOT NULL
        OR (json_extract(m.body, '$.createdBy') = 'agent'
            AND json_extract(m.body, '$.creationSource') = 'server')))";
+
+/// The newest failed error item on a failed run's root node (T3 latestRootProviderFailure).
+pub(crate) fn latest_root_failure(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    latest_run: Option<&Value>,
+) -> StoreResult<Option<Value>> {
+    Ok(match latest_run {
+        Some(run) if run["status"] == "failed" => one(
+            tx,
+            "SELECT body FROM entities WHERE thread_id = ?1 AND kind = 'turnItems'
+             AND json_extract(body, '$.type') = 'error' AND json_extract(body, '$.status') = 'failed'
+             AND json_extract(body, '$.runId') = ?2 AND json_extract(body, '$.nodeId') = ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![thread_id, run["id"].as_str(), run["rootNodeId"].as_str()],
+        )?
+        .map(|item| item["failure"].clone()),
+        _ => None,
+    })
+}
 
 /// `isSilentRunForShell` on a `runs` row aliased `r`: the server's own idle compaction stays
 /// out of the shell unless it failed, so lists and notifications keep the user's last turn.
@@ -242,19 +289,7 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         latest_user("")?,
         latest_user("AND json_extract(body, '$.createdBy') = 'user'")?,
     );
-    // `latestRootProviderFailure`: the newest failed error item on a failed run's root node.
-    let failure = match &latest_run {
-        Some(run) if run["status"] == "failed" => one(
-            tx,
-            "SELECT body FROM entities WHERE thread_id = ?1 AND kind = 'turnItems'
-             AND json_extract(body, '$.type') = 'error' AND json_extract(body, '$.status') = 'failed'
-             AND json_extract(body, '$.runId') = ?2 AND json_extract(body, '$.nodeId') = ?3
-             ORDER BY seq DESC LIMIT 1",
-            params![thread_id, run["id"].as_str(), run["rootNodeId"].as_str()],
-        )?
-        .map(|item| item["failure"].clone()),
-        _ => None,
-    };
+    let failure = latest_root_failure(tx, thread_id, latest_run.as_ref())?;
     let item_count = tx.count(thread_id, "turnItems")?;
     // `subagent_count`: native and delegated alike, one `subagents` row per child.
     let subagent_count = tx.count(thread_id, "subagents")?;
@@ -328,7 +363,7 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "lastError": failure_field("message"),
         "lastErrorClass": failure_field("class"),
         "lastErrorCode": failure_field("code"),
-        "usageLimitResetAt": null,
+        "usageLimitResetAt": if failure_field("class") == "usage_limit" {failure_field("resetAt")} else {Value::Null},
         "pendingRuntimeRequest": pending_summary,
         "pendingGuestMessageCount": 0,
         "latestVisibleMessage": null,

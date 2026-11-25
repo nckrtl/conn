@@ -349,6 +349,8 @@ dependencies = [
  "conn-provider",
  "conn-provider-support",
  "conn-support",
+ "regex-automata",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -381,12 +383,14 @@ dependencies = [
  "conn-provider",
  "conn-provider-support",
  "conn-support",
+ "jiff",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
+ "url",
 ]
 
 [[package]]

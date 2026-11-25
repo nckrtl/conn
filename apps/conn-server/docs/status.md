@@ -2738,7 +2738,7 @@ Not built, with the reason:
 
 - **The Codex status probe.** Built on 2026-11-15 (see "Codex: the abandoned start and the
   status probe"), with Codex's `customModels`.
-- Claude's `customModels` and `autoCompactWindow`, Codex's `shadowHomePath` and `setupMode`
+- Codex's `shadowHomePath` and `setupMode`
   (T3's managed Codex home).
 - More than one instance of Grok (its default instance follows its settings as before).
 
@@ -3198,9 +3198,8 @@ T3 Code.
 2. **Provider interface.** The server side of the host handle
    (`ProviderHost`: only the trait and a rooted file host exist; no terminals, and the
    server passes none); titles through an agent provider (see
-   "Claude provider: background work, …"); Claude's workflow tasks and `stopTask`; Claude's
-   `customModels` and `autoCompactWindow` (see "Provider instance settings for Claude and
-   Codex"). The Codex status probe and Codex's `customModels` are built (2026-11-15).
+   "Claude provider: background work, …"); Claude's workflow tasks and `stopTask`. Claude instance
+   settings now apply `customModels` and `autoCompactWindow`. The Codex status probe and Codex's `customModels` are built (2026-11-15).
 3. **Other providers.** One ACP provider for Grok, Kiro, fx, Antigravity and the ACP registry:
    `crates/conn-provider-acp`. **Grok is offered by the server (2026-11-14):** T3's default
    `grok` instance, off until `providerInstances.grok` enables it, probed as T3 probes the CLI

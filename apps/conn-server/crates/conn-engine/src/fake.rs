@@ -56,6 +56,10 @@ pub const HOOK_STOP_REASON: &str =
     "preCompact hook (project): Save a current task checkpoint before compaction.";
 
 pub struct FakeProvider {
+    #[cfg(test)]
+    pub(crate) child_queries: Mutex<Vec<Value>>,
+    #[cfg(test)]
+    pub(crate) goal_stop_check: Arc<Mutex<Option<conn_provider::GoalStopCheck>>>,
     id: ProviderInstanceId,
     /// [`Provider::driver`]: `claudeAgent` unless [`Self::with_driver`] changes it.
     driver: &'static str,
@@ -82,6 +86,7 @@ pub struct FakeProvider {
     /// Session calls in order: `start <run>`, `interrupt <run>`, `interrupted <run>`,
     /// `rollback`, `rolled back`.
     pub calls: Arc<Mutex<Vec<String>>>,
+    pub native_controls: Arc<Mutex<Vec<Value>>>,
     /// The `nativeConversationHeadRef` of the provider thread each turn starts on. A rollback
     /// sets it to `rolled-back:<target>`, so a test sees which row a turn continues.
     pub turn_heads: Arc<Mutex<Vec<Value>>>,
@@ -91,11 +96,13 @@ pub struct FakeProvider {
     pub injected: Arc<Mutex<Vec<(String, Value)>>>,
     /// Sessions take injected history, as Codex's `thread/inject_items`.
     injects: bool,
+    lose_injection_reply: Arc<AtomicBool>,
     /// Provider threads made per app thread (`ensure_thread`); the second and later get a
     /// numbered id, as a real provider gives each new conversation its own.
     ensured: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     /// Rollbacks left to fail; `usize::MAX` fails every one.
     fail_rollbacks: Arc<AtomicUsize>,
+    fail_fork: bool,
     /// Stop and rollback take this long after their work, as a slow provider.
     control_delay: std::time::Duration,
     steering: bool,
@@ -122,10 +129,22 @@ pub struct FakeProvider {
     /// as a provider process that exits on its own (systemd's SIGTERM reaches it too).
     process_exit: Option<Arc<tokio::sync::Notify>>,
     #[cfg(test)]
+    pub(crate) steer_receipt: SteerReceiptGate,
+    #[cfg(test)]
     pub(crate) late_start_entered: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     pub(crate) workflow_stop_entered: Arc<tokio::sync::Notify>,
 }
+
+#[cfg(test)]
+type SteerReceiptGate = Arc<
+    Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+>;
 
 impl std::fmt::Debug for FakeProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -140,6 +159,10 @@ impl std::fmt::Debug for FakeProvider {
 impl FakeProvider {
     pub fn new(instance_id: &str) -> Self {
         Self {
+            #[cfg(test)]
+            goal_stop_check: Default::default(),
+            #[cfg(test)]
+            child_queries: Mutex::new(Vec::new()),
             id: instance_id.into(),
             driver: "claudeAgent",
             sessions: Arc::new(AtomicUsize::new(0)),
@@ -153,12 +176,15 @@ impl FakeProvider {
             forks: Arc::new(Mutex::new(vec![])),
             resumes: Arc::new(Mutex::new(vec![])),
             calls: Arc::new(Mutex::new(vec![])),
+            native_controls: Arc::default(),
             turn_heads: Arc::default(),
             prompts: Arc::default(),
             injected: Arc::default(),
             injects: false,
+            lose_injection_reply: Arc::default(),
             ensured: Arc::default(),
             fail_rollbacks: Arc::new(AtomicUsize::new(0)),
+            fail_fork: false,
             control_delay: std::time::Duration::ZERO,
             steering: true,
             background_wait: true,
@@ -172,10 +198,18 @@ impl FakeProvider {
             process_exit: None,
             finish_background: Arc::default(),
             #[cfg(test)]
+            steer_receipt: Arc::default(),
+            #[cfg(test)]
             late_start_entered: Arc::default(),
             #[cfg(test)]
             workflow_stop_entered: Arc::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rejecting_fork(mut self) -> Self {
+        self.fail_fork = true;
+        self
     }
 
     /// A provider whose processes can exit on their own: `exit.notify_waiters()` ends the event
@@ -189,6 +223,7 @@ impl FakeProvider {
     /// rows still say it can.
     pub fn without_rollback(mut self) -> Self {
         self.capabilities["threads"]["canRollbackThread"] = json!(false);
+        self.capabilities["checkpointing"]["providerCanRollbackConversation"] = json!(false);
         self
     }
 
@@ -243,6 +278,12 @@ impl FakeProvider {
 
     /// A provider whose sessions take context handoff history into the native thread, as
     /// Codex does (`injectHistory`).
+    #[cfg(test)]
+    pub(crate) fn losing_one_injection_reply(self) -> Self {
+        self.lose_injection_reply.store(true, Ordering::SeqCst);
+        self.with_history_injection()
+    }
+
     pub fn with_history_injection(mut self) -> Self {
         self.injects = true;
         self
@@ -252,6 +293,11 @@ impl FakeProvider {
     /// A provider of another driver, such as `codex`.
     pub fn with_driver(mut self, driver: &'static str) -> Self {
         self.driver = driver;
+        self
+    }
+
+    pub fn with_native_resume(mut self) -> Self {
+        self.capabilities["turns"]["supportsNativeResume"] = json!(true);
         self
     }
 
@@ -280,6 +326,10 @@ struct Turn {
 }
 
 struct FakeSession {
+    #[cfg(test)]
+    goal_stop_check: Arc<Mutex<Option<conn_provider::GoalStopCheck>>>,
+    #[cfg(test)]
+    steer_receipt: SteerReceiptGate,
     #[cfg(test)]
     late_start_entered: Arc<tokio::sync::Notify>,
     #[cfg(test)]
@@ -312,12 +362,15 @@ struct FakeSession {
     forks: Arc<Mutex<Vec<String>>>,
     resumes: Arc<Mutex<Vec<String>>>,
     calls: Arc<Mutex<Vec<String>>>,
+    native_controls: Arc<Mutex<Vec<Value>>>,
     turn_heads: Arc<Mutex<Vec<Value>>>,
     prompts: Arc<Mutex<Vec<String>>>,
     injected: Arc<Mutex<Vec<(String, Value)>>>,
     injects: bool,
+    lose_injection_reply: Arc<AtomicBool>,
     ensured: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     fail_rollbacks: Arc<AtomicUsize>,
+    fail_fork: bool,
     control_delay: std::time::Duration,
     close_delay: std::time::Duration,
     /// A close ends the running turn as interrupted, as a provider's close can.
@@ -360,6 +413,21 @@ impl Provider for FakeProvider {
             .clone()
             .unwrap_or(conn_provider::SelectionTransitionPlan::ApplyOnNextTurn)
     }
+    #[cfg(test)]
+    fn native_child_work(
+        &self,
+        root: String,
+        task: String,
+        launch: Value,
+        siblings: Vec<Value>,
+    ) -> BoxFuture<'_, ProviderResult<Vec<Value>>> {
+        Box::pin(async move {
+            let row = json!({"root":root, "task":task, "launch":launch,"siblings":siblings});
+            self.child_queries.lock().unwrap().push(row);
+            Ok(Vec::new())
+        })
+    }
+
     fn capabilities(&self) -> BoxFuture<'_, ProviderResult<ProviderCapabilities>> {
         Box::pin(async {
             from_json(self.capabilities.clone()).map_err(|e| ProviderError::Protocol {
@@ -398,6 +466,9 @@ impl Provider for FakeProvider {
                 });
             }
             let mut capabilities = conn_provider::testing::session_capabilities();
+            if let Some(native) = self.capabilities["turns"].get("supportsNativeResume") {
+                capabilities["turns"]["supportsNativeResume"] = native.clone();
+            }
             if !self.steering {
                 capabilities["turns"]["supportsActiveSteering"] = json!(false);
             }
@@ -413,6 +484,10 @@ impl Provider for FakeProvider {
                 })?,
                 background_tasks_end_with_process: true,
                 session: Box::new(FakeSession {
+                    #[cfg(test)]
+                    goal_stop_check: self.goal_stop_check.clone(),
+                    #[cfg(test)]
+                    steer_receipt: self.steer_receipt.clone(),
                     #[cfg(test)]
                     late_start_entered: self.late_start_entered.clone(),
                     #[cfg(test)]
@@ -439,12 +514,15 @@ impl Provider for FakeProvider {
                     forks: self.forks.clone(),
                     resumes: self.resumes.clone(),
                     calls: self.calls.clone(),
+                    native_controls: self.native_controls.clone(),
                     turn_heads: self.turn_heads.clone(),
                     prompts: self.prompts.clone(),
                     injected: self.injected.clone(),
                     injects: self.injects,
+                    lose_injection_reply: self.lose_injection_reply.clone(),
                     ensured: self.ensured.clone(),
                     fail_rollbacks: self.fail_rollbacks.clone(),
+                    fail_fork: self.fail_fork,
                     control_delay: self.control_delay,
                     close_delay: self.close_delay,
                     close_interrupts: self.close_interrupts,
@@ -611,8 +689,45 @@ impl FakeSession {
 }
 
 impl Session for FakeSession {
+    #[cfg(test)]
+    fn set_goal_stop_check(&self, check: conn_provider::GoalStopCheck) {
+        *crate::lock(&self.goal_stop_check) = Some(check);
+    }
     fn provider_session_id(&self) -> &ProviderSessionId {
         &self.id
+    }
+
+    #[cfg(test)]
+    fn start_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+    ) -> BoxFuture<'_, ProviderResult<Option<String>>> {
+        Box::pin(async move {
+            assert_eq!(
+                thread.provider_session_id.as_deref(),
+                Some(self.id.as_str())
+            );
+            crate::lock(&self.calls).push(format!("sign in {server} on {}", self.id.as_str()));
+            Ok(Some("https://example.invalid/sign-in".into()))
+        })
+    }
+    #[cfg(test)]
+    fn complete_mcp_sign_in(
+        &self,
+        _thread: ProviderThread,
+        _server: String,
+        callback: String,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            if callback == "https://example.invalid/callback?code=accepted" {
+                return Ok(());
+            }
+            Err(ProviderError::Failed {
+                operation: "fixture",
+                detail: callback,
+            })
+        })
     }
 
     fn injects_history(&self) -> bool {
@@ -630,6 +745,12 @@ impl Session for FakeSession {
                     .unwrap_or("-")
                     .to_owned();
             crate::lock(&self.injected).push((native, input.items));
+            if self.lose_injection_reply.swap(false, Ordering::SeqCst) {
+                return Err(ProviderError::Failed {
+                    operation: "inject_history",
+                    detail: "Lost reply after native acceptance.".into(),
+                });
+            }
             Ok(true)
         })
     }
@@ -1068,6 +1189,19 @@ impl Session for FakeSession {
                         }})));
                     started.push(terminal(&turn, TurnStatus::Completed, None));
                 }
+                "reject-encrypted-history" | "reject-encrypted-history-with-work" | "reject-thinking-signature" | "reject-thinking-signature-with-work" => {
+                    if text.ends_with("-with-work") {
+                        crate::lock(&self.roster).push(("pending-shell".into(), false));
+                        started.push(self.roster_update(conn_contract::to_json(&input.provider_thread)));
+                    }
+                    started.push(terminal(&turn, TurnStatus::Failed, Some(json!({
+                        "class":"provider_error", "message":"The native history was rejected.",
+                        "code":if text.starts_with("reject-thinking") { "INVALID_THINKING_SIGNATURE" } else { "invalid_encrypted_content" }, "retryable":false
+                    }))));
+                }
+                "fail-usage-limit-unknown-reset" => started.push(terminal(&turn, TurnStatus::Failed, Some(json!({
+                    "class":"usage_limit","message":"Usage limit reached","code":null,"retryable":false,
+                })))),
                 "fail-usage-limit" => started.push(terminal(
                     &turn,
                     TurnStatus::Failed,
@@ -1104,12 +1238,30 @@ impl Session for FakeSession {
         })
     }
 
+    fn rename_thread(&self, title: String) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            crate::lock(&self.native_controls).push(json!({"rename": title}));
+            Ok(())
+        })
+    }
+
     fn steer_turn(&self, input: SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
+            #[cfg(test)]
+            let held = crate::lock(&self.steer_receipt).take();
+            #[cfg(test)]
+            if let Some((entered, release)) = held {
+                let _ = entered.send(());
+                let _ = release.await;
+                return Ok(());
+            }
             if !self.steering {
                 return Err(ProviderError::Unsupported {
                     operation: "steer_turn",
                 });
+            }
+            if let Some(selection) = &input.model_selection {
+                crate::lock(&self.native_controls).push(json!({"steer": selection}));
             }
             let events = {
                 let turn = crate::lock(&self.turn);
@@ -1177,6 +1329,12 @@ impl Session for FakeSession {
                 "stop background {}",
                 input.provider_turn_id.as_str()
             ));
+            emit(
+                &self.events(),
+                vec![event(json!({"type":"background_work.updated",
+                "providerTurnId":input.provider_turn_id,"pending":false}))],
+            )
+            .await;
             Ok(())
         })
     }
@@ -1348,6 +1506,7 @@ impl Session for FakeSession {
                 })?,
                 provider_turns: vec![],
                 messages: vec![],
+                reasoning_message_ids: Vec::new(),
                 runtime_requests: vec![],
             })
         })
@@ -1366,6 +1525,12 @@ impl Session for FakeSession {
                     .as_ref()
                     .map_or("-", |id| id.as_str())
             ));
+            if self.fail_fork {
+                return Err(ProviderError::Failed {
+                    operation: "fork",
+                    detail: "Native fork unavailable".into(),
+                });
+            }
             let mut thread = conn_contract::to_json(&input.source_provider_thread);
             let now = now_iso();
             thread["id"] = json!(format!(

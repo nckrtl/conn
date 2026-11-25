@@ -594,13 +594,16 @@ async fn the_loop_sweeps_each_minute_and_on_a_settings_change() {
     h.launch("third", "baseline").await;
     h.clock
         .advance(std::time::Duration::from_secs(2 * 24 * 60 * 60));
-    tokio::time::advance(std::time::Duration::from_secs(61)).await;
-    for _ in 0..500 {
-        if h.thread("third").await["settledOverride"] == "settled" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    // SQLite can publish the previous settlement before its sweep finishes and arms the
+    // next timer. Keep advancing the paused timer while the database worker makes progress.
+    assert_eq!(SWEEP_EVERY, std::time::Duration::from_secs(60));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while h.thread("third").await["settledOverride"] != "settled" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "periodic sweep did not settle the thread"
+        );
+        tokio::time::advance(SWEEP_EVERY).await;
     }
-    assert_eq!(h.thread("third").await["settledOverride"], "settled");
     task.abort();
 }

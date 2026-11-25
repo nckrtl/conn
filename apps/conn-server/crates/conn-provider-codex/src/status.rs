@@ -1354,7 +1354,7 @@ fn percent(value: f64) -> Value {
 }
 
 /// `codexRateLimitsToWindows`.
-fn rate_limit_windows(snapshot: &Value) -> Vec<Value> {
+pub(crate) fn rate_limit_windows(snapshot: &Value) -> Vec<Value> {
     const SESSION: i64 = 5 * 60;
     const WEEK: i64 = 7 * 24 * 60;
     const MONTH: i64 = 30 * 24 * 60;

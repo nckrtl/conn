@@ -67,7 +67,8 @@ dies, open turns end as failed, and the next call starts a new process and resum
   through. No sign-in call is made.
 - **Thread config:** `tools.update_plan.enabled`, `mcp_optional_startup_grace_ms: 10000`,
   `features.concurrent_reasoning_summaries`, and `T3CODE_THREAD_ID` through
-  `shell_environment_policy.set`.
+  `shell_environment_policy.set`. The adapter reads the workspace config before each native
+  thread load and passes the app thread ID to its configured stdio MCP servers.
 - **Turn policy:** per turn, from the runtime mode (table in `PROTOCOL.md`), or the policy's
   `approval_policy` / `sandbox_policy` override (sandbox decoded as TS does), so model, effort
   and mode changes apply on the next turn.
@@ -75,6 +76,7 @@ dies, open turns end as failed, and the next call starts a new process and resum
   orchestration, runtime and tool text, byte for byte (`tools/gen-instructions.mjs`).
 - **Attachments:** a path line per attachment in the text (`attachmentPrompt.ts`), and GIF,
   JPEG, PNG and WebP images inline as data URLs, from `CodexConfig::attachments_dir`.
+  File reads and base64 encoding run on the blocking pool.
 
 ## Supported
 
@@ -88,7 +90,7 @@ thread resume after a restart, rollback (`CodexThreadRevert.ts`), fork (native, 
 `lastTurnId`, or reverted to the boundary; the fork's own model and cwd, as
 `codexThreadRuntimeParams`), requests Codex resolved itself
 (`serverRequest/resolved`), MCP form elicitations as approvals with the app name and
-persistence choices (`CodexMcpElicitation.ts`, in `src/elicitation.rs`). The engine resumes a
+persistence choices (`CodexMcpElicitation.ts`, in `conn-provider-support/src/elicitation.rs`). The engine resumes a
 thread when its load changes (`thread_load_model_selection` drops the effort, as T3's
 `normalizeCodexThreadLoadModelSelection`).
 
@@ -122,16 +124,28 @@ and output files sit in `<tmp>/t3code-codex-{schema,output}-<pid>-XXXXXX/<12 hex
 after. Errors carry T3's texts ("Codex CLI request timed out.", "Codex CLI command failed:
 …", "Codex returned invalid structured output.").
 
+**Retries and usage limits.** A retry notification creates or updates one timeline row.
+New provider output completes it. A retry with no progress for ten minutes fails the run
+and interrupts its native turn. A root turn rejected for `serverOverloaded` can continue
+up to five times on the existing native thread with empty input. Usage-limit failures carry
+the reset time from the account snapshot or Codex's dated message when available.
+
+**Native controls.** Conn sends `/compact` to `thread/compact/start` and restores the
+turn's additional context after compaction completes. Explicit title changes update the
+native thread. A steer applies the selected service tier first. Thread-scoped MCP sign-in
+relays the validated local OAuth callback and waits for the server's completion event.
+Retrying a pending sign-in on the same thread returns the original authorization URL.
+Codex names only the MCP server in its completion event, so Conn keeps one native attempt
+per server until it finishes or the app-server process changes.
+An async question in an agent message becomes a user-input request.
+
 ## Not implemented
 
 - **Subagent stop** (`stopTask`) is not built.
-- **Capacity continuations** (a turn held for a usage limit, `capacityContinuations`) are not
-  built; the wakes below do not wait for one.
 - **Text generation:** T3's managed runtime (`resolveRuntime`), custom models
   (`customModels`) and the catalog's `isDefault`/`isLegacy` flags in the model fallback; the
   fallback to another provider when Codex is unusable (in the server's title code).
-- **Thread operations:** snapshots, compaction requests, history injection, archive,
-  feedback upload; the `additionalContext` restore after compaction (`thread/inject_items`).
+- **Thread operations:** snapshots, archive and feedback upload.
 - **Goals** (`/goal`, `src/mapper/goals.rs`): built as T3's `runGoalCommand`, including the run
   held across Codex's own goal turns and the pause after the 5 s grace. The engine never
   steers a `/goal` into a running turn, sent or promoted from the queue, and stops the run a
@@ -139,15 +153,13 @@ after. Errors carry T3's texts ("Codex CLI request timed out.", "Codex CLI comma
   delegated task will wake the thread (`goalsPausedForWake`). Two differences: an answer to
   `thread/goal/set` does not replace a goal notification for the same thread that came after
   the request went out, and the goal row shows before the run's terminal.
-- **Retries:** `error` with `willRetry: true` makes no retry row; the turn keeps running.
-- **Rate limits:** `account/rateLimits/*` is ignored, so usage-limit failures have no `resetAt`.
 - **T3 context details:** browser tools are assumed on (TS reads them from the MCP session);
   device tools follow the session's `device` capability (`McpServer.device_tools`). App context entries go in `additionalContext` as `untrusted`.
   Snapshot window context of image attachments is not added.
 - **Tool rows:** MCP presentation (titles, icons, surfaces).
 - **Elicitations:** URL elicitations and forms an approval cannot fill are declined, as in T3.
   `item/tool/call` and auth-refresh requests get an error reply.
-- **Image generation**, prompt suggestions, async questions in agent messages, and the Linux
+- **Image generation**, prompt suggestions and the Linux
   systemd agent scope (see `PROTOCOL.md`, Launch).
 
 ## Status probe

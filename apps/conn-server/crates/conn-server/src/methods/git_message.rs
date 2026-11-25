@@ -155,6 +155,7 @@ pub(super) async fn generate(
         )
     };
     let request = conn_provider::TextGenerationRequest {
+        project_cwd: None,
         operation: "generateCommitMessage".into(),
         cwd: input.cwd.clone(),
         prompt,

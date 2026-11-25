@@ -334,7 +334,7 @@ pub(crate) fn remove_sessions_in(profile: &Path, cwd: &str) {
 }
 
 /// `Schema.isUUID(4)`: a version 4 UUID with the RFC variant, so the id is safe in a path.
-fn is_native_session_id(id: &str) -> bool {
+pub(crate) fn is_native_session_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     crate::grok_background::is_uuid(id)
         && bytes.get(14) == Some(&b'4')
@@ -408,7 +408,6 @@ pub(crate) fn directories(state_dir: &Path, instance_id: &str) -> Directories {
 /// `prepareAntigravityProfile`: the profile folders (0700) and `antigravity-acp/settings.json`
 /// with the sign-in method (never a credential). Blocking. The browser check T3 runs (its
 /// Node helper) is not needed: our helper is this server's own executable.
-/// Not ported: the links to the user's `~/.gemini` skills (`linkAntigravityUserSkills`).
 /// The error is T3's text; T3 raises it as a transport error (`authSupportError`), not a
 /// setup error, so a check shows its own fixed text instead.
 pub(crate) fn prepare_profile(
@@ -425,8 +424,51 @@ pub(crate) fn prepare_profile(
                 .map_err(|_| PROFILE_PERMISSIONS_FAILED)?;
         }
     }
+    #[cfg(unix)]
+    if let Some(home) = std::env::var_os("HOME") {
+        link_user_configuration(&dirs.profile, &Path::new(&home).join(".gemini"));
+    }
     std::fs::write(acp.join("settings.json"), profile_settings(settings))
         .map_err(|_| PROFILE_SETTINGS_FAILED)
+}
+
+/// Keep local profile contents unless the agent created an empty placeholder.
+#[cfg(unix)]
+fn link_user_configuration(profile: &Path, gemini: &Path) {
+    for relative in [
+        "config/skills",
+        "antigravity-cli/skills",
+        "AGENTS.md",
+        "GEMINI.md",
+        "config/skills.json",
+    ] {
+        let target = gemini.join(relative);
+        let link = profile.join(relative);
+        let install = || -> std::io::Result<()> {
+            if let Ok(current) = std::fs::read_link(&link) {
+                if current == target && target.exists() {
+                    return Ok(());
+                }
+                std::fs::remove_file(&link)?;
+            }
+            if !target.exists() {
+                return Ok(());
+            }
+            if link.is_dir() {
+                std::fs::remove_dir(&link)?;
+            }
+            if link.exists() {
+                return Ok(());
+            }
+            if let Some(parent) = link.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::os::unix::fs::symlink(&target, &link)
+        };
+        if let Err(err) = install() {
+            eprintln!("Antigravity could not link {relative}: {err}");
+        }
+    }
 }
 
 /// `antigravityAuthSupport.ts` texts for `prepareAntigravityProfile` (`tools/check-copies.mjs`).
@@ -496,6 +538,7 @@ pub(crate) fn launch(
     let gemini_home = dirs.profile.display().to_string();
     set(&mut env, "GEMINI_HOME", &gemini_home);
     set(&mut env, "AGY_ACP_FORCE_FILE_STORAGE", "1");
+    set(&mut env, "AGY_CLI_DISABLE_AUTO_UPDATE", "true");
     let browser = [self_command, BROWSER_SUBCOMMAND, "--", "%s"]
         .iter()
         .map(|a| quote(a))
@@ -562,7 +605,7 @@ pub fn browser_main(args: &[String]) -> i32 {
 
 // ---- the flavor ---------------------------------------------------------------------------
 
-fn version_triple(version: Option<&str>) -> Option<[u64; 3]> {
+pub(crate) fn version_triple(version: Option<&str>) -> Option<[u64; 3]> {
     let version = version?.trim();
     let mut parts = version.splitn(3, '.');
     let mut next = |last: bool| {
@@ -604,9 +647,13 @@ fn appends_system_prompt(initialize: &Value) -> bool {
 /// `antigravitySessionMeta` with the conversational session's append (the pull request
 /// linking text).
 fn session_meta(initialize: &Value) -> Option<J> {
+    setup_meta(initialize, true)
+}
+
+pub(crate) fn setup_meta(initialize: &Value, conversational: bool) -> Option<J> {
     let version = version_triple(initialize["agentInfo"]["version"].as_str());
     let writes_run_workflow = version.is_some_and(|v| ([1, 4, 2]..=[1, 4, 5]).contains(&v));
-    let append = appends_system_prompt(initialize);
+    let append = conversational && appends_system_prompt(initialize);
     if !writes_run_workflow && !append {
         return None;
     }
@@ -740,6 +787,338 @@ fn capabilities() -> Value {
     caps
 }
 
+pub(crate) fn attachment_blocks(
+    attachments: &[Value],
+    dir: Option<&Path>,
+    caps: &Value,
+) -> Result<Vec<J>, String> {
+    use std::io::Read;
+    const TOTAL: u64 = 50 * 1024 * 1024;
+    let mut total = 0;
+    let mut blocks = Vec::new();
+    for a in attachments {
+        let name = a["name"].as_str().unwrap_or("");
+        let mime = a["mimeType"]
+            .as_str()
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let extension = Path::new(name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let ext_is_text = matches!(
+            extension.as_str(),
+            "txt"
+                | "md"
+                | "mdx"
+                | "json"
+                | "jsonl"
+                | "csv"
+                | "tsv"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "xml"
+                | "html"
+                | "css"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "py"
+                | "rb"
+                | "rs"
+                | "go"
+                | "sh"
+                | "sql"
+                | "log"
+                | "diff"
+                | "patch"
+                | "c"
+                | "h"
+                | "cpp"
+                | "hpp"
+                | "swift"
+                | "java"
+                | "kt"
+        );
+        let text = mime.starts_with("text/")
+            || matches!(
+                mime.as_str(),
+                "application/json"
+                    | "application/ld+json"
+                    | "application/javascript"
+                    | "application/typescript"
+                    | "application/xml"
+                    | "application/yaml"
+                    | "application/x-yaml"
+                    | "application/x-sh"
+            )
+            || ext_is_text;
+        let kind = if a["type"] == "image"
+            && caps["image"] == true
+            && matches!(
+                mime.as_str(),
+                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+            ) {
+            "image"
+        } else if a["type"] != "file" || a["source"]["_tag"] == "pasted-text" {
+            continue;
+        } else if caps["audio"] == true
+            && matches!(
+                mime.as_str(),
+                "audio/aac"
+                    | "audio/flac"
+                    | "audio/mpeg"
+                    | "audio/mp3"
+                    | "audio/mp4"
+                    | "audio/m4a"
+                    | "audio/x-m4a"
+                    | "audio/ogg"
+                    | "audio/wav"
+                    | "audio/x-wav"
+                    | "audio/webm"
+            )
+        {
+            "audio"
+        } else if caps["embeddedContext"] == true && mime == "application/pdf" {
+            "resource_link"
+        } else if caps["embeddedContext"] == true && text {
+            "resource"
+        } else {
+            continue;
+        };
+        let path = conn_provider_support::attachments::saved_path(dir, a)
+            .ok_or_else(|| format!("Invalid attachment '{name}'"))?;
+        let metadata = std::fs::metadata(&path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .ok_or_else(|| format!("Could not read attachment '{name}'"))?;
+        let limit = match kind {
+            "image" => 10 * 1024 * 1024,
+            "audio" => 20 * 1024 * 1024,
+            "resource_link" => TOTAL,
+            _ => 1024 * 1024,
+        };
+        let size = metadata.len();
+        if size > limit || size > TOTAL - total {
+            if kind == "image" {
+                return Err(format!(
+                    "Image '{name}' exceeds the Antigravity attachment limit"
+                ));
+            }
+            continue;
+        }
+        let mut uri = String::from("file://");
+        for byte in path.as_os_str().as_encoded_bytes() {
+            if byte.is_ascii_alphanumeric() || b"/:.-_~".contains(byte) {
+                uri.push(char::from(*byte))
+            } else {
+                use std::fmt::Write;
+                let _ = write!(uri, "%{byte:02X}");
+            }
+        }
+        if kind == "resource_link" {
+            total += size;
+            blocks.push(
+                obj()
+                    .with("type", kind)
+                    .with("uri", uri)
+                    .with("name", name)
+                    .with("mimeType", mime)
+                    .with("size", json!(size)),
+            );
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let read_limit = limit.min(TOTAL - total);
+        std::fs::File::open(path)
+            .and_then(|file| file.take(read_limit + 1).read_to_end(&mut bytes))
+            .map_err(|_| format!("Could not read attachment '{name}'"))?;
+        if bytes.len() as u64 > read_limit {
+            return Err(format!("Attachment '{name}' grew while being read"));
+        }
+        total += bytes.len() as u64;
+        if kind == "resource" {
+            let text = if bytes.starts_with(&[255, 254]) || bytes.starts_with(&[254, 255]) {
+                let little = bytes[0] == 255;
+                (bytes.len() % 2 == 0)
+                    .then(|| {
+                        String::from_utf16(
+                            &bytes[2..]
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|b| {
+                                    if little {
+                                        u16::from_le_bytes(*b)
+                                    } else {
+                                        u16::from_be_bytes(*b)
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .ok()
+                    })
+                    .flatten()
+            } else {
+                std::str::from_utf8(bytes.strip_prefix(&[239, 187, 191]).unwrap_or(&bytes))
+                    .ok()
+                    .map(str::to_owned)
+            };
+            let Some(text) = text.filter(|s| !s.contains('\0')) else {
+                total -= bytes.len() as u64;
+                continue;
+            };
+            blocks.push(
+                obj().with("type", kind).with(
+                    "resource",
+                    obj()
+                        .with("uri", uri)
+                        .with("mimeType", mime)
+                        .with("text", text),
+                ),
+            );
+        } else {
+            blocks.push(
+                obj()
+                    .with("type", kind)
+                    .with("data", conn_support::base64::encode(&bytes))
+                    .with("mimeType", mime),
+            );
+        }
+    }
+    Ok(blocks)
+}
+
+fn subagent(tool: &crate::tools::ToolState) -> Option<crate::grok_background::SubagentUpdate> {
+    let title = tool.title.as_deref()?;
+    if tool
+        .data
+        .get("meta")
+        .is_some_and(|v| v["is_mcp_tool_call"] == true)
+    {
+        return None;
+    }
+    let raw = tool.data.get("rawInput").unwrap_or(&Value::Null);
+    let swarm = raw["action"]
+        .as_str()
+        .is_some_and(|a| a.eq_ignore_ascii_case("add"))
+        && (title.to_ascii_lowercase().contains("swarm")
+            || tool
+                .data
+                .get("meta")
+                .is_some_and(|v| v["antigravity"]["swarm"]["tool"] == "swarm"));
+    if !swarm
+        && !matches!(
+            title,
+            "Running start_subagent"
+                | "Run start_subagent?"
+                | "Running invoke_subagent"
+                | "Run invoke_subagent?"
+                | "Run invoke_subagent"
+        )
+    {
+        return None;
+    }
+    let launches: Vec<_> = if swarm {
+        let tasks = raw["tasks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let n = (raw["n"].as_u64().unwrap_or(0).min(64) as usize)
+            .max(tasks.len().min(64))
+            .max(1);
+        (0..n)
+            .map(|i| {
+                let role = raw["name"]
+                    .as_str()
+                    .map(|n| format!("@{}", n.trim_start_matches('@')))
+                    .unwrap_or_else(|| "Swarm worker".into());
+                let role = if n > 1 {
+                    format!("{role}-{}", i + 1)
+                } else {
+                    role
+                };
+                let prompt = [
+                    raw["brief"].as_str().unwrap_or(""),
+                    tasks.get(i).and_then(Value::as_str).unwrap_or(""),
+                ]
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+                (role, prompt)
+            })
+            .collect()
+    } else {
+        raw["Subagents"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(raw))
+            .iter()
+            .filter_map(|v| Some((v["Role"].as_str()?.into(), v["Prompt"].as_str()?.into())))
+            .collect()
+    };
+    let (title, prompt) = match launches.as_slice() {
+        [] => (
+            "Antigravity subagent batch".into(),
+            tool.detail
+                .clone()
+                .or_else(|| tool.title.clone())
+                .unwrap_or_default(),
+        ),
+        [only] => only.clone(),
+        _ => (
+            launches
+                .iter()
+                .map(|v| v.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            launches
+                .iter()
+                .map(|v| format!("{}\n{}", v.0, v.1))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+    };
+    let output = tool.data.get("rawOutput").unwrap_or(&Value::Null);
+    let status = match tool.status.as_deref() {
+        Some("failed") => "failed",
+        Some("pending") => "pending",
+        _ => "running",
+    };
+    Some(crate::grok_background::SubagentUpdate {
+        native_task_id: tool.tool_call_id.clone(),
+        prompt,
+        title: Some(title),
+        model: output["model"]
+            .as_str()
+            .or_else(|| raw["model"].as_str())
+            .map(str::to_owned),
+        status: status.into(),
+        child_session_id: output["conversationId"]
+            .as_str()
+            .filter(|_| swarm)
+            .map(str::to_owned),
+        result: output
+            .as_str()
+            .filter(|_| status == "failed")
+            .map(str::to_owned),
+        suppress_normal_tool: false,
+    })
+}
+
+pub(crate) fn runtime_capabilities(version: Option<&str>) -> Value {
+    let mut caps = capabilities();
+    if version_triple(version).is_some_and(|v| v >= [1, 5, 0]) {
+        caps["turns"]["supportsActiveSteering"] = json!(true);
+    }
+    caps
+}
+
 pub static ANTIGRAVITY: Flavor = Flavor {
     driver: DRIVER,
     harness: "Antigravity",
@@ -756,7 +1135,7 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     authenticate_eagerly: true,
     session_setup: Some(SessionSetup {
         meta: session_meta,
-        attachments_directory: true,
+        attachments_directory: false,
         carries_linking: appends_system_prompt,
     }),
     model_switch: ModelSwitch::ConfigOption,
@@ -769,18 +1148,51 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     prompt_failure: |message, code| {
         crate::flavor::provider_failure(message, "provider_error", code)
     },
+    terminal_warning: Some(
+        "⚠ There was a network issue connecting to the server, please try again.",
+    ),
     permission_override: |_| None,
     select_model: |_, _, _, _| None,
     normalize_tool: None,
     capabilities,
     // ACP 1.3.0 treats /compact as ordinary model input.
     supports_compaction: false,
-    background: None,
+    background: Some(crate::flavor::BackgroundHooks {
+        task_id: |_| None,
+        is_command: |_| false,
+        completions: |_| Vec::new(),
+        text_mutations: |_| Vec::new(),
+        is_persistent: |_| false,
+        is_wake,
+        lifecycle: |_, _| None,
+        subagent,
+    }),
     mcp_over_http: true,
     supports_image_prompts: true,
     rpc_failure,
     stdout_signal: Some(stdout_signal),
 };
+
+/// Root ACP output can arrive after a prompt reply, with no new client prompt.
+pub(crate) fn is_wake(params: &Value) -> bool {
+    let update = &params["update"];
+    let text = |v: &Value| v["text"].as_str().is_some_and(|t| !t.is_empty());
+    match update["sessionUpdate"].as_str() {
+        Some("agent_message_chunk" | "agent_thought_chunk") => text(&update["content"]),
+        Some("agent_message" | "agent_thought") => update["content"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(text)),
+        Some("tool_call" | "tool_call_update") => update["toolCallId"].is_string(),
+        Some(
+            "plan"
+            | "plan_update"
+            | "plan_removed"
+            | "compaction_update"
+            | "compaction_summary_chunk",
+        ) => true,
+        _ => false,
+    }
+}
 
 /// `ProviderError::Failed` operation of an error reply that asks for a Google sign-in.
 pub(crate) const SIGN_IN_REQUIRED: &str = "sign-in-required";

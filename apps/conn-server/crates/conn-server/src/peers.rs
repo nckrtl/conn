@@ -2570,11 +2570,15 @@ mod tests {
         let dropped =
             tokio::time::timeout(Duration::from_millis(100), peers.answer(answer.clone())).await;
         assert!(dropped.is_err(), "the answer was still linking");
+        // The detached task records the outcome first and frees the card after; wait for both
+        // within one deadline, then check each on its own.
         let mut status = String::new();
+        let mut freed = false;
         for _ in 0..200 {
             let found = peers.read_card(&thread, &card).await.unwrap().unwrap();
             status = found["linkStatus"].as_str().unwrap_or_default().to_owned();
-            if status != "pending" {
+            freed = crate::lock(&peers.answering).is_empty();
+            if status != "pending" && freed {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2583,10 +2587,7 @@ mod tests {
             status, "failed",
             "the outcome was recorded after the client left"
         );
-        assert!(
-            crate::lock(&peers.answering).is_empty(),
-            "the card was freed"
-        );
+        assert!(freed, "the card was freed");
     }
 
     /// Every address supplied is checked (`PeerLinks.link` probes them all); probes in flight

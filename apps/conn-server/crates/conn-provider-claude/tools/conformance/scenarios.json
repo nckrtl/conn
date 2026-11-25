@@ -15,6 +15,73 @@
       ]
     },
     {
+      "name": "custom_model_unknown_context",
+      "runtimeMode": "full-access",
+      "instance": { "config": { "customModels": ["orbit-model"], "autoCompactWindow": "300000" } },
+      "expectedFirstContext": { "maxTokens": null, "autoCompactThreshold": 267000 },
+      "scripts": ["e01_turn"],
+      "steps": [{ "turn": "Reply with exactly: pong", "model": "orbit-model" }]
+    },
+    {
+      "name": "custom_alias_compact_window",
+      "runtimeMode": "full-access",
+      "instance": {
+        "config": {
+          "customModels": [
+            "sonnet"
+          ],
+          "autoCompactWindow": "120000",
+          "launchArgs": "--settings '{\"env\":{\"KEEP_ENV\":\"keep\",\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\":\"300000\"},\"cleanupPeriodDays\":12}'"
+        }
+      },
+      "scripts": [
+        "e01_turn",
+        "e01_turn"
+      ],
+      "steps": [
+        {
+          "turn": "Reply with exactly: pong",
+          "model": "sonnet"
+        },
+        {
+          "turn": "Reply with exactly: pong",
+          "model": "claude-haiku-5-5"
+        }
+      ]
+    },
+    {
+      "name": "custom_model_flags",
+      "runtimeMode": "full-access",
+      "instance": {
+        "config": {
+          "customModels": [
+            {
+              "slug": "my-model",
+              "capabilities": {
+                "optionDescriptors": [
+                  {
+                    "type": "boolean",
+                    "id": "fastMode",
+                    "label": "Fast Mode",
+                    "currentValue": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "scripts": [
+        "e01_turn"
+      ],
+      "steps": [
+        {
+          "turn": "Reply with exactly: pong",
+          "model": "my-model"
+        }
+      ]
+    },
+    {
       "name": "resumed_turn",
       "runtimeMode": "full-access",
       "scripts": [

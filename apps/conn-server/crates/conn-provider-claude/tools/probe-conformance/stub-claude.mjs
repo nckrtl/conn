@@ -22,6 +22,24 @@ const index = fs.readdirSync(records).filter((f) => f.endsWith(".json")).length;
 const recordPath = path.join(records, `${String(index).padStart(3, "0")}.json`);
 const argv = process.argv.slice(2);
 const record = { argv, env: { ...process.env }, cwd: process.cwd(), stdin: [], signals: [] };
+// A guide's private file exists only while the CLI runs. Save the known fixture fields
+// and the shape of its permission policy, never arbitrary user settings or env values.
+if (argv.includes("--setting-sources")) {
+  const value = argv[argv.indexOf("--settings") + 1];
+  const inline = value?.startsWith("{") === true;
+  const settings = JSON.parse(inline ? value : fs.readFileSync(value, "utf8"));
+  record.guide = {
+    storage: inline ? "inline" : "file",
+    mode: inline ? null : (fs.statSync(value).mode & 0o777),
+    disableAllHooks: settings.disableAllHooks,
+    user: settings.env?.CONN_GUIDE_USER === "kept",
+    launch: settings.env?.CONN_GUIDE_LAUNCH === "kept",
+    permissionKeys: Object.keys(settings.permissions ?? {}).sort(),
+    launchGrant: settings.permissions?.allow?.includes("Bash(*)") === true,
+    deny: settings.permissions?.deny ?? [],
+    model: Object.fromEntries(["alwaysThinkingEnabled", "fastMode", "ultracode"].filter((key) => key in settings).map((key) => [key, settings[key]])),
+  };
+}
 // Written aside, then renamed: a run killed mid-write keeps its last whole record.
 const save = () => {
   fs.writeFileSync(`${recordPath}.tmp`, `${JSON.stringify(record, null, 1)}\n`);
@@ -54,6 +72,8 @@ if (argv.includes("-p")) {
 } else if (argv.includes("--version")) {
   const version = behaviour.version ?? {};
   if (version.hang === true) {
+    // A killed writer can leave a partial next record beside the last committed one.
+    fs.writeFileSync(path.join(records, "001.json.tmp"), "{");
     setInterval(() => {}, 1000);
   } else {
     if (version.stdout) process.stdout.write(version.stdout);

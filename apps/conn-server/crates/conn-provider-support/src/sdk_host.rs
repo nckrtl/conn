@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 /// A helper line longer than this is dropped. Large tool results (images as base64) stay below.
-const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-/// Events buffered per query before the router waits for that query's driver.
+const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+/// Data events buffered per query. One extra slot always admits its terminal event.
 const QUERY_EVENT_CAPACITY: usize = 256;
 /// Environment variable naming the helper (a Node single executable, or an `.mjs` script).
 pub const HELPER_ENV: &str = "CONN_SDK_HOST";
@@ -275,15 +275,10 @@ impl Helper {
     /// Opens a query with this option object. `extra` holds the open command's other fields
     /// (`subagentStartContext`, `wrap`).
     pub fn open(&self, options: Value, extra: Value) -> ProviderResult<Query> {
-        let (tx, events) = mpsc::channel(QUERY_EVENT_CAPACITY);
-        let (id, writer) = {
+        let id = {
             let mut state = self.inner.lock();
-            let writer = self.inner.ensure_running(&mut state)?;
             state.next_id += 1;
-            let id = format!("q{}", state.next_id);
-            let generation = state.generation;
-            state.queries.insert(id.clone(), (generation, tx));
-            (id, writer)
+            format!("q{}", state.next_id)
         };
         let mut command = json!({
             "t": "open", "driver": self.inner.driver.name, "instanceId": &*self.instance_id,
@@ -292,12 +287,21 @@ impl Helper {
         if let (Some(target), Value::Object(extra)) = (command.as_object_mut(), extra) {
             target.extend(extra);
         }
-        if writer
-            .try_send((self.inner.driver.encode)(&command))
-            .is_err()
+        let line = (self.inner.driver.encode)(&command);
+        if line.len() > MAX_LINE_BYTES {
+            return Err(helper_err(
+                "the SDK host command exceeds the 32 MiB frame limit",
+            ));
+        }
+        let (tx, events) = mpsc::channel(QUERY_EVENT_CAPACITY + 1);
         {
-            self.inner.lock().queries.remove(&id);
-            return Err(helper_err("the Claude helper is not accepting input"));
+            let mut state = self.inner.lock();
+            let writer = self.inner.ensure_running(&mut state)?;
+            writer
+                .try_send(line)
+                .map_err(|_| helper_err("the Claude helper is not accepting input"))?;
+            let generation = state.generation;
+            state.queries.insert(id.clone(), (generation, tx));
         }
         Ok(Query {
             id,
@@ -439,6 +443,9 @@ impl Inner {
         command["id"] = json!(id);
         let line = (self.driver.encode)(&command);
         drop(command);
+        if line.len() > MAX_LINE_BYTES {
+            return Err("the SDK host command exceeds the 32 MiB frame limit".into());
+        }
         let exchange = async {
             writer
                 .send(line)
@@ -628,8 +635,27 @@ async fn dispatch_sdk(inner: &Inner, mut line: Value) {
             state.queries.get(&query).map(|(_, tx)| tx.clone())
         }
     };
-    if let Some(tx) = tx {
-        let _ = tx.send(event).await;
+    let Some(tx) = tx else { return };
+    if end || tx.capacity() > 1 {
+        let _ = tx.try_send(event);
+        return;
+    }
+    // The shared reader must still dispatch other sessions' control replies. Keep all
+    // frames delivered so far in order and fail just this session at its reserved slot.
+    let writer = {
+        let mut state = inner.lock();
+        state.queries.remove(&query);
+        state.running.as_ref().map(|host| host.process.writer())
+    };
+    let _ = tx.try_send(QueryEvent::End(QueryEnd::helper_failed(
+        "Claude produced events faster than this session could consume them",
+    )));
+    if let Some(writer) = writer {
+        tokio::spawn(async move {
+            let _ = writer
+                .send(json!({"t": "abort", "sessionId": query}).to_string())
+                .await;
+        });
     }
 }
 
@@ -771,9 +797,13 @@ impl QueryHandle {
             Ok(value) => json!({"t": "response", "sessionId": self.id, "id": id, "value": value}),
             Err(error) => json!({"t": "response", "sessionId": self.id, "id": id, "error": error}),
         };
-        let _ = writer
-            .send((self.helper.inner.driver.encode)(&command))
-            .await;
+        let line = (self.helper.inner.driver.encode)(&command);
+        let response = if line.len() <= MAX_LINE_BYTES {
+            line
+        } else {
+            json!({"t":"response","sessionId":self.id,"id":id,"error":"the SDK callback response exceeds the 32 MiB frame limit"}).to_string()
+        };
+        let _ = writer.send(response).await;
     }
 
     /// Gives up a query whose open was interrupted, as the T3 server's query runner does: the
@@ -802,6 +832,39 @@ impl QueryHandle {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_query_cannot_block_another_querys_interrupt() {
+        let script = r#"read a
+read b
+read ctl
+i=0
+while [ "$i" -lt 257 ]; do echo '{"ch":"sdk","t":"msg","sessionId":"q1","m":{"n":1}}'; i=$((i+1)); done
+echo '{"ch":"reply","id":3,"ok":true,"value":"interrupted"}'
+read abort"#;
+        let helper = Helper::new(
+            HelperCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+            },
+            "test",
+            plain_driver("test"),
+        );
+        let mut slow = helper.open(json!({}), json!({})).unwrap();
+        let mut backlog = slow.take_events().unwrap();
+        let fast = helper.open(json!({}), json!({})).unwrap();
+        assert_eq!(
+            fast.handle()
+                .call("interrupt", json!([]), Duration::from_secs(2))
+                .await
+                .unwrap(),
+            "interrupted"
+        );
+        for _ in 0..QUERY_EVENT_CAPACITY {
+            assert!(matches!(backlog.recv().await, Some(QueryEvent::Message(_))));
+        }
+        assert!(matches!(backlog.recv().await, Some(QueryEvent::End(_))));
+        helper.stop().await;
+    }
     #[test]
     fn scripts_run_under_node_and_executables_directly() {
         let script = HelperCommand::from_path("/x/index.mjs");

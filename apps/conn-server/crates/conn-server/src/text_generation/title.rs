@@ -299,6 +299,7 @@ impl Titles {
             let model_selection = conn_contract::from_json(selection.clone())
                 .map_err(|_| "The title model selection is not valid.".to_owned())?;
             let request = TextGenerationRequest {
+                project_cwd: None,
                 operation: "generateThreadTitle".into(),
                 cwd: cwd.clone(),
                 prompt: prompt.clone(),

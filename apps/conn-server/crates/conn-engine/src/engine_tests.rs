@@ -13,6 +13,18 @@ use tokio::time::timeout;
 use crate::fake::FakeProvider;
 use crate::{Engine, EngineConfig, EngineError, ProjectConfig, SqliteEngine, Subscription};
 
+#[path = "engine_tests/claude_control.rs"]
+mod claude_control;
+
+#[path = "engine_tests/codex_wake.rs"]
+mod codex_wake;
+
+#[path = "engine_tests/grok_background_correction.rs"]
+mod grok_background_correction;
+
+#[path = "engine_tests/provider_sessions.rs"]
+mod provider_sessions;
+
 const ROOT: &str = "/tmp/conn-engine-project";
 
 struct TempDb(PathBuf);
@@ -3878,7 +3890,7 @@ fn title_config(db: &TempDb, titles: Option<Arc<HeldTitles>>) -> EngineConfig {
     // The engine that holds a title is the one the test drops: its idle sessions close soon,
     // so its tasks end and the test can wait for them. The next engine keeps the default.
     if titles.is_some() {
-        config.idle_session = Some(Duration::from_millis(20));
+        config.idle_session = crate::IdleTimeout::After(Duration::from_millis(20));
     }
     config.title_generator = titles.map(|t| t as Arc<dyn crate::TitleGenerator>);
     config
@@ -4491,6 +4503,7 @@ async fn a_restart_keeps_a_rollback_ahead_of_later_work() {
                     checkpoint_id: "k".into(),
                     scope_id: "s".into(),
                     restore_files: Some(false),
+                    portable: false,
                     resume_snapshot: None,
                 };
                 tx.enqueue(Some("rb-1"), &[crate::commands::Effect::Rollback(rollback)])
@@ -6667,7 +6680,7 @@ async fn a_claude_goal_resume_is_refused_before_it_stops_work() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_declined_steer_waits_first_in_the_queue() {
+async fn declined_steers_keep_their_message_ids_and_fifo_priority() {
     let db = TempDb::new("steer-declined");
     let (engine, _) = open_with(&db, FakeProvider::new("claudeAgent").without_steering());
     dispatch(&engine, create("t1", "c1")).await;
@@ -6679,22 +6692,24 @@ async fn a_declined_steer_waits_first_in_the_queue() {
     dispatch(&engine, message("t1", "c2", "hang")).await;
     until_provider_turn(&mut thread).await;
     dispatch(&engine, message("t1", "c3", "queued first")).await;
-    dispatch(
-        &engine,
-        message_with(
-            "t1",
-            "c4",
-            "steer me",
-            json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
-            None,
-        ),
-    )
-    .await;
+    for (id, text) in [("c4", "first steer"), ("c5", "second steer")] {
+        dispatch(
+            &engine,
+            message_with(
+                "t1",
+                id,
+                text,
+                json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+                None,
+            ),
+        )
+        .await;
+    }
     // The follow-up lands after the decline; wait for its run.
     loop {
         let item = next(&mut thread).await;
         if item["event"]["type"] == "run.created"
-            && item["event"]["payload"]["userMessageId"] == "message:c4"
+            && item["event"]["payload"]["userMessageId"] == "message:c5"
         {
             break;
         }
@@ -6710,23 +6725,28 @@ async fn a_declined_steer_waits_first_in_the_queue() {
     assert_eq!(
         queued,
         [
-            (json!("message:c3"), json!(2)),
-            (json!("message:c4"), json!(1))
+            (json!("message:c3"), json!(3)),
+            (json!("message:c4"), json!(1)),
+            (json!("message:c5"), json!(2))
         ]
     );
     assert_eq!(
         local_item_texts(&p),
-        ["turn_start hang", "queued_turn steer me"],
+        [
+            "turn_start hang",
+            "queued_turn first steer",
+            "queued_turn second steer"
+        ],
         "the steer item now waits in the queue"
     );
     // T3's timeline rule: a queued user message is not shown until its run starts.
     assert_eq!(item_texts(&p), ["turn_start hang"]);
     dispatch(
         &engine,
-        json!({"type": "run.interrupt", "commandId": "c5", "threadId": "t1", "runId": "run:t1:1"}),
+        json!({"type": "run.interrupt", "commandId": "stop", "threadId": "t1", "runId": "run:t1:1"}),
     )
     .await;
-    for _ in 0..3 {
+    for _ in 0..4 {
         until_run_ends(&mut thread).await;
     }
     let p = projection(&engine, "t1").await;
@@ -6734,14 +6754,91 @@ async fn a_declined_steer_waits_first_in_the_queue() {
         item_texts(&p),
         [
             "turn_start hang",
-            "queued_turn steer me",
+            "queued_turn first steer",
+            "queued_turn second steer",
             "run_interrupt_request ",
             "run_interrupt_result ",
-            "assistant_message echo: steer me",
+            "assistant_message echo: first steer",
+            "assistant_message echo: second steer",
             "queued_turn queued first",
             "assistant_message echo: queued first",
         ]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_steer_displaced_by_stop_respects_its_source_threads_queue_hold() {
+    for stop_thread in [true, false] {
+        let db = TempDb::new(&format!("steer-source-stop-{stop_thread}"));
+        let (engine, fake) = open_with(&db, FakeProvider::new("claudeAgent"));
+        dispatch(&engine, create("t1", "create")).await;
+        // A Stop that predates this attempt cannot hold its later follow-up.
+        dispatch(&engine, stop("t1", "old-stop")).await;
+        let mut stream = engine
+            .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+            .await
+            .unwrap();
+        next(&mut stream).await;
+        dispatch(&engine, message("t1", "p", "hang")).await;
+        until_provider_turn(&mut stream).await;
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, native_receipt) = tokio::sync::oneshot::channel();
+        *crate::lock(&fake.steer_receipt) = Some((entered, native_receipt));
+        let steer = |id, text| {
+            message_with(
+                "t1",
+                id,
+                text,
+                json!({"type":"steer_active","targetRunId":"run:t1:1"}),
+                None,
+            )
+        };
+        dispatch(&engine, steer("a", "first steer")).await;
+        timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch(&engine, steer("b", "second steer")).await;
+        let stop_command = if stop_thread {
+            stop("t1", "stop")
+        } else {
+            json!({"type":"run.interrupt","commandId":"stop","threadId":"t1","runId":"run:t1:1","holdQueue":false})
+        };
+        dispatch(&engine, stop_command).await;
+        let end = until_run_ends(&mut stream).await;
+        assert_eq!(end.last().unwrap().1["status"], "interrupted");
+        release.send(()).unwrap();
+        loop {
+            let item = next(&mut stream).await;
+            if item["event"]["type"] == "run.created"
+                && item["event"]["payload"]["userMessageId"] == "message:b"
+            {
+                let run = &item["event"]["payload"];
+                if stop_thread {
+                    assert_eq!(run["status"], "queued");
+                    assert_eq!(run["queueHeld"], true);
+                    assert_eq!(run["queuePosition"], 1);
+                } else {
+                    assert_ne!(run["queueHeld"], true);
+                }
+                break;
+            }
+        }
+        if stop_thread {
+            let p = projection(&engine, "t1").await;
+            assert_eq!(p["runs"][1]["status"], "queued");
+            assert_eq!(p["providerTurns"].as_array().unwrap().len(), 1);
+            dispatch(
+                &engine,
+                json!({"type":"queue.resume","commandId":"resume","threadId":"t1"}),
+            )
+            .await;
+        }
+        let p = run_to_end(&engine, "t1", "run:t1:2").await;
+        assert_eq!(p["runs"][1]["userMessageId"], "message:b");
+        assert_eq!(p["runs"][1]["status"], "completed");
+        assert_eq!(p["providerTurns"].as_array().unwrap().len(), 2);
+    }
 }
 
 fn open_home(db: &TempDb) -> SqliteEngine {
@@ -7005,7 +7102,7 @@ fn every_contract_command_is_handled_or_refused_with_a_reason() {
             );
         }
     }
-    assert_eq!(handled, 52);
+    assert_eq!(handled, 53);
     assert_eq!(conn_contract::COMMAND_TYPES.len(), 58);
 }
 
@@ -8024,6 +8121,52 @@ async fn orchestration_reads_answer_from_the_store() {
     );
 }
 
+#[tokio::test]
+async fn native_child_work_queries_only_the_owning_instance_and_session() {
+    let db = TempDb::new("native-child-work-route");
+    let owner = Arc::new(FakeProvider::new("work").with_driver("antigravity"));
+    let other = Arc::new(FakeProvider::new("personal").with_driver("antigravity"));
+    let mut config = EngineConfig::new(db.path());
+    config.providers = vec![owner.clone(), other.clone()];
+    let engine = SqliteEngine::open(config).unwrap();
+    engine.inner().db(|store| {
+        let db = store.raw();
+        for (id, node) in [("child","task"),("foreign","wrong"),("orphan","orphan")] {
+            let row = json!({"id":id,"lineage":{"parentThreadId":"parent","relationshipToParent":"subagent"},"forkedFrom":{"type":"node","nodeId":node}});
+            db.execute("INSERT INTO threads(id,project_id,activity_at,thread) VALUES (?1,'p','',?2)",rusqlite::params![id,row.to_string()]).map_err(|e|e.to_string())?;
+        }
+        let rows = [
+            ("runs","one",json!({"id":"one","providerThreadId":"pt","activeAttemptId":"attempt"})),
+            ("runs","other",json!({"id":"other","providerThreadId":"oth"})),
+            ("providerThreads","pt",json!({"providerInstanceId":"work","nativeThreadRef":{"nativeId":"old"}})),
+            ("providerThreads","oth",json!({"providerInstanceId":"work","nativeThreadRef":{"nativeId":"elsewhere"}})),
+            ("attempts","attempt",json!({"nativeThreadId":"root"})),
+        ];
+        let put = |kind:&str,id:&str,row:Value| db.execute("INSERT INTO entities(thread_id,kind,id,first_seq,seq,body) VALUES ('parent',?1,?2,1,1,?3)",rusqlite::params![kind,id,row.to_string()]).map(|_|()).map_err(|e|e.to_string());
+        for (kind,id,row) in rows { put(kind,id,row)?; }
+        for (node,child,run,instance) in [("task","child","one","work"),("sib","sibling","one","work"),("wrong","foreign","one","personal"),("else","other","other","work"),("orphan","orphan","missing","work")] {
+            put("subagents",node,json!({"id":node,"childThreadId":child,"runId":run,"providerInstanceId":instance,"origin":"provider_native","driver":"antigravity","nativeTaskRef":{"nativeId":node},"title":"Reader","prompt":node}))?;
+        }
+        Ok::<_,String>(())
+    }).await.unwrap();
+    for id in ["foreign", "orphan", "unknown", "child"] {
+        call(
+            &engine,
+            "orchestration.getNativeChildWork",
+            json!({"threadId":id}),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(other.child_queries.lock().unwrap().is_empty());
+    assert_eq!(
+        *owner.child_queries.lock().unwrap(),
+        [
+            json!({"root":"root","task":"task","launch":{"title":"Reader","prompt":"task"},"siblings":[{"nativeTaskId":"sib","title":"Reader","prompt":"sib"}]})
+        ]
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn older_settled_threads_page_and_trim() {
     let db = TempDb::new("settled");
@@ -8852,7 +8995,7 @@ async fn engine_on_jump_clock(name: &str, first: &str) -> (TempDb, SqliteEngine,
     }];
     config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
     config.clock = clock.clone();
-    config.idle_session = Some(Duration::from_secs(30 * 60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(30 * 60));
     config.idle_max_hold = Duration::from_secs(4 * 60 * 60);
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
@@ -8905,7 +9048,7 @@ async fn an_idle_session_closes_and_the_next_turn_resumes_it() {
     }];
     config.providers = vec![provider.clone()];
     config.clock = paused_clock();
-    config.idle_session = Some(Duration::from_secs(60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(60));
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
     dispatch(&engine, message("t1", "c2", "first")).await;
@@ -9289,7 +9432,7 @@ async fn background_work_holds_an_idle_session_up_to_the_limit() {
     }];
     config.providers = vec![provider.clone()];
     config.clock = paused_clock();
-    config.idle_session = Some(Duration::from_secs(60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(60));
     config.idle_max_hold = Duration::from_secs(600);
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
@@ -9320,7 +9463,7 @@ async fn reported_background_work_holds_the_session_and_shows_in_the_shell() {
     }];
     config.providers = vec![provider.clone()];
     config.clock = paused_clock();
-    config.idle_session = Some(Duration::from_secs(60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(60));
     config.idle_max_hold = Duration::from_secs(600);
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
@@ -12668,6 +12811,108 @@ async fn closing_a_secret_card_clears_the_shell_snapshot_and_resume_stream() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn mcp_sign_in_routes_to_its_live_thread_and_keeps_callback_out_of_errors_and_events() {
+    let db = TempDb::new("sign-in");
+    let (engine, provider) = open(&db);
+    for tid in ["one", "two"] {
+        dispatch(&engine, create(tid, &format!("create-{tid}"))).await;
+        dispatch(&engine, message(tid, &format!("send-{tid}"), "hello")).await;
+        run_to_end(&engine, tid, &format!("run:{tid}:1")).await;
+    }
+    let pt = projection(&engine, "one").await["providerThreads"][0].clone();
+    let mut input = json!({"threadId":"two","providerThreadId":pt["id"],"server":"test"});
+    assert!(
+        engine
+            .call("provider.mcpSignIn.start", input.clone())
+            .await
+            .is_err()
+    );
+    input["threadId"] = "one".into();
+    let reply = engine
+        .call("provider.mcpSignIn.start", input.clone())
+        .await
+        .unwrap();
+    assert_eq!(reply["authorizationUrl"], "https://example.invalid/sign-in");
+    assert!(provider.calls.lock().unwrap().contains(&format!(
+        "sign in test on {}",
+        pt["providerSessionId"].as_str().unwrap()
+    )));
+    input["callbackUrl"] = "https://example.invalid/callback?code=example-private-code".into();
+    let Err(EngineError::Rejected(error)) = engine
+        .call("provider.mcpSignIn.complete", input.clone())
+        .await
+    else {
+        panic!("expected native rejection")
+    };
+    assert!(!error.to_string().contains("example-private-code"));
+    assert!(
+        !serde_json::to_string(&engine.test_events("one").await)
+            .unwrap()
+            .contains("example-private-code")
+    );
+    engine.inner().close_session("one").await;
+    assert!(
+        engine
+            .call("provider.mcpSignIn.start", input)
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&provider.sessions), 2);
+}
+
+#[tokio::test]
+async fn a_browser_sign_in_keeps_its_session_until_completion_or_expiry() {
+    let db = TempDb::new("sign-in-idle");
+    let clock = Arc::new(crate::ManualClock::at(1_800_000_000_000));
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(
+        FakeProvider::new("claudeAgent").with_native_resume(),
+    )];
+    config.clock = clock.clone();
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(&engine, message("t1", "send", "hello")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    let input =
+        json!({"threadId":"t1","providerThreadId":p["providerThreads"][0]["id"],"server":"first"});
+    let mut second = input.clone();
+    second["server"] = "second".into();
+    for login in [&input, &second] {
+        engine
+            .call("provider.mcpSignIn.start", login.clone())
+            .await
+            .unwrap();
+    }
+    clock.advance(Duration::from_secs(180));
+    engine.release_idle_sessions().await;
+    assert_eq!(engine.inner().live_count(), 1);
+    let mut callback = input;
+    callback["callbackUrl"] = "https://example.invalid/callback?code=accepted".into();
+    engine
+        .call("provider.mcpSignIn.complete", callback)
+        .await
+        .unwrap();
+    clock.advance(Duration::from_secs(120));
+    engine.release_idle_sessions().await;
+    assert_eq!(
+        engine.inner().live_count(),
+        1,
+        "second sign-in still waiting"
+    );
+    clock.advance(Duration::from_secs(300));
+    engine.release_idle_sessions().await;
+    assert_eq!(
+        engine.inner().live_count(),
+        0,
+        "abandoned browser sign-in expired"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn mcp_apps_calls_only_the_source_session_and_stores_context_without_a_session() {
     let db = TempDb::new("mcp-apps");
     struct AppSnapshots;
@@ -13802,7 +14047,6 @@ async fn an_async_question_is_answered_with_one_message_and_one_run() {
     };
     for (index, answers) in [
         json!({"color":" ","sizes":["Small"]}),
-        json!({"color":"Blue","sizes":[]}),
         json!({"color":"Blue","sizes":["Small"," "]}),
         json!({"color":"Blue","sizes":["Small"],"extra":" "}),
     ]
@@ -13868,6 +14112,56 @@ async fn an_async_question_is_answered_with_one_message_and_one_run() {
         provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
         1
     );
+}
+
+/// A later user message continues visible history on a fresh native thread after the provider
+/// rejects an accepted turn's saved context. A thread with background work stays put.
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_codex_history_recovers_without_orphaning_pending_work() {
+    for (driver, failure) in [
+        ("codex", "reject-encrypted-history"),
+        ("antigravity", "reject-thinking-signature"),
+    ] {
+        for pending in [false, true] {
+            let db = TempDb::new("codex-rejected-history");
+            let (engine, provider) = open_with(
+                &db,
+                FakeProvider::new("claudeAgent")
+                    .with_driver(driver)
+                    .with_history_injection(),
+            );
+            dispatch(&engine, create("t1", "create")).await;
+            dispatch(&engine, message("t1", "first", "the original history")).await;
+            run_to_end(&engine, "t1", "run:t1:1").await;
+            let rejection = if pending {
+                format!("{failure}-with-work")
+            } else {
+                failure.to_owned()
+            };
+            dispatch(&engine, message("t1", "reject", &rejection)).await;
+            let rejected = run_to_end(&engine, "t1", "run:t1:2").await;
+            assert_eq!(rejected["runs"][1]["status"], "failed");
+            let original = rejected["runs"][1]["providerThreadId"].clone();
+            dispatch(
+                &engine,
+                message("t1", "continue", "continue after the rejection"),
+            )
+            .await;
+            let after = run_to_end(&engine, "t1", "run:t1:3").await;
+            let injected = crate::lock(&provider.injected).clone();
+            if pending {
+                assert_eq!(after["runs"][2]["status"], "failed", "{after}");
+                assert!(injected.is_empty());
+                assert_eq!(after["thread"]["activeProviderThreadId"], original);
+            } else {
+                assert_eq!(after["runs"][2]["status"], "completed", "{after}");
+                assert_ne!(after["runs"][2]["providerThreadId"], original);
+                assert_eq!(injected.len(), 1);
+                assert!(injected[0].1.to_string().contains("the original history"));
+            }
+            engine.shutdown().await;
+        }
+    }
 }
 
 /// A provider failure holds the queue, but a buffered provider notification still starts: it
@@ -13963,6 +14257,28 @@ async fn seed_async_question(engine: &SqliteEngine) {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_async_answer_accepts_an_empty_multiselect_and_an_image_only_answer() {
+    let db = TempDb::new("answer-image-only");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    seed_async_question(&engine).await;
+    let mut answer = async_answer("answer");
+    answer["answers"] = json!({"sizes":[]});
+    let picture = json!({"type":"image","id":"image-id","name":"color.png","mimeType":"image/png","sizeBytes":8});
+    answer["attachmentsByQuestionId"] = json!({"color":[picture]});
+    dispatch(&engine, answer).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    let reply = &p["messages"][0];
+    assert!(
+        reply["text"]
+            .as_str()
+            .unwrap()
+            .contains("Which sizes?\nNone selected")
+    );
+    assert_eq!(reply["attachments"][0]["id"], "image-id");
 }
 
 fn async_answer(command: &str) -> Value {
@@ -14173,6 +14489,201 @@ async fn a_usage_limit_blocks_only_its_provider() {
     let p = run_to_end(&engine, "t1", "run:t1:2").await;
     assert_eq!(run_for(&p, "b")["status"], "completed");
     assert_eq!(count(&codex.sessions), 1);
+}
+
+#[tokio::test]
+async fn a_user_stop_settlement_or_recovery_choice_wins_over_an_automatic_limit_arm() {
+    for action in ["stop-before", "stop-after", "settle", "opt-out"] {
+        let db = TempDb::new(action);
+        let (engine, _) = open(&db);
+        dispatch(&engine, create("t1", "create")).await;
+        dispatch(&engine, message("t1", "limited", "fail-usage-limit")).await;
+        run_to_end(&engine, "t1", "run:t1:1").await;
+        let row = engine
+            .inner()
+            .db(|store| store.stored_shell("t1").map(Option::unwrap))
+            .await
+            .unwrap();
+        let now =
+            crate::time::millis_from_iso(row["latestRunCompletedAt"].as_str().unwrap()).unwrap();
+        let arm = crate::limit_recovery::command(&row, now, true, true).unwrap();
+        if action == "stop-after" || action == "settle" {
+            engine
+                .inner()
+                .dispatch_value(arm.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        if action == "settle" {
+            dispatch(
+                &engine,
+                json!({"type":"thread.settle","threadId":"t1","commandId":"settle"}),
+            )
+            .await;
+            dispatch(
+                &engine,
+                json!({"type":"thread.unsettle","threadId":"t1","commandId":"unsettle","reason":"user"}),
+            )
+            .await;
+        } else if action == "opt-out" {
+            dispatch(&engine,json!({"type":"thread.metadata.update","threadId":"t1","commandId":"opt-out",
+                "limitRecovery":{"runId":row["latestRunId"],"resetAt":row["usageLimitResetAt"],"autoResume":false,"snooze":false}})).await;
+        } else {
+            dispatch(
+                &engine,
+                json!({"type":"thread.stop","threadId":"t1","commandId":"stop"}),
+            )
+            .await;
+        }
+        engine
+            .inner()
+            .dispatch_value(arm)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let stored = engine
+            .inner()
+            .db(|store| store.stored_shell("t1").map(Option::unwrap))
+            .await
+            .unwrap();
+        assert_eq!(stored["limitRecovery"]["autoResume"], false, "{action}");
+        let after = crate::time::millis_from_iso(stored["usageLimitResetAt"].as_str().unwrap())
+            .unwrap()
+            + 1;
+        assert!(
+            crate::limit_recovery::command(&stored, after, true, true).is_none(),
+            "{action}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stop_on_a_failed_quota_run_survives_its_late_reset_time_and_server_restart() {
+    let db = TempDb::new("late-limit-stop");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(
+        &engine,
+        message("t1", "limited", "fail-usage-limit-unknown-reset"),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    let mut item = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "error")
+        .unwrap()
+        .clone();
+    assert!(item["failure"]["resetAt"].is_null());
+    dispatch(
+        &engine,
+        json!({"type":"thread.stop","threadId":"t1","commandId":"stop"}),
+    )
+    .await;
+    drop(engine);
+    let (engine, _) = open(&db);
+    item["failure"]["resetAt"] =
+        conn_support::time::iso_from_ms(conn_support::time::now_ms() + 3_600_000).into();
+    engine
+        .inner()
+        .write(move |tx| {
+            tx.append(
+                crate::store::Draft::new("t1", "turn-item.updated", item).run(Some("run:t1:1")),
+            )
+        })
+        .await
+        .unwrap();
+    let row = engine
+        .inner()
+        .db(|s| s.stored_shell("t1").map(Option::unwrap))
+        .await
+        .unwrap();
+    let arm = crate::limit_recovery::command(&row, conn_support::time::now_ms() as i64, true, true)
+        .unwrap();
+    engine
+        .inner()
+        .dispatch_value(arm)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let stored = engine
+        .inner()
+        .db(|s| s.stored_shell("t1").map(Option::unwrap))
+        .await
+        .unwrap();
+    assert_eq!(stored["limitRecovery"]["autoResume"], false);
+    assert_eq!(stored["limitRecovery"]["snooze"], false);
+    assert!(
+        crate::limit_recovery::command(
+            &stored,
+            crate::time::millis_from_iso(stored["usageLimitResetAt"].as_str().unwrap()).unwrap()
+                + 1,
+            true,
+            true
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_known_usage_reset_automatically_resumes_the_failed_run_only_once() {
+    struct Recover;
+    impl crate::EngineHost for Recover {
+        fn usage_limit_preferences(&self) -> (bool, bool) {
+            (true, true)
+        }
+    }
+    let db = TempDb::new("automatic-limit-recovery");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    // The provider dates its reset when the turn fails, after the engine started.
+    let start = conn_support::time::now_ms() - 5_000;
+    let clock = Arc::new(crate::ManualClock::at(start));
+    let config = || {
+        let mut config = EngineConfig::new(db.path());
+        config.clock = clock.clone();
+        config.host = Some(Arc::new(Recover));
+        config.projects = vec![ProjectConfig {
+            title: "project".into(),
+            workspace_root: ROOT.into(),
+        }];
+        config.providers = vec![provider.clone()];
+        config
+    };
+    let engine = SqliteEngine::open(config()).unwrap();
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(&engine, message("t1", "limited", "fail-usage-limit")).await;
+    run_to_end(&engine, "t1", "run:t1:1").await;
+    let reset = timeout(Duration::from_secs(5), async {
+        loop {
+            let p = projection(&engine, "t1").await;
+            if p["thread"]["limitRecovery"]["autoResume"] == true {
+                let reset = p["thread"]["limitRecovery"]["resetAt"].as_str().unwrap();
+                break u64::try_from(crate::time::millis_from_iso(reset).unwrap()).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker armed the real usage-limit error");
+    drop(engine);
+    clock.advance(Duration::from_millis(reset - start));
+    let engine = SqliteEngine::open(config()).unwrap();
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(p["runs"][1]["usageLimitContinuationOfRunId"], "run:t1:1");
+    assert_eq!(p["runs"][1]["status"], "completed", "{}", p["turnItems"]);
+    drop(engine);
+    let engine = SqliteEngine::open(config()).unwrap();
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        provider
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.as_str() == "Continue where you left off.")
+            .count(),
+        1
+    );
 }
 
 /// Round-2 gate finding 1: after a failed worktree setup the thread has no checkout of its
@@ -15719,4 +16230,67 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
     dispatch(&engine, answer).await;
     assert_eq!(host.claims.lock().unwrap().len(), claims);
     assert_eq!(provider.answers.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_sweep_keeps_a_session_that_started_work_while_another_closed() {
+    let db = TempDb::new("audit-idle-race");
+    let (engine, provider) = open_with(
+        &db,
+        FakeProvider::new("claudeAgent")
+            .with_close_delay(Duration::from_millis(240))
+            .with_close_interrupting(),
+    );
+    for id in ["ta", "tb"] {
+        dispatch(&engine, create(id, &format!("create-{id}"))).await;
+        dispatch(&engine, message(id, &format!("first-{id}"), "first")).await;
+        run_to_end(&engine, id, &format!("run:{id}:1")).await;
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let inner = engine.inner().clone();
+    let sweep = tokio::spawn(async move {
+        inner
+            .reap_idle(crate::IdleTimeout::After(Duration::from_millis(5)))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while provider.closed.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let remaining = ["ta", "tb"]
+        .into_iter()
+        .find(|id| engine.inner().live_thread(id).is_some())
+        .unwrap();
+    dispatch(&engine, message(remaining, "second", "hang")).await;
+    let run = format!("run:{remaining}:2");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let p = projection(&engine, remaining).await;
+            if p["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["id"] == run && r["status"] == "running")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    sweep.await.unwrap();
+    assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let projection = projection(&engine, remaining).await;
+    assert!(
+        projection["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == run && r["status"] == "running")
+    );
 }

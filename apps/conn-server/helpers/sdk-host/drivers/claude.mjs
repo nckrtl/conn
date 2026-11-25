@@ -14,6 +14,7 @@ import {
   resolveSettings,
 } from "@anthropic-ai/claude-agent-sdk";
 import { execFile, spawn } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
 
 /** Prompts waiting for the CLI to take them, per query. T3's queue is unbounded. */
 const MAX_QUEUED_PROMPTS = 64;
@@ -98,19 +99,36 @@ function descendants(rows, roots) {
  * A job that left the CLI's group escapes the group kill. So the CLI's tree is recorded while it
  * runs, and what is still the same process (pid and start time) is stopped after it exits.
  */
+const processTrackers = new Set();
+let processPoll;
+let readingProcessTable;
+function sharedProcessTable() {
+  readingProcessTable ??= readProcessTable().finally(() => { readingProcessTable = undefined; });
+  return readingProcessTable;
+}
 function trackDescendants(cliPid) {
   const tracked = new Map();
   const identity = (row) => `${row.pid} ${row.started}`;
-  const refresh = async (cliRunning) => {
-    const rows = await readProcessTable();
+  const refresh = (rows, cliRunning) => {
     const running = new Set(rows.map(identity));
     for (const [key] of tracked) if (!running.has(key)) tracked.delete(key);
     const roots = [...(cliRunning ? [cliPid] : []), ...[...tracked.values()].map((row) => row.pid)];
     for (const row of descendants(rows, roots)) tracked.set(identity(row), row);
     return running;
   };
+  const sample = (rows) => refresh(rows, true);
+  processTrackers.add(sample);
+  processPoll ??= setInterval(async () => {
+    const rows = await sharedProcessTable();
+    for (const tracker of processTrackers) tracker(rows);
+  }, DESCENDANT_POLL_MS).unref();
   const stop = async () => {
-    const running = await refresh(false);
+    processTrackers.delete(sample);
+    if (processTrackers.size === 0) {
+      clearInterval(processPoll);
+      processPoll = undefined;
+    }
+    const running = refresh(await sharedProcessTable(), false);
     for (const [key, row] of tracked) {
       if (!running.has(key)) continue;
       try {
@@ -120,7 +138,7 @@ function trackDescendants(cliPid) {
     }
     tracked.clear();
   };
-  return { refresh: () => refresh(true), stop };
+  return { refresh: async () => sample(await sharedProcessTable()), stop };
 }
 
 function makeSpawner(state, describeError) {
@@ -191,12 +209,8 @@ function makeSpawner(state, describeError) {
     }
     if (child.pid !== undefined) {
       const tracker = trackDescendants(child.pid);
-      const timer = setInterval(() => {
-        tracker.refresh().catch(() => {});
-      }, DESCENDANT_POLL_MS);
       state.refreshDescendants = () => tracker.refresh().then(() => undefined, () => undefined);
       child.once("exit", () => {
-        clearInterval(timer);
         state.refreshDescendants = () => Promise.resolve();
         tracker.stop().catch(() => {});
       });
@@ -358,7 +372,12 @@ async function probeCapabilities(options, extra = {}) {
 }
 
 const FUNCTIONS = {
-  forkSession,
+  async forkSession(sessionId, options) {
+    const result = await forkSession(sessionId, options);
+    // The SDK assigns new UUIDs to the copied messages.
+    const messages = await getSessionMessages(result.sessionId, options?.dir ? { dir: options.dir } : {}).catch(() => []);
+    return { ...result, headMessageId: messages.at(-1)?.uuid };
+  },
   getSessionMessages,
   getSubagentMessages,
   resolveSettings,
@@ -417,6 +436,7 @@ export function createDriver(host) {
       const options = { ...(command.options ?? {}) };
       options.canUseTool = (toolName, input, callbackOptions) => {
         const { signal, ...rest } = callbackOptions ?? {};
+        if (typeof rest.decisionReason === "string") rest.decisionReason = stripVTControlCharacters(rest.decisionReason);
         return session.request("canUseTool", rest.requestId, { toolName, input, options: rest }, signal);
       };
       options.onElicitation = (request, callbackOptions) =>
@@ -441,7 +461,7 @@ export function createDriver(host) {
       // T3's `onStop` answers `{continue: false}` only while a Claude goal is active and a
       // delegated task will wake the thread. The Conn Server tracks no Claude goals, so it gives
       // T3's answer for a thread without an active goal.
-      if (command.stopHook === true) hooks.Stop = [{ hooks: [() => Promise.resolve({})] }];
+      if (command.stopHook === true) hooks.Stop = [{ hooks: [(_input, _tool, options) => session.request("stopHook", undefined, {}, options?.signal)] }];
       if (Object.keys(hooks).length > 0) options.hooks = hooks;
       if (command.wrap !== false) options.spawnClaudeCodeProcess = makeSpawner(state, describeError);
 
@@ -500,6 +520,18 @@ export function createDriver(host) {
         state.mcpRequests += 1;
       }
       try {
+        if (method === "mcpAuthenticate" || method === "mcpSubmitOAuthCallbackUrl") {
+          const q = state.query;
+          const send = Reflect.get(q, "request");
+          if (typeof send !== "function") throw new Error("Claude MCP sign-in is unavailable.");
+          const callback = method === "mcpSubmitOAuthCallbackUrl";
+          const pasted = callback ? String(args[1]).trim() : "";
+          const request = callback
+            ? { subtype: "mcp_oauth_callback_url", serverName: args[0], callbackUrl: new URL(/^[a-z][a-z\d+.-]*:\/\//iu.test(pasted) ? pasted : `http://${pasted}`).toString() }
+            : { subtype: "mcp_authenticate", serverName: args[0] };
+          const reply = await Reflect.apply(send, q, [request]);
+          return !callback && reply?.response?.requiresUserAction === true ? reply.response.authUrl ?? null : null;
+        }
         if (method === "callMcpTool" || method === "listPermissionRules") {
           const q = session.state?.query;
           const send = q === undefined ? undefined : Reflect.get(q, "request");
@@ -570,6 +602,9 @@ export function createDriver(host) {
     fn(name, args, configDir) {
       const fn = FUNCTIONS[name];
       if (typeof fn !== "function") return Promise.reject(new Error(`unknown function ${name}`));
+      // Capability probes pass the CLI its own complete environment. They do not
+      // mutate the host SDK environment, and must not hold the session-file queue.
+      if (name === "probeCapabilities") return fn(...args);
       const run = async () => {
         // Without a configDir the SDK reads the host's own environment, as T3's in-process calls do.
         if (typeof configDir !== "string") return (await fn(...args)) ?? null;

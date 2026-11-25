@@ -975,6 +975,7 @@ impl<E: Env> Mapper<E> {
             running_tools: Vec::new(),
             running_compactions: Vec::new(),
             latest_failure: None,
+            recovered_retries: 0,
             continues: Vec::new(),
             hook_stop_reason: None,
         };

@@ -109,7 +109,7 @@ CI path filters and sync triggers are listed in [`docs/upkeep.md`](docs/upkeep.m
 | Claude conformance  | `crates/conn-provider-claude/tools/conformance/run.sh` (skipped, with one line, without `npm ci` in `helpers/sdk-host`)          | The `claude` CLI gets the same argv, environment and stdin as from the T3 server, on a stub CLI      |
 | Claude probe conformance | `node crates/conn-provider-claude/tools/probe-conformance/run.mjs` (skipped with the Claude conformance) | Claude's `ServerProvider` entry and every CLI run of its status probe equal the T3 server's `checkClaudeProviderStatus`, and its thread titles equal `generateThreadTitle`, on a stub CLI |
 | T3 replay (Claude)  | `node crates/conn-provider-claude/tools/t3-replay/check.mjs`                                                                    | The T3 server's Claude transcripts: exactly the scenarios in `expected-failures.txt` fail            |
-| T3 fixture replay   | `node crates/conn-engine/tools/t3-fixture-replay/check.mjs`                                                                     | T3's testkit fixtures through this engine and our Claude, Codex and Grok providers pass T3's own assertions, except the variants in its `expected-failures.txt` (69 of 159 pass) |
+| T3 fixture replay   | `node crates/conn-engine/tools/t3-fixture-replay/check.mjs`                                                                     | Runs T3's engine assertions for Claude, Codex, and Grok, including Grok's native child threads and background commands. The separate Antigravity checks exercise ACP wire behavior. |
 | Thread CLI diff     | `node crates/conn-server/tools/thread-cli-diff.mjs target/release/conn-server` | Orbit's task-turn commands (`t3 thread` start, send, list and show, `t3 auth session issue --scope … --json`, revoke, and `t3_copy_rpc.mjs`'s calls) give the same stdout, stderr and exit code as the T3 server's own `t3` CLI, on a stub `codex` with T3's transcripts |
 | Model manifest diff | `node crates/conn-server/tools/model-manifest-diff.mjs target/release/examples/model_manifest_cache` | `model-manifest.json` as this server writes it equals T3's `encodeManifestCache`, byte for byte |
 | Orbit flow          | `node crates/conn-server/tools/orbit-flow.mjs target/release/examples/replay_server`                                            | Orbit's container flow: start, project add, session issue, launch over `/mcp`, revoke, clean stop; then its task-turn path: the model check, `t3 thread` start, list, show, send, a turn that asks, and `t3_copy_rpc.mjs`'s read and interrupt   |
@@ -468,12 +468,12 @@ lists what it serves.
 | Workspace       | `conn-vcs` (status, refs, review, worktrees), `conn-files` (files, search, assets, uploads)     |
 | Terminals       | `conn-terminal`                                                                                 |
 | Source control  | `conn-source-control`: GitHub discovery, all 9 `sourceControl.*` (GitHub repositories)  |
-| Text generators | `src/text_generation/`: `server.listTextGeneratorModels` and thread titles through the user's own model API (`docs/server-area.md`, "Text generators") |
+| Text generators | `server.listTextGeneratorModels` lists configured models. For thread titles, Conn can use the configured text generator, the Claude or Codex CLI, or the Grok or Antigravity ACP adapter. |
 
 The server joins them in `src/host.rs`: each provider session gets a `/mcp` credential, messages
 claim their uploads, a `worktree` launch provisions a worktree, archive and delete close the
 thread's terminals, and a turn's end refreshes VCS status. One idle rule closes provider
-sessions (`--session-idle-timeout`, default 30 minutes, held up to 4 hours by background work).
+sessions (`--session-idle-timeout`). By default, resumable providers close after two idle minutes and other providers after thirty. Background work can hold a session for up to four hours.
 SIGTERM and SIGINT stop terminals and close every provider session before the server exits.
 
 **Proven with the real web client** (headless Chromium; `fixtures/README.md`): pairing, a turn,
@@ -537,16 +537,15 @@ What a real Conn session hits that this server does not do:
   scheduled-task edits, provider sign-in and install, peer links, discovered local servers and
   the other methods the startup coverage line lists as missing.
 - **No checkpoints:** turns are not captured as git refs, so no turn diff or restore.
-- **Titles through a text generator or Codex:** a thread title is generated when the title
-  model is a text generator (`crates/conn-server/src/text_generation/`) or a Codex instance,
-  the default (`codex exec`, as T3; `crates/conn-provider-codex/README.md`). With Claude as
-  the title model the thread keeps the client's seed title until the Claude provider
-  implements `Provider::generate_text` (`docs/server-area.md`, "Text generators").
 - **`/mcp` serves 28 of 87 T3 tools** (`crates/conn-mcp/README.md`).
 - **Worktree launch and worktree delegates:** the worktree is made before the thread exists;
   `prepared-run.*` stays refused. A launch runs no project setup script; a `delegate_task`
   child with `isolation: worktree` starts it in its terminal without waiting for it.
-- **Providers:** Claude, Codex and Grok (Grok with `/compact`, background work and subagents; not subagents carried over to a later turn). Their gaps are in each crate's README. Claude and Codex instance settings apply (binary, home, launch arguments, environment, enabled, identity); Codex is probed as T3 probes it (its `app-server`, account, models, skills, config, usage) and reads `customModels`; not yet: Claude's `customModels` and `autoCompactWindow`, Codex's `shadowHomePath` and managed setup.
+- **Provider coverage.** Conn runs Claude Code, Codex, Grok and Antigravity. Grok child work
+  can continue across turns. The [Claude](crates/conn-provider-claude/README.md),
+  [Codex](crates/conn-provider-codex/README.md) and [ACP](crates/conn-provider-acp/README.md)
+  guides describe native session behavior and supported settings. Codex managed setup and
+  shadow homes are outside the Rust adapter.
 - **Auth:** bearer and ticket only. No cookie sessions, DPoP or relay (`DROP-IN.md` §4).
 - **Desktop-local backend:** the `--bootstrap-fd` start works; the desktop itself still
   spawns the T3 server (`DROP-IN.md` §2).

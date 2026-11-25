@@ -137,6 +137,78 @@ impl Inner {
         }
     }
 
+    /// Sign-in stays with the live session. The callback may contain a code and is never persisted.
+    pub(crate) async fn mcp_sign_in(&self, method: &str, input: Value) -> Result<Value> {
+        let tid = input["threadId"].as_str().unwrap_or_default().to_owned();
+        let pt = input["providerThreadId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let server = input["server"].as_str().unwrap_or_default();
+        let error = |detail: &str| {
+            EngineError::Rejected(
+                json!({"_tag":"ProviderMcpSignInError","server":server,"detail":detail}),
+            )
+        };
+        let stopped = || error("The agent session has ended. Send a message, then sign in again.");
+        let row = self
+            .db(move |store| {
+                let tx = store.tx()?;
+                tx.entity(&tid, "providerThreads", &pt)
+            })
+            .await
+            .map_err(|_| stopped())?
+            .ok_or_else(stopped)?;
+        let thread: ProviderThread = from_json(row).map_err(|_| stopped())?;
+        let session_id = thread.provider_session_id.as_ref().ok_or_else(stopped)?;
+        let begin = method == "provider.mcpSignIn.start";
+        let (live, token, was_pending) = {
+            let sessions = crate::lock(&self.live);
+            let live = sessions
+                .values()
+                .find(|live| live.session().provider_session_id().as_str() == session_id)
+                .cloned()
+                .ok_or_else(stopped)?;
+            let now = self.clock.now_millis();
+            live.touch(now);
+            let (token, pending) = live.hold_mcp_sign_in(server, begin, now);
+            (live, token, pending)
+        };
+        let safe_error = |e: ProviderError| match e {
+            ProviderError::Unsupported { .. } => {
+                error("This agent can't sign MCP servers in from Conn.")
+            }
+            ProviderError::SessionStopped => stopped(),
+            _ => error(&format!(
+                "Couldn't {} the sign-in to {server}.",
+                if begin { "start" } else { "finish" }
+            )),
+        };
+        let time = || conn_support::time::iso_from_ms(self.clock.now_millis());
+        if begin {
+            let result = live
+                .session()
+                .start_mcp_sign_in(thread, server.to_owned())
+                .await;
+            if !matches!(result, Ok(Some(_))) {
+                live.release_mcp_sign_in(server, &token);
+            }
+            let url = result.map_err(safe_error)?;
+            Ok(json!({"signedInAt":url.is_none().then(time),"authorizationUrl":url}))
+        } else {
+            let callback = input["callbackUrl"].as_str().unwrap_or_default().to_owned();
+            let result = live
+                .session()
+                .complete_mcp_sign_in(thread, server.to_owned(), callback)
+                .await;
+            if result.is_ok() || !was_pending {
+                live.release_mcp_sign_in(server, &token);
+            }
+            result.map_err(safe_error)?;
+            Ok(json!({"signedInAt":time()}))
+        }
+    }
+
     pub(crate) async fn mcp_app_request(
         self: &Arc<Self>,
         method: &str,

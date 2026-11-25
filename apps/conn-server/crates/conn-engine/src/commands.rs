@@ -29,6 +29,17 @@ pub(crate) enum Effect {
         thread_id: String,
         run_id: String,
         message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_selection: Option<Value>,
+    },
+    #[serde(rename = "provider-thread.rename")]
+    RenameThread { thread_id: String, title: String },
+    #[serde(rename = "provider-subagent.stop")]
+    StopSubagent {
+        thread_id: String,
+        provider_session_id: String,
+        provider_thread: Value,
+        task_id: String,
     },
     #[serde(rename = "provider-turn.interrupt")]
     Interrupt { thread_id: String, run_id: String },
@@ -123,6 +134,7 @@ pub(crate) type Handler = fn(&mut Tx<'_>, Value) -> Outcome;
 
 pub(crate) fn handler(command_type: &str) -> Option<Handler> {
     Some(match command_type {
+        "subagent.stop" => stop_subagent,
         "thread.create" => thread_create,
         "thread.created.record" => thread_created_record,
         "message.dispatch" => message_dispatch,
@@ -189,12 +201,66 @@ pub(crate) fn refusal(command_type: &str) -> &'static str {
         "notification.delivery.accept" => {
             "Conn Server does not deliver background notifications yet."
         }
-        "subagent.stop" => {
-            "Conn Server cannot stop a single subagent yet; stop the thread instead."
-        }
 
         _ => "Conn Server does not support this command.",
     }
+}
+
+fn stop_subagent(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    let input: conn_contract::OrchestrationV2CommandSubagentStop = decode(command)?;
+    let tid = input.thread_id.as_str();
+    let rid = input.run_id.as_str();
+    let id = input.subagent_id.as_str();
+    let task = tx.entity(tid, "subagents", id)?.unwrap_or_default();
+    let native = task["nativeTaskRef"]["nativeId"].as_str();
+    if task["origin"] != "provider_native"
+        || task["driver"] != "claudeAgent"
+        || task["runId"] != rid
+        || task["nativeTaskRef"]["strength"] != "strong"
+        || native.is_none()
+    {
+        return reject("The requested native subagent cannot be stopped on this run.");
+    }
+    if !matches!(
+        task["status"].as_str(),
+        Some("running" | "waiting" | "pending")
+    ) {
+        return Ok(vec![]);
+    }
+    let run = tx.entity(tid, "runs", rid)?.unwrap_or_default();
+    let pt = tx
+        .entity(
+            tid,
+            "providerThreads",
+            run["providerThreadId"].as_str().unwrap_or_default(),
+        )?
+        .unwrap_or_default();
+    let Some(session_id) = pt["providerSessionId"].as_str().filter(|_| {
+        pt["driver"] == task["driver"] && pt["providerInstanceId"] == task["providerInstanceId"]
+    }) else {
+        return reject("The requested native subagent has no owning provider session.");
+    };
+    if !tx
+        .entities(tid, "providerTurns")?
+        .iter()
+        .any(|turn| turn["providerThreadId"] == pt["id"])
+    {
+        return reject("The requested native subagent has no owning provider session.");
+    }
+    let mut updated = task.clone();
+    updated["updatedAt"] = tx.now().into();
+    tx.append(
+        Draft::new(tid, "subagent.updated", updated)
+            .run(Some(rid))
+            .node(Some(id))
+            .payload_instance(),
+    )?;
+    Ok(vec![Effect::StopSubagent {
+        thread_id: tid.into(),
+        task_id: native.unwrap_or_default().into(),
+        provider_session_id: session_id.into(),
+        provider_thread: pt,
+    }])
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(command: Value) -> Result<T, CommandError> {
@@ -232,6 +298,18 @@ pub(crate) fn is_active(run: &Value) -> bool {
 
 pub(crate) fn active_run(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Option<Value>> {
     tx.active_run(thread_id)
+}
+
+/// A thread Stop or settlement can outlive the native run and its interrupt request.
+/// Its committed receipt still holds a late steer or quota continuation for that attempt.
+fn thread_stopped_after_run_start(tx: &Tx<'_>, thread: &str, run: &str) -> StoreResult<bool> {
+    tx.sql().query_row(
+        "SELECT EXISTS(SELECT 1 FROM receipts WHERE owner_kind='thread' AND owner_id=?1 AND error IS NULL
+           AND command_type IN ('thread.stop', 'thread.settle', 'thread.auto-settle')
+           AND sequence >= (SELECT COALESCE(a.first_seq,r.first_seq) FROM entities r LEFT JOIN entities a
+              ON a.thread_id=r.thread_id AND a.kind='attempts' AND a.id=json_extract(r.body,'$.activeAttemptId')
+              WHERE r.thread_id=?1 AND r.kind='runs' AND r.id=?2))",
+        rusqlite::params![thread,run], |row|row.get(0)).map_err(|e|e.to_string())
 }
 
 /// Queued runs in delivery order: `queuePosition`, then ordinal.
@@ -353,6 +431,7 @@ struct MessageDispatch {
     delivery_intent: Option<String>,
     steer_follow_up_of_run_id: Option<String>,
     restart_continuation_of_run_id: Option<String>,
+    usage_limit_continuation_of_run_id: Option<String>,
     title_seed: Option<String>,
     /// A wake the server queued (`{ source, outcome, summary }`): shown as a notice.
     notification: Option<Value>,
@@ -588,6 +667,40 @@ fn goal_stops_run(
 }
 
 pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    if let Some(limited) = command["usageLimitContinuationOfRunId"].as_str() {
+        let tid = command["threadId"].as_str().unwrap_or_default();
+        let row = crate::shell::thread_shell(tx, tid)?;
+        let now = crate::time::millis_from_iso(tx.now()).unwrap_or_default();
+        let eligible = crate::limit_recovery::command(&row, now, false, false);
+        if row["latestRunId"] != limited
+            || !eligible.as_ref().is_some_and(|c| {
+                c["type"] == "message.dispatch"
+                    && c["usageLimitRecoveryRequestId"] == command["usageLimitRecoveryRequestId"]
+            })
+            || !tx
+                .entity(tid, "runs", limited)?
+                .is_some_and(|r| r["providerInstanceId"] == row["providerInstanceId"])
+        {
+            // A snooze can land between the deadline and delivery. Give its next wake a
+            // fresh identity, otherwise this command receipt would suppress it permanently.
+            if row["limitRecovery"]["autoResume"] == true
+                && row["limitRecovery"]["runId"] == limited
+                && row["limitRecovery"]["requestId"] == command["usageLimitRecoveryRequestId"]
+                && row["snoozedUntil"]
+                    .as_str()
+                    .and_then(crate::time::millis_from_iso)
+                    .is_some_and(|until| until > now)
+                && let Some(mut thread) = tx.thread(tid)?
+            {
+                thread["limitRecovery"]["requestId"] = command["commandId"].clone();
+                tx.append(
+                    Draft::new(tid, "thread.metadata-updated", thread)
+                        .command(command["commandId"].as_str()),
+                )?;
+            }
+            return Ok(vec![]);
+        }
+    }
     let mut c: MessageDispatch = decode(command)?;
     let thread = live_thread(tx, &c.thread_id)?;
     // `sendToThread`'s archive guard for a schedule's or an agent's send, checked again in the
@@ -680,7 +793,16 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
         .unwrap_or_default()
         .to_owned();
     let goal = native_goal(tx, &c.text, !c.attachments.is_empty(), &instance)?;
-    let (delivery, interrupt) = delivery(tx, &mut c, goal.as_ref())?;
+    // A native steer can resolve after Stop has finished its source run and held the queue.
+    let hold_follow_up = match c.steer_follow_up_of_run_id.as_deref() {
+        Some(source) => thread_stopped_after_run_start(tx, &c.thread_id, source)?,
+        None => false,
+    };
+    let (delivery, interrupt) = if hold_follow_up {
+        (Delivery::Queue { first: true }, None)
+    } else {
+        delivery(tx, &mut c, goal.as_ref())?
+    };
     if let Delivery::Steer(target) = delivery {
         return steer_into(tx, &c, &target);
     }
@@ -738,6 +860,22 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
         queued: false,
         now: &now,
     };
+    if thread["lineage"]["sideChat"] == true
+        && !fresh
+        && let Some(transfer) = crate::fork::pending_fork(tx, &c.thread_id)?
+        && transfer["sourcePoint"]["runId"].is_string()
+        && !tx
+            .entities(&c.thread_id, "contextHandoffs")?
+            .iter()
+            .any(|h| h["strategy"] == "manual_context" && h["transferId"] == transfer["id"])
+    {
+        let note = crate::provider_handoff::side_chat_note(tx, &place, &transfer)?;
+        tx.append(
+            Draft::new(&c.thread_id, "context-handoff.updated", note)
+                .run(Some(&run_id))
+                .command(cid),
+        )?;
+    }
     let switch = match (&fork, from) {
         (crate::fork::ForkExecution::Portable(pending), _) => Some(
             crate::provider_handoff::prepare_fork(tx, &thread, &place, pending)?,
@@ -780,9 +918,22 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
 
     let queue_position = match delivery {
         Delivery::Queue { first: true } => {
-            // Everything already queued moves down one place.
+            // Earlier declined steers stay together in send order, ahead of ordinary messages.
+            // The dispatch receipt survives process restarts and also covers older queued runs.
+            let mut insert_at = 1;
+            let mut leading_steers = c.steer_follow_up_of_run_id.is_some();
             for mut run in queued_runs(tx, &c.thread_id)? {
                 let position = run["queuePosition"].as_u64().unwrap_or(1);
+                if leading_steers
+                    && let Some(message) = run["userMessageId"].as_str()
+                    && tx
+                        .outcome(&format!("command:steer-follow-up:{message}"))?
+                        .is_some_and(|receipt| receipt.refusal.is_none())
+                {
+                    insert_at = position + 1;
+                    continue;
+                }
+                leading_steers = false;
                 run["queuePosition"] = json!(position + 1);
                 let id = run["id"].as_str().unwrap_or_default().to_owned();
                 tx.append(
@@ -791,7 +942,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
                         .command(cid),
                 )?;
             }
-            json!(1)
+            json!(insert_at)
         }
         Delivery::Queue { first: false } => {
             let last = queued_runs(tx, &c.thread_id)?
@@ -815,6 +966,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             None => false,
         };
     let held = worktree_missing
+        || hold_follow_up
         || (queued
             && !wake_skips_hold
             && queued_runs(tx, &c.thread_id)?
@@ -872,8 +1024,15 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
     if let Some(source) = &c.restart_continuation_of_run_id {
         run["restartContinuationOfRunId"] = json!(source);
     }
-    // A run the thread queues for itself continues the task of the run that sent it.
-    let continued = match &c.restart_continuation_of_run_id {
+    if let Some(source) = &c.usage_limit_continuation_of_run_id {
+        run["usageLimitContinuationOfRunId"] = json!(source);
+    }
+    // A recovery continues the delegated task of the original run.
+    let continued = match c
+        .restart_continuation_of_run_id
+        .as_ref()
+        .or(c.usage_limit_continuation_of_run_id.as_ref())
+    {
         Some(source) => tx.entity(&c.thread_id, "runs", source)?,
         None if c.sender_thread_id.as_deref() == Some(c.thread_id.as_str()) => {
             active_run(tx, &c.thread_id)?
@@ -1359,6 +1518,7 @@ fn steer_into(tx: &mut Tx<'_>, c: &MessageDispatch, target: &Value) -> Outcome {
         thread_id: c.thread_id.clone(),
         run_id,
         message_id: c.message_id.clone(),
+        model_selection: c.model_selection.clone(),
     }])
 }
 
@@ -2183,7 +2343,7 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
             .cloned()
             .unwrap_or_default(),
         context: message.get("context").filter(|v| v.is_object()).cloned(),
-        model_selection: None,
+        model_selection: selection.is_object().then(|| selection.clone()),
         created_by: message["createdBy"].as_str().unwrap_or("user").to_owned(),
         creation_source: message["creationSource"]
             .as_str()
@@ -2197,6 +2357,7 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
         delivery_intent: None,
         steer_follow_up_of_run_id: None,
         restart_continuation_of_run_id: None,
+        usage_limit_continuation_of_run_id: None,
         sender_thread_id: None,
         title_seed: None,
         target_capabilities: None,
@@ -2280,6 +2441,16 @@ fn thread_stop(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let command_id = command["commandId"].as_str().map(str::to_owned);
     let c: ThreadStop = decode(command)?;
     let mut thread = live_thread(tx, &c.thread_id)?;
+    if let Some(recovery) = crate::limit_recovery::disarmed(tx, &thread, &json!(command_id), false)?
+    {
+        thread["limitRecovery"] = recovery;
+        thread["updatedAt"] = tx.now().into();
+        tx.append(
+            Draft::new(&c.thread_id, "thread.metadata-updated", thread.clone())
+                .command(command_id.as_deref())
+                .payload_instance(),
+        )?;
+    }
     crate::link_requests::close_pending(tx, &c.thread_id)?;
     // Stop means stop: queued messages wait until the user sends again or resumes the queue.
     hold_queue(tx, &c.thread_id)?;
@@ -2704,7 +2875,10 @@ fn runtime_request_respond(tx: &mut Tx<'_>, command: Value) -> Outcome {
                 return reject("The question for this request was not found.");
             };
             let answers = c.answers.as_ref().and_then(Value::as_object);
-            Some(async_reply(&item, answers).map_err(|e| CommandError::Rejected(e.into()))?)
+            Some(
+                async_reply(&item, answers, c.attachments_by_question_id.as_ref())
+                    .map_err(|e| CommandError::Rejected(e.into()))?,
+            )
         }
         _ => None,
     };
@@ -2785,6 +2959,7 @@ fn message_answer(answer: &Value) -> Option<String> {
 fn async_reply(
     item: &Value,
     answers: Option<&serde_json::Map<String, Value>>,
+    attachments: Option<&Value>,
 ) -> Result<String, &'static str> {
     const UNANSWERED: &str = "Answer each question before sending.";
     let questions = item["questions"].as_array().map_or(&[][..], Vec::as_slice);
@@ -2799,15 +2974,24 @@ fn async_reply(
     }
     let mut replies = vec![];
     for question in questions {
-        let answer = question["id"]
-            .as_str()
-            .and_then(|id| answers.get(id))
-            .and_then(message_answer);
-        match answer {
-            Some(text) => replies.push(format!(
-                "{}\n{text}",
-                question["question"].as_str().unwrap_or_default()
-            )),
+        let id = question["id"].as_str().unwrap_or_default();
+        let answer = answers.get(id);
+        let label = question["question"].as_str().unwrap_or_default();
+        match answer.and_then(message_answer) {
+            Some(text) => replies.push(format!("{label}\n{text}")),
+            None if question["multiSelect"] == true
+                && question["required"] != true
+                && answer.and_then(Value::as_array).is_some_and(Vec::is_empty) =>
+            {
+                replies.push(format!("{label}\nNone selected"))
+            }
+            None if attachments
+                .and_then(|map| map.get(id))
+                .and_then(Value::as_array)
+                .is_some_and(|images| !images.is_empty()) =>
+            {
+                replies.push(label.to_owned())
+            }
             // Clients send "" for a skipped optional question.
             None if question["required"] == false => {}
             None => return Err(UNANSWERED),
@@ -2819,8 +3003,50 @@ fn async_reply(
     Ok(replies.join("\n\n"))
 }
 
+/// A child completion may join a running turn only while it can do so without
+/// restarting, interrupting a tool, or attaching to a different attempt.
+pub(crate) fn can_steer_delegated_wake(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    run: &Value,
+) -> StoreResult<bool> {
+    if run["status"] != "running"
+        || run["activeAttemptId"].is_null()
+        || !session_steering(tx, thread_id, run, true)?
+        || interrupt_request(tx, thread_id, run["id"].as_str().unwrap_or_default())?.is_some()
+    {
+        return Ok(false);
+    }
+    if let Some(id) = run["userMessageId"].as_str()
+        && tx
+            .entity(thread_id, "messages", id)?
+            .is_some_and(|message| is_native_maintenance(&message))
+    {
+        return Ok(false);
+    }
+    let thread = tx.thread(thread_id)?.unwrap_or_default();
+    if thread["modelSelection"]["instanceId"].is_string()
+        && thread["modelSelection"]["instanceId"] != run["providerInstanceId"]
+    {
+        return Ok(false);
+    }
+    Ok(tx
+        .entities_where(thread_id, "providerTurns", "status", "running")?
+        .iter()
+        .any(|turn| turn["runAttemptId"] == run["activeAttemptId"]))
+}
+
 /// Whether the provider session the run's provider thread is on steers a running turn.
 fn session_steers(tx: &Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<bool> {
+    session_steering(tx, thread_id, run, false)
+}
+
+fn session_steering(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    run: &Value,
+    preserve_tools: bool,
+) -> StoreResult<bool> {
     let Some(provider_thread) = run["providerThreadId"]
         .as_str()
         .map(|id| tx.entity(thread_id, "providerThreads", id))
@@ -2837,7 +3063,9 @@ fn session_steers(tx: &Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<bool
     else {
         return Ok(false);
     };
-    Ok(session["capabilities"]["turns"]["supportsActiveSteering"] == true)
+    let caps = &session["capabilities"]["turns"];
+    Ok(caps["supportsActiveSteering"] == true
+        && (!preserve_tools || caps["activeSteeringInterruptsTools"] != true))
 }
 
 /// Sends the async answer as the user's message: it steers the active run, or queues or
@@ -2881,7 +3109,8 @@ fn async_answer(tx: &mut Tx<'_>, c: &RuntimeRequestRespond, text: String) -> Out
             "threadId": c.thread_id,
             "messageId": format!("async-answer:{}", c.request_id),
             "text": text,
-            "attachments": [],
+            "attachments": c.attachments_by_question_id.as_ref().and_then(Value::as_object).into_iter()
+                .flat_map(|map| map.values()).filter_map(Value::as_array).flatten().collect::<Vec<_>>(),
             "createdBy": "user",
             "creationSource": "server",
             "dispatchMode": dispatch_mode,
@@ -3311,6 +3540,41 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
         *value = json!(project);
     }
     let old = live_thread(tx, &c.thread_id)?;
+    let recovery = match command.get("limitRecovery") {
+        None => None,
+        Some(Value::Null) => Some(Value::Null),
+        Some(update) => {
+            let shell = crate::shell::thread_shell(tx, &c.thread_id)?;
+            if shell["latestRunId"] != update["runId"]
+                || shell["usageLimitResetAt"] != update["resetAt"]
+                || shell["lastErrorClass"] != "usage_limit"
+            {
+                return reject("The usage limit changed before recovery could be set.");
+            }
+            let previous = &old["limitRecovery"];
+            let same =
+                previous["runId"] == update["runId"] && previous["resetAt"] == update["resetAt"];
+            let auto_arm = command["connAutomaticLimitArm"] == true;
+            if auto_arm
+                && (same || old["settledOverride"] == "settled" || !old["archivedAt"].is_null())
+            {
+                return Ok(vec![]);
+            }
+            let run_id = update["runId"].as_str().unwrap_or_default();
+            let stopped = auto_arm
+                && (interrupt_request(tx, &c.thread_id, run_id)?.is_some()
+                    || thread_stopped_after_run_start(tx, &c.thread_id, run_id)?);
+            let setting = |key: &str| {
+                update[key]
+                    .as_bool()
+                    .or_else(|| same.then(|| previous[key].as_bool()).flatten())
+                    .unwrap_or(false)
+            };
+            Some(
+                json!({"requestId":c.command_id,"runId":update["runId"],"resetAt":update["resetAt"],"autoResume":!stopped && setting("autoResume"),"snooze":!stopped && setting("snooze")}),
+            )
+        }
+    };
     for (expected, actual, label) in [
         ("expectedWorktreePath", "worktreePath", "worktree"),
         ("expectedBranch", "branch", "branch"),
@@ -3352,6 +3616,12 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
     }
     let command_id = c.command_id.clone();
     let titled = c.title.is_some();
+    let native_title = c
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && old["title"] != *title)
+        .map(str::to_owned);
     let thread_id = c.thread_id.clone();
     patch_thread_for(
         tx,
@@ -3361,6 +3631,23 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
         // The claim's event names its command, so a replay can find the thread it claimed.
         expects_empty.then_some(command_id.as_str()),
         |t, now| {
+            if let Some(recovery) = recovery {
+                if recovery["snooze"] == true
+                    && recovery["resetAt"]
+                        .as_str()
+                        .and_then(crate::time::millis_from_iso)
+                        > crate::time::millis_from_iso(now)
+                {
+                    t["snoozedUntil"] = recovery["resetAt"].clone();
+                    t["snoozedAt"] = json!(now);
+                } else if t["limitRecovery"]["snooze"] == true
+                    && t["snoozedUntil"] == t["limitRecovery"]["resetAt"]
+                {
+                    t["snoozedUntil"] = Value::Null;
+                    t["snoozedAt"] = Value::Null;
+                }
+                t["limitRecovery"] = recovery;
+            }
             for field in ["branch", "worktreePath", "orbitProject"] {
                 if let Some(value) = command.get(field) {
                     t[field] = value.clone();
@@ -3386,6 +3673,12 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
     } else {
         vec![]
     };
+    if let Some(title) = native_title {
+        effects.push(Effect::RenameThread {
+            thread_id: thread_id.clone(),
+            title,
+        });
+    }
     let previous_run = if workspace_changed {
         active_run(tx, &thread_id)?
     } else {
@@ -3875,6 +4168,7 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }
     let settled_at = command["settledAt"].clone();
     let current = live_thread(tx, &thread_id)?;
+    let disabled = crate::limit_recovery::disarmed(tx, &current, &command["commandId"], true)?;
     let again = current["settledOverride"] == "settled"
         && !is_null(&current, "settledAt")
         && is_null(&current, "pinnedAt");
@@ -3883,6 +4177,9 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
             t["settledOverride"] == "settled" && !is_null(t, "settledAt") && is_null(t, "pinnedAt");
         let snoozed = !is_null(t, "snoozedUntil") || !is_null(t, "snoozedAt");
         t["settledOverride"] = json!("settled");
+        if let Some(recovery) = disabled {
+            t["limitRecovery"] = recovery;
+        }
         crate::pull_requests::end_watches(t);
         if !already {
             t["settledAt"] = if settled_at.is_string() {

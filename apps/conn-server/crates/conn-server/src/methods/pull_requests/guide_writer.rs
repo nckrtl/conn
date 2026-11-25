@@ -575,6 +575,7 @@ async fn generate(
     panel: &Panel,
     selection: &Value,
     cwd: &Path,
+    project_cwd: &Path,
     prompt: String,
 ) -> Result<review_guide::Generated, String> {
     let instance = selection
@@ -603,6 +604,7 @@ async fn generate(
         ));
     }
     let request = conn_provider::TextGenerationRequest {
+        project_cwd: Some(project_cwd.to_string_lossy().into_owned()),
         operation: "generateReviewGuide".into(),
         cwd: cwd.to_string_lossy().into_owned(),
         prompt,
@@ -706,7 +708,7 @@ async fn write(panel: Arc<Panel>, job: Job) -> Result<(), String> {
     let prompt = prompts::review_guide_prompt(&input);
     let path = prepared.checkout.path.clone();
     let (generated, change) = tokio::join!(
-        generate(&panel, &selection, &path, prompt),
+        generate(&panel, &selection, &path, &job.project.root, prompt),
         read_change(&path, &prepared.base_commit)
     );
     prepared.checkout.drop_all().await;

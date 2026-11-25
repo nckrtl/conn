@@ -56,6 +56,8 @@ pub struct ClaudeConfig {
     /// `launchArgs`, as stored (T3 does not trim them). Parsed per query
     /// (`makeClaudeQueryOptions`); probes and titles do not use them.
     pub launch_args: String,
+    pub custom_models: crate::catalog::CustomModels,
+    pub auto_compact_window: Option<u64>,
     /// `buildRuntimeInstructions({ harness: "Claude Code" })`: the start of
     /// `systemPrompt.append`.
     pub append_system_prompt: Option<String>,
@@ -136,6 +138,10 @@ impl ClaudeConfig {
         self.home_path = envelope
             .config_str("homePath")
             .map(|home| absolute(&instance::expand_home(&home)));
+        self.custom_models = crate::catalog::CustomModels::parse(&envelope.config["customModels"]);
+        self.auto_compact_window = envelope
+            .config_str("autoCompactWindow")
+            .and_then(|v| parse_compact_window(&v));
         self.instance_env = envelope.environment;
         self.launch_args = envelope.config["launchArgs"]
             .as_str()
@@ -143,6 +149,100 @@ impl ClaudeConfig {
             .to_owned();
         self
     }
+}
+
+pub(crate) fn parse_compact_window(value: &str) -> Option<u64> {
+    let window = value.parse::<u64>().ok()?;
+    ((100_000..=1_000_000).contains(&window) && value == window.to_string()).then_some(window)
+}
+
+/// The window Claude uses for context reporting. Explicitly disabling auto-compaction
+/// suppresses the threshold even when an instance requests a window.
+pub(crate) fn usage_compact_window(
+    config: &ClaudeConfig,
+    cwd: Option<&str>,
+    selection: &Value,
+) -> Option<u64> {
+    let env = query_env(
+        config,
+        "",
+        false,
+        conn_support::login_env::child_env(),
+        None,
+    );
+    let home = config_dir(config, &env);
+    let flags = launch_args::parse_flags(&config.launch_args);
+    let flag = flags
+        .iter()
+        .find(|(key, _)| key == "settings")
+        .map(|(_, value)| value.as_deref());
+    let launch = launch_args::read_settings(flag, cwd)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&launch_args::Json::Object(s).to_text()).ok());
+    let settings: Vec<Value> = launch
+        .into_iter()
+        .chain(
+            crate::skills::settings_paths(&home, cwd.map(Path::new))
+                .into_iter()
+                .rev()
+                .map(|p| crate::skills::json_file(&p))
+                .filter(Value::is_object),
+        )
+        .collect();
+    let env_setting = |name: &str| {
+        settings
+            .iter()
+            .find_map(|s| s["env"][name].as_str())
+            .or_else(|| env.get(name)?.as_str())
+    };
+    if ["DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"]
+        .iter()
+        .any(|name| {
+            env_setting(name).is_some_and(|value| {
+                ["1", "true", "yes", "on"].contains(&value.trim().to_ascii_lowercase().as_str())
+            })
+        })
+        || settings
+            .iter()
+            .find_map(|s| s["autoCompactEnabled"].as_bool())
+            == Some(false)
+    {
+        return None;
+    }
+    if let Some(window) = config.auto_compact_window {
+        return Some(window);
+    }
+    let valid_window = |number: u64| (100_000..=1_000_000).contains(&number).then_some(number);
+    if let Some(window) = env_setting("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        .and_then(|s| s.trim().parse().ok())
+        .and_then(valid_window)
+    {
+        return Some(window);
+    }
+    if settings.is_empty() {
+        return None;
+    }
+    // T3 resolves the per-model native setting with its default catalog, independently of the instance picker.
+    let compiled = crate::catalog::compile(selection, &Default::default());
+    let model = compiled
+        .api_model_id
+        .strip_suffix("[1m]")
+        .unwrap_or(&compiled.api_model_id);
+    for s in settings {
+        let per_model = &s["modelSettings"][model]["autoCompactWindow"];
+        if per_model == "auto" {
+            return None;
+        }
+        if let Some(window) = per_model
+            .as_u64()
+            .and_then(valid_window)
+            .or_else(|| s["autoCompactWindow"].as_u64().and_then(valid_window))
+        {
+            return Some(window);
+        }
+    }
+    None
 }
 
 /// `path.resolve` against the server's working folder.
@@ -174,6 +274,8 @@ impl Default for ClaudeConfig {
             home_path: None,
             instance_env: InstanceEnv::default(),
             launch_args: String::new(),
+            custom_models: Default::default(),
+            auto_compact_window: None,
             append_system_prompt: Some(default_append_system_prompt()),
             attachments_dir: None,
             setting_sources: None,
@@ -459,9 +561,6 @@ pub fn query_options(
     if !thinking_off && thinking_display.is_none() {
         extra_args.push(("thinking-display".into(), Some("summarized".into())));
     }
-    // T3 pins an alias-named model to itself (`ANTHROPIC_DEFAULT_<ALIAS>_MODEL` in
-    // settings.env) only after its model catalog resolved the alias; without the catalog a
-    // bare alias goes to the CLI as is, which expands it the same way.
     let mut settings = input.selection_settings.clone();
     if !thinking_off {
         options.insert(
@@ -470,33 +569,47 @@ pub fn query_options(
         );
         settings.insert("showThinkingSummaries".into(), json!(true));
     }
-    match &launch.settings {
-        // `--settings` lies beneath T3's keys, in its own order.
-        Some(base) => {
-            let mut merged = base.clone();
-            let order = [
-                "effortLevel",
-                "alwaysThinkingEnabled",
-                "fastMode",
-                "ultracode",
-                "showThinkingSummaries",
-            ];
-            let mut keys: Vec<&String> = settings.keys().collect();
-            keys.sort_by_key(|k| order.iter().position(|o| o == k).unwrap_or(order.len()));
-            for key in keys {
-                if let Some(value) = settings.get(key) {
-                    launch_args::set(&mut merged, key, launch_args::Json::from_value(value));
+    if let Some(window) = config.auto_compact_window {
+        settings.insert("autoCompactWindow".into(), json!(window));
+        settings.entry("env").or_insert_with(|| json!({}))["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] =
+            json!(window.to_string());
+    }
+    if let Some(base) = &launch.settings {
+        // Keep the order of user-supplied settings and env entries in the native CLI arguments.
+        let mut merged = base.clone();
+        for key in [
+            "effortLevel",
+            "alwaysThinkingEnabled",
+            "fastMode",
+            "ultracode",
+            "autoCompactWindow",
+            "env",
+            "showThinkingSummaries",
+        ] {
+            if let Some(value) = settings.get(key) {
+                let mut value = launch_args::Json::from_value(value);
+                if key == "env"
+                    && let Some(launch_args::Json::Object(base_env)) = base
+                        .iter()
+                        .find(|(key, _)| key == "env")
+                        .map(|(_, value)| value)
+                    && let launch_args::Json::Object(overrides) = value
+                {
+                    let mut env = base_env.clone();
+                    for (key, value) in overrides {
+                        launch_args::set(&mut env, &key, value);
+                    }
+                    value = launch_args::Json::Object(env);
                 }
+                launch_args::set(&mut merged, key, value);
             }
-            options.insert(
-                "settings".into(),
-                crate::ordered::raw(launch_args::Json::Object(merged).to_text()),
-            );
         }
-        None if !settings.is_empty() => {
-            options.insert("settings".into(), Value::Object(settings));
-        }
-        None => {}
+        options.insert(
+            "settings".into(),
+            crate::ordered::raw(launch_args::Json::Object(merged).to_text()),
+        );
+    } else if !settings.is_empty() {
+        options.insert("settings".into(), Value::Object(settings));
     }
     options.insert("supportedDialogKinds".into(), json!(["resume_return"]));
     options.insert(
@@ -733,6 +846,38 @@ mod tests {
             ClaudeConfig::default().with_instance(None).binary,
             PathBuf::from("claude")
         );
+    }
+
+    #[test]
+    fn effective_compaction_window_respects_native_settings_precedence() {
+        let dir = std::env::temp_dir().join(format!("conn-compact-{}", conn_support::uuid_v4()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"autoCompactWindow":350000}"#).unwrap();
+        let local = project.join(".claude/settings.local.json");
+        let model = json!({"model":"orbit-model"});
+        let mut config = ClaudeConfig {
+            home_path: Some(dir.clone()),
+            ..Default::default()
+        };
+        let window = |config: &ClaudeConfig| usage_compact_window(config, project.to_str(), &model);
+        assert_eq!(window(&config), Some(350_000));
+        std::fs::write(
+            &local,
+            r#"{"modelSettings":{"orbit-model":{"autoCompactWindow":"auto"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(window(&config), None);
+        config.launch_args =
+            r#"--settings '{"env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"250000"}}'"#.to_owned();
+        assert_eq!(window(&config), Some(250_000));
+        config.auto_compact_window = Some(120_000);
+        assert_eq!(window(&config), Some(120_000));
+        std::fs::write(&local, r#"{"autoCompactEnabled":false}"#).unwrap();
+        assert_eq!(window(&config), None);
+        std::fs::write(&local, r#"{"env":{"DISABLE_AUTO_COMPACT":"yes"}}"#).unwrap();
+        assert_eq!(window(&config), None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn policy(runtime: &str) -> QueryPolicy {

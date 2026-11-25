@@ -6,6 +6,7 @@
 //! is a small hand-written matcher. The patterns are named next to each matcher. `\s` is
 //! taken as ASCII white space.
 
+use conn_provider_support::notification::{Work, WorkKind};
 use serde_json::Value;
 
 use crate::tools::ToolState;
@@ -37,21 +38,15 @@ pub(crate) struct TaskMutation {
     pub append_output: String,
 }
 
-/// What a lifecycle notification describes (`xAiBackgroundTaskReport` kind).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReportKind {
-    Command,
-    Monitor,
-}
-
 /// `XAiBackgroundTaskLifecycleMutation`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Lifecycle {
     pub session_id: String,
     pub task_id: String,
     pub status: TaskStatus,
+    pub exit_code: Option<i64>,
     pub output: Option<String>,
-    pub report: Option<ReportKind>,
+    pub report: Option<Work>,
 }
 
 // ---- small matchers ----------------------------------------------------------------------
@@ -786,8 +781,8 @@ pub(crate) fn is_task_completed_wake(params: &Value) -> bool {
         .is_some_and(|id| id.starts_with("task-completed-"))
 }
 
-/// `xAiBackgroundTaskReport`'s kind.
-fn report_kind(update: &Value) -> Option<ReportKind> {
+/// `xAiBackgroundTaskReport`.
+fn background_report(update: &Value, status: TaskStatus) -> Option<Work> {
     let snapshot = &update["task_snapshot"];
     let monitor_description = non_empty(&update["monitor_description"]);
     let display = non_empty(&snapshot["display_command"]);
@@ -799,13 +794,41 @@ fn report_kind(update: &Value) -> Option<ReportKind> {
     let is_command = snapshot["kind"] == "bash"
         || snapshot["command"].is_string()
         || update["command"].is_string();
-    if is_monitor {
-        Some(ReportKind::Monitor)
-    } else if is_command {
-        Some(ReportKind::Command)
-    } else {
-        None
+    if !is_monitor && !is_command {
+        return None;
     }
+    let label = monitor_description
+        .or_else(|| non_empty(&snapshot["description"]))
+        .or_else(|| non_empty(&update["description"]))
+        .or_else(|| {
+            display.map(|name| {
+                name.strip_prefix("[monitor]")
+                    .unwrap_or(&name)
+                    .trim_start()
+                    .to_owned()
+            })
+        })
+        .or_else(|| non_empty(&snapshot["command"]))
+        .or_else(|| non_empty(&update["command"]));
+    Some(Work {
+        kind: if is_monitor {
+            WorkKind::Monitor
+        } else {
+            WorkKind::Command
+        },
+        label,
+        outcome: match status {
+            TaskStatus::Running => "updated",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+        },
+        child_thread_id: None,
+        exit_code: if is_monitor {
+            None
+        } else {
+            snapshot["exit_code"].as_i64()
+        },
+    })
 }
 
 /// `xAiBackgroundTaskLifecycleMutation` of an `x.ai/task_backgrounded` (`running`) or
@@ -830,8 +853,9 @@ pub(crate) fn lifecycle(params: &Value, completed: bool) -> Option<Lifecycle> {
         session_id,
         task_id,
         status,
+        exit_code: snapshot["exit_code"].as_i64(),
         output: snapshot["output"].as_str().map(str::to_owned),
-        report: report_kind(update),
+        report: background_report(update, status),
     })
 }
 
@@ -1221,7 +1245,10 @@ mod tests {
         let done = json!({"sessionId": "s", "update": {"sessionUpdate": "task_completed", "task_snapshot": {"task_id": ID, "output": "o", "exit_code": 1, "kind": "bash"}}});
         let life = lifecycle(&done, true).unwrap();
         assert_eq!(life.status, TaskStatus::Failed);
-        assert_eq!(life.report, Some(ReportKind::Command));
+        assert_eq!(
+            life.report.as_ref().map(|report| report.kind),
+            Some(WorkKind::Command)
+        );
         let started = json!({"sessionId": "s", "update": {"sessionUpdate": "task_backgrounded", "tool_call_id": "c", "task_id": ID, "command": "x"}});
         assert_eq!(
             lifecycle(&started, false).unwrap().status,

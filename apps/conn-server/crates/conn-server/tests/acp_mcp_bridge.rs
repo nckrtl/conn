@@ -40,6 +40,9 @@ fn serve(listener: TcpListener, seen: Arc<Mutex<Vec<String>>>) {
                     r#"{{"jsonrpc":"2.0","id":{},"result":{{"protocolVersion":"2025-06-18","capabilities":{{}}}}}}"#,
                     message["id"]
                 ),
+                Some("tools/call") => serde_json::json!({"jsonrpc":"2.0","id":message["id"],"result":{
+                    "structuredContent":{"ok":true},"content":[{"type":"text","text":"{\"ok\":true}"},{"type":"text","text":"status"}]
+                }}).to_string(),
                 Some("tools/list") => format!(
                     r#"{{"jsonrpc":"2.0","id":{},"result":{{"tools":[]}}}}"#,
                     message["id"]
@@ -56,6 +59,9 @@ fn serve(listener: TcpListener, seen: Arc<Mutex<Vec<String>>>) {
                 "HTTP/1.1 {status}\r\nmcp-session-id: s-1\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
                 reply.len()
             );
+            if head.starts_with("DELETE ") {
+                break;
+            }
         }
     });
 }
@@ -162,4 +168,41 @@ fn relays_lines_with_t3s_headers_and_stays_small() {
     assert!(seen[2].contains("mcp-session-id: s-1"));
     assert!(seen[2].contains("mcp-protocol-version: 2025-06-18"));
     assert!(seen[2].contains("accept: application/json, text/event-stream"));
+}
+
+#[test]
+fn one_shot_calls_the_tool_with_the_thread_credential_and_ends_its_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    serve(listener, seen.clone());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_conn-server"))
+        .args(["acp-mcp-call", "fixture", "-"])
+        .env("T3_ACP_MCP_ENDPOINT", endpoint)
+        .env("T3_ACP_MCP_AUTHORIZATION", "Bearer fixture-only")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"thread":"one"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        result["content"],
+        serde_json::json!([{"type":"text","text":"status"}])
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    for msg in seen.iter() {
+        assert!(msg.contains("authorization: Bearer fixture-only"));
+    }
+    assert!(seen[0].contains("t3-code-acp-cli"));
+    assert!(seen[2].contains(r#""arguments":{"thread":"one"}"#));
+    assert!(seen[3].starts_with("DELETE /mcp"));
 }

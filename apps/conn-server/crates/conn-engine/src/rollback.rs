@@ -159,6 +159,16 @@ fn rejected<T>(message: impl Into<String>) -> Result<T, CommandError> {
     reject(message)
 }
 
+fn has_pending_work(tx: &Tx<'_>, thread_id: &str) -> StoreResult<bool> {
+    Ok(
+        crate::shell::thread_shell(tx, thread_id)?["pendingBackgroundTasks"]
+            .as_array()
+            .is_some_and(|tasks| !tasks.is_empty()),
+    )
+}
+
+const ACTIVE_BACKGROUND: &str = "Stop the active background work before rolling back this thread.";
+
 /// The admission of `checkpoint.rollback`.
 pub(crate) fn checkpoint_rollback(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
@@ -203,15 +213,23 @@ pub(crate) fn checkpoint_rollback(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let unsupported = |capability: &str, detail: &str| {
         format!("{instance} cannot satisfy {capability} for command {command_id}: {detail}")
     };
-    if caps["threads"]["canRollbackThread"] != true
-        || caps["checkpointing"]["providerCanRollbackConversation"] != true
+    let portable = matches!(
+        provider_thread["driver"].as_str(),
+        Some("grok" | "antigravity")
+    ) && caps["checkpointing"]["providerCanRollbackConversation"] != true;
+    if portable && has_pending_work(tx, &thread_id)? {
+        return rejected(ACTIVE_BACKGROUND);
+    }
+    if !portable
+        && (caps["threads"]["canRollbackThread"] != true
+            || caps["checkpointing"]["providerCanRollbackConversation"] != true)
     {
         return rejected(unsupported(
             "rollback",
             "providerInstanceId conversation rollback is unavailable",
         ));
     }
-    if caps["checkpointing"]["providerRollbackReturnsSnapshot"] != true {
+    if !portable && caps["checkpointing"]["providerRollbackReturnsSnapshot"] != true {
         return rejected(unsupported(
             "rollback_snapshot",
             "rollback must return a providerInstanceId thread snapshot",
@@ -242,7 +260,17 @@ pub(crate) fn checkpoint_rollback(tx: &mut Tx<'_>, command: Value) -> Outcome {
         return rejected(OTHER_CHECKOUT_RESTORE_MESSAGE);
     }
     let target_ordinal = checkpoint["appRunOrdinal"].as_u64().unwrap_or(0);
-    if target_ordinal > 0 {
+    if portable
+        && target_ordinal > 0
+        && !tx.entities(&thread_id, "runs")?.iter().any(|run| {
+            run["ordinal"] == target_ordinal
+                && run["status"] != "rolled_back"
+                && run["providerInstanceId"] == instance
+        })
+    {
+        return rejected("Cannot roll back to a missing run or a run on another provider.");
+    }
+    if target_ordinal > 0 && !portable {
         let target_run = tx
             .entities(&thread_id, "runs")?
             .into_iter()
@@ -298,6 +326,7 @@ pub(crate) fn checkpoint_rollback(tx: &mut Tx<'_>, command: Value) -> Outcome {
         checkpoint_id: checkpoint_id.to_owned(),
         scope_id: scope_id.to_owned(),
         restore_files,
+        portable,
         resume_snapshot: None,
     };
     Ok(vec![Effect::Rollback(request)])
@@ -314,6 +343,9 @@ pub(crate) struct RollbackRequest {
     pub(crate) scope_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) restore_files: Option<bool>,
+    /// The adapter cannot truncate. Start the next turn in a new native conversation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) portable: bool,
     /// The provider's answer a previous process stored before it stopped: the rollback goes on
     /// from the file restore and sends no provider rollback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,6 +452,9 @@ fn read_context(
     else {
         return Ok(Err(RollbackFailure::Invalid("rollback-target-invalid")));
     };
+    if request.portable && has_pending_work(tx, tid)? {
+        return Ok(Err(RollbackFailure::Invalid(ACTIVE_BACKGROUND)));
+    }
     let status = checkpoint["status"].as_str().unwrap_or_default();
     if provider_thread["providerSessionId"].is_null()
         || checkpoint["scopeId"] != scope["id"]
@@ -660,23 +695,25 @@ impl Inner {
             .await
             .map_err(RollbackFailure::Failed)??;
         let target_ordinal = context.checkpoint["appRunOrdinal"].as_u64().unwrap_or(0);
-        let target = if target_ordinal == 0 {
-            RollbackTarget::ThreadStart {
-                checkpoint_id: request.checkpoint_id.clone(),
-            }
-        } else {
-            let Some(turn) = &context.target_turn else {
-                return Err(RollbackFailure::Invalid("provider-turn-unavailable"));
-            };
-            if turn["providerThreadId"] != context.provider_thread["id"] {
-                return Err(RollbackFailure::Invalid("provider-turn-unavailable"));
-            }
-            RollbackTarget::ProviderTurn {
-                checkpoint_id: request.checkpoint_id.clone(),
-                app_run_ordinal: u32::try_from(target_ordinal).unwrap_or(u32::MAX),
-                provider_turn: from_json(turn.clone())
-                    .map_err(|e| RollbackFailure::Failed(e.to_string()))?,
-            }
+        let native_target = || -> Result<RollbackTarget, RollbackFailure> {
+            Ok(if target_ordinal == 0 {
+                RollbackTarget::ThreadStart {
+                    checkpoint_id: request.checkpoint_id.clone(),
+                }
+            } else {
+                let Some(turn) = &context.target_turn else {
+                    return Err(RollbackFailure::Invalid("provider-turn-unavailable"));
+                };
+                if turn["providerThreadId"] != context.provider_thread["id"] {
+                    return Err(RollbackFailure::Invalid("provider-turn-unavailable"));
+                }
+                RollbackTarget::ProviderTurn {
+                    checkpoint_id: request.checkpoint_id.clone(),
+                    app_run_ordinal: u32::try_from(target_ordinal).unwrap_or(u32::MAX),
+                    provider_turn: from_json(turn.clone())
+                        .map_err(|e| RollbackFailure::Failed(e.to_string()))?,
+                }
+            })
         };
         let restore_files = request.restore_files != Some(false);
         if restore_files && !context.isolated {
@@ -691,6 +728,18 @@ impl Inner {
         } else if let Some((row, _)) = &progress.provider {
             // An earlier attempt rolled the provider back; only a later step failed.
             row.clone()
+        } else if request.portable {
+            if let Some(live) = self.live_thread(&request.thread_id)
+                && live.has_background_work()
+            {
+                return Err(RollbackFailure::Invalid(ACTIVE_BACKGROUND));
+            }
+            self.close_session(&request.thread_id).await;
+            let mut row = context.provider_thread.clone();
+            row["nativeThreadRef"] = Value::Null;
+            row["providerSessionId"] = Value::Null;
+            row["nativeMetadata"] = json!({"connRestoreKeptHistory":true});
+            row
         } else {
             let live = self.rollback_session(&context).await?;
             live.touch(self.clock.now_millis());
@@ -715,7 +764,7 @@ impl Inner {
                 .rollback_thread(RollbackThreadInput {
                     provider_thread: from_json(context.provider_thread.clone())
                         .map_err(|e| RollbackFailure::Failed(e.to_string()))?,
-                    target,
+                    target: native_target()?,
                     provider_thread_turns: context
                         .provider_thread_turns
                         .iter()

@@ -49,6 +49,7 @@ while IFS= read -r line; do
   case "$line" in
 {cases}
     *'"method":"initialize"'*) emit "{{\"id\":$id,\"result\":{{\"userAgent\":\"t3code_desktop/0.167.0 (x)\"}}}}" ;;
+    *'"method":"thread/name/set"'*) emit "{{\"id\":$id,\"result\":{{}}}}" ;;
     *'"method":"model/list"'*) emit "{{\"id\":$id,\"result\":{{\"data\":[],\"nextCursor\":null}}}}" ;;
     *'"method":"thread/start"'*) emit "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"th1\",\"createdAt\":1,\"updatedAt\":2}}}}}}" ;;
     *'"method":"config/read"'*) emit "{{\"id\":$id,\"result\":{{\"config\":{{}}}}}}" ;;
@@ -100,6 +101,7 @@ impl Fixture {
             CodexConfig {
                 binary,
                 home_path: Some(dir.clone()),
+                attachments_dir: Some(dir.clone()),
                 goal_continuation_grace: grace,
                 stop_confirm_timeout: Duration::from_secs(2),
                 ..CodexConfig::default()
@@ -663,3 +665,6 @@ async fn close_cancels_the_goal_grace() {
     witness.close().await;
     let _ = std::fs::remove_dir_all(&fixture.dir);
 }
+
+#[path = "session/protocol_tests.rs"]
+mod protocol_tests;

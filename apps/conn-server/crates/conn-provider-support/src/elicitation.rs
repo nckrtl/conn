@@ -9,7 +9,7 @@
 use serde_json::{Map, Value, json};
 
 /// T3's `describeMcpElicitation`: the app name and the approval options to show.
-pub(crate) fn describe(params: &Value) -> (String, Vec<Value>) {
+pub fn describe(params: &Value) -> (String, Vec<Value>) {
     let meta = metadata(&params["_meta"]);
     let field = |value: &Value| value.as_str().map(str::to_owned);
     let from_message = params["message"].as_str().and_then(app_from_message);
@@ -94,7 +94,7 @@ pub(crate) fn describe(params: &Value) -> (String, Vec<Value>) {
 }
 
 /// T3's `toMcpElicitationResponse`: the reply for an approval decision.
-pub(crate) fn response(params: &Value, decision: &str) -> Value {
+pub fn response(params: &Value, decision: &str) -> Value {
     if decision == "decline" || decision == "cancel" {
         return json!({ "action": decision });
     }

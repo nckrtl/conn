@@ -1497,6 +1497,7 @@ impl ThreadState {
             // The thread's own record changed (model, provider, title, ...): keep it current. The
             // timeline is unchanged.
             DomainEvent::ThreadArchived(ev) => {
+                self.active_provider_thread_id.clone_from(&ev.payload.active_provider_thread_id);
                 self.thread = Some(Box::new(ev.payload));
                 false
             }
@@ -2712,6 +2713,30 @@ mod timing_tests {
             Some(12_400),
             "falls back to owning run elapsed duration"
         );
+    }
+
+    #[test]
+    fn provider_switch_and_metadata_restore_the_selected_conversation() {
+        let frames: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../tests/fixtures/thread_turn_stream.json"))
+                .unwrap();
+        let mut thread = frames[0]["projection"]["thread"].clone();
+        let mut state = ThreadState::new(thread["id"].as_str().unwrap());
+        for (kind, selected) in [
+            ("thread.provider-switched", None),
+            ("thread.metadata-updated", Some("selected")),
+        ] {
+            state.active_provider_thread_id = Some("retired".into());
+            thread["activeProviderThreadId"] = serde_json::json!(selected);
+            state.apply_domain_event(
+                serde_json::from_value(serde_json::json!({
+                    "id":"switch-event", "type":kind, "threadId":thread["id"],
+                    "occurredAt":thread["updatedAt"], "payload":thread
+                }))
+                .unwrap(),
+            );
+            assert_eq!(state.active_provider_thread_id.as_deref(), selected);
+        }
     }
 
     #[test]

@@ -23,6 +23,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.agentPanelRequests]: AuthPreviewOperateScope,
   [WS_METHODS.agentPanelRespond]: AuthPreviewOperateScope,
   [WS_METHODS.providerAuthRemoveMethod]: AuthProvidersManageScope,
+  // An MCP sign-in stores a credential for the agent, as an account sign-in does.
+  [WS_METHODS.providerMcpSignInStart]: AuthProvidersManageScope,
+  [WS_METHODS.providerMcpSignInComplete]: AuthProvidersManageScope,
   [WS_METHODS.previewClose]: AuthPreviewOperateScope,
   [WS_METHODS.annotationsCreate]: AuthPreviewOperateScope,
   [WS_METHODS.annotationsRemove]: AuthPreviewOperateScope,

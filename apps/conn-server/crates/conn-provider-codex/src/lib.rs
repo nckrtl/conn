@@ -12,7 +12,7 @@
 
 pub mod client;
 pub mod context;
-mod elicitation;
+use conn_provider_support::elicitation;
 #[rustfmt::skip]
 pub mod instructions;
 pub mod launch;
@@ -61,7 +61,7 @@ pub struct CodexProvider {
     /// The instance's `enabled`, `displayName`, `accentColor` and `customModels`.
     settings: status::StatusSettings,
     /// The `ServerProvider` entry: T3's pending one until the first probe ends.
-    status: Mutex<Value>,
+    status: Arc<Mutex<Value>>,
     /// One probe at a time.
     probing: tokio::sync::Mutex<()>,
 }
@@ -106,7 +106,7 @@ impl CodexProvider {
             server,
             models,
             settings,
-            status: Mutex::new(pending),
+            status: Arc::new(Mutex::new(pending)),
             probing: tokio::sync::Mutex::new(()),
         }
     }
@@ -239,6 +239,7 @@ impl Provider for CodexProvider {
                 (
                     Some(launch::selection_model(&input.model_selection)),
                     input.runtime_policy.cwd.clone(),
+                    self.status.clone(),
                 ),
                 input.mcp_servers,
             );
@@ -334,6 +335,7 @@ pub fn capabilities() -> Value {
             "emitsTurnStarted": true,
             "emitsTurnCompleted": true,
             "supportsInterrupt": true,
+            "supportsNativeResume": true,
             "supportsActiveSteering": true,
             "supportsSteeringByInterruptRestart": false,
             "supportsQueuedMessages": false,

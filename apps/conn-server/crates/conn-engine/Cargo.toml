@@ -52,7 +52,7 @@ conn-provider-codex.workspace = true
 # ... and T3's recorded Claude fixtures, on a fake SDK host.
 conn-provider-claude.workspace = true
 # ... and T3's recorded Grok fixtures, on T3's own ACP replay agent.
-conn-provider-acp.workspace = true
+conn-provider-acp = { workspace = true, features = ["fixture-replay"] }
 # examples/memory_load.rs: live heap bytes (the workspace forbids the unsafe a counting
 # allocator needs). Dev only; not in the server binary.
 stats_alloc = "0.1"

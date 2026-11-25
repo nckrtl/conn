@@ -19,6 +19,7 @@ struct ThreadView: View {
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
     @State private var showsOutline = false
+    @State private var showsAgents = false
     @State private var historyNotice: String?
     @State private var scrollTarget: String?
     @State private var historyRequest = UUID()
@@ -431,6 +432,13 @@ struct ThreadView: View {
             questionDrafts = questionDrafts.filter { $0.key == current }
             questionSteps = questionSteps.filter { $0.key == current }
         }
+        .sheet(isPresented: $showsAgents) {
+            ThreadAgentsSheet(agents: turnSubagents) { agent in
+                guard let child = agent.child else { return }
+                showsAgents = false
+                onOpenThread(child, agent.environment)
+            }
+        }
         .sheet(isPresented: $showsOutline) {
             NavigationStack {
                 List(markers.filter {
@@ -779,13 +787,17 @@ struct ThreadView: View {
         return Date()
     }
 
-    private struct TurnSubagent: Identifiable {
+    struct TurnSubagent: Identifiable {
         let id: String
         let title: String
         let child: String?
         let environment: String?
         let settled: Bool
         let status: String
+        let state: FfiTurnItemStatus
+        let provider: String?
+        let model: String?
+        let updatedAt: String?
     }
 
     /// The subagents of the latest turn (those after the last user message) plus any still running
@@ -796,16 +808,21 @@ struct ThreadView: View {
             .map { $0 + 1 } ?? 0
         return snapshot.entries.indices.compactMap { index in
             let entry = snapshot.entries[index]
-            guard case let .subagent(id, child, title, _, _, label, settled, _, _, _, _, _) = entry,
+            guard case let .subagent(id, child, title, _, state, label, settled, _, _, created, started, completed) = entry,
                   index >= start || !settled else { return nil }
             var thread = child
             var environment: String?
-            if case let .subagent(_, _, _, env, linked)? = snapshot.feedDetails[id] {
+            var provider: String?
+            var model: String?
+            if case let .subagent(driver, slug, _, env, linked)? = snapshot.feedDetails[id] {
                 thread = linked ?? child
                 environment = env
+                provider = driver
+                model = slug
             }
             return TurnSubagent(id: id, title: title, child: thread, environment: environment,
-                                settled: settled, status: label)
+                                settled: settled, status: label, state: state, provider: provider,
+                                model: model, updatedAt: completed ?? started ?? created)
         }
     }
 
@@ -843,15 +860,9 @@ struct ThreadView: View {
     private func agentsCapsule(_ agents: [TurnSubagent]) -> some View {
         let live = agents.filter { !$0.settled }.count
         let label = live > 0 ? "\(live)/\(agents.count)" : "\(agents.count) done"
-        return Menu {
-            ForEach(agents) { agent in
-                Button {
-                    if let child = agent.child { onOpenThread(child, agent.environment) }
-                } label: {
-                    Label("\(agent.title), \(agent.status)", systemImage: agent.settled ? "checkmark.circle" : "circle.dotted")
-                }
-                .disabled(agent.child == nil)
-            }
+        return Button {
+            UISelectionFeedbackGenerator().selectionChanged()
+            showsAgents = true
         } label: {
             HStack(spacing: 6) {
                 ThreadGlyph(name: "users", size: 14)
@@ -870,6 +881,7 @@ struct ThreadView: View {
             .contentShape(Capsule())
         }
         .accessibilityLabel(live > 0 ? "Open agents, \(live) of \(agents.count) agents working" : "Open agents, \(agents.count) done")
+        .buttonStyle(.plain)
         .accessibilityIdentifier("thread.agents")
     }
 

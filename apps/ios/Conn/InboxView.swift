@@ -459,7 +459,7 @@ private func deriveProjectColor(_ projectName: String, isDark: Bool) -> Color {
     )
 }
 
-private func parseISODate(from raw: String?) -> Date? {
+func parseISODate(from raw: String?) -> Date? {
     guard let raw, !raw.isEmpty else { return nil }
     let fractional = ISO8601DateFormatter()
     fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -470,7 +470,7 @@ private func parseISODate(from raw: String?) -> Date? {
 }
 
 /// Whole-minute relative time matching Expo's thread row rule ("0m", "23m", "2h", "3d").
-private func wholeMinuteRelativeTime(from date: Date) -> String {
+func wholeMinuteRelativeTime(from date: Date) -> String {
     let seconds = max(0, Int(Date().timeIntervalSince(date)))
     let minutes = seconds / 60
     if minutes < 60 { return "\(minutes)m" }

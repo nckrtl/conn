@@ -1565,7 +1565,8 @@ final class ConnSpikeUITests: XCTestCase {
         tap(app.buttons["Photos"].firstMatch)
         let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
         tap(photo.exists ? photo : app.collectionViews.cells.firstMatch)
-        tap(app.buttons["Add"].firstMatch)
+        let done = app.navigationBars.buttons["Done"].firstMatch
+        tap(done.exists ? done : app.buttons["Add"].firstMatch)
         let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch
         XCTAssertTrue(chip.waitForExistence(timeout: 15))
         let filename = String(chip.label.dropFirst("Remove ".count))

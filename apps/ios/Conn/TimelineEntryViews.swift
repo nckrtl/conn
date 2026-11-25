@@ -142,9 +142,9 @@ struct LiveWorkRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // No padded box: the glyph starts on the feed's text edge.
             ThreadGlyph(name: glyph, size: 16)
                 .foregroundStyle(theme.mutedForeground)
-                .frame(width: 24, height: 24)
             ShimmerText(label, size: size)
         }
         .frame(minHeight: 24)

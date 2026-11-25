@@ -614,6 +614,10 @@ struct ThreadView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
+        // A tap on the feed puts the keyboard away; simultaneous, so links, cards and buttons still work.
+        .simultaneousGesture(TapGesture().onEnded {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        })
         .onChange(of: scrollFingerprint) { _, _ in
             if stickToBottom && readingWindow == nil {
                 withAnimation(Kit.Motion.fast) {

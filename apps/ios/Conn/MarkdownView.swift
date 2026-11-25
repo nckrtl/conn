@@ -254,6 +254,8 @@ struct MarkdownView: View {
         for run in parsed.runs {
             var piece = AttributedString(parsed[run.range])
             var chip = false
+            // Links are underlined so they read as tappable (desktop does the same).
+            if run.link != nil { piece.underlineStyle = .single }
             if let intent = run.inlinePresentationIntent {
                 if intent.contains(.code) {
                     piece.font = .system(size: codeSize, design: .monospaced)

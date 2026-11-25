@@ -11,9 +11,10 @@ struct ThreadLink: Equatable, Sendable {
         self.threadId = threadId
     }
 
-    /// `conn://thread/<environment>/<thread>`.
+    /// `conn://thread/<environment>/<thread>`, or the agents' `t3-thread://v2/<environment>/<thread>`.
     init?(url: URL) {
-        guard url.scheme == "conn", url.host() == "thread" else { return nil }
+        guard (url.scheme == "conn" && url.host() == "thread")
+            || (url.scheme == "t3-thread" && url.host() == "v2") else { return nil }
         let parts = url.pathComponents.filter { $0 != "/" }
         guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
         environmentId = parts[0]

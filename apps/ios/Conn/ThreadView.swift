@@ -615,6 +615,13 @@ struct ThreadView: View {
         .background(theme.background.ignoresSafeArea())
         .defaultScrollAnchor(.bottom, for: .alignment)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
+        // Thread links in messages (`t3-thread://v2/…`, `conn://thread/…`) open in the app; other
+        // links go to the system.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let link = ThreadLink(url: url) else { return .systemAction }
+            onOpenThread(link.threadId, link.environmentId)
+            return .handled
+        })
         .coordinateSpace(name: "timeline-viewport")
         .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
         .onScrollPhaseChange { _, phase, context in

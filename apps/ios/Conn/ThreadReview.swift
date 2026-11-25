@@ -157,6 +157,7 @@ struct PatchBody: View {
     var comments: [String: [String]] = [:]
     var comment: ((FfiPatchLine) -> Void)? = nil
     @Environment(\.connTheme) private var theme
+    @State private var viewportWidth: CGFloat = 0
     @State private var colors: [AttributedString] = []
 
     var body: some View {
@@ -169,13 +170,8 @@ struct PatchBody: View {
                         let line = patch.lines[index]
                         let tint = line.marker == "+" ? theme.diffAdded : line.marker == "-" ? theme.diffRemoved : theme.mutedForeground
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
-                            if let comment, line.number != nil {
-                                Button { comment(line) } label: {
-                                    Image(systemName: "text.bubble").frame(minWidth: 30, minHeight: 28)
-                                }.accessibilityLabel("Comment on line " + String(line.number ?? 0))
-                            }
-                            Text(line.oldLine.map(String.init) ?? "").frame(width: 32, alignment: .trailing)
-                            Text(line.newLine.map(String.init) ?? "").frame(width: 32, alignment: .trailing)
+                            Text(line.number.map(String.init) ?? "")
+                                .foregroundStyle(theme.mutedForeground).frame(width: 27, alignment: .trailing)
                             Text(line.marker == "@@" ? "" : line.marker)
                             if line.number != nil && colors.indices.contains(index) {
                                 Text(colors[index])
@@ -185,9 +181,12 @@ struct PatchBody: View {
                             }
                         }
                         .fixedSize(horizontal: true, vertical: false)
-                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(tint)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(minWidth: viewportWidth, maxWidth: .infinity, minHeight: 19, alignment: .leading)
                         .background(tint.opacity(line.marker == " " ? 0 : 0.12))
+                        .modifier(ReviewLineAction(action: line.number.flatMap { number in comment.map { submit in
+                            (number, { submit(line) })
+                        }}))
                         let notes = (line.oldLine.flatMap { comments["left" + String($0)] } ?? [])
                             + (line.newLine.flatMap { comments["right" + String($0)] } ?? [])
                         ForEach(Array(notes.enumerated()), id: \.offset) { _, note in
@@ -198,6 +197,7 @@ struct PatchBody: View {
                 }
                 .padding(.vertical, 8).textSelection(.enabled)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewportWidth = $0 }
             .task(id: theme.themeId) {
                 colors = []
                 let themeId = theme.themeId
@@ -206,10 +206,24 @@ struct PatchBody: View {
                     guard bytes <= 512 * 1024 else { return [AttributedString]() }
                     // Preserve row indices; hunk headers use their own style.
                     let source = patch.lines.map { $0.number == nil ? "" : $0.text }.joined(separator: "\n")
-                    return highlightCode(source: source, language: patch.path, theme: themeId).map(attributedCodeLine)
+                    let ext = (patch.path as NSString).pathExtension.lowercased()
+                    let fragment = ext == "php" && !source.contains("<?")
+                    let lines = highlightCode(source: fragment ? "<?php\n" + source : source,
+                                              language: ext == "vue" ? "file.html" : patch.path, theme: themeId)
+                    return lines.dropFirst(fragment ? 1 : 0).map(attributedCodeLine)
                 }.value
                 if !Task.isCancelled { colors = highlighted }
             }
         }
+    }
+}
+
+private struct ReviewLineAction: ViewModifier {
+    let action: (UInt32, () -> Void)?
+    func body(content: Content) -> some View {
+        if let (number, act) = action {
+            Button(action: act) { content.contentShape(Rectangle()) }
+                .buttonStyle(.plain).accessibilityLabel("Comment on line " + String(number))
+        } else { content }
     }
 }

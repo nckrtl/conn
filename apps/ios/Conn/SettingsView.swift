@@ -9,19 +9,22 @@ struct SettingsRootSheet: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Connections") {
-                    NavigationLink {
-                        SettingsEnvironmentsDetailView(store: store)
-                    } label: {
-                        settingsRow(icon: "desktopcomputer", label: "Environments", value: String(store.linked.count + (store.isPaired ? 1 : 0)))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Connections").font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(theme.mutedForeground).padding(.horizontal, 16)
+                    PhoneSettingsGroup {
+                        NavigationLink {
+                            SettingsEnvironmentsDetailView(store: store)
+                        } label: {
+                            HStack(spacing: 12) {
+                                ConnIcon("desktopcomputer").frame(width: 22)
+                                PhoneOptionRow(title: "Environments", value: String(store.linked.count + (store.isPaired ? 1 : 0)))
+                            }
+                        }
                     }
-                }
-
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(theme.background.ignoresSafeArea())
+                }.padding(.horizontal, 14).padding(.top, 14)
+            }.buttonStyle(.plain).background(theme.background)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -35,25 +38,7 @@ struct SettingsRootSheet: View {
                     .accessibilityIdentifier("settings.closeButton")
                 }
             }
-        }
-    }
-
-    private func settingsRow(icon: String, label: String, value: String?) -> some View {
-        HStack(spacing: 12) {
-            ConnIcon(icon)
-                .font(.system(size: 16))
-                .foregroundStyle(theme.mutedForeground)
-                .frame(width: 24)
-            Text(label)
-                .font(.system(size: 16))
-                .foregroundStyle(theme.foreground)
-            Spacer()
-            if let value {
-                Text(value)
-                    .font(.system(size: 15))
-                    .foregroundStyle(theme.mutedForeground)
-            }
-        }
+        }.tint(theme.foreground).presentationBackground(theme.background)
     }
 }
 
@@ -100,6 +85,8 @@ private struct SettingsEnvironmentsDetailView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .contentMargins(.top, 6, for: .scrollContent)
+        .listSectionSpacing(24)
         .scrollContentBackground(.hidden)
         .background(theme.background.ignoresSafeArea())
         .alert("Link environment", isPresented: $adding) {
@@ -109,5 +96,39 @@ private struct SettingsEnvironmentsDetailView: View {
         }
         .navigationTitle("Environments")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct PhoneSettingsGroup<Content: View>: View {
+    @Environment(\.connTheme) private var theme
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Group(subviews: content) { rows in
+                ForEach(rows.indices, id: \.self) { index in
+                    if index > 0 { Divider().padding(.horizontal, 14) }
+                    rows[index].frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                        .padding(.horizontal, 14)
+                }
+            }
+        }.background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+struct PhoneOptionRow: View {
+    let title: String
+    var value = ""
+    var provider: String?
+    var disclosure = "chevron.right"
+    @Environment(\.connTheme) private var theme
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title).foregroundStyle(theme.foreground)
+            Spacer()
+            if let provider { ProviderIcon(driver: provider, size: 15) }
+            if !value.isEmpty { Text(value).foregroundStyle(theme.mutedForeground).lineLimit(1) }
+            if !disclosure.isEmpty { Image(systemName: disclosure).font(.system(size: 12)).foregroundStyle(theme.mutedForeground) }
+        }.font(.system(size: 16)).frame(minHeight: 48).contentShape(Rectangle())
     }
 }

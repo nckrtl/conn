@@ -12,6 +12,7 @@ struct OrbitConnectView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 96, height: 64)
+                .frame(maxWidth: .infinity, maxHeight: .infinity).ignoresSafeArea()
                 .accessibilityHidden(true)
             switch state {
             case let .connecting(message):
@@ -21,7 +22,7 @@ struct OrbitConnectView: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(theme.mutedForeground)
                         .accessibilityIdentifier("orbit.connecting")
-                }.padding(.bottom, 12)
+                }.padding(.bottom, 6)
             case let .failed(message, detail):
                 Color.black.opacity(0.36).ignoresSafeArea()
                 VStack(spacing: 0) {
@@ -46,7 +47,7 @@ struct OrbitConnectView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 12)
                 .padding(.top, 20)
-                .frame(maxWidth: 300)
+                .frame(maxWidth: 280)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
             }
         }

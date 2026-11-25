@@ -9,6 +9,7 @@ struct PullRequestRow: Codable, Identifiable, Hashable {
     let author: Actor?
     let labels: [LabelValue]?
     let checksState: String?
+    let updatedAt: String?
     var id: String { url }
     var ref: [String: Any] {
         ["projectId": projectId, "host": host, "repository": repository, "number": number]
@@ -44,6 +45,7 @@ struct PullRequestsTabView: View {
     let store: CoreStore
     let searchQuery: String
     @State private var rows: [PullRequestRow] = []
+    @State private var checkCounts: [String: String] = [:]
     @State private var stats: [String: PullRequestStats.Stat] = [:]
     @State private var request = UUID()
     @State private var notice: String?
@@ -72,7 +74,7 @@ struct PullRequestsTabView: View {
                                 Text("\(label) (\(candidates.filter { option == "All" || $0.status == option }.count))").tag(option)
                             }
                         }.pickerStyle(.inline)
-                    } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 44, height: 44) }
+                    } label: { WorkspaceFilterIcon() }
                     .accessibilityLabel("Filter pull requests")
                 }.frame(height: 56)
                 if loading { ProgressView() }
@@ -101,11 +103,24 @@ struct PullRequestsTabView: View {
                                         }.font(.caption.monospacedDigit()).fixedSize()
                                     }
                                 }
-                                Text("\(row.projectTitle) · #\(row.number) · \(row.status)").font(.subheadline).foregroundStyle(.secondary)
+                                HStack(spacing: 6) {
+                                    Text(["#" + String(row.number), row.author?.login, checkCounts[row.id] ?? row.status].compactMap { $0 }.joined(separator: " · "))
+                                    Spacer(minLength: 4)
+                                    if let age = shortAge(row.updatedAt) { Text(age).monospacedDigit() }
+                                }.font(.system(size: 13)).foregroundStyle(theme.mutedForeground).lineLimit(1)
                             }
-                            Spacer()
                         }.padding(.vertical, 12).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityIdentifier("pr.row.\(row.repository).\(row.number)")
+                    .task(id: request) {
+                        guard checkCounts[row.id] == nil else { return }
+                        struct Checks: Decodable { let checks: [PullRequestRecord.Detail.Check] }
+                        guard let result = try? await store.pullRequest(.checks, input: row.ref, as: Checks?.self),
+                              !Task.isCancelled else { return }
+                        let runs = result.checks.filter { $0.placeholder != true }
+                        if !runs.isEmpty {
+                            checkCounts[row.id] = "\(runs.filter { $0.status == "success" }.count) of \(runs.count) passed"
+                        }
+                    }
                 }
             }.padding(.horizontal, 12)
         }
@@ -138,6 +153,7 @@ struct PullRequestsTabView: View {
                 }
                 input["cursors"] = page.nextCursors
             }
+            checkCounts = [:]
             rows = result
             notice = messages.isEmpty ? nil : messages.sorted().joined(separator: "\n")
             loading = false
@@ -164,6 +180,18 @@ struct PullRequestRecord: View {
             let name, status: String
             let description: String?
             let placeholder: Bool?
+            let startedAt, completedAt: String?
+
+            var duration: String? { threadElapsed(startedAt, completedAt) }
+
+            var stateLabel: String {
+                switch status {
+                case "success": "Passed"
+                case "failure": "Failed"
+                case "pending": threadDate(startedAt) == nil ? "Pending" : "Running"
+                default: status.replacingOccurrences(of: "-", with: " ").capitalized
+                }
+            }
         }
         struct Permissions: Decodable { let verdicts: [String]; let comment: Bool?; let inlineComment: Bool? }
         struct Capabilities: Decodable { let review: Permissions; let diff: Bool }
@@ -195,6 +223,7 @@ struct PullRequestRecord: View {
         let omittedFileStats: [Omitted]?
         let withheldFilesReadable: Bool?
     }
+    @Environment(\.connTheme) private var theme
     let store: CoreStore
     let row: PullRequestRow
     @State private var section = "Overview"
@@ -211,6 +240,12 @@ struct PullRequestRecord: View {
         let additions: Int
         let deletions: Int
 
+        var kind: String {
+            if patch.oldPath == nil || patch.oldPath == "/dev/null" { return "New" }
+            if patch.newPath == nil || patch.newPath == "/dev/null" { return "Deleted" }
+            return "Edited"
+        }
+
         init(_ patch: FfiFilePatch) {
             self.patch = patch
             additions = patch.lines.count { $0.marker == "+" }
@@ -224,6 +259,19 @@ struct PullRequestRecord: View {
     @State private var truncated = false
     @State private var submitting = false
 
+    @State private var fileFilter = "Changed"
+
+    private var checks: [Detail.Check] { detail?.checks.filter { $0.placeholder != true } ?? [] }
+    private var visibleChecks: [Detail.Check] { checks.filter { checkFilter == "All" || $0.stateLabel == checkFilter } }
+    private var subtitle: String? {
+        switch section {
+        case "Checks":
+            return "\(checkFilter == "All" ? checks.filter { $0.status == "success" }.count : visibleChecks.count) of \(checks.count) checks \(checkFilter == "All" ? "passed" : checkFilter.lowercased())"
+        case "Timeline": return shortAge(row.updatedAt).map { "Updated " + $0 + " ago" }
+        case "Code": return detail.map { "\($0.changedFiles) changed \($0.changedFiles == 1 ? "file" : "files")" }
+        default: return nil
+        }
+    }
     private var canCommentOnFile: Bool {
         detail?.capabilities.review.inlineComment == true &&
         detail?.viewerPermissions.comment == true &&
@@ -234,32 +282,33 @@ struct PullRequestRecord: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text(row.title).font(.title2.weight(.semibold))
                 if let failure { Text(failure); Button("Try again") { attempt += 1 } }
                 if let detail {
                     switch section {
                     case "Checks":
-                        let checks = detail.checks.filter { $0.placeholder != true }
-                        Picker("Status", selection: $checkFilter) {
-                            ForEach(["All"] + Set(checks.map(\.status)).sorted(), id: \.self) { status in
-                                Text("\(status.capitalized) (\(checks.filter { status == "All" || $0.status == status }.count))").tag(status)
+                        VStack(spacing: 0) {
+                            ForEach(Array(visibleChecks.enumerated()), id: \.offset) { index, check in
+                                HStack(spacing: 8) {
+                                    RecordStatusIndicator(status: check.stateLabel)
+                                    Text(check.name).font(.system(size: 14))
+                                    Spacer()
+                                    if let duration = check.duration {
+                                        Text(duration).font(.system(size: 13)).monospacedDigit().foregroundStyle(.secondary)
+                                    }
+                                }.frame(minHeight: 22).padding(.bottom, 12).padding(.top, index == 0 ? 0 : 12)
+                                    .accessibilityElement(children: .combine).accessibilityValue(check.stateLabel)
+                                if index + 1 < visibleChecks.count { Divider() }
                             }
                         }
-                        ForEach(Array(checks.enumerated()), id: \.offset) { _, check in
-                            if checkFilter == "All" || check.status == checkFilter {
-                                LabeledContent(check.name, value: check.status.capitalized)
-                                if let description = check.description { Text(description).foregroundStyle(.secondary) }
-                            }
-                        }
-                    case "Files":
+                    case "Code":
                         if let patches {
-                            ForEach(patches, id: \.patch.path) { change in
+                            ForEach(patches.filter { fileFilter == "Changed" || $0.kind == fileFilter }, id: \.patch.path) { change in
                                 let path = change.patch.path as NSString
                                 Button {
                                     selectedFile = change
                                 } label: {
                                     HStack(spacing: 10) {
-                                        Image(systemName: "doc.text")
+                                        ChangedFileIcon(path: change.patch.path)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(path.lastPathComponent).fontWeight(.medium)
                                             if !path.deletingLastPathComponent.isEmpty {
@@ -269,7 +318,6 @@ struct PullRequestRecord: View {
                                         Spacer()
                                         Text("+\(change.additions)").foregroundStyle(.green)
                                         Text("−\(change.deletions)").foregroundStyle(.red)
-                                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
                                     }.font(.subheadline).lineLimit(1).contentShape(Rectangle())
                                 }.buttonStyle(.plain).accessibilityIdentifier("pr.file.\(change.patch.path)")
                             }
@@ -289,18 +337,26 @@ struct PullRequestRecord: View {
                             if events.isEmpty { Text("No activity").accessibilityIdentifier("pr.timeline.empty") }
                             ForEach(events.sorted { $0.0 < $1.0 }, id: \.1) { event in
                                 VStack(alignment: .leading) {
-                                    Text(event.0).font(.caption).foregroundStyle(.secondary)
-                                    MarkdownView(source: event.2)
+                                    HStack(alignment: .top, spacing: 12) {
+                                        ConnIcon(activity.commits.contains { $0.oid == event.1 } ? "arrow.triangle.branch" : "text.bubble")
+                                            .foregroundStyle(.secondary).frame(width: 16)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            MarkdownView(source: event.2, recordStyle: true)
+                                            if let date = threadDate(event.0) { Text(date, style: .relative).font(.caption).foregroundStyle(.secondary) }
+                                        }
+                                    }
                                 }.accessibilityElement(children: .combine).accessibilityIdentifier("pr.timeline.event")
                             }
                         } else if failure == nil { ProgressView() }
                     default:
-                        if let author = row.author { LabeledContent("Author", value: author.login) }
-                        LabeledContent("Status", value: row.status)
-                        LabeledContent("Repository", value: row.repository)
-                        LabeledContent("Branch", value: "\(row.headBranch) → \(row.baseBranch)")
-                        LabeledContent("Changes", value: "+\(detail.additions) −\(detail.deletions) · \(detail.changedFiles) files")
-                        MarkdownView(source: detail.body)
+                        VStack(alignment: .leading, spacing: 14) {
+                            RecordField(icon: "folder", label: "Repository", value: row.repository)
+                            if let author = row.author { RecordField(icon: "person.2", label: "Author", value: [author.login, shortAge(row.updatedAt).map { $0 + " ago" }].compactMap { $0 }.joined(separator: " · ")) }
+                            RecordField(icon: "arrow.triangle.branch", label: "Branch", value: "\(row.headBranch) → \(row.baseBranch)")
+                            RecordLineStats(added: Double(detail.additions), removed: Double(detail.deletions), withIcon: true)
+                        }.padding(.bottom, 12)
+                        Text(row.title).font(.system(size: 17, weight: .medium))
+                        MarkdownView(source: detail.body, recordStyle: true)
                         let verdicts = detail.viewerPermissions.verdicts.filter { detail.capabilities.review.verdicts.contains($0) }
                         if !verdicts.isEmpty {
                             Menu("Review") {
@@ -311,18 +367,34 @@ struct PullRequestRecord: View {
                         }
                     }
                 } else if failure == nil { ProgressView() }
-            }.padding().frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 20)
         }
-        .navigationTitle("Pull Request #\(row.number)")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        .background(theme.background)
+        .modifier(RecordChrome(title: section == "Overview" ? "Pull request #\(row.number)" : section,
+                               subtitle: subtitle,
+                               tabs: [("Overview", "doc.text"), ("Checks", "checkmark.circle"), ("Timeline", "clock")]
+                                  + (detail?.capabilities.diff == true ? [("Code", "chevron.left.forwardslash.chevron.right")] : []),
+                               selection: section) { section = $0 })
         .toolbar {
-            ToolbarItemGroup(placement: .bottomBar) {
-                ForEach(["Overview", "Checks", "Timeline"] + (detail?.capabilities.diff == true ? ["Files"] : []), id: \.self) { name in
-                    Button { section = name } label: {
-                        Image(systemName: name == "Overview" ? "doc.text" : name == "Checks" ? "checkmark.circle" : name == "Files" ? "doc.on.doc" : "clock")
-                    }.tint(name == section ? .accentColor : .secondary).accessibilityLabel(name).accessibilityAddTraits(name == section ? .isSelected : [])
-                }
+            if section == "Checks" || (section == "Code" && Set(patches?.map(\.kind) ?? []).count > 1) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        if section == "Checks" {
+                            Picker("Filter checks", selection: $checkFilter) {
+                                ForEach(["All"] + Set(checks.map(\.stateLabel)).sorted(), id: \.self) { key in
+                                    Text("\(key) · \(checks.filter { key == "All" || $0.stateLabel == key }.count)").tag(key)
+                                }
+                            }
+                        } else {
+                            Picker("Filter files", selection: $fileFilter) {
+                                ForEach(["Changed"] + Set(patches?.map(\.kind) ?? []).sorted(), id: \.self) { key in
+                                    Text("\(key) · \(patches?.filter { key == "Changed" || $0.kind == key }.count ?? 0)").tag(key)
+                                }
+                            }
+                        }
+                    } label: { WorkspaceFilterIcon() }
+                    .accessibilityLabel(section == "Checks" ? "Filter checks" : "Filter files")
+                }.sharedBackgroundVisibility(.hidden)
             }
         }
         .navigationDestination(isPresented: Binding(get: { selectedFile != nil }, set: { if !$0 { selectedFile = nil } })) {
@@ -357,7 +429,7 @@ struct PullRequestRecord: View {
                 if detail == nil || section == "Overview" {
                     detail = try await store.pullRequest(.detail, input: row.ref, as: Detail.self)
                 }
-                if section == "Files" && patches == nil {
+                if section == "Code" && patches == nil {
                     var input = row.ref
                     var result: [FfiFilePatch] = []
                     var paths = Set<String>()
@@ -506,5 +578,42 @@ private struct OmittedPatch: View {
                 if change == nil { error = "No diff available" }
             } catch { self.error = error.localizedDescription }
         }
+    }
+}
+
+private func shortAge(_ timestamp: String?) -> String? {
+    guard let date = threadDate(timestamp) else { return nil }
+    let seconds = max(0, Int(-date.timeIntervalSinceNow))
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 { return "\(seconds / 60)m" }
+    if seconds < 86400 { return "\(seconds / 3600)h" }
+    return "\(seconds / 86400)d"
+}
+
+private struct ChangedFileIcon: View {
+    let path: String
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let ext = (path as NSString).pathExtension.lowercased()
+        let icon: (String, UInt32, UInt32)? = switch ext {
+        case "php": ("php", 0x693acf, 0x9d6afb)
+        case "vue": ("vue", 0x199f43, 0x5ecc71)
+        case "ts", "mts", "cts": ("typescript", 0x1a85d4, 0x69b1ff)
+        case "tsx", "jsx": ("react", 0x1ca1c7, 0x68cdf2)
+        case "js", "cjs", "mjs": ("javascript", 0xd5a910, 0xffd452)
+        case "json", "swift", "html": (ext, 0xd47628, 0xffa359)
+        case "rs": ("rust", 0xd47628, 0xffa359)
+        case "md": ("markdown", 0x199f43, 0x5ecc71)
+        case "py": ("python", 0x1a85d4, 0x69b1ff)
+        case "css": ("css", 0x693acf, 0x9d6afb)
+        default: nil
+        }
+        Group {
+            if let icon {
+                Image("file-" + icon.0).resizable().scaledToFit()
+                    .foregroundStyle(Color(rgbHex: scheme == .dark ? icon.2 : icon.1))
+            } else { ConnIcon("doc").foregroundStyle(.secondary) }
+        }.frame(width: 16, height: 16).accessibilityHidden(true)
     }
 }

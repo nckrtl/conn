@@ -40,6 +40,7 @@ struct NewThreadDraftView: View {
                 .font(.system(size: 26, weight: .medium))
                 .tracking(-0.65)
                 .multilineTextAlignment(.center)
+                .offset(y: -52)
             if selectedProjectId != nil {
                 Button(selectedProjectTitle) { showingProjectPicker = true }
                     .accessibilityIdentifier("newThread.projectPickerButton")

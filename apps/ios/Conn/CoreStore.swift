@@ -101,7 +101,18 @@ final class CoreStore {
     var environmentId: String? { state?.environmentId }
 
     var orbitConnect: OrbitConnectState? {
-        switch state?.phase {
+        var phase = state?.phase
+        #if DEBUG && targetEnvironment(simulator)
+        switch ProcessInfo.processInfo.environment["CONN_TEST_LAUNCH_PHASE"] {
+        case "splash": return .connecting("")
+        case "checking": phase = .connecting(target: .primaryAgent)
+        case "setup": phase = .live(status: .connecting)
+        case "finalizing": phase = .live(status: .connected)
+        default: break
+        }
+        #endif
+        return switch phase {
+        case nil: .connecting("")
         case .connecting: .connecting("Checking connection")
         case .live(.connected): .connecting("Finalizing")
         case .live: .connecting("Downloading threads")
@@ -123,7 +134,8 @@ final class CoreStore {
             try? FileManager.default.removeItem(at: Self.cacheDirectory(scope))
         }
         var gatewayURL: String?
-        #if DEBUG
+        #if DEBUG && targetEnvironment(simulator)
+        gatewayURL = ProcessInfo.processInfo.environment["CONN_TEST_TASK_GATEWAY"]
         if arguments.contains("--test-unreachable-gateway") { gatewayURL = "https://127.0.0.1:1" }
         #endif
         do {
@@ -200,7 +212,7 @@ final class CoreStore {
             }
             UserDefaults.standard.set(Array(Set(savedScopes).union(linked.keys)), forKey: "linkedSessions")
         } catch {
-            if !Task.isCancelled && environmentId == primary { discoveryError = error.localizedDescription }
+            if !Task.isCancelled && environmentId == primary { discoveryError = connectionMessage(error) }
         }
     }
 
@@ -720,5 +732,15 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
 
     func onProvidersChanged() {
         Task { @MainActor [weak store] in store?.handleProvidersChanged() }
+    }
+}
+
+private func connectionMessage(_ error: Error) -> String {
+    guard let error = error as? FfiError else { return error.localizedDescription }
+    switch error {
+    case let .Connection(message), let .Auth(message), let .Rpc(message), let .Orbit(message, _),
+         let .InvalidUrl(message), let .InvalidInput(message), let .InvalidTheme(message):
+        return message
+    case .Closed: return "Connection closed."
     }
 }

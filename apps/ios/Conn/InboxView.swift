@@ -108,7 +108,7 @@ struct InboxView: View {
                     }
                     .pickerStyle(.inline)
                 } label: {
-                    Image(systemName: "line.3.horizontal.decrease").frame(width: 44, height: 44)
+                    WorkspaceFilterIcon()
                 }.accessibilityLabel("Filter threads")
             }.padding(.horizontal, 16).frame(height: 56)
             .listRowInsets(EdgeInsets())

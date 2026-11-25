@@ -15,7 +15,8 @@ struct ConnTheme: Sendable, Equatable {
         fatalError("Built-in Conn theme tokens unavailable")
     }
 
-    var background: Color { Color(ffi: tokens.background) }
+    var background: Color { Color(ffi: tokens.shellPanel) }
+    var settingsGroup: Color { background.mix(with: foreground, by: tokens.appearance == .light ? 0.05 : 0.056) }
     var foreground: Color { Color(ffi: tokens.foreground) }
     var card: Color { Color(ffi: tokens.card) }
     var cardForeground: Color { Color(ffi: tokens.cardForeground) }

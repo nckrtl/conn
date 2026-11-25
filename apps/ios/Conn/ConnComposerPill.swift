@@ -114,7 +114,7 @@ struct ProviderIcon: View {
 
     var body: some View {
         switch driver?.trimmingCharacters(in: .whitespaces).lowercased() {
-        case "claudeagent":
+        case "claude", "claudeagent":
             Image("provider-claude").resizable().scaledToFit().frame(width: size, height: size)
         case "antigravity":
             Image("provider-antigravity").resizable().scaledToFit().frame(width: size, height: size)

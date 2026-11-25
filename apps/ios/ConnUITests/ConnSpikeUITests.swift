@@ -218,12 +218,86 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertFalse(title.isEmpty)
     }
 
-    func testWorkspaceRecords() throws {
+    func testLaunchVisualStates() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["CONN_CAPTURE_LAUNCH"] == "1" else { throw XCTSkip("Launch appearance snapshots") }
+        let theme = env["CONN_APPEARANCE"] ?? "light"
+        let app = XCUIApplication()
+        app.launchEnvironment["CONN_TEST_APPEARANCE"] = theme
+        for phase in ["splash", "checking", "setup", "finalizing", "no-gateway", "no-network"] {
+            if let fixture = env["CONN_TEST_TASK_GATEWAY"].flatMap(URL.init(string:)) {
+                _ = try await URLSession.shared.data(from: fixture.appending(path: "fixture-mode/" + (phase == "no-network" ? "unknown-node" : "normal")))
+            }
+            app.launchEnvironment["CONN_TEST_LAUNCH_PHASE"] = phase
+            app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = env["CONN_TEST_TASK_GATEWAY"]
+            app.launchArguments = ["--reset-session", phase == "no-gateway" ? "--test-unreachable-gateway" : phase == "no-network" ? "--test-orbit" : "--manual-pairing"]
+            app.launch()
+            if phase.hasPrefix("no-") {
+                XCTAssertTrue(app.staticTexts["orbit.errorText"].waitForExistence(timeout: 20))
+            } else if phase != "splash" {
+                XCTAssertTrue(app.staticTexts["orbit.connecting"].waitForExistence(timeout: 10))
+            }
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = theme + "-launch-" + phase
+            shot.lifetime = .keepAlways
+            add(shot)
+            app.terminate()
+        }
+    }
+
+    func testComposerVisualStates() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairing = env["CONN_PANEL_PAIRING"] else { throw XCTSkip("Requires an isolated panel fixture") }
+        let app = XCUIApplication()
+        let theme = env["CONN_APPEARANCE"] ?? "light"
+        app.launchEnvironment["CONN_TEST_APPEARANCE"] = theme
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        let url = app.textFields["pairing.urlField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 10))
+        url.tap()
+        url.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        func capture(_ name: String) {
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = theme + "-" + name
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        for scenario in ["approval-command", "approval-long", "approval-session", "approval-two", "approval-six", "question-single", "question-long", "question-multi-1"] {
+            let row = app.buttons["inbox.thread.fidelity-" + scenario]
+            if !row.waitForExistence(timeout: 10) || !row.isHittable { app.swipeUp() }
+            XCTAssertTrue(row.isHittable, scenario)
+            row.tap()
+            let panel = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", scenario.hasPrefix("approval") ? "thread.approval." : "thread.question.")).firstMatch
+            XCTAssertTrue(panel.waitForExistence(timeout: 10), scenario)
+            capture("thread-" + scenario)
+            if scenario.hasPrefix("question") && scenario != "question-long" {
+                let option = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'question.option.'")).firstMatch
+                option.tap()
+                if scenario == "question-single" { capture("thread-question-selected") }
+                else {
+                    let next = app.buttons["question.next"]
+                    if next.exists && next.isHittable { next.tap() }
+                    let second = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'question.option.'"))
+                    if second.count >= 2 { second.element(boundBy: 0).tap(); second.element(boundBy: 1).tap() }
+                    capture("thread-question-multi-2")
+                    if next.exists && next.isHittable { next.tap() }
+                    capture("thread-question-cant-submit")
+                }
+            }
+            app.navigationBars.buttons.firstMatch.tap()
+            app.swipeDown()
+        }
+    }
+
+    func testWorkspaceRecords() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_PAIRING_URL"] else { throw XCTSkip("Requires an isolated Conn server") }
         let appearance = env["CONN_APPEARANCE"] ?? "light"
         XCUIDevice.shared.appearance = appearance == "dark" ? .dark : .light
         let app = XCUIApplication()
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = env["CONN_TEST_TASK_GATEWAY"]
         app.launchEnvironment["CONN_TEST_APPEARANCE"] = appearance
         app.launchArguments = ["--reset-session", "--manual-pairing"]
         app.launch()
@@ -238,6 +312,13 @@ final class ConnSpikeUITests: XCTestCase {
             attachment.lifetime = .keepAlways
             add(attachment)
         }
+        let fixture = env["CONN_TEST_TASK_GATEWAY"].flatMap(URL.init(string:))
+        func mode(_ name: String) async throws {
+            guard let fixture else { return }
+            let (_, response) = try await URLSession.shared.data(from: fixture.appending(path: "fixture-mode/" + name))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        }
+        try await mode("normal")
         let threads = app.buttons["workspace.tab.threads"]
         let ready = threads.waitForExistence(timeout: 25)
         if !ready { capture("workspace-failure") }
@@ -246,7 +327,11 @@ final class ConnSpikeUITests: XCTestCase {
         let firstThread = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).firstMatch
         XCTAssertTrue(firstThread.waitForExistence(timeout: 15))
         capture("threads")
+        app.buttons["workspace.searchButton"].tap()
+        capture("bottom-search")
+        app.buttons["workspace.cancelSearch"].tap()
         app.buttons["Filter threads"].tap()
+        capture("thread-list-populated-filter")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", "project")).firstMatch.waitForExistence(timeout: 5))
         if let project = env["CONN_TEST_FILTER_PROJECT"] {
             app.buttons[project].firstMatch.tap()
@@ -260,10 +345,19 @@ final class ConnSpikeUITests: XCTestCase {
         app.buttons["workspace.settingsButton"].tap()
         XCTAssertTrue(app.staticTexts["Environments"].waitForExistence(timeout: 5))
         capture("settings")
+        app.buttons.containing(.staticText, identifier: "Environments").firstMatch.tap()
+        capture("settings-environments")
+        app.navigationBars.buttons.firstMatch.tap()
         app.buttons["settings.closeButton"].tap()
         app.buttons["inbox.newThreadButton"].tap()
         XCTAssertTrue(app.staticTexts["What should we work on?"].waitForExistence(timeout: 5))
         capture("general-draft")
+        if fixture != nil {
+            let input = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
+            input.tap()
+            input.typeText("Fix image attachments in Conn.")
+            capture("new-chat-example")
+        }
         if env["CONN_TEST_GENERAL_LAUNCH"] == "1" {
             let prompt = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
             prompt.tap()
@@ -279,6 +373,20 @@ final class ConnSpikeUITests: XCTestCase {
         capture("thread")
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Model")).firstMatch.tap()
         XCTAssertTrue(app.buttons["modelPicker.confirm"].waitForExistence(timeout: 8))
+        if fixture != nil {
+            let providerRow = app.buttons.containing(.staticText, identifier: "Provider").firstMatch
+            XCTAssertTrue(providerRow.waitForExistence(timeout: 10))
+            capture("configuration")
+            providerRow.tap()
+            let provider = app.buttons["modelPicker.provider.claudeAgent"]
+            XCTAssertTrue(provider.waitForExistence(timeout: 10))
+            capture("configuration-providers")
+            provider.tap()
+            let model = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'modelPicker.model.'")).firstMatch
+            XCTAssertTrue(model.waitForExistence(timeout: 10))
+            capture("configuration-models")
+            model.tap()
+        }
         if env["CONN_TEST_PROVIDER_CATALOG"] == "1" {
             app.buttons.containing(.staticText, identifier: "Provider").firstMatch.tap()
             let provider = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'modelPicker.provider.'")).firstMatch
@@ -304,10 +412,17 @@ final class ConnSpikeUITests: XCTestCase {
         let task = env["CONN_TEST_TASK_ID"].map { app.descendants(matching: .any)["tasks.row." + $0].firstMatch } ?? app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'tasks.row.'")).firstMatch
         if task.waitForExistence(timeout: 12) {
             capture("tasks")
+            app.buttons["tasks.laneMenu"].tap()
+            capture("tasks-loaded-filter")
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "In progress")).firstMatch.tap()
             task.tap()
-            for section in ["Overview", "Steps", "Agents"] {
+            for section in ["Overview", "Subtasks", "Agents"] {
                 app.buttons[section].tap()
                 capture("task-" + section)
+                if section == "Subtasks", env["CONN_TEST_TASK_GATEWAY"] != nil {
+                    app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'task.step.'")).firstMatch.tap()
+                    capture("task-expanded")
+                }
             }
             app.navigationBars.buttons.firstMatch.tap()
         } else {
@@ -321,7 +436,7 @@ final class ConnSpikeUITests: XCTestCase {
             for _ in 0..<8 where !done.isHittable { app.swipeUp() }
             XCTAssertTrue(done.isHittable)
             done.tap()
-            app.buttons["Steps"].tap()
+            app.buttons["Subtasks"].tap()
             let step = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'task.step.'")).firstMatch
             XCTAssertTrue(step.waitForExistence(timeout: 10))
             step.tap()
@@ -332,13 +447,14 @@ final class ConnSpikeUITests: XCTestCase {
         let pr = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'pr.row.'")).firstMatch
         XCTAssertTrue(pr.waitForExistence(timeout: 40), "The test server should list at least one open pull request")
         app.buttons["Filter pull requests"].tap()
+        capture("pull-requests-populated-filter")
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Draft (")).firstMatch.tap()
         capture("filtered-prs")
         app.buttons["Filter pull requests"].tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All (")).firstMatch.tap()
         capture("pull-requests")
         pr.tap()
-        for section in ["Overview", "Checks", "Timeline", "Files"] {
+        for section in ["Overview", "Checks", "Timeline", "Code"] {
             let tab = app.buttons[section]
             XCTAssertTrue(tab.waitForExistence(timeout: 20))
             tab.tap()
@@ -346,7 +462,13 @@ final class ConnSpikeUITests: XCTestCase {
                 let item = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'pr.timeline.'")).firstMatch
                 XCTAssertTrue(item.waitForExistence(timeout: 30))
             }
-            if section != "Files" { capture("pr-" + section) }
+            if section == "Checks", env["CONN_TEST_TASK_GATEWAY"] != nil {
+                XCTAssertTrue(app.staticTexts["1m 12s"].waitForExistence(timeout: 8))
+                app.buttons["Filter checks"].tap()
+                capture("pr-detail-checks-filter")
+                app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All")).firstMatch.tap()
+            }
+            if section != "Code" { capture("pr-" + section) }
         }
         let file = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'pr.file.'")).firstMatch
         XCTAssertTrue(file.waitForExistence(timeout: 30))
@@ -379,6 +501,34 @@ final class ConnSpikeUITests: XCTestCase {
         }
         backToFiles.tap()
         app.navigationBars.buttons.firstMatch.tap()
+        if fixture != nil {
+            let running = app.buttons["pr.row.nckrtl/conn.1931"]
+            running.tap()
+            app.buttons["Checks"].tap()
+            XCTAssertTrue(app.staticTexts["4 of 12 checks passed"].waitForExistence(timeout: 10))
+            capture("pr-running-checks")
+            app.buttons["Filter checks"].tap()
+            capture("pr-detail-checks-filter")
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All")).firstMatch.tap()
+            app.buttons["Code"].tap()
+            let filter = app.buttons["Filter files"]
+            if filter.waitForExistence(timeout: 10) {
+                filter.tap()
+                capture("pr-detail-code-filter")
+                app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Changed")).firstMatch.tap()
+            }
+            app.navigationBars.buttons.firstMatch.tap()
+            try await mode("empty")
+            threads.tap()
+            app.buttons["workspace.tab.pullRequests"].tap()
+            XCTAssertTrue(app.staticTexts["No open pull requests"].waitForExistence(timeout: 12))
+            capture("pull-requests-empty")
+            try await mode("unavailable")
+            app.buttons["workspace.tab.tasks"].tap()
+            let error = app.descendants(matching: .any)["tasks.error"].firstMatch
+            if error.waitForExistence(timeout: 6) { capture("tasks-unavailable") }
+            try await mode("normal")
+        }
         threads.tap()
         firstThread.tap()
         let expectedTitle = app.navigationBars.firstMatch.identifier

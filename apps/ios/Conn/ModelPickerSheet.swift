@@ -25,70 +25,94 @@ struct ModelPickerSheet: View {
 
     var body: some View {
         NavigationStack(path: $pages) {
-            List {
-                if let picker, picker.loaded {
-                    let section = picker.sections.first { $0.models.contains(where: \.selected) }
-                    let row = section?.models.first(where: \.selected)
-                    if picker.sections.isEmpty {
-                        Text("No models available.").foregroundStyle(.secondary)
-                    } else {
-                        Section {
-                            NavigationLink(value: Page.providers) {
-                                LabeledContent("Provider", value: section?.label ?? "Select")
-                            }
-                            if let section {
-                                Button { browse(section) } label: {
-                                    LabeledContent("Model", value: row?.label ?? "Select")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if let picker, picker.loaded {
+                        let section = picker.sections.first { $0.models.contains(where: \.selected) }
+                        let row = section?.models.first(where: \.selected)
+                        if picker.sections.isEmpty {
+                            Text("No models available.").foregroundStyle(.secondary)
+                        } else {
+                            PhoneSettingsGroup {
+                                Button { pages.append(.providers) } label: {
+                                    PhoneOptionRow(title: "Provider", value: section?.label ?? "Select", provider: section?.driver)
                                 }
-                            }
-                            if let row {
-                                ForEach(row.controls, id: \.id) { control in
-                                    Picker(control.toggle || control.id == "serviceTier" ? "Speed" : "Effort", selection: Binding(
-                                        get: { optionChanges[control.id] ?? control.current },
-                                        set: { value in
-                                            pending = (row.instanceId, row.model)
-                                            optionChanges[control.id] = value == control.current ? nil : value
-                                        }
-                                    )) {
-                                        ForEach(Array(zip(control.values, control.labels)), id: \.0) { value, label in
-                                            Text(label).tag(value)
+                                if let section {
+                                    Button { browse(section) } label: {
+                                        PhoneOptionRow(title: "Model", value: row?.label ?? "Select")
+                                    }
+                                }
+                                if let row {
+                                    ForEach(row.controls, id: \.id) { control in
+                                        let current = optionChanges[control.id] ?? control.current
+                                        let label = control.toggle || control.id == "serviceTier" ? "Speed" : "Effort"
+                                        Menu {
+                                            ForEach(Array(zip(control.values, control.labels)), id: \.0) { value, name in
+                                                Button {
+                                                    pending = (row.instanceId, row.model)
+                                                    optionChanges[control.id] = value == control.current ? nil : value
+                                                } label: {
+                                                    if current == value { Label(name, systemImage: "checkmark") } else { Text(name) }
+                                                }
+                                            }
+                                        } label: {
+                                            PhoneOptionRow(title: label,
+                                                           value: control.values.firstIndex(of: current).map { control.labels[$0] } ?? current,
+                                                           disclosure: "chevron.down")
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                } else { ProgressView("Loading models…") }
-                Section {
-                    Picker("Follow-up messages", selection: $steer) {
-                        Text("Steer").tag(true)
-                        Text("Queue").tag(false)
-                    }
-                }
-            }
-            .navigationDestination(for: Page.self) { page in
-                switch page {
-                case .providers:
-                    List(picker?.sections ?? [], id: \.instanceId) { section in
-                        Button { browse(section) } label: {
-                            Label { Text(section.label) } icon: { ProviderIcon(driver: section.driver, size: 18) }
-                        }.accessibilityIdentifier("modelPicker.provider." + section.instanceId)
-                    }.navigationTitle("Provider")
-                case .models(let instance):
-                    List(picker?.sections.first { $0.instanceId == instance }?.models ?? [], id: \.model) { row in
-                        Button {
-                            if !row.selected { optionChanges = [:] }
-                            pending = (row.instanceId, row.model)
-                            pages = []
-                        } label: {
-                            HStack {
-                                Text(row.label)
-                                Spacer()
-                                if row.selected { Image(systemName: "checkmark") }
+                    } else { ProgressView("Loading models…") }
+                    VStack(alignment: .leading, spacing: 8) {
+                        PhoneSettingsGroup {
+                            Menu {
+                                Button("Steer") { steer = true }
+                                Button("Queue") { steer = false }
+                            } label: {
+                                PhoneOptionRow(title: "Follow-up messages", value: steer ? "Steer" : "Queue", disclosure: "chevron.down")
                             }
-                        }.accessibilityIdentifier("modelPicker.model." + row.model)
-                    }.navigationTitle("Model")
-                }
+                        }
+                        Text(steer ? "Send follow-ups to the running turn." : "Send follow-ups after the running turn finishes.")
+                            .font(.system(size: 13)).foregroundStyle(theme.mutedForeground).padding(.horizontal, 14)
+                    }
+                }.padding(.horizontal, 14).padding(.top, 10)
+            }
+            .buttonStyle(.plain).background(theme.background)
+            .navigationDestination(for: Page.self) { page in
+                ScrollView {
+                    PhoneSettingsGroup {
+                        switch page {
+                        case .providers:
+                            ForEach(picker?.sections ?? [], id: \.instanceId) { section in
+                                Button { browse(section) } label: {
+                                    HStack { ProviderIcon(driver: section.driver); Text(section.label); Spacer(); ConnIcon("chevron.right") }
+                                        .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                                }.accessibilityIdentifier("modelPicker.provider." + section.instanceId)
+                            }
+                        case .models(let instance):
+                            if let section = picker?.sections.first(where: { $0.instanceId == instance }) {
+                                ForEach(section.models, id: \.model) { row in
+                                    Button {
+                                        if !row.selected { optionChanges = [:] }
+                                        pending = (row.instanceId, row.model)
+                                        pages = []
+                                    } label: {
+                                        HStack {
+                                            ProviderIcon(driver: section.driver)
+                                            Text(row.label)
+                                            Spacer()
+                                            if row.selected { ConnIcon("checkmark") }
+                                        }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                                    }.accessibilityIdentifier("modelPicker.model." + row.model)
+                                }
+                            }
+                        }
+                    }.padding(.horizontal, 14).padding(.top, 10)
+                }.buttonStyle(.plain).background(theme.background)
+                    .navigationTitle(page == .providers ? "Provider" : "Model")
+                    .navigationBarTitleDisplayMode(.inline)
             }
             .navigationTitle("Thread settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -99,12 +123,14 @@ struct ModelPickerSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(picker?.hasPending == true || !optionChanges.isEmpty || steer != store.followUpSteers(threadId) ? "Save" : "Done") { commitAndClose() }
-                        .fontWeight(.semibold)
+                        .fontWeight(.semibold).foregroundStyle(Color.accentColor)
                         .disabled(saving)
                         .accessibilityIdentifier("modelPicker.confirm")
-                }
+                }.sharedBackgroundVisibility(.hidden)
             }
         }
+        .tint(theme.foreground)
+        .presentationBackground(theme.background)
         .onAppear { steer = store.followUpSteers(threadId) }
         .alert("Model unavailable", isPresented: $showingUnavailable) {
             Button("OK", role: .cancel) {}

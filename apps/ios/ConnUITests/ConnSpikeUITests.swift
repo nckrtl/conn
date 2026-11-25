@@ -1558,7 +1558,8 @@ final class ConnSpikeUITests: XCTestCase {
         child.tap()
         let template = app.buttons["Start a draft with Report"]
         XCTAssertTrue(template.waitForExistence(timeout: 10))
-        template.tap()
+        // The row's Spacer is not hit-testable (plain button, no contentShape), so tap the label, not the centre.
+        template.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.5)).tap()
         let project = app.buttons["newThread.projectPickerButton"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         XCTAssertEqual(project.label, "Child workspace")

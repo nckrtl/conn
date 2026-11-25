@@ -1979,7 +1979,9 @@ impl ChatView {
                             cx,
                         ));
                     }
-                    // Conn `AssistantTimelineRow`: `px-1 py-0.5`, row spacing `pb-2` before work or `pb-4`.
+                    // Conn `AssistantTimelineRow`: `px-1 py-0.5`. Row spacing is wider than T3's
+                    // `pb-2`/`pb-4` (Nick, 2026-11-26): 16px before work, 20px otherwise, so
+                    // consecutive agent messages and the work after them read as separate.
                     div()
                         .id(SharedString::from(format!("chat-assistant-{id}")))
                         .a11y(
@@ -1990,7 +1992,7 @@ impl ChatView {
                         .group(group)
                         .w_full()
                         .min_w_0()
-                        .pb(px(if *followed_by_work { 8.0 } else { 16.0 }))
+                        .pb(px(if *followed_by_work { 16.0 } else { 20.0 }))
                         .child(inner)
                         .into_any_element()
                 } else {
@@ -2890,7 +2892,9 @@ impl ChatView {
                 .w_full()
                 .min_w_0()
                 .pt(px(4.0))
-                .pb(px(8.0))
+                // Collapsed, the message follows the header closely; expanded, the divider
+                // keeps its 8px of room above it.
+                .pb(px(if manually_expanded { 8.0 } else { 0.0 }))
                 .border_b_1()
                 .border_color(fold_divider)
                 .child(div().flex().flex_row().items_center().child(fold_btn));

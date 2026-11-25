@@ -14,6 +14,10 @@ struct ConnApp: App {
         UINavigationBar.appearance().titleTextAttributes = [
             .font: UIFont.systemFont(ofSize: 18, weight: .medium),
         ]
+        // Lab `.m-wsbar-tab`: idle tab icons in the muted foreground.
+        UITabBar.appearance().unselectedItemTintColor = UIColor { traits in
+            UIColor(ConnTheme.resolve(for: traits.userInterfaceStyle == .dark ? .dark : .light).mutedForeground)
+        }
         let store = CoreStore()
         _store = State(initialValue: store)
         // Push taps can arrive at launch, before the first view appears.

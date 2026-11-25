@@ -45,32 +45,68 @@ struct WorkspaceRootView: View {
     @State private var pullRequests = WorkspacePullRequests()
     @State private var tasks = TasksModel()
     @FocusState private var searchFocused: Bool
+    /// The tab content's bottom inset (the top of the system tab bar) and the screen's own bottom inset.
+    @State private var tabBarInset: CGFloat = 0
+    @State private var screenInset: CGFloat = 0
 
-    private func footerAction(_ icon: String, label: String, id: String, action: @escaping () -> Void) -> some View {
+    /// Lab `.m-wsbar-circle`: a 48pt glass circle with a 20pt glyph in the primary colour.
+    private func footerAction(_ glyph: String, label: String, id: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            connImage(icon).resizable().scaledToFit().frame(width: 20, height: 20)
+            ThreadGlyph(name: glyph, size: 20)
+                .foregroundStyle(theme.primary)
                 .frame(width: 48, height: 48).contentShape(Circle())
         }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle)
             .accessibilityLabel(label).accessibilityIdentifier(id)
     }
 
+    /// An icon-only tab item from the lab's 24-unit glyphs, drawn at the lab's 22pt.
+    private func tabIcon(_ glyph: String, _ title: String) -> some View {
+        let size = CGSize(width: 22, height: 22)
+        let image = UIImage(named: "thread-" + glyph).map { source in
+            UIGraphicsImageRenderer(size: size).image { _ in source.draw(in: CGRect(origin: .zero, size: size)) }
+                .withRenderingMode(.alwaysTemplate)
+        } ?? UIImage()
+        image.accessibilityLabel = title
+        return Image(uiImage: image).accessibilityLabel(title)
+    }
+
     var body: some View {
         NavigationStack(path: $navigationPath) {
             TabView(selection: selection) {
+                // Lab `WorkspaceBar`: icon-only items, search inside the same pill (no `.search` role,
+                // which would split it into its own circle).
                 Tab(value: WorkspaceSelection.section(.threads)) { section(.threads) } label: {
-                    Label { Text("Threads") } icon: { connImage("text.bubble") }
+                    tabIcon("thread", "Threads")
                 }.accessibilityIdentifier("workspace.tab.threads")
                 Tab(value: WorkspaceSelection.section(.tasks)) { section(.tasks) } label: {
-                    Label { Text("Tasks") } icon: { connImage("checklist") }
+                    tabIcon("checklist", "Tasks")
                 }.accessibilityIdentifier("workspace.tab.tasks")
                 Tab(value: WorkspaceSelection.section(.pullRequests)) { section(.pullRequests) } label: {
-                    Label { Text("Pull requests") } icon: { connImage("arrow.triangle.pull") }
+                    tabIcon("pull-request", "Pull requests")
                 }.accessibilityIdentifier("workspace.tab.pullRequests")
-                Tab(value: WorkspaceSelection.search, role: .search) {
-                    section(selectedTab, query: searchQuery)
+                Tab(value: WorkspaceSelection.search) { section(selectedTab, query: searchQuery) } label: {
+                    tabIcon("search", "Search")
                 }.accessibilityIdentifier("workspace.searchButton")
             }
             .tabViewStyle(.tabBarOnly)
+            // Lab: the active tab takes the accent foreground; content keeps the app tint.
+            .tint(theme.accentForeground)
+            .onGeometryChange(for: CGFloat.self, of: { $0.safeAreaInsets.bottom }) { screenInset = $0 }
+            .overlay(alignment: .bottom) {
+                // The settings and new-chat circles sit on the tab bar's row, either side of its pill.
+                if !isSearching {
+                    HStack {
+                        footerAction("more-horizontal", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
+                        Spacer()
+                        footerAction("add", label: "New chat", id: "inbox.newThreadButton") {
+                            navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
+                        }.disabled(store.showsOffline).opacity(store.showsOffline ? 0.5 : 1)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, max(0, (tabBarInset + screenInset) / 2 - 24))
+                    .ignoresSafeArea(edges: .bottom)
+                }
+            }
             .toolbar(.hidden, for: .navigationBar)
             .toolbar(.hidden, for: .bottomBar)
             .navigationDestination(for: WorkspaceRoute.self) { route in
@@ -198,32 +234,39 @@ struct WorkspaceRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background.ignoresSafeArea())
+        .tint(theme.primary)
+        // Lab: searching swaps the whole bar for the field and a cancel circle.
+        .toolbar(query != nil ? .hidden : .visible, for: .tabBar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 4) {
+            VStack(spacing: 8) {
                 if store.showsOffline && !store.showsSavedConnectionAlert { OfflinePill() }
-                HStack(spacing: 8) {
-                    if query != nil {
-                        TextField(tab.searchPlaceholder, text: $searchQuery)
-                            .focused($searchFocused).submitLabel(.search)
-                            .accessibilityIdentifier("workspace.searchField")
-                            .padding(.horizontal, 16).frame(height: 48).glassEffect(.regular, in: .capsule)
-                            .onAppear {
-                                guard focusOnSearchEntry else { return }
-                                focusOnSearchEntry = false
-                                searchFocused = true
-                            }
-                        footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
+                if query != nil {
+                    HStack(spacing: 8) {
+                        // Lab `.ios-search-field`: 44pt capsule, 12 inset, 18pt glyph 6 from the text.
+                        HStack(spacing: 6) {
+                            ThreadGlyph(name: "search", size: 18).foregroundStyle(theme.mutedForeground)
+                            TextField(tab.searchPlaceholder, text: $searchQuery)
+                                .focused($searchFocused).submitLabel(.search)
+                                .foregroundStyle(theme.foreground)
+                                .accessibilityIdentifier("workspace.searchField")
+                        }
+                        .padding(.horizontal, 12).frame(height: 44)
+                        .overlay(Capsule().strokeBorder(theme.border, lineWidth: 1))
+                        .glassEffect(.regular, in: .capsule)
+                        .onAppear {
+                            guard focusOnSearchEntry else { return }
+                            focusOnSearchEntry = false
+                            searchFocused = true
+                        }
+                        footerAction("close", label: "Cancel search", id: "workspace.cancelSearch") {
                             selection.wrappedValue = .section(selectedTab)
                         }
-                    } else {
-                        footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
-                        Spacer()
-                        footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
-                            navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
-                        }.disabled(store.showsOffline)
-                    }
-                }.padding(.horizontal, 20)
-            }
+                    }.padding(.horizontal, 24)
+                }
+            }.padding(.bottom, query == nil ? 8 : 0)
+        }
+        .onGeometryChange(for: CGFloat.self, of: { $0.safeAreaInsets.bottom }) { inset in
+            if query == nil { tabBarInset = inset }
         }
     }
 

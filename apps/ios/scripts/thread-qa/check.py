@@ -53,7 +53,39 @@ def plus_visible(image, center_y):
     return False
 
 
-def check(path, tessdata, keyboard_top):
+# Line breaks observed in the 402 pt lab with the same report sentence as
+# both a normal user message and a left-aligned assistant reply.
+REPLY_LINES = (
+    "build 5 is already merged and installed on polar.",
+    "this delayed report covers the liquid glass",
+    "update. the thread-list flicker and ordering fix is",
+    "still in progress.",
+)
+BUBBLE_LINES = (
+    "build 5 is already merged and",
+    "installed on polar. this delayed",
+    "report covers the liquid glass",
+    "update. the thread-list flicker and",
+    "ordering fix is still in progress.",
+)
+
+
+def body_lines(feed, expected, left, require):
+    lines = []
+    for words in expected:
+        matches = [line for line in feed if line[0] == words]
+        if len(matches) != 1:
+            require(False, f"message body wrap differs at: {words}")
+            return []
+        lines.append(matches[0])
+    require(all(abs(x - left) <= 4 and 13 <= b - y <= 17 for _, x, y, r, b in lines),
+            "message body type size or inset differs")
+    require(all(abs(b[2] - a[2] - 24) <= 2 for a, b in zip(lines, lines[1:])),
+            "message body line spacing differs")
+    return lines
+
+
+def check(path, tessdata, keyboard_top, bubble=False):
     errors = []
 
     def require(condition, message):
@@ -83,6 +115,10 @@ def check(path, tessdata, keyboard_top):
                     for t, x, y, r, b in lines), "empty composer placeholder missing or misplaced")
 
     feed = [line for line in lines if 104 < line[2] and line[4] <= top]
+    if bubble:
+        body_lines(feed, BUBBLE_LINES, 107, require)
+        return errors
+
     # This fixture contains exactly one completed delegate report, followed
     # by one assistant reply. There is no user-authored outgoing message.
     pixels = image.load()
@@ -115,17 +151,9 @@ def check(path, tessdata, keyboard_top):
         require(surface(image, round(y - 3), INSET, 19, 383), "inner card fill or width")
         require(close_color(image.getpixel((6, round(y))), PAGE), "Dark Ocean page fill")
 
-    # Three line endings measure effective font size and wrapping using the
-    # same words. A different reply or a clipped line cannot stand in for it.
-    reply = [one_line(fragment) for fragment in (
-        "installed on polar. this delayed", "report covers the liquid glass update",
-        "and ordering fix is still in progress")]
-    if all(reply):
-        first, second, last = reply
-        require(first[0].endswith("delayed") and second[0].endswith("flicker"),
-                "assistant reply line endings differ")
-        require(10 <= first[4] - first[2] <= 15 and 17 <= second[2] - first[2] <= 24
-                and 17 <= last[2] - second[2] <= 24, "assistant type size or line spacing differs")
+    reply = body_lines(feed, REPLY_LINES, 17, require)
+    if reply:
+        first, last = reply[0], reply[-1]
         if preview:
             require(preview[4] < first[2], "reply must follow the report")
         times = [l for l in feed if l[2] > last[4] and re.search(r"\b\d{1,2}:\d{2}\b", l[0])]
@@ -142,10 +170,11 @@ if __name__ == "__main__":
     parser.add_argument("image", type=Path)
     parser.add_argument("--tessdata", type=Path, required=True, help="directory containing eng.traineddata")
     parser.add_argument("--keyboard-top", type=int, help="observed focused keyboard minY in screen points")
+    parser.add_argument("--bubble", action="store_true", help="measure report.json reply as a normal user bubble")
     args = parser.parse_args()
     if args.keyboard_top is not None and not 400 <= args.keyboard_top <= 650:
         parser.error("expected a portrait software keyboard top between 400 and 650 pt")
-    failures = check(args.image, args.tessdata, args.keyboard_top)
+    failures = check(args.image, args.tessdata, args.keyboard_top, args.bubble)
     for failure in failures:
         print(f"FAIL {failure}")
     print("FAIL" if failures else "PASS", args.image)

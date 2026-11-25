@@ -45,15 +45,12 @@ struct ThreadView: View {
     @State private var advanceTask: Task<Void, Never>?
     @State private var viewHeight: CGFloat = 800
 
-    /// This thread's composer text, kept in the store by thread id.
+    private var composer: ComposerDraft { store.composerDraft(.thread(threadId)) }
     private var draft: String {
-        get { store.drafts[threadId] ?? "" }
-        nonmutating set { store.drafts[threadId] = newValue.isEmpty ? nil : newValue }
+        get { composer.text }
+        nonmutating set { composer.text = newValue }
     }
 
-    private var draftBinding: Binding<String> {
-        Binding(get: { draft }, set: { draft = $0 })
-    }
     /// The chip's provider and the sheet; `model_picker` in conn-ffi builds both.
     @State private var modelPicker: FfiModelPicker?
     @State private var showingModelPicker = false
@@ -233,7 +230,7 @@ struct ThreadView: View {
     }
 
     private var hasDraft: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        pendingQuestion == nil ? composer.hasContent : !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// With a question open, text answers it and an empty composer runs the answer action.
@@ -246,7 +243,7 @@ struct ThreadView: View {
     private var composerCanSend: Bool {
         guard store.status == .connected, readingWindow == nil else { return false }
         guard let question = pendingQuestion, let panel = questionPanelModel else {
-            return hasDraft && !store.isSending
+            return hasDraft && !composer.locked
         }
         if hasDraft {
             return panel.acceptsText && question.answerable
@@ -483,10 +480,7 @@ struct ThreadView: View {
                     scrollTarget = nil
                 }
             }
-            // Mobile's thread overlay (`ThreadDetailScreen.tsx` 1640-1660, 1805-1862): the cards and the
-            // composer float over the full-width feed. `safeAreaBar` insets the feed and gives the
-            // bottom scroll-edge blur its height (mobile's `EdgeBlur` behind the composer).
-            .safeAreaBar(edge: .bottom, spacing: 0) {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     if snapshot != nil && (!stickToBottom || readingWindow != nil) {
                         Button {
@@ -560,7 +554,9 @@ struct ThreadView: View {
                     ConnComposerPill(
                         placeholder: questionPanelModel?.composerPlaceholder
                             ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
-                        text: draftBinding,
+                        draft: composer,
+                        limits: store.composerLimits,
+                        allowsAttachments: questionPanelModel == nil,
                         isBusy: isWorking && !hasDraft && questionPanelModel == nil,
                         canSend: composerCanSend,
                         onSend: {
@@ -603,6 +599,7 @@ struct ThreadView: View {
                             }
                         }
                     )
+                    .id(ObjectIdentifier(composer))
                     .disabled(store.status != .connected || readingWindow != nil)
                     .accessibilityIdentifier("thread.composer")
                 }
@@ -611,7 +608,7 @@ struct ThreadView: View {
                 .padding(.bottom, 2)
             }
             .scrollEdgeEffectHidden(true, for: .top)
-            .scrollEdgeEffectStyle(.soft, for: .bottom)
+            .scrollEdgeEffectHidden(true, for: .bottom)
         }
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -737,11 +734,13 @@ struct ThreadView: View {
         }
     }
 
-    /// `CoreStore.sendDraft` clears the thread's draft as it sends and restores it on failure.
     private func sendDraft(scrollProxy: ScrollViewProxy) {
         stickToBottom = true
+        let draft = composer
+        let mode: FfiSendMode = store.followUpSteers(threadId) ? .steer : .queue
         Task {
-            if await store.sendDraft(threadId: threadId) {
+            let sent = await store.submit(draft, for: .thread(threadId), to: .reply(threadId: threadId, mode: mode))
+            if sent != nil, store.openThreadId == threadId {
                 withAnimation(Kit.Motion.fast) {
                     scrollProxy.scrollTo("timeline-bottom", anchor: .bottom)
                 }

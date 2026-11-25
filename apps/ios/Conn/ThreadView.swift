@@ -505,7 +505,8 @@ struct ThreadView: View {
 
     private func timeline(_ proxy: ScrollViewProxy) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
+            // Lab `.m-feed-inner`: 22 between messages.
+            LazyVStack(alignment: .leading, spacing: 22) {
                 if let error = store.lastError, !error.isEmpty {
                     KitNotice(error, icon: .warning, tone: .error)
                 }

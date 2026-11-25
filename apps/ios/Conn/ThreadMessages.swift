@@ -138,9 +138,14 @@ struct ThreadMessage: View {
                     if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
                 }
                 .padding(3)
-                .background(theme.messageSurface, in: .rect(cornerRadius: 14))
+                // Lab: the corner toward the copy button is nearly square.
+                .background(theme.messageSurface, in: UnevenRoundedRectangle(
+                    topLeadingRadius: 14, bottomLeadingRadius: 14, bottomTrailingRadius: 4, topTrailingRadius: 14,
+                    style: .continuous))
+                // The copy glyph's right edge sits on the bubble's right edge (its 24 pt target pads 5).
                 MessageFooter(text: text, timestamp: date, trailingCopy: true)
-                    .padding(.horizontal, 4)
+                    .padding(.leading, 4)
+                    .padding(.trailing, -5)
             }
             .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.8 }
             .frame(maxWidth: .infinity, alignment: .trailing)

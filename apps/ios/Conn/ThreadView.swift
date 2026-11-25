@@ -755,8 +755,8 @@ struct ThreadView: View {
             .accessibilityIdentifier("thread.composer")
         }
         // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
-        .padding(.horizontal, 12)
-        .padding(.bottom, 2)
+        .padding(.horizontal, ComposerSheet.screenInset)
+        .padding(.bottom, ComposerSheet.bottomGutter)
     }
 
     private func sendDraft(scrollProxy: ScrollViewProxy) {

@@ -1,3 +1,5 @@
+import SwiftUI
+import UIKit
 import XCTest
 @testable import Conn
 
@@ -160,7 +162,24 @@ final class VoiceDictationTests: XCTestCase {
         XCTAssertEqual(ComposerInputMetrics.leadingInset(expanded: true, hasLeadingControl: true), 12)
     }
 
-    func testKeyboardGapTopsUpTheFourPointsTheScreensLeave() {
-        XCTAssertEqual(4 + ComposerInputMetrics.keyboardExtraGap, 10)
+    func testSheetSurfaceRunsTwentyEightPointsBehindTheKeyboard() {
+        // The box sits `bottomGutter` above the keyboard, so the surface reaches 28 past its top edge.
+        XCTAssertEqual(ComposerSheet.bottomBleed, ComposerSheet.bottomGutter + 28)
+        XCTAssertEqual(ComposerSheet.bottomBleed, 30)
+        // The controls sit 4 pt clear: the screens' gutter plus the box's own 2 pt padding.
+        XCTAssertEqual(ComposerSheet.bottomGutter + 2, 4)
+    }
+
+    func testKeyboardCurvesMapAndThePrivateCurveFallsBack() {
+        func note(curve: Int?, duration: Double? = 0.3) -> Notification {
+            var info: [AnyHashable: Any] = [:]
+            if let curve { info[UIResponder.keyboardAnimationCurveUserInfoKey] = curve }
+            if let duration { info[UIResponder.keyboardAnimationDurationUserInfoKey] = duration }
+            return Notification(name: UIResponder.keyboardWillChangeFrameNotification, userInfo: info)
+        }
+        XCTAssertEqual(KeyboardMotion.animation(note(curve: 0)), .easeInOut(duration: 0.3))
+        XCTAssertEqual(KeyboardMotion.animation(note(curve: 3)), .linear(duration: 0.3))
+        XCTAssertEqual(KeyboardMotion.animation(note(curve: 7)), KeyboardMotion.privateCurve)
+        XCTAssertEqual(KeyboardMotion.animation(note(curve: nil)), KeyboardMotion.privateCurve)
     }
 }

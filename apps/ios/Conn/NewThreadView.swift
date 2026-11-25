@@ -72,9 +72,9 @@ struct NewThreadDraftView: View {
                 )
                 .accessibilityIdentifier("newThread.promptField")
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, ComposerSheet.screenInset)
             .padding(.top, 6)
-            .padding(.bottom, 2)
+            .padding(.bottom, ComposerSheet.bottomGutter)
         }
         .onAppear { visible = true }
         .onDisappear { visible = false }

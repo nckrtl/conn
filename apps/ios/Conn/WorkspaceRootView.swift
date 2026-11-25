@@ -72,33 +72,30 @@ struct WorkspaceRootView: View {
     /// Mobile's switcher: 48pt tall with 4pt above and below, 64pt per item, 22pt icons; the selected
     /// item sits in a capsule of the text colour at 12% with its icon in the accent foreground.
     private var workspaceSwitcher: some View {
-        HStack(spacing: 0) {
-            switcherItem(.section(.threads), glyph: "thread", title: "Threads", id: "workspace.tab.threads")
-            switcherItem(.section(.tasks), glyph: "checklist", title: "Tasks", id: "workspace.tab.tasks")
-            switcherItem(.section(.pullRequests), glyph: "pull-request", title: "Pull requests", id: "workspace.tab.pullRequests")
-            switcherItem(.search, glyph: "search", title: "Search", id: "workspace.searchButton")
+        // iOS 26's segmented control: its Liquid Glass thumb lifts and magnifies under the finger,
+        // the tab bar's lens, while sitting in the bottom toolbar between the two circles.
+        Picker("Workspace", selection: selection) {
+            segmentIcon("thread", "Threads").tag(WorkspaceSelection.section(.threads))
+            segmentIcon("checklist", "Tasks").tag(WorkspaceSelection.section(.tasks))
+            segmentIcon("pull-request", "Pull requests").tag(WorkspaceSelection.section(.pullRequests))
+            segmentIcon("search", "Search").tag(WorkspaceSelection.search)
         }
-        .padding(.vertical, 4)
-        .frame(height: 48)
+        .pickerStyle(.segmented)
+        .controlSize(.extraLarge)
+        .frame(width: 256)
+        .accessibilityIdentifier("workspace.switcher")
     }
 
-    private func switcherItem(_ value: WorkspaceSelection, glyph: String, title: String, id: String) -> some View {
-        let selected = selection.wrappedValue == value
-        return Button {
-            withAnimation(.snappy(duration: 0.2)) { selection.wrappedValue = value }
-        } label: {
-            ThreadGlyph(name: glyph, size: 22)
-                .foregroundStyle(selected ? theme.accentForeground : theme.mutedForeground)
-                .frame(width: 64, height: 40)
-                .background {
-                    if selected { Capsule().fill(theme.foreground.opacity(0.12)) }
-                }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityIdentifier(id)
+    /// A segment's icon: the lab's 24-unit glyph drawn at 22pt as a template image, as a segmented
+    /// control needs a plain image.
+    private func segmentIcon(_ glyph: String, _ title: String) -> some View {
+        let size = CGSize(width: 22, height: 22)
+        let image = UIImage(named: "thread-" + glyph).map { source in
+            UIGraphicsImageRenderer(size: size).image { _ in source.draw(in: CGRect(origin: .zero, size: size)) }
+                .withRenderingMode(.alwaysTemplate)
+        } ?? UIImage()
+        image.accessibilityLabel = title
+        return Image(uiImage: image).accessibilityLabel(title)
     }
 
     /// Lab `.m-wsbar-circle`: a 48pt glass circle with a 20pt glyph in the primary colour.

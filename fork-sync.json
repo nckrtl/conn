@@ -161,7 +161,9 @@
         "apps/web/src/components/AppRouteModal.tsx",
         "apps/web/src/components/ToolbarGroup.tsx",
         "apps/web/src/components/Sidebar.tsx",
-        "apps/desktop/src/window/DesktopWindow.ts"
+        "apps/desktop/src/window/DesktopWindow.ts",
+        "apps/web/src/components/chat/ComposerSurface.tsx",
+        "apps/web/src/components/ThreadTerminalDrawer.tsx"
       ],
       "presence": [
         {
@@ -190,9 +192,11 @@
       "id": "icons",
       "forkHeading": "Icons",
       "files": [
+        "assets/conn/superheroicons",
+        "scripts/generate-conn-icons.ts",
         "apps/web/src/icons/connIcon.tsx",
         "apps/web/src/icons/lucide-react.ts",
-        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/components/sidebar/workspaceVisuals.tsx",
         "apps/web/vite.config.ts",
         "apps/web/tsconfig.json",
         "apps/web/package.json",
@@ -201,9 +205,12 @@
       ],
       "presence": [
         {
-          "kind": "symbol",
-          "path": "apps/web/src/components/ChatView.tsx",
-          "symbol": "<ConnIconScope>"
+          "kind": "file",
+          "path": "apps/web/src/icons/lucide-react.ts"
+        },
+        {
+          "kind": "file",
+          "path": "scripts/generate-conn-icons.ts"
         },
         {
           "kind": "symbol",
@@ -228,30 +235,31 @@
       ]
     },
     {
-      "id": "ios-icons",
-      "forkHeading": "iOS icons",
+      "id": "mobile-icons",
+      "forkHeading": "Mobile icons",
       "files": [
-        "apps/mobile/modules/conn-symbols/symbols.json",
-        "apps/mobile/src/components/ConnSymbolScope.tsx",
-        "apps/mobile/src/features/threads/ThreadDetailScreen.tsx",
+        "scripts/build-conn-symbols.ts",
+        "apps/mobile/modules/conn-symbols/ios",
+        "apps/mobile/modules/conn-symbols/ios/ConnSymbols.swift",
         "apps/mobile/src/components/ui/AppSymbol.tsx",
-        "apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift"
+        "apps/mobile/src/components/ui/AppSymbol.android.tsx",
+        "apps/mobile/src/components/ui/ConnGlyph.tsx",
+        "apps/mobile/src/components/ui/connGlyphs.generated.ts",
+        "apps/mobile/src/native/connHeaderIcon.ts"
       ],
       "presence": [
         {
-          "kind": "symbol",
-          "path": "apps/mobile/src/features/threads/ThreadDetailScreen.tsx",
-          "symbol": "<ConnSymbolScope>"
+          "kind": "file",
+          "path": "scripts/build-conn-symbols.ts"
+        },
+        {
+          "kind": "file",
+          "path": "apps/mobile/modules/conn-symbols/ios/ConnSymbols.swift"
         },
         {
           "kind": "symbol",
           "path": "apps/mobile/src/components/ui/AppSymbol.tsx",
-          "symbol": "conn.${name}"
-        },
-        {
-          "kind": "symbol",
-          "path": "apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift",
-          "symbol": "setSingleLineCentered"
+          "symbol": "ConnSymbols.swift"
         }
       ]
     },
@@ -302,24 +310,23 @@
       "id": "orbit",
       "forkHeading": "Orbit",
       "files": [
-        "apps/web/src/orbit/orbitWorkspaces.ts",
-        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/orbit",
+        "apps/web/src/components/settings/OrbitSettings.tsx",
         "apps/web/src/components/settings/ConnectionsSettings.tsx"
       ],
       "presence": [
         {
           "kind": "file",
-          "path": "apps/web/src/orbit/orbitWorkspaces.ts"
+          "path": "apps/web/src/orbit/orbitCheckout.ts"
+        },
+        {
+          "kind": "file",
+          "path": "apps/web/src/orbit/orbitDraft.ts"
         },
         {
           "kind": "symbol",
-          "path": "apps/web/src/components/ChatView.tsx",
-          "symbol": "orbitProjectFolder"
-        },
-        {
-          "kind": "symbol",
-          "path": "apps/web/src/components/ChatView.tsx",
-          "symbol": "isGitRepo || isOrbitProjectFolder"
+          "path": "apps/web/src/components/settings/ConnectionsSettings.tsx",
+          "symbol": "<EnvironmentProviderSection />"
         },
         {
           "kind": "symbol",
@@ -521,6 +528,37 @@
       ]
     },
     {
+      "id": "i18n-app-name",
+      "forkHeading": "i18n and the app name",
+      "files": [
+        "packages/shared/src/appName.ts",
+        "apps/mobile/src/lib/installAppName.ts",
+        "oxlint-plugin-t3code/rules/no-hardcoded-app-name.ts",
+        "scripts/check-conn-brand.ts",
+        "scripts/conn-brand.ts",
+        "vite.config.ts"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "packages/shared/src/appName.ts"
+        },
+        {
+          "kind": "file",
+          "path": "oxlint-plugin-t3code/rules/no-hardcoded-app-name.ts"
+        },
+        {
+          "kind": "file",
+          "path": "scripts/check-conn-brand.ts"
+        },
+        {
+          "kind": "symbol",
+          "path": "vite.config.ts",
+          "symbol": "\"t3code/no-hardcoded-app-name\": \"error\""
+        }
+      ]
+    },
+    {
       "id": "mobile-home-bar",
       "forkHeading": "Mobile home bar and filter",
       "files": [
@@ -540,7 +578,8 @@
       "files": [
         "apps/mobile/src/features/threads/thread-feed-item-size.ts",
         "apps/mobile/src/features/threads/ThreadFeed.tsx",
-        "apps/mobile/src/features/threads/thread-work-log.tsx"
+        "apps/mobile/src/features/threads/thread-work-log.tsx",
+        "apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift"
       ],
       "presence": [
         {
@@ -552,6 +591,11 @@
           "kind": "symbol",
           "path": "apps/mobile/src/features/threads/thread-work-log.tsx",
           "symbol": "props.icon === \"credential\""
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift",
+          "symbol": "setSingleLineCentered"
         }
       ]
     },
@@ -564,6 +608,27 @@
           "kind": "symbol",
           "path": "apps/server/src/persistence/Migrations.ts",
           "symbol": "reconcileConnPeerLinksMigration"
+        }
+      ]
+    },
+    {
+      "id": "orbit-registration",
+      "forkHeading": "Orbit registration",
+      "files": [
+        "scripts/orbit/t3-orbit-register",
+        "scripts/orbit/com.nckrtl.t3-orbit-register.plist",
+        "scripts/orbit/t3-orbit-register.service",
+        "scripts/orbit/t3-orbit-register.timer",
+        "scripts/orbit/t3-orbit-register.test.sh"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "scripts/orbit/t3-orbit-register"
+        },
+        {
+          "kind": "file",
+          "path": "scripts/orbit/com.nckrtl.t3-orbit-register.plist"
         }
       ]
     },
@@ -585,18 +650,13 @@
         "apps/web/src/components/chat/ChatComposer.tsx",
         "apps/web/src/components/EnvironmentContextChip.tsx",
         "apps/web/src/composerDraftStore.ts",
-        "apps/web/src/components/chat/useComposerSend.ts"
+        "packages/shared/src/composerContextReferences.ts"
       ],
       "presence": [
         {
           "kind": "symbol",
-          "path": "apps/web/src/composerDraftStore.ts",
-          "symbol": "\"orbit\": the first message creates an Orbit Instance copy"
-        },
-        {
-          "kind": "symbol",
-          "path": "apps/web/src/components/chat/useComposerSend.ts",
-          "symbol": "registerOrbitWorkspace"
+          "path": "packages/shared/src/composerContextReferences.ts",
+          "symbol": "call conn_environment_link with this environmentId"
         }
       ]
     },
@@ -637,6 +697,42 @@
           "kind": "symbol",
           "path": "apps/server/src/ws.ts",
           "symbol": "wsFork"
+        }
+      ]
+    },
+    {
+      "id": "provider-clis",
+      "forkHeading": "Provider CLIs",
+      "files": [
+        "apps/server/src/provider/orbitManagedProviders.ts",
+        "apps/server/src/provider/providerCliOnPath.ts",
+        "apps/server/src/provider/Drivers/AntigravityDriver.ts",
+        "apps/server/src/provider/CodexManagedRuntime.ts",
+        "apps/server/src/provider/ProviderRegistry.ts",
+        "apps/server/src/server.ts",
+        "apps/server/src/provider/AntigravityInstallation.ts",
+        "apps/server/src/provider/CodexInstallation.ts",
+        "apps/server/src/provider/providerInstallation.ts",
+        "apps/server/src/provider/providerMaintenanceRunner.ts"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/server/src/provider/orbitManagedProviders.ts"
+        },
+        {
+          "kind": "file",
+          "path": "apps/server/src/provider/providerCliOnPath.ts"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/server/src/server.ts",
+          "symbol": "OrbitManagedProviders.layerNoLatestVersions"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/server/src/provider/ProviderRegistry.ts",
+          "symbol": "withoutProviderMaintenance(provider)"
         }
       ]
     },

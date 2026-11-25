@@ -19,7 +19,7 @@ python lab.py "$EVIDENCE/lab" "$EVIDENCE/report.json" \
   --origin "$LAB_ORIGIN" --tessdata /tmp/conn-thread-data
 ```
 
-Set `EVIDENCE` to an evidence directory outside build products and `LAB_ORIGIN` to the running lab. The browser uses a disposable profile. The command requires the unmodified report view to pass and each visual mutation to fail on its named assertion. It saves each image. The mutations cover an outgoing bubble, the wrong inner fill, a hidden attachment action, smaller type and a missing final timestamp.
+Set `EVIDENCE` to an evidence directory outside build products and `LAB_ORIGIN` to the running lab. The browser uses a disposable profile. The command requires the unmodified report view to pass and each visual mutation to fail on its named assertion. It saves each image. The mutations cover an outgoing bubble, the wrong inner fill, a hidden attachment action, smaller card text, the former message font size in both roles, and a missing final timestamp.
 
 1. On native, open the seeded thread, dismiss the keyboard and go to the newest message. Save `native-closed.png` after scrolling stops.
 2. Focus the empty composer, show the English QWERTY software keyboard with predictive text, and go to the newest message. Save `native-focused.png` after the keyboard stops. Record the keyboard's actual top in screen points from the accessibility frame. With only a screenshot, multiply the top edge's pixel Y by 402 and divide by the full image width. Round to the nearest point.
@@ -32,9 +32,11 @@ python check.py "$EVIDENCE/native-focused.png" --tessdata /tmp/conn-thread-data 
   --keyboard-top "$KEYBOARD_TOP_PT"
 ```
 
+For the user bubble, send the exact `reply` field in `report.json` as a normal user message and capture it fully visible with the keyboard down. Run `python check.py "$EVIDENCE/native-bubble.png" --bubble --tessdata /tmp/conn-thread-data`. At 402 pt wide and default Dynamic Type, the 16 pt body has 24 pt line spacing. This sentence wraps to five lines in the bubble and four in the assistant reply. The test checks painted glyph height, line breaks, inset and line spacing for each role.
+
 If OCR reports a missing line, inspect the original PNG. The check measures visible text and pixels. Use the native interaction test to verify that tapping the disclosure or attachment opens it.
 
-## Measurements from November 25
+## Original 13 pt baseline from November 25
 
 | Measurement | Lab, matched delegated content | Physical baseline, keyboard dismissed |
 | --- | --- | --- |

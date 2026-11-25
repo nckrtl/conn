@@ -49,6 +49,8 @@ with sync_playwright() as playwright:
         ("hidden-attachment", ".m-composer-plus {visibility: hidden}", "missing attachment plus"),
         ("small-type", ".m-feed .m-feed-card-preview {font-size: 10px !important}",
          "preview type or inset"),
+        ("old-body-size", ".m-feed-text .m-md {font-size: 13px !important; line-height: 21.125px !important}",
+         "message body wrap differs"),
         ("covered-tail", ".m-feed-item:last-child .ios-message-meta {visibility: hidden}",
          "last reply timestamp covered"),
     ]
@@ -70,4 +72,22 @@ with sync_playwright() as playwright:
         )
         feed.evaluate("n => n.scrollTop = n.scrollHeight")
         phone.screenshot(path=args.out / "keyboard-space-reference.png", animations="disabled")
+    fixture["entries"] = [{"kind": "user", "text": data["reply"], "minutesAgo": 0}]
+    bubble_page = browser.new_page(viewport={"width": 1000, "height": 1100}, device_scale_factor=3)
+    stored = json.dumps(json.dumps([fixture]))
+    bubble_page.add_init_script(f"localStorage.setItem('conn.ios-lab.threads.v1', {stored});")
+    bubble_page.goto(f"{args.origin.rstrip('/')}/?{query}")
+    bubble_phone = bubble_page.get_by_test_id("phone-dark-ocean")
+    bubble_phone.locator(".m-user-bubble").get_by_text(data["reply"], exact=True).wait_for()
+    bubble_page.evaluate("document.fonts.ready")
+    for name, css in (("bubble", None), ("old-bubble-size", "font-size: 13px; line-height: 21.125px")):
+        if css:
+            bubble_phone.locator(".m-user-bubble").evaluate("(el, css) => el.style.cssText += css", css)
+        bubble_phone.locator(".m-feed").evaluate("n => n.scrollTop = n.scrollHeight")
+        image = args.out / f"{name}.png"
+        bubble_phone.screenshot(path=image, animations="disabled")
+        errors = check(image, args.tessdata, None, bubble=True)
+        print(f"{name}: {errors or 'PASS'}")
+        if (not css and errors) or (css and not any("message body wrap differs" in e for e in errors)):
+            raise SystemExit(f"unexpected result for {name}")
     browser.close()

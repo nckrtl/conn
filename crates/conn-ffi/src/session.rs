@@ -173,9 +173,9 @@ pub(crate) enum Effect<C> {
     },
 }
 
-/// Failed tries in a row before a reconnect counts as offline. The first try after launch or
-/// resume often fails while the network wakes; the next follows 250 ms later.
-const OFFLINE_AFTER_FAILED_TRIES: u32 = 2;
+/// Failed tries in a row before a reconnect counts as offline. Backoff waits 250, 500, then
+/// 1000 ms, so three failures span about 1.75 s: long enough for a waking network to come up.
+const OFFLINE_AFTER_FAILED_TRIES: u32 = 3;
 
 struct Attempt<C> {
     id: u64,
@@ -1768,15 +1768,21 @@ mod tests {
         );
         let _ = m.status(1, reconnecting(3));
         assert!(
-            m.state().shows_offline,
-            "two failed retries confirm offline"
+            !m.state().shows_offline,
+            "two failed retries are still connecting"
         );
-        // Foreground nudges a fresh try: connecting again until it fails twice more.
+        let _ = m.status(1, reconnecting(4));
+        assert!(
+            m.state().shows_offline,
+            "three failed retries confirm offline"
+        );
+        // Foreground nudges a fresh try: connecting again until it fails three more times.
         let _ = m.foreground();
         assert!(!m.state().shows_offline, "a foreground retry is connecting");
         let _ = m.status(1, reconnecting(1));
-        assert!(!m.state().shows_offline);
         let _ = m.status(1, reconnecting(2));
+        assert!(!m.state().shows_offline);
+        let _ = m.status(1, reconnecting(3));
         assert!(m.state().shows_offline);
         let _ = m.status(1, FfiConnectionStatus::Connected);
         assert!(!m.state().shows_offline);

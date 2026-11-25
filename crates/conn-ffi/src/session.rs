@@ -96,7 +96,7 @@ pub trait SessionListener: Send + Sync {
     fn on_state(&self, state: FfiSessionState);
     /// Store this session (or clear it with `None`) exactly as given.
     fn on_save(&self, session: Option<FfiSavedSession>);
-    fn on_shell(&self, connection_id: u64, snapshot: FfiShellSnapshot);
+    fn on_shell_changed(&self, connection_id: u64);
     fn on_thread(&self, connection_id: u64, snapshot: FfiThreadSnapshot);
     fn on_error(&self, message: String);
     fn on_providers_changed(&self);
@@ -1091,11 +1091,29 @@ impl ConnSession {
         self.step(|m| m.restore(saved));
     }
 
-    /// Opens existing history for the primary saved identity while gateway discovery is pending.
-    pub async fn saved_offline_reader(&self) -> Option<Arc<OfflineReader>> {
+    /// Reads only the completed inbox file. Message database opening and backfill run separately.
+    pub async fn cached_shell(&self, identity: String) -> Option<FfiShellSnapshot> {
         let dir = self.cache_dir.clone()?;
-        let saved = self.machine.lock().ok()?.saved.clone()?;
-        let identity = saved.environment_id.or(saved.orbit_server_id)?;
+        self.orbit
+            .handle()
+            .spawn(async move {
+                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
+                    .await
+                    .ok()?
+                    != identity
+                {
+                    return None;
+                }
+                crate::offline::read_saved_shell(&dir, &identity).await
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Opens a saved environment's matching cache while its connection or discovery is pending.
+    pub async fn saved_offline_reader(&self, identity: String) -> Option<Arc<OfflineReader>> {
+        let dir = self.cache_dir.clone()?;
         self.orbit
             .handle()
             .spawn(async move {
@@ -1259,6 +1277,14 @@ impl ConnSession {
         self.step(|m| m.close_thread(thread_id));
     }
 
+    /// Read at presentation time: a callback queued before a socket retry carries no stale rows.
+    #[must_use]
+    pub fn published_shell(&self, connection_id: u64) -> Option<FfiShellSnapshot> {
+        let machine = self.machine.lock().ok()?;
+        let attempt = machine.attempt.as_ref().filter(|a| a.id == connection_id)?;
+        attempt.core.as_ref()?.published_shell()
+    }
+
     /// The live connection, for thread and command calls.
     #[must_use]
     pub fn core(&self) -> Option<Arc<ConnCore>> {
@@ -1305,9 +1331,9 @@ impl CoreListener for AttemptListener {
         }
     }
 
-    fn on_shell(&self, snapshot: FfiShellSnapshot) {
+    fn on_shell(&self, _: FfiShellSnapshot) {
         if let Some(s) = self.current() {
-            s.listener.on_shell(self.id, snapshot);
+            s.listener.on_shell_changed(self.id);
         }
     }
 
@@ -1939,7 +1965,7 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         states: Mutex<Vec<FfiSessionState>>,
-        shells: Mutex<Vec<FfiShellSnapshot>>,
+        shell_connection: Mutex<u64>,
         deleted: Mutex<Vec<(u64, String)>>,
         saves: Mutex<Vec<Option<FfiSavedSession>>>,
         notify: Condvar,
@@ -1969,8 +1995,8 @@ mod tests {
         fn on_save(&self, session: Option<FfiSavedSession>) {
             self.saves.lock().expect("saves").push(session);
         }
-        fn on_shell(&self, _: u64, snapshot: FfiShellSnapshot) {
-            self.shells.lock().unwrap().push(snapshot);
+        fn on_shell_changed(&self, id: u64) {
+            *self.shell_connection.lock().unwrap() = id;
             self.notify.notify_all();
         }
         fn on_thread(&self, _connection_id: u64, _snapshot: FfiThreadSnapshot) {}
@@ -1999,25 +2025,30 @@ mod tests {
             .unwrap();
             (session, recorder)
         };
-        fn read(rec: &Recorder) -> FfiShellSnapshot {
-            let (shells, _) = rec
+        fn read(
+            session: &ConnSession,
+            rec: &Recorder,
+            more_than: Option<usize>,
+        ) -> FfiShellSnapshot {
+            assert!(rec.wait_for(|state| matches!(state.phase, FfiSessionPhase::Live { .. })));
+            let (id, result) = rec
                 .notify
                 .wait_timeout_while(
-                    rec.shells.lock().unwrap(),
+                    rec.shell_connection.lock().unwrap(),
                     Duration::from_secs(90),
-                    |shells| !shells.iter().any(|s| s.synchronized),
+                    |id| {
+                        session
+                            .published_shell(*id)
+                            .is_none_or(|s| more_than.is_some_and(|n| s.threads.len() <= n))
+                    },
                 )
                 .unwrap();
-            shells
-                .iter()
-                .rev()
-                .find(|s| s.synchronized)
-                .expect("authorized synchronized shell")
-                .clone()
+            assert!(!result.timed_out(), "expected published shell");
+            session.published_shell(*id).unwrap()
         }
         let (primary, events) = start("primary");
         primary.launch(None);
-        let shell = read(&events);
+        let shell = read(&primary, &events, None);
         let credential = events
             .saves
             .lock()
@@ -2037,7 +2068,7 @@ mod tests {
         drop(primary);
         let (restored, events) = start("primary");
         restored.launch(Some(credential.clone()));
-        read(&events);
+        read(&restored, &events, None);
         let targets =
             futures::executor::block_on(restored.linked_nodes(primary_id, vec![], vec![])).unwrap();
         assert!(targets.targets.iter().any(|t| t.server_id == desktop_id));
@@ -2048,7 +2079,7 @@ mod tests {
         );
         let (desktop, child) = start("desktop");
         desktop.follow_environment(desktop_id.clone(), None);
-        let shell = read(&child);
+        let shell = read(&desktop, &child, None);
         let child_credential = child
             .saves
             .lock()
@@ -2063,11 +2094,7 @@ mod tests {
             child_credential.environment_id.as_deref(),
             Some(desktop_id.as_str())
         );
-        let active = shell
-            .threads
-            .iter()
-            .filter(|t| !t.settled && !t.is_subagent)
-            .count();
+        let active = shell.threads.iter().filter(|t| !t.settled).count();
         assert!(active > 0);
         eprintln!(
             "desktop {desktop_id}: {} projects, {active} active, {} loaded settled, {} older",
@@ -2077,20 +2104,17 @@ mod tests {
         );
         if shell.older_settled_count > 0 {
             futures::executor::block_on(desktop.core().unwrap().load_older_settled()).unwrap();
-            let (_snapshots, timed) = child
-                .notify
-                .wait_timeout_while(
-                    child.shells.lock().unwrap(),
-                    Duration::from_secs(30),
-                    |shells| !shells.iter().any(|s| s.threads.len() > shell.threads.len()),
-                )
-                .unwrap();
-            assert!(!timed.timed_out(), "older page added threads");
+            read(&desktop, &child, Some(shell.threads.len()));
         }
         drop(desktop);
         let (resumed, events) = start("desktop");
         resumed.follow_environment(desktop_id, Some(child_credential));
-        assert!(read(&events).threads.iter().any(|t| !t.settled));
+        assert!(
+            read(&resumed, &events, None)
+                .threads
+                .iter()
+                .any(|t| !t.settled)
+        );
     }
 
     #[test]
@@ -2280,11 +2304,12 @@ mod tests {
             Err(err) => panic!("cannot inspect the new Node's shell: {err}"),
         }
         let cold = ConnSession::with_orbit(session.orbit.clone(), Some(dir), recorder);
-        let url = session.state().server_url.expect("connected server URL");
         for (identity, allowed) in [("node-old", false), ("node-new", true)] {
-            cold.machine.lock().expect("machine").saved =
-                Some(saved(&url, Some(identity), Some(identity)));
-            assert_eq!(rt.block_on(cold.saved_offline_reader()).is_some(), allowed);
+            assert_eq!(
+                rt.block_on(cold.saved_offline_reader(identity.to_owned()))
+                    .is_some(),
+                allowed
+            );
         }
         if let Some(core) = session.core() {
             core.disconnect();

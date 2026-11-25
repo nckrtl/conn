@@ -1609,6 +1609,11 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     /**
+     * Reads only the completed inbox file. Message database opening and backfill run separately.
+     */
+    func cachedShell(identity: String) async  -> FfiShellSnapshot?
+    
+    /**
      * The user left this thread: unsubscribe it.
      */
     func closeThread(threadId: String) 
@@ -1666,9 +1671,9 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func retry() 
     
     /**
-     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     * Opens a saved environment's matching cache while its connection or discovery is pending.
      */
-    func savedOfflineReader() async  -> OfflineReader?
+    func savedOfflineReader(identity: String) async  -> OfflineReader?
     
     func signOut() 
     
@@ -1748,6 +1753,26 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
 
     
 
+    
+    /**
+     * Reads only the completed inbox file. Message database opening and backfill run separately.
+     */
+open func cachedShell(identity: String)async  -> FfiShellSnapshot?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_connsession_cached_shell(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(identity)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiShellSnapshot.lift,
+            errorHandler: nil
+            
+        )
+}
     
     /**
      * The user left this thread: unsubscribe it.
@@ -1918,14 +1943,14 @@ open func retry()  {try! rustCall() {
 }
     
     /**
-     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     * Opens a saved environment's matching cache while its connection or discovery is pending.
      */
-open func savedOfflineReader()async  -> OfflineReader?  {
+open func savedOfflineReader(identity: String)async  -> OfflineReader?  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_connsession_saved_offline_reader(
-                        self.uniffiCloneHandle()
+                        self.uniffiCloneHandle(),FfiConverterString.lower(identity)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
@@ -8885,14 +8910,22 @@ public struct FfiShellSnapshot: Equatable, Hashable {
     public var olderSettledCount: UInt64
     public var projects: [FfiProject]
     public var threads: [FfiThreadSummary]
+    /**
+     * IDs held by this environment that must also mask later environments in a merged inbox.
+     */
+    public var hiddenThreadIds: [String]
     public var synchronized: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(olderSettledCount: UInt64, projects: [FfiProject], threads: [FfiThreadSummary], synchronized: Bool) {
+    public init(olderSettledCount: UInt64, projects: [FfiProject], threads: [FfiThreadSummary], 
+        /**
+         * IDs held by this environment that must also mask later environments in a merged inbox.
+         */hiddenThreadIds: [String], synchronized: Bool) {
         self.olderSettledCount = olderSettledCount
         self.projects = projects
         self.threads = threads
+        self.hiddenThreadIds = hiddenThreadIds
         self.synchronized = synchronized
     }
 
@@ -8915,6 +8948,7 @@ public struct FfiConverterTypeFfiShellSnapshot: FfiConverterRustBuffer {
                 olderSettledCount: FfiConverterUInt64.read(from: &buf), 
                 projects: FfiConverterSequenceTypeFfiProject.read(from: &buf), 
                 threads: FfiConverterSequenceTypeFfiThreadSummary.read(from: &buf), 
+                hiddenThreadIds: FfiConverterSequenceString.read(from: &buf), 
                 synchronized: FfiConverterBool.read(from: &buf)
         )
     }
@@ -8923,6 +8957,7 @@ public struct FfiConverterTypeFfiShellSnapshot: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.olderSettledCount, into: &buf)
         FfiConverterSequenceTypeFfiProject.write(value.projects, into: &buf)
         FfiConverterSequenceTypeFfiThreadSummary.write(value.threads, into: &buf)
+        FfiConverterSequenceString.write(value.hiddenThreadIds, into: &buf)
         FfiConverterBool.write(value.synchronized, into: &buf)
     }
 }
@@ -10614,6 +10649,9 @@ public func FfiConverterTypeFfiThreadSnapshot_lower(_ value: FfiThreadSnapshot) 
  * Summary row for one thread in [`FfiShellSnapshot`].
  */
 public struct FfiThreadSummary: Equatable, Hashable {
+    public var orderGroup: UInt8
+    public var orderKey: String
+    public var orderTimeMs: Int64
     public var sidebarProjectKey: String
     public var orbitProjectSlug: String?
     public var id: String
@@ -10623,7 +10661,6 @@ public struct FfiThreadSummary: Equatable, Hashable {
     public var activity: FfiThreadActivity
     public var updatedAt: String?
     public var settled: Bool
-    public var isSubagent: Bool
     public var pinned: Bool
     public var unread: Bool
     /**
@@ -10639,7 +10676,7 @@ public struct FfiThreadSummary: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sidebarProjectKey: String, orbitProjectSlug: String?, id: String, projectId: String, title: String, branch: String?, activity: FfiThreadActivity, updatedAt: String?, settled: Bool, isSubagent: Bool, pinned: Bool, unread: Bool, 
+    public init(orderGroup: UInt8, orderKey: String, orderTimeMs: Int64, sidebarProjectKey: String, orbitProjectSlug: String?, id: String, projectId: String, title: String, branch: String?, activity: FfiThreadActivity, updatedAt: String?, settled: Bool, pinned: Bool, unread: Bool, 
         /**
          * The provider's error (`lastError`) while the thread has failed; `None` otherwise.
          * Conn mobile shows it as a third row line (`ThreadListV2Row`).
@@ -10648,6 +10685,9 @@ public struct FfiThreadSummary: Equatable, Hashable {
          * The failure is a usage limit (`lastErrorClass: usage_limit`), which mobile shows as a
          * warning ("limited") instead of an error.
          */usageLimited: Bool) {
+        self.orderGroup = orderGroup
+        self.orderKey = orderKey
+        self.orderTimeMs = orderTimeMs
         self.sidebarProjectKey = sidebarProjectKey
         self.orbitProjectSlug = orbitProjectSlug
         self.id = id
@@ -10657,7 +10697,6 @@ public struct FfiThreadSummary: Equatable, Hashable {
         self.activity = activity
         self.updatedAt = updatedAt
         self.settled = settled
-        self.isSubagent = isSubagent
         self.pinned = pinned
         self.unread = unread
         self.failureMessage = failureMessage
@@ -10680,6 +10719,9 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadSummary {
         return
             try FfiThreadSummary(
+                orderGroup: FfiConverterUInt8.read(from: &buf), 
+                orderKey: FfiConverterString.read(from: &buf), 
+                orderTimeMs: FfiConverterInt64.read(from: &buf), 
                 sidebarProjectKey: FfiConverterString.read(from: &buf), 
                 orbitProjectSlug: FfiConverterOptionString.read(from: &buf), 
                 id: FfiConverterString.read(from: &buf), 
@@ -10689,7 +10731,6 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
                 activity: FfiConverterTypeFfiThreadActivity.read(from: &buf), 
                 updatedAt: FfiConverterOptionString.read(from: &buf), 
                 settled: FfiConverterBool.read(from: &buf), 
-                isSubagent: FfiConverterBool.read(from: &buf), 
                 pinned: FfiConverterBool.read(from: &buf), 
                 unread: FfiConverterBool.read(from: &buf), 
                 failureMessage: FfiConverterOptionString.read(from: &buf), 
@@ -10698,6 +10739,9 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiThreadSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.orderGroup, into: &buf)
+        FfiConverterString.write(value.orderKey, into: &buf)
+        FfiConverterInt64.write(value.orderTimeMs, into: &buf)
         FfiConverterString.write(value.sidebarProjectKey, into: &buf)
         FfiConverterOptionString.write(value.orbitProjectSlug, into: &buf)
         FfiConverterString.write(value.id, into: &buf)
@@ -10707,7 +10751,6 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
         FfiConverterTypeFfiThreadActivity.write(value.activity, into: &buf)
         FfiConverterOptionString.write(value.updatedAt, into: &buf)
         FfiConverterBool.write(value.settled, into: &buf)
-        FfiConverterBool.write(value.isSubagent, into: &buf)
         FfiConverterBool.write(value.pinned, into: &buf)
         FfiConverterBool.write(value.unread, into: &buf)
         FfiConverterOptionString.write(value.failureMessage, into: &buf)
@@ -18197,6 +18240,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_cached_shell() != 29377) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 18448) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18242,7 +18288,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 11824) {
+    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 45730) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {

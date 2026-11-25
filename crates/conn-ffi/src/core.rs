@@ -187,6 +187,10 @@ impl Drop for ConnCore {
 }
 
 impl ConnCore {
+    pub(crate) fn published_shell(&self) -> Option<FfiShellSnapshot> {
+        self.shell_watch.borrow().clone()
+    }
+
     /// Starts a connection. `orbit_server_id` marks an Orbit session: its bearers are reported
     /// with that id, and a rejected bearer ends it so the session can re-pair through Orbit.
     pub(crate) fn start(
@@ -1080,6 +1084,7 @@ struct SessionIdentity {
 
 struct PumpState {
     offline: Option<crate::offline::SyncState>,
+    seed_offline_threads: bool,
     identity: SessionIdentity,
     connection: Connection,
     listener: Arc<dyn CoreListener>,
@@ -1293,18 +1298,17 @@ impl PumpState {
                 } else {
                     self.shell.older_page_failed(&request);
                 }
-                self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                if self.shell.synchronized {
+                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                }
                 true
             }
             PumpControl::EnableOffline(reader) => {
-                let mut sync = crate::offline::SyncState::new(reader);
-                if self.shell.synchronized {
-                    sync.shell(&self.shell, &self.open_threads);
-                    for state in self.threads.values() {
-                        sync.thread(state, state.sequence);
-                    }
+                self.offline = Some(crate::offline::SyncState::new(reader));
+                self.seed_offline_threads = true;
+                if self.shell.synchronized && !self.coalescer.has_pending_shell() {
+                    self.sync_offline_shell();
                 }
-                self.offline = Some(sync);
                 true
             }
             PumpControl::OpenThread(thread_id) => {
@@ -1461,6 +1465,10 @@ impl PumpState {
     fn handle_event(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Status(status) => {
+                // The driver resumes from its last received sequence, even mid-replay. Keep
+                // reducing into this shell, but publish only after this subscription's marker.
+                self.invalidate_shell();
+                self.shell_snapshot_required = false;
                 let ffi_status: FfiConnectionStatus = status.into();
                 self.status_watch.send_replace(ffi_status.clone());
                 self.listener.on_status(ffi_status);
@@ -1475,22 +1483,21 @@ impl PumpState {
             }
             ClientEvent::Shell(item) => {
                 let change = self.shell.apply(item);
-                self.sync_shell_run_meta();
-                if self.shell.synchronized
-                    && let Some(sync) = &mut self.offline
-                {
-                    sync.shell(&self.shell, &self.open_threads);
+                if self.shell_snapshot_required {
+                    self.shell.synchronized = false;
+                }
+                if self.shell.synchronized {
+                    self.sync_shell_run_meta();
+                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
                 }
                 if !change.threads_changed.is_empty() {
                     self.resubscribe_ended_threads();
                 }
                 if change.snapshot_required {
+                    self.invalidate_shell();
                     self.shell_snapshot_required = true;
                     self.connection.subscribe_shell_with_idle_subagents();
                 }
-                let snapshot = build_shell_snapshot(&self.shell);
-                self.shell_watch.send_replace(Some(snapshot.clone()));
-                self.emit_or_buffer_shell(snapshot);
 
                 // Refresh header metadata (title/branch/model) on open threads updated by shell.
                 for thread_id in change.threads_changed {
@@ -1559,6 +1566,7 @@ impl PumpState {
                     self.listener.on_error(err.clone());
                 }
                 if tag == TAG_SUBSCRIBE_SHELL {
+                    self.invalidate_shell();
                     if self.shell_snapshot_required || error.is_none() {
                         self.shell_snapshot_required = false;
                         self.connection.subscribe_shell_with_idle_subagents();
@@ -1598,9 +1606,32 @@ impl PumpState {
         }
     }
 
+    fn invalidate_shell(&mut self) {
+        self.shell.synchronized = false;
+        self.coalescer.reset_shell();
+        self.shell_watch.send_replace(None);
+    }
+
+    fn sync_offline_shell(&mut self) {
+        if let Some(sync) = &mut self.offline {
+            sync.shell(&self.shell, &self.open_threads);
+            if std::mem::take(&mut self.seed_offline_threads) {
+                for state in self.threads.values() {
+                    sync.thread(state, state.sequence);
+                }
+            }
+        }
+    }
+
+    fn publish_shell(&mut self, snapshot: FfiShellSnapshot) {
+        self.sync_offline_shell();
+        self.shell_watch.send_replace(Some(snapshot.clone()));
+        self.listener.on_shell(snapshot);
+    }
+
     fn emit_or_buffer_shell(&mut self, snapshot: FfiShellSnapshot) {
         if let Some(ready) = self.coalescer.push_shell(snapshot, Instant::now()) {
-            self.listener.on_shell(ready);
+            self.publish_shell(ready);
         }
     }
 
@@ -1613,7 +1644,7 @@ impl PumpState {
     fn flush_due(&mut self) {
         let (shell, threads) = self.coalescer.drain_due(Instant::now());
         if let Some(snapshot) = shell {
-            self.listener.on_shell(snapshot);
+            self.publish_shell(snapshot);
         }
         for snapshot in threads {
             self.listener.on_thread(snapshot);
@@ -1638,6 +1669,7 @@ async fn run_pump(
     }
     let mut state = PumpState {
         offline: None,
+        seed_offline_threads: false,
         identity,
         connection,
         listener,
@@ -2007,6 +2039,17 @@ mod tests {
                     .is_some_and(|sh| sh.synchronized && sh.projects.len() == 1)
             }),
             "must receive synchronized shell snapshot"
+        );
+
+        assert!(
+            listener
+                .inner
+                .lock()
+                .expect("listener lock")
+                .shells
+                .iter()
+                .all(|s| s.synchronized),
+            "partial inventory reached the iOS listener"
         );
 
         core.open_thread("thread-1".to_owned());

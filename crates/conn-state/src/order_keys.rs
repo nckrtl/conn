@@ -4,7 +4,7 @@
 //!
 //! Keys are lowercase letter strings compared as plain strings; a smaller key sorts higher.
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use conn_contract::OrchestrationV2ThreadShell as ThreadShell;
@@ -188,16 +188,60 @@ fn millis(iso: &str) -> i64 {
     parse_iso8601_epoch_ms(iso).unwrap_or(0)
 }
 
-/// Keyed pinned threads by key, then keyless ones newest first (`sortPinnedThreadsByOrderKey`).
+/// GPUI's sidebar compares these fields in order, then the thread id in plain byte order.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SidebarOrder<'a> {
+    pub group: u8,
+    pub key: &'a str,
+    pub newest_first: Reverse<i64>,
+}
+
+impl<'a> SidebarOrder<'a> {
+    fn keyed(group: u8, key: &'a str) -> Self {
+        Self {
+            group,
+            key,
+            newest_first: Reverse(0),
+        }
+    }
+
+    fn timed(group: u8, millis: i64) -> Self {
+        Self {
+            group,
+            key: "",
+            newest_first: Reverse(millis),
+        }
+    }
+
+    fn pinned(thread: &'a ThreadShell) -> Self {
+        match pin_key(thread) {
+            Some(key) => Self::keyed(0, key),
+            None => Self::timed(1, millis(&thread.created_at)),
+        }
+    }
+
+    fn active(thread: &'a ThreadShell) -> Self {
+        match active_key(thread) {
+            None => Self::timed(2, anchor_millis(thread)),
+            Some(key) => Self::keyed(3, key),
+        }
+    }
+
+    #[must_use]
+    pub fn for_thread(thread: &'a ThreadShell, settled: bool) -> Self {
+        if settled {
+            Self::timed(4, crate::shell::settled_sort_time(thread))
+        } else if thread.pinned_at.as_ref().is_some_and(Option::is_some) {
+            Self::pinned(thread)
+        } else {
+            Self::active(thread)
+        }
+    }
+}
+
+/// Keyed pinned threads by key, then keyless ones newest first.
 pub fn sort_pinned(threads: &mut [&ThreadShell]) {
-    threads.sort_by(|left, right| match (pin_key(left), pin_key(right)) {
-        (Some(l), Some(r)) => l.cmp(r).then_with(|| left.id.cmp(&right.id)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => millis(&right.created_at)
-            .cmp(&millis(&left.created_at))
-            .then_with(|| left.id.cmp(&right.id)),
-    });
+    threads.sort_by_key(|t| (SidebarOrder::pinned(t), t.id.as_str()));
 }
 
 /// The time a keyless active thread sorts by: its creation, or the last time it was un-settled
@@ -215,14 +259,7 @@ fn anchor_millis(thread: &ThreadShell) -> i64 {
 /// Keyless active threads first, newest anchor first, then keyed ones by key
 /// (`sortActiveThreadsByOrderKey`).
 pub fn sort_active(threads: &mut [&ThreadShell]) {
-    threads.sort_by(|left, right| match (active_key(left), active_key(right)) {
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (Some(l), Some(r)) => l.cmp(r).then_with(|| left.id.cmp(&right.id)),
-        (None, None) => anchor_millis(right)
-            .cmp(&anchor_millis(left))
-            .then_with(|| left.id.cmp(&right.id)),
-    });
+    threads.sort_by_key(|t| (SidebarOrder::active(t), t.id.as_str()));
 }
 
 #[cfg(test)]

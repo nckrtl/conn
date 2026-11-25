@@ -16,10 +16,8 @@ struct InboxView: View {
 
     var body: some View {
         Group {
-            if let shell = store.shell {
-                inboxList(shell: shell)
-            } else if store.linked.values.contains(where: { $0.shell != nil }) {
-                inboxList(shell: FfiShellSnapshot(olderSettledCount: 0, projects: [], threads: [], synchronized: false))
+            if store.inboxOwners.contains(where: { $0.shell != nil }) {
+                inboxList()
             } else {
                 loadingState
             }
@@ -56,39 +54,26 @@ struct InboxView: View {
         var id: [String] { [owner.scope, thread.id] }
     }
 
-    @ViewBuilder
-    private func inboxList(shell: FfiShellSnapshot) -> some View {
-        let catalogs = ([("", shell)] + store.linked.compactMap { key, owner in owner.shell.map { (key, $0) } })
-            .filter { environmentFilter == nil || $0.0 == environmentFilter }
-        let projectChoices = catalogs.reduce(into: [String: String]()) { choices, entry in
-            for project in entry.1.projects { choices[project.id] = project.title }
-            for thread in entry.1.threads {
+    private func inboxList() -> some View {
+        let owners = store.inboxOwners.filter { environmentFilter == nil || $0.scope == environmentFilter }
+        let projectChoices = owners.reduce(into: [String: String]()) { choices, owner in
+            guard let snapshot = owner.shell else { return }
+            for project in snapshot.projects { choices[project.id] = project.title }
+            for thread in snapshot.threads {
                 if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
             }
         }
-        let owners = ([store] + store.linked.values.sorted { $0.displayName < $1.displayName })
-            .filter { environmentFilter == nil || $0.scope == environmentFilter }
-        let rows = owners.flatMap { owner -> [ScopedRow] in
-            guard let snapshot = owner.shell else { return [] }
-            let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0) })
-            return filteredThreads(in: snapshot, projectsById: projects).map {
-                ScopedRow(thread: $0, owner: owner, project: projects[$0.projectId])
-            }
-        }
-        let active = rows.filter { !$0.thread.settled }.sorted {
-            if $0.thread.pinned != $1.thread.pinned { return $0.thread.pinned }
-            return ($0.thread.updatedAt ?? "", $0.owner.scope, $0.thread.id) > ($1.thread.updatedAt ?? "", $1.owner.scope, $1.thread.id)
-        }
-        let settled = rows.filter { $0.thread.settled }.sorted {
-            ($0.thread.updatedAt ?? "", $0.owner.scope, $0.thread.id) > ($1.thread.updatedAt ?? "", $1.owner.scope, $1.thread.id)
-        }
+        let rows = inboxRows()
+        let active = rows.filter { !$0.thread.settled }
+        let settled = rows.filter { $0.thread.settled }
         let paged = owners.filter { ($0.shell?.olderSettledCount ?? 0) > 0 }
         let missing = paged.reduce(0) { $0 + Int($1.shell?.olderSettledCount ?? 0) }
-        List {
+        return List {
             ZStack(alignment: .trailing) {
                 VStack(spacing: 0) {
                     Text("Threads").font(.system(size: 18, weight: .medium))
-                    Text("\(rows.count) threads · " + (owners.count == 1 ? owners[0].displayName : "\(owners.count) environments")).font(.caption).foregroundStyle(.secondary)
+                    Text("\(rows.count) threads").font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("inbox.threadCount")
                 }.frame(maxWidth: .infinity)
                 Menu {
                     Picker("Environment", selection: $environmentFilter) {
@@ -115,38 +100,6 @@ struct InboxView: View {
             .listRowSeparator(.hidden)
             .listRowBackground(theme.background)
 
-            if let error = store.lastError, !error.isEmpty {
-                KitNotice(error, icon: .warning, tone: .error) {
-                    Button("Retry") {
-                        store.reconnect()
-                    }
-                    .buttonStyle(.kit)
-                }
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-            }
-
-            if store.discovering && store.discoveredPrimary != store.environmentId && store.discoveryError == nil {
-                ProgressView("Finding environments")
-            }
-            if let error = store.discoveryError {
-                Text("Environment discovery: " + error).foregroundStyle(.secondary)
-                Button("Retry discovery") { Task { await store.discoverLinked() } }
-            }
-            ForEach(owners.filter { !$0.scope.isEmpty }, id: \.scope) { child in
-                if child.showsOffline || child.lastError != nil {
-                    VStack(alignment: .leading) {
-                        Text(child.displayName + " · Not connected")
-                        if case let .failed(message, detail, _) = child.state?.phase {
-                            Text([message, detail].compactMap { $0 }.joined(separator: " ")).font(.caption)
-                        } else if let message = child.lastError { Text(message).font(.caption) }
-                        Button("Retry") { child.reconnect() }
-                    }
-                } else if child.shell?.synchronized != true {
-                    Text("Loading " + child.displayName + "…").foregroundStyle(.secondary)
-                }
-            }
             if active.isEmpty && settled.isEmpty && missing == 0 {
                 if store.discoveredPrimary == store.environmentId && owners.allSatisfy({ $0.shell?.synchronized == true }) && store.discoveryError == nil { emptyState }
             } else {
@@ -334,21 +287,29 @@ struct InboxView: View {
         .padding(.vertical, 80)
     }
 
-    private func filteredThreads(
-        in shell: FfiShellSnapshot,
-        projectsById: [String: FfiProject]
-    ) -> [FfiThreadSummary] {
-        var result = shell.threads
-        if let projectFilter = selectedProjectFilter {
-            result = result.filter { $0.sidebarProjectKey == projectFilter }
+    private func inboxRows() -> [ScopedRow] {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var seen = Set<String>()
+        var rows: [ScopedRow] = []
+        for owner in store.inboxOwners {
+            guard let snapshot = owner.shell else { continue }
+            seen.formUnion(snapshot.hiddenThreadIds)
+            let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0) })
+            for thread in snapshot.threads where seen.insert(thread.id).inserted {
+                guard environmentFilter == nil || owner.scope == environmentFilter else { continue }
+                guard selectedProjectFilter == nil || thread.sidebarProjectKey == selectedProjectFilter else { continue }
+                let project = projects[thread.projectId]
+                if !query.isEmpty && ![thread.title, thread.branch, thread.orbitProjectSlug ?? project?.title]
+                    .compactMap({ $0 }).contains(where: { $0.lowercased().contains(query) }) { continue }
+                rows.append(ScopedRow(thread: thread, owner: owner, project: project))
+            }
         }
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return result.filter { !$0.isSubagent } }
-        return result.filter { thread in
-            if thread.title.lowercased().contains(q) { return true }
-            if let branch = thread.branch?.lowercased(), branch.contains(q) { return true }
-            if let proj = (thread.orbitProjectSlug ?? projectsById[thread.projectId]?.title)?.lowercased(), proj.contains(q) { return true }
-            return false
+        return rows.sorted {
+            let lhs = $0.thread, rhs = $1.thread
+            if lhs.orderGroup != rhs.orderGroup { return lhs.orderGroup < rhs.orderGroup }
+            if lhs.orderKey != rhs.orderKey { return lhs.orderKey.utf8.lexicographicallyPrecedes(rhs.orderKey.utf8) }
+            if lhs.orderTimeMs != rhs.orderTimeMs { return lhs.orderTimeMs > rhs.orderTimeMs }
+            return lhs.id.utf8.lexicographicallyPrecedes(rhs.id.utf8)
         }
     }
 }

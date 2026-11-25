@@ -147,7 +147,7 @@ struct ThreadMessage: View {
                     .padding(.leading, 4)
                     .padding(.trailing, -5)
             }
-            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.8 }
+            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }

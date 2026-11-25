@@ -152,7 +152,7 @@ struct MarkdownView: View {
 
         case let .list(items):
             // Lab `.m-md ul/ol`: `li` 6 apart, markers in the text colour (numbers 600). In the feed
-            // the marker's left edge is the paragraph's left edge and the text follows 8 later.
+            // the marker sits 6 in from the paragraph's left edge and the text follows 8 later.
             let numbered = items.contains { $0.marker != "•" }
             let widest = items.map(\.marker).max { $0.count < $1.count } ?? ""
             let disc = bodySize * 0.375
@@ -191,6 +191,8 @@ struct MarkdownView: View {
                     .lineHeight(bodyLineHeight)
                 }
             }
+            // Feed lists sit 6 in from the paragraph edge (lab `.m-feed .m-md :is(ul, ol)`).
+            .padding(.leading, messageStyle != nil ? 6 : 0)
         }
     }
 

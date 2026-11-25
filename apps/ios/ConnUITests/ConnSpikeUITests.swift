@@ -1295,6 +1295,42 @@ final class ConnSpikeUITests: XCTestCase {
         try app.debugDescription.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
+    func testChildArtifactFollowUpProject() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let fixture = env["CONN_INVENTORY_FIXTURE"].flatMap(URL.init(string:)),
+              let pairing = env["CONN_PAIRING_URL"] else {
+            throw XCTSkip("Run thread-inventory-fixture.mjs with the simulator UDID and child-project")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = "http://127.0.0.1:1"
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        let parent = app.buttons["inbox.thread.parent"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["inbox.thread.child"].exists)
+        XCTAssertFalse(app.buttons["inbox.settledThread.child"].exists)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).count, 1)
+        parent.tap()
+        let child = app.buttons["Open Artifact child"]
+        XCTAssertTrue(child.waitForExistence(timeout: 10))
+        child.tap()
+        let template = app.buttons["Start a draft with Report"]
+        XCTAssertTrue(template.waitForExistence(timeout: 10))
+        template.tap()
+        let project = app.buttons["newThread.projectPickerButton"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        XCTAssertEqual(project.label, "Child workspace")
+        app.buttons["Send"].tap()
+        let (projectID, response) = try await URLSession.shared.data(from: fixture.appending(path: "follow-up-project"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(decoding: projectID, as: UTF8.self), "child-project")
+    }
+
     func testAtomicThreadInventory() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let fixture = env["CONN_INVENTORY_FIXTURE"].flatMap(URL.init(string:)),

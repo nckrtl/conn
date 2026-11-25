@@ -60,7 +60,8 @@ struct InboxView: View {
         let projectChoices = owners.reduce(into: [String: String]()) { choices, owner in
             guard let snapshot = owner.shell else { return }
             for project in snapshot.projects { choices[project.id] = project.title }
-            for thread in snapshot.threads {
+            let hidden = Set(snapshot.hiddenThreadIds)
+            for thread in snapshot.threads where !hidden.contains(thread.id) {
                 if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
             }
         }

@@ -9,9 +9,63 @@ const read = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), "
 const fixture = read("../../../crates/conn-state/tests/fixtures/sidebar_inventory.json");
 const base = read("../../../crates/conn-state/tests/fixtures/shell_thread_updates.json")[0].thread;
 const marker = { kind: "synchronized" };
+const childProjectTest = process.argv[3] === "child-project";
+const followUp = Promise.withResolvers();
 const row = (fields) => ({
   ...base, title: fields.id, lineage: { rootThreadId: fields.id }, ...fields,
 });
+
+// The child deliberately belongs to a different project from its parent.
+function childProjectRequest(ws, frame) {
+  if (frame._tag !== "Request") return false;
+  const parent = row({ id: "parent", projectId: "parent-project" });
+  const child = row({
+    id: "child", projectId: "child-project", title: "Artifact child",
+    delegatedFrom: { threadId: parent.id, environmentId: "primary", title: parent.title },
+    lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationshipToParent: "subagent" },
+  });
+  const chunk = (value) => ws.send(JSON.stringify({ _tag: "Chunk", requestId: frame.id, values: [value, marker] }));
+  const reply = (value) => ws.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value } }));
+  switch (frame.tag) {
+    case "orchestration.subscribeShell": {
+      const projects = [parent, child].map((t) => ({
+        id: t.projectId, title: t === child ? "Child workspace" : "Parent workspace",
+        workspaceRoot: "/tmp/" + t.projectId, scripts: [], createdAt: t.createdAt, updatedAt: t.updatedAt,
+      }));
+      chunk({ kind: "snapshot", snapshot: {
+        schemaVersion: 1, snapshotSequence: 1, projects, threads: [parent, child], archivedThreads: [],
+      } });
+      return true;
+    }
+    case "orchestration.subscribeThread": {
+      const id = frame.payload.threadId;
+      if (id !== parent.id && id !== child.id) return false;
+      const snap = read("../../../crates/conn-state/tests/fixtures/thread_turn_stream.json")[0];
+      const projection = snap.projection;
+      const thread = id === child.id ? child : parent;
+      Object.assign(projection.thread, { id, title: thread.title, projectId: thread.projectId });
+      const common = { id: "item-" + id, threadId: id, ordinal: 1, updatedAt: thread.updatedAt, status: "completed" };
+      const item = id === parent.id ? {
+        ...common, type: "subagent", subagentId: "worker", title: child.title, origin: "app_owned",
+        driver: "codex", providerInstanceId: "codex", childThreadId: child.id, prompt: "Prepare a template",
+      } : {
+        ...common, type: "assistant_message", messageId: "template", streaming: false,
+        text: '::artifact-template{skill_name="artifact-template-report" display_name="Report" skill_directory="/tmp/report" artifact_kind="document"}',
+      };
+      projection.messages = [];
+      projection.turnItems = [item];
+      projection.visibleTurnItems = [];
+      chunk(snap);
+      return true;
+    }
+    case "projects.ensureScratch": reply({ projectId: "general-project" }); return true;
+    case "orchestration.launchThread":
+      followUp.resolve(frame.payload.projectId);
+      reply({ threadId: frame.payload.threadId });
+      return true;
+    default: return false;
+  }
+}
 
 function environment(name) {
   let socket, requestId, receiveSubscription, receiveAck;
@@ -42,6 +96,7 @@ function environment(name) {
     websocket: {
       message(ws, text) {
         for (const frame of [JSON.parse(text)].flat()) {
+          if (childProjectTest && childProjectRequest(ws, frame)) continue;
           if (frame._tag === "Ping") ws.send(JSON.stringify({ _tag: "Pong" }));
           if (frame._tag === "Request" && frame.tag === "orchestration.subscribeShell") {
             console.log(name, replay ? "replay subscribed" : "initial subscription");
@@ -117,6 +172,7 @@ const control = Bun.serve({
   async fetch(req) {
     const step = new URL(req.url).pathname.slice(1);
     switch (step) {
+      case "follow-up-project": return new Response(await followUp.promise);
       case "hold": held = Promise.all([primary.hold(), linked.hold()]); break;
       case "staged": await held; break;
       case "primary": primary.commit(); break;
@@ -156,7 +212,8 @@ const device = process.argv[2];
 if (!device) throw new Error("Pass the task simulator UDID");
 const child = spawn("xcodebuild", ["test", "-project", "apps/ios/Conn.xcodeproj", "-scheme", "Conn",
   "-destination", "id=" + device, "-derivedDataPath", "apps/ios/build/DerivedData",
-  "-parallel-testing-enabled", "NO", "-only-testing:ConnUITests/ConnSpikeUITests/testAtomicThreadInventory",
+  "-parallel-testing-enabled", "NO",
+  "-only-testing:ConnUITests/ConnSpikeUITests/" + (childProjectTest ? "testChildArtifactFollowUpProject" : "testAtomicThreadInventory"),
   "CODE_SIGN_IDENTITY=-"], { cwd: root, stdio: "inherit", env: { ...process.env,
     TEST_RUNNER_CONN_INVENTORY_FIXTURE: control.url.href,
     TEST_RUNNER_CONN_PAIRING_URL: primary.url + "#token=test",

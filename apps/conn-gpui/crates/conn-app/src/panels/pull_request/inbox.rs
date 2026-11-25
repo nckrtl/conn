@@ -21,9 +21,8 @@ use gpui_kit::{
 };
 
 use super::{
-    host_diff,
+    host_diff::{self, CodeFileEntry},
     logic::{describe_rpc_error, format_relative_time, now_epoch_ms},
-    tabs::CodeFileEntry,
 };
 use crate::a11y::ConnA11yExt as _;
 use crate::panels::{color::to_hsla, header::superhero_icon};
@@ -510,6 +509,7 @@ impl PullRequestInbox {
                 Some(Ok(rows)) if rows.is_empty() => body = body.child("No changed files"),
                 Some(Ok(rows)) => {
                     for f in rows {
+                        let (adds, dels) = f.line_counts(None);
                         body = body.child(
                             h_flex()
                                 .id(SharedString::from(format!("pr-inbox-file-{}", f.path)))
@@ -528,10 +528,7 @@ impl PullRequestInbox {
                                         .font_family(crate::theme::MONO_FONT)
                                         .child(f.path.clone()),
                                 )
-                                .child(stats(
-                                    f.additions.unwrap_or_default(),
-                                    f.deletions.unwrap_or_default(),
-                                )),
+                                .child(stats(adds, dels)),
                         );
                     }
                 }

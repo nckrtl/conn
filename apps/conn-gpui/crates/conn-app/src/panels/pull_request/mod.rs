@@ -50,6 +50,7 @@ use self::header::{
     ConfirmableAction, HeaderCallbacks, HeaderPickerState, render_condensed_header_row,
     render_detail_ghost, render_header_body, render_title_header, render_unavailable_state,
 };
+use self::host_diff::{CodeFileEntry, FileDiffState};
 pub(crate) use self::logic::PrThreadFields;
 use self::logic::{
     CommentFilter, ComposerMode, DetailTab, ResolvedPullRequestTarget, ReviewOutcome,
@@ -60,9 +61,9 @@ use self::logic::{
     resolve_thread_pr_target,
 };
 use self::tabs::{
-    CodeFileEntry, FileDiffState, ReactionState, TabCallbacks, render_checks_tab,
-    render_checks_tab_trailing, render_code_tab, render_code_tab_trailing, render_description_tab,
-    render_floating_composer, render_tab_bar, render_timeline_tab, render_timeline_tab_trailing,
+    ReactionState, TabCallbacks, render_checks_tab, render_checks_tab_trailing, render_code_tab,
+    render_code_tab_trailing, render_description_tab, render_floating_composer, render_tab_bar,
+    render_timeline_tab, render_timeline_tab_trailing,
 };
 use super::chrome;
 
@@ -1146,70 +1147,30 @@ impl PullRequestPanel {
                 }
                 panel.code_files_loading = false;
 
-                let mut files_map: HashMap<String, CodeFileEntry> = HashMap::new();
-                let mut order: Vec<String> = Vec::new();
-
-                if let Ok(viewed) = &viewed_res {
-                    panel.files_viewed.clear();
-                    for item in &viewed.files {
-                        panel.files_viewed.insert(item.path.clone(), item.state);
-                        if !files_map.contains_key(&item.path) {
-                            order.push(item.path.clone());
-                            files_map.insert(
-                                item.path.clone(),
-                                CodeFileEntry {
-                                    path: item.path.clone(),
-                                    old_path: item.path.clone(),
-                                    change_type: ReviewDiffChangeType::Change,
-                                    additions: None,
-                                    deletions: None,
-                                },
-                            );
-                        }
-                    }
-                }
-
+                let host_error = host_files
+                    .as_ref()
+                    .err()
+                    .map(|err| describe_rpc_error(err).1);
+                let files = host_diff::merge_files(
+                    viewed_res.ok().map(|result| result.files),
+                    &mut panel.files_viewed,
+                    host_files.unwrap_or_default(),
+                    review_paths,
+                );
                 panel.code_diffs.clear();
-                if let Ok(files) = host_files.as_ref() {
-                    for file in files {
-                        let path = &file.entry.path;
-                        if !files_map.contains_key(path) {
-                            order.push(path.clone());
-                        }
-                        files_map.insert(path.clone(), file.entry.clone());
-                        if let Some(patch) = &file.patch {
+                panel.code_files = files
+                    .into_iter()
+                    .map(|file| {
+                        if let Some(patch) = file.patch {
                             panel
                                 .code_diffs
-                                .insert(path.clone(), FileDiffState::Loaded(patch.clone()));
+                                .insert(file.entry.path.clone(), FileDiffState::Loaded(patch));
                         }
-                    }
-                }
-
-                for path in review_paths {
-                    if !files_map.contains_key(&path) {
-                        order.push(path.clone());
-                        files_map.insert(
-                            path.clone(),
-                            CodeFileEntry {
-                                path: path.clone(),
-                                old_path: path,
-                                change_type: ReviewDiffChangeType::Change,
-                                additions: None,
-                                deletions: None,
-                            },
-                        );
-                    }
-                }
-
-                panel.code_files = order
-                    .into_iter()
-                    .filter_map(|p| files_map.remove(&p))
+                        file.entry
+                    })
                     .collect();
-
-                if panel.code_files.is_empty()
-                    && let Err(err) = host_files
-                {
-                    panel.code_files_error = Some(describe_rpc_error(&err).1);
+                if panel.code_files.is_empty() {
+                    panel.code_files_error = host_error;
                 }
 
                 if let Some(first) = panel.code_files.first().map(|f| f.path.clone()) {
@@ -1275,17 +1236,12 @@ impl PullRequestPanel {
                 }
                 match res {
                     Ok(contents) => {
-                        let diff = build_unified_diff_from_contents(
+                        panel.apply_code_file_contents(
                             &old_path,
-                            &path,
+                            path,
                             &contents.old_contents,
                             &contents.new_contents,
                         );
-                        if let Some(entry) = panel.code_files.iter_mut().find(|f| f.path == path) {
-                            entry.additions = Some(diff.additions);
-                            entry.deletions = Some(diff.deletions);
-                        }
-                        panel.code_diffs.insert(path, FileDiffState::Loaded(diff));
                     }
                     Err(err) => {
                         panel
@@ -1297,6 +1253,11 @@ impl PullRequestPanel {
             });
         })
         .detach();
+    }
+
+    fn apply_code_file_contents(&mut self, old_path: &str, path: String, old: &str, new: &str) {
+        let diff = build_unified_diff_from_contents(old_path, &path, old, new);
+        self.code_diffs.insert(path, FileDiffState::Loaded(diff));
     }
 
     fn toggle_file_viewed(&mut self, path: String, viewed: bool, cx: &mut Context<'_, Self>) {

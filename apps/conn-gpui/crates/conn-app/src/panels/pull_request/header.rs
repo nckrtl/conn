@@ -11,6 +11,7 @@ use conn_contract::{
     PullRequestLabelCandidate, PullRequestReviewerCandidate, PullRequestState,
 };
 use conn_theme::{Appearance, Tokens, color_mix_srgb};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -1566,6 +1567,22 @@ pub(super) fn render_actor_label(tokens: &Tokens, actor: Option<&IssueActor>) ->
         .into_any_element()
 }
 
+pub(super) fn diff_label(
+    id: &'static str,
+    text: impl Into<SharedString>,
+    color: Hsla,
+) -> AnyElement {
+    let text = text.into();
+    div()
+        .id(id)
+        .role(gpui_kit::Role::Label)
+        .aria_label(text.clone())
+        .text_color(color)
+        .child(text)
+        .test_support()
+        .into_any_element()
+}
+
 /// `+additions -deletions` mono diff stat (`PullRequestDiffStat`).
 pub(super) fn render_diff_stat(
     tokens: &Tokens,
@@ -1582,16 +1599,16 @@ pub(super) fn render_diff_stat(
         .gap(px(4.0))
         .font_family(SharedString::from(MONO_FONT))
         .text_size(px(font_size_px))
-        .child(
-            div()
-                .text_color(to_hsla(tokens.diff_added))
-                .child(format!("+{}", format_grouped_count(additions))),
-        )
-        .child(
-            div()
-                .text_color(to_hsla(tokens.diff_removed))
-                .child(format!("-{}", format_grouped_count(deletions))),
-        )
+        .child(diff_label(
+            "pr-diff-additions",
+            format!("+{}", format_grouped_count(additions)),
+            to_hsla(tokens.diff_added),
+        ))
+        .child(diff_label(
+            "pr-diff-deletions",
+            format!("-{}", format_grouped_count(deletions)),
+            to_hsla(tokens.diff_removed),
+        ))
         .into_any_element()
 }
 

@@ -189,6 +189,7 @@ impl FakeProvider {
     /// rows still say it can.
     pub fn without_rollback(mut self) -> Self {
         self.capabilities["threads"]["canRollbackThread"] = json!(false);
+        self.capabilities["checkpointing"]["providerCanRollbackConversation"] = json!(false);
         self
     }
 
@@ -1067,6 +1068,16 @@ impl Session for FakeSession {
                                            "updatedAt": now},
                         }})));
                     started.push(terminal(&turn, TurnStatus::Completed, None));
+                }
+                "reject-encrypted-history" | "reject-encrypted-history-with-work" => {
+                    if text.ends_with("-with-work") {
+                        crate::lock(&self.roster).push(("pending-shell".into(), false));
+                        started.push(self.roster_update(conn_contract::to_json(&input.provider_thread)));
+                    }
+                    started.push(terminal(&turn, TurnStatus::Failed, Some(json!({
+                        "class":"provider_error", "message":"The native history was rejected.",
+                        "code":"invalid_encrypted_content", "retryable":false
+                    }))));
                 }
                 "fail-usage-limit" => started.push(terminal(
                     &turn,

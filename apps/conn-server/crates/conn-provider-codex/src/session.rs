@@ -677,10 +677,9 @@ impl CodexSession {
         id: ProviderSessionId,
         instance_id: &ProviderInstanceId,
         server: Arc<AppServer>,
-        catalog: Arc<Mutex<Value>>,
         events: mpsc::Sender<ProviderEvent>,
         config: &crate::CodexConfig,
-        open: (Option<String>, Option<String>),
+        open: (Option<String>, Option<String>, Arc<Mutex<Value>>),
         mcp_servers: Vec<McpServer>,
     ) -> Self {
         let (inbox, rx) = mpsc::channel(EVENT_CAPACITY);
@@ -696,11 +695,21 @@ impl CodexSession {
             open_model: open.0,
             open_cwd: open.1,
             server,
-            catalog,
+            catalog: open.2,
             applied_name: Default::default(),
             inbox,
             state: Mutex::new(State {
-                mapper: Mapper::new(SystemEnv),
+                mapper: {
+                    let mut mapper = Mapper::new(SystemEnv);
+                    mapper.time_zone = config
+                        .instance_env
+                        .0
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == "TZ")
+                        .map(|(_, v)| v.clone());
+                    mapper
+                },
                 events: Some(events),
                 thread: None,
                 app_thread_id: None,
@@ -1003,14 +1012,18 @@ impl Inner {
         {
             return;
         }
-        if let Some(tier) = launch::service_tier(selection) {
-            let _ = self
+        if let Some(tier) = launch::service_tier(selection)
+            && self
                 .server
                 .request(
                     "thread/settings/update",
                     json!({"threadId":native, "serviceTier":tier}),
                 )
-                .await;
+                .await
+                .is_ok()
+            && let Some(cap) = &mut self.lock().capacity
+        {
+            cap.set_service_tier(&tier);
         }
     }
 
@@ -1087,7 +1100,6 @@ impl Inner {
         // Another session that owns the thread (a closed one waiting for its subagent) keeps
         // its frames until Codex accepts the resume: a completion sent before a refusal reaches
         // it.
-        let claim = self.server.claim_route(native, &self.inbox);
         if !force && self.server.is_loaded(native) {
             self.server.route(native, self.inbox.clone());
             let generation = self.server.generation();
@@ -1099,8 +1111,13 @@ impl Inner {
         let mut params = self.thread_params(app_thread, cwd, model).await?;
         params["threadId"] = json!(native);
         params["excludeTurns"] = json!(true);
+        let claim = self.server.claim_route(native, &self.inbox);
         let mut closes = self.server.watch_closes();
-        let result = match self.server.request("thread/resume", params.clone()).await {
+        let result = match self
+            .server
+            .resume_for(native, params.clone(), &self.inbox)
+            .await
+        {
             Err(CallError::Rpc(e))
                 if e.message.contains("is archived") || e.message.contains("codex unarchive") =>
             {
@@ -1109,7 +1126,7 @@ impl Inner {
                     .request("thread/unarchive", json!({ "threadId": native }))
                     .await
                 {
-                    Ok(_) => self.server.request("thread/resume", params).await,
+                    Ok(_) => self.server.resume_for(native, params, &self.inbox).await,
                     Err(e) => Err(e),
                 }
             }
@@ -1131,7 +1148,7 @@ impl Inner {
                     }
                 })
                 .await;
-                self.server.request("thread/resume", params).await
+                self.server.resume_for(native, params, &self.inbox).await
             }
             other => other,
         };
@@ -1318,6 +1335,7 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                 }
                 SessionMsg::AccountLimits => state.mapper.update_reset(inner.server.limit_reset()),
                 SessionMsg::Overloaded => {
+                    state.capacity = None;
                     if let Some((native, generation)) = &mut state.thread {
                         inner.server.forget_loaded(native);
                         *generation = None;
@@ -1329,6 +1347,7 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                     state.mapper.on_exit(false, "The Codex session could not keep up with provider events. Resume the conversation.")
                 }
                 SessionMsg::Exited(detail) => {
+                    state.capacity = None;
                     if let Some(thread) = &mut state.thread {
                         thread.1 = None;
                     }
@@ -2048,16 +2067,33 @@ impl Session for CodexSession {
                     true,
                 )
                 .await;
-            let outs = inner.lock().mapper.release_goal_updates(&native);
-            inner.deliver(outs).await;
-            let result = result?;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let outs = inner.lock().mapper.release_goal_updates(&native);
+                    inner.deliver(outs).await;
+                    return Err(error);
+                }
+            };
             let mut row = row;
             row["providerSessionId"] = json!(inner.id);
             row["providerInstanceId"] = json!(inner.instance_id);
             row["status"] = json!("idle");
             row["nativeThreadRef"] = json!({"driver": DRIVER, "nativeId": result["thread"]["id"].as_str().unwrap_or(&native), "strength": "strong"});
             row["updatedAt"] = json!(codex_time(&result["thread"]["updatedAt"]));
-            from_json(row).map_err(|e| failed("resume_thread", e.to_string()))
+            let (outs, resumed) = {
+                let mut state = inner.lock();
+                state
+                    .mapper
+                    .remember_root_thread(&native, row.clone(), false);
+                let outs = state.mapper.release_goal_updates(&native);
+                (
+                    outs,
+                    state.mapper.root_thread(&native).cloned().unwrap_or(row),
+                )
+            };
+            inner.deliver(outs).await;
+            from_json(resumed).map_err(|e| failed("resume_thread", e.to_string()))
         })
     }
 

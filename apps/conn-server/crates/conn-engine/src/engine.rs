@@ -525,6 +525,7 @@ impl SqliteEngine {
         tx.enqueue(None, &effects)?;
         tx.commit(None)?;
         let notify = store.published.clone();
+        let limit_recovery_wake = store.limit_recovery_wake.clone();
         let engine = Self {
             inner: Arc::new(Inner {
                 store: Arc::new(Mutex::new(store)),
@@ -583,6 +584,7 @@ impl SqliteEngine {
             });
         }
         engine.inner.ensure_effect_worker();
+        crate::limit_recovery::start(&engine.inner, limit_recovery_wake);
         Ok(engine)
     }
 
@@ -1568,20 +1570,38 @@ impl Inner {
                     }
                 }
             }
-            Effect::StopSubagent { thread_id, provider_session_id, provider_thread, task_id } => {
-                let live = self.live_thread(&thread_id).filter(|live| live.session().provider_session_id().as_str() == provider_session_id)
-                    .ok_or_else(|| "The requested native subagent has no owning provider session.".to_owned())?;
-                live.session().stop_task(conn_provider::StopTaskInput {
-                    provider_thread: serde_json::from_value(provider_thread).map_err(|e| e.to_string())?,
-                    task_id,
-                }).await.map_err(|e| e.to_string())?;
+            Effect::StopSubagent {
+                thread_id,
+                provider_session_id,
+                provider_thread,
+                task_id,
+            } => {
+                let live = self
+                    .live_thread(&thread_id)
+                    .filter(|live| {
+                        live.session().provider_session_id().as_str() == provider_session_id
+                    })
+                    .ok_or_else(|| {
+                        "The requested native subagent has no owning provider session.".to_owned()
+                    })?;
+                live.session()
+                    .stop_task(conn_provider::StopTaskInput {
+                        provider_thread: serde_json::from_value(provider_thread)
+                            .map_err(|e| e.to_string())?,
+                        task_id,
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             Effect::Steer {
                 thread_id,
                 run_id,
                 message_id,
                 model_selection,
-            } => self.steer(thread_id, run_id, message_id, model_selection).await,
+            } => {
+                self.steer(thread_id, run_id, message_id, model_selection)
+                    .await
+            }
             Effect::Interrupt { thread_id, run_id } => self.interrupt(thread_id, run_id).await,
             Effect::AbandonStart { thread_id, run_id } => {
                 self.abandon_start(&thread_id, &run_id).await;

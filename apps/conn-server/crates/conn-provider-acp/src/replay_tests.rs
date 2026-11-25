@@ -189,6 +189,7 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
         attachments_dir: None,
         auth_method: None,
         runtime_version: None,
+        profile: None,
         skill_cli: None,
         default_model: None,
         observer: None,
@@ -239,6 +240,45 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
                     .await;
                 if let Err(e) = result {
                     errors.push(format!("ensureThread: {e}"));
+                }
+            }
+            "resumeThread" => {
+                match session
+                    .resume_thread(conn_provider::ResumeThreadInput {
+                        provider_thread: from_json(input["providerThread"].clone()).unwrap(),
+                        thread_id: None,
+                        model_selection: None,
+                        runtime_policy: None,
+                    })
+                    .await
+                {
+                    Ok(thread) => assert_eq!(
+                        conn_contract::to_json(&thread)["nativeThreadRef"],
+                        input["providerThread"]["nativeThreadRef"]
+                    ),
+                    Err(e) => errors.push(format!("resumeThread: {e}")),
+                }
+            }
+            "steerTurn" => {
+                let turn = crate::testing::turn_input(input);
+                let id = crate::lock(&events)
+                    .iter()
+                    .find_map(|e| e["providerTurn"]["id"].as_str().map(str::to_owned));
+                if let Some(id) = id {
+                    let steer = conn_provider::SteerInput {
+                        provider_turn_id: id.as_str().into(),
+                        thread_id: turn.thread_id,
+                        run_id: turn.run_id,
+                        provider_thread: turn.provider_thread,
+                        message: turn.message,
+                        model_selection: Some(turn.model_selection),
+                        app_context: turn.app_context,
+                    };
+                    if let Err(e) = session.steer_turn(steer).await {
+                        errors.push(format!("steerTurn: {e}"));
+                    }
+                } else {
+                    errors.push("no running turn to steer".into())
                 }
             }
             "startTurn" => {
@@ -875,4 +915,161 @@ async fn antigravity_retries_undelivered_instructions_after_a_trailing_tool_upda
         .map(|event| event["status"].as_str().unwrap())
         .collect();
     assert_eq!(statuses, ["failed", "completed"]);
+}
+
+fn wire_request(method: &str, params: Value) -> Value {
+    json!({"type":"expect_outbound","label":format!("request:{method}"),"frame":{"kind":"request","method":method,"params":params}})
+}
+fn wire_result(method: &str, result: Value) -> Value {
+    json!({"type":"emit_inbound","label":format!("response:{method}"),"frame":{"kind":"response","method":method,"result":result}})
+}
+
+#[tokio::test]
+async fn cold_resume_activates_saved_conversations_before_prompting() {
+    for (flavor, mut fixture) in [
+        (&crate::flavor::GROK, read_golden("grok", "simple")),
+        (
+            &crate::antigravity::ANTIGRAVITY,
+            antigravity_turn_with_thinking_level(),
+        ),
+    ] {
+        let calls = fixture["calls"].as_array_mut().unwrap();
+        let at = calls
+            .iter()
+            .position(|c| c["method"] == "startTurn")
+            .unwrap();
+        let thread = &mut calls[at]["input"]["providerThread"];
+        thread["nativeThreadRef"]["nativeId"] = json!("saved-session");
+        let thread = thread.clone();
+        calls.insert(
+            at,
+            json!({"method":"resumeThread","input":{"providerThread":thread}}),
+        );
+        let script = fixture["transcripts"][0].as_array_mut().unwrap();
+        let init = script
+            .iter_mut()
+            .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+            .unwrap();
+        init["frame"]["result"]["agentCapabilities"]["loadSession"] = json!(true);
+        if flavor.resume {
+            init["frame"]["result"]["agentCapabilities"]["sessionCapabilities"]["resume"] =
+                json!({});
+        }
+        let new = script
+            .iter()
+            .position(|r| r["frame"]["method"] == "session/new" && r["frame"]["kind"] == "response")
+            .unwrap();
+        let setup = script[new]["frame"]["result"].clone();
+        let prompt = script
+            .iter()
+            .position(|r| {
+                r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request"
+            })
+            .unwrap();
+        let method = if flavor.resume {
+            "session/resume"
+        } else {
+            "session/load"
+        };
+        let at = script
+            .iter()
+            .position(|r| {
+                r["frame"]["kind"] == "request"
+                    && r["frame"]["params"]["configId"] == "thought_level"
+            })
+            .unwrap_or(prompt);
+        for r in script.iter_mut().skip(at) {
+            let f = &mut r["frame"];
+            if f["params"].get("sessionId").is_some() {
+                f["params"]["sessionId"] = json!("saved-session");
+            }
+        }
+        let mut setup = setup;
+        if let Some(options) = setup["configOptions"].as_array_mut()
+            && let Some(model) = options.iter_mut().find(|o| o["category"] == "model")
+        {
+            model["currentValue"] = json!("gemini-3.8-flash");
+        }
+        script.splice(
+            at..at,
+            [
+                wire_request(method, json!("<any>")),
+                wire_result(method, setup),
+            ],
+        );
+        let run = replay(flavor, &fixture).await;
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        let script = crate::lock(&run.script);
+        assert!(script.complete(), "{:?}", script.failure);
+        for method in [method, "session/prompt"] {
+            assert!(
+                script
+                    .written
+                    .iter()
+                    .any(|f| f["method"] == method && f["params"]["sessionId"] == "saved-session")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn antigravity_reports_typed_limits_and_native_usage() {
+    for reason in ["max_tokens", "max_turn_requests", "refusal"] {
+        let mut fixture = antigravity_turn_with_thinking_level();
+        let frame = fixture["transcripts"][0]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|v| v["frame"]["method"] == "session/prompt" && v["frame"]["kind"] == "response")
+            .unwrap();
+        frame["frame"]["result"] = json!({"stopReason":reason,"usage":{"inputTokens":163,"outputTokens":40,"cachedReadTokens":12,"thoughtTokens":32}});
+        let run = replay(&crate::antigravity::ANTIGRAVITY, &fixture).await;
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        let terminal = run
+            .events
+            .iter()
+            .find(|e| e["type"] == "turn.terminal")
+            .unwrap();
+        assert_eq!(terminal["status"], "failed");
+        if reason == "refusal" {
+            assert_eq!(terminal["failure"]["class"], "usage_limit");
+        }
+        let usage = run
+            .events
+            .iter()
+            .find_map(|e| e["providerTurn"].get("turnTokenUsage"))
+            .unwrap();
+        assert_eq!(usage["inputTokens"], 175);
+        assert_eq!(usage["outputTokens"], 40);
+        assert_eq!(usage["reasoningTokens"], 32);
+        assert_eq!(usage["usageStatus"], "partial");
+    }
+}
+
+#[tokio::test]
+async fn app_context_reaches_the_grok_prompt_as_external_text() {
+    let mut fixture = read_golden("grok", "simple");
+    let call = fixture["calls"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|c| c["method"] == "startTurn")
+        .unwrap();
+    call["input"]["appContext"] = json!([{"key":"card","text":"selected value"}]);
+    let prompt = fixture["transcripts"][0]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e["frame"]["method"] == "session/prompt" && e["frame"]["kind"] == "request")
+        .unwrap();
+    prompt["frame"]["params"]["prompt"]
+        .as_array_mut()
+        .unwrap()
+        .insert(
+            0,
+            json!({"type":"text","text":"<external_card>selected value</external_card>"}),
+        );
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    assert!(crate::lock(&run.script).complete());
 }

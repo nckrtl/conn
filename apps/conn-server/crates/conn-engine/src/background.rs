@@ -260,3 +260,116 @@ mod tests {
         );
     }
 }
+
+impl crate::engine::Inner {
+    pub(crate) async fn native_child_work(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::EngineError<serde_json::Value>> {
+        use serde_json::{Value, json};
+        let thread_id = input["threadId"].as_str().unwrap_or_default().to_owned();
+        let err = || {
+            crate::EngineError::Rejected(
+                json!({"_tag":"OrchestrationV2GetNativeChildWorkError","threadId":thread_id,"cause":"Could not read native child work."}),
+            )
+        };
+        let tid = thread_id.clone();
+        let context = self
+            .db(move |store| -> Result<_, String> {
+                let tx = store.tx()?;
+                let Some(thread) = tx.thread(&tid)? else {
+                    return Ok(None);
+                };
+                let (Some(parent), Some(node)) = (
+                    thread["lineage"]["parentThreadId"].as_str(),
+                    thread["forkedFrom"]["nodeId"].as_str(),
+                ) else {
+                    return Ok(None);
+                };
+                if thread["forkedFrom"]["type"] != "node"
+                    || thread["lineage"]["relationshipToParent"] != "subagent"
+                {
+                    return Ok(None);
+                }
+                let rows = tx.entities(parent, "subagents")?;
+                let Some(task) = rows.iter().find(|r| {
+                    r["id"] == node
+                        && r["childThreadId"] == tid
+                        && r["driver"] == "antigravity"
+                        && r["origin"] == "provider_native"
+                }) else {
+                    return Ok(None);
+                };
+                let Some(native) = task["nativeTaskRef"]["nativeId"].as_str() else {
+                    return Ok(None);
+                };
+                let owner = |row: &Value| -> Result<Option<(Value, String)>, String> {
+                    let Some(run_id) = row["runId"].as_str() else {
+                        return Ok(None);
+                    };
+                    let Some(run) = tx.entity(parent, "runs", run_id)? else {
+                        return Ok(None);
+                    };
+                    let Some(pt) = run["providerThreadId"].as_str() else {
+                        return Ok(None);
+                    };
+                    let Some(pt) = tx.entity(parent, "providerThreads", pt)? else {
+                        return Ok(None);
+                    };
+                    let attempt = run["activeAttemptId"]
+                        .as_str()
+                        .map(|id| tx.entity(parent, "attempts", id))
+                        .transpose()?
+                        .flatten();
+                    let root = attempt
+                        .as_ref()
+                        .and_then(|a| a["nativeThreadId"].as_str())
+                        .or_else(|| pt["nativeThreadRef"]["nativeId"].as_str());
+                    Ok(root.map(|id| (pt["providerInstanceId"].clone(), id.to_owned())))
+                };
+                let Some((instance, root)) = owner(task)? else {
+                    return Ok(None);
+                };
+                if instance != task["providerInstanceId"] {
+                    return Ok(None);
+                }
+                let mut siblings = vec![];
+                for row in &rows {
+                    if row["id"] == node
+                        || row["driver"] != "antigravity"
+                        || row["origin"] != "provider_native"
+                        || row["providerInstanceId"] != instance
+                    {
+                        continue;
+                    }
+                    if let Some(id) = row["nativeTaskRef"]["nativeId"].as_str()
+                        && owner(row)?.is_some_and(|(_, session)| session == root)
+                    {
+                        siblings.push(
+                            json!({"nativeTaskId":id,"prompt":row["prompt"],"title":row["title"]}),
+                        );
+                    }
+                }
+                Ok(Some((
+                    instance.as_str().unwrap_or_default().to_owned(),
+                    root,
+                    native.to_owned(),
+                    json!({"title":task["title"],"prompt":task["prompt"]}),
+                    siblings,
+                )))
+            })
+            .await
+            .map_err(|_| err())?;
+        let children = if let Some((id, root, native, launch, siblings)) = context
+            && let Some(provider) = self.providers.get(&id)
+        {
+            provider
+                .native_child_work(root, native, launch, siblings)
+                .await
+                .map_err(|_| err())?
+        } else {
+            vec![]
+        };
+        Ok(json!({"children":children}))
+    }
+}

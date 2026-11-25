@@ -256,6 +256,7 @@ struct Turn {
     provider_thread: Value,
     native_title: Option<String>,
     held_result: Option<ResultMsg>,
+    goal_checked: bool,
     provider_thread_id: String,
     provider_turn_id: String,
     native_turn_id: String,
@@ -493,8 +494,8 @@ impl<E: Env> Mapper<E> {
         else {
             return Vec::new();
         };
-        let (_, message_id) = turn.pending_steers.remove(index);
-        vec![steer_event(turn, &message_id, SteerStatus::Completed)]
+        turn.pending_steers.remove(index);
+        Vec::new()
     }
 
     /// Stop with no turn running: the process and its background work are gone
@@ -564,6 +565,7 @@ impl<E: Env> Mapper<E> {
             provider_thread: provider_thread.clone(),
             native_title: None,
             held_result: None,
+            goal_checked: false,
             provider_thread_id,
             provider_turn_id: ids::provider_turn_id(DRIVER, &native_turn_id),
             native_turn_id,
@@ -1401,6 +1403,115 @@ impl<E: Env> Mapper<E> {
         out
     }
 
+    pub(super) fn active_goal(&self) -> bool {
+        self.turn
+            .as_ref()
+            .is_some_and(|turn| turn.provider_thread["goal"]["status"] == "active")
+    }
+
+    pub(super) fn observe_goal(&mut self, frame: &Value) -> Vec<Out> {
+        let Some(turn) = &mut self.turn else {
+            return vec![];
+        };
+        if !frame["parent_tool_use_id"].is_null() {
+            return vec![];
+        }
+        let current = &turn.provider_thread["goal"];
+        if frame["type"] == "assistant" && frame["message"]["model"] != "<synthetic>" {
+            turn.goal_checked |= current["status"] == "active";
+            return vec![];
+        }
+        let content = &frame["message"]["content"];
+        let text = || {
+            content.as_str().map(str::to_owned).unwrap_or_else(|| {
+                content
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["type"] == "text")
+                    .filter_map(|p| p["text"].as_str())
+                    .collect()
+            })
+        };
+        let next = match frame["type"].as_str() {
+            Some("system")
+                if frame["subtype"] == "informational"
+                    && frame["content"].as_str().is_some_and(|s| {
+                        s.starts_with("Goal cleared after an unrecoverable error (")
+                    }) =>
+            {
+                Value::Null
+            }
+            Some("assistant") => {
+                let text = text();
+                let text = text.trim();
+                if let Some(objective) = text
+                    .strip_prefix("Goal set: ")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    json!({"status":"active","objective":objective,"checks":0})
+                } else if text.starts_with("Goal cleared: ") || text.starts_with("No goal set") {
+                    Value::Null
+                } else if let Some((objective, count)) = text
+                    .strip_prefix("Goal active: ")
+                    .and_then(|s| s.rsplit_once(" ("))
+                {
+                    let count = count.split_once(')').and_then(|(count, _)| {
+                        if count == "not yet evaluated" {
+                            Some(0)
+                        } else {
+                            count
+                                .strip_suffix(" turns")
+                                .or_else(|| count.strip_suffix(" turn"))
+                                .and_then(|s| s.parse::<u64>().ok())
+                        }
+                    });
+                    let Some(count) = count else { return vec![] };
+                    let mut goal = if current["objective"] == objective {
+                        current.clone()
+                    } else {
+                        json!({"objective":objective})
+                    };
+                    goal["status"] = json!("active");
+                    goal["checks"] = json!(count);
+                    goal
+                } else {
+                    return vec![];
+                }
+            }
+            Some("user") if frame["isSynthetic"] == true && current.is_object() => {
+                let text = text();
+                let prefix = format!(
+                    "Stop hook feedback:\n[{}]: ",
+                    current["objective"].as_str().unwrap_or("")
+                );
+                let Some(check) = text.strip_prefix(&prefix) else {
+                    return vec![];
+                };
+                let mut goal = current.clone();
+                goal["lastCheck"] = json!(check.trim());
+                goal["status"] = json!("active");
+                goal["checks"] = json!(current["checks"].as_u64().unwrap_or(0).saturating_add(1));
+                goal
+            }
+            _ => return vec![],
+        };
+        if *current == next {
+            return vec![];
+        }
+        turn.provider_thread["goal"] = next;
+        turn.provider_thread["updatedAt"] = json!(self.env.now());
+        self.last_provider_thread = Some(turn.provider_thread.clone());
+        let mut out = vec![];
+        emit(
+            &mut out,
+            |provider_thread| ProviderEvent::ProviderThreadUpdated { provider_thread },
+            turn.provider_thread.clone(),
+        );
+        out
+    }
+
     pub(super) fn mcp_sign_in_notices(&mut self, names: &[&str]) -> Vec<Out> {
         let Some(turn) = &mut self.turn else {
             return vec![];
@@ -1419,6 +1530,15 @@ impl<E: Env> Mapper<E> {
                 turn_item(item)
             })
             .collect()
+    }
+
+    pub(super) fn is_turn_prompt(&self, uuid: &Value) -> bool {
+        uuid.as_str().is_some_and(|uuid| {
+            self.turn
+                .as_ref()
+                .and_then(|turn| turn.prompt_uuid.as_deref())
+                == Some(uuid)
+        })
     }
 
     pub(super) fn retry_active(&self) -> bool {
@@ -1578,6 +1698,18 @@ impl<E: Env> Mapper<E> {
             provider_turn,
         );
         let mut thread = turn.provider_thread.clone();
+        if completed
+            && turn.goal_checked
+            && thread["goal"]["status"] == "active"
+            && !self.has_pending_background_work()
+            && result.is_some_and(|r| {
+                r.terminal_reason
+                    .as_deref()
+                    .is_none_or(|s| s == "completed")
+            })
+        {
+            thread["goal"]["status"] = json!("complete");
+        }
         thread["providerSessionId"] = json!(self.provider_session_id);
         if thread.get("firstRunOrdinal").is_none_or(Value::is_null) {
             thread["firstRunOrdinal"] = json!(turn.run_ordinal);

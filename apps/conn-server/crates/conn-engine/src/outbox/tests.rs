@@ -79,8 +79,19 @@ fn every_effect_round_trips_under_its_effect_type() {
             checkpoint_id: "k".into(),
             scope_id: "s".into(),
             restore_files: Some(false),
+            portable: false,
             resume_snapshot: None,
         }),
+        Effect::RenameThread {
+            thread_id: "t".into(),
+            title: "new title".into(),
+        },
+        Effect::StopSubagent {
+            thread_id: "t".into(),
+            task_id: "child".into(),
+            provider_session_id: "session".into(),
+            provider_thread: json!({"id":"p"}),
+        },
         Effect::CaptureCheckpoint {
             thread_id: "t".into(),
             run_id: "r".into(),
@@ -362,6 +373,7 @@ fn a_replaced_engine_cannot_move_a_rollback_on() {
             checkpoint_id: "k".into(),
             scope_id: "s".into(),
             restore_files: Some(false),
+            portable: false,
             resume_snapshot: None,
         })],
     )
@@ -488,6 +500,7 @@ fn rollback_row(thread: &str, command: &str) -> Effect {
         checkpoint_id: "k".into(),
         scope_id: "s".into(),
         restore_files: Some(false),
+        portable: false,
         resume_snapshot: None,
     })
 }

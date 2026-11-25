@@ -258,6 +258,20 @@ impl<E: Env> Mapper<E> {
         let Some(turn) = self.turn.as_ref() else {
             return false;
         };
+        if self.flavor.driver == "antigravity"
+            && (!self.pending.is_empty()
+                || turn.tools.values().any(|t| {
+                    open(t)
+                        && t.status.as_deref() != Some("pending")
+                        && (matches!(
+                            t.title.as_deref(),
+                            Some("Running schedule" | "Run schedule")
+                        ) || (t.kind.as_deref() == Some("execute")
+                            && t.data.get("rawInput").is_none_or(|r| r["IsDaemon"] != true)))
+                }))
+        {
+            return true;
+        }
         let bg = &turn.bg;
         if !bg.awaiting_hydration.is_empty() || !bg.pending_injected_report.is_empty() {
             return true;
@@ -692,7 +706,7 @@ impl<E: Env> Mapper<E> {
     // ---- continuation ----------------------------------------------------------------------
 
     /// `offerContinuationRun`: asks the engine for one continuation turn.
-    fn offer_continuation(&mut self, out: &mut Vec<Out>) -> bool {
+    pub(crate) fn offer_continuation(&mut self, out: &mut Vec<Out>) -> bool {
         if self.hooks().is_none()
             || self.bg.closed
             || self.bg.quarantined
@@ -869,6 +883,16 @@ impl<E: Env> Mapper<E> {
             return;
         }
         let Some(hooks) = self.hooks() else { return };
+        if self.flavor.driver == "antigravity"
+            && !self.bg.quarantined
+            && self.is_root(params["sessionId"].as_str().unwrap_or(""))
+            && (hooks.is_wake)(params)
+        {
+            self.buffer_wake(params);
+            self.offer_continuation(out);
+            return;
+        }
+
         let update = &params["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or("");
         if matches!(

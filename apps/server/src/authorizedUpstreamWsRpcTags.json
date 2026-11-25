@@ -5,6 +5,8 @@
   "server.refreshProviders",
   "server.updateProvider",
   "provider.consumeResetCredit",
+  "provider.mcpSignIn.start",
+  "provider.mcpSignIn.complete",
   "provider.auth.start",
   "provider.auth.complete",
   "provider.chatgpt.reconnect-profile",

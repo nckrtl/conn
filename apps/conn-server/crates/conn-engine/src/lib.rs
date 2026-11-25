@@ -53,6 +53,7 @@ mod fork;
 mod fresh;
 mod history;
 mod html_cleanup;
+mod limit_recovery;
 mod link_requests;
 mod outbox;
 mod outline;
@@ -83,8 +84,8 @@ pub use attention::{AttentionOutboxRow, RELEASED_COMPLETION_GRACE_MS};
 pub use background_wait::{BackgroundWait, BackgroundWaitError};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use engine::{
-    CleanupThreads, CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, IdleTimeout, ProjectConfig,
-    RuntimePolicyOverride, STORE_IN_USE, SqliteEngine,
+    CleanupThreads, CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, IdleTimeout,
+    ProjectConfig, RuntimePolicyOverride, STORE_IN_USE, SqliteEngine,
 };
 pub use families::{delegated_task_result, monitor_runs};
 pub use fold::{SearchField, field_holds_words, fold, fold_field, fold_search_query, match_fields};
@@ -207,6 +208,10 @@ pub trait EngineHost: Send + Sync {
 
     /// `responseStreamingMode` of `project_id` (`resolveProjectSettings`): how streamed
     /// assistant text is stored. The default is T3's default, `paragraph`.
+    fn usage_limit_preferences(&self) -> (bool, bool) {
+        (false, false)
+    }
+
     fn response_streaming_mode(&self, _project_id: Option<&str>) -> ResponseStreamingMode {
         ResponseStreamingMode::Paragraph
     }

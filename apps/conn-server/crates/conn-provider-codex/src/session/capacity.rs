@@ -1,5 +1,5 @@
 //! Continue a failed root turn on the same Codex thread with empty input.
-use super::*;
+use super::{Duration, Inner, Out, State, TurnInput, Value, interrupt, json};
 use tokio::time::Instant;
 
 pub(super) struct Capacity {
@@ -36,6 +36,10 @@ impl Capacity {
             attempts: 0,
             pending: None,
         }
+    }
+
+    pub(super) fn set_service_tier(&mut self, tier: &str) {
+        self.params["serviceTier"] = json!(tier);
     }
 
     pub(super) fn deadline(&self) -> Option<Instant> {

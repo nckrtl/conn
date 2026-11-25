@@ -107,7 +107,9 @@ const SHELL_ERROR: &str = "OrchestrationV2GetShellSnapshotError";
 
 pub(crate) async fn call(inner: Arc<Inner>, method: String, input: Value) -> CallResult {
     match method.as_str() {
-        "provider.mcpSignIn.start" | "provider.mcpSignIn.complete" => inner.mcp_sign_in(&method, input).await,
+        "provider.mcpSignIn.start" | "provider.mcpSignIn.complete" => {
+            inner.mcp_sign_in(&method, input).await
+        }
         "mcpApps.callTool"
         | "mcpApps.toolInfo"
         | "mcpApps.readResource"
@@ -164,8 +166,7 @@ pub(crate) async fn call(inner: Arc<Inner>, method: String, input: Value) -> Cal
                 .checkpoint_diff(crate::checkpoint::DiffMethod::FullThread, input)
                 .await
         }
-        // Native child work is an Antigravity profile read; no provider here has one.
-        "orchestration.getNativeChildWork" => Ok(json!({"children": []})),
+        "orchestration.getNativeChildWork" => inner.native_child_work(&input).await,
         "orchestration.searchThread" => {
             inner
                 .db(move |s| s.search_thread(&input))

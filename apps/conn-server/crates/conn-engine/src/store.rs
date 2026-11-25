@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS threads (
   thread      TEXT NOT NULL,
   shell       TEXT
 );
+CREATE INDEX IF NOT EXISTS threads_usage_limited ON threads(id)
+WHERE deleted=0 AND json_extract(shell,'$.status')='failed' AND json_extract(shell,'$.lastErrorClass')='usage_limit';
 CREATE TABLE IF NOT EXISTS entities (
   thread_id TEXT NOT NULL,
   kind      TEXT NOT NULL,
@@ -326,6 +328,7 @@ pub(crate) struct Store {
     /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
     /// after its transaction), so a caller that goes away cannot keep clients from seeing it.
     pub(crate) published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    pub(crate) limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
     /// The engine that may write here ([`Store::take_ownership`]); `None` for a store opened
     /// without an engine.
     owner: Option<Owner>,
@@ -469,6 +472,7 @@ impl Store {
             attention: None,
             effects_wake: std::sync::Arc::default(),
             published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
+            limit_recovery_wake: Default::default(),
             owner: None,
             #[cfg(test)]
             settle_faults: std::cell::Cell::new(0),
@@ -580,6 +584,7 @@ impl Store {
             effects_wake: self.effects_wake.clone(),
             effects_written: false,
             published: self.published.clone(),
+            limit_recovery_wake: self.limit_recovery_wake.clone(),
             owner: self.owner.clone(),
             now_ms,
             generates_titles,
@@ -841,6 +846,16 @@ impl Store {
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(err)?
             .map(|row| row.map_err(err))
+            .collect()
+    }
+
+    pub(crate) fn limit_recovery_page(&self, after: &str) -> StoreResult<Vec<Value>> {
+        let mut stmt=self.conn.prepare("SELECT shell FROM threads WHERE deleted=0 AND json_extract(shell,'$.status')='failed' AND json_extract(shell,'$.lastErrorClass')='usage_limit' AND id>?1 ORDER BY id LIMIT 32").map_err(|e|e.to_string())?;
+        stmt.query_map([after], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .map(|row| {
+                serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+            })
             .collect()
     }
 
@@ -1902,6 +1917,7 @@ pub(crate) struct Tx<'a> {
     effects_wake: std::sync::Arc<tokio::sync::Notify>,
     effects_written: bool,
     published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
     owner: Option<Owner>,
     now_ms: u64,
     zone: jiff::tz::TimeZone,
@@ -2752,6 +2768,7 @@ impl Tx<'_> {
     /// Recomputes touched shell rows, records the receipt, and commits. Returns the sequence
     /// a client waits for: the last change of this write, or the high water if it wrote none.
     pub(crate) fn commit(mut self, receipt: Option<&ReceiptKey<'_>>) -> StoreResult<u64> {
+        let mut limited_thread_changed = false;
         for (thread_id, seq) in std::mem::take(&mut self.touched) {
             let previous: Option<(Option<String>, bool)> = self
                 .tx
@@ -2788,6 +2805,8 @@ impl Tx<'_> {
                 if previous.as_deref() == Some(text.as_str()) {
                     continue;
                 }
+                limited_thread_changed |=
+                    row["status"] == "failed" && row["lastErrorClass"] == "usage_limit";
                 if self.attention.is_some() {
                     let before = previous
                         .as_deref()
@@ -2863,6 +2882,9 @@ impl Tx<'_> {
             return Err(NOT_OWNER.into());
         }
         self.tx.commit().map_err(err)?;
+        if limited_thread_changed {
+            self.limit_recovery_wake.notify_one();
+        }
         *self.store_seq = self.next_seq;
         self.published.send_if_modified(|published| {
             let newer = high > *published;

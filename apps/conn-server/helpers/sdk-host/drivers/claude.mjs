@@ -14,6 +14,7 @@ import {
   resolveSettings,
 } from "@anthropic-ai/claude-agent-sdk";
 import { execFile, spawn } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
 
 /** Prompts waiting for the CLI to take them, per query. T3's queue is unbounded. */
 const MAX_QUEUED_PROMPTS = 64;
@@ -435,6 +436,7 @@ export function createDriver(host) {
       const options = { ...(command.options ?? {}) };
       options.canUseTool = (toolName, input, callbackOptions) => {
         const { signal, ...rest } = callbackOptions ?? {};
+        if (typeof rest.decisionReason === "string") rest.decisionReason = stripVTControlCharacters(rest.decisionReason);
         return session.request("canUseTool", rest.requestId, { toolName, input, options: rest }, signal);
       };
       options.onElicitation = (request, callbackOptions) =>
@@ -523,8 +525,9 @@ export function createDriver(host) {
           const send = Reflect.get(q, "request");
           if (typeof send !== "function") throw new Error("Claude MCP sign-in is unavailable.");
           const callback = method === "mcpSubmitOAuthCallbackUrl";
+          const pasted = callback ? String(args[1]).trim() : "";
           const request = callback
-            ? { subtype: "mcp_oauth_callback_url", serverName: args[0], callbackUrl: new URL(args[1]).toString() }
+            ? { subtype: "mcp_oauth_callback_url", serverName: args[0], callbackUrl: new URL(/^[a-z][a-z\d+.-]*:\/\//iu.test(pasted) ? pasted : `http://${pasted}`).toString() }
             : { subtype: "mcp_authenticate", serverName: args[0] };
           const reply = await Reflect.apply(send, q, [request]);
           return !callback && reply?.response?.requiresUserAction === true ? reply.response.authUrl ?? null : null;

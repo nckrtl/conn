@@ -102,7 +102,8 @@ impl Instances {
         providers: &ProviderSet,
         settings: &Map<String, Value>,
     ) -> Vec<String> {
-        self.reconcile_after_refresh(providers, settings, false).await
+        self.reconcile_after_refresh(providers, settings, false)
+            .await
     }
 
     pub(crate) async fn reconcile_after_refresh(
@@ -130,8 +131,11 @@ impl Instances {
                 .iter()
                 .find(|p| p.instance_id().as_str() == want.id)
                 .filter(|provider| {
-                    if path_changed && provider.server_provider_entry("").is_some_and(|entry|
-                        entry["enabled"] == true && entry["installed"] == false) {
+                    if path_changed
+                        && provider.server_provider_entry("").is_some_and(|entry| {
+                            entry["enabled"] == true && entry["installed"] == false
+                        })
+                    {
                         return false;
                     }
                     built_before

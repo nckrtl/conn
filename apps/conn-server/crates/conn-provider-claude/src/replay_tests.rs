@@ -1334,3 +1334,105 @@ fn a_byte_truncated_transcript_shows_no_excerpt() {
     assert!(!answers.iter().any(|a| a.starts_with("Partial answer")));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn the_previous_result_cannot_acknowledge_an_unread_steer() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("steer"), "first", "full-access"),
+        "default",
+    );
+    mapper.set_prompt_uuid("first");
+    mapper.steer_sent("second", "second-item");
+    let result = |id: &str| {
+        Inbound::from_value(
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id],"result":"ok"}),
+        )
+    };
+    let first = mapper.handle(result("first"));
+    assert!(mapper.turn_active());
+    assert!(!first.iter().any(|out| matches!(
+        out,
+        Out::Event(ProviderEvent::SteerUpdated { .. } | ProviderEvent::TurnTerminal(_))
+    )));
+    let accepted = mapper.handle(Inbound::from_value(
+        json!({"type":"command_lifecycle","command_uuid":"second","state":"started"}),
+    ));
+    assert!(accepted.iter().any(|out| matches!(
+        out,
+        Out::Event(ProviderEvent::SteerUpdated {
+            status: conn_provider::SteerStatus::Completed,
+            ..
+        })
+    )));
+    let last = mapper.handle(result("second"));
+    assert!(
+        last.iter()
+            .any(|out| matches!(out, Out::Event(ProviderEvent::TurnTerminal(_))))
+    );
+}
+
+#[test]
+fn provider_safety_denials_and_user_ask_rules_remain_distinct() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("test"), "test", "full-access"),
+        "bypassPermissions",
+    );
+    let mut params = json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"fixture"},"tool_use_id":"test","decision_reason":"Dangerous rm warning"});
+    let frame = |request: Value| {
+        Inbound::from_value(
+            json!({"type":"control_request","request_id":"fixture","request":request}),
+        )
+    };
+    let denied = mapper.handle(frame(params.clone()));
+    assert!(
+        denied
+            .iter()
+            .any(|o| matches!(o,Out::Write(line) if line.contains("\"behavior\":\"deny\"")))
+    );
+    params["matched_ask_rule"] = json!({"rule":"Bash(fixture)"});
+    let asks = mapper.handle(frame(params));
+    assert!(
+        asks.iter()
+            .any(|o| matches!(o, Out::Event(ProviderEvent::RuntimeRequestUpdated { .. })))
+    );
+}
+
+#[test]
+fn a_successful_native_rename_publishes_the_new_app_title_once() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(
+            1,
+            &provider_thread("native"),
+            "/rename New title",
+            "full-access",
+        ),
+        "default",
+    );
+    let event = mapper.handle(Inbound::from_value(
+        json!({"type":"system","subtype":"session_title_changed","title":" New title "}),
+    ));
+    assert!(
+        !event
+            .iter()
+            .any(|o| matches!(o, Out::Event(ProviderEvent::AppThreadCreated { .. })))
+    );
+    let result = mapper.handle(Inbound::from_value(
+        json!({"type":"result","subtype":"success","is_error":false,"local_command":"rename"}),
+    ));
+    assert!(result.iter().any(|o|matches!(o,Out::Event(ProviderEvent::AppThreadCreated{app_thread,..}) if app_thread.title=="New title")));
+}
+
+#[test]
+fn the_final_main_model_iteration_sets_the_context_window() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("advisor"), "test", "full-access"),
+        "default",
+    );
+    let event=mapper.handle(Inbound::from_value(json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"a","model":"claude-opus","usage":{
+        "input_tokens":1089209,"iterations":[{"type":"message","input_tokens":500000},{"type":"message","input_tokens":545100,"output_tokens":96},{"type":"advisor","input_tokens":543000}]}}}})));
+    assert!(event.iter().any(|out|matches!(out,Out::Event(ProviderEvent::ProviderTurnUpdated{provider_turn,..}) if to_json(provider_turn)["tokenUsage"]["usedTokens"]==545196)));
+}

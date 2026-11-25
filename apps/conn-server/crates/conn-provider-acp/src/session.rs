@@ -141,7 +141,8 @@ pub(crate) struct Config {
     /// The catalog's default model, used when the selection asks for the default
     /// (`applyAntigravityAcpModelSelection`'s `defaultModel`).
     pub default_model: Option<String>,
-    pub skill_cli: Option<(String, Vec<(String,String)>)>,
+    pub profile: Option<std::path::PathBuf>,
+    pub skill_cli: Option<(String, Vec<(String, String)>)>,
     /// Told about the session's config options and commands as the agent reports them.
     pub observer: Option<Observer>,
 }
@@ -221,6 +222,8 @@ struct State<E: Env> {
     prompt_request: Option<i64>,
     /// The prompt id of the running turn, for Grok's `prompt_complete`.
     active_prompt: Option<(u64, String)>,
+    detached_requests: Vec<(RequestId, Value)>,
+    step_boundary: i64,
     last_progress: tokio::time::Instant,
     prompt_watchdog: Option<tokio::task::JoinHandle<()>>,
     commands: Option<Vec<String>>,
@@ -228,7 +231,10 @@ struct State<E: Env> {
     instruction_state: Option<InstructionState>,
     delivered_notes: Option<String>,
     delivered_context: std::collections::HashMap<String, String>,
-    replay_activity: Option<(String, tokio::sync::watch::Sender<Option<tokio::time::Instant>>)>,
+    replay_activity: Option<(
+        String,
+        tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    )>,
     /// What the running prompt delivers once it succeeds.
     delivery: Option<Delivery>,
     flush_armed: bool,
@@ -507,7 +513,27 @@ impl AcpSession {
         inner.check_abandoned(run_id)?;
         // `compactThread`: T3's orchestrator sends `/compact` in any case as exactly
         // `/compact` to a flavor that compacts.
-        let user_text = if flavor.supports_compaction
+        let agent_compacts = if flavor.driver == "antigravity"
+            && attachments.is_empty()
+            && input.message.text.trim().eq_ignore_ascii_case("/compact")
+        {
+            if !inner
+                .state
+                .lock()
+                .await
+                .commands
+                .as_ref()
+                .is_some_and(|c| c.iter().any(|n| n == "compact"))
+            {
+                return Err(ProviderError::Unsupported {
+                    operation: "compact_thread",
+                });
+            }
+            true
+        } else {
+            flavor.supports_compaction
+        };
+        let user_text = if agent_compacts
             && attachments.is_empty()
             && input.message.text.trim().eq_ignore_ascii_case("/compact")
         {
@@ -516,15 +542,36 @@ impl AcpSession {
             input.message.text.clone()
         };
         // The attachment paths check the disk: off the runtime thread.
-        let user_text = if let Some((binary,env))=&inner.config.skill_cli
-            && let Some(mention)=user_text.trim_start().strip_prefix('$') {
-            let end=mention.find(|c:char| !(c.is_ascii_alphanumeric() || matches!(c,'_' | '-' | '.'))).unwrap_or(mention.len());
-            let (name,rest)=mention.split_at(end);
-            if name.starts_with(|c:char|c.is_ascii_alphabetic()) &&
-                crate::grok_status::discover_skills(binary,env,Some(std::path::Path::new(&inner.config.cwd)),Duration::from_secs(4)).await
-                .is_some_and(|skills|skills.iter().any(|sk|sk["name"]==name && sk["enabled"]==true)) { format!("/{name}{rest}") }
-            else {user_text}
-        }else{user_text};
+        let user_text = if let Some((binary, env)) = &inner.config.skill_cli
+            && let Some(mention) = user_text.trim_start().strip_prefix('$')
+        {
+            let end = mention
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':')))
+                .unwrap_or(mention.len());
+            let (name, rest) = mention.split_at(end);
+            if name.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && name.chars().any(|c| c.is_ascii_alphabetic())
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                && crate::grok_status::discover_skills(
+                    binary,
+                    env,
+                    Some(std::path::Path::new(&inner.config.cwd)),
+                    Duration::from_secs(4),
+                )
+                .await
+                .is_some_and(|skills| {
+                    skills
+                        .iter()
+                        .any(|sk| sk["name"] == name && sk["enabled"] == true)
+                })
+            {
+                format!("/{name}{rest}")
+            } else {
+                user_text
+            }
+        } else {
+            user_text
+        };
         let message_text = {
             let (text, attachments, dir) = (
                 user_text.clone(),
@@ -549,10 +596,29 @@ impl AcpSession {
             let effort = crate::grok::selection_effort(&selection);
             let options = selection["options"].as_array().cloned().unwrap_or_default();
             inner
+                .configure_mode(&connection, &to_json(&input.runtime_policy))
+                .await?;
+            inner
                 .configure(&connection, &model, effort.as_deref(), &options)
                 .await?;
         }
         inner.check_abandoned(run_id)?;
+        let step_boundary = if let Some(path) = inner.config.profile.clone() {
+            let session = inner
+                .state
+                .lock()
+                .await
+                .session_id
+                .clone()
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || crate::antigravity_work::last_step(&path, &session))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(-1)
+        } else {
+            -1
+        };
         {
             let mut state = inner.state.lock().await;
             if state.closed {
@@ -582,6 +648,11 @@ impl AcpSession {
                     .mapper
                     .begin_turn(&input, &session_id, &input.message.text);
                 inner.deliver(&mut state, outs).await;
+                let requests = std::mem::take(&mut state.detached_requests);
+                drop(state);
+                for (id, params) in requests {
+                    handle_permission(inner, generation, id, &params).await;
+                }
                 return Ok(());
             }
             let instruction_state = InstructionState {
@@ -589,7 +660,11 @@ impl AcpSession {
                     .ok()
                     .is_some_and(|v| v == "plan"),
                 has_t3_mcp: inner.has_t3_mcp(),
-                has_device_tools: inner.config.mcp_servers.iter().any(|s| s.name == "conn" && s.device_tools),
+                has_device_tools: inner
+                    .config
+                    .mcp_servers
+                    .iter()
+                    .any(|s| s.name == "conn" && s.device_tools),
             };
             // A compacted session gets T3's instructions and notes again.
             let compaction_marker = state.mapper.compaction_marker();
@@ -623,24 +698,29 @@ impl AcpSession {
                     "ACP driver did not negotiate image prompt support",
                 ));
             }
-            // Antigravity (`buildAntigravityPrompt`): without `promptCapabilities.image` an
-            // image goes as its path only, which the text already carries.
-            let images_as_paths = flavor.client_file_reads
-                && state.initialize["agentCapabilities"]["promptCapabilities"]["image"] != true;
-            if !images_as_paths {
-                blocks.extend(image_blocks);
-            }
+            blocks.extend(image_blocks);
             if blocks.is_empty() {
                 return Err(protocol_error(
                     "ACP turn requires non-empty text or attachments",
                 ));
             }
-            let app_context: Vec<_> = input.app_context.iter().filter(|entry|
-                !slash && state.delivered_context.get(&entry.key) != Some(&entry.text)
-            ).cloned().collect();
-            blocks.splice(0..0, app_context.iter().map(|entry|
-                obj().with("type", "text").with("text", format!("<external_{0}>{1}</external_{0}>", entry.key, entry.text))
-            ));
+            let app_context: Vec<_> = input
+                .app_context
+                .iter()
+                .filter(|entry| {
+                    !slash && state.delivered_context.get(&entry.key) != Some(&entry.text)
+                })
+                .cloned()
+                .collect();
+            blocks.splice(
+                0..0,
+                app_context.iter().map(|entry| {
+                    obj().with("type", "text").with(
+                        "text",
+                        format!("<external_{0}>{1}</external_{0}>", entry.key, entry.text),
+                    )
+                }),
+            );
             if send_notes {
                 blocks.push(obj().with("type", "text").with("text", notes.clone()));
             }
@@ -666,12 +746,15 @@ impl AcpSession {
             } else {
                 None
             };
+            state.step_boundary = step_boundary;
             state.active_prompt = Some((generation, prompt_id.unwrap_or_default()));
             let outs = state.mapper.begin_turn(&input, &session_id, &user_text);
             inner.deliver(&mut state, outs).await;
             // The reply comes back through the driver, in order with the turn's updates.
             state.prompt_request = connection.send("session/prompt", params).await;
-            if state.prompt_request.is_none() {return Err(ProviderError::SessionStopped)}
+            if state.prompt_request.is_none() {
+                return Err(ProviderError::SessionStopped);
+            }
             inner.arm_inactivity(&mut state);
         }
         Ok(())
@@ -718,6 +801,8 @@ impl AcpSession {
                 setup: Value::Null,
                 prompt_seq: 0,
                 active_prompt: None,
+                detached_requests: Vec::new(),
+                step_boundary: -1,
                 last_progress: tokio::time::Instant::now(),
                 prompt_watchdog: None,
                 commands: None,
@@ -965,6 +1050,7 @@ impl Inner {
             state.session_id = Some(session_id.clone());
             state.mapper.set_root_session(&session_id);
             state.initialize = initialize;
+            state.mapper.model_window = grok_window(&setup, &state.initialize, &self.config.model);
             state.setup = setup;
             let buffered = std::mem::take(&mut state.startup_updates);
             for params in buffered
@@ -988,22 +1074,36 @@ impl Inner {
     }
 
     /// Activate the saved native conversation before publishing its thread or accepting input.
-    async fn activate(self: &Arc<Self>, connection: &Connection, initialize: &Value, session_id: &str) -> ProviderResult<()> {
+    async fn activate(
+        self: &Arc<Self>,
+        connection: &Connection,
+        initialize: &Value,
+        session_id: &str,
+    ) -> ProviderResult<()> {
         let agent = &initialize["agentCapabilities"];
         let caps = &initialize["capabilities"]["session"];
-        let method = if self.config.flavor.resume && (!agent["sessionCapabilities"]["resume"].is_null() || !caps["resume"].is_null()) {
+        let method = if self.config.flavor.resume
+            && (!agent["sessionCapabilities"]["resume"].is_null() || !caps["resume"].is_null())
+        {
             "session/resume"
         } else if agent["loadSession"] == true || caps.get("load").is_some_and(Value::is_object) {
             "session/load"
         } else {
-            return Err(protocol_error("The ACP agent did not advertise conversation loading or resumption"));
+            return Err(protocol_error(
+                "The ACP agent did not advertise conversation loading or resumption",
+            ));
         };
         let params = self.session_setup_params(initialize, Some(session_id));
-        let (tx,mut rx) = tokio::sync::watch::channel(None);
-        let allow_idle = method == "session/load" && self.config.flavor.completion == Completion::XAiPromptComplete;
+        let (tx, mut rx) = tokio::sync::watch::channel(None);
+        let allow_idle = method == "session/load"
+            && self.config.flavor.completion == Completion::XAiPromptComplete;
         {
             let mut state = self.state.lock().await;
-            if state.mapper.has_turn() || state.closed { return Err(protocol_error("Cannot activate a saved ACP conversation during a turn or after close")); }
+            if state.mapper.has_turn() || state.closed {
+                return Err(protocol_error(
+                    "Cannot activate a saved ACP conversation during a turn or after close",
+                ));
+            }
             state.replay_activity = Some((session_id.to_owned(), tx));
         }
         let idle = async {
@@ -1014,7 +1114,9 @@ impl Inner {
                         () = tokio::time::sleep_until(at + Duration::from_secs(2)) => break,
                         changed = rx.changed() => if changed.is_err() { std::future::pending::<()>().await; },
                     }
-                } else if rx.changed().await.is_err() { std::future::pending::<()>().await; }
+                } else if rx.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
             }
         };
         let setup = tokio::select! {
@@ -1025,7 +1127,9 @@ impl Inner {
         let mut state = self.state.lock().await;
         state.replay_activity = None;
         let setup = setup.map_err(|e| failed(self.config.flavor, method, &e))?;
-        if state.closed || state.runtime.is_none() { return Err(ProviderError::SessionStopped); }
+        if state.closed || state.runtime.is_none() {
+            return Err(ProviderError::SessionStopped);
+        }
         state.session_id = Some(session_id.to_owned());
         state.mapper.set_root_session(session_id);
         state.setup = setup;
@@ -1054,10 +1158,26 @@ impl Inner {
         // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
         // the agent, and the observer hears both.
         let update = &params["update"];
-        if matches!(update["sessionUpdate"].as_str(),Some("agent_message_chunk"|"agent_thought_chunk"|"agent_message"|"agent_thought"|"tool_call"|"tool_call_update"|"plan"|"plan_update"|"compaction_update"|"usage_update")) {
-            state.last_progress=tokio::time::Instant::now();
+        if matches!(
+            update["sessionUpdate"].as_str(),
+            Some(
+                "agent_message_chunk"
+                    | "agent_thought_chunk"
+                    | "agent_message"
+                    | "agent_thought"
+                    | "tool_call"
+                    | "tool_call_update"
+                    | "plan"
+                    | "plan_update"
+                    | "compaction_update"
+                    | "usage_update"
+            )
+        ) {
+            state.last_progress = tokio::time::Instant::now();
         }
-        if update["sessionUpdate"]=="current_mode_update" {state.setup["modes"]["currentModeId"]=update["currentModeId"].clone();}
+        if update["sessionUpdate"] == "current_mode_update" {
+            state.setup["modes"]["currentModeId"] = update["currentModeId"].clone();
+        }
         if update["sessionUpdate"] == "config_option_update"
             && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
         {
@@ -1068,11 +1188,122 @@ impl Inner {
         if update["sessionUpdate"] == "available_commands_update"
             && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
         {
-            state.commands = commands.as_array().map(|a|a.iter().filter_map(|c|c["name"].as_str().map(str::to_owned)).collect());
+            state.commands = commands.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|c| c["name"].as_str().map(str::to_owned))
+                    .collect()
+            });
             self.observe(state, HeldUpdate::AvailableCommands(commands.clone()));
         }
         let outs = state.mapper.session_update(params);
         self.deliver(state, outs).await;
+    }
+
+    async fn configure_mode(&self, connection: &Connection, policy: &Value) -> ProviderResult<()> {
+        if self.config.flavor.driver != "antigravity" {
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        let config = state.setup["configOptions"]
+            .as_array()
+            .and_then(|o| {
+                o.iter()
+                    .find(|o| o["category"] == "mode" && o["type"] == "select")
+            })
+            .cloned();
+        let modes = &state.setup["modes"];
+        let current = config
+            .as_ref()
+            .and_then(|o| o["currentValue"].as_str())
+            .or_else(|| modes["currentModeId"].as_str())
+            .unwrap_or("default")
+            .to_owned();
+        let mut available = Vec::new();
+        if let Some(opts) = config.as_ref().and_then(|c| c["options"].as_array()) {
+            for opt in opts {
+                if let Some(v) = opt["value"].as_str() {
+                    available.push(v.to_owned())
+                } else if let Some(group) = opt["options"].as_array() {
+                    available.extend(
+                        group
+                            .iter()
+                            .filter_map(|c| c["value"].as_str().map(str::to_owned)),
+                    );
+                }
+            }
+        } else if let Some(opts) = modes["availableModes"].as_array() {
+            available.extend(
+                opts.iter()
+                    .filter_map(|c| c["id"].as_str().map(str::to_owned)),
+            );
+        }
+        let plan = policy["interactionMode"] == "plan";
+        let desired = if plan {
+            let Some(id) = available
+                .iter()
+                .find(|id| id.eq_ignore_ascii_case("plan") || id.eq_ignore_ascii_case("architect"))
+            else {
+                return Ok(());
+            };
+            if *id != current && state.previous_mode.is_none() {
+                state.previous_mode = Some(current.clone());
+            }
+            id.clone()
+        } else if policy["runtimeMode"] == "auto" && available.iter().any(|s| s == "auto") {
+            "auto".to_owned()
+        } else if let Some(previous) = &state.previous_mode {
+            previous.clone()
+        } else if current == "auto" || current == "plan" {
+            "default".to_owned()
+        } else {
+            return Ok(());
+        };
+        if desired == current || !available.contains(&desired) {
+            return Ok(());
+        }
+        let id = state
+            .session_id
+            .clone()
+            .ok_or(ProviderError::SessionStopped)?;
+        let config_id = config
+            .as_ref()
+            .and_then(|v| v["id"].as_str())
+            .map(str::to_owned);
+        drop(state);
+        let (method, params) = if let Some(key) = config_id.as_deref() {
+            (
+                "session/set_config_option",
+                obj()
+                    .with("sessionId", id)
+                    .with("configId", key)
+                    .with("value", desired.clone()),
+            )
+        } else {
+            (
+                "session/set_mode",
+                obj().with("sessionId", id).with("modeId", desired.clone()),
+            )
+        };
+        let reply = connection
+            .setup_call(method, params)
+            .await
+            .map_err(|e| failed(self.config.flavor, method, &e))?;
+        let mut state = self.state.lock().await;
+        if reply["configOptions"].is_array() {
+            state.setup["configOptions"] = reply["configOptions"].clone();
+        } else if let Some(key) = config_id
+            && let Some(opts) = state.setup["configOptions"].as_array_mut()
+            && let Some(opt) = opts.iter_mut().find(|v| v["id"] == key)
+        {
+            opt["currentValue"] = json!(desired);
+        }
+        if state.setup["modes"].is_object() {
+            state.setup["modes"]["currentModeId"] = json!(desired);
+        }
+        if !plan {
+            state.previous_mode = None;
+        }
+        Ok(())
     }
 
     /// `initialize`, as `AcpSessionRuntime.initializeOnce` and effect-acp's negotiating
@@ -1220,6 +1451,7 @@ impl Inner {
         if let Some(model_id) = sent {
             state.setup["models"]["currentModelId"] = json!(model_id);
         }
+        state.mapper.model_window = grok_window(&state.setup, &state.initialize, model);
         state.active_model = Some(key);
         Ok(())
     }
@@ -1291,7 +1523,10 @@ impl Inner {
             .with("sessionId", session_id)
             .with("configId", config_id.clone())
             .with("value", value.clone());
-        match connection.setup_call("session/set_config_option", params).await {
+        match connection
+            .setup_call("session/set_config_option", params)
+            .await
+        {
             Ok(reply) => {
                 let mut state = self.state.lock().await;
                 self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
@@ -1375,6 +1610,19 @@ impl Inner {
     /// attachments folder, as `{type: image, data, mimeType}` after the text.
     async fn image_blocks(&self, attachments: &[Value]) -> ProviderResult<Vec<J>> {
         use conn_provider_support::attachments::{is_native_image, saved_path};
+        if self.config.flavor.driver == "antigravity" {
+            let state = self.state.lock().await;
+            let caps = state.initialize["agentCapabilities"]["promptCapabilities"].clone();
+            drop(state);
+            let dir = self.config.attachments_dir.clone();
+            let attachments = attachments.to_vec();
+            return tokio::task::spawn_blocking(move || {
+                crate::antigravity::attachment_blocks(&attachments, dir.as_deref(), &caps)
+            })
+            .await
+            .map_err(|_| protocol_error("Could not read Antigravity attachments"))?
+            .map_err(protocol_error);
+        }
         let mut blocks = Vec::new();
         for attachment in attachments.iter().filter(|a| is_native_image(a)) {
             let id = attachment["id"].as_str().unwrap_or("").to_owned();
@@ -1466,34 +1714,82 @@ impl Inner {
         });
     }
 
-    fn arm_inactivity(self:&Arc<Self>, state:&mut State<DynEnv>){
-        if let Some(previous)=state.prompt_watchdog.take() {previous.abort();}
-        if self.config.flavor.driver!="antigravity"{return}
-        let weak=Arc::downgrade(self);
-        let generation=state.generation;
-        let request=state.prompt_request;
-        state.last_progress=tokio::time::Instant::now();
-        state.prompt_watchdog=Some(tokio::spawn(async move{
-            const LIMIT: Duration=Duration::from_secs(15*60);
+    fn arm_inactivity(self: &Arc<Self>, state: &mut State<DynEnv>) {
+        if let Some(previous) = state.prompt_watchdog.take() {
+            previous.abort();
+        }
+        if self.config.flavor.driver != "antigravity" {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let generation = state.generation;
+        let request = state.prompt_request;
+        state.last_progress = tokio::time::Instant::now();
+        state.prompt_watchdog = Some(tokio::spawn(async move {
+            const LIMIT: Duration = Duration::from_secs(15 * 60);
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                let Some(inner)=weak.upgrade() else{return};
-                let mut state=inner.state.lock().await;
-                if state.generation!=generation || state.active_prompt.is_none() || state.prompt_request!=request{return}
-                if state.mapper.waiting_for_input_or_tool(){state.last_progress=tokio::time::Instant::now();continue}
-                if state.last_progress.elapsed()<LIMIT {continue}
-                state.active_prompt=None;
-                state.prompt_request=None;
-                state.delivery=None;
-                let outs=state.mapper.prompt_settled(PromptOutcome::Failed{message:"The Antigravity agent stopped responding for 15 minutes.".into(),code:None});
-                inner.deliver(&mut state,outs).await;
-                state.restart_required=true;
+                let Some(inner) = weak.upgrade() else { return };
+                let mut state = inner.state.lock().await;
+                if state.generation != generation
+                    || state.active_prompt.is_none()
+                    || state.prompt_request != request
+                {
+                    return;
+                }
+                if state.mapper.waiting_for_input_or_tool() {
+                    state.last_progress = tokio::time::Instant::now();
+                    continue;
+                }
+                if state.last_progress.elapsed() < LIMIT {
+                    continue;
+                }
+                state.active_prompt = None;
+                state.prompt_request = None;
+                state.delivery = None;
+                let outs = state.mapper.prompt_settled(PromptOutcome::Failed {
+                    message: "The Antigravity agent stopped responding for 15 minutes.".into(),
+                    code: None,
+                });
+                inner.deliver(&mut state, outs).await;
+                state.restart_required = true;
                 state.prompt_watchdog.take();
                 drop(state);
                 inner.end_runtime().await;
                 return;
             }
         }));
+    }
+
+    async fn reconcile_children(self: &Arc<Self>, generation: u64) {
+        if self.config.flavor.driver != "antigravity" {
+            return;
+        }
+        let state = self.state.lock().await;
+        let ids = state.mapper.running_child_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let turn = state.mapper.current_provider_turn_id().map(str::to_owned);
+        let session = state.session_id.clone().unwrap_or_default();
+        drop(state);
+        let active = if let Some(profile) = self.config.profile.clone() {
+            tokio::task::spawn_blocking(move || {
+                crate::antigravity_work::active_children(&profile, &session, &ids)
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut state = self.state.lock().await;
+        if state.generation != generation
+            || state.mapper.current_provider_turn_id() != turn.as_deref()
+        {
+            return;
+        }
+        let out = state.mapper.idle_recorded_children(&active);
+        self.deliver(&mut state, out).await;
     }
 
     /// Settles the running prompt once (reply, or Grok's completion notification).
@@ -1503,6 +1799,34 @@ impl Inner {
         prompt_id: Option<&str>,
         outcome: PromptOutcome,
     ) {
+        self.reconcile_children(generation).await;
+        let mut outcome = outcome;
+        if let Some(profile) = self.config.profile.clone()
+            && matches!(&outcome,PromptOutcome::Stopped(r) if r=="end_turn")
+        {
+            let state = self.state.lock().await;
+            let (session, after, request) = (
+                state.session_id.clone().unwrap_or_default(),
+                state.step_boundary,
+                state.prompt_request,
+            );
+            drop(state);
+            let failure = tokio::task::spawn_blocking(move || {
+                crate::antigravity_work::terminal_error(&profile, &session, after)
+            })
+            .await
+            .ok()
+            .flatten();
+            if self.state.lock().await.prompt_request != request {
+                return;
+            }
+            if let Some(message) = failure {
+                outcome = PromptOutcome::Failed {
+                    message,
+                    code: None,
+                };
+            }
+        }
         let mut state = self.state.lock().await;
         if state.generation != generation {
             return;
@@ -1516,13 +1840,17 @@ impl Inner {
             return;
         }
         let outcome = state.mapper.prompt_outcome(outcome);
-        if let Some(timer)=state.prompt_watchdog.take(){timer.abort();}
+        if let Some(timer) = state.prompt_watchdog.take() {
+            timer.abort();
+        }
         let delivery = state.delivery.take();
         // Grok cancels locally, refusals discard the prompt, and errors need a retry.
         if let Some(delivery) = delivery
             && matches!(&outcome, PromptOutcome::Stopped(reason) if reason != "cancelled" && reason != "refusal" && reason != "error")
         {
-            state.delivered_context.extend(delivery.app_context.into_iter().map(|e| (e.key,e.text)));
+            state
+                .delivered_context
+                .extend(delivery.app_context.into_iter().map(|e| (e.key, e.text)));
             if let Some(instruction_state) = delivery.instruction_state {
                 state.instruction_state = Some(instruction_state);
                 state
@@ -1565,16 +1893,52 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 handle_notification(&inner, generation, &method, &params).await;
             }
             Incoming::Request { id, method, params } => {
+                if inner.config.flavor.driver == "grok"
+                    && matches!(
+                        method.as_str(),
+                        "x.ai/exit_plan_mode" | "_x.ai/exit_plan_mode"
+                    )
+                {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        continue;
+                    }
+                    let mut outs = state.mapper.capture_exit_plan(&params);
+                    outs.push(Out::Reply{id,result:obj().with("outcome","abandoned").with("feedback","The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.")});
+                    inner.deliver(&mut state, outs).await;
+                    continue;
+                }
                 if method == "elicitation/create" {
                     let mut state = inner.state.lock().await;
-                    if state.generation != generation {continue}
+                    if state.generation != generation {
+                        continue;
+                    }
                     let schema = &params["requestedSchema"];
-                    let out = if state.mapper.has_turn() && params["mode"] == "form"
-                        && let Some(questions) = crate::elicitation::form_questions(schema,params["message"].as_str().unwrap_or("Choose an option.")) {
-                        let native_id = format!("{}:elicitation:{}",state.session_id.as_deref().unwrap_or(""),id.to_value());
-                        state.mapper.user_input_request(id, &native_id,&native_id,questions,mapper::Pending::Form(schema.clone()))
-                    } else { vec![Out::Reply{id,result:obj().with("action","decline")}] };
-                    inner.deliver(&mut state,out).await;
+                    let out = if state.mapper.has_turn()
+                        && params["mode"] == "form"
+                        && let Some(questions) = crate::elicitation::form_questions(
+                            schema,
+                            params["message"].as_str().unwrap_or("Choose an option."),
+                        ) {
+                        let native_id = format!(
+                            "{}:elicitation:{}",
+                            state.session_id.as_deref().unwrap_or(""),
+                            id.to_value()
+                        );
+                        state.mapper.user_input_request(
+                            id,
+                            &native_id,
+                            &native_id,
+                            questions,
+                            mapper::Pending::Form(schema.clone()),
+                        )
+                    } else {
+                        vec![Out::Reply {
+                            id,
+                            result: obj().with("action", "decline"),
+                        }]
+                    };
+                    inner.deliver(&mut state, out).await;
                     continue;
                 }
                 if method == "session/request_permission" {
@@ -1645,14 +2009,20 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 let outcome = match result {
                     Ok(reply) => {
                         if inner.config.flavor.driver == "antigravity" {
-                            inner.state.lock().await.mapper.record_prompt_usage(&reply["usage"]);
+                            inner
+                                .state
+                                .lock()
+                                .await
+                                .mapper
+                                .record_prompt_usage(&reply["usage"]);
                         }
                         PromptOutcome::Stopped(
-                        reply["stopReason"]
-                            .as_str()
-                            .unwrap_or("end_turn")
-                            .to_owned(),
-                    )},
+                            reply["stopReason"]
+                                .as_str()
+                                .unwrap_or("end_turn")
+                                .to_owned(),
+                        )
+                    }
                     Err(CallError::Rpc(error)) => PromptOutcome::Failed {
                         message: error.message,
                         code: Some(error.code),
@@ -1738,6 +2108,28 @@ async fn handle_read_text_file(inner: &Arc<Inner>, generation: u64, id: RequestI
 /// `handleRequestPermission`: an immediate allow or deny under the policy, or a request the
 /// user answers.
 async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, params: &Value) {
+    if inner.config.flavor.driver == "antigravity" {
+        let mut state = inner.state.lock().await;
+        if state.generation != generation {
+            return;
+        }
+        if !state.mapper.has_turn() && state.session_id.as_deref() == params["sessionId"].as_str() {
+            let mut outs = Vec::new();
+            state.mapper.offer_continuation(&mut outs);
+            if !outs.is_empty() || !state.detached_requests.is_empty() {
+                if state.detached_requests.len() < 64 {
+                    state.detached_requests.push((id, params.clone()));
+                } else {
+                    outs.push(Out::Reply {
+                        id,
+                        result: obj().with("outcome", obj().with("outcome", "cancelled")),
+                    });
+                }
+                inner.deliver(&mut state, outs).await;
+                return;
+            }
+        }
+    }
     let (params, policy, kind) = {
         let state = inner.state.lock().await;
         if state.generation != generation {
@@ -1751,13 +2143,32 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
             .or_else(|| state.mapper.tracked_tool_kind(tool_call_id));
         (params, state.policy.clone(), kind)
     };
-    if inner.config.flavor.driver == "antigravity" && let Some(key) = params["toolCall"]["toolCallId"].as_str().filter(|s| s.starts_with("interaction_")) {
+    if inner.config.flavor.driver == "antigravity"
+        && let Some(key) = params["toolCall"]["toolCallId"]
+            .as_str()
+            .filter(|s| s.starts_with("interaction_"))
+    {
         let mut state = inner.state.lock().await;
-        if state.generation != generation {return}
-        let out = if state.mapper.has_turn() && let Some(questions)=crate::elicitation::permission_question(&params){
-            state.mapper.user_input_request(id,key,key,questions.clone(),mapper::Pending::AntigravityQuestion(questions))
-        }else{vec![Out::Reply{id,result:obj().with("outcome",obj().with("outcome","cancelled"))}]};
-        inner.deliver(&mut state,out).await;
+        if state.generation != generation {
+            return;
+        }
+        let out = if state.mapper.has_turn()
+            && let Some(questions) = crate::elicitation::permission_question(&params)
+        {
+            state.mapper.user_input_request(
+                id,
+                key,
+                key,
+                questions.clone(),
+                mapper::Pending::AntigravityQuestion(questions),
+            )
+        } else {
+            vec![Out::Reply {
+                id,
+                result: obj().with("outcome", obj().with("outcome", "cancelled")),
+            }]
+        };
+        inner.deliver(&mut state, out).await;
         return;
     }
     let locations: Vec<String> = params["toolCall"]["locations"]
@@ -1794,22 +2205,71 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
 
 async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, params: &Value) {
     if method == "session/update" {
+        if inner.config.flavor.driver == "antigravity"
+            && params["update"]["sessionUpdate"] == "usage_update"
+            && inner.state.lock().await.active_prompt.is_none()
+        {
+            inner.reconcile_children(generation).await;
+        }
+        let enriched = if inner.config.flavor.driver == "antigravity"
+            && params["update"]["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|v| v["type"] == "diff"))
+        {
+            let mut params = params.clone();
+            let cwd = inner.config.cwd.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::antigravity_edits::enrich(&mut params, std::path::Path::new(&cwd));
+                params
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let params = enriched.as_ref().unwrap_or(params);
         let mut state = inner.state.lock().await;
         if state.generation != generation {
             return;
         }
-        if let Some((target,activity)) = &state.replay_activity
-            && params["sessionId"] == target.as_str() {
+        if let Some((target, activity)) = &state.replay_activity
+            && params["sessionId"] == target.as_str()
+        {
             let update = &params["update"];
             let progress = match update["sessionUpdate"].as_str() {
-                Some("agent_message_chunk" | "agent_thought_chunk") => update["content"]["text"].as_str().is_some_and(|t| !t.is_empty()),
-                Some("agent_message" | "agent_thought") => update["content"].as_array().is_some_and(|items| items.iter().any(|v| v["text"].as_str().is_some_and(|t| !t.is_empty()))),
-                Some("tool_call" | "tool_call_update" | "plan" | "plan_update" | "plan_removed" | "available_commands_update" | "current_mode_update" | "config_option_update" | "session_info_update" | "usage_update" | "compaction_update" | "compaction_summary_chunk") => true,
+                Some("agent_message_chunk" | "agent_thought_chunk") => update["content"]["text"]
+                    .as_str()
+                    .is_some_and(|t| !t.is_empty()),
+                Some("agent_message" | "agent_thought") => {
+                    update["content"].as_array().is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|v| v["text"].as_str().is_some_and(|t| !t.is_empty()))
+                    })
+                }
+                Some(
+                    "tool_call"
+                    | "tool_call_update"
+                    | "plan"
+                    | "plan_update"
+                    | "plan_removed"
+                    | "available_commands_update"
+                    | "current_mode_update"
+                    | "config_option_update"
+                    | "session_info_update"
+                    | "usage_update"
+                    | "compaction_update"
+                    | "compaction_summary_chunk",
+                ) => true,
                 _ => false,
             };
-            if params["_meta"]["isReplay"] == true || progress { activity.send_replace(Some(tokio::time::Instant::now())); }
+            if params["_meta"]["isReplay"] == true || progress {
+                activity.send_replace(Some(tokio::time::Instant::now()));
+            }
             // A load can replay the user's entire history. The engine already owns those turns.
-            if !is_startup_metadata(params) { return; }
+            if !is_startup_metadata(params) {
+                return;
+            }
         }
         let Some(root) = state.session_id.clone() else {
             // Starting: keep the latest metadata per session and kind until the root is known.
@@ -1984,13 +2444,40 @@ fn xai_prompt_complete(method: &str, params: &Value) -> Option<(String, PromptOu
 
 /// `acpMcpContext` + `sessionMcpServers` for each `/mcp` server (see
 /// `Inner::session_mcp_servers`).
-pub(crate) fn apply_thread_environment(env: &mut Vec<(String, String)>, thread_id: &str, servers: &[McpServer], command: &str) {
-    let Some(server) = servers.iter().find(|s| s.name == "conn") else { return };
-    let Some((_, auth)) = server.headers.iter().find(|(k,_)| k.eq_ignore_ascii_case("authorization")) else { return };
-    for (name, value) in [("T3CODE_THREAD_ID", thread_id), ("T3_ACP_MCP_NODE", command), ("T3_ACP_MCP_ENDPOINT", server.url.as_str()), ("T3_ACP_MCP_AUTHORIZATION", auth)] {
-        env.retain(|(k,_)| k != name);
-        env.push((name.to_owned(),value.to_owned()));
+pub(crate) fn apply_thread_environment(
+    env: &mut Vec<(String, String)>,
+    thread_id: &str,
+    servers: &[McpServer],
+    command: &str,
+) {
+    let Some(server) = servers.iter().find(|s| s.name == "conn") else {
+        return;
+    };
+    let Some((_, auth)) = server
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    else {
+        return;
+    };
+    for (name, value) in [
+        ("T3CODE_THREAD_ID", thread_id),
+        ("T3_ACP_MCP_NODE", command),
+        ("T3_ACP_MCP_ENDPOINT", server.url.as_str()),
+        ("T3_ACP_MCP_AUTHORIZATION", auth),
+    ] {
+        env.retain(|(k, _)| k != name);
+        env.push((name.to_owned(), value.to_owned()));
     }
+}
+
+fn grok_window(setup: &Value, initialize: &Value, model: &str) -> Option<u64> {
+    let models = setup["models"]["availableModels"]
+        .as_array()
+        .or_else(|| initialize["_meta"]["modelState"]["availableModels"].as_array())?;
+    models.iter().find(|m| m["modelId"] == model)?["_meta"]["totalContextTokens"]
+        .as_u64()
+        .filter(|n| *n > 0)
 }
 
 fn mcp_entries(
@@ -2070,11 +2557,19 @@ impl Session for AcpSession {
     ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
         Box::pin(async move {
             let mut thread = to_json(&input.provider_thread);
-            let native = thread["nativeThreadRef"]["nativeId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| protocol_error("Saved ACP conversation has no native id"))?;
+            let native = thread["nativeThreadRef"]["nativeId"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| protocol_error("Saved ACP conversation has no native id"))?;
             let inner = &self.inner;
             let state = inner.state.lock().await;
             if state.session_id.as_deref() != Some(native) {
-                let connection = state.runtime.as_ref().ok_or(ProviderError::SessionStopped)?.connection.clone();
+                let connection = state
+                    .runtime
+                    .as_ref()
+                    .ok_or(ProviderError::SessionStopped)?
+                    .connection
+                    .clone();
                 let initialize = state.initialize.clone();
                 drop(state);
                 inner.activate(&connection, &initialize, native).await?;
@@ -2101,40 +2596,97 @@ impl Session for AcpSession {
         })
     }
 
-    fn steer_turn(&self, input:conn_provider::SteerInput)->BoxFuture<'_,ProviderResult<()>> {
+    fn steer_turn(&self, input: conn_provider::SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
-            let inner=&self.inner;
-            let attachments:Vec<_>=input.message.attachments.iter().map(to_json).collect();
-            let images=inner.image_blocks(&attachments).await?;
-            let mut state=inner.state.lock().await;
-            if state.mapper.current_provider_turn_id()!=Some(input.provider_turn_id.as_str()) || state.mapper.turn_interrupted(){
+            let inner = &self.inner;
+            let attachments: Vec<_> = input.message.attachments.iter().map(to_json).collect();
+            let images = inner.image_blocks(&attachments).await?;
+            let mut state = inner.state.lock().await;
+            if state.mapper.current_provider_turn_id() != Some(input.provider_turn_id.as_str())
+                || state.mapper.turn_interrupted()
+            {
                 return Err(protocol_error("The ACP turn is no longer active"));
             }
-            let connection=state.runtime.as_ref().ok_or(ProviderError::SessionStopped)?.connection.clone();
-            let native=state.session_id.clone().ok_or(ProviderError::SessionStopped)?;
-            let entries:Vec<_>=input.app_context.into_iter().filter(|e| !input.message.text.trim_start().starts_with('/') && state.delivered_context.get(&e.key)!=Some(&e.text)).collect();
-            let notes:Vec<_>=entries.iter().map(|e|format!("<external_{0}>{1}</external_{0}>",e.key,e.text)).collect();
-            if inner.config.flavor.driver=="grok" {
-                if images.len()!=attachments.len(){return Err(ProviderError::Unsupported{operation:"steer_turn"})}
-                let text=if notes.is_empty(){input.message.text}else{[notes.join("\n"),input.message.text].join("\n\n")};
-                let params=obj().with("sessionId",native).with("text",text).with_opt("content",(!images.is_empty()).then_some(J::Arr(images)));
+            let connection = state
+                .runtime
+                .as_ref()
+                .ok_or(ProviderError::SessionStopped)?
+                .connection
+                .clone();
+            let native = state
+                .session_id
+                .clone()
+                .ok_or(ProviderError::SessionStopped)?;
+            let entries: Vec<_> = input
+                .app_context
+                .into_iter()
+                .filter(|e| {
+                    !input.message.text.trim_start().starts_with('/')
+                        && state.delivered_context.get(&e.key) != Some(&e.text)
+                })
+                .collect();
+            let notes: Vec<_> = entries
+                .iter()
+                .map(|e| format!("<external_{0}>{1}</external_{0}>", e.key, e.text))
+                .collect();
+            if inner.config.flavor.driver == "grok" {
+                if images.len() != attachments.len() {
+                    return Err(ProviderError::Unsupported {
+                        operation: "steer_turn",
+                    });
+                }
+                let text = if notes.is_empty() {
+                    input.message.text
+                } else {
+                    [notes.join("\n"), input.message.text].join("\n\n")
+                };
+                let params = obj()
+                    .with("sessionId", native)
+                    .with("text", text)
+                    .with_opt("content", (!images.is_empty()).then_some(J::Arr(images)));
                 drop(state);
-                let reply=connection.setup_call("_x.ai/interject",params).await.map_err(|e|failed(inner.config.flavor,"_x.ai/interject",&e))?;
-                if reply["result"]["status"]!="queued"{return Err(protocol_error("Grok did not queue the interjection"))}
-                inner.state.lock().await.delivered_context.extend(entries.into_iter().map(|e|(e.key,e.text)));
+                let reply = connection
+                    .setup_call("_x.ai/interject", params)
+                    .await
+                    .map_err(|e| failed(inner.config.flavor, "_x.ai/interject", &e))?;
+                if reply["result"]["status"] != "queued" {
+                    return Err(protocol_error("Grok did not queue the interjection"));
+                }
+                inner
+                    .state
+                    .lock()
+                    .await
+                    .delivered_context
+                    .extend(entries.into_iter().map(|e| (e.key, e.text)));
                 return Ok(());
             }
-            if !crate::antigravity::version_triple(state.initialize["agentInfo"]["version"].as_str()).is_some_and(|v| v>=[1,5,0]){
-                return Err(ProviderError::Unsupported{operation:"steer_turn"});
+            if !crate::antigravity::version_triple(
+                state.initialize["agentInfo"]["version"].as_str(),
+            )
+            .is_some_and(|v| v >= [1, 5, 0])
+            {
+                return Err(ProviderError::Unsupported {
+                    operation: "steer_turn",
+                });
             }
-            let mut blocks:Vec<_>=notes.into_iter().map(|s|obj().with("type","text").with("text",s)).collect();
-            blocks.push(obj().with("type","text").with("text",input.message.text));
+            let mut blocks: Vec<_> = notes
+                .into_iter()
+                .map(|s| obj().with("type", "text").with("text", s))
+                .collect();
+            blocks.push(obj().with("type", "text").with("text", input.message.text));
             blocks.extend(images);
-            let params=obj().with("sessionId",native).with("prompt",J::Arr(blocks));
-            let request=connection.send("session/prompt",params).await.ok_or(ProviderError::SessionStopped)?;
-            state.prompt_request=Some(request);
-            state.active_prompt=Some((state.generation,String::new()));
-            if let Some(delivery)=state.delivery.as_mut(){delivery.app_context.extend(entries);}
+            let params = obj()
+                .with("sessionId", native)
+                .with("prompt", J::Arr(blocks));
+            let request = connection
+                .send("session/prompt", params)
+                .await
+                .ok_or(ProviderError::SessionStopped)?;
+            state.prompt_request = Some(request);
+            state.active_prompt = Some((state.generation, String::new()));
+            if let Some(delivery) = state.delivery.as_mut() {
+                delivery.app_context.extend(entries);
+            }
             inner.arm_inactivity(&mut state);
             Ok(())
         })
@@ -2247,6 +2799,10 @@ impl Session for AcpSession {
                     return Closed::RuntimeStopped;
                 }
                 state.closed = true;
+                if let Some(timer) = state.prompt_watchdog.take() {
+                    timer.abort();
+                }
+                state.detached_requests.clear();
                 state.mapper.close_background();
                 let can_close =
                     !state.initialize["agentCapabilities"]["sessionCapabilities"]["close"]
@@ -2326,6 +2882,7 @@ mod spawn_tests {
             runtime_version: None,
             self_command: "/conn-server".into(),
             default_model: None,
+            profile: None,
             skill_cli: None,
             observer: None,
         }

@@ -25,3 +25,4 @@ pub mod process;
 pub mod process_tree;
 pub mod redact;
 pub mod sdk_host;
+pub mod skill_mentions;

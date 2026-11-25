@@ -89,7 +89,12 @@ impl AntigravityProvider {
     }
 
     /// The agent process for a session in `cwd`: `agy acp` from the resolved executable.
-    async fn session_spawner(&self, cwd: &str, thread: Option<&str>, servers: &[conn_provider::McpServer]) -> ProviderResult<session::Spawner> {
+    async fn session_spawner(
+        &self,
+        cwd: &str,
+        thread: Option<&str>,
+        servers: &[conn_provider::McpServer],
+    ) -> ProviderResult<session::Spawner> {
         #[cfg(test)]
         if let Some(spawner) = &self.test_spawner {
             return Ok(spawner.clone());
@@ -102,7 +107,9 @@ impl AntigravityProvider {
                 detail,
             })?;
         let mut env = self.base_env();
-        if let Some(thread) = thread { session::apply_thread_environment(&mut env, thread, servers, &self.self_command()); }
+        if let Some(thread) = thread {
+            session::apply_thread_environment(&mut env, thread, servers, &self.self_command());
+        }
         Ok(spawner(
             executable,
             self.dirs.clone(),
@@ -264,7 +271,9 @@ impl AntigravityProvider {
             }));
         }
         let workspace = thread.is_some();
-        let spawner = self.session_spawner(&cwd, thread.as_deref(), &mcp_servers).await?;
+        let spawner = self
+            .session_spawner(&cwd, thread.as_deref(), &mcp_servers)
+            .await?;
         let (dirs, settings) = (self.dirs.clone(), self.settings.clone());
         tokio::task::spawn_blocking(move || antigravity::prepare_profile(&dirs, &settings))
             .await
@@ -298,8 +307,9 @@ impl AntigravityProvider {
             self_command,
             // A thread applies the configured default; a model refresh starts, as T3's does,
             // from the model the agent has selected.
+            profile: Some(self.dirs.profile.clone()),
             skill_cli: None,
-        default_model: workspace
+            default_model: workspace
                 .then(|| antigravity::catalog(&self.config.model_manifest))
                 .flatten()
                 .and_then(|catalog| catalog.default_model),
@@ -424,7 +434,11 @@ impl AntigravityProvider {
             .map_err(|error| ProviderError::Failed {
                 operation: "refresh-models",
                 detail: match error {
-                    OpenError::Aborted => REFRESH_TIMED_OUT.to_owned(),
+                    OpenError::Aborted
+                    | OpenError::Other(ProviderError::Failed {
+                        operation: "acp_setup_timeout",
+                        ..
+                    }) => REFRESH_TIMED_OUT.to_owned(),
                     error => refresh_failure_detail(&ProviderError::from(error)),
                 },
             })
@@ -657,7 +671,10 @@ impl Provider for AntigravityProvider {
 
     fn capabilities(&self) -> BoxFuture<'_, ProviderResult<ProviderCapabilities>> {
         Box::pin(async move {
-            from_json(antigravity::runtime_capabilities(lock(&self.observed).version.as_deref())).map_err(|e| ProviderError::Protocol {
+            from_json(antigravity::runtime_capabilities(
+                lock(&self.observed).version.as_deref(),
+            ))
+            .map_err(|e| ProviderError::Protocol {
                 detail: e.to_string(),
             })
         })
@@ -696,33 +713,78 @@ impl Provider for AntigravityProvider {
         })
     }
 
-    fn generate_text(&self, request: conn_provider::TextGenerationRequest) -> BoxFuture<'_, ProviderResult<Value>> {
+    fn native_child_work(
+        &self,
+        root_session_id: String,
+        native_task_id: String,
+        launch: Value,
+        siblings: Vec<Value>,
+    ) -> BoxFuture<'_, ProviderResult<Vec<Value>>> {
+        let profile = self.dirs.profile.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::antigravity_work::children(
+                    &profile,
+                    &root_session_id,
+                    &native_task_id,
+                    &launch,
+                    &siblings,
+                )
+            })
+            .await
+            .map_err(|_| ProviderError::SessionStopped)
+        })
+    }
+
+    fn generate_text(
+        &self,
+        request: conn_provider::TextGenerationRequest,
+    ) -> BoxFuture<'_, ProviderResult<Value>> {
         Box::pin(async move {
             if !self.settings.enabled || request.investigate {
-                return Err(ProviderError::Unsupported { operation: "generate_text" });
+                return Err(ProviderError::Unsupported {
+                    operation: "generate_text",
+                });
             }
             let profile = self.dirs.profile.clone();
             let parent = self.dirs.runtime_temp.join("text");
-            let cwd = tokio::task::spawn_blocking(move || {
+            // Own the empty directory across executable discovery. Cancellation can also occur
+            // while the blocking creation is returning its result to this task.
+            struct Scratch(Option<PathBuf>);
+            impl Drop for Scratch {
+                fn drop(&mut self) {
+                    if let Some(dir) = &self.0 {
+                        let _ = std::fs::remove_dir(dir);
+                    }
+                }
+            }
+            let mut scratch = tokio::task::spawn_blocking(move || {
                 if !crate::text_generation::profile_allows_generation(&profile) {
                     return Err(std::io::Error::other("Antigravity text generation is unavailable for profiles with global hooks or MCP configuration."));
                 }
-                make_run_temp(&parent)
+                make_run_temp(&parent).map(|dir| Scratch(Some(dir)))
             }).await.map_err(|_| ProviderError::SessionStopped)?.map_err(|e| ProviderError::Failed {operation:"generate_text",detail:e.to_string()})?;
-            let cwd = cwd.to_string_lossy().into_owned();
-            let spawner = match self.session_spawner(&cwd, None, &[]).await {
-                Ok(spawner) => spawner,
-                Err(error) => {
-                    let _ = tokio::fs::remove_dir(&cwd).await;
-                    return Err(error);
-                }
-            };
-            crate::text_generation::Helper { cwd, spawner,
+            let cwd = scratch
+                .0
+                .as_deref()
+                .ok_or(ProviderError::SessionStopped)?
+                .to_string_lossy()
+                .into_owned();
+            let spawner = self.session_spawner(&cwd, None, &[]).await?;
+            // From the first poll of generate onward, the worker owns cleanup through child exit.
+            scratch.0.take();
+            crate::text_generation::Helper {
+                cwd,
+                spawner,
                 antigravity: Some(crate::text_generation::Antigravity {
-                    profile: self.dirs.profile.clone(), auth_method:self.settings.auth_method.clone(),
-                    default_model:antigravity::catalog(&self.config.model_manifest).and_then(|catalog|catalog.default_model),
+                    profile: self.dirs.profile.clone(),
+                    auth_method: self.settings.auth_method.clone(),
+                    default_model: antigravity::catalog(&self.config.model_manifest)
+                        .and_then(|catalog| catalog.default_model),
                 }),
-            }.generate(request).await
+            }
+            .generate(request)
+            .await
         })
     }
 
@@ -769,7 +831,7 @@ impl Provider for AntigravityProvider {
                 )
                 .await?;
             let now = SystemEnv.now();
-            let (initialize,_) = session.handshake().await;
+            let (initialize, _) = session.handshake().await;
             let row = json!({
                 "id": input.provider_session_id.as_str(),
                 "driver": ANTIGRAVITY.driver,

@@ -148,7 +148,7 @@ source, API provider; never a token), slash commands, models, usage windows and 
 Before the first probe the entry is T3's pending one. `CONN_CLAUDE_STATUS_PROBE=off` turns the
 probe off; every check that starts the server sets it, so no check runs this machine's
 `claude`. Not ported: reset credits (Anthropic's API), the organization id (Claude's account
-file), the version advisory (a registry lookup), skills, custom models, applying effort caps.
+file), the version advisory (a registry lookup), plugin skill discovery, custom models and applying effort caps.
 Proof: `tools/probe-conformance/run.mjs`, 11 status scenarios against T3's own function (and
 5 title scenarios against T3's `generateThreadTitle`); `instance-settings` and
 `title-instance` run an instance with a `~` binary path, a sensitive variable and
@@ -194,7 +194,7 @@ counts as background work (`Session::has_pending_background_work`).
 | steer written (`priority: "now"`)                 | `steer.updated` pending; completed on `command_lifecycle` started or an echo; the `aborted_*` result folds in          |
 | `can_use_tool`                                    | approval: `node` + `runtime_request` + `turn_item` (`approval_request`)                                                |
 | `can_use_tool` AskUserQuestion / ExitPlanMode     | `user_input_request` / `plan.updated` (proposed plan)                                                                  |
-| `elicitation`, `request_user_dialog`              | field-less form as an approval card; `resume_return` as a question                                                     |
+| `elicitation`, `request_user_dialog`              | consent forms as an approval card; `resume_return` as a question                                                     |
 | `control_cancel_request`                          | request, node and item `cancelled`                                                                                     |
 | `system` `status` compacting / `compact_boundary` | `compaction` row running, then completed with token counts and a usage update                                          |
 | `system` `api_retry`                              | `error` row with `retry` (running, then recovered); on failure the retry goes on `turn.terminal`                       |
@@ -257,8 +257,8 @@ Normalized in the comparison:
 - **Tool titles:** T3's own `/mcp` tools (`conn` and its aliases) get no presentation, as
   T3; T3 decides by its tool table, this provider by the server name. `normalizeMcpHttpUrl`
   keeps an icon URL as sent, where T3 normalizes it with `new URL`.
-- **Attachments:** PDFs stay path-only. No skill splitting of slash commands. The 28 MiB
-  inline budget lives in memory and starts over after a restart.
+- **Attachments:** eligible PDFs with verifiable page counts are native document blocks.
+  Claude restores its 28 MiB and 100-page budgets from the provider thread.
 - **Not passed:** `autoCompactWindow`, `customModels`,
   `ENABLE_TOOL_SEARCH`, the delegated child's prompt cache TTL, prompt suggestions, the
   device-tool text and hook (no device tools), custom models.
@@ -276,17 +276,13 @@ Normalized in the comparison:
   --json-schema … --tools "" --permission-mode dontAsk`, the prompt on stdin, a fresh temp
   folder, 180 s, a retry without `--no-session-persistence` for CLIs before 2.0.63. No SDK host.
   Proven by the four `title*` scenarios of `tools/probe-conformance`.
-- **Stop hook and goals:** every query gets T3's `Stop` hook (`onStop`), so `initialize` is
-  equal. T3's hook answers `{continue: false}` while a Claude `/goal` is active and a
-  delegated task will wake the thread; this provider tracks no Claude goals (`active_goal` is
-  ignored), so its hook always answers `{}`, T3's answer without an active goal.
-- **Native session title:** as T3, a turn sends `rename_session` (`source: "host"`) when the
-  thread title differs from the one last applied to the native session; a new session applies
-  its title at spawn, and the applied titles live per provider instance, across sessions.
-  T3 also records the applied title in `nativeMetadata.title`, so it survives a restart; this
-  provider reads a recorded title but writes none, so after a restart it renames once more.
-  A native `/rename` does not retitle the thread here (T3 #36879).
-- **Elicitation:** only field-less forms; TS fills simple forms.
+- **Stop hook and goals:** the adapter follows native goal confirmations and checks. The Stop
+  hook pauses a live goal while an app-owned child still owes its parent a wake.
+- **Native session title:** a successful native `/rename` updates the Conn thread title.
+  Applying a Conn title uses the SDK's `rename_session` control request.
+- **Elicitation:** the approval card accepts one-time consent and persistence toggles. Forms
+  requiring an input the card cannot collect receive an MCP cancellation. Unshown defaults
+  cannot grant a permission.
 - **No `/mcp` instructions text** in this crate: the server passes it as `mcp_instructions`.
 
 ## History operations

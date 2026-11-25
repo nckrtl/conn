@@ -137,18 +137,16 @@ pub(crate) fn thread_fork(tx: &mut Tx<'_>, command: Value) -> Outcome {
             "A subagent cannot start a side chat."
         });
     }
-    let Some(run) = run_for_source_point(tx, &source_id, point)? else {
-        if side_chat && point_type == "latest_stable" {
-            return reject(
-                "Conn Server cannot open a side chat before the thread's first turn has finished.",
-            );
-        }
+    let run = run_for_source_point(tx, &source_id, point)?;
+    let early_side_chat = run.is_none() && side_chat && point_type == "latest_stable";
+    if run.is_none() && !early_side_chat {
         return reject(format!(
             "No stable source run was found for fork source {point_type}."
         ));
-    };
+    }
+    let run = run.unwrap_or(Value::Null);
     let status = run["status"].as_str().unwrap_or_default();
-    if !forkable(status) {
+    if !early_side_chat && !forkable(status) {
         return reject(format!(
             "Fork source run {} is {status}; in-progress and rolled-back runs cannot be forked.",
             run["id"].as_str().unwrap_or_default()
@@ -203,7 +201,11 @@ pub(crate) fn thread_fork(tx: &mut Tx<'_>, command: Value) -> Outcome {
         ("lineage", new_lineage),
         (
             "forkedFrom",
-            json!({"type": "run", "threadId": source_id, "runId": run["id"]}),
+            if early_side_chat {
+                Value::Null
+            } else {
+                json!({"type": "run", "threadId": source_id, "runId": run["id"]})
+            },
         ),
         ("createdAt", json!(now)),
         ("updatedAt", json!(now)),
@@ -234,8 +236,8 @@ pub(crate) fn thread_fork(tx: &mut Tx<'_>, command: Value) -> Outcome {
             &conn_support::uuid_v4(),
         ]),
         "type": "fork", "sourceThreadId": source_id, "targetThreadId": target_id,
-        "sourcePoint": source_point(tx, &source_id, &run)?, "basePoint": null,
-        "sourceProviderInstanceId": run["providerInstanceId"],
+        "sourcePoint": if early_side_chat {json!({"threadId":source_id})} else {source_point(tx, &source_id, &run)?}, "basePoint": null,
+        "sourceProviderInstanceId": if early_side_chat {&source["providerInstanceId"]} else {&run["providerInstanceId"]},
         "targetProviderInstanceId": null, "targetRunId": null, "status": "pending",
         "resolution": null, "createdBy": command["createdBy"],
         "error": if strong { Value::Null } else {
@@ -337,11 +339,6 @@ pub(crate) fn decide_fork_execution(
         && capabilities["identity"]["nativeThreadIds"] == "strong";
     if native {
         return Ok(ForkExecution::Ready);
-    }
-    if thread["lineage"]["sideChat"] == true || source_run.is_none() {
-        return reject(
-            "Conn Server carries a side chat's history only through a native fork: the same provider, a finished source turn, and no newer turn running on the source. Send the message on the source thread, or fork again.",
-        );
     }
     if let Some(capabilities) = target_capabilities {
         crate::provider_handoff::ensure_context_handoff(capabilities, instance, command_id, true)?;

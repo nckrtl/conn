@@ -636,6 +636,7 @@ pub fn user_input(
 /// `SKILL_MENTION_PATTERN` (`composerInlineTokens.ts`): a whole word made of a currency sigil
 /// and a skill name that holds a letter and is not an amount such as `5k`.
 fn skill_mention_text(text: &str) -> String {
+    use conn_provider_support::skill_mentions::{is_currency, is_skill_name};
     let mut out = String::with_capacity(text.len());
     let mut word_start = 0;
     for (i, c) in text.char_indices().chain([(text.len(), ' ')]) {
@@ -656,58 +657,6 @@ fn skill_mention_text(text: &str) -> String {
         word_start = i + c.len_utf8();
     }
     out
-}
-
-fn is_currency(c: char) -> bool {
-    matches!(
-        c,
-        '$' | '€'
-            | '£'
-            | '¥'
-            | '¢'
-            | '₹'
-            | '₩'
-            | '₽'
-            | '₺'
-            | '₴'
-            | '₦'
-            | '₪'
-            | '฿'
-            | '₫'
-            | '₱'
-            | '₡'
-            | '₲'
-            | '₵'
-            | '₸'
-            | '₼'
-            | '₾'
-            | '₿'
-    )
-}
-
-fn is_skill_name(name: &str) -> bool {
-    let valid = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
-        && name.chars().any(|c| c.is_ascii_alphabetic());
-    valid && !is_amount(name)
-}
-
-/// `[0-9][0-9_]*` with an optional `k`/`m`/`b`/`t` or `e<digits>` suffix.
-fn is_amount(name: &str) -> bool {
-    let digits = name.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
-    if !name.starts_with(|c: char| c.is_ascii_digit()) {
-        return false;
-    }
-    digits.is_empty()
-        || matches!(digits, "k" | "K" | "m" | "M" | "b" | "B" | "t" | "T")
-        || (digits.len() > 1
-            && digits.starts_with(['e', 'E'])
-            && digits[1..].chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]

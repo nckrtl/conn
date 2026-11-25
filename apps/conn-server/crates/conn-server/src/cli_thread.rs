@@ -475,31 +475,55 @@ struct McpClient {
 
 /// Runs a single call with the current ACP thread's MCP session credential.
 pub fn acp_mcp_call(args: &[String]) -> i32 {
-    let (Ok(endpoint), Ok(authorization)) = (std::env::var("T3_ACP_MCP_ENDPOINT"), std::env::var("T3_ACP_MCP_AUTHORIZATION")) else {
+    let (Ok(endpoint), Ok(authorization)) = (
+        std::env::var("T3_ACP_MCP_ENDPOINT"),
+        std::env::var("T3_ACP_MCP_AUTHORIZATION"),
+    ) else {
         eprintln!("acp-mcp-call requires T3_ACP_MCP_ENDPOINT and T3_ACP_MCP_AUTHORIZATION.");
         return 2;
     };
-    let [tool, arguments] = args else { eprintln!("acp-mcp-call requires <tool> and <arguments-json>."); return 2 };
-    let Ok(arguments) = serde_json::from_str::<Value>(arguments) else { eprintln!("acp-mcp-call arguments must be valid JSON."); return 2 };
-    if !arguments.is_object() { eprintln!("acp-mcp-call arguments must be a JSON object."); return 2; }
-    let Some(origin) = endpoint.strip_suffix("/mcp") else { eprintln!("Invalid Conn MCP endpoint."); return 1 };
+    let [tool, arguments] = args else {
+        eprintln!("acp-mcp-call requires <tool> and <arguments-json>.");
+        return 2;
+    };
+    let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
+        eprintln!("acp-mcp-call arguments must be valid JSON.");
+        return 2;
+    };
+    if !arguments.is_object() {
+        eprintln!("acp-mcp-call arguments must be a JSON object.");
+        return 2;
+    }
+    let Some(origin) = endpoint.strip_suffix("/mcp") else {
+        eprintln!("Invalid Conn MCP endpoint.");
+        return 1;
+    };
     let mut client = McpClient::new(origin, "");
     client.authorization = authorization;
-    let result = client.initialize("t3-code-acp-cli").and_then(|()|
-        client.request("tools/call", json!({"name":tool, "arguments":arguments})));
+    let result = client
+        .initialize("t3-code-acp-cli")
+        .and_then(|()| client.request("tools/call", json!({"name":tool, "arguments":arguments})));
     client.terminate();
     match result {
         Ok(envelope) => {
             let mut result = envelope["result"].clone();
             if let Some(structured) = result.get("structuredContent").cloned()
-                && let Some(parts) = result["content"].as_array_mut() {
-                parts.retain(|part| part["type"] != "text" || !part["text"].as_str().is_some_and(|text|
-                    serde_json::from_str::<Value>(text).is_ok_and(|v| v == structured)));
+                && let Some(parts) = result["content"].as_array_mut()
+            {
+                parts.retain(|part| {
+                    part["type"] != "text"
+                        || !part["text"].as_str().is_some_and(|text| {
+                            serde_json::from_str::<Value>(text).is_ok_and(|v| v == structured)
+                        })
+                });
             }
             println!("{result}");
             0
         }
-        Err(error) => { eprintln!("acp-mcp-call: {error}"); 1 }
+        Err(error) => {
+            eprintln!("acp-mcp-call: {error}");
+            1
+        }
     }
 }
 

@@ -141,12 +141,20 @@ struct Live {
     initialized: bool,
 }
 
+struct Relay {
+    target: mpsc::Sender<SessionMsg>,
+    queue: mpsc::Sender<SessionMsg>,
+    overloaded: bool,
+}
+
 #[derive(Default)]
 struct State {
     live: Option<Live>,
     generation: u64,
     next_id: u64,
     pending: HashMap<(u64, u64), oneshot::Sender<Result<Value, RpcError>>>,
+    // A successful resume transfers the route before the reader processes the next line.
+    resumes: HashMap<(u64, u64), (String, mpsc::Sender<SessionMsg>)>,
     routes: HashMap<String, mpsc::Sender<SessionMsg>>,
     /// Every open session's inbox, for exit notices; keyed by session id.
     sessions: HashMap<String, mpsc::Sender<SessionMsg>>,
@@ -156,7 +164,7 @@ struct State {
     /// Deltas dropped because a session's inbox was full (logged once).
     dropped_deltas: u64,
     // One bounded relay per blocked inbox. A stalled consumer cannot block stdout reads.
-    relays: Vec<(mpsc::Sender<SessionMsg>, mpsc::Sender<SessionMsg>)>,
+    relays: Vec<Relay>,
     /// Native threads loaded on a process (started, resumed or forked there), by generation.
     loaded: HashMap<String, u64>,
     /// At most [`UNROUTED_KEPT`] frames, oldest first, with the native thread they name.
@@ -487,6 +495,22 @@ impl AppServer {
         self.request_on(generation, method, params).await
     }
 
+    pub async fn resume_for(
+        self: &Arc<Self>,
+        native: &str,
+        params: Value,
+        inbox: &mpsc::Sender<SessionMsg>,
+    ) -> Result<Value, CallError> {
+        let generation = self.ensure_started().await?;
+        self.request_routed(
+            generation,
+            "thread/resume",
+            params,
+            Some((native.to_owned(), inbox.clone())),
+        )
+        .await
+    }
+
     /// Writes a request and returns its answer as a [`Reply`] that owns everything it needs,
     /// so the wait can move to another task. Once this returns, the line is on its way to
     /// the process: a caller that gives up on the answer knows the request went out.
@@ -521,7 +545,20 @@ impl AppServer {
         method: &str,
         params: Value,
     ) -> Result<Value, CallError> {
+        self.request_routed(generation, method, params, None).await
+    }
+
+    async fn request_routed(
+        &self,
+        generation: u64,
+        method: &str,
+        params: Value,
+        route: Option<(String, mpsc::Sender<SessionMsg>)>,
+    ) -> Result<Value, CallError> {
         let (id, rx) = self.open_slot(generation);
+        if let Some(route) = route {
+            self.lock().resumes.insert((generation, id), route);
+        }
         let until = deadline(method);
         // A caller that gives up (a Stop abandons a start) takes its pending slot with it; a
         // late answer then finds none and is dropped.
@@ -629,7 +666,13 @@ impl AppServer {
         let mut early = Vec::new();
         let target = match &inbound {
             Inbound::Response { id, result } => {
-                if let Some(tx) = self.lock().pending.remove(&(generation, *id)) {
+                let mut state = self.lock();
+                if let Some((native, inbox)) = state.resumes.remove(&(generation, *id))
+                    && result.is_ok()
+                {
+                    state.routes.insert(native, inbox);
+                }
+                if let Some(tx) = state.pending.remove(&(generation, *id)) {
                     let _ = tx.send(result.clone());
                 }
                 return;
@@ -730,20 +773,24 @@ impl AppServer {
         let mut state = self.lock();
         let relay = state
             .relays
-            .iter()
-            .find(|(target, _)| target.same_channel(inbox));
+            .iter_mut()
+            .find(|r| r.target.same_channel(inbox));
         let delta = matches!(&msg, SessionMsg::Frame(frame) if is_delta(frame));
         if delta && (relay.is_some() || inbox.capacity() == 0) {
             state.dropped_deltas = state.dropped_deltas.saturating_add(1);
             return;
         }
-        if let Some((_, relay)) = relay {
+        if let Some(relay) = relay {
+            if relay.overloaded {
+                return;
+            }
             // The relay reserves its last slot to report reliable-data loss, even if
             // this session never catches up. All later frames wait for a clean resume.
-            if relay.capacity() > 1 {
-                let _ = relay.try_send(msg);
-            } else if relay.capacity() == 1 {
-                let _ = relay.try_send(SessionMsg::Overloaded);
+            if relay.queue.capacity() > 1 {
+                let _ = relay.queue.try_send(msg);
+            } else {
+                relay.overloaded = true;
+                let _ = relay.queue.try_send(SessionMsg::Overloaded);
             }
             return;
         }
@@ -752,7 +799,11 @@ impl AppServer {
         };
         let (tx, mut rx) = mpsc::channel(SESSION_INBOX);
         let target = inbox.clone();
-        state.relays.push((target.clone(), tx));
+        state.relays.push(Relay {
+            target: target.clone(),
+            queue: tx,
+            overloaded: false,
+        });
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut next = first;
@@ -768,9 +819,7 @@ impl AppServer {
                     next = msg;
                     continue;
                 }
-                state
-                    .relays
-                    .retain(|(other, _)| !other.same_channel(&target));
+                state.relays.retain(|r| !r.target.same_channel(&target));
                 break;
             }
         });
@@ -903,10 +952,9 @@ struct PendingSlot<'a> {
 
 impl Drop for PendingSlot<'_> {
     fn drop(&mut self) {
-        self.server
-            .lock()
-            .pending
-            .remove(&(self.generation, self.id));
+        let mut state = self.server.lock();
+        state.pending.remove(&(self.generation, self.id));
+        state.resumes.remove(&(self.generation, self.id));
     }
 }
 
@@ -934,6 +982,93 @@ echo '{"method":"thread/started","params":{"threadId":"t1"}}'
 echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
 read never
 "#;
+
+    const DYNAMIC_INIT: &str = r#"
+read init
+id=$(echo "$init" | sed 's/.*"id":\([0-9]*\).*/\1/')
+echo "{\"id\":$id,\"result\":{}}"
+read initialized
+read req
+read never
+"#;
+
+    #[tokio::test]
+    async fn stale_exit_does_not_cancel_a_replacement_request_or_session() {
+        let server = AppServer::new(fake(DYNAMIC_INIT));
+        let (inbox, mut rx) = mpsc::channel(4);
+        server.add_session("live", inbox);
+        let generation = server.ensure_started().await.unwrap();
+        let reply = server.send("thread/start", json!({})).await.unwrap();
+        server
+            .on_exit(
+                generation - 1,
+                &ExitInfo {
+                    code: Some(0),
+                    signal: None,
+                    stderr_tail: String::new(),
+                },
+            )
+            .await;
+        assert!(rx.try_recv().is_err());
+        server
+            .dispatch(
+                generation,
+                Inbound::Response {
+                    id: reply.id,
+                    result: Ok(json!("healthy")),
+                },
+            )
+            .await;
+        assert_eq!(reply.wait().await.unwrap(), "healthy");
+        server.remove_session("live", &[]).await;
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_start_retires_only_its_generation() {
+        let server = AppServer::new(fake(DYNAMIC_INIT));
+        let (inbox, mut rx) = mpsc::channel(4);
+        server.add_session("live", inbox);
+        let first = server.ensure_started().await.unwrap();
+        let mut reply = server.send("thread/start", json!({})).await.unwrap();
+        reply.until = tokio::time::Instant::now();
+        assert_eq!(reply.wait().await, Err(CallError::Timeout));
+        assert!(matches!(rx.recv().await, Some(SessionMsg::Exited(_))));
+        assert!(server.ensure_started().await.unwrap() > first);
+        server.remove_session("live", &[]).await;
+    }
+
+    #[tokio::test]
+    async fn a_reliable_frame_on_a_full_route_preserves_order_without_blocking_control() {
+        let script = r#"read init
+echo '{"id":1,"result":{}}'
+read initialized
+read req
+echo '{"method":"item/started","params":{"threadId":"slow","i":1}}'
+echo '{"method":"item/completed","params":{"threadId":"slow","i":2}}'
+echo '{"method":"turn/completed","params":{"threadId":"slow","i":3}}'
+echo '{"id":2,"result":{"ok":true}}'
+read never"#;
+        let server = AppServer::new(fake(script));
+        let (inbox, mut rx) = mpsc::channel(1);
+        server.add_session("slow", inbox.clone());
+        server.route("slow", inbox);
+        let answer = tokio::time::timeout(
+            Duration::from_secs(3),
+            server.request("turn/interrupt", json!({"threadId":"fast"})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(answer["ok"], true);
+        for i in 1..=3 {
+            let Some(SessionMsg::Frame(Inbound::Notification { params, .. })) = rx.recv().await
+            else {
+                panic!("missing reliable frame")
+            };
+            assert_eq!(params["i"], i);
+        }
+        server.remove_session("slow", &[]).await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn routes_responses_and_notifications_then_reports_exit() {

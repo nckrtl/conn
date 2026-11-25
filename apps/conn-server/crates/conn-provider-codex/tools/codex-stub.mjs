@@ -232,6 +232,22 @@ const onFrame = (frame) => {
     send({ id: frame.id, result: { thread: { id: frame.params.threadId }, model: null } });
     return;
   }
+  // Recent Codex adapters read the workspace config before each thread load and
+  // send a native name. Old recordings only read config immediately before turn/start.
+  // These reads must not consume a later turn's matching expectation.
+  const nextExpected = entries.slice(cursor).find((entry) => entry.type === "expect_outbound");
+  const params = frame.params ?? {};
+  const loadConfig =
+    frame.method === "config/read" &&
+    ["thread/start", "thread/resume", "thread/fork", "thread/unarchive"].includes(nextExpected?.frame.method) &&
+    params.includeLayers === false && (params.cwd === undefined || typeof params.cwd === "string");
+  const nameThread = frame.method === "thread/name/set" && typeof params.threadId === "string" &&
+    typeof params.name === "string" && nextExpected?.frame.method !== frame.method;
+  if (frame.id !== undefined && (loadConfig || nameThread)) {
+    log({ kind: "workspace-config-or-name", frame });
+    send({ id: frame.id, result: loadConfig ? { config: {}, origins: {} } : {} });
+    return;
+  }
   if (held !== null) {
     heldFrames.push(frame);
     return;

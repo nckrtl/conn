@@ -96,6 +96,7 @@ struct Inner {
     abandon: tokio::sync::Notify,
     /// [`STOP_CONFIRM_TIMEOUT`]; shorter in tests.
     stop_confirm_timeout: Duration,
+    retry_budget: Duration,
 }
 
 struct State {
@@ -109,6 +110,7 @@ struct State {
     mcp_servers: Vec<McpServer>,
     /// Inline attachment bytes sent so far (`claudeAttachmentBudget`).
     attachment_budget: attachments::Budget,
+    attachment_thread: Option<String>,
     /// The running turn's prompt effort, for its steers.
     turn_prompt_effort: Option<String>,
     /// `resolveBypassAvailability`, cached per working directory (T3's `bypassCache`).
@@ -294,6 +296,7 @@ struct Live {
     /// Becomes true when the query's `end` arrived.
     ended: watch::Receiver<bool>,
     native_thread_id: String,
+    app_thread_id: String,
     cwd: Option<String>,
     policy: QueryPolicy,
     /// The permission mode now in force (a denied ExitPlanMode can leave `plan`).
@@ -351,6 +354,7 @@ impl ClaudeSession {
                 // T3's query runner does, so taking them at open sends the same.
                 mcp_servers,
                 attachment_budget: attachments::Budget::default(),
+                attachment_thread: None,
                 turn_prompt_effort: None,
                 bypass_cache: None,
                 closed: false,
@@ -362,8 +366,15 @@ impl ClaudeSession {
             turn_control: tokio::sync::Mutex::new(()),
             abandon: tokio::sync::Notify::new(),
             stop_confirm_timeout: STOP_CONFIRM_TIMEOUT,
+            retry_budget: Duration::from_secs(600),
         });
         Self { id, inner }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_retry_budget(mut self, budget: Duration) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().retry_budget = budget;
+        self
     }
 
     /// A session whose interrupt waits `timeout` for the CLI to exit.
@@ -399,9 +410,25 @@ impl Inner {
         for out in outs {
             match out {
                 Out::Event(mut event) => {
+                    if let ProviderEvent::AppThreadCreated {
+                        app_thread,
+                        create_only: None,
+                    } = &event
+                        && let Some(live) = self
+                            .lock()
+                            .live
+                            .as_ref()
+                            .filter(|l| l.app_thread_id == app_thread.id.as_str())
+                    {
+                        crate::lock(&self.applied_titles)
+                            .insert(live.native_thread_id.clone(), app_thread.title.clone());
+                    }
                     if let ProviderEvent::ProviderThreadUpdated { provider_thread } = &mut event {
-                        let budget = self.lock().attachment_budget;
-                        if budget.bytes > 0 || budget.pages > 0 {
+                        let state = self.lock();
+                        let budget = state.attachment_budget;
+                        let same = state.attachment_thread == native_thread_id(provider_thread);
+                        drop(state);
+                        if same && (budget.bytes > 0 || budget.pages > 0) {
                             let mut row = to_json(provider_thread);
                             row["nativeMetadata"]["claudeAttachmentBudget"] = budget.metadata();
                             if let Ok(updated) = from_json(row) {
@@ -815,7 +842,7 @@ async fn drive(
     let mut flush_at = None;
     let mut retry_at = None;
     let mut request_at = None;
-    let budget = Duration::from_secs(600);
+    let budget = inner.retry_budget;
     loop {
         let dirty = {
             let state = inner.lock();
@@ -835,7 +862,7 @@ async fn drive(
                             state.mapper.flush()
                         };
                         inner.deliver(Some(&query), outs).await;
-                        return None;
+                        None
                     }
                     event = rx.recv() => Some(event),
                 }
@@ -871,6 +898,8 @@ async fn drive(
         let Some(event) = event else { continue };
         let message = match event {
             Some(QueryEvent::Message(value)) => {
+                let goal_updates = inner.lock().mapper.observe_goal(&value);
+                inner.deliver(Some(&query), goal_updates).await;
                 if matches!(value["type"].as_str(), Some("assistant" | "user"))
                     && value["parent_tool_use_id"].is_null()
                     && let Some(uuid) = value["uuid"].as_str()
@@ -886,9 +915,12 @@ async fn drive(
                     live.emitted.push_back(uuid.to_owned());
                 }
                 if inner.lock().mapper.turn_active() {
-                    if value["type"] == "system"
+                    if (value["type"] == "system"
                         && value["subtype"] == "status"
-                        && value["status"] == "requesting"
+                        && value["status"] == "requesting")
+                        || (value["type"] == "command_lifecycle"
+                            && value["state"] == "started"
+                            && inner.lock().mapper.is_turn_prompt(&value["command_uuid"]))
                     {
                         request_at = Some(tokio::time::Instant::now() + budget);
                     } else if value["parent_tool_use_id"].is_null()
@@ -1001,7 +1033,14 @@ async fn drive(
                 message
             }
             Some(QueryEvent::Request { id, kind, .. }) if kind == "stopHook" => {
-                let check = inner.lock().goal_stop_check.clone();
+                let check = {
+                    let state = inner.lock();
+                    state
+                        .mapper
+                        .active_goal()
+                        .then(|| state.goal_stop_check.clone())
+                        .flatten()
+                };
                 let hold = match check {
                     Some(check) => check().await,
                     None => false,
@@ -1091,6 +1130,7 @@ fn note_init(state: &mut State, generation: u64, init: &Value) {
         state.resumable.insert(id.to_owned());
         state.app_context.reset();
         state.attachment_budget = attachments::Budget::default();
+        state.attachment_thread = Some(id.to_owned());
     }
     if let Some(live) = state
         .live
@@ -1866,8 +1906,14 @@ impl ClaudeSession {
                 ));
             }
             let stored = attachments::Budget::restore(&to_json(&input.provider_thread));
-            state.attachment_budget.bytes = stored.bytes.max(state.attachment_budget.bytes);
-            state.attachment_budget.pages = stored.pages.max(state.attachment_budget.pages);
+            let native = native_thread_id(&input.provider_thread);
+            if state.attachment_thread == native {
+                state.attachment_budget.bytes = stored.bytes.max(state.attachment_budget.bytes);
+                state.attachment_budget.pages = stored.pages.max(state.attachment_budget.pages);
+            } else {
+                state.attachment_budget = stored;
+                state.attachment_thread = native;
+            }
             state.mapper.set_catalog(models);
             if state.live.is_none() && !state.closed {
                 let mode = plain_policy(&input.runtime_policy).permission_mode;
@@ -1888,6 +1934,7 @@ impl ClaudeSession {
         )
         .prompt_effort;
         let text = catalog::prompt_text(&input.message.text, effort.as_deref());
+        let original_budget = self.inner.lock().attachment_budget;
         let prepared = match self
             .inner
             .unless_abandoned(run_id, async {
@@ -1906,6 +1953,7 @@ impl ClaudeSession {
         let (content, policy) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
+                self.inner.lock().attachment_budget = original_budget;
                 if opened_early {
                     let outs = if self.inner.start_abandoned(run_id) {
                         // The engine ended the run; the early turn ends as Stop ends a turn.
@@ -1959,9 +2007,10 @@ impl ClaudeSession {
                 CONTROL_TIMEOUT,
             )
             .await;
-        if offered.is_err() {
+        if let Err(error) = offered {
             let outs = {
                 let mut state = inner.lock();
+                state.attachment_budget = original_budget;
                 if let Some(offer) = offer {
                     state.app_context.refused(offer);
                 }
@@ -1970,7 +2019,7 @@ impl ClaudeSession {
                     .on_exit(false, "The Claude process stopped before the turn started.")
             };
             inner.deliver(None, outs).await;
-            return Err(ProviderError::SessionStopped);
+            return Err(error);
         }
         if let Some(offer) = offer {
             inner.lock().app_context.accepted(offer);
@@ -1988,15 +2037,16 @@ impl ClaudeSession {
         let dir = self.inner.config.attachments_dir.clone();
         let initial = self.inner.lock().attachment_budget;
         let (text, list) = (text.to_owned(), list.to_vec());
-        let home = launch::config_dir(&self.inner.config, &Map::new());
-        let args = self.inner.config.launch_args.clone();
+        let config = self.inner.config.clone();
         let (content, budget) = tokio::task::spawn_blocking(move || {
             let mut budget = initial;
             let mut content =
                 attachments::prompt_content(&text, &list, dir.as_deref(), &mut budget)?;
-            if text.contains('$') && !text.trim_start().starts_with("/goal") {
+            if text.contains(conn_provider_support::skill_mentions::is_currency)
+                && !text.trim_start().starts_with("/goal")
+            {
                 let skills =
-                    crate::skills::discover(&home, cwd.as_deref().map(std::path::Path::new), &args);
+                    crate::skills::discover(&config, cwd.as_deref().map(std::path::Path::new));
                 if let Some((leading, command)) = crate::skills::dispatch(&text, &skills) {
                     let mut blocks = content.as_array().cloned().unwrap_or_default();
                     if list.is_empty() {
@@ -2064,6 +2114,7 @@ impl ClaudeSession {
                 generation,
                 stopping: stopping.clone(),
                 ended,
+                app_thread_id: input.thread_id.clone(),
                 native_thread_id: input.native_thread_id.clone(),
                 cwd: input.cwd.clone(),
                 permission_mode: input.policy.permission_mode.clone(),
@@ -2574,6 +2625,7 @@ impl Session for ClaudeSession {
             };
             let text = catalog::prompt_text(&input.message.text, effort.as_deref());
             let cwd = self.inner.lock().live.as_ref().and_then(|l| l.cwd.clone());
+            let original_budget = self.inner.lock().attachment_budget;
             let content = self.content(&text, &input.message.attachments, cwd).await?;
             let uuid = SystemEnv.uuid();
             let (query, outs, content, offer) = {
@@ -2610,16 +2662,17 @@ impl Session for ClaudeSession {
                     CONTROL_TIMEOUT,
                 )
                 .await;
-            if offered.is_err() {
+            if let Err(error) = offered {
                 let outs = {
                     let mut state = self.inner.lock();
+                    state.attachment_budget = original_budget;
                     if let Some(offer) = offer {
                         state.app_context.refused(offer);
                     }
                     state.mapper.steer_failed(&uuid)
                 };
                 self.inner.deliver(None, outs).await;
-                return Err(ProviderError::SessionStopped);
+                return Err(error);
             }
             if let Some(offer) = offer {
                 self.inner.lock().app_context.accepted(offer);

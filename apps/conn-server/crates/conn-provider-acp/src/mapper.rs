@@ -164,6 +164,7 @@ pub(crate) struct Mapper<E: Env> {
     provider_thread: Option<Value>,
     native_metadata: Option<Value>,
     context_usage: Option<Value>,
+    pub(crate) model_window: Option<u64>,
     pending: HashMap<String, PendingRequest>,
     logged: HashSet<String>,
     /// `compactionMarkers`: set when the session compacted, so the next prompt resends T3's
@@ -180,6 +181,7 @@ pub(crate) struct Mapper<E: Env> {
     /// Completed turns whose background commands still own their rows
     /// (`detachedBackgroundCommands`' values); see [`background::SessionBackground`].
     detached_turns: Vec<Turn>,
+    carryover: Option<Box<Turn>>,
 }
 
 impl<E: Env> std::fmt::Debug for Mapper<E> {
@@ -206,6 +208,7 @@ impl<E: Env> Mapper<E> {
             provider_thread: None,
             native_metadata: None,
             context_usage: None,
+            model_window: None,
             pending: HashMap::new(),
             logged: HashSet::new(),
             compaction_marker: None,
@@ -215,6 +218,7 @@ impl<E: Env> Mapper<E> {
             turn_seq: 0,
             bg: background::SessionBackground::default(),
             detached_turns: Vec::new(),
+            carryover: None,
         }
     }
 
@@ -278,8 +282,16 @@ impl<E: Env> Mapper<E> {
         ids::turn_item_from_item(self.driver(), &self.scoped(native_item_id))
     }
 
-    pub(crate) fn waiting_for_input_or_tool(&self)->bool {
-        !self.pending.is_empty() || self.turn.as_ref().is_some_and(|turn|turn.tools.values().any(|tool| matches!(crate::tools::item_status(tool.status.as_deref()),"running"|"pending")))
+    pub(crate) fn waiting_for_input_or_tool(&self) -> bool {
+        !self.pending.is_empty()
+            || self.turn.as_ref().is_some_and(|turn| {
+                turn.tools.values().any(|tool| {
+                    matches!(
+                        crate::tools::item_status(tool.status.as_deref()),
+                        "running" | "pending"
+                    )
+                })
+            })
     }
 
     pub(crate) fn has_turn(&self) -> bool {
@@ -498,12 +510,12 @@ impl<E: Env> Mapper<E> {
             let mut usage = turn.prompt_usage.clone().unwrap_or_else(|| json!({}));
             usage["usageScope"] = json!("main_agent");
             usage["hasSubagents"] = json!(!turn.subagents.list.is_empty());
-            usage["usageStatus"] = json!(match (&turn.prompt_usage,status) {
+            usage["usageStatus"] = json!(match (&turn.prompt_usage, status) {
                 (None, _) => "unavailable",
-                (Some(_),"completed") => "complete",
-                _ => "partial"
+                (Some(_), "completed") => "complete",
+                _ => "partial",
             });
-            set(&mut payload,"turnTokenUsage",usage);
+            set(&mut payload, "turnTokenUsage", usage);
         }
         payload
     }
@@ -827,9 +839,26 @@ impl<E: Env> Mapper<E> {
         let session_id = params["sessionId"].as_str().unwrap_or("").to_owned();
         let update = &params["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or("");
-        if self.driver() == "grok" && self.root_session.as_deref() == Some(&session_id)
-            && let Some(total) = params["_meta"]["totalTokens"].as_u64() {
-            self.session_state_update(&session_id, "usage_update", &json!({"used":total}), &mut out);
+        if self.driver() == "grok"
+            && kind != "usage_update"
+            && self.root_session.as_deref() == Some(&session_id)
+            && let Some(total) = params["_meta"]["totalTokens"].as_u64()
+            && self
+                .context_usage
+                .as_ref()
+                .and_then(|u| u["usedTokens"].as_u64())
+                != Some(total)
+        {
+            let mut usage = self.context_usage.clone().unwrap_or_else(|| json!({}));
+            usage["usedTokens"] = json!(total);
+            if let Some(window) = self.model_window {
+                usage["maxTokens"] = json!(window);
+            }
+            self.context_usage = Some(usage.clone());
+            if let Some(turn) = self.turn.as_mut() {
+                turn.context_usage = usage;
+            }
+            self.publish_session_state(&session_id, &mut out);
         }
         // Turn projection misses compactions that finish while idle or after settlement.
         if kind == "compaction_update"
@@ -1061,6 +1090,10 @@ impl<E: Env> Mapper<E> {
                 turn.native_metadata = metadata;
             }
         }
+        self.publish_session_state(session_id, out);
+    }
+
+    fn publish_session_state(&mut self, session_id: &str, out: &mut Vec<Out>) {
         let now = self.env.now();
         let Some(thread) = self.provider_thread.as_mut() else {
             return;
@@ -1076,6 +1109,9 @@ impl<E: Env> Mapper<E> {
             .native_metadata
             .clone()
             .unwrap_or_else(|| thread["nativeMetadata"].clone());
+        if self.turn.is_none() && thread["status"] == "active" {
+            thread["status"] = json!("idle");
+        }
         set(thread, "contextUsage", usage);
         set(thread, "nativeMetadata", metadata);
         set(thread, "updatedAt", json!(now));
@@ -1291,6 +1327,30 @@ impl<E: Env> Mapper<E> {
             }
             self.emit_tool(&tool, None, Some(status), out);
         }
+    }
+
+    pub(crate) fn capture_exit_plan(&mut self, params: &Value) -> Vec<Out> {
+        let mut out = Vec::new();
+        let request = params.get("params").unwrap_or(params);
+        let prior = self
+            .turn
+            .as_ref()
+            .and_then(|turn| turn.plans.get("proposed-plan"))
+            .and_then(|(_, _, p)| p.as_ref())
+            .and_then(|p| p["markdown"].as_str());
+        let plan = request["planContent"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .or(prior)
+            .unwrap_or(
+                "# No plan written yet\n\n(The agent exited plan mode without writing a plan.)",
+            )
+            .to_owned();
+        if prior != Some(&plan) {
+            self.emit_plan("proposed-plan", PlanUpdate::Markdown(plan), &mut out);
+        }
+        out
     }
 
     // ---- plans ---------------------------------------------------------------------------
@@ -1608,7 +1668,9 @@ impl<E: Env> Mapper<E> {
         let pending = self.pending.get(request_id)?;
         let result = match &pending.kind {
             Pending::Form(schema) => crate::elicitation::form_response(schema, answers),
-            Pending::AntigravityQuestion(questions) => crate::elicitation::permission_response(questions, answers),
+            Pending::AntigravityQuestion(questions) => {
+                crate::elicitation::permission_response(questions, answers)
+            }
             Pending::Approval(options) => match select_option(options, decision?) {
                 Some(option) => selected(&option),
                 None => obj().with("outcome", obj().with("outcome", "cancelled")),
@@ -1619,10 +1681,12 @@ impl<E: Env> Mapper<E> {
             },
         };
         let pending = self.pending.remove(request_id)?;
-        Some(vec![Out::Reply {
+        let mut out = vec![Out::Reply {
             id: pending.agent_id,
             result,
-        }])
+        }];
+        self.rearm_deferred_finalize(&mut out);
+        Some(out)
     }
 
     /// `beginUserInputRequest`: a question the user answers.
@@ -1759,16 +1823,34 @@ impl<E: Env> Mapper<E> {
     }
 
     pub(crate) fn record_prompt_usage(&mut self, usage: &Value) {
-        let (Some(turn), Some(input), Some(output)) = (self.turn.as_mut(), usage["inputTokens"].as_u64(), usage["outputTokens"].as_u64()) else { return };
+        let (Some(turn), Some(input), Some(output)) = (
+            self.turn.as_mut(),
+            usage["inputTokens"].as_u64(),
+            usage["outputTokens"].as_u64(),
+        ) else {
+            return;
+        };
         let read = usage["cachedReadTokens"].as_u64();
         let input = input.saturating_add(read.unwrap_or_default());
         let mut counters = json!({"inputTokens": input, "outputTokens": output});
-        for (key,value) in [("cachedInputTokens",read),
-            ("cacheCreationTokens",usage["cachedWriteTokens"].as_u64().map(|v|v.min(input.saturating_sub(read.unwrap_or_default())))),
-            ("reasoningTokens",usage["thoughtTokens"].as_u64().map(|v|v.min(output)))] {
-            if let Some(count)=value { counters[key]=json!(count); }
+        for (key, value) in [
+            ("cachedInputTokens", read),
+            (
+                "cacheCreationTokens",
+                usage["cachedWriteTokens"]
+                    .as_u64()
+                    .map(|v| v.min(input.saturating_sub(read.unwrap_or_default()))),
+            ),
+            (
+                "reasoningTokens",
+                usage["thoughtTokens"].as_u64().map(|v| v.min(output)),
+            ),
+        ] {
+            if let Some(count) = value {
+                counters[key] = json!(count);
+            }
         }
-        turn.prompt_usage=Some(counters);
+        turn.prompt_usage = Some(counters);
     }
 
     /// The prompt settled: finalize with the status its outcome gives.
@@ -1777,13 +1859,29 @@ impl<E: Env> Mapper<E> {
         match outcome {
             PromptOutcome::Stopped(reason) => {
                 let failure = match reason.as_str() {
-                    "refusal" if self.driver() == "antigravity" => Some(json!({"class":"usage_limit","message":"You have reached your Antigravity quota for this period.","code":"QUOTA_EXHAUSTED","retryable":true,"resetAt":null})),
-                    "refusal" => Some(crate::flavor::provider_failure("The agent refused this request. The agent's next turn won't include this message or its reply.", "provider_error", None)),
-                    "max_tokens" => Some(crate::flavor::provider_failure("The agent stopped because its reply reached the output token limit.", "provider_error", None)),
-                    "max_turn_requests" => Some(crate::flavor::provider_failure("The agent stopped because it reached its request limit for this turn.", "provider_error", None)),
-                    _ => None
+                    "refusal" if self.driver() == "antigravity" => Some(
+                        json!({"class":"usage_limit","message":"You have reached your Antigravity quota for this period.","code":"QUOTA_EXHAUSTED","retryable":true,"resetAt":null}),
+                    ),
+                    "refusal" => Some(crate::flavor::provider_failure(
+                        "The agent refused this request. The agent's next turn won't include this message or its reply.",
+                        "provider_error",
+                        None,
+                    )),
+                    "max_tokens" => Some(crate::flavor::provider_failure(
+                        "The agent stopped because its reply reached the output token limit.",
+                        "provider_error",
+                        None,
+                    )),
+                    "max_turn_requests" => Some(crate::flavor::provider_failure(
+                        "The agent stopped because it reached its request limit for this turn.",
+                        "provider_error",
+                        None,
+                    )),
+                    _ => None,
                 };
-                if let Some(failure) = failure { return self.finalize("failed",Some(failure)); }
+                if let Some(failure) = failure {
+                    return self.finalize("failed", Some(failure));
+                }
                 let status = if reason == "cancelled" {
                     if interrupted {
                         "interrupted"
@@ -1827,7 +1925,9 @@ impl<E: Env> Mapper<E> {
         let Some(mut turn) = self.turn.take() else {
             return out;
         };
-        if self.flavor.supports_compaction && settled == "completed" {
+        if (self.flavor.supports_compaction || self.driver() == "antigravity")
+            && settled == "completed"
+        {
             if turn.compact_command {
                 self.mark_compacted(None);
             }
@@ -1894,6 +1994,8 @@ impl<E: Env> Mapper<E> {
         self.pending.clear();
         if settled == "completed" {
             self.detach_background_commands(turn);
+        } else if !turn.subagents.list.is_empty() {
+            self.carryover = Some(Box::new(turn));
         }
         self.background_after_finalize(settled, &mut out);
         out

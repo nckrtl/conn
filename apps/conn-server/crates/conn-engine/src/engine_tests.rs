@@ -4491,6 +4491,7 @@ async fn a_restart_keeps_a_rollback_ahead_of_later_work() {
                     checkpoint_id: "k".into(),
                     scope_id: "s".into(),
                     restore_files: Some(false),
+                    portable: false,
                     resume_snapshot: None,
                 };
                 tx.enqueue(Some("rb-1"), &[crate::commands::Effect::Rollback(rollback)])
@@ -7005,7 +7006,7 @@ fn every_contract_command_is_handled_or_refused_with_a_reason() {
             );
         }
     }
-    assert_eq!(handled, 52);
+    assert_eq!(handled, 53);
     assert_eq!(conn_contract::COMMAND_TYPES.len(), 58);
 }
 
@@ -13802,7 +13803,6 @@ async fn an_async_question_is_answered_with_one_message_and_one_run() {
     };
     for (index, answers) in [
         json!({"color":" ","sizes":["Small"]}),
-        json!({"color":"Blue","sizes":[]}),
         json!({"color":"Blue","sizes":["Small"," "]}),
         json!({"color":"Blue","sizes":["Small"],"extra":" "}),
     ]
@@ -13868,6 +13868,51 @@ async fn an_async_question_is_answered_with_one_message_and_one_run() {
         provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
         1
     );
+}
+
+/// A later user message continues visible history on a fresh native thread after Codex
+/// rejects an accepted turn's encrypted context. A thread with background work stays put.
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_codex_history_recovers_without_orphaning_pending_work() {
+    for pending in [false, true] {
+        let db = TempDb::new("codex-rejected-history");
+        let (engine, provider) = open_with(
+            &db,
+            FakeProvider::new("claudeAgent")
+                .with_driver("codex")
+                .with_history_injection(),
+        );
+        dispatch(&engine, create("t1", "create")).await;
+        dispatch(&engine, message("t1", "first", "the original history")).await;
+        run_to_end(&engine, "t1", "run:t1:1").await;
+        let rejection = if pending {
+            "reject-encrypted-history-with-work"
+        } else {
+            "reject-encrypted-history"
+        };
+        dispatch(&engine, message("t1", "reject", rejection)).await;
+        let rejected = run_to_end(&engine, "t1", "run:t1:2").await;
+        assert_eq!(rejected["runs"][1]["status"], "failed");
+        let original = rejected["runs"][1]["providerThreadId"].clone();
+        dispatch(
+            &engine,
+            message("t1", "continue", "continue after the rejection"),
+        )
+        .await;
+        let after = run_to_end(&engine, "t1", "run:t1:3").await;
+        let injected = crate::lock(&provider.injected).clone();
+        if pending {
+            assert_eq!(after["runs"][2]["status"], "failed", "{after}");
+            assert!(injected.is_empty());
+            assert_eq!(after["thread"]["activeProviderThreadId"], original);
+        } else {
+            assert_eq!(after["runs"][2]["status"], "completed", "{after}");
+            assert_ne!(after["runs"][2]["providerThreadId"], original);
+            assert_eq!(injected.len(), 1);
+            assert!(injected[0].1.to_string().contains("the original history"));
+        }
+        engine.shutdown().await;
+    }
 }
 
 /// A provider failure holds the queue, but a buffered provider notification still starts: it
@@ -13963,6 +14008,28 @@ async fn seed_async_question(engine: &SqliteEngine) {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_async_answer_accepts_an_empty_multiselect_and_an_image_only_answer() {
+    let db = TempDb::new("answer-image-only");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    seed_async_question(&engine).await;
+    let mut answer = async_answer("answer");
+    answer["answers"] = json!({"sizes":[]});
+    let picture = json!({"type":"image","id":"image-id","name":"color.png","mimeType":"image/png","sizeBytes":8});
+    answer["attachmentsByQuestionId"] = json!({"color":[picture]});
+    dispatch(&engine, answer).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    let reply = &p["messages"][0];
+    assert!(
+        reply["text"]
+            .as_str()
+            .unwrap()
+            .contains("Which sizes?\nNone selected")
+    );
+    assert_eq!(reply["attachments"][0]["id"], "image-id");
 }
 
 fn async_answer(command: &str) -> Value {
@@ -15721,35 +15788,65 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
     assert_eq!(provider.answers.lock().unwrap().len(), 1);
 }
 
-#[tokio::test(flavor="current_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn idle_sweep_keeps_a_session_that_started_work_while_another_closed() {
-    let db=TempDb::new("audit-idle-race");
-    let (engine,provider)=open_with(&db,FakeProvider::new("claudeAgent")
-        .with_close_delay(Duration::from_millis(240)).with_close_interrupting());
-    for id in ["ta","tb"] {
-      dispatch(&engine,create(id,&format!("create-{id}"))).await;
-      dispatch(&engine,message(id,&format!("first-{id}"),"first")).await;
-      run_to_end(&engine,id,&format!("run:{id}:1")).await;
+    let db = TempDb::new("audit-idle-race");
+    let (engine, provider) = open_with(
+        &db,
+        FakeProvider::new("claudeAgent")
+            .with_close_delay(Duration::from_millis(240))
+            .with_close_interrupting(),
+    );
+    for id in ["ta", "tb"] {
+        dispatch(&engine, create(id, &format!("create-{id}"))).await;
+        dispatch(&engine, message(id, &format!("first-{id}"), "first")).await;
+        run_to_end(&engine, id, &format!("run:{id}:1")).await;
     }
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let inner=engine.inner().clone();
-    let sweep=tokio::spawn(async move{inner.reap_idle(crate::IdleTimeout::After(Duration::from_millis(5))).await});
+    let inner = engine.inner().clone();
+    let sweep = tokio::spawn(async move {
+        inner
+            .reap_idle(crate::IdleTimeout::After(Duration::from_millis(5)))
+            .await
+    });
     tokio::time::timeout(Duration::from_secs(1), async {
-       while provider.closed.load(std::sync::atomic::Ordering::SeqCst)==0 { tokio::task::yield_now().await; }
-    }).await.unwrap();
-    let remaining=["ta","tb"].into_iter().find(|id|engine.inner().live_thread(id).is_some()).unwrap();
-    dispatch(&engine,message(remaining,"second","hang")).await;
-    let run=format!("run:{remaining}:2");
-    tokio::time::timeout(Duration::from_secs(1),async {
-      loop {
-        let p=projection(&engine,remaining).await;
-        if p["runs"].as_array().unwrap().iter().any(|r|r["id"]==run && r["status"]=="running"){break;}
-        tokio::task::yield_now().await;
-      }
-    }).await.unwrap();
-    assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst),1);
+        while provider.closed.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let remaining = ["ta", "tb"]
+        .into_iter()
+        .find(|id| engine.inner().live_thread(id).is_some())
+        .unwrap();
+    dispatch(&engine, message(remaining, "second", "hang")).await;
+    let run = format!("run:{remaining}:2");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let p = projection(&engine, remaining).await;
+            if p["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["id"] == run && r["status"] == "running")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
     sweep.await.unwrap();
     assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
     let projection = projection(&engine, remaining).await;
-    assert!(projection["runs"].as_array().unwrap().iter().any(|r| r["id"] == run && r["status"] == "running"));
+    assert!(
+        projection["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == run && r["status"] == "running")
+    );
 }

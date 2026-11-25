@@ -531,7 +531,9 @@ fn serve_args(args: &Args, state_dir: PathBuf) -> Result<Command, String> {
         None => conn_engine::IdleTimeout::ProviderDefault,
         Some(minutes) => match minutes.parse::<u64>() {
             Ok(0) => conn_engine::IdleTimeout::Disabled,
-            Ok(minutes) => conn_engine::IdleTimeout::After(std::time::Duration::from_secs(minutes.saturating_mul(60))),
+            Ok(minutes) => conn_engine::IdleTimeout::After(std::time::Duration::from_secs(
+                minutes.saturating_mul(60),
+            )),
             Err(_) => return Err(format!("invalid --session-idle-timeout `{minutes}`")),
         },
     };

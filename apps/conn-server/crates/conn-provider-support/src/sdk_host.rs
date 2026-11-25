@@ -824,6 +824,39 @@ impl QueryHandle {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_query_cannot_block_another_querys_interrupt() {
+        let script = r#"read a
+read b
+read ctl
+i=0
+while [ "$i" -lt 257 ]; do echo '{"ch":"sdk","t":"msg","sessionId":"q1","m":{"n":1}}'; i=$((i+1)); done
+echo '{"ch":"reply","id":3,"ok":true,"value":"interrupted"}'
+read abort"#;
+        let helper = Helper::new(
+            HelperCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+            },
+            "test",
+            plain_driver("test"),
+        );
+        let mut slow = helper.open(json!({}), json!({})).unwrap();
+        let mut backlog = slow.take_events().unwrap();
+        let fast = helper.open(json!({}), json!({})).unwrap();
+        assert_eq!(
+            fast.handle()
+                .call("interrupt", json!([]), Duration::from_secs(2))
+                .await
+                .unwrap(),
+            "interrupted"
+        );
+        for _ in 0..QUERY_EVENT_CAPACITY {
+            assert!(matches!(backlog.recv().await, Some(QueryEvent::Message(_))));
+        }
+        assert!(matches!(backlog.recv().await, Some(QueryEvent::End(_))));
+        helper.stop().await;
+    }
     #[test]
     fn scripts_run_under_node_and_executables_directly() {
         let script = HelperCommand::from_path("/x/index.mjs");

@@ -234,12 +234,12 @@ impl Provider for CodexProvider {
                 input.provider_session_id,
                 &self.instance_id,
                 self.server.clone(),
-                self.status.clone(),
                 tx,
                 &self.config,
                 (
                     Some(launch::selection_model(&input.model_selection)),
                     input.runtime_policy.cwd.clone(),
+                    self.status.clone(),
                 ),
                 input.mcp_servers,
             );

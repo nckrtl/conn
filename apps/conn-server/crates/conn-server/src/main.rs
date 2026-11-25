@@ -10,7 +10,10 @@ fn main() {
         std::process::exit(conn_server::acp_mcp_bridge::main());
     }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("acp-mcp-call")) {
-        let args = std::env::args_os().skip(2).map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let args = std::env::args_os()
+            .skip(2)
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         std::process::exit(conn_server::cli::acp_mcp_call(&args));
     }
     // Antigravity's `BROWSER`: reports a sign-in URL instead of opening a browser.

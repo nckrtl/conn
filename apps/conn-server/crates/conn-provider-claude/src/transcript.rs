@@ -114,3 +114,34 @@ pub(super) fn extended(root: &Path, native: &str, emitted: &VecDeque<String>) ->
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn only_a_new_root_message_after_a_known_anchor_restarts_the_query() {
+        let root =
+            std::env::temp_dir().join(format!("conn-transcript-{}", conn_support::uuid_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let entry = |id: &str| json!({"type":"user","uuid":id,"message":{"content":"test"}});
+        let mut external = entry("external");
+        external["isSidechain"] = json!(true);
+        let mut lines = vec![entry("old"), entry("seen"), external];
+        let emitted = VecDeque::from(["seen".to_owned()]);
+        let write = |rows: &[Value]| {
+            std::fs::write(
+                repo.join("native.jsonl"),
+                rows.iter().map(|v| format!("{v}\n")).collect::<String>(),
+            )
+            .unwrap()
+        };
+        write(&lines);
+        assert_eq!(extended(&root, "native", &emitted), Some(false));
+        lines.push(entry("terminal"));
+        write(&lines);
+        assert_eq!(extended(&root, "native", &emitted), Some(true));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

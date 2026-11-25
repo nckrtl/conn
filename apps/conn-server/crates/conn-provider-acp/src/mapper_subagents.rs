@@ -29,6 +29,7 @@ pub(super) struct Subagent {
     /// `OrchestrationV2Subagent`.
     pub(super) task: Value,
     child_thread_id: String,
+    provider_thread: Option<Value>,
     child_root_node_id: String,
     turn_item_id: String,
     turn_item_ordinal: u32,
@@ -402,6 +403,7 @@ impl<E: Env> Mapper<E> {
             pending_assistant: Vec::new(),
             child_item_ordinals: HashMap::new(),
             next_child_ordinal: 101,
+            provider_thread: None,
             terminal_status_projected: false,
             tools: HashMap::new(),
             tool_skips: HashMap::new(),
@@ -492,6 +494,7 @@ impl<E: Env> Mapper<E> {
             let held = self.turn.as_mut().map(|turn| {
                 if let Some(sub) = turn.subagents.get_mut(&native_task_id) {
                     sub.child_session_id = Some(child_session.clone());
+                    sub.provider_thread = Some(provider_thread.clone());
                     set(&mut sub.task, "providerThreadId", json!(provider_thread_id));
                 }
                 turn.subagents
@@ -935,6 +938,24 @@ impl<E: Env> Mapper<E> {
             .turn
             .as_ref()
             .and_then(|t| t.subagents.key_of_session(&session_id));
+        if self.flavor.driver == "grok"
+            && let Some(key) = key.as_deref()
+            && let Some(total) = params["_meta"]["totalTokens"].as_u64()
+            && let Some(thread) = self
+                .turn
+                .as_mut()
+                .and_then(|t| t.subagents.get_mut(key))
+                .and_then(|s| s.provider_thread.as_mut())
+            && thread["contextUsage"]["usedTokens"] != total
+        {
+            thread["contextUsage"] = json!({"usedTokens":total});
+            thread["updatedAt"] = json!(self.env.now());
+            let thread = thread.clone();
+            self.event(
+                json!({"type":"provider_thread.updated","providerThread":thread}),
+                out,
+            );
+        }
         if kind == "tool_call" || kind == "tool_call_update" {
             let Some(key) = key else { return };
             let fallback = (kind == "tool_call").then_some("pending");
@@ -1023,8 +1044,27 @@ impl<E: Env> Mapper<E> {
             self.rearm_deferred_finalize(&mut out);
             return out;
         }
-        // A subagent of an earlier turn (T3's carryover subagents) is not built: its end is
-        // dropped here.
+        if self.carryover.as_ref().is_some_and(|owner| {
+            owner.native_thread_id == session_id
+                && owner.subagents.key_of_session(child_session_id).is_some()
+        }) {
+            let live = self.turn.take();
+            self.turn = self.carryover.take().map(|t| *t);
+            // The carried owner has the matching child. Its updates retain the original run and node ids.
+            out = self.finish_subagent(session_id, child_session_id, status, result);
+            self.carryover = self
+                .turn
+                .take()
+                .filter(|owner| {
+                    owner
+                        .subagents
+                        .list
+                        .iter()
+                        .any(|(_, s)| !subagent_status_is_terminal(s.status()))
+                })
+                .map(Box::new);
+            self.turn = live;
+        }
         out
     }
 
@@ -1058,6 +1098,43 @@ impl<E: Env> Mapper<E> {
             suppress_normal_tool: true,
         };
         self.emit_subagent(update, out);
+    }
+
+    pub(crate) fn running_child_ids(&self) -> Vec<String> {
+        self.turn
+            .as_ref()
+            .into_iter()
+            .flat_map(|t| t.subagents.list.iter())
+            .filter(|(_, s)| crate::grok_background::subagent_status_blocks_settlement(s.status()))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    pub(crate) fn idle_recorded_children(&mut self, active: &[String]) -> Vec<Out> {
+        let mut out = Vec::new();
+        for key in self.running_child_ids() {
+            if active.contains(&key) {
+                continue;
+            }
+            let Some(child) = self.turn.as_ref().and_then(|t| t.subagents.get(&key)) else {
+                continue;
+            };
+            self.emit_subagent(
+                SubagentUpdate {
+                    native_task_id: key,
+                    prompt: child.task["prompt"].as_str().unwrap_or("").into(),
+                    title: child.task["title"].as_str().map(str::to_owned),
+                    model: child.task["model"].as_str().map(str::to_owned),
+                    status: "idle".into(),
+                    child_session_id: child.child_session_id.clone(),
+                    result: None,
+                    suppress_normal_tool: false,
+                },
+                &mut out,
+            );
+        }
+        self.rearm_deferred_finalize(&mut out);
+        out
     }
 
     /// Subagents whose status blocks the turn's settle (`hasDeferredBackgroundWork`).

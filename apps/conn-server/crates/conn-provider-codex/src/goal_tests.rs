@@ -664,3 +664,6 @@ async fn close_cancels_the_goal_grace() {
     witness.close().await;
     let _ = std::fs::remove_dir_all(&fixture.dir);
 }
+
+#[path = "session/protocol_tests.rs"]
+mod protocol_tests;

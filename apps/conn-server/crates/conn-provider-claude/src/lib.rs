@@ -172,9 +172,7 @@ impl Provider for ClaudeProvider {
 
     fn refresh_workspace(&self, cwd: String) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            let home = launch::config_dir(&self.config, &serde_json::Map::new());
-            let discovered =
-                skills::list(home, Some(cwd.clone()), self.config.launch_args.clone()).await;
+            let discovered = skills::list(self.config.clone(), Some(cwd.clone())).await;
             let now = conn_support::time::iso_from_ms(conn_support::time::now_ms());
             let mut status = lock(&self.status);
             let entry =
@@ -273,9 +271,7 @@ impl Provider for ClaudeProvider {
             })
             .await;
             if settings.enabled {
-                let home = launch::config_dir(&self.config, &serde_json::Map::new());
-                entry["skills"] =
-                    json!(skills::list(home, None, self.config.launch_args.clone()).await);
+                entry["skills"] = json!(skills::list(self.config.clone(), None).await);
             }
             let mut status = lock(&self.status);
             if let Some(workspaces) = status.as_ref().and_then(|s| s.get("workspaceSnapshots")) {
@@ -356,7 +352,7 @@ pub fn capabilities() -> Value {
             "emitsTurnCompleted": true,
             "supportsInterrupt": true,
             "supportsActiveSteering": true,
-            "activeSteeringInterruptsTools": true,
+            "activeSteeringInterruptsTools": false,
             "supportsSteeringByInterruptRestart": false,
             "supportsQueuedMessages": false,
             "terminalStatusQuality": "strong",

@@ -1,6 +1,9 @@
 //! Codex owns the OAuth listener and token exchange. Relay only the callback the same
 //! native sign-in issued, and wait for its result on the shared app-server connection.
-use super::*;
+use super::{
+    CallError, Duration, HashMap, Inner, Mutex, ProviderResult, ProviderThread, Value, call_failed,
+    failed, json, native_thread_id,
+};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -160,7 +163,19 @@ pub(super) async fn start(
 }
 
 fn checked_callback(redirect: &Url, state: &str, pasted: &str) -> Option<Url> {
-    let url = Url::parse(pasted).ok()?;
+    if pasted.len() > 16_384 {
+        return None;
+    }
+    let pasted = pasted.trim();
+    let url = if pasted.contains("://") {
+        Url::parse(pasted).ok()?
+    } else {
+        Url::parse(&format!("{}://{pasted}", redirect.scheme())).ok()?
+    };
+    let outcomes = url
+        .query_pairs()
+        .filter(|(key, _)| key == "code" || key == "error")
+        .count();
     (url.scheme() == "http"
         && url.origin() == redirect.origin()
         && url.path() == redirect.path()
@@ -169,6 +184,7 @@ fn checked_callback(redirect: &Url, state: &str, pasted: &str) -> Option<Url> {
         && url.fragment().is_none()
         && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
         && query(&url, "state").as_deref() == Some(state)
+        && outcomes == 1
         && (query(&url, "code").is_some() || query(&url, "error").is_some()))
     .then_some(url)
 }

@@ -129,7 +129,10 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis);
     if idle.is_some() {
-        config.idle_session = idle.map_or(conn_engine::IdleTimeout::Disabled, conn_engine::IdleTimeout::After);
+        config.idle_session = idle.map_or(
+            conn_engine::IdleTimeout::Disabled,
+            conn_engine::IdleTimeout::After,
+        );
     }
     let engine = SqliteEngine::open(config).unwrap();
     let project = SqliteEngine::project_id_for(&root);

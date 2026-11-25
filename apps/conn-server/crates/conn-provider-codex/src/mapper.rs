@@ -32,6 +32,7 @@ use crate::protocol::{Inbound, reply, reply_error};
 mod goals;
 mod subagents;
 
+mod rate_limits;
 pub use goals::{
     GoalCommand, describe as describe_goal, objective_too_long, parse_command, provider_goal,
 };
@@ -303,6 +304,7 @@ pub struct Mapper<E: Env> {
     retries: HashMap<String, (tokio::time::Instant, Value)>,
     pub(crate) limit_reset: Option<String>,
     limited_item: Option<Value>,
+    pub(crate) time_zone: Option<String>,
 }
 
 /// A completed turn kept for its running commands, and the commands whose end already asked
@@ -453,6 +455,7 @@ impl<E: Env> Mapper<E> {
             retries: Default::default(),
             limit_reset: None,
             limited_item: None,
+            time_zone: None,
         }
     }
 
@@ -2206,7 +2209,15 @@ impl<E: Env> Mapper<E> {
             let shared = failure["code"]
                 .as_str()
                 .is_some_and(|c| c.starts_with("subscription_sharing_"));
-            if !shared && let Some(reset) = &self.limit_reset {
+            if !shared
+                && let Some(reset) = self.limit_reset.clone().or_else(|| {
+                    rate_limits::message_reset(
+                        failure["message"].as_str()?,
+                        &completed_at,
+                        self.time_zone.as_deref(),
+                    )
+                })
+            {
                 failure["resetAt"] = json!(reset);
             }
             let key = format!("terminal-failure:{}", turn.provider_turn_id);
@@ -2225,9 +2236,15 @@ impl<E: Env> Mapper<E> {
                 &mut item,
                 json!({"type":"error","title":"Usage limit reached","nativeItemRef":null,"failure":failure}),
             );
-            push_event(out, json!({"type":"turn_item.updated","turnItem":item}));
-            if !shared && turn.subagent.is_none() {
-                self.limited_item = Some(item);
+            if let Some(run) = &turn.run_id {
+                // The engine writes this row when it settles the run. A later account
+                // update changes that same error so its queue can resume exactly once.
+                if !shared {
+                    item["id"] = json!(format!("turn-item:{run}:error"));
+                    self.limited_item = Some(item);
+                }
+            } else {
+                push_event(out, json!({"type":"turn_item.updated","turnItem":item}));
             }
         }
         self.retries.remove(native);
@@ -3311,7 +3328,8 @@ fn file_patches(changes: &[Value]) -> String {
 }
 
 fn file_change_artifacts(env: &mut impl Env, turn: &mut Turn, item: &Value, out: &mut Vec<Out>) {
-    let Some((first, others)) = item["changes"].as_array().and_then(|c| c.split_first()) else {
+    let files = item["changes"].as_array().map_or(&[][..], Vec::as_slice);
+    let Some((first, others)) = files.split_first() else {
         return;
     };
     let id = item["id"].as_str().unwrap_or_default();
@@ -3354,7 +3372,7 @@ fn file_change_artifacts(env: &mut impl Env, turn: &mut Turn, item: &Value, out:
     extend(
         &mut turn_item,
         json!({
-            "type": "file_change", "fileName": first["path"], "diffStr": if others.is_empty() { first["diff"].clone() } else { json!(file_patches(item["changes"].as_array().unwrap())) }, "changes": changes,
+            "type": "file_change", "fileName": first["path"], "diffStr": if others.is_empty() { first["diff"].clone() } else { json!(file_patches(files)) }, "changes": changes,
         }),
     );
     push_event(out, json!({"type": "node.updated", "node": node}));

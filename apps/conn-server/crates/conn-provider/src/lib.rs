@@ -41,7 +41,7 @@ pub use set::ProviderSet;
 use tokio::sync::mpsc;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-/// Re-reads the thread's goal and undelivered delegated work when the native Stop hook fires.
+/// Checks for undelivered delegated work when the native Stop hook evaluates the goal.
 pub type GoalStopCheck = std::sync::Arc<dyn Fn() -> BoxFuture<'static, bool> + Send + Sync>;
 pub type ProviderResult<T> = Result<T, ProviderError>;
 
@@ -55,7 +55,13 @@ pub trait Provider: Send + Sync {
     fn capabilities(&self) -> BoxFuture<'_, ProviderResult<ProviderCapabilities>>;
 
     /// Reads confirmed native child work under one provider-owned root session.
-    fn native_child_work(&self, _root_session_id: String, _native_task_id: String, _launch: serde_json::Value, _siblings: Vec<serde_json::Value>) -> BoxFuture<'_, ProviderResult<Vec<serde_json::Value>>> {
+    fn native_child_work(
+        &self,
+        _root_session_id: String,
+        _native_task_id: String,
+        _launch: serde_json::Value,
+        _siblings: Vec<serde_json::Value>,
+    ) -> BoxFuture<'_, ProviderResult<Vec<serde_json::Value>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
@@ -95,7 +101,9 @@ pub trait Provider: Send + Sync {
     }
 
     /// Discovers project-scoped commands in the requested workspace.
-    fn refresh_workspace(&self, _cwd: String) -> BoxFuture<'_, ()> { Box::pin(async {}) }
+    fn refresh_workspace(&self, _cwd: String) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 
     /// Probes the provider again (`ManagedServerProvider.refresh`) with the instance's
     /// `providerInstances[id]` settings entry (`None`: no entry), so the next
@@ -227,12 +235,21 @@ pub trait Session: Send + Sync {
     fn provider_session_id(&self) -> &ProviderSessionId;
 
     /// Starts a sign-in for this thread's MCP server. None means it is already signed in.
-    fn start_mcp_sign_in(&self, _thread: ProviderThread, _server: String) -> BoxFuture<'_, ProviderResult<Option<String>>> {
+    fn start_mcp_sign_in(
+        &self,
+        _thread: ProviderThread,
+        _server: String,
+    ) -> BoxFuture<'_, ProviderResult<Option<String>>> {
         unsupported("start_mcp_sign_in")
     }
 
     /// Completes the challenge on the same native session that started it.
-    fn complete_mcp_sign_in(&self, _thread: ProviderThread, _server: String, _callback_url: String) -> BoxFuture<'_, ProviderResult<()>> {
+    fn complete_mcp_sign_in(
+        &self,
+        _thread: ProviderThread,
+        _server: String,
+        _callback_url: String,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
         unsupported("complete_mcp_sign_in")
     }
 

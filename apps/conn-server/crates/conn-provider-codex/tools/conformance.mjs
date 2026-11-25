@@ -947,12 +947,23 @@ const readLog = (path) =>
 /** Each process start with the frames it got, in order. */
 const processes = (log) => {
   const out = [];
+  const auxiliary = new Map();
   for (const entry of log) {
     if (entry.kind === "start") out.push({ start: entry, frames: [], childReads: [], extra: [], missing: [], end: [] });
     // An old stub can still log its shutdown after the resumed process starts.
     const current = out.find((p) => p.start.pid === entry.pid);
     if (current === undefined) continue;
     if (entry.kind === "in") current.frames.push(entry.frame ?? { invalid: entry.line });
+    // These calls were added after the bundled TS reference and recordings.
+    // The stub verifies their method, phase and payload. The current-protocol
+    // Rust tests cover workspace MCP overrides and title propagation.
+    if (entry.kind === "workspace-config-or-name") {
+      const index = current.frames.findLastIndex((f) => f.id === entry.frame.id && f.method === entry.frame.method);
+      if (index !== -1) current.frames.splice(index, 1);
+      const ids = auxiliary.get(current) ?? [];
+      ids.push(entry.frame.id);
+      auxiliary.set(current, ids);
+    }
     // A subagent's model read (the stub logs it as \`child-metadata\` right after its \`in\`):
     // both servers send it from a background task, so it is compared as a set, not in order.
     if (entry.kind === "child-metadata") {
@@ -966,6 +977,13 @@ const processes = (log) => {
     if (["SIGTERM", "SIGINT", "SIGHUP", "stdin-end", "linger-exit"].includes(entry.kind)) {
       current.end.push({ kind: entry.kind, afterMs: entry.afterMs });
     }
+  }
+  for (const [proc, ids] of auxiliary) {
+    proc.frames = proc.frames.map((frame) =>
+      frame.method !== undefined && typeof frame.id === "number"
+        ? { ...frame, id: frame.id - ids.filter((id) => id < frame.id).length }
+        : frame,
+    );
   }
   // No `linger-exit`: the client killed the stub (SIGKILL) before the linger ended.
   for (const p of out) {

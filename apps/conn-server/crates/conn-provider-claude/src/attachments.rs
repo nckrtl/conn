@@ -6,7 +6,7 @@
 //! the session's budget lasts. Paths follow T3's attachment store (`attachmentStore.ts`):
 //! `<dir>/<id><ext>`.
 //!
-use std::{io::Read, path::Path};
+use std::{fs::OpenOptions, io::Read, path::Path};
 
 use conn_contract::{ChatAttachment, to_json};
 use serde_json::{Value, json};
@@ -16,66 +16,9 @@ pub const BUDGET_BYTES: u64 = 28 * 1024 * 1024;
 
 const SUPPORTED_IMAGES: &[&str] = &["image/gif", "image/jpeg", "image/png", "image/webp"];
 
-const IMAGE_EXTENSIONS: &[(&str, &str)] = &[
-    ("image/avif", ".avif"),
-    ("image/bmp", ".bmp"),
-    ("image/gif", ".gif"),
-    ("image/heic", ".heic"),
-    ("image/heif", ".heif"),
-    ("image/jpeg", ".jpg"),
-    ("image/jpg", ".jpg"),
-    ("image/png", ".png"),
-    ("image/svg+xml", ".svg"),
-    ("image/tiff", ".tiff"),
-    ("image/webp", ".webp"),
-];
+pub use conn_provider_support::attachments::relative_path;
 
-const SAFE_IMAGE_EXTENSIONS: &[&str] = &[
-    ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".tiff",
-    ".webp",
-];
-
-fn extension_of(name: &str, max: usize) -> Option<String> {
-    let (_, ext) = name.trim().rsplit_once('.')?;
-    let ext = ext.to_ascii_lowercase();
-    (!ext.is_empty() && ext.len() <= max && ext.chars().all(|c| c.is_ascii_alphanumeric()))
-        .then(|| format!(".{ext}"))
-}
-
-/// `attachmentRelativePath`.
-pub fn relative_path(attachment: &Value) -> Option<String> {
-    let id = attachment.get("id")?.as_str()?;
-    let safe_id = !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !safe_id {
-        return None;
-    }
-    let name = attachment.get("name").and_then(Value::as_str).unwrap_or("");
-    let mime = attachment
-        .get("mimeType")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let extension = match attachment.get("type")?.as_str()? {
-        "image" => IMAGE_EXTENSIONS
-            .iter()
-            .find(|(m, _)| *m == mime)
-            .map(|(_, e)| e.to_string())
-            .or_else(|| {
-                extension_of(name, 8).filter(|e| SAFE_IMAGE_EXTENSIONS.contains(&e.as_str()))
-            })
-            .unwrap_or_else(|| ".bin".into()),
-        "file" => extension_of(name, 10)
-            .filter(|e| e != ".part")
-            .unwrap_or_else(|| ".bin".into()),
-        _ => return None,
-    };
-    Some(format!("{id}{extension}"))
-}
-
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Budget {
     pub bytes: u64,
     pub pages: u64,
@@ -257,8 +200,16 @@ pub fn prompt_content(
                 value["id"].as_str().unwrap_or("")
             )
         };
+        let mut open = OpenOptions::new();
+        open.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+        }
         let file = conn_provider_support::attachments::saved_path(dir, value)
-            .and_then(|path| std::fs::File::open(path).ok());
+            .and_then(|path| open.open(path).ok())
+            .filter(|file| file.metadata().is_ok_and(|m| m.is_file()));
         let Some(file) = file else {
             if pdf {
                 continue;
@@ -271,11 +222,8 @@ pub fn prompt_content(
             .saturating_sub(overhead)
             / 4
             * 3;
-        if file
-            .metadata()
-            .ok()
-            .is_some_and(|m| m.len() > max || !m.is_file())
-        {
+        let max = if pdf { max.min(20 * 1024 * 1024) } else { max };
+        if file.metadata().is_ok_and(|m| m.len() > max) {
             continue;
         }
         let mut bytes = Vec::new();
@@ -284,6 +232,9 @@ pub fn prompt_content(
                 continue;
             }
             return Err(read_error());
+        }
+        if bytes.len() as u64 > max {
+            continue;
         }
         let cost = 4 * (bytes.len() as u64).div_ceil(3) + overhead;
         if cost > BUDGET_BYTES.saturating_sub(budget.bytes) {
@@ -308,6 +259,36 @@ mod tests {
     use super::*;
     use conn_contract::from_json;
 
+    #[test]
+    fn supported_documents_respect_the_budget_and_images_must_be_readable() {
+        let root = std::env::temp_dir().join(format!("conn-doc-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pdf=b"%PDF-1.7\n<< /Type /Catalog >> << /Type /Pages /Count 1 /Kids [1 0 R] >> << /Type /Page >>\n%%EOF";
+        std::fs::write(root.join("doc.pdf"), pdf).unwrap();
+        let file=from_json(json!({"type":"file","id":"doc","name":"a.pdf","mimeType":"application/pdf","sizeBytes":pdf.len()})).unwrap();
+        let mut budget = Budget::default();
+        let inline = prompt_content(
+            "read",
+            std::slice::from_ref(&file),
+            Some(&root),
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(inline[0]["type"], "document");
+        assert_eq!(budget.pages, 1);
+        budget.pages = 100;
+        assert_eq!(
+            prompt_content("read", &[file], Some(&root), &mut budget).unwrap()[0]["type"],
+            "text"
+        );
+        let image=from_json(json!({"type":"image","id":"gone","name":"gone.png","mimeType":"image/png","sizeBytes":1})).unwrap();
+        assert!(
+            prompt_content("look", &[image], Some(&root), &mut budget)
+                .unwrap_err()
+                .contains("gone")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn paths_follow_the_attachment_store() {
         let image = json!({"type": "image", "id": "t-1", "name": "a.PNG", "mimeType": "image/png", "sizeBytes": 1});

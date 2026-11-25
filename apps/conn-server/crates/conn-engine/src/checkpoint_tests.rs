@@ -1646,6 +1646,38 @@ async fn rollback_asks_the_provider_instance_whether_it_can_roll_back() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn portable_rollback_starts_a_new_native_conversation_with_only_kept_history() {
+    for driver in ["grok", "antigravity"] {
+        let db = TempDb::new(driver);
+        let repo = Repo::new(driver);
+        let (engine, provider) = with_turns(
+            &db,
+            &repo,
+            FakeProvider::new("claudeAgent")
+                .with_driver(driver)
+                .without_rollback(),
+            create_worktree_thread(&repo),
+            &["kept apples", "discarded pears"],
+        )
+        .await;
+        let p = projection(&engine, "t1").await;
+        dispatch(&engine, rollback("rb", &checkpoint_at(&p, 1), Some(false))).await;
+        until(&engine, |p| p["runs"][1]["status"] == "rolled_back").await;
+        dispatch(&engine, message("t1", "after", "next question")).await;
+        run_to_end(&engine, "t1", "run:t1:3").await;
+        let prompts = provider.prompts.lock().unwrap();
+        let prompt = prompts.last().unwrap();
+        assert!(
+            prompt.contains("kept apples") && prompt.contains("next question"),
+            "{driver}: {prompt}"
+        );
+        assert!(!prompt.contains("discarded pears"), "{driver}: {prompt}");
+        assert!(provider.rollbacks.lock().unwrap().is_empty());
+        assert!(provider.resumes.lock().unwrap().is_empty());
+    }
+}
+
 fn refused_message<T, E: serde::Serialize>(result: Result<T, EngineError<E>>) -> String {
     let Err(EngineError::Rejected(error)) = result else {
         panic!("refused")

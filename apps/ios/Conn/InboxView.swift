@@ -360,16 +360,13 @@ private struct ThreadListV2RowView: View {
     }
 
     private var metaLine: AttributedString {
+        // The lab's line: ✦ (Claude's orange) · project · branch · age.
+        var line = AttributedString("✦")
+        line.foregroundColor = Color(red: 0xd9 / 255, green: 0x79 / 255, blue: 0x57 / 255)
         var parts: [String] = [projectTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "No project"]
         if let branch = thread.branch, !branch.isEmpty { parts.append(branch) }
-        var line = AttributedString(parts.joined(separator: " · ") + " · ")
-        // The lab's agent mark: a ✦ in Claude's orange.
-        var agent = AttributedString("✦")
-        agent.foregroundColor = Color(red: 0xd9 / 255, green: 0x79 / 255, blue: 0x57 / 255)
-        line += agent
-        if let date = parseISODate(from: thread.updatedAt) {
-            line += AttributedString(" · " + wholeMinuteRelativeTime(from: date))
-        }
+        if let date = parseISODate(from: thread.updatedAt) { parts.append(wholeMinuteRelativeTime(from: date)) }
+        line += AttributedString(" · " + parts.joined(separator: " · "))
         return line
     }
 }

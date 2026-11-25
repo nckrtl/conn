@@ -58,7 +58,10 @@ struct WorkspaceRootView: View {
             .accessibilityLabel("Open settings").accessibilityIdentifier("workspace.settingsButton")
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
+        // The segmented control draws its own glass track; the toolbar's shared glass behind it
+        // made a second, outer pill.
         ToolbarItem(placement: .bottomBar) { workspaceSwitcher }
+            .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItem(placement: .bottomBar) {
             Button { navigationPath.append(.newThreadDraft(projectId: nil, title: "General")) } label: {

@@ -717,6 +717,16 @@ void uniffi_conn_ffi_fn_free_offlinereader(uint64_t handle, RustCallStatus *_Non
 uint64_t uniffi_conn_ffi_fn_method_offlinereader_before(uint64_t ptr, RustBuffer thread, RustBuffer id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_DISCARD_IMAGE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_DISCARD_IMAGE
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_discard_image(uint64_t ptr, RustBuffer thread, RustBuffer file
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_IMAGE_BYTES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_IMAGE_BYTES
+uint64_t uniffi_conn_ffi_fn_method_offlinereader_image_bytes(uint64_t ptr, RustBuffer thread, RustBuffer file, int8_t online
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_OUTLINE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_OUTLINE
 uint64_t uniffi_conn_ffi_fn_method_offlinereader_outline(uint64_t ptr, RustBuffer thread, int8_t online
@@ -730,6 +740,11 @@ uint64_t uniffi_conn_ffi_fn_method_offlinereader_prompt_window(uint64_t ptr, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_RECENT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_RECENT
 uint64_t uniffi_conn_ffi_fn_method_offlinereader_recent(uint64_t ptr, RustBuffer thread
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_RETAINS_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_RETAINS_THREAD
+int8_t uniffi_conn_ffi_fn_method_offlinereader_retains_thread(uint64_t ptr, RustBuffer thread, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_OFFLINEREADER_SAVED_SHELL
@@ -1816,6 +1831,18 @@ uint16_t uniffi_conn_ffi_checksum_method_offlinereader_before(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_DISCARD_IMAGE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_DISCARD_IMAGE
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_discard_image(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_IMAGE_BYTES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_IMAGE_BYTES
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_image_bytes(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_OUTLINE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_OUTLINE
 uint16_t uniffi_conn_ffi_checksum_method_offlinereader_outline(void
@@ -1831,6 +1858,12 @@ uint16_t uniffi_conn_ffi_checksum_method_offlinereader_prompt_window(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_RECENT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_RECENT
 uint16_t uniffi_conn_ffi_checksum_method_offlinereader_recent(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_RETAINS_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_OFFLINEREADER_RETAINS_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_offlinereader_retains_thread(void
     
 );
 #endif

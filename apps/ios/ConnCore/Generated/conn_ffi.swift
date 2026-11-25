@@ -634,6 +634,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -2745,11 +2763,17 @@ public protocol OfflineReaderProtocol: AnyObject, Sendable {
     
     func before(thread: String, id: String) async throws  -> FfiThreadSnapshot
     
+    func discardImage(thread: String, file: FfiAttachment) async throws 
+    
+    func imageBytes(thread: String, file: FfiAttachment, online: Bool) async throws  -> Data
+    
     func outline(thread: String, online: Bool) async throws  -> [FfiPromptMarker]
     
     func promptWindow(thread: String, id: String, online: Bool) async throws  -> FfiThreadSnapshot
     
     func recent(thread: String) async throws  -> FfiThreadSnapshot
+    
+    func retainsThread(thread: String)  -> Bool
     
     func savedShell() async  -> FfiShellSnapshot?
     
@@ -2825,6 +2849,38 @@ open func before(thread: String, id: String)async throws  -> FfiThreadSnapshot  
         )
 }
     
+open func discardImage(thread: String, file: FfiAttachment)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_discard_image(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterTypeFfiAttachment_lower(file)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+open func imageBytes(thread: String, file: FfiAttachment, online: Bool)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_image_bytes(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterTypeFfiAttachment_lower(file),FfiConverterBool.lower(online)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
 open func outline(thread: String, online: Bool)async throws  -> [FfiPromptMarker]  {
     return
         try  await uniffiRustCallAsync(
@@ -2871,6 +2927,16 @@ open func recent(thread: String)async throws  -> FfiThreadSnapshot  {
             liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
+}
+    
+open func retainsThread(thread: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_offlinereader_retains_thread(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(thread),uniffiCallStatus
+    )
+})
 }
     
 open func savedShell()async  -> FfiShellSnapshot?  {
@@ -18415,6 +18481,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_offlinereader_before() != 42718) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_discard_image() != 39557) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_image_bytes() != 27491) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_offlinereader_outline() != 14487) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18422,6 +18494,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 57075) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_retains_thread() != 10877) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_saved_shell() != 26240) {

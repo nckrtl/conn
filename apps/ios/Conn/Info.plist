@@ -40,6 +40,10 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Conn connects to your conn-server on the local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Conn records your voice to dictate messages.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Conn uses speech recognition on this device to turn your dictation into text.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

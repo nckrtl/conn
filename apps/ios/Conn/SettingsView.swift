@@ -30,6 +30,22 @@ struct SettingsRootSheet: View {
                         .font(.system(size: 16)).foregroundStyle(theme.foreground)
                         .contentShape(Rectangle())
                     }
+                    Text("Voice").font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(theme.mutedForeground).padding(.horizontal, 16).padding(.top, 13)
+                    PhoneSettingsGroup(radius: 20, inset: 16) {
+                        NavigationLink {
+                            SettingsMicrophoneView()
+                        } label: {
+                            HStack(spacing: 10) {
+                                ThreadGlyph(name: "microphone", size: 22).frame(width: 32, alignment: .leading)
+                                Text("Microphone").foregroundStyle(theme.foreground)
+                                Spacer()
+                                ThreadGlyph(name: "chevron-right", size: 15).foregroundStyle(theme.mutedForeground)
+                            }
+                            .font(.system(size: 16)).frame(minHeight: 48).contentShape(Rectangle())
+                        }
+                        .accessibilityIdentifier("settings.microphoneRow")
+                    }
                 }.padding(.horizontal, 18).padding(.top, 14)
             }.buttonStyle(.plain).background(theme.background)
             .settingsSheetTitle("Settings")

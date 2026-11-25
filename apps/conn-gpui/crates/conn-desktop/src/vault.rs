@@ -286,7 +286,6 @@ struct WireCredential {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeReply {
-    id: Option<String>,
     status: Option<String>,
     message: Option<String>,
     databases: Option<Vec<WireDatabase>>,
@@ -296,6 +295,112 @@ struct BridgeReply {
     #[serde(rename = "itemID")]
     item_id: Option<String>,
     credential: Option<WireCredential>,
+}
+
+/// Only the `id` of a reply frame, to find ours before reading the rest.
+#[derive(Deserialize)]
+struct ReplyId {
+    id: Option<String>,
+}
+
+/// Which WebAuthn ceremony Vault runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyMode {
+    /// `navigator.credentials.create`.
+    Create,
+    /// `navigator.credentials.get`.
+    Get,
+}
+
+impl PasskeyMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "passkey-create",
+            Self::Get => "passkey-get",
+        }
+    }
+}
+
+/// The `DOMException` a failed ceremony rejects with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PasskeyError {
+    NotAllowed,
+    InvalidState,
+    Security,
+    NotSupported,
+    Abort,
+}
+
+impl PasskeyError {
+    /// The `DOMException` name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NotAllowed => "NotAllowedError",
+            Self::InvalidState => "InvalidStateError",
+            Self::Security => "SecurityError",
+            Self::NotSupported => "NotSupportedError",
+            Self::Abort => "AbortError",
+        }
+    }
+
+    /// Maps a name Vault sent. A name Conn does not know is a refusal, as in the Chrome
+    /// extension and Conn's Electron bridge.
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "InvalidStateError" => Self::InvalidState,
+            "SecurityError" => Self::Security,
+            "NotSupportedError" => Self::NotSupported,
+            "AbortError" => Self::Abort,
+            _ => Self::NotAllowed,
+        }
+    }
+}
+
+/// Largest `url` Vault accepts in a passkey request.
+pub const PASSKEY_URL_MAX_BYTES: usize = 8192;
+/// Largest `options` string Vault accepts in a passkey request.
+pub const PASSKEY_OPTIONS_MAX_BYTES: usize = 12_000;
+
+/// A passkey request carries exactly these fields: Vault refuses any other.
+#[derive(Serialize)]
+struct PasskeyBridgeRequest<'a> {
+    version: u8,
+    id: &'a str,
+    kind: &'static str,
+    mode: &'static str,
+    url: &'a str,
+    options: &'a str,
+}
+
+#[derive(Deserialize)]
+struct PasskeyReply {
+    status: Option<String>,
+    passkey: Option<String>,
+    error: Option<String>,
+}
+
+/// Reads Vault's passkey reply: the credential JSON string on `ok`, else the error to reject with.
+fn parse_passkey_reply(payload: &[u8]) -> Result<String, PasskeyError> {
+    let reply: PasskeyReply =
+        serde_json::from_slice(payload).map_err(|_| PasskeyError::NotAllowed)?;
+    match reply.status.as_deref() {
+        Some("ok") => {
+            let passkey = reply.passkey.ok_or(PasskeyError::NotAllowed)?;
+            // The page shim parses it: refuse anything that is not a JSON object.
+            match serde_json::from_str::<serde_json::Value>(&passkey) {
+                Ok(serde_json::Value::Object(_)) => Ok(passkey),
+                _ => Err(PasskeyError::NotAllowed),
+            }
+        }
+        Some("error") => Err(reply
+            .error
+            .as_deref()
+            .map_or(PasskeyError::NotAllowed, PasskeyError::from_name)),
+        _ => Err(PasskeyError::NotAllowed),
+    }
 }
 
 fn parse_wire_database(wire: WireDatabase) -> Option<(VaultDatabase, Option<String>)> {
@@ -618,6 +723,49 @@ impl VaultClient {
         }
     }
 
+    /// Runs one passkey ceremony in Vault, which is the authenticator.
+    ///
+    /// `url` is the page's exact HTTPS top-frame address and `options` the `{publicKey: …}` string
+    /// in the Chrome extension's wire format. Both come from Conn, never from the page. Vault
+    /// waits for a person (Touch ID), so the call waits as long as the client timeout allows.
+    /// Closing the pipe with no reply (an older Vault) rejects with `NotAllowedError`, and so does
+    /// every other failure to reach Vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`PasskeyError`] the page's promise rejects with.
+    pub async fn passkey(
+        &self,
+        mode: PasskeyMode,
+        url: &str,
+        options: &str,
+    ) -> Result<String, PasskeyError> {
+        if https_origin(url).is_none() || url.len() > PASSKEY_URL_MAX_BYTES {
+            return Err(PasskeyError::Security);
+        }
+        if options.is_empty() || options.len() > PASSKEY_OPTIONS_MAX_BYTES {
+            return Err(PasskeyError::NotSupported);
+        }
+        if !self.binary.exists() {
+            return Err(PasskeyError::NotAllowed);
+        }
+        let request_id = next_request_id();
+        let body = serde_json::to_vec(&PasskeyBridgeRequest {
+            version: 1,
+            id: &request_id,
+            kind: "passkey",
+            mode: mode.as_str(),
+            url,
+            options,
+        })
+        .map_err(|_| PasskeyError::NotSupported)?;
+        let payload = self
+            .exchange(&request_id, &body)
+            .await
+            .map_err(|_| PasskeyError::NotAllowed)?;
+        parse_passkey_reply(&payload)
+    }
+
     async fn send_request(
         &self,
         kind: &str,
@@ -646,9 +794,18 @@ impl VaultClient {
         };
         let body = serde_json::to_vec(&payload)
             .map_err(|err| VaultError::new(VaultErrorKind::Error, err.to_string()))?;
+        let payload = self.exchange(&request_id, &body).await?;
+        serde_json::from_slice(&payload)
+            .map_err(|_| VaultError::new(VaultErrorKind::Error, "Vault sent an invalid reply."))
+    }
+
+    /// Sends one framed request to a fresh `--conn-bridge` process and returns the raw payload of
+    /// the reply whose `id` is `request_id`. Closing the pipe without a reply (an older Vault, or a
+    /// refused caller) is an error. The child dies with the call, which Vault reads as the caller
+    /// going away, so dropping the future cancels a pending ceremony.
+    async fn exchange(&self, request_id: &str, body: &[u8]) -> Result<Vec<u8>, VaultError> {
         let body_len = u32::try_from(body.len())
             .map_err(|_| VaultError::new(VaultErrorKind::Error, "Vault request is too large."))?;
-
         let mut child = Command::new(&self.binary)
             .arg("--conn-bridge")
             .stdin(Stdio::piped())
@@ -670,7 +827,7 @@ impl VaultClient {
         // Keep stdin open until the reply arrives: the relay treats EOF as caller disconnect.
         let mut frame = Vec::with_capacity(4 + body.len());
         frame.extend_from_slice(&body_len.to_le_bytes());
-        frame.extend_from_slice(&body);
+        frame.extend_from_slice(body);
         if stdin.write_all(&frame).await.is_err() || stdin.flush().await.is_err() {
             let _ = child.kill().await;
             return Err(VaultError::new(
@@ -706,11 +863,11 @@ impl VaultClient {
                         "Vault sent an invalid reply.",
                     ));
                 }
-                let reply: BridgeReply = serde_json::from_slice(&payload_buf).map_err(|_| {
+                let reply: ReplyId = serde_json::from_slice(&payload_buf).map_err(|_| {
                     VaultError::new(VaultErrorKind::Error, "Vault sent an invalid reply.")
                 })?;
-                if reply.id.as_deref() == Some(request_id.as_str()) {
-                    return Ok(reply);
+                if reply.id.as_deref() == Some(request_id) {
+                    return Ok(payload_buf);
                 }
             }
         };
@@ -1075,5 +1232,225 @@ sys.stdout.buffer.flush()
                 .is_some_and(|png| png.starts_with(&PNG_SIGNATURE))
         );
         Ok(())
+    }
+
+    const PASSKEY_OPTIONS: &str =
+        r#"{"publicKey":{"challenge":"AAAAAAAAAAAAAAAAAAAAAA","rpId":"example.com"}}"#;
+
+    /// A fake Vault that checks the request is exactly the contract's shape, then answers with
+    /// `reply_body` (Python source of an expression over `req`).
+    fn passkey_script(reply_body: &str) -> String {
+        format!(
+            r#"
+import json, struct, sys
+
+req = json.loads(sys.stdin.buffer.read(struct.unpack("<I", sys.stdin.buffer.read(4))[0]))
+keys = sorted(req.keys())
+ok_shape = (
+    keys == ["id", "kind", "mode", "options", "url", "version"]
+    and req["version"] == 1
+    and req["kind"] == "passkey"
+    and req["mode"] in ("passkey-create", "passkey-get")
+    and isinstance(req["options"], str)
+)
+if not ok_shape:
+    reply = {{"id": req["id"], "status": "error", "error": "NotSupportedError"}}
+else:
+    reply = {reply_body}
+body = json.dumps(reply).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+sys.stdout.buffer.flush()
+"#
+        )
+    }
+
+    #[test]
+    fn passkey_modes_and_errors_use_the_contract_names() {
+        assert_eq!(PasskeyMode::Create.as_str(), "passkey-create");
+        assert_eq!(PasskeyMode::Get.as_str(), "passkey-get");
+        for error in [
+            PasskeyError::NotAllowed,
+            PasskeyError::InvalidState,
+            PasskeyError::Security,
+            PasskeyError::NotSupported,
+            PasskeyError::Abort,
+        ] {
+            assert_eq!(PasskeyError::from_name(error.name()), error);
+        }
+        assert_eq!(PasskeyError::from_name("Locked"), PasskeyError::NotAllowed);
+        assert_eq!(PasskeyError::from_name(""), PasskeyError::NotAllowed);
+    }
+
+    #[test]
+    fn parses_passkey_replies() {
+        let ok =
+            br#"{"id":"1","status":"ok","passkey":"{\"id\":\"abc\",\"type\":\"public-key\"}"}"#;
+        assert_eq!(
+            parse_passkey_reply(ok).as_deref(),
+            Ok(r#"{"id":"abc","type":"public-key"}"#)
+        );
+        let named = |name: &str| {
+            parse_passkey_reply(
+                format!(r#"{{"id":"1","status":"error","error":"{name}","message":"x"}}"#)
+                    .as_bytes(),
+            )
+        };
+        assert_eq!(named("InvalidStateError"), Err(PasskeyError::InvalidState));
+        assert_eq!(named("SecurityError"), Err(PasskeyError::Security));
+        assert_eq!(named("NotSupportedError"), Err(PasskeyError::NotSupported));
+        assert_eq!(named("AbortError"), Err(PasskeyError::Abort));
+        assert_eq!(named("NotAllowedError"), Err(PasskeyError::NotAllowed));
+        assert_eq!(named("Surprise"), Err(PasskeyError::NotAllowed));
+        // An error with no name, a missing credential, a credential that is not an object, an
+        // unknown status and a frame that is not JSON all refuse.
+        for bad in [
+            &br#"{"id":"1","status":"error"}"#[..],
+            br#"{"id":"1","status":"ok"}"#,
+            br#"{"id":"1","status":"ok","passkey":"[1]"}"#,
+            br#"{"id":"1","status":"ok","passkey":"not json"}"#,
+            br#"{"id":"1","status":"locked"}"#,
+            b"nonsense",
+        ] {
+            assert_eq!(parse_passkey_reply(bad), Err(PasskeyError::NotAllowed));
+        }
+    }
+
+    #[tokio::test]
+    async fn passkey_request_has_exactly_the_contract_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = passkey_script(
+            r#"{"id": req["id"], "status": "ok", "passkey": json.dumps({"mode": req["mode"], "url": req["url"], "options": req["options"]})}"#,
+        );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let url = "https://example.com/login?next=%2F";
+        for mode in [PasskeyMode::Get, PasskeyMode::Create] {
+            let credential = client
+                .passkey(mode, url, PASSKEY_OPTIONS)
+                .await
+                .map_err(|err| err.name())?;
+            let value: serde_json::Value = serde_json::from_str(&credential)?;
+            assert_eq!(value["mode"], mode.as_str());
+            assert_eq!(value["url"], url);
+            assert_eq!(value["options"], PASSKEY_OPTIONS);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_skips_replies_for_other_requests() -> Result<(), Box<dyn std::error::Error>> {
+        let script = passkey_script(r#"{"id": req["id"], "status": "ok", "passkey": "{}"}"#)
+            .replace(
+                "body = json.dumps(reply)",
+                r#"stray = json.dumps({"id": "other", "status": "error", "error": "SecurityError"}).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(stray)) + stray)
+body = json.dumps(reply)"#,
+            );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let credential = client
+            .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+            .await;
+        assert_eq!(credential.as_deref(), Ok("{}"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_error_names_reach_the_caller() -> Result<(), Box<dyn std::error::Error>> {
+        for (name, expected) in [
+            ("InvalidStateError", PasskeyError::InvalidState),
+            ("SecurityError", PasskeyError::Security),
+            ("NotSupportedError", PasskeyError::NotSupported),
+            ("NotAllowedError", PasskeyError::NotAllowed),
+        ] {
+            let script = passkey_script(&format!(
+                r#"{{"id": req["id"], "status": "error", "error": "{name}", "message": "no"}}"#
+            ));
+            let (_dir, bin) = write_fake_vault(&script)?;
+            let outcome = VaultClient::with_binary(&bin)
+                .passkey(PasskeyMode::Create, "https://example.com/", PASSKEY_OPTIONS)
+                .await;
+            assert_eq!(outcome, Err(expected), "{name}");
+        }
+        Ok(())
+    }
+
+    /// An older Vault closes the pipe without a reply.
+    #[tokio::test]
+    async fn passkey_closed_pipe_is_not_allowed() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, bin) = write_fake_vault(
+            "import sys
+sys.stdin.buffer.read(4)
+sys.exit(0)
+",
+        )?;
+        let outcome = VaultClient::with_binary(&bin)
+            .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+            .await;
+        assert_eq!(outcome, Err(PasskeyError::NotAllowed));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_timeout_is_not_allowed() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, bin) = write_fake_vault(
+            "import time
+time.sleep(30)
+",
+        )?;
+        let started = std::time::Instant::now();
+        let outcome = VaultClient::with_binary(&bin)
+            .with_timeout(Duration::from_millis(300))
+            .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+            .await;
+        assert_eq!(outcome, Err(PasskeyError::NotAllowed));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        Ok(())
+    }
+
+    /// The default wait covers a person using Touch ID, far beyond the 15 s status cap.
+    #[test]
+    fn passkey_waits_for_a_person() {
+        assert!(VaultClient::new().timeout >= Duration::from_secs(120));
+    }
+
+    #[tokio::test]
+    async fn passkey_refuses_before_starting_vault() {
+        // A binary that does not exist proves the checks ran first for these.
+        let client = VaultClient::with_binary("/nonexistent/Vault");
+        for url in [
+            "http://example.com/",
+            "https://user:pw@example.com/",
+            "about:blank",
+            "not a url",
+        ] {
+            assert_eq!(
+                client.passkey(PasskeyMode::Get, url, PASSKEY_OPTIONS).await,
+                Err(PasskeyError::Security),
+                "{url}"
+            );
+        }
+        let long_url = format!("https://example.com/{}", "a".repeat(PASSKEY_URL_MAX_BYTES));
+        assert_eq!(
+            client
+                .passkey(PasskeyMode::Get, &long_url, PASSKEY_OPTIONS)
+                .await,
+            Err(PasskeyError::Security)
+        );
+        for options in ["", &"x".repeat(PASSKEY_OPTIONS_MAX_BYTES + 1)] {
+            assert_eq!(
+                client
+                    .passkey(PasskeyMode::Get, "https://example.com/", options)
+                    .await,
+                Err(PasskeyError::NotSupported)
+            );
+        }
+        assert_eq!(
+            client
+                .passkey(PasskeyMode::Get, "https://example.com/", PASSKEY_OPTIONS)
+                .await,
+            Err(PasskeyError::NotAllowed),
+            "no Vault installed"
+        );
     }
 }

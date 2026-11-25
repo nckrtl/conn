@@ -1563,7 +1563,8 @@ final class ConnSpikeUITests: XCTestCase {
         field.typeText(privateText)
         tap(app.buttons["Add attachment"].firstMatch)
         tap(app.buttons["Photos"].firstMatch)
-        tap(app.collectionViews.cells.firstMatch)
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
+        tap(photo.exists ? photo : app.collectionViews.cells.firstMatch)
         tap(app.buttons["Add"].firstMatch)
         let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch
         XCTAssertTrue(chip.waitForExistence(timeout: 15))

@@ -1775,7 +1775,7 @@ impl FilesPanel {
                         &format!("file-preview-{path}"),
                         raw_contents,
                         &self.tokens,
-                        &MarkdownOptions::default(),
+                        &MarkdownOptions::files_preview(),
                     )),
                 }
             }

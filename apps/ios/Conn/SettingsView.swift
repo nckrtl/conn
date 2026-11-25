@@ -10,35 +10,35 @@ struct SettingsRootSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                SettingsSection("Connections") {
-                    NavigationLink {
-                        SettingsEnvironmentsDetailView(store: store)
-                    } label: {
-                        // Lab: 22pt glyph in a 32pt column, 10 between items, 15pt chevron.
-                        HStack(spacing: 10) {
-                            ThreadGlyph(name: "desktop", size: 22).frame(width: 32)
-                            Text("Environments").frame(maxWidth: .infinity, alignment: .leading)
-                            Text(String(store.linked.count + (store.isPaired ? 1 : 0)))
-                                .foregroundStyle(theme.mutedForeground)
-                            ThreadGlyph(name: "chevron-right", size: 15).foregroundStyle(theme.mutedForeground)
+                // Lab `.ios-settings-sheet`: 18 pt sides, a 14 pt title, 20 pt groups with 16 pt row insets.
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Connections").font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(theme.mutedForeground).padding(.horizontal, 16)
+                    PhoneSettingsGroup(radius: 20, inset: 16) {
+                        NavigationLink {
+                            SettingsEnvironmentsDetailView(store: store)
+                        } label: {
+                            HStack(spacing: 10) {
+                                ThreadGlyph(name: "desktop", size: 22).frame(width: 32, alignment: .leading)
+                                Text("Environments").foregroundStyle(theme.foreground)
+                                Spacer()
+                                Text(String(store.linked.count + (store.isPaired ? 1 : 0))).foregroundStyle(theme.mutedForeground)
+                                ThreadGlyph(name: "chevron-right", size: 15).foregroundStyle(theme.mutedForeground)
+                            }
+                            .font(.system(size: 16)).frame(minHeight: 48).contentShape(Rectangle())
                         }
                         .font(.system(size: 16)).foregroundStyle(theme.foreground)
                         .contentShape(Rectangle())
                     }
-                }
-                .padding(.horizontal, 18).padding(.top, 14)
+                }.padding(.horizontal, 18).padding(.top, 14)
             }.buttonStyle(.plain).background(theme.background)
             .settingsSheetTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .accessibilityLabel("Close settings")
-                    .accessibilityIdentifier("settings.closeButton")
+                    SheetGlassButton(glyph: "close", label: "Close settings") { dismiss() }
+                        .accessibilityIdentifier("settings.closeButton")
                 }
+                .sharedBackgroundVisibility(.hidden)
             }
         }.tint(theme.foreground).presentationBackground(theme.background)
     }
@@ -196,12 +196,34 @@ struct PhoneSettingsGroup<Content: View>: View {
         VStack(spacing: 0) {
             Group(subviews: content) { rows in
                 ForEach(rows.indices, id: \.self) { index in
-                    if index > 0 { Divider().padding(.horizontal, inset) }
+                    if index > 0 { PhoneSettingsDivider().padding(.horizontal, inset) }
                     rows[index].frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                         .padding(.horizontal, inset)
                 }
             }
-        }.background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: radius))
+        }.background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+}
+
+/// Lab `.ios-thread-options > * + *::before`: a 1 pt line in the text colour at 16%.
+struct PhoneSettingsDivider: View {
+    @Environment(\.connTheme) private var theme
+    var body: some View { Rectangle().fill(theme.foreground.opacity(0.16)).frame(height: 1) }
+}
+
+/// Lab `.ios-thread-options label::after`: a 6 pt box with a 1.5 pt right and bottom border,
+/// turned 45 degrees, which draws a small down chevron.
+private struct DropdownChevron: View {
+    @Environment(\.connTheme) private var theme
+    var body: some View {
+        Path { path in
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: 4.243, y: 4.243))
+            path.addLine(to: CGPoint(x: 8.485, y: 0))
+        }
+        .stroke(theme.mutedForeground, style: StrokeStyle(lineWidth: 1.5, lineCap: .square, lineJoin: .miter))
+        .frame(width: 8.5, height: 4.3)
+        .accessibilityHidden(true)
     }
 }
 
@@ -215,9 +237,15 @@ struct PhoneOptionRow: View {
         HStack(spacing: 8) {
             Text(title).foregroundStyle(theme.foreground)
             Spacer()
-            if let provider { ProviderIcon(driver: provider, size: 15) }
+            if let provider { ProviderIcon(driver: provider, size: 16) }
             if !value.isEmpty { Text(value).foregroundStyle(theme.mutedForeground).lineLimit(1) }
-            if !disclosure.isEmpty { Image(systemName: disclosure).font(.system(size: 12)).foregroundStyle(theme.mutedForeground) }
+            if disclosure == "chevron.right" {
+                ThreadGlyph(name: "chevron-right", size: 14).foregroundStyle(theme.mutedForeground)
+            } else if disclosure == "chevron.down" {
+                DropdownChevron()
+            } else if !disclosure.isEmpty {
+                Image(systemName: disclosure).font(.system(size: 12)).foregroundStyle(theme.mutedForeground)
+            }
         }.font(.system(size: 16)).frame(minHeight: 48).contentShape(Rectangle())
     }
 }

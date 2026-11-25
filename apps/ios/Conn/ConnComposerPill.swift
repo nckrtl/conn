@@ -25,88 +25,90 @@ struct ConnComposerPill<Trailing: View>: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
         VStack(alignment: .leading, spacing: 0) {
-            if let error = draft.error {
-                Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(theme.destructive)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
-                    .accessibilityLabel("Attachment or send error, \(error)")
-            }
             if allowsAttachments && !draft.files.isEmpty {
+                // Lab `.m-draft-files`: above the pill, `gap 6`, `padding 0 4`, `margin 0 0 6`.
                 ScrollView(.horizontal) {
                     HStack(spacing: 6) {
                         ForEach(draft.files) { file in
-                            Button {
-                                draft.files.removeAll { $0.id == file.id }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: file.isImage ? "photo" : "doc")
-                                    Text(file.name).lineLimit(1).truncationMode(.middle)
-                                    Image(systemName: "xmark.circle.fill")
+                            HStack(spacing: 6) {
+                                ThreadGlyph(name: "file-text", size: 16)
+                                Text(file.name).lineLimit(1).truncationMode(.middle)
+                                Button {
+                                    draft.files.removeAll { $0.id == file.id }
+                                } label: {
+                                    ThreadGlyph(name: "close", size: 14)
+                                        .frame(minWidth: 44, minHeight: 44)
+                                        .contentShape(Rectangle())
                                 }
-                                .font(.footnote)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(theme.foreground.opacity(0.08), in: Capsule())
-                                .frame(minHeight: 44)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .disabled(draft.locked)
+                                .accessibilityLabel("Remove \(file.name)")
                             }
-                            .buttonStyle(.plain)
-                            .disabled(draft.locked)
-                            .accessibilityLabel("Remove \(file.name)")
+                            .font(.system(size: 13))
+                            .padding(.leading, 10)
+                            .background(theme.card.opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
                     }
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, 4)
                 }
                 .scrollIndicators(.hidden)
+                .padding(.bottom, 6)
             }
-            HStack(alignment: .bottom, spacing: 0) {
-                if allowsAttachments && limits.images {
-                    Menu {
-                        Button("Photos", systemImage: "photo.on.rectangle") { showingPhotos = true }
-                        if limits.maxFileBytes != nil {
-                            Button("Files", systemImage: "folder") { showingFiles = true }
+            VStack(alignment: .leading, spacing: 0) {
+                if let error = draft.error {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(theme.destructive)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                        .accessibilityLabel("Attachment or send error, \(error)")
+                }
+                HStack(alignment: .bottom, spacing: 0) {
+                    if allowsAttachments && limits.images {
+                        Menu {
+                            Button("Photos", systemImage: "photo.on.rectangle") { showingPhotos = true }
+                            if limits.maxFileBytes != nil {
+                                Button("Files", systemImage: "folder") { showingFiles = true }
+                            }
+                        } label: {
+                            ThreadGlyph(name: "add", size: 20)
+                                .frame(width: Self.control, height: Self.control)
+                                .contentShape(Rectangle())
                         }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 18, weight: .medium))
-                            .frame(width: Self.control, height: Self.control)
-                            .contentShape(Rectangle())
+                        .disabled(draft.locked || draft.files.count >= 100)
+                        .accessibilityLabel("Add attachment")
                     }
-                    .disabled(draft.locked || draft.files.count >= 100)
-                    .accessibilityLabel("Add attachment")
-                }
-                TextField(
-                    placeholder, text: $draft.text,
-                    prompt: Text(placeholder).foregroundStyle(theme.mutedForeground),
-                    axis: .vertical
-                )
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 16))
-                    .lineHeight(.exact(points: 24))
-                    .tint(theme.foreground)
-                    .lineLimit(1...maxLines)
-                    .padding(.vertical, 10)
-                    .padding(.leading, 12)
-                    .frame(maxWidth: .infinity, minHeight: Self.control, alignment: .leading)
-                    .disabled(draft.sending)
+                    TextField(
+                        placeholder, text: $draft.text,
+                        prompt: Text(placeholder).foregroundStyle(theme.placeholder),
+                        axis: .vertical
+                    )
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16))
+                        .lineHeight(.exact(points: 24))
+                        .tint(theme.foreground)
+                        .lineLimit(1...maxLines)
+                        .padding(.vertical, 10)
+                        .padding(.leading, 12)
+                        .frame(maxWidth: .infinity, minHeight: Self.control, alignment: .leading)
+                        .disabled(draft.sending)
 
-                trailing().frame(minHeight: Self.control)
-                if draft.locked {
-                    ProgressView()
-                        .frame(width: Self.control, height: Self.control)
-                        .accessibilityLabel(draft.sending ? "Sending" : "Adding attachment")
-                } else {
-                    actionButton
+                    trailing().frame(minHeight: Self.control)
+                    if draft.locked {
+                        ProgressView()
+                            .frame(width: Self.control, height: Self.control)
+                            .accessibilityLabel(draft.sending ? "Sending" : "Adding attachment")
+                    } else {
+                        actionButton
+                    }
                 }
             }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .foregroundStyle(theme.foreground)
+            .glassEffect(.regular, in: shape)
+            .background(theme.background, in: shape)
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 2)
-        .foregroundStyle(theme.foreground)
-        .glassEffect(.regular, in: shape)
-        .background(theme.background, in: shape)
         .sheet(isPresented: $showingPhotos) {
             ComposerPhotosPicker(draft: draft, limits: limits) { showingPhotos = false }
         }

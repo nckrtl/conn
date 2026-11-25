@@ -20,6 +20,7 @@ struct PendingUserInputCard: View {
     let onDismiss: () -> Void
 
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
     @State private var contextExpanded = false
     @State private var footerHeight: CGFloat = 0
     @State private var hiddenTop = false
@@ -27,25 +28,27 @@ struct PendingUserInputCard: View {
 
     private static let sheetRadius: CGFloat = 28
     private static let fadeHeight: CGFloat = 24
-    /// A trailing text button ends at the 20pt text edge instead of the panel's 8pt edge.
-    private static let textActionLastMargin: CGFloat = 12
 
     private var showNext: Bool { panel.showNext && !advancing }
-    private var lastIsText: Bool { !panel.showSend && !showNext }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            // Lab `.m-composer-panel-header`: a 14 pt bubble, "Question", and "1 of 3" at 13/17 regular.
             HStack(spacing: 8) {
-                Label("Question", systemImage: "text.bubble")
+                ThreadGlyph(name: "comment-text", size: 14)
+                Text("Question").font(.system(size: 13, weight: .medium)).lineHeight(.exact(points: 16))
                 Spacer()
-                if let progress = panel.progress { Text(progress) }
+                if let progress = panel.progress {
+                    Text(progress).font(.system(size: 13)).lineHeight(.exact(points: 17))
+                }
             }
-            .font(.system(size: 13, weight: .medium))
             .foregroundStyle(theme.mutedForeground)
             .padding(.horizontal, 17).padding(.vertical, 10)
+            .frame(minHeight: 30)
             scrollArea
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(theme.background, in: .rect(cornerRadius: 24))
+                .background(composerPanelInner(theme, appearance))
+                .clipShape(.rect(cornerRadius: Self.sheetRadius - 3, style: .continuous))
+                .composerPanelEdge(radius: Self.sheetRadius - 3)
             if let notice = panel.notice {
                 Text(notice)
                     .font(.system(size: 13))
@@ -53,26 +56,27 @@ struct PendingUserInputCard: View {
                     .foregroundStyle(theme.mutedForeground)
             }
             if panel.showFooter {
-                footer.padding(.horizontal, 9)
+                footer.padding(.horizontal, 8).padding(.vertical, 10)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
             }
         }
         .padding(3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Self.sheetRadius, style: .continuous).fill(theme.settingsGroup))
+        .background(RoundedRectangle(cornerRadius: Self.sheetRadius, style: .continuous).fill(threadCardSurface(theme, appearance)))
+        .composerPanelEdge(radius: Self.sheetRadius)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.question.\(question.requestId)")
     }
 
     // MARK: Scroll area
 
-    /// One content column from the 8pt edge on both sides. Text sits 12pt in (the 20pt inset);
-    /// option highlights extend back out to the edge.
+    /// Text sits 20 pt from the panel's edge (17 in the body) and the option highlights 8 pt
+    /// from it (5 in the body), so a radio lines up with the question text.
     private var scrollArea: some View {
         let scrollMax = max(60, maxHeight - 72 - footerHeight - (panel.notice == nil ? 0 : 48))
         return HeightCappedScroll(maxHeight: scrollMax) {
             VStack(alignment: .leading, spacing: 8) {
-                MarkdownView(source: panel.question)
+                MarkdownView(source: panel.question).padding(.horizontal, 17)
                 if let markdown = question.contextMarkdown, let preview = question.contextPreview {
                     AgentContext(
                         markdown: markdown,
@@ -80,6 +84,7 @@ struct PendingUserInputCard: View {
                         expanded: contextExpanded,
                         onToggle: { contextExpanded.toggle() }
                     )
+                    .padding(.horizontal, 17)
                 }
                 if !panel.options.isEmpty || panel.customAnswer != nil {
                     // 4pt more than the text gap: the highlight has no text leading.
@@ -98,30 +103,30 @@ struct PendingUserInputCard: View {
                             ) {
                                 Text("Your answer")
                                     .font(.system(size: 12, weight: .medium))
+                                    .lineHeight(.exact(points: 16))
                                     .foregroundStyle(theme.mutedForeground)
                                 Text(custom)
                                     .font(.system(size: 14))
+                                    .lineHeight(.exact(points: 19))
                                     .foregroundStyle(theme.foreground)
                             }
                         }
                     }
-                    .padding(.horizontal, -12)
+                    .padding(.horizontal, 5)
                     .padding(.top, 4)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 4)
+            .padding(.vertical, 16)
         } onEdges: { top, bottom in
             hiddenTop = top
             hiddenBottom = bottom
         }
         .id(panel.questionId)
-        .padding(.leading, -12)
         .overlay(alignment: .top) {
-            if hiddenTop { ScrollEdgeFade(edge: .top, color: theme.card) }
+            if hiddenTop { ScrollEdgeFade(edge: .top, color: composerPanelInner(theme, appearance)) }
         }
         .overlay(alignment: .bottom) {
-            if hiddenBottom { ScrollEdgeFade(edge: .bottom, color: theme.card) }
+            if hiddenBottom { ScrollEdgeFade(edge: .bottom, color: composerPanelInner(theme, appearance)) }
         }
     }
 
@@ -138,10 +143,12 @@ struct PendingUserInputCard: View {
             ) {
                 Text(option.label)
                     .font(.system(size: 14, weight: .medium))
+                    .lineHeight(.exact(points: 19))
                     .foregroundStyle(theme.foreground)
                 if let description = option.description {
                     Text(description)
                         .font(.system(size: 13))
+                        .lineHeight(.exact(points: 16))
                         .foregroundStyle(theme.mutedForeground)
                 }
             }
@@ -157,11 +164,22 @@ struct PendingUserInputCard: View {
 
     // MARK: Footer
 
-    /// The progress keeps the 20pt text inset; a last pill ends at the 8pt edge, a last text
-    /// button at the text edge.
+    /// Lab `.m-q-actions`: three columns `1fr auto 1fr`, 8 apart. Back is flush left, Skip sits in
+    /// the middle and the Send or Next pill is flush right.
     private var footer: some View {
-        HStack(spacing: 20) {
-            Spacer(minLength: 0)
+        HStack(spacing: 8) {
+            HStack(spacing: 0) {
+                if panel.showBack {
+                    TextAction(
+                        label: "Back",
+                        accessibilityLabel: "Previous question",
+                        disabled: panel.backDisabled,
+                        action: { onStepChange(Int(panel.step) - 1) }
+                    )
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
             if panel.showSkip {
                 TextAction(
                     label: "Skip",
@@ -169,42 +187,40 @@ struct PendingUserInputCard: View {
                     disabled: panel.skipDisabled,
                     action: onDismiss
                 )
-                .padding(.trailing, panel.showSkip && lastIsText && !panel.showBack ? Self.textActionLastMargin : 0)
             }
-            if panel.showBack {
-                TextAction(
-                    label: "Back",
-                    accessibilityLabel: "Previous question",
-                    disabled: panel.backDisabled,
-                    action: { onStepChange(Int(panel.step) - 1) }
-                )
-                .padding(.trailing, lastIsText ? Self.textActionLastMargin : 0)
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                if panel.showSend {
+                    ConnButton(
+                        label: "Send",
+                        tone: .primary,
+                        size: .compact,
+                        horizontalPadding: 20,
+                        disabledFill: theme.secondary,
+                        disabled: panel.sendDisabled,
+                        loading: responding,
+                        action: onSubmit
+                    )
+                    .fixedSize()
+                    .accessibilityLabel("Send answers")
+                    .accessibilityIdentifier("question.send")
+                }
+                if showNext {
+                    ConnButton(
+                        label: "Next",
+                        tone: .primary,
+                        size: .compact,
+                        horizontalPadding: 20,
+                        disabledFill: theme.secondary,
+                        disabled: panel.nextDisabled,
+                        action: { onStepChange(Int(panel.step) + 1) }
+                    )
+                    .fixedSize()
+                    .accessibilityLabel("Next question")
+                    .accessibilityIdentifier("question.next")
+                }
             }
-            if panel.showSend {
-                ConnButton(
-                    label: "Send",
-                    tone: .primary,
-                    size: .compact,
-                    disabled: panel.sendDisabled,
-                    loading: responding,
-                    action: onSubmit
-                )
-                .fixedSize()
-                .accessibilityLabel("Send answers")
-                .accessibilityIdentifier("question.send")
-            }
-            if showNext {
-                ConnButton(
-                    label: "Next",
-                    tone: .primary,
-                    size: .compact,
-                    disabled: panel.nextDisabled,
-                    action: { onStepChange(Int(panel.step) + 1) }
-                )
-                .fixedSize()
-                .accessibilityLabel("Next question")
-                .accessibilityIdentifier("question.next")
-            }
+            .frame(maxWidth: .infinity)
         }
         .frame(minHeight: 40)
     }
@@ -223,14 +239,14 @@ private struct AgentContext: View {
     @State private var width: CGFloat = 0
 
     private static let fontSize: CGFloat = 15
-    private static let lineSpacing: CGFloat = 4
+    private static let lineHeight: CGFloat = 21
 
     /// Where the preview stops, measured at the panel's width; `nil` when it fits.
     private var clamped: String? {
         guard width > 0 else { return nil }
         return questionContextClamp(
             preview: preview,
-            fits: ThreeLineFit(width: width, fontSize: Self.fontSize, lineSpacing: Self.lineSpacing)
+            fits: ThreeLineFit(width: width, fontSize: Self.fontSize, lineHeight: Self.lineHeight)
         )
     }
 
@@ -248,14 +264,14 @@ private struct AgentContext: View {
                 let more = Text("Show more").fontWeight(.medium).foregroundStyle(theme.foreground)
                 Text("\(Text(clamped + "… ").foregroundStyle(theme.mutedForeground))\(more)")
                     .font(.system(size: Self.fontSize))
-                    .lineSpacing(Self.lineSpacing)
+                    .lineHeight(.exact(points: Self.lineHeight))
                     .onTapGesture(perform: onToggle)
                     .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Show more")
             } else {
                 Text(preview)
                     .font(.system(size: Self.fontSize))
-                    .lineSpacing(Self.lineSpacing)
+                    .lineHeight(.exact(points: Self.lineHeight))
                     .foregroundStyle(theme.mutedForeground)
                     .lineLimit(3)
             }
@@ -268,6 +284,7 @@ private struct AgentContext: View {
         Button(action: onToggle) {
             Text(label)
                 .font(.system(size: Self.fontSize, weight: .medium))
+                .lineHeight(.exact(points: Self.lineHeight))
                 .foregroundStyle(theme.foreground)
         }
         .buttonStyle(.plain)
@@ -279,18 +296,19 @@ private final class ThreeLineFit: FfiTextFits, @unchecked Sendable {
     private let width: CGFloat
     private let font: UIFont
     private let mediumFont: UIFont
-    private let lineSpacing: CGFloat
+    private let lineHeight: CGFloat
 
-    init(width: CGFloat, fontSize: CGFloat, lineSpacing: CGFloat) {
+    init(width: CGFloat, fontSize: CGFloat, lineHeight: CGFloat) {
         self.width = width
         self.font = .systemFont(ofSize: fontSize)
         self.mediumFont = .systemFont(ofSize: fontSize, weight: .medium)
-        self.lineSpacing = lineSpacing
+        self.lineHeight = lineHeight
     }
 
     func fits(text: String, withMore: Bool) -> Bool {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = lineSpacing
+        paragraph.minimumLineHeight = lineHeight
+        paragraph.maximumLineHeight = lineHeight
         let string = NSMutableAttributedString(
             string: text,
             attributes: [.font: font, .paragraphStyle: paragraph]
@@ -304,8 +322,7 @@ private final class ThreeLineFit: FfiTextFits, @unchecked Sendable {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil
         ).height
-        let threeLines = font.lineHeight * 3 + lineSpacing * 2
-        return ceil(height) <= ceil(threeLines) + 1
+        return ceil(height) <= ceil(lineHeight * 3) + 1
     }
 }
 
@@ -374,6 +391,7 @@ private struct OptionRow<Content: View>: View {
                     // Indented to the title column: mark width (20) + gap (12).
                     Text("Recommended")
                         .font(.system(size: 13, weight: .medium))
+                        .lineHeight(.exact(points: 17))
                         .foregroundStyle(theme.primary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 1)
@@ -390,7 +408,8 @@ private struct OptionRow<Content: View>: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 14)
+            // Lab `.m-q-option`: `14 12` padding plus a 1 pt transparent top border.
+            .padding(.top, 15).padding(.bottom, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
@@ -411,6 +430,7 @@ private struct OptionRowStyle: ButtonStyle {
             RoundedRectangle(cornerRadius: 16, style: .continuous).fill(
                 theme.foreground.opacity(selected ? 0.06 : configuration.isPressed ? 0.05 : 0)
             )
+            .composerPanelEdge(radius: 16, visible: selected)
         )
     }
 }
@@ -428,6 +448,7 @@ private struct TextAction: View {
         Button(action: action) {
             Text(label)
                 .font(.system(size: 14, weight: .medium))
+                .lineHeight(.exact(points: 19))
                 .foregroundStyle(theme.mutedForeground)
                 .contentShape(Rectangle().inset(by: -11))
         }

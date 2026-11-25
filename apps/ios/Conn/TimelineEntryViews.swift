@@ -5,6 +5,7 @@ struct WorkGroupCard: View {
     let group: FfiWorkGroupTiming
     let entries: [FfiTimelineEntry]
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
     @State private var expanded = false
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
@@ -32,8 +33,7 @@ struct WorkGroupCard: View {
                         .font(.system(size: size))
                         .lineHeight(.exact(points: size * 1.625))
                         .foregroundStyle(theme.mutedForeground)
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                    ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
                         .foregroundStyle(theme.mutedForeground)
                     Spacer()
                 }
@@ -59,8 +59,9 @@ struct WorkGroupCard: View {
                 .padding(.bottom, 4)
             }
 
-            Divider()
-                .overlay(theme.border.opacity(0.6))
+            Rectangle()
+                .fill(threadDividerColor(theme, appearance))
+                .frame(height: 1)
         }
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
     }
@@ -149,10 +150,9 @@ struct TimelineEntryRow: View {
                 ThreadCardHeaderLink(open: (metadata.thread ?? child).map { destination in
                     { onOpenThread(destination, metadata.environment) }
                 }, label: "Open " + title) {
-                    ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
-                        Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
-                            .frame(width: 6, height: 6)
-                    }
+                    // GPUI's fixed info and success colours (lab `--thread-info`, `--thread-success`).
+                    ProviderIcon(driver: metadata.provider, size: 14).cardStatusDot(
+                        status == .completed ? Color(rgbHex: 0x00BC7D) : status == .failed ? theme.destructive : Color(rgbHex: 0x2B7FFF))
                     let elapsed = threadElapsed(started, ended)
                     Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)

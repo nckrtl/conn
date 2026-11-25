@@ -396,9 +396,11 @@ struct ThreadView: View {
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
-                    Text(displayTitle).font(.headline.weight(.medium))
+                    // Lab `.m-header-title-text`: 17/22 at 600; `.m-header-subtitle`: 12/16, muted.
+                    Text(displayTitle).font(.system(size: 17, weight: .semibold)).lineHeight(.exact(points: 22))
                     if let displaySubtitle {
-                        Text(displaySubtitle).font(.caption).foregroundStyle(theme.mutedForeground)
+                        Text(displaySubtitle).font(.system(size: 12)).lineHeight(.exact(points: 16))
+                            .foregroundStyle(theme.mutedForeground)
                     }
                 }
                 .lineLimit(1)
@@ -722,16 +724,18 @@ struct ThreadView: View {
                     }
                 },
                 trailing: {
-                    HStack(spacing: 4) {
-                        if isWorking && (hasDraft || questionPanelModel != nil) {
+                    HStack(spacing: 0) {
+                        if isWorking && hasDraft && questionPanelModel == nil {
                             Button {
                                 Task {
                                     await store.stopThread(threadId: threadId)
                                 }
                             } label: {
+                                // Lab `.ios-stop`: a bare 13 pt `stop` in the text colour.
                                 ThreadGlyph(name: "stop", size: 13)
-                                    .foregroundStyle(theme.destructive)
-                                    .frame(width: 28, height: 28)
+                                    .foregroundStyle(theme.foreground)
+                                    .frame(minHeight: 44)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Stop")

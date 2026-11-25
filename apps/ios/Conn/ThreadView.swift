@@ -559,11 +559,13 @@ struct ThreadView: View {
                     }
 
                     if snapshot.working && store.status == .connected && pendingApprovals.isEmpty && pendingQuestion == nil {
-                        HStack(spacing: Kit.Space.m) {
-                            // Mobile's `RunFoldWorking` is plain text, never a spinner.
-                            Text("Working…")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(theme.mutedForeground)
+                        // Mobile's live fold row and `ThinkingTimelineRow`. A running work group
+                        // already carries the "Working for" row; without one it stands alone.
+                        VStack(alignment: .leading, spacing: 0) {
+                            if !snapshot.workGroups.contains(where: \.hasActive) {
+                                WorkingFold(since: runStartedAt(in: snapshot))
+                            }
+                            LiveWorkRow(label: liveWork.label, systemImage: liveWork.icon)
                         }
                         .padding(.top, Kit.Space.xs)
                     }
@@ -634,24 +636,9 @@ struct ThreadView: View {
     }
 
     private func composerArea(_ proxy: ScrollViewProxy) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if snapshot != nil && (!stickToBottom || readingWindow != nil) {
-                Button {
-                    UISelectionFeedbackGenerator().selectionChanged()
-                    latest()
-                } label: {
-                    ThreadGlyph(name: "chevron-down", size: 16)
-                        .foregroundStyle(theme.foreground)
-                        .frame(width: 38.5, height: 38.5)
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity)
-                .accessibilityLabel("Jump to latest")
-                .accessibilityIdentifier("thread.scrollToEnd")
-            }
+        GlassEffectContainer(spacing: 12) {
+          VStack(alignment: .leading, spacing: 0) {
+            floatingControl()
           VStack(alignment: .leading, spacing: 10.5) {
             if let historyNotice {
                 Text(historyNotice).font(.kitDetail)
@@ -753,10 +740,123 @@ struct ThreadView: View {
             .id(ObjectIdentifier(composer))
             .disabled(store.status != .connected || readingWindow != nil)
             .accessibilityIdentifier("thread.composer")
+          }
         }
         // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
         .padding(.horizontal, ComposerSheet.screenInset)
         .padding(.bottom, ComposerSheet.bottomGutter)
+    }
+
+    /// What the running turn does now, for the live row: a running tool, the subagents it waits on,
+    /// or thinking (mobile `liveToolActivitySummary`, `waitingOnSubagentsLabel`).
+    private var liveWork: (label: String, icon: String) {
+        guard let snapshot else { return ("Thinking", "brain") }
+        let last = snapshot.entries.last { if case .queuedUser = $0 { false } else { true } }
+        if case let .tool(_, kind, title, _, .running, _, _, _)? = last {
+            return (title.isEmpty ? kind : title, "wrench.and.screwdriver")
+        }
+        let waiting = turnSubagents.filter { !$0.settled }.count
+        if waiting > 0 {
+            return (waiting == 1 ? "Waiting on a subagent" : "Waiting on \(waiting) subagents", "brain")
+        }
+        return ("Thinking", "brain")
+    }
+
+    private func runStartedAt(in snapshot: FfiThreadSnapshot) -> Date {
+        for entry in snapshot.entries.reversed() {
+            if case let .user(_, _, createdAt, _, _, _, _) = entry, let date = threadDate(createdAt) { return date }
+        }
+        return Date()
+    }
+
+    private struct TurnSubagent: Identifiable {
+        let id: String
+        let title: String
+        let child: String?
+        let environment: String?
+        let settled: Bool
+        let status: String
+    }
+
+    /// The subagents of the latest turn, those after the last user message (mobile's
+    /// `useThreadTurnSubagents`).
+    private var turnSubagents: [TurnSubagent] {
+        guard let snapshot else { return [] }
+        let start = snapshot.entries.lastIndex { if case .user = $0 { true } else { false } }
+            .map { $0 + 1 } ?? 0
+        return snapshot.entries[start...].compactMap { entry in
+            guard case let .subagent(id, child, title, _, _, label, settled, _, _, _, _, _) = entry else { return nil }
+            var thread = child
+            var environment: String?
+            if case let .subagent(_, _, _, env, linked)? = snapshot.feedDetails[id] {
+                thread = linked ?? child
+                environment = env
+            }
+            return TurnSubagent(id: id, title: title, child: thread, environment: environment,
+                                settled: settled, status: label)
+        }
+    }
+
+    /// Mobile's `FloatingWorkingControl`, above the approvals and the composer: a glass capsule for
+    /// the running subagents ("2/3", or "3 done" once they settle) and the jump-to-latest circle,
+    /// 16 apart. Both share one glass container with the composer, so they merge when they touch.
+    @ViewBuilder
+    private func floatingControl() -> some View {
+        let agents = turnSubagents
+        let showsJump = snapshot != nil && (!stickToBottom || readingWindow != nil)
+        if showsJump || !agents.isEmpty {
+            HStack(spacing: 16) {
+                if !agents.isEmpty { agentsCapsule(agents) }
+                if showsJump {
+                    Button {
+                        UISelectionFeedbackGenerator().selectionChanged()
+                        latest()
+                    } label: {
+                        ThreadGlyph(name: "chevron-down", size: 16)
+                            .foregroundStyle(theme.foreground)
+                            .frame(width: 38.5, height: 38.5)
+                            .glassEffect(.regular.interactive(), in: .circle)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Jump to latest")
+                    .accessibilityIdentifier("thread.scrollToEnd")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func agentsCapsule(_ agents: [TurnSubagent]) -> some View {
+        let live = agents.filter { !$0.settled }.count
+        let label = live > 0 ? "\(live)/\(agents.count)" : "\(agents.count) done"
+        return Menu {
+            ForEach(agents) { agent in
+                Button {
+                    if let child = agent.child { onOpenThread(child, agent.environment) }
+                } label: {
+                    Label("\(agent.title), \(agent.status)", systemImage: agent.settled ? "checkmark.circle" : "circle.dotted")
+                }
+                .disabled(agent.child == nil)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "person.2")
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.mutedForeground)
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.foreground)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .contentShape(Capsule())
+        }
+        .accessibilityLabel(live > 0 ? "Open agents, \(live) of \(agents.count) agents working" : "Open agents, \(agents.count) done")
+        .accessibilityIdentifier("thread.agents")
     }
 
     private func sendDraft(scrollProxy: ScrollViewProxy) {

@@ -1,5 +1,6 @@
 import DesignKit
 import SwiftUI
+import ImageIO
 import UIKit
 import UniformTypeIdentifiers
 
@@ -44,30 +45,25 @@ struct ConnComposerPill<Trailing: View>: View {
         )
         VStack(alignment: .leading, spacing: 0) {
             if allowsAttachments && !draft.files.isEmpty {
-                // Lab `.m-draft-files`: above the pill, `gap 6`, `padding 0 4`, `margin 0 0 6`.
+                // Lab `.m-draft-files`: images are 60 pt thumbnails (Conn mobile's composer strip),
+                // files keep their chip. 7 pt above and 11 pt to the right hold the remove targets.
                 ScrollView(.horizontal) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 10) {
                         ForEach(draft.files) { file in
-                            HStack(spacing: 6) {
-                                ThreadGlyph(name: "file-text", size: 16)
-                                Text(file.name).lineLimit(1).truncationMode(.middle)
-                                Button {
+                            if file.isImage {
+                                ComposerImageThumbnail(file: file, locked: draft.locked) {
                                     draft.files.removeAll { $0.id == file.id }
-                                } label: {
-                                    ThreadGlyph(name: "close", size: 14)
-                                        .frame(minWidth: 44, minHeight: 44)
-                                        .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(draft.locked)
-                                .accessibilityLabel("Remove \(file.name)")
+                            } else {
+                                ComposerFileChip(file: file, locked: draft.locked) {
+                                    draft.files.removeAll { $0.id == file.id }
+                                }
                             }
-                            .font(.system(size: 13))
-                            .padding(.leading, 10)
-                            .background(theme.card.opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
                     }
-                    .padding(.horizontal, 4)
+                    .padding(.leading, 4)
+                    .padding(.trailing, 11)
+                    .padding(.top, 7)
                 }
                 .scrollIndicators(.hidden)
                 .padding(.bottom, 6)
@@ -147,12 +143,12 @@ struct ConnComposerPill<Trailing: View>: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 2)
             .foregroundStyle(theme.foreground)
-            .glassEffect(keyboardUp ? .identity : .regular, in: shape)
-            // The surface is a background, not part of the layout. Keyboard up it reaches past the
-            // screens' side insets to the screen edges and runs `bottomBleed` below the box, behind
-            // the keyboard. The box, and so the controls, stay where the safe area puts them.
+            // The pill and the sheet are one Liquid Glass surface in two shapes. It is a background,
+            // not part of the layout. Keyboard up it reaches past the screens' side insets to the
+            // screen edges and runs `bottomBleed` below the box, behind the keyboard. The box, and
+            // so the controls, stay where the safe area puts them.
             .background {
-                ComposerSurface(shape: shape, fill: theme.background, hairline: theme.border, sheet: keyboardUp)
+                ComposerSurface(shape: shape, hairline: theme.border, sheet: keyboardUp)
                     .padding(.horizontal, keyboardUp ? -ComposerSheet.screenInset : 0)
                     .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)
             }
@@ -410,20 +406,109 @@ enum ComposerSheet {
     static var bottomBleed: CGFloat { bottomGutter + keyboardCover }
 }
 
-/// The composer's solid surface. As a sheet it has a 0.5 pt top edge in the border colour: the
-/// lab's `inset 0 0.5px 0`, a border layer with the fill moved down half a point over it.
+/// The composer's Liquid Glass, in the pill's shape or the sheet's. The glass never changes, so
+/// the pill morphs into the sheet as one material. As a sheet it gains a 0.5 pt top edge in the
+/// border colour: the lab's `inset 0 0.5px 0`.
 private struct ComposerSurface: View {
     let shape: UnevenRoundedRectangle
-    let fill: Color
     let hairline: Color
     let sheet: Bool
 
     var body: some View {
-        ZStack {
-            shape.fill(hairline).opacity(sheet ? 1 : 0)
-            shape.fill(fill).offset(y: sheet ? 0.5 : 0)
+        Color.clear
+            .glassEffect(.regular, in: shape)
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(hairline)
+                    .frame(height: 0.5)
+                    .opacity(sheet ? 1 : 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .clipShape(shape)
+            }
+    }
+}
+
+/// A draft image: a 60 pt rounded square, filled and cropped, with a 22 pt dark remove circle 4 pt
+/// in from the corner (Conn mobile's `ComposerAttachmentStrip`, 72 pt, radius 16, there). The
+/// remove target is 44 pt. The picture is decoded once, at thumbnail size, off the main thread.
+private struct ComposerImageThumbnail: View {
+    let file: ComposerFile
+    let locked: Bool
+    let remove: () -> Void
+    @Environment(\.connTheme) private var theme
+    @Environment(\.displayScale) private var displayScale
+    @State private var image: UIImage?
+
+    private static let side: CGFloat = 60
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(theme.card.opacity(0.78))
+            .frame(width: Self.side, height: Self.side)
+            .overlay {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(alignment: .topTrailing) {
+                Button(action: remove) {
+                    ThreadGlyph(name: "close", size: 10)
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(Color.black.opacity(0.55), in: Circle())
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(locked)
+                .offset(x: 7, y: -7)
+                .accessibilityLabel("Remove \(file.name)")
+            }
+            .task(id: file.id) { image = await Self.thumbnail(of: file.url, pixels: Self.side * displayScale * 2) }
+            .accessibilityElement(children: .contain)
+    }
+
+    private static func thumbnail(of url: URL, pixels: CGFloat) async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: pixels,
+            ]
+            return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+                .map { UIImage(cgImage: $0) }
+        }.value
+    }
+}
+
+/// A draft file, as before: icon, name and a remove button in a rounded chip.
+private struct ComposerFileChip: View {
+    let file: ComposerFile
+    let locked: Bool
+    let remove: () -> Void
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ThreadGlyph(name: "file-text", size: 16)
+            Text(file.name).lineLimit(1).truncationMode(.middle)
+            Button(action: remove) {
+                ThreadGlyph(name: "close", size: 14)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(locked)
+            .accessibilityLabel("Remove \(file.name)")
         }
-        .clipShape(shape)
+        .font(.system(size: 13))
+        .padding(.leading, 10)
+        .background(theme.card.opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 

@@ -7,13 +7,12 @@ struct WorkGroupCard: View {
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
     @State private var expanded = false
+    /// When the running group started, from the server's elapsed time at the last snapshot.
+    @State private var startedAt = Date()
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
     private var title: String {
-        if group.hasActive {
-            return group.durationLabel.map { "Working (\($0))…" } ?? "Working…"
-        }
         if let label = group.durationLabel, !label.isEmpty {
             return "Worked for \(label)"
         }
@@ -26,25 +25,30 @@ struct WorkGroupCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: gap) {
-            Button {
-                withAnimation(Kit.Motion.fast) {
-                    expanded.toggle()
+            if group.hasActive {
+                // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
+                WorkingFoldLabel(since: startedAt, size: size)
+            } else {
+                Button {
+                    withAnimation(Kit.Motion.fast) {
+                        expanded.toggle()
+                    }
+                } label: {
+                    // No fixed line box, so the chevron centres on the text's own glyphs.
+                    HStack(alignment: .center, spacing: 4) {
+                        Text(title)
+                            .font(.system(size: size))
+                            .foregroundStyle(theme.mutedForeground)
+                        ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
+                            .foregroundStyle(theme.mutedForeground)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
                 }
-            } label: {
-                // No fixed line box, so the chevron centres on the text's own glyphs.
-                HStack(alignment: .center, spacing: 4) {
-                    Text(title)
-                        .font(.system(size: size))
-                        .foregroundStyle(theme.mutedForeground)
-                    ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
-                        .foregroundStyle(theme.mutedForeground)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
-            if expanded {
+            if expanded && !group.hasActive {
                 // Lab `.m-work-log`: plain 44 pt rows split by subtle dividers, no cards.
                 let steps = entries.filter {
                     if case .thinking = $0 { return true }
@@ -81,6 +85,175 @@ struct WorkGroupCard: View {
         // The feed stacks items 22 apart; below the divider only the paragraph gap is wanted.
         .padding(.bottom, gap - 22)
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
+        .onAppear { anchor() }
+        .onChange(of: group.durationMs) { anchor() }
+    }
+
+    private func anchor() {
+        if group.hasActive, let ms = group.durationMs {
+            startedAt = Date(timeIntervalSinceNow: -Double(ms) / 1000)
+        }
+    }
+}
+
+/// The working divider when no work group is running yet: the same row and rule as a group's.
+struct WorkingFold: View {
+    let since: Date
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    var body: some View {
+        let gap = size * 0.85
+        VStack(alignment: .leading, spacing: gap) {
+            WorkingFoldLabel(since: since, size: size)
+            Rectangle().fill(threadDividerColor(theme, appearance)).frame(height: 1)
+        }
+        .padding(.bottom, gap)
+    }
+}
+
+/// "Working for 59s", ticking once a second (mobile `RunFoldWorking`, desktop `format_working_elapsed`).
+struct WorkingFoldLabel: View {
+    let since: Date
+    let size: CGFloat
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let seconds = max(0, Int(context.date.timeIntervalSince(since)))
+            Text("Working for \(seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s")")
+                .font(.system(size: size))
+                .monospacedDigit()
+                .foregroundStyle(theme.mutedForeground)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("thread.workingFold")
+    }
+}
+
+/// Conn's live row (`ThinkingTimelineRow`): an icon and a shimmering label, never a spinner.
+struct LiveWorkRow: View {
+    let label: String
+    var systemImage = "brain"
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14))
+                .foregroundStyle(theme.mutedForeground)
+                .frame(width: 24, height: 24)
+            ShimmerText(label, size: size)
+        }
+        .frame(minHeight: 24)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("thread.liveWork")
+    }
+}
+
+/// Conn's `live-tool-shine`: a 72 pt highlight band sweeps the label in 12 steps over 1.35 s, then
+/// rests 1.45 s (mobile `work-shimmer-steps.ts`). The band is a gradient mask moved by a timeline
+/// that fires 12 times per 2.8 s cycle, so the text never repaints at frame rate. Reduce Motion
+/// shows plain muted text.
+struct ShimmerText: View {
+    let text: String
+    let size: CGFloat
+    @Environment(\.connTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(_ text: String, size: CGFloat) {
+        self.text = text
+        self.size = size
+    }
+
+    var body: some View {
+        let font = Font.system(size: size)
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .foregroundStyle(theme.mutedForeground)
+            .overlay {
+                if !reduceMotion {
+                    TimelineView(ShimmerSchedule()) { context in
+                        Text(text)
+                            .font(font)
+                            .lineLimit(1)
+                            .foregroundStyle(theme.foreground)
+                            .mask { ShimmerBand(progress: ShimmerSchedule.progress(at: context.date)) }
+                    }
+                    .accessibilityHidden(true)
+                }
+            }
+    }
+}
+
+private struct ShimmerBand: View {
+    /// 0 is the band's left edge off the text's left, 1 is its left edge past the text's right.
+    let progress: Double
+    private static let width: CGFloat = 72
+
+    var body: some View {
+        GeometryReader { geometry in
+            LinearGradient(
+                stops: [
+                    .init(color: .white.opacity(0), location: 0),
+                    .init(color: .white.opacity(0.12), location: 0.15),
+                    .init(color: .white.opacity(0.55), location: 0.35),
+                    .init(color: .white, location: 0.5),
+                    .init(color: .white.opacity(0.55), location: 0.65),
+                    .init(color: .white.opacity(0.12), location: 0.85),
+                    .init(color: .white.opacity(0), location: 1),
+                ],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: Self.width)
+            .offset(x: -Self.width + progress * (geometry.size.width + Self.width))
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
+        }
+    }
+}
+
+/// Fires at each of the shimmer's 12 steps and not between, so the view updates about 4 times a
+/// second on average and sleeps through the rest.
+struct ShimmerSchedule: TimelineSchedule {
+    static let steps = 12
+    static let sweep: TimeInterval = 1.35
+    static let pause: TimeInterval = 1.45
+    private static var cycle: TimeInterval { sweep + pause }
+    private static var step: TimeInterval { sweep / Double(steps) }
+
+    /// The band's progress at `date`: the last step reached in the sweep, then fully past the text
+    /// through the pause. All shimmers share the clock, so they sweep together.
+    static func progress(at date: Date) -> Double {
+        let phase = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle)
+        return Double(min(Int(phase / step + 1e-6), steps)) / Double(steps)
+    }
+
+    func entries(from start: Date, mode: Mode) -> Entries {
+        Entries(cursor: start.timeIntervalSinceReferenceDate, first: true)
+    }
+
+    struct Entries: Sequence, IteratorProtocol {
+        var cursor: TimeInterval
+        var first: Bool
+
+        mutating func next() -> Date? {
+            if first {
+                first = false
+                return Date(timeIntervalSinceReferenceDate: cursor)
+            }
+            let cycle = ShimmerSchedule.cycle
+            let step = ShimmerSchedule.step
+            let cycleStart = (cursor / cycle).rounded(.down) * cycle
+            let nextStep = ((cursor - cycleStart) / step + 1e-6).rounded(.down) + 1
+            cursor = nextStep <= Double(ShimmerSchedule.steps)
+                ? cycleStart + nextStep * step
+                : cycleStart + cycle + step
+            return Date(timeIntervalSinceReferenceDate: cursor)
+        }
     }
 }
 

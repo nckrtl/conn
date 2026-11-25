@@ -52,7 +52,7 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.metaSize
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {

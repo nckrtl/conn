@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 struct PullRequestRow: Codable, Identifiable, Hashable {
@@ -25,7 +26,7 @@ struct PullRequestRow: Codable, Identifiable, Hashable {
     }
 }
 
-private struct PullRequestStats: Decodable {
+fileprivate struct PullRequestStats: Decodable {
     struct Stat: Decodable {
         let projectId, repository: String
         let number, additions, deletions: Int
@@ -44,21 +45,15 @@ private struct PullRequestPage: Decodable {
 struct PullRequestsTabView: View {
     let store: CoreStore
     let searchQuery: String
-    @State private var rows: [PullRequestRow] = []
-    @State private var checkCounts: [String: String] = [:]
-    @State private var stats: [String: PullRequestStats.Stat] = [:]
-    @State private var request = UUID()
-    @State private var notice: String?
-    @State private var loading = true
-    @State private var filter = "All"
+    @Bindable var model: WorkspacePullRequests
     @Environment(\.connTheme) private var theme
 
     var body: some View {
-        let candidates = rows.filter { row in
+        let candidates = model.rows.filter { row in
             searchQuery.isEmpty || [row.title, row.repository, row.projectTitle, "#\(row.number)", row.headBranch, row.author?.login ?? "", row.labels?.map(\.name).joined(separator: " ") ?? ""]
                 .joined(separator: " ").localizedCaseInsensitiveContains(searchQuery)
         }
-        let selected = candidates.filter { filter == "All" || $0.status == filter }
+        let selected = candidates.filter { model.filter == "All" || $0.status == model.filter }
         ScrollView {
             LazyVStack(spacing: 0) {
                 ZStack(alignment: .trailing) {
@@ -68,7 +63,7 @@ struct PullRequestsTabView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity)
                     Menu {
-                        Picker("Status", selection: $filter) {
+                        Picker("Status", selection: $model.filter) {
                             ForEach(["All", "Checks running", "Checks passed", "Checks failed", "Draft"], id: \.self) { option in
                                 let label = option == "Checks running" ? "In progress" : option
                                 Text("\(label) (\(candidates.filter { option == "All" || $0.status == option }.count))").tag(option)
@@ -77,9 +72,9 @@ struct PullRequestsTabView: View {
                     } label: { WorkspaceFilterIcon() }
                     .accessibilityLabel("Filter pull requests")
                 }.frame(height: 56)
-                if loading { ProgressView() }
-                if let notice { Text(notice).foregroundStyle(.secondary).padding() }
-                if !loading && notice == nil && selected.isEmpty {
+                if model.loading { ProgressView() }
+                if let notice = model.notice { Text(notice).foregroundStyle(.secondary).padding() }
+                if !model.loading && model.notice == nil && selected.isEmpty {
                     let empty = candidates.isEmpty && searchQuery.isEmpty
                     VStack(spacing: 4) {
                         Text(empty ? "No pull requests" : "No matching pull requests")
@@ -99,7 +94,7 @@ struct PullRequestsTabView: View {
                                 HStack(spacing: 6) {
                                     Text(row.title).font(.system(size: 16, weight: .medium)).lineLimit(1)
                                     Spacer(minLength: 0)
-                                    if let stat = stats[row.id] {
+                                    if let stat = model.stats[row.id] {
                                         HStack(spacing: 4) {
                                             Text("+\(stat.additions)").foregroundStyle(theme.diffAdded)
                                             Text("−\(stat.deletions)").foregroundStyle(theme.diffRemoved)
@@ -107,29 +102,28 @@ struct PullRequestsTabView: View {
                                     }
                                 }
                                 HStack(spacing: 6) {
-                                    Text(["#" + String(row.number), row.author?.login, checkCounts[row.id] ?? row.status].compactMap { $0 }.joined(separator: " · "))
+                                    Text(["#" + String(row.number), row.author?.login, model.checkCounts[row.id] ?? row.status].compactMap { $0 }.joined(separator: " · "))
                                     Spacer(minLength: 4)
                                     if let age = shortAge(row.updatedAt) { Text(age + " ago").monospacedDigit() }
                                 }.font(.system(size: 13)).foregroundStyle(theme.mutedForeground).lineLimit(1)
                             }
                         }.padding(.vertical, 12).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityIdentifier("pr.row.\(row.repository).\(row.number)")
-                    .task(id: request) {
-                        guard checkCounts[row.id] == nil else { return }
+                    .task(id: model.request) {
+                        guard model.checkCounts[row.id] == nil else { return }
                         struct Checks: Decodable { let checks: [PullRequestRecord.Detail.Check] }
                         guard let result = try? await store.pullRequest(.checks, input: row.ref, as: Checks?.self),
                               !Task.isCancelled else { return }
                         let runs = result.checks.filter { $0.placeholder != true }
                         if !runs.isEmpty {
-                            checkCounts[row.id] = "\(runs.filter { $0.status == "success" }.count) of \(runs.count) passed"
+                            model.checkCounts[row.id] = "\(runs.filter { $0.status == "success" }.count) of \(runs.count) passed"
                         }
                     }
                 }
             }.padding(.horizontal, 12)
         }
         .background(theme.background)
-        .refreshable { await load() }
-        .task(id: store.environmentId) { await load() }
+        .refreshable { await model.load(store: store) }
     }
 
     private func statusColor(_ row: PullRequestRow) -> Color {
@@ -141,8 +135,20 @@ struct PullRequestsTabView: View {
         default: return theme.mutedForeground
         }
     }
+}
 
-    private func load() async {
+@MainActor
+@Observable
+final class WorkspacePullRequests {
+    var rows: [PullRequestRow] = []
+    var checkCounts: [String: String] = [:]
+    fileprivate var stats: [String: PullRequestStats.Stat] = [:]
+    var request = UUID()
+    var notice: String?
+    var loading = true
+    var filter = "All"
+
+    func load(store: CoreStore) async {
         let generation = UUID()
         request = generation
         loading = true

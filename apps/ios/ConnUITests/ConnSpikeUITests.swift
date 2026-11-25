@@ -50,7 +50,7 @@ final class ConnSpikeUITests: XCTestCase {
             searchButton.tap()
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
             saveScreenshot(named: "search\(themeSuffix)", dir: screensDir)
-            let cancelSearch = app.buttons["workspace.cancelSearchButton"].firstMatch
+            let cancelSearch = app.buttons["workspace.cancelSearch"].firstMatch
             if cancelSearch.waitForExistence(timeout: 5) {
                 cancelSearch.tap()
                 RunLoop.current.run(until: Date().addingTimeInterval(0.4))
@@ -417,6 +417,63 @@ final class ConnSpikeUITests: XCTestCase {
         excerpt.tap()
         assertAtLatest()
         capture("excerpt")
+    }
+
+    func testWorkspaceSystemTabs() throws {
+        let env = ProcessInfo.processInfo.environment
+        let pairing = try XCTUnwrap(env["CONN_PAIRING_URL"], "Requires an isolated, seeded Conn server")
+        let threadTitle = env["CONN_THREAD_TITLE"] ?? "Inspect main.rs and greeting"
+        let app = XCUIApplication()
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = env["CONN_TEST_TASK_GATEWAY"]
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        let url = app.textFields["pairing.urlField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 10))
+        url.tap()
+        url.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+
+        let bar = app.tabBars.firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 25))
+        let threads = bar.buttons["workspace.tab.threads"]
+        let tasks = bar.buttons["workspace.tab.tasks"]
+        let pullRequests = bar.buttons["workspace.tab.pullRequests"]
+        let search = bar.buttons["workspace.searchButton"]
+        XCTAssertTrue(threads.isSelected)
+        XCTAssertTrue(tasks.isHittable && pullRequests.isHittable && search.isHittable)
+        let center = CGVector(dx: 0.5, dy: 0.5)
+        threads.coordinate(withNormalizedOffset: center).press(forDuration: 0.35,
+            thenDragTo: tasks.coordinate(withNormalizedOffset: center), withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(tasks.wait(for: \.isSelected, toEqual: true, timeout: 5))
+        XCTAssertTrue(app.buttons["tasks.laneMenu"].exists)
+
+        pullRequests.tap()
+        XCTAssertTrue(pullRequests.isSelected)
+        search.tap()
+        let field = app.textFields["workspace.searchField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.placeholderValue, "Search pull requests")
+        let cancel = app.buttons["workspace.cancelSearch"]
+        cancel.tap()
+        XCTAssertTrue(pullRequests.wait(for: \.isSelected, toEqual: true, timeout: 5))
+
+        threads.tap()
+        search.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.placeholderValue, "Search threads")
+        field.tap()
+        field.typeText(threadTitle)
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.' AND label CONTAINS[c] %@", threadTitle)).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["thread.composer"].waitForExistence(timeout: 10))
+        XCTAssertFalse(bar.exists || field.exists || cancel.exists)
+        XCTAssertFalse(app.buttons["workspace.settingsButton"].exists || app.buttons["inbox.newThreadButton"].exists)
+        app.navigationBars.buttons["Back"].tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, threadTitle)
+        cancel.tap()
+        XCTAssertTrue(threads.wait(for: \.isSelected, toEqual: true, timeout: 5))
     }
 
     func testWorkspaceRecords() async throws {
@@ -1188,7 +1245,7 @@ final class ConnSpikeUITests: XCTestCase {
                 settle(1.5)
                 if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
                 capture("prs-search")
-                if !tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"]) { app.swipeDown() }
+                if !tap(app, ["workspace.cancelSearch", "Cancel", "Close"]) { app.swipeDown() }
                 settle(1.5)
             }
         }
@@ -1197,7 +1254,7 @@ final class ConnSpikeUITests: XCTestCase {
             settle(1.5)
             if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
             capture("search")
-            if !tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"]) { app.swipeDown() }
+            if !tap(app, ["workspace.cancelSearch", "Cancel", "Close"]) { app.swipeDown() }
             settle(1.5)
         }
         if barTap(["workspace.settingsButton", "Open settings"], swiftX: 0.115) {

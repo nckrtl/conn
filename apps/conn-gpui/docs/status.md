@@ -4,6 +4,12 @@
 
 Keep this file accurate. Update it whenever a milestone lands, a proof passes, or a blocker is found.
 
+## Approved desktop panel reference, 25 November 2026
+
+The desktop reference is `apps/lab-gpui` at `b4f0ac5512b823431dea8cca12eb84ace6502e21`. The native VM captured MCP and Database at 1440 × 900. Both search controls line up with their 32px list rows, with 6px below search and 2px between rows. Database result rows and MCP log entries use 10px vertical padding. A real SQLite query returned 23. A stdio MCP tool read the same database. Overview displayed its declared field and whole-input examples. A second stdio session verified all four hint pills.
+
+The VM also opened an Orbit task from thread details, expanded its subtask brief and deliverables, opened and returned from a workspace file, and sent GET and HEAD requests. HEAD displayed the 204 status and empty response. The pull request inbox filtered a live GitHub list through the selected Conn server, opened a three-file breakdown, then loaded the PR detail and code patch.
+
 ## Milestones (from `GOAL.md`)
 
 | Phase | Area | State | Proof |

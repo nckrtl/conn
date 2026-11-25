@@ -56,7 +56,7 @@ pub(crate) fn render_connection_menu(
         .min_w(px(160.0))
         .max_w(px(360.0))
         .p(px(4.0))
-        .rounded(px(12.0))
+        .rounded(px(8.0))
         .bg(to_hsla(tokens.popover))
         .border_1()
         .border_color(divider)
@@ -65,7 +65,19 @@ pub(crate) fn render_connection_menu(
 
     let selected_id = selected.map(|conn| conn.id.as_str());
     if !connections.is_empty() {
+        let mut vault_heading_shown = false;
         for connection in connections {
+            if connection.source == ConnectionSource::Vault && !vault_heading_shown {
+                vault_heading_shown = true;
+                list = list.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(px(12.0))
+                        .text_color(muted)
+                        .child("Vault"),
+                );
+            }
             let is_selected = selected_id == Some(connection.id.as_str());
             let target = connection_target(&connection.connection, connection.ssh_host.as_deref());
             let id = connection.id.clone();
@@ -75,7 +87,7 @@ pub(crate) fn render_connection_menu(
                     .id(SharedString::from(format!("db-conn-item-{id}")))
                     .a11y_button(
                         format!("panel.database.connection.{id}"),
-                        "Database connection",
+                        connection.name.clone(),
                     )
                     .w_full()
                     .min_h(px(28.0))
@@ -83,7 +95,7 @@ pub(crate) fn render_connection_menu(
                     .py(px(4.0))
                     .gap(px(6.0))
                     .items_center()
-                    .rounded(px(8.0))
+                    .rounded(px(4.0))
                     .cursor_pointer()
                     .text_size(px(14.0))
                     .line_height(px(20.0))
@@ -118,6 +130,7 @@ pub(crate) fn render_connection_menu(
         let entity = entity.clone();
         h_flex()
             .id(id)
+            .a11y_button(format!("panel.database.{id}"), label)
             .w_full()
             .min_h(px(28.0))
             .px(px(8.0))

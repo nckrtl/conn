@@ -22,7 +22,7 @@
 | 4. Terminal Panel / Drawer | 6 | 3 | 3 | 2 | Solid `alacritty_terminal` PTY + selection/clipboard; spawns local shell instead of `conn-server` `terminal.*` RPC, floating action bar overlaps content, missing "Add to chat" & link clicks |
 | 5. Browser / Preview & Annotations | 11 | 5 | 10 | 2 | CEF offscreen, Vault logins, annotations + Operator dictation, Laravel debug bar with 8 flyout panels (native header capture); missing More (`⋮`) menu (DevTools/Zoom/Appearance/Clear), Device Viewport toolbar, Screenshot/Record, Element picker, Test Logins |
 | 6. API Panel | 11 | 1 | 1 | 0 | Near-complete parity; Laravel debug bar under the response is in; missing `baseUrl` seeding |
-| 7. Database Panel | 11 | 3 | 1 | 0 | Near-complete parity; the debug bar's "Open in Database" fills the editor but does not run the query; missing SQL syntax highlighting in editor and grouped Vault/Env labels in connection menu |
+| 7. Database Panel | 12 | 2 | 1 | 0 | The SQL editor highlights queries. The debug bar opens SQL in the editor. The chooser groups Vault connections under their own heading. |
 | 8. MCP Inspector Panel | 13 | 1 | 0 | 0 | Near-1:1 parity across Tools/Resources/Prompts/Log/Server + agent `mcp_connect`/`mcp_call` |
 | 9. Tasks Panel (Orbit Board) | 8 | 2 | 0 | 0 | Native Orbit board + charts + detail; `open_pull_request` opens browser instead of inline PR panel, `open_agent_conversation` stubbed |
 | 10. Pull Request & Linked Items | 17 | 4 | 6 | 2 | Very rich PR & Linked Items port; missing `PullRequestCheckoutMenu`, continuous multi-file Code tab + inline PR review annotations + split diff/whitespace/hide-tests, `Shift` speed actions, PR stack menu |
@@ -277,9 +277,10 @@ Matching already: Pierre tree metrics (28 px rows, 5 px radius, 2 px row margin,
 - `[x]` **Top connection error alert (`warning_notice`) & no-connection empty state with `+ Add connection` CTA** (`DatabasePanel.tsx:715-728` -> `panels/database/mod.rs:911-940`, `views.rs:215-242`).
 - `[x]` **Agent `database_query` tool integration (`panel_open` + populate SQL + execute + display rows)** (`DatabasePanel.tsx:615-650` -> `panels/database/mod.rs:420-490`, `app.rs`).
 
+- `[x]` The native SQL editor highlights SQL tokens and keeps each connection’s query text.
+
 ### Drift (`[~]`)
-- `[~]` **SQL editor syntax highlighting** (`database/SqlEditor.tsx` -> `panels/database/mod.rs:1072-1093`): Conn renders SQL syntax highlighting inside `SqlEditor`; `conn-gpui` uses a plain monochrome `Textarea`.
-- `[~]` **Connection menu source grouping labels** (`DatabasePanel.tsx:285-338` -> `panels/database/views.rs:68-108`): Conn groups connections under section headers (`From .env`, `Saved`, `Vault`) and marks SSH-tunneled targets; `conn-gpui` renders a single flat list of all connections above one divider.
+- `[~]` The desktop lab and native picker show workspace and saved connections first, then a Vault heading when Vault connections are available. The web client also labels the workspace and saved groups.
 
 ### Missing (`[ ]`)
 - `[~]` **Pending query handoff from Laravel Toolbar (`openDatabaseQuery`)** (`BrowserLaravelToolbar.tsx:92`, `DatabasePanel.tsx:620-645` -> `panels/laravel_toolbar/mod.rs:452 open_query`, `panels/mod.rs` subscriptions to both bars): "Open in Database" switches to the Database panel and fills the editor with the SQL, bindings inlined (`set_agent_sql`); it does not run the query, and it needs a selected connection.

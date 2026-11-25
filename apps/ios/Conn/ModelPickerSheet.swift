@@ -1,70 +1,151 @@
 import SwiftUI
 import UIKit
 
-/// The model list of Conn mobile's thread settings sheet (`ThreadSettingsSheet.tsx`
-/// `ThreadSettingsModelsScreen`, `ThreadSettingsRows`): "Thread settings", a close button, Done
-/// or Save, the "Find a model" search, and provider sections of grouped rows. A tap picks a row;
-/// Save applies it. `model_picker` in conn-ffi builds the sections.
 struct ModelPickerSheet: View {
     @Bindable var store: CoreStore
     let threadId: String
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.connTheme) private var theme
+    private enum Page: Hashable { case providers, models(String) }
+    @State private var pages: [Page] = []
     @State private var query = ""
     @State private var toggled: [String] = []
     @State private var pending: (instanceId: String, model: String)?
     @State private var picker: FfiModelPicker?
+    @State private var optionChanges: [String: String] = [:]
+    @State private var steer = false
     @State private var saving = false
     @State private var showingUnavailable = false
 
     private var reloadKey: String {
         let pick = pending.map { "\($0.instanceId):\($0.model)" } ?? ""
         let model = store.openThread?.modelLabel ?? ""
-        return "\(store.providersRevision)|\(query)|\(toggled.joined(separator: ","))|\(pick)|\(model)"
+        return "\(store.providersRevision)|\(toggled.joined(separator: ","))|\(pick)|\(model)"
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $pages) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if let picker {
-                        if !picker.loaded {
-                            notice("Loading models…")
-                        } else if picker.sections.isEmpty {
-                            notice(query.isEmpty ? "No models available." : "No models match your search.")
-                        }
-                        ForEach(picker.sections, id: \.instanceId) { section in
-                            header(section)
-                            ForEach(Array(section.models.enumerated()), id: \.element.model) { index, row in
-                                modelRow(row, isFirst: index == 0, isLast: index == section.models.count - 1)
+                VStack(alignment: .leading, spacing: 24) {
+                    if let picker, picker.loaded {
+                        let section = picker.sections.first { $0.models.contains(where: \.selected) }
+                        let row = section?.models.first(where: \.selected)
+                        if picker.sections.isEmpty {
+                            Text("No models available.").foregroundStyle(.secondary)
+                        } else {
+                            PhoneSettingsGroup {
+                                Button { pages.append(.providers) } label: {
+                                    PhoneOptionRow(title: "Provider", value: section?.label ?? "Select", provider: section?.driver)
+                                }
+                                if let section {
+                                    Button { browse(section) } label: {
+                                        PhoneOptionRow(title: "Model", value: row.map { displayName($0.label, provider: section.label) } ?? "Select")
+                                    }
+                                }
+                                if let row {
+                                    ForEach(row.controls, id: \.id) { control in
+                                        let current = optionChanges[control.id] ?? control.current
+                                        let label = control.toggle || control.id == "serviceTier" ? "Speed" : "Effort"
+                                        Menu {
+                                            ForEach(Array(zip(control.values, control.labels)), id: \.0) { value, name in
+                                                Button {
+                                                    pending = (row.instanceId, row.model)
+                                                    optionChanges[control.id] = value == control.current ? nil : value
+                                                } label: {
+                                                    if current == value { Label(name, systemImage: "checkmark") } else { Text(name) }
+                                                }
+                                            }
+                                        } label: {
+                                            PhoneOptionRow(title: label,
+                                                           value: control.values.firstIndex(of: current).map { control.labels[$0] } ?? current,
+                                                           disclosure: "chevron.down")
+                                        }
+                                    }
+                                }
                             }
                         }
+                    } else { ProgressView("Loading models…") }
+                    VStack(alignment: .leading, spacing: 8) {
+                        PhoneSettingsGroup {
+                            Menu {
+                                Button("Steer") { steer = true }
+                                Button("Queue") { steer = false }
+                            } label: {
+                                PhoneOptionRow(title: "Follow-up messages", value: steer ? "Steer" : "Queue", disclosure: "chevron.down")
+                            }
+                        }
+                        Text(steer ? "Send follow-ups to the running turn." : "Send follow-ups after the running turn finishes.")
+                            .font(.system(size: 13)).foregroundStyle(theme.mutedForeground).padding(.horizontal, 14)
                     }
-                }
-                .padding(.bottom, 16)
+                }.padding(.horizontal, 14)
             }
-            .background(theme.background.ignoresSafeArea())
+            .buttonStyle(.plain).background(theme.background)
+            .navigationDestination(for: Page.self) { page in
+                ScrollView {
+                    PhoneSettingsGroup {
+                        switch page {
+                        case .providers:
+                            ForEach(picker?.sections ?? [], id: \.instanceId) { section in
+                                Button { browse(section) } label: {
+                                    HStack { ProviderIcon(driver: section.driver); Text(section.label); Spacer(); ConnIcon("chevron.right") }
+                                        .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                                }.accessibilityIdentifier("modelPicker.provider." + section.instanceId)
+                            }
+                        case .models(let instance):
+                            if let section = picker?.sections.first(where: { $0.instanceId == instance }) {
+                                let matches = section.models.filter { query.isEmpty || $0.label.localizedCaseInsensitiveContains(query) }
+                                if matches.isEmpty { Text("No models match your search.").foregroundStyle(theme.mutedForeground) }
+                                ForEach(matches, id: \.model) { row in
+                                    Button {
+                                        if !row.selected { optionChanges = [:] }
+                                        pending = (row.instanceId, row.model)
+                                        pages = []
+                                    } label: {
+                                        HStack {
+                                            ProviderIcon(driver: section.driver)
+                                            Text(displayName(row.label, provider: section.label))
+                                            Spacer()
+                                            if row.selected { ConnIcon("checkmark") }
+                                        }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                                    }.accessibilityIdentifier("modelPicker.model." + row.model)
+                                }
+                            }
+                        }
+                    }.padding(.horizontal, 14)
+                }.buttonStyle(.plain).background(theme.background)
+                    .safeAreaInset(edge: .bottom) {
+                        if case .models = page {
+                            HStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass").foregroundStyle(theme.mutedForeground)
+                                TextField("Find a model", text: $query)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .accessibilityIdentifier("modelPicker.search")
+                            }.padding(.horizontal, 14).frame(height: 44)
+                                .background(theme.settingsGroup, in: Capsule()).padding(.horizontal, 14)
+                        }
+                    }
+                    .navigationTitle(pageTitle(page))
+                    .navigationBarTitleDisplayMode(.inline)
+            }
             .navigationTitle("Thread settings")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(
-                text: $query,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "Find a model"
-            )
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { dismiss() } label: { Image(systemName: "xmark") }
                         .accessibilityLabel("Cancel thread settings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(picker?.hasPending == true ? "Save" : "Done") { commitAndClose() }
-                        .fontWeight(.semibold)
+                    Button(picker?.hasPending == true || !optionChanges.isEmpty || steer != store.followUpSteers(threadId) ? "Save" : "Done") { commitAndClose() }
+                        .fontWeight(.semibold).foregroundStyle(.blue)
                         .disabled(saving)
                         .accessibilityIdentifier("modelPicker.confirm")
-                }
+                }.sharedBackgroundVisibility(.hidden)
             }
         }
+        .tint(theme.foreground)
+        .presentationBackground(theme.background)
+        .onAppear { steer = store.followUpSteers(threadId) }
         .alert("Model unavailable", isPresented: $showingUnavailable) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -80,19 +161,21 @@ struct ModelPickerSheet: View {
             }
         }
         .task(id: reloadKey) {
-            picker = await store.modelPicker(
+            let result = await store.modelPicker(
                 threadId: threadId,
-                query: query,
+                query: "",
                 toggled: toggled,
                 pending: pending
             )
+            if !Task.isCancelled { picker = result }
         }
     }
 
     /// `commitPendingModel`: the core sends the pick only while the catalog still offers it;
     /// otherwise the sheet stays open with mobile's "Model unavailable" alert.
     private func commitAndClose() {
-        guard let pending, picker?.hasPending == true else {
+        guard let pending, picker?.hasPending == true || !optionChanges.isEmpty else {
+            store.setFollowUpSteers(steer, threadId: threadId)
             dismiss()
             return
         }
@@ -101,11 +184,13 @@ struct ModelPickerSheet: View {
             let result = await store.saveThreadModel(
                 threadId: threadId,
                 instanceId: pending.instanceId,
-                model: pending.model
+                model: pending.model, changes: optionChanges
             )
             saving = false
             switch result {
-            case .saved?, .unchanged?: dismiss()
+            case .saved?, .unchanged?:
+                store.setFollowUpSteers(steer, threadId: threadId)
+                dismiss()
             case .unavailable?: showingUnavailable = true
             // The thread's scope is still loading; the sheet keeps its loading state.
             case .notReady?, nil: break
@@ -113,119 +198,23 @@ struct ModelPickerSheet: View {
         }
     }
 
-    private func notice(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 14))
-            .foregroundStyle(theme.mutedForeground)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 32)
-    }
-
-    /// `ProviderHeader`: the icon at 15 and the label (14 medium, muted); a collapsible one adds the
-    /// folded count and a 12pt chevron.
-    private func header(_ section: FfiModelPickerSection) -> some View {
-        let content = HStack(spacing: 7) {
-            ProviderIcon(driver: section.driver, size: 15)
-            Text(section.label)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(theme.mutedForeground)
-            if section.collapsible {
-                Spacer(minLength: 0)
-                if section.collapsed {
-                    Text("\(section.modelCount)")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(theme.mutedForeground)
-                }
-                ConnIcon(section.collapsed ? "chevron.down" : "chevron.up")
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.mutedForeground)
-            }
-        }
-        .padding(.horizontal, 3.5)
-        .padding(.top, 7)
-        .frame(minHeight: 44, alignment: .bottom)
-        .padding(.horizontal, 14)
-        .padding(.top, 3.5)
-
-        return Group {
-            if section.collapsible {
-                Button {
-                    if let index = toggled.firstIndex(of: section.instanceId) {
-                        toggled.remove(at: index)
-                    } else {
-                        toggled.append(section.instanceId)
-                    }
-                } label: {
-                    content.contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(section.label), \(section.modelCount) models")
-            } else {
-                content.accessibilityAddTraits(.isHeader)
-            }
+    private func pageTitle(_ page: Page) -> String {
+        switch page {
+        case .providers: "Provider"
+        case .models(let instance): picker?.sections.first { $0.instanceId == instance }?.label ?? "Models"
         }
     }
 
-    /// `ModelRowContent` with the iOS trailing checkmark: 44 tall, 14 at the sides inside a 14pt
-    /// inset card, label 16 medium, badges 11 bold, sub-provider 13 muted.
-    private func modelRow(_ row: FfiModelPickerRow, isFirst: Bool, isLast: Bool) -> some View {
-        let shape = UnevenRoundedRectangle(
-            topLeadingRadius: isFirst ? 14 : 0,
-            bottomLeadingRadius: isLast ? 14 : 0,
-            bottomTrailingRadius: isLast ? 14 : 0,
-            topTrailingRadius: isFirst ? 14 : 0,
-            style: .continuous
-        )
-        return Button {
-            UISelectionFeedbackGenerator().selectionChanged()
-            pending = (row.instanceId, row.model)
-        } label: {
-            HStack(spacing: 7) {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 7) {
-                        Text(row.label)
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(theme.foreground)
-                            .lineLimit(1)
-                        if row.isDefault { badge("Default", strong: true) }
-                        if row.isLegacy { badge("Legacy", strong: false) }
-                    }
-                    if !row.subtitle.isEmpty {
-                        Text(row.subtitle)
-                            .font(.system(size: 13))
-                            .foregroundStyle(theme.mutedForeground)
-                            .lineLimit(1)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if row.selected {
-                    ConnIcon("checkmark")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(theme.foreground)
-                }
-            }
-            .padding(.horizontal, 14)
-            .frame(minHeight: 44)
-            .background(theme.card, in: shape)
-            .overlay(alignment: .bottom) {
-                if !isLast {
-                    Rectangle().fill(theme.border.opacity(0.6)).frame(height: 0.5)
-                }
-            }
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 14)
-        .accessibilityLabel([row.label, row.subtitle].filter { !$0.isEmpty }.joined(separator: ", "))
-        .accessibilityAddTraits(row.selected ? [.isSelected] : [])
+    private func displayName(_ model: String, provider: String) -> String {
+        model.hasPrefix(provider + " ") ? String(model.dropFirst(provider.count + 1)) : model
     }
 
-    private func badge(_ text: String, strong: Bool) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .bold))
-            .foregroundStyle(theme.mutedForeground)
-            .padding(.horizontal, 5.25)
-            .padding(.vertical, 1.75)
-            .background(theme.foreground.opacity(strong ? 0.12 : 0.06), in: RoundedRectangle(cornerRadius: 6))
+    private func browse(_ section: FfiModelPickerSection) {
+        query = ""
+        if section.collapsed {
+            if toggled.contains(section.instanceId) { toggled.removeAll { $0 == section.instanceId } }
+            else { toggled.append(section.instanceId) }
+        }
+        pages.append(.models(section.instanceId))
     }
 }

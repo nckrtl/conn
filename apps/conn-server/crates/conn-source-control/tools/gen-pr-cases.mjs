@@ -45,6 +45,11 @@ add("checks", [
   {name:"job",status:"COMPLETED",conclusion:"SUCCESS",workflowName:"CI",completedAt:"2026-11-16T00:00:00Z"},
   {name:"job",status:"COMPLETED",conclusion:"CANCELLED",workflowName:"Other"},
 ]).checks);
+const timedChecks = [
+  {name:"test",status:"COMPLETED",conclusion:"SUCCESS",startedAt:"2026-11-16T00:00:00Z",completedAt:"2026-11-16T00:00:23Z"},
+  {name:"build",status:"IN_PROGRESS",startedAt:"2026-11-16T00:00:10Z",completedAt:"0001-01-01T00:00:00Z"},
+];
+add("checks", timedChecks, pure.pullRequestChecksFromContexts(timedChecks).checks);
 for (const filename of ["src/app.rs", "src/app.test.ts", "src/Tests.swift", "src/Latest.java", "tests/a.rs", "tests/fixtures/a.rs", "a/README.md", "a/Cargo.lock", "foo.generated.ts", "a/__generated__/x", "foo_pb2.py", "foo.spec.tsx", "a\\__mocks__\\foo", "foo.snap", "mockData.ts", "mockery.ts", "requirements-dev.txt", "constraints.txt", "CMakeLists.txt", "robots.txt", "llms.txt", "foo.txt", "test_a.py", "conftest.py"]) {
   const input = {files:[{path:filename,additions:7,deletions:3}],truncated:false};
   add("breakdown", input, toChangeBreakdown(input));

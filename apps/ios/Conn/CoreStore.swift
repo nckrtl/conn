@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The launch path through Orbit, shown while no connection is up.
 enum OrbitConnectState: Equatable {
-    case connecting
+    case connecting(String)
     case failed(message: String, detail: String?)
 }
 
@@ -16,9 +16,11 @@ enum OrbitConnectState: Equatable {
 final class CoreStore {
     private(set) var state: FfiSessionState?
     private(set) var shell: FfiShellSnapshot?
+    private var shellConnection: UInt64?
     private(set) var openThread: FfiThreadSnapshot?
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
+    private var readerConnection: UInt64?
     private(set) var isSending = false
     var lastError: String?
     /// A thread to show, set by a `conn://thread/...` URL or a push tap; the workspace consumes it.
@@ -34,6 +36,51 @@ final class CoreStore {
 
     @ObservationIgnored private var session: ConnSession?
     private var core: ConnCore? { session?.core() }
+
+    func pullRequest<T: Decodable>(_ operation: FfiPullRequestOperation, input: [String: Any], as: T.Type) async throws -> T {
+        guard let core else { throw URLError(.notConnectedToInternet) }
+        let data = try JSONSerialization.data(withJSONObject: input)
+        let response = try await core.pullRequest(operation: operation, input: String(decoding: data, as: UTF8.self))
+        return try JSONDecoder().decode(T.self, from: Data(response.utf8))
+    }
+
+    private(set) var fleetID: String?
+    private(set) var fleetLabel: String?
+    private(set) var discoveryError: String?
+    private(set) var discovering = false
+    private(set) var discoveredPrimary: String?
+    private var lastFleetAttempt: Date?
+    private(set) var loadingOlder = false
+    private(set) var olderError: String?
+    var showsOffline: Bool { state?.showsOffline == true }
+    private var coldLaunchSession: FfiSavedSession?
+    private var choseOffline = false
+    var showsSavedConnectionAlert: Bool {
+        coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
+    }
+
+    func useSavedWorkspaceOffline() { choseOffline = true }
+
+    func retrySavedConnection() {
+        guard let saved = coldLaunchSession else { return }
+        if case .idle = state?.phase {
+            session?.launch(saved: saved)
+        } else {
+            session?.retry()
+        }
+        if let latest = session?.state() { handleState(latest) }
+    }
+
+    var displayName: String { fleetLabel ?? serverURL.flatMap { URL(string: $0)?.host } ?? fleetID ?? scope }
+
+    func loadOlder() async {
+        guard !loadingOlder, let core, status == .connected else { return }
+        loadingOlder = true
+        defer { loadingOlder = false }
+        olderError = nil
+        do { try await core.loadOlderSettled() }
+        catch { olderError = error.localizedDescription }
+    }
 
     let scope: String
     private(set) var linked: [String: CoreStore] = [:]
@@ -62,31 +109,56 @@ final class CoreStore {
     /// The workspace, rather than the Orbit or pairing screen: connected before, or connecting to
     /// this launch's first server (its offline history shows meanwhile). After a switch to
     /// another server, the connecting screen shows until that one connects.
-    var showsWorkspace: Bool { hasConnected || (isPaired && identityEpoch == 0) }
+    private(set) var showsWorkspace = false
+
+    private func updateWorkspaceVisibility() {
+        if shell != nil && (hasConnected || offlineReader != nil) { showsWorkspace = true }
+    }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
-    var environmentId: String? { state?.environmentId }
+    var environmentId: String? { state?.environmentId ?? coldLaunchSession?.environmentId }
 
     var orbitConnect: OrbitConnectState? {
-        switch state?.phase {
-        case .connecting: .connecting
-        case .live where !hasConnected: .connecting
+        var phase = state?.phase
+        #if DEBUG && targetEnvironment(simulator)
+        switch ProcessInfo.processInfo.environment["CONN_TEST_LAUNCH_PHASE"] {
+        case "splash": return .connecting("")
+        case "checking": phase = .connecting(target: .primaryAgent)
+        case "setup": phase = .live(status: .connecting)
+        case "finalizing": phase = .live(status: .connected)
+        default: break
+        }
+        #endif
+        return switch phase {
+        case nil: .connecting("")
+        case .connecting: .connecting("Checking connection")
+        case .live(.connected): .connecting("Finalizing")
+        case .live: .connecting("Downloading threads")
         case let .failed(message, detail, _): .failed(message: message, detail: detail)
         default: nil
         }
     }
 
-    init(scope: String = "") {
+    init(scope: String = "", deferOrbit: Bool = false) {
         self.scope = scope
         let arguments = ProcessInfo.processInfo.arguments
         if scope.isEmpty && arguments.contains("--reset-session") {
+            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("workspace.route.") {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            UserDefaults.standard.removeObject(forKey: "workspace.selectedTab")
             clearLinkedSessions()
             KeychainStore.clearSession(scope: scope)
             try? FileManager.default.removeItem(at: Self.cacheDirectory(scope))
         }
+        var gatewayURL: String?
+        #if DEBUG && targetEnvironment(simulator)
+        gatewayURL = ProcessInfo.processInfo.environment["CONN_TEST_TASK_GATEWAY"]
+        if arguments.contains("--test-unreachable-gateway") { gatewayURL = "https://127.0.0.1:1" }
+        #endif
         do {
             session = try ConnSession(
-                gatewayUrl: nil,
+                gatewayUrl: gatewayURL,
                 cacheDirectory: Self.cacheDirectory(scope).path,
                 listener: SessionBridge(store: self, scope: scope)
             )
@@ -101,14 +173,77 @@ final class CoreStore {
                 environmentId: $0.environmentId
             )
         }
+        fleetID = saved?.orbitServerId
         guard scope.isEmpty else {
-            session?.restore(saved: saved)
+            if !deferOrbit || fleetID == nil { session?.restore(saved: saved) }
             return
         }
         guard !arguments.contains("--manual-pairing") else { return }
+        coldLaunchSession = saved
         session?.launch(saved: saved)
+        if let saved, let session {
+            Task {
+                guard let reader = await session.savedOfflineReader(), let snapshot = await reader.savedShell(),
+                      coldLaunchSession != nil, !hasConnected, offlineReader == nil,
+                      let identity = saved.environmentId ?? saved.orbitServerId,
+                      state?.environmentId.map({ $0 == identity }) ?? true else { return }
+                offlineReader = reader
+                shell = snapshot
+                updateWorkspaceVisibility()
+                if let id = openThreadId { restoreThread(id) }
+            }
+        }
         for id in UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? [] {
-            if KeychainStore.loadSession(scope: id) != nil { linked[id] = CoreStore(scope: id) }
+            if KeychainStore.loadSession(scope: id) != nil { linked[id] = CoreStore(scope: id, deferOrbit: true) }
+        }
+    }
+
+    func discoverLinked() async {
+        guard scope.isEmpty, !discovering, let session, status == .connected, let primary = environmentId else { return }
+        let generation = identityEpoch
+        discovering = true
+        defer { discovering = false }
+        let savedScopes = UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []
+        let credentials = Dictionary(uniqueKeysWithValues: Set(savedScopes).compactMap { key in
+            KeychainStore.loadSession(scope: key).map { (key, $0) }
+        })
+        let saved = credentials.values.compactMap(\.orbitServerId)
+        let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
+        do {
+            let discovery = try await session.linkedNodes(primaryId: primary, saved: saved, disabled: disabled)
+            guard !Task.isCancelled, generation == identityEpoch, environmentId == primary else { return }
+            let targets = discovery.targets
+            discoveryError = discovery.unresolvedEndpoints.isEmpty ? nil :
+                "Could not verify the server identity at " + discovery.unresolvedEndpoints.joined(separator: ", ")
+            discoveredPrimary = primary
+            let wanted = Set(targets.map(\.serverId))
+            for (key, child) in linked {
+                if let id = child.fleetID, !wanted.contains(id) {
+                    child.session?.connectManually()
+                    linked.removeValue(forKey: key)
+                }
+            }
+            for target in targets {
+                let id = target.serverId
+                let existing = linked.values.first { $0.fleetID == id || $0.environmentId == id }
+                if let existing, existing.fleetID == nil { continue }
+                let key = existing?.scope ?? credentials.first { $0.value.orbitServerId == id }?.key ?? UUID().uuidString
+                let child = existing ?? CoreStore(scope: key, deferOrbit: true)
+                child.fleetID = id
+                child.fleetLabel = target.displayTitle
+                linked[key] = child
+                if let attempt = child.lastFleetAttempt {
+                    guard child.showsOffline, Date().timeIntervalSince(attempt) >= 300 else { continue }
+                }
+                child.lastFleetAttempt = Date()
+                let credential = credentials[key].map {
+                    FfiSavedSession(serverUrl: $0.serverURL, bearer: $0.bearerToken, orbitServerId: $0.orbitServerId, environmentId: $0.environmentId)
+                }
+                child.session?.followEnvironment(environmentId: id, saved: credential)
+            }
+            UserDefaults.standard.set(Array(Set(savedScopes).union(linked.keys)), forKey: "linkedSessions")
+        } catch {
+            if !Task.isCancelled && environmentId == primary { discoveryError = connectionMessage(error) }
         }
     }
 
@@ -138,6 +273,29 @@ final class CoreStore {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    func assetURL(id: String, name: String, mime: String, mcp: Bool = false) async throws -> URL {
+        guard let core, status == .connected else { throw URLError(.notConnectedToInternet) }
+        let epoch = identityEpoch
+        let raw = try await core.attachmentUrl(id: id, name: name, mime: mime, mcpApp: mcp)
+        guard identityEpoch == epoch, let url = URL(string: raw) else { throw URLError(.cancelled) }
+        return url
+    }
+
+    func mcpApp(thread: String, item: String, attachment: String) async throws -> ThreadMcpApp {
+        guard let core, status == .connected else { throw URLError(.notConnectedToInternet) }
+        return try await core.threadMcpApp(thread: thread, item: item, attachment: attachment)
+    }
+
+    func patches(thread: String, turn: Int64) async throws -> [FfiFilePatch] {
+        guard let core, status == .connected else { throw URLError(.notConnectedToInternet) }
+        return try await core.turnPatch(threadId: thread, turn: turn)
+    }
+
+    func setupFeed(thread: String) throws -> WorktreeSetupFeed {
+        guard let core, status == .connected else { throw URLError(.notConnectedToInternet) }
+        return try core.worktreeSetup(threadId: thread)
     }
 
     func openThread(_ threadId: String) {
@@ -192,10 +350,10 @@ final class CoreStore {
 
     /// Save in the thread settings sheet. `.unavailable` means the catalog dropped the pick and
     /// nothing was sent; `nil` means the send failed (see `lastError`).
-    func saveThreadModel(threadId: String, instanceId: String, model: String) async -> FfiModelSave? {
+    func saveThreadModel(threadId: String, instanceId: String, model: String, changes: [String: String]) async -> FfiModelSave? {
         guard let core else { return nil }
         do {
-            return try await core.saveThreadModel(threadId: threadId, instanceId: instanceId, model: model)
+            return try await core.saveThreadModelOptions(threadId: threadId, instanceId: instanceId, model: model, changes: changes)
         } catch {
             lastError = error.localizedDescription
             return nil
@@ -212,10 +370,18 @@ final class CoreStore {
 
     /// Sends the thread's draft. Like mobile, the draft clears as the message goes out; a failed
     /// send merges the sent text back into that thread's draft, wherever the user is by then.
+    func followUpSteers(_ threadId: String) -> Bool {
+        UserDefaults.standard.bool(forKey: "steer.\(environmentId ?? scope).\(threadId)")
+    }
+
+    func setFollowUpSteers(_ steer: Bool, threadId: String) {
+        UserDefaults.standard.set(steer, forKey: "steer.\(environmentId ?? scope).\(threadId)")
+    }
+
     func sendDraft(threadId: String) async -> Bool {
         let message = drafts[threadId] ?? ""
         drafts[threadId] = nil
-        let sent = await sendMessage(threadId: threadId, text: message, mode: .auto)
+        let sent = await sendMessage(threadId: threadId, text: message, mode: followUpSteers(threadId) ? .steer : .queue)
         if !sent {
             let restored = composerRestoreDraft(current: drafts[threadId] ?? "", sent: message)
             drafts[threadId] = restored.isEmpty ? nil : restored
@@ -359,13 +525,27 @@ final class CoreStore {
             let child = CoreStore(scope: id)
             child.connectWithPairingURL(raw)
             linked[id] = child
-            UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
+            UserDefaults.standard.set(Array(Set(UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []).union(linked.keys)), forKey: "linkedSessions")
         } catch { lastError = error.localizedDescription }
     }
 
+    var disabledOrbitLinks: [String] {
+        UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
+    }
+
+    func enableOrbitLink(_ id: String) {
+        UserDefaults.standard.set(disabledOrbitLinks.filter { $0 != id }, forKey: "disabledOrbitLinks")
+        Task { await discoverLinked() }
+    }
+
     func removeLinked(_ id: String) {
+        if let orbit = linked[id]?.fleetID {
+            let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
+            UserDefaults.standard.set(Array(Set(disabled + [orbit])), forKey: "disabledOrbitLinks")
+        }
         linked.removeValue(forKey: id)?.disconnect()
-        UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
+        let saved = UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []
+        UserDefaults.standard.set(saved.filter { $0 != id }, forKey: "linkedSessions")
     }
 
     private func clearLinkedSessions() {
@@ -397,6 +577,7 @@ final class CoreStore {
     }
 
     func disconnect() {
+        coldLaunchSession = nil
         if scope.isEmpty {
             clearLinkedSessions()
             Task { await PushRegistration.shared.unregister() }
@@ -434,8 +615,9 @@ final class CoreStore {
         if session?.openLink(environmentId: link.environmentId) == .here { return }
         guard scope.isEmpty else { return }
         let child = CoreStore(scope: link.environmentId)
+        child.fleetID = link.environmentId
         linked[link.environmentId] = child
-        UserDefaults.standard.set(Array(linked.keys), forKey: "linkedSessions")
+        UserDefaults.standard.set(Array(Set(UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []).union(linked.keys)), forKey: "linkedSessions")
         child.session?.connectEnvironment(environmentId: link.environmentId)
     }
 
@@ -455,47 +637,67 @@ final class CoreStore {
         if let state, newState.revision <= state.revision { return }
         // The open thread stays: the session resubscribes it on the new connection. Only a switch
         // to another server drops it, with that server's inbox.
-        if newState.connectionId != state?.connectionId {
+        if newState.connectionId != shellConnection {
+            shell?.synchronized = false
+        }
+        let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
+        let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
+        if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
+            coldLaunchSession = nil
             shell = nil
             offlineReader = nil
-        }
-        if newState.identityEpoch != state?.identityEpoch ?? 0 {
+            discoveredPrimary = nil
+            showsWorkspace = false
             openThread = nil
             openThreadId = nil
         }
         state = newState
+        if newState.hasConnected { coldLaunchSession = nil }
         switch newState.phase {
         case let .idle(message):
             if let message { lastError = message }
+            else {
+                shell = nil
+                offlineReader = nil
+                showsWorkspace = false
+                discoveredPrimary = nil
+            }
         case let .live(status):
             if status != .connected { shell?.synchronized = false }
             if status == .connected { lastError = nil }
         default:
             break
         }
-        if newState.offlineReady, offlineReader == nil, let reader = session?.offlineReader() {
+        updateWorkspaceVisibility()
+        if newState.offlineReady, readerConnection != newState.connectionId, let reader = session?.offlineReader() {
             showOffline(reader, connection: newState.connectionId)
         }
     }
 
     /// The cache's saved inbox stands in until the server's arrives.
     private func showOffline(_ reader: OfflineReader, connection: UInt64) {
+        readerConnection = connection
         offlineReader = reader
         Task {
             let saved = await reader.savedShell()
             guard state?.connectionId == connection else { return }
-            if shell == nil { shell = saved }
+            if shell?.synchronized != true, let saved { shell = saved }
+            updateWorkspaceVisibility()
             if let id = openThreadId { restoreThread(id) }
         }
     }
 
     fileprivate func handleShell(_ snapshot: FfiShellSnapshot, connectionId: UInt64) {
-        guard connectionId >= (state?.connectionId ?? 0) else { return }
-        if snapshot.synchronized || shell == nil { shell = snapshot }
+        guard session?.state().connectionId == connectionId else { return }
+        if snapshot.synchronized || shell == nil {
+            shell = snapshot
+            shellConnection = connectionId
+        }
+        updateWorkspaceVisibility()
     }
 
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
-        guard connectionId >= (state?.connectionId ?? 0) else { return }
+        guard session?.state().connectionId == connectionId else { return }
         if openThreadId == snapshot.threadId {
             openThread = snapshot
         }
@@ -505,7 +707,7 @@ final class CoreStore {
     /// from the shell is not deleted (older settled threads are left out), so only this and a
     /// successful delete clear a draft.
     fileprivate func handleThreadDeleted(_ threadId: String, connectionId: UInt64) {
-        guard connectionId >= (state?.connectionId ?? 0) else { return }
+        guard session?.state().connectionId == connectionId else { return }
         drafts[threadId] = nil
     }
 
@@ -566,5 +768,15 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
 
     func onProvidersChanged() {
         Task { @MainActor [weak store] in store?.handleProvidersChanged() }
+    }
+}
+
+private func connectionMessage(_ error: Error) -> String {
+    guard let error = error as? FfiError else { return error.localizedDescription }
+    switch error {
+    case let .Connection(message), let .Auth(message), let .Rpc(message), let .Orbit(message, _),
+         let .InvalidUrl(message), let .InvalidInput(message), let .InvalidTheme(message):
+        return message
+    case .Closed: return "Connection closed."
     }
 }

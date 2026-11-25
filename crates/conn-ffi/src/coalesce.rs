@@ -138,6 +138,7 @@ mod tests {
 
     fn shell_snap(synchronized: bool, project_count: usize) -> FfiShellSnapshot {
         FfiShellSnapshot {
+            older_settled_count: 0,
             projects: (0..project_count)
                 .map(|i| crate::types::FfiProject {
                     id: format!("p-{i}"),
@@ -158,6 +159,7 @@ mod tests {
             title: None,
             branch: None,
             model_label: None,
+            feed_details: Default::default(),
             entries: vec![FfiTimelineEntry::Assistant {
                 id: "a1".to_owned(),
                 markdown: text.to_owned(),

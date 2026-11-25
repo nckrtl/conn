@@ -8,6 +8,7 @@ struct InboxView: View {
     let onSelectThread: (String, String) -> Void
 
     @Environment(\.connTheme) private var theme
+    @State private var environmentFilter: String?
     @State private var settledExpanded = false
     @State private var renameOwner: CoreStore?
     @State private var renamingThread: FfiThreadSummary?
@@ -18,7 +19,7 @@ struct InboxView: View {
             if let shell = store.shell {
                 inboxList(shell: shell)
             } else if store.linked.values.contains(where: { $0.shell != nil }) {
-                inboxList(shell: FfiShellSnapshot(projects: [], threads: [], synchronized: false))
+                inboxList(shell: FfiShellSnapshot(olderSettledCount: 0, projects: [], threads: [], synchronized: false))
             } else {
                 loadingState
             }
@@ -48,27 +49,68 @@ struct InboxView: View {
         }
     }
 
+    private struct ScopedRow: Identifiable {
+        let thread: FfiThreadSummary
+        let owner: CoreStore
+        let project: FfiProject?
+        var id: [String] { [owner.scope, thread.id] }
+    }
+
     @ViewBuilder
     private func inboxList(shell: FfiShellSnapshot) -> some View {
-        let projectsById = Dictionary(uniqueKeysWithValues: shell.projects.map { ($0.id, $0) })
-        let filtered = filteredThreads(in: shell, projectsById: projectsById)
-        let active = filtered
-            .filter { !$0.settled }
-            .sorted { lhs, rhs in
-                if lhs.pinned != rhs.pinned { return lhs.pinned }
-                return (lhs.updatedAt ?? "") > (rhs.updatedAt ?? "")
+        let catalogs = ([("", shell)] + store.linked.compactMap { key, owner in owner.shell.map { (key, $0) } })
+            .filter { environmentFilter == nil || $0.0 == environmentFilter }
+        let projectChoices = catalogs.reduce(into: [String: String]()) { choices, entry in
+            for project in entry.1.projects { choices[project.id] = project.title }
+            for thread in entry.1.threads {
+                if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
             }
-        let settled = filtered
-            .filter { $0.settled }
-            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
-
+        }
+        let owners = ([store] + store.linked.values.sorted { $0.displayName < $1.displayName })
+            .filter { environmentFilter == nil || $0.scope == environmentFilter }
+        let rows = owners.flatMap { owner -> [ScopedRow] in
+            guard let snapshot = owner.shell else { return [] }
+            let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0) })
+            return filteredThreads(in: snapshot, projectsById: projects).map {
+                ScopedRow(thread: $0, owner: owner, project: projects[$0.projectId])
+            }
+        }
+        let active = rows.filter { !$0.thread.settled }.sorted {
+            if $0.thread.pinned != $1.thread.pinned { return $0.thread.pinned }
+            return ($0.thread.updatedAt ?? "", $0.owner.scope, $0.thread.id) > ($1.thread.updatedAt ?? "", $1.owner.scope, $1.thread.id)
+        }
+        let settled = rows.filter { $0.thread.settled }.sorted {
+            ($0.thread.updatedAt ?? "", $0.owner.scope, $0.thread.id) > ($1.thread.updatedAt ?? "", $1.owner.scope, $1.thread.id)
+        }
+        let paged = owners.filter { ($0.shell?.olderSettledCount ?? 0) > 0 }
+        let missing = paged.reduce(0) { $0 + Int($1.shell?.olderSettledCount ?? 0) }
         List {
-            // Top filter pills matching ThreadListFilters.tsx ("All environments ⌄" / "All projects ⌄")
-            ThreadListFiltersBar(
-                environmentLabel: store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local",
-                projects: shell.projects.filter { !isScratchProjectTitle($0.title) },
-                selectedProjectFilter: $selectedProjectFilter
-            )
+            ZStack(alignment: .trailing) {
+                VStack(spacing: 0) {
+                    Text("Threads").font(.system(size: 18, weight: .medium))
+                    Text("\(rows.count) threads · " + (owners.count == 1 ? owners[0].displayName : "\(owners.count) environments")).font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity)
+                Menu {
+                    Picker("Environment", selection: $environmentFilter) {
+                        Text("All environments").tag(nil as String?)
+                        Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
+                        ForEach(store.linked.keys.sorted(), id: \.self) { scope in
+                            Text(store.linked[scope]?.displayName ?? scope).tag(Optional(scope))
+                                .accessibilityIdentifier("inbox.environment." + (store.linked[scope]?.fleetID ?? scope))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    Picker("Project", selection: $selectedProjectFilter) {
+                        Text("All projects").tag(nil as String?)
+                        ForEach(projectChoices.keys.sorted { (projectChoices[$0] ?? $0, $0) < (projectChoices[$1] ?? $1, $1) }, id: \.self) { key in
+                            Text(projectChoices[key] ?? key).tag(Optional(key))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    WorkspaceFilterIcon()
+                }.accessibilityLabel("Filter threads")
+            }.padding(.horizontal, 16).frame(height: 56)
             .listRowInsets(EdgeInsets())
             .listRowSeparator(.hidden)
             .listRowBackground(theme.background)
@@ -85,24 +127,40 @@ struct InboxView: View {
                 .listRowBackground(Color.clear)
             }
 
-            if active.isEmpty && settled.isEmpty && store.linked.isEmpty {
-                emptyState
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(theme.background)
-            } else {
-                ForEach(active, id: \.id) { thread in
-                    threadRow(thread, owner: store, project: projectsById[thread.projectId], settled: false)
+            if store.discovering && store.discoveredPrimary != store.environmentId && store.discoveryError == nil {
+                ProgressView("Finding environments")
+            }
+            if let error = store.discoveryError {
+                Text("Environment discovery: " + error).foregroundStyle(.secondary)
+                Button("Retry discovery") { Task { await store.discoverLinked() } }
+            }
+            ForEach(owners.filter { !$0.scope.isEmpty }, id: \.scope) { child in
+                if child.showsOffline || child.lastError != nil {
+                    VStack(alignment: .leading) {
+                        Text(child.displayName + " · Not connected")
+                        if case let .failed(message, detail, _) = child.state?.phase {
+                            Text([message, detail].compactMap { $0 }.joined(separator: " ")).font(.caption)
+                        } else if let message = child.lastError { Text(message).font(.caption) }
+                        Button("Retry") { child.reconnect() }
+                    }
+                } else if child.shell?.synchronized != true {
+                    Text("Loading " + child.displayName + "…").foregroundStyle(.secondary)
                 }
-
-                if !settled.isEmpty {
+            }
+            if active.isEmpty && settled.isEmpty && missing == 0 {
+                if store.discoveredPrimary == store.environmentId && owners.allSatisfy({ $0.shell?.synchronized == true }) && store.discoveryError == nil { emptyState }
+            } else {
+                ForEach(active) { row in
+                    threadRow(row.thread, owner: row.owner, project: row.project, settled: false)
+                }
+                if !settled.isEmpty || missing > 0 {
                     Button {
                         withAnimation(Kit.Motion.base) {
                             settledExpanded.toggle()
                         }
                     } label: {
                         HStack(spacing: 6) {
-                            Text("Settled (\(settled.count))")
+                            Text("Settled (\(settled.count + missing))")
                                 .font(.system(size: 13, weight: .medium).monospacedDigit())
                                 .foregroundStyle(theme.mutedForeground)
                             Spacer()
@@ -122,22 +180,21 @@ struct InboxView: View {
                     .accessibilityIdentifier("inbox.settledHeader")
 
                     if settledExpanded {
-                        ForEach(settled, id: \.id) { thread in
-                            threadRow(thread, owner: store, project: projectsById[thread.projectId], settled: true)
+                        ForEach(settled) { row in
+                            threadRow(row.thread, owner: row.owner, project: row.project, settled: true)
+                        }
+                        ForEach(paged, id: \.scope) { owner in
+                            Button("Load older threads · " + owner.displayName) {
+                                Task { await owner.loadOlder() }
+                            }.disabled(owner.loadingOlder || owner.status != .connected)
+                            if let message = owner.olderError { Text(message).foregroundStyle(.secondary) }
                         }
                     }
                 }
             }
-            ForEach(store.linked.keys.sorted(), id: \.self) { id in
-                if let owner = store.linked[id], let remote = owner.shell {
-                    let projects = Dictionary(uniqueKeysWithValues: remote.projects.map { ($0.id, $0) })
-                    Section(owner.serverURL.flatMap { URL(string: $0)?.host } ?? id) {
-                        ForEach(filteredThreads(in: remote, projectsById: projects), id: \.id) { thread in
-                            threadRow(thread, owner: owner, project: projects[thread.projectId], settled: thread.settled)
-                        }
-                    }
-                }
-            }
+        }
+        .onChange(of: environmentFilter) { _, _ in
+            if let key = selectedProjectFilter, projectChoices[key] == nil { selectedProjectFilter = nil }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
@@ -153,7 +210,7 @@ struct InboxView: View {
         } label: {
             ThreadListV2RowView(
                 thread: thread,
-                projectTitle: project?.title,
+                projectTitle: thread.orbitProjectSlug ?? project?.title,
                 settled: settled
             )
         }
@@ -283,118 +340,20 @@ struct InboxView: View {
     ) -> [FfiThreadSummary] {
         var result = shell.threads
         if let projectFilter = selectedProjectFilter {
-            result = result.filter { $0.projectId == projectFilter }
+            result = result.filter { $0.sidebarProjectKey == projectFilter }
         }
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return result.filter { !$0.isSubagent } }
         return result.filter { thread in
             if thread.title.lowercased().contains(q) { return true }
             if let branch = thread.branch?.lowercased(), branch.contains(q) { return true }
-            if let proj = projectsById[thread.projectId]?.title.lowercased(), proj.contains(q) { return true }
+            if let proj = (thread.orbitProjectSlug ?? projectsById[thread.projectId]?.title)?.lowercased(), proj.contains(q) { return true }
             return false
         }
     }
 }
 
 // MARK: - ThreadListFiltersBar (1:1 port of ThreadListFilters.tsx)
-
-private struct ThreadListFiltersBar: View {
-    let environmentLabel: String
-    let projects: [FfiProject]
-    @Binding var selectedProjectFilter: String?
-    @Environment(\.connTheme) private var theme
-
-    private var selectedProjectTitle: String? {
-        guard let id = selectedProjectFilter else { return nil }
-        return projects.first(where: { $0.id == id })?.title
-    }
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                Menu {
-                    Button {
-                    } label: {
-                        Label("All environments", systemImage: "checkmark")
-                    }
-                    Button {
-                    } label: {
-                        Text(environmentLabel)
-                    }
-                } label: {
-                    filterPill(label: "All environments", active: false)
-                }
-                .accessibilityLabel("Filter threads by environment")
-
-                Menu {
-                    Button {
-                        selectedProjectFilter = nil
-                    } label: {
-                        if selectedProjectFilter == nil {
-                            Label("All projects", systemImage: "checkmark")
-                        } else {
-                            Text("All projects")
-                        }
-                    }
-                    ForEach(projects, id: \.id) { project in
-                        Button {
-                            selectedProjectFilter = project.id
-                        } label: {
-                            if selectedProjectFilter == project.id {
-                                Label(project.title, systemImage: "checkmark")
-                            } else {
-                                Text(project.title)
-                            }
-                        }
-                    }
-                } label: {
-                    filterPill(label: selectedProjectTitle ?? "All projects", active: selectedProjectFilter != nil)
-                }
-                .accessibilityLabel("Filter threads by project")
-
-                if selectedProjectFilter != nil {
-                    Button {
-                        selectedProjectFilter = nil
-                    } label: {
-                        ConnIcon("xmark.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundStyle(theme.mutedForeground)
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Reset thread filters")
-                }
-            }
-            // `ThreadListFilters`: px-12, pt-2, pb-10, gap 8.
-            .padding(.horizontal, 12)
-            .padding(.top, 2)
-            .padding(.bottom, 10)
-        }
-    }
-
-    /// `Chip.tsx`: interactive glass, radius 14, min height 28, padding 10.5×5.25, a 14pt medium
-    /// muted label (max 180 wide) and an 11pt `chevron.down`; a selected chip is tinted primary.
-    private func filterPill(label: String, active: Bool) -> some View {
-        HStack(spacing: 5.25) {
-            Text(label)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(active ? theme.primaryForeground : theme.mutedForeground)
-                .lineLimit(1)
-                .frame(maxWidth: 180, alignment: .leading)
-                .fixedSize(horizontal: true, vertical: false)
-            ConnIcon("chevron.down")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(active ? theme.primaryForeground : theme.mutedForeground)
-        }
-        .padding(.horizontal, 10.5)
-        .padding(.vertical, 5.25)
-        .frame(minHeight: 28)
-        .glassEffect(
-            active ? .regular.tint(theme.primary).interactive() : .regular.interactive(),
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-        )
-    }
-}
 
 // MARK: - ThreadListV2RowView (1:1 port of ThreadListV2Row)
 
@@ -415,17 +374,7 @@ private struct ThreadListV2RowView: View {
             HStack(alignment: .center, spacing: titleGap) {
                 ProjectFaviconView(title: projectTitle, size: iconSize)
                     .opacity(settled ? 0.6 : 1)
-                    .overlay(alignment: .topTrailing) {
-                        // `StatusBadgeDot`: a 6pt dot in a 2pt screen-colored ring, 4pt past the corner.
-                        if let dotColor = statusDotColor {
-                            Circle()
-                                .fill(dotColor)
-                                .frame(width: 6, height: 6)
-                                .padding(2)
-                                .background(Circle().fill(theme.background))
-                                .offset(x: 4, y: -4)
-                        }
-                    }
+                    .projectStatusDot(statusDotColor)
 
                 Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
                     .font(.system(size: 16, weight: settled ? .regular : .medium))
@@ -603,4 +552,21 @@ private func wholeMinuteRelativeTime(from date: Date) -> String {
     if hours < 24 { return "\(hours)h" }
     let days = hours / 24
     return "\(days)d"
+}
+
+extension View {
+    func projectStatusDot(_ color: Color?) -> some View {
+        overlay(alignment: .topTrailing) {
+            if let color { ProjectStatusDot(color: color) }
+        }
+    }
+}
+
+private struct ProjectStatusDot: View {
+    let color: Color
+    @Environment(\.connTheme) private var theme
+    var body: some View {
+        Circle().fill(color).frame(width: 6, height: 6)
+            .padding(2).background(theme.background, in: Circle()).offset(x: 4, y: -4)
+    }
 }

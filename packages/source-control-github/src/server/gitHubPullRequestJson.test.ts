@@ -620,6 +620,8 @@ describe("pull request detail decoding", () => {
     expect(detail.checks.map((check) => [check.name, check.status])).toEqual([
       ["Prepare PR size config", "pending"],
     ]);
+    expect(detail.checks[0]?.startedAt).toBe("2026-08-11T17:01:04Z");
+    expect(detail.checks[0]?.completedAt).toBeUndefined();
     expect(detail.checksState).toBe("pending");
   });
 

@@ -9,6 +9,8 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 "Released and running in Orbit"); the web and iOS clients were tested against it in a VM
 (see "Client parity, wave 1").
 
+PR checks now include GitHub’s start and completion timestamps when available. Clients can show elapsed time for completed runs.
+
 **Effect outbox (2026-11-23):** effects commit with their command in `effect_outbox` and one
 worker runs them, as T3's `EffectOutbox.ts` and `EffectWorker.ts`. Before, they started after
 the commit returned, so a closed socket could lose a committed turn start (the run stayed

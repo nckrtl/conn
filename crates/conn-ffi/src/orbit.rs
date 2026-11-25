@@ -47,6 +47,15 @@ use crate::core::{ConnCore, CoreListener};
 use crate::theme::FfiAppearance;
 use crate::types::{FfiCredential, FfiError, FfiOrbitErrorReason};
 
+async fn checked_bearer(expected: String, url: String, bearer: String) -> BearerCheckOutcome {
+    if crate::session::fetch_environment_id(&url).await.as_deref() == Some(expected.as_str()) {
+        check_bearer_session(&url, &bearer).await
+    } else {
+        // The connection repeats the descriptor check and reports a mismatch before authentication.
+        BearerCheckOutcome::Unreachable
+    }
+}
+
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const CLONE_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_TASKS_LIMIT: u32 = 100;
@@ -254,7 +263,10 @@ pub struct FfiOrbitEnvironment {
     pub registered_by: Option<String>,
 }
 
-fn map_orbit_environment(target: &OrbitServerTarget, is_local: bool) -> FfiOrbitEnvironment {
+pub(crate) fn map_orbit_environment(
+    target: &OrbitServerTarget,
+    is_local: bool,
+) -> FfiOrbitEnvironment {
     let (instance_id, instance_name, project_id, project_name, project_slug, instance_url) =
         match &target.kind {
             OrbitTargetKind::Node { .. } => (None, None, None, None, None, None),
@@ -1017,6 +1029,7 @@ impl From<AgentState> for FfiAgentState {
 pub enum FfiImplementerMode {
     PerSubtask,
     Shared,
+    Task,
 }
 
 impl From<ImplementerMode> for FfiImplementerMode {
@@ -1024,6 +1037,7 @@ impl From<ImplementerMode> for FfiImplementerMode {
         match value {
             ImplementerMode::PerSubtask => Self::PerSubtask,
             ImplementerMode::Shared => Self::Shared,
+            ImplementerMode::Task => Self::Task,
         }
     }
 }
@@ -1708,7 +1722,7 @@ impl OrbitCore {
         OrbitProfileClient::new(Arc::clone(&self.transport))
     }
 
-    fn fleet_client(&self) -> OrbitFleetClient {
+    pub(crate) fn fleet_client(&self) -> OrbitFleetClient {
         OrbitFleetClient::new(Arc::clone(&self.transport))
     }
 
@@ -1779,9 +1793,13 @@ impl OrbitCore {
         F: FnOnce(String, String) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = BearerCheckOutcome> + Send + 'static,
     {
+        let profile = self.profile_client();
         let client = self.fleet_client();
         let fleet = self
-            .spawn_on_rt(async move { client.list_fleet(None).await.map_err(FfiError::from) })
+            .spawn_on_rt(async move {
+                profile.me().await.map_err(FfiError::from)?;
+                client.list_fleet(None).await.map_err(FfiError::from)
+            })
             .await;
         let target = match fleet {
             Ok(fleet) => select_primary_agent_node(&fleet.nodes, None).cloned(),
@@ -1970,11 +1988,12 @@ impl OrbitCore {
         cached_bearer: Option<String>,
         listener: Arc<dyn CoreListener>,
     ) -> Result<Arc<ConnCore>, FfiError> {
+        let expected = server_id.clone();
         self.connect_environment_with_probe(
             server_id,
             cached_bearer,
             listener,
-            |url, bearer| async move { check_bearer_session(&url, &bearer).await },
+            move |url, bearer| checked_bearer(expected, url, bearer),
         )
         .await
     }
@@ -1988,8 +2007,12 @@ impl OrbitCore {
         saved: Option<FfiOrbitSession>,
         listener: Arc<dyn CoreListener>,
     ) -> FfiOrbitConnectOutcome {
-        self.connect_primary_agent_with_probe(saved, listener, |url, bearer| async move {
-            check_bearer_session(&url, &bearer).await
+        let expected = saved
+            .as_ref()
+            .map(|s| s.server_id.clone())
+            .unwrap_or_default();
+        self.connect_primary_agent_with_probe(saved, listener, move |url, bearer| {
+            checked_bearer(expected, url, bearer)
         })
         .await
     }
@@ -2666,6 +2689,7 @@ pub(crate) mod tests {
     /// - `GET /ws` (Effect RPC: `orchestration.subscribeShell`, `projects.ensureScratch`,
     ///   `orchestration.launchThread`)
     pub(crate) async fn spawn_mock_conn_server(
+        environment: &'static str,
         valid_bearer: &'static str,
         expected_code: &'static str,
         issued_bearer: &'static str,
@@ -2800,30 +2824,36 @@ pub(crate) mod tests {
                         }
                     }
                     let req_str = String::from_utf8_lossy(&raw);
-                    let (status_line, body) = if req_str.starts_with("GET /api/auth/session") {
-                        let expected_header = format!("authorization: bearer {valid_bearer}");
-                        let authed = req_str
-                            .lines()
-                            .any(|line| line.eq_ignore_ascii_case(&expected_header));
-                        (
-                            "HTTP/1.1 200 OK",
-                            json!({ "authenticated": authed }).to_string(),
-                        )
-                    } else if req_str.starts_with("POST /oauth/token") {
-                        if req_str.contains(&format!("subject_token={expected_code}")) {
+                    let (status_line, body) =
+                        if req_str.starts_with("GET /.well-known/t3/environment") {
                             (
                                 "HTTP/1.1 200 OK",
-                                json!({ "access_token": issued_bearer }).to_string(),
+                                json!({"environmentId":environment}).to_string(),
                             )
-                        } else {
+                        } else if req_str.starts_with("GET /api/auth/session") {
+                            let expected_header = format!("authorization: bearer {valid_bearer}");
+                            let authed = req_str
+                                .lines()
+                                .any(|line| line.eq_ignore_ascii_case(&expected_header));
                             (
-                                "HTTP/1.1 401 Unauthorized",
-                                json!({ "error": "invalid_credential" }).to_string(),
+                                "HTTP/1.1 200 OK",
+                                json!({ "authenticated": authed }).to_string(),
                             )
-                        }
-                    } else {
-                        ("HTTP/1.1 404 Not Found", "{}".to_owned())
-                    };
+                        } else if req_str.starts_with("POST /oauth/token") {
+                            if req_str.contains(&format!("subject_token={expected_code}")) {
+                                (
+                                    "HTTP/1.1 200 OK",
+                                    json!({ "access_token": issued_bearer }).to_string(),
+                                )
+                            } else {
+                                (
+                                    "HTTP/1.1 401 Unauthorized",
+                                    json!({ "error": "invalid_credential" }).to_string(),
+                                )
+                            }
+                        } else {
+                            ("HTTP/1.1 404 Not Found", "{}".to_owned())
+                        };
                     let resp = format!(
                         "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -3108,6 +3138,7 @@ pub(crate) mod tests {
             .build()
             .expect("test tokio rt");
         let (server_url, server_task) = rt.block_on(spawn_mock_conn_server(
+            "node-mini",
             "good-bearer",
             "minted-pair-code",
             "fresh-bearer",
@@ -3260,6 +3291,11 @@ pub(crate) mod tests {
             (
                 "no agent role",
                 Box::new(|req| match req.path.as_str() {
+                    "/me" => Ok(GatewayResponse {
+                        status: 200,
+                        body: json!({"data":{"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}})
+                            .to_string(),
+                    }),
                     "/environments" => Ok(GatewayResponse {
                         status: 200,
                         body: json!({ "data": [{
@@ -3280,6 +3316,11 @@ pub(crate) mod tests {
             (
                 "pairing refused",
                 Box::new(|req| match req.path.as_str() {
+                    "/me" => Ok(GatewayResponse {
+                        status: 200,
+                        body: json!({"data":{"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}})
+                            .to_string(),
+                    }),
                     "/environments" => Ok(GatewayResponse {
                         status: 200,
                         body: json!({ "data": [{
@@ -3336,7 +3377,16 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             while let Ok((mut tcp, _)) = listener.accept().await {
                 let mut buf = [0u8; 4096];
-                let _ = tcp.read(&mut buf).await;
+                let n = tcp.read(&mut buf).await.unwrap_or(0);
+                if buf[..n].starts_with(b"GET /.well-known/t3/environment") {
+                    let body = r#"{"environmentId":"node-agent"}"#;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tcp.write_all(reply.as_bytes()).await;
+                    continue;
+                }
                 let _ = tcp
                     .write_all(
                         b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -3418,6 +3468,7 @@ pub(crate) mod tests {
             .build()
             .expect("test tokio rt");
         let (server_url, server_task) = rt.block_on(spawn_mock_conn_server(
+            "node-agent",
             "good-bearer",
             "minted-pair-code",
             "fresh-bearer",
@@ -3435,6 +3486,11 @@ pub(crate) mod tests {
                 return Err(GatewayError::Network("connection refused".to_owned()));
             }
             match req.path.as_str() {
+                "/me" => Ok(GatewayResponse {
+                    status: 200,
+                    body: json!({"data":{"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}})
+                        .to_string(),
+                }),
                 "/environments" => Ok(GatewayResponse {
                     status: 200,
                     body: json!({ "data": [{
@@ -3566,6 +3622,7 @@ pub(crate) mod tests {
             .build()
             .expect("test tokio rt");
         let (server_url, server_task) = rt.block_on(spawn_mock_conn_server(
+            "env-clone-900",
             "unused",
             "res-inline-code",
             "clone-bearer",
@@ -3672,6 +3729,7 @@ pub(crate) mod tests {
             .build()
             .expect("test tokio rt");
         let (server_url, server_task) = rt.block_on(spawn_mock_conn_server(
+            "env-existing-901",
             "existing-bearer",
             "unused-code",
             "unused-fresh",

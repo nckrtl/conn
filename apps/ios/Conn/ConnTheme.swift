@@ -15,7 +15,9 @@ struct ConnTheme: Sendable, Equatable {
         fatalError("Built-in Conn theme tokens unavailable")
     }
 
-    var background: Color { Color(ffi: tokens.background) }
+    var background: Color { Color(ffi: tokens.shellPanel) }
+    var footerSurface: Color { card.opacity(0.78) }
+    var settingsGroup: Color { background.mix(with: foreground, by: tokens.appearance == .light ? 0.05 : 0.056) }
     var foreground: Color { Color(ffi: tokens.foreground) }
     var card: Color { Color(ffi: tokens.card) }
     var cardForeground: Color { Color(ffi: tokens.cardForeground) }
@@ -75,5 +77,22 @@ struct ConnThemeProvider<Content: View>: View {
         content
             .environment(\.connTheme, resolved)
             .tint(resolved.primary)
+    }
+}
+
+extension View {
+    func phoneFooterSurface<S: InsettableShape>(_ shape: S) -> some View {
+        modifier(PhoneFooterSurface(shape: shape))
+    }
+}
+
+private struct PhoneFooterSurface<S: InsettableShape>: ViewModifier {
+    let shape: S
+    @Environment(\.connTheme) private var theme
+    func body(content: Content) -> some View {
+        content.background {
+            shape.fill(theme.footerSurface)
+                .shadow(color: .black.opacity(0.03), radius: 4, y: 1)
+        }.overlay { shape.strokeBorder(theme.foreground.opacity(0.14), lineWidth: 0.65).allowsHitTesting(false) }
     }
 }

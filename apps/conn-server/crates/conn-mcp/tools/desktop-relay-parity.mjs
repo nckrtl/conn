@@ -83,6 +83,122 @@ const cases = [
   { tool: "conn_preview_list", args: {} },
 ];
 
+// Known differences: Conn deliberately diverges from T3 here (PR #380). The stand-in desktop
+// registers a tab and does not subscribe to `panels.requests`, as the Electron app does. A
+// desktop that already has a registered tab is a default target for the Conn Server, and it
+// never defaults a CDP endpoint or a recording to one. Each entry is keyed by case index and
+// excuses only what it names, and it pins Conn's side so a further change still fails:
+//   ignore    paths dropped from both sides before the replies are compared (`*` is any array
+//             element); the rest of the reply must still match T3.
+//   rustReply the same case on Conn's side must answer exactly this text, as an error (T3's
+//             reply is not compared).
+//   rust      checks the fields Conn adds or changes, on Conn's reply before `ignore` drops them.
+//   requests  the desktop requests the case made on each side, when they differ; both are
+//             compared in full, so a case without `requests` must match T3 request for request.
+const REQUEST_BASE = {
+  agentSessionId: "html-parity\u0000full-access\u0000<thread>",
+  requestId: "<requestId>",
+  tabId: "<desktop-tab>",
+  threadId: "<thread>",
+};
+const request = (operation, input, timeoutMs, tabIdExplicit) => ({
+  ...REQUEST_BASE,
+  input,
+  operation,
+  tabIdExplicit,
+  timeoutMs,
+});
+// The status read that lists a desktop tab in `preview_status.tabs`.
+const tabListRead = request("status", {}, 500, true);
+const structured = (reply) => reply?.result?.structuredContent;
+const desktopTab = (tab) =>
+  tab?.tabId === "<desktop-tab>" && tab.host === "Parity Mac" && tab.hostedHere === false;
+const known = new Map([
+  [
+    0,
+    {
+      why: "without a tabId a status call goes to the registered desktop tab and lists the desktop tabs",
+      ignore: ["control", "profiles", "tabId", "title", "url", "visible"],
+      rust: (s) =>
+        s?.tabId === "<desktop-tab>" && s.url === URL_ && s.tabs?.length === 1 && desktopTab(s.tabs[0]),
+      requests: {
+        t3: [tabListRead],
+        rust: [request("status", {}, 15000, false), tabListRead],
+      },
+    },
+  ],
+  [
+    1,
+    {
+      why: "preview.list adds host and hostedHere to a desktop tab",
+      ignore: ["sessions.*.host", "sessions.*.hostedHere"],
+      rust: (s) => s?.sessions?.length === 1 && s.sessions[0].host === "Parity Mac" && s.sessions[0].hostedHere === false,
+    },
+  ],
+  [
+    17,
+    {
+      why: "a CDP endpoint never defaults to a desktop tab, so no tab serves it",
+      rustReply: "No active preview tab was found for cdpEndpoint. Call preview_open first.",
+      requests: {
+        t3: [request("cdpEndpoint", {}, 15000, false), tabListRead],
+        rust: [],
+      },
+    },
+  ],
+  [
+    18,
+    {
+      why: "a recording without a tabId stays on the server browser, which has no tab here",
+      rustReply: "No active preview tab was found for recordingStart. Call preview_open first.",
+    },
+  ],
+  [
+    20,
+    {
+      why: "a status call lists the desktop tabs first",
+      ignore: ["tabs"],
+      rust: (s) => s?.tabs?.length === 1 && desktopTab(s.tabs[0]),
+      requests: {
+        t3: [request("status", {}, 15000, false)],
+        rust: [request("status", {}, 15000, false), tabListRead],
+      },
+    },
+  ],
+]);
+
+/** JSON with sorted keys, so two values compare by content. */
+function canon(value) {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+}
+
+/** Drops `path` (dot-separated, `*` for each array element) from every JSON text and structure of a reply. */
+function without(reply, paths) {
+  const drop = (value, steps) => {
+    if (!value || typeof value !== "object") return;
+    const [head, ...rest] = steps;
+    if (head === "*") return Array.isArray(value) && value.forEach((item) => drop(item, rest));
+    if (rest.length === 0) delete value[head];
+    else drop(value[head], rest);
+  };
+  const copy = JSON.parse(JSON.stringify(reply));
+  for (const path of paths) {
+    drop(structured(copy), path.split("."));
+    for (const part of copy?.result?.content ?? []) {
+      try {
+        const value = JSON.parse(part.text);
+        drop(value, path.split("."));
+        part.text = JSON.stringify(value);
+      } catch {}
+    }
+  }
+  return copy;
+}
+
 /** Puts the real desktop tab id where a case says `$desktop`. */
 function bind(value, tab) {
   return JSON.parse(JSON.stringify(value ?? null).replaceAll('"$desktop"', JSON.stringify(tab)));
@@ -215,6 +331,7 @@ async function expected(root) {
         );
         const mcp = yield* McpServer.McpServer;
         const replies = [];
+        const requestEnds = [];
         for (const c of cases) {
           reply = c.reply ?? null;
           const result = yield* mcp.callTool({ name: c.tool, arguments: bind(c.args, tab) }).pipe(
@@ -243,8 +360,9 @@ async function expected(root) {
             }),
           );
           replies.push(result);
+          requestEnds.push(requests.length);
         }
-        return { replies, requests, thread, tab };
+        return { replies, requests, requestEnds, thread, tab };
       }).pipe(Effect.provide(registrations)),
     ),
   );
@@ -300,7 +418,9 @@ function normalize(run) {
     }
     return v;
   };
-  return transform({ replies: run.replies, requests: run.requests }, "");
+  // The requests, grouped by the case that made them.
+  const requests = run.requestEnds.map((end, i) => run.requests.slice(i === 0 ? 0 : run.requestEnds[i - 1], end));
+  return transform({ replies: run.replies, requests }, "");
 }
 
 export async function desktopRelayParity(binary) {
@@ -312,22 +432,44 @@ export async function desktopRelayParity(binary) {
     let failed = 0;
     cases.forEach((c, i) => {
       const [e, a] = [want.replies[i], got.replies[i]];
-      const equal = JSON.stringify(e) === JSON.stringify(a);
-      console.log(`${equal ? "ok  " : "DIFF"} desktop relay ${c.tool} ${i + 1}`);
+      const excuse = known.get(i);
+      let equal;
+      if (excuse?.rustReply !== undefined) {
+        equal =
+          a?.result?.isError === true &&
+          a.result.content?.length === 1 &&
+          a.result.content[0].text === excuse.rustReply;
+      } else if (excuse) {
+        equal =
+          excuse.rust(structured(a)) &&
+          canon(without(e, excuse.ignore)) === canon(without(a, excuse.ignore));
+      } else {
+        equal = canon(e) === canon(a);
+      }
+      console.log(
+        `${equal ? "ok  " : "DIFF"} desktop relay ${c.tool} ${i + 1}${equal && excuse ? ` (known difference: ${excuse.why})` : ""}`,
+      );
       if (!equal) {
         failed++;
         console.error(JSON.stringify({ expected: e, got: a }).slice(0, 6000));
       }
     });
-    const requestsEqual = JSON.stringify(want.requests) === JSON.stringify(got.requests);
-    console.log(`${requestsEqual ? "ok  " : "DIFF"} desktop relay requests (${want.requests.length})`);
-    if (!requestsEqual) {
-      failed++;
-      const count = Math.max(want.requests.length, got.requests.length);
-      for (let i = 0; i < count; i++)
-        if (JSON.stringify(want.requests[i]) !== JSON.stringify(got.requests[i]))
-          console.error(`request ${i + 1}`, JSON.stringify({ expected: want.requests[i], got: got.requests[i] }));
-    }
+    // The desktop's requests, case by case: a known difference pins both sides in full.
+    let total = 0;
+    cases.forEach((c, i) => {
+      const [e, a] = [want.requests[i], got.requests[i]];
+      const excuse = known.get(i)?.requests;
+      const equal = excuse ? canon(e) === canon(excuse.t3) && canon(a) === canon(excuse.rust) : canon(e) === canon(a);
+      total += e.length;
+      if (excuse && equal)
+        console.log(`ok   desktop relay requests ${c.tool} ${i + 1} (known difference: ${known.get(i).why})`);
+      if (!equal) {
+        failed++;
+        console.log(`DIFF desktop relay requests ${c.tool} ${i + 1}`);
+        console.error(`requests of case ${i + 1}`, JSON.stringify({ expected: e, got: a }));
+      }
+    });
+    console.log(`${failed === 0 ? "ok  " : "    "} desktop relay requests (${total} from T3)`);
     if (failed) throw Error(`${failed} desktop relay parity cases differ`);
   } finally {
     FS.rmSync(root, { recursive: true, force: true });

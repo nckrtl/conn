@@ -6751,6 +6751,42 @@ async fn a_desktop_with_a_registered_tab_serves_the_call_without_a_panel_request
     assert!(electron.try_recv().is_err(), "no panel request was needed");
 }
 
+/// The Electron desktop (no tab hosting) runs T3's `open` for `preview_open`; only a desktop that
+/// hosts agent tabs (GPUI, whose runner has no `open`) gets it as a `navigate`.
+#[tokio::test]
+async fn preview_open_sends_t3s_open_to_a_desktop_that_does_not_host_tabs() {
+    let rig = desktop_rig("desktop-electron-open").await;
+    let mut agent = rig.agent().await;
+    let _electron = rig.broker.subscribe().unwrap();
+    assert!(!rig.broker.has_tab_host());
+    rig.host("s1", "desk-1");
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_open","arguments":{"tabId":"desk-1","url":"http://localhost:4000","open":false}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    {
+        let log = rig.log.lock().unwrap();
+        assert_eq!(log[0].0, "desk-1");
+        assert_eq!(log[0].1, "open", "{log:?}");
+        assert_eq!(log[0].3["url"], "http://localhost:4000");
+    }
+    let _gpui = rig.broker.subscribe_tab_host().unwrap();
+    let before = rig.log.lock().unwrap().len();
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_open","arguments":{"tabId":"desk-1","url":"http://localhost:4001"}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let log = rig.log.lock().unwrap();
+    assert_eq!(log[before].1, "navigate", "{log:?}");
+    assert_eq!(log[before].3, json!({"url":"http://localhost:4001"}));
+}
+
 /// A desktop that hosts tabs but has none for the thread yet is asked to open its Browser panel;
 /// the call goes to the tab it registers.
 #[tokio::test]

@@ -149,10 +149,17 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
         }
     };
     let (desktop_input, timeout_ms) = desktop_input(name, args);
-    // A desktop tab is never "opened" by the agent (T3's runner has no `open`): opening is
-    // showing the thread's desktop tab, navigated if the agent gave an address.
+    // The GPUI host's runner has no `open`: with a desktop that hosts agent tabs, opening is
+    // showing the thread's desktop tab, navigated if the agent gave an address. Any other desktop
+    // (the Electron app) runs T3's `open` as T3 sends it.
     let hosted = preview.desktop_tabs(environment, &caller.thread_id);
+    let tab_host = cx
+        .config()
+        .panels
+        .as_ref()
+        .is_some_and(|p| p.has_tab_host());
     let desktop_open = name == "preview_open"
+        && tab_host
         && !hosted.is_empty()
         && tab.is_none_or(|tab| hosted.iter().any(|h| h.tab == tab));
     let (operation, desktop_input, timeout_ms) = if desktop_open {

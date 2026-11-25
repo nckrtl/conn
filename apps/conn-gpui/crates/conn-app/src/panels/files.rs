@@ -45,6 +45,7 @@ const PREVIEW_TOP_PAD_PX: f32 = 12.0;
 /// Width of the fade at a breadcrumb trail edge that has more crumbs beyond it.
 const CRUMB_FADE_PX: f32 = 14.0;
 const TREE_ROW_HEIGHT_PX: f32 = 28.0;
+const TREE_LABEL_GAP_PX: f32 = 5.0;
 /// Corner radius of the Files tree hover and selection highlight.
 const TREE_ROW_RADIUS_PX: f32 = 5.0;
 /// Standard panel UI text size (`text-ui`: 13px / 20px).
@@ -1273,7 +1274,7 @@ impl FilesPanel {
                     .border_1()
                     .border_color(control_border)
                     .px(px(9.0))
-                    .gap(px(6.0))
+                    .gap(px(TREE_LABEL_GAP_PX))
                     .items_center()
                     // `FileSearchField`: Escape clears the search and leaves the field.
                     .on_key_down(
@@ -1291,6 +1292,7 @@ impl FilesPanel {
                         div().flex_1().min_w_0().child(
                             Input::new(&self.search_input)
                                 .appearance(false)
+                                .pl_0()
                                 .text_size(px(UI_TEXT_PX)),
                         ),
                     ),
@@ -1589,7 +1591,7 @@ impl FilesPanel {
                 .flex_shrink_0()
                 .pl(px(indent_px))
                 .pr(px(8.0))
-                .gap(px(5.0))
+                .gap(px(TREE_LABEL_GAP_PX))
                 .items_center()
                 .rounded(px(TREE_ROW_RADIUS_PX))
                 .cursor_pointer()

@@ -567,7 +567,7 @@ struct ThreadView: View {
                             }
                             LiveWorkRow(label: liveWork.label, glyph: liveWork.icon)
                         }
-                        .padding(.top, Kit.Space.xs)
+                        // The gap under the divider is the fold's own paragraph gap, as above it.
                     }
                 } else {
                     HStack(spacing: Kit.Space.m) {

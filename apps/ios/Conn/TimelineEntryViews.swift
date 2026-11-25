@@ -147,7 +147,6 @@ struct LiveWorkRow: View {
                 .foregroundStyle(theme.mutedForeground)
             ShimmerText(label, size: size)
         }
-        .frame(minHeight: 24)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityIdentifier("thread.liveWork")

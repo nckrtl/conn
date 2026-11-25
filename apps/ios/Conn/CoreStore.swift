@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import SwiftUI
 
 /// The launch path through Orbit, shown while no connection is up.
@@ -698,8 +699,62 @@ final class CoreStore {
 
     // MARK: - Session events
 
+    private static let sessionLog = Logger(subsystem: "com.nckrtl.conn.ios", category: "session")
+
+    /// One `.info` line per published state, so a cold start can be read back from the device log.
+    /// It names the host only, and strips URLs in error text down to theirs.
+    private func logState(_ s: FfiSessionState) {
+        func text(_ value: String) -> String {
+            let line = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            let hostOnly = line.replacingOccurrences(
+                of: "(https?://[^/\\s\"'<>)]+)[^\\s\"'<>)]*", with: "$1/…", options: .regularExpression
+            )
+            return String(hostOnly.prefix(300))
+        }
+        var parts = ["scope=\(scope.isEmpty ? "main" : scope)", "rev=\(s.revision)", "conn=\(s.connectionId)"]
+        var errors: [String] = []
+        switch s.phase {
+        case let .idle(message):
+            parts.append("phase=idle")
+            if let message { errors.append(message) }
+        case let .connecting(target):
+            let name = switch target {
+            case .primaryAgent: "primaryAgent"
+            case .environment: "environment"
+            case .manual: "manual"
+            }
+            parts.append("phase=connecting target=\(name)")
+        case let .live(status):
+            switch status {
+            case .connecting: parts.append("phase=live status=connecting")
+            case .connected: parts.append("phase=live status=connected")
+            case let .reconnecting(attempt): parts.append("phase=live status=reconnecting(\(attempt))")
+            case let .failed(message):
+                parts.append("phase=live status=failed")
+                errors.append(message)
+            }
+        case let .failed(message, detail, _):
+            parts.append("phase=failed")
+            errors.append(message)
+            if let detail { errors.append(detail) }
+        case .suspended:
+            parts.append("phase=suspended")
+        }
+        parts.append("failed_tries=\(s.failedTries)")
+        parts.append("start_retries=\(s.startRetries)")
+        parts.append("grace=\(s.inGrace ? "on" : "off")")
+        parts.append("shows_offline=\(s.showsOffline)")
+        if let host = s.serverUrl.flatMap({ URL(string: $0)?.host }) { parts.append("host=\(host)") }
+        for (index, error) in errors.enumerated() {
+            parts.append("\(index == 0 ? "error" : "detail")=\"\(text(error))\"")
+        }
+        let line = parts.joined(separator: " ")
+        Self.sessionLog.info("\(line, privacy: .public)")
+    }
+
     func handleState(_ newState: FfiSessionState) {
         if let state, newState.revision <= state.revision { return }
+        logState(newState)
         // The open thread stays: the session resubscribes it on the new connection. Only a switch
         // to another server drops it, with that server's inbox.
         let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId

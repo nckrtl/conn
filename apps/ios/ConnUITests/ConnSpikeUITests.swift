@@ -2,6 +2,52 @@ import UIKit
 import XCTest
 
 @MainActor
+extension XCUIApplication {
+    func visiblePickerElement(where matches: (any XCUIElementSnapshot) -> Bool) -> (any XCUIElementSnapshot)? {
+        guard let root = try? snapshot() else { return nil }
+        func find(_ node: any XCUIElementSnapshot) -> (any XCUIElementSnapshot)? {
+            if matches(node), !node.frame.isEmpty, root.frame.contains(CGPoint(x: node.frame.midX, y: node.frame.midY)) {
+                return node
+            }
+            for child in node.children {
+                if let found = find(child) { return found }
+            }
+            return nil
+        }
+        return find(root)
+    }
+
+    func tapPickerElement(_ element: any XCUIElementSnapshot) {
+        coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: element.frame.midX - frame.minX, dy: element.frame.midY - frame.minY)).tap()
+    }
+
+    func selectSeededPhoto() throws {
+        var thumbnail: (any XCUIElementSnapshot)?
+        let grid = NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                thumbnail = self.visiblePickerElement {
+                    ($0.elementType == .image && $0.label.hasPrefix("Photo,")) || $0.elementType == .cell
+                }
+                return thumbnail != nil
+            }
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: grid, object: nil)], timeout: 15), .completed)
+        tapPickerElement(try XCTUnwrap(thumbnail))
+
+        var confirm: (any XCUIElementSnapshot)?
+        let selected = NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                confirm = self.visiblePickerElement { $0.elementType == .button && ["Done", "Add"].contains($0.label) && $0.isEnabled }
+                return confirm != nil || self.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch.exists
+            }
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: selected, object: nil)], timeout: 15), .completed)
+        if let confirm { tapPickerElement(confirm) }
+    }
+}
+
+@MainActor
 final class ConnSpikeUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -1638,18 +1684,8 @@ final class ConnSpikeUITests: XCTestCase {
         field.typeText(privateText)
         tap(app.buttons["Add attachment"].firstMatch)
         tap(app.buttons["Photos"].firstMatch)
-        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
-        let cell = app.collectionViews.cells.firstMatch
-        let gridReady = NSPredicate { _, _ in photo.isHittable || cell.isHittable }
-        expectation(for: gridReady, evaluatedWith: nil)
-        waitForExpectations(timeout: 15)
-        tap(photo.isHittable ? photo : cell)
-        let confirm = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", ["Done", "Add"])).firstMatch
+        try app.selectSeededPhoto()
         let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch
-        let selectionReady = NSPredicate { _, _ in confirm.isHittable || chip.exists }
-        expectation(for: selectionReady, evaluatedWith: nil)
-        waitForExpectations(timeout: 15)
-        if confirm.isHittable { tap(confirm) }
         XCTAssertTrue(chip.waitForExistence(timeout: 15))
         let filename = String(chip.label.dropFirst("Remove ".count))
         XCTAssertFalse(filename.isEmpty)

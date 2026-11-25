@@ -73,7 +73,7 @@ struct InboxView: View {
                         .accessibilityIdentifier("inbox.threadCount")
                 }.frame(maxWidth: .infinity)
                 Menu {
-                    Picker("Environment", selection: $environmentFilter) {
+                    Picker("Environments", selection: $environmentFilter) {
                         Text("All environments").tag(nil as String?)
                         Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
                         ForEach(store.linked.keys.sorted(), id: \.self) { scope in
@@ -82,7 +82,7 @@ struct InboxView: View {
                         }
                     }
                     .pickerStyle(.inline)
-                    Picker("Project", selection: $selectedProjectFilter) {
+                    Picker("Projects", selection: $selectedProjectFilter) {
                         Text("All projects").tag(nil as String?)
                         ForEach(projectChoices.keys.sorted { (projectChoices[$0] ?? $0, $0) < (projectChoices[$1] ?? $1, $1) }, id: \.self) { key in
                             Text(projectChoices[key] ?? key).tag(Optional(key))

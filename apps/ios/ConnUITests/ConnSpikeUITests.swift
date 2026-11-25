@@ -1464,6 +1464,8 @@ final class ConnSpikeUITests: XCTestCase {
         field.typeText(pairing)
         app.buttons["pairing.connectButton"].tap()
         XCTAssertTrue(app.buttons["inbox.thread.witness-running"].waitForExistence(timeout: 15))
+        // app.open relaunches the app; without this it would repeat --reset-session and wipe the pairing.
+        app.launchArguments = []
         app.open(try XCTUnwrap(URL(string: "conn://thread/linked/old-linked")))
         let back = app.buttons["Back"]
         let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Saved linked message")).firstMatch
@@ -1644,7 +1646,8 @@ final class ConnSpikeUITests: XCTestCase {
         let active = ["p", "q", "a", "b", "c", "d"]
         expectRows(active, ["s", "t"], phase: "Both inventories committed")
         tap(app.buttons["Filter threads"])
-        tap(app.buttons["inbox.environment.linked"])
+        // iOS menus drop the Picker rows' accessibility identifiers. The fixture's two environments both show their host, so pick the second (the linked one).
+        tap(app.buttons.matching(NSPredicate(format: "label == '127.0.0.1'")).element(boundBy: 1))
         XCTAssertTrue(app.staticTexts["Shadow b"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["inbox.thread.p"].exists)
         tap(app.buttons["Filter threads"])

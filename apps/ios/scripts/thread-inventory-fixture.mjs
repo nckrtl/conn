@@ -206,17 +206,24 @@ function simulatorSupportDirectory() {
   return dir + "/Library/Application Support";
 }
 
-async function waitForSavedInventories() {
+// The app keeps each paired environment's cache in thread-cache[-<scope>]/pairing-<id>/.
+function cacheDirectories() {
   const dir = simulatorSupportDirectory();
+  return readdirSync(dir).filter((name) => name === "thread-cache" || name.startsWith("thread-cache-"))
+    .flatMap((name) => readdirSync(dir + "/" + name).filter((child) => child.startsWith("pairing-"))
+      .map((child) => dir + "/" + name + "/" + child));
+}
+
+async function waitForSavedInventories() {
   const expected = new Set(["old-primary", "old-linked"]);
   const deadline = Date.now() + 10000;
   while (expected.size) {
-    for (const name of readdirSync(dir).filter((name) => name === "thread-cache" || name.startsWith("thread-cache-"))) {
+    for (const cache of cacheDirectories()) {
       try {
-        const saved = JSON.parse(readFileSync(dir + "/" + name + "/shell.json", "utf8"));
+        const saved = JSON.parse(readFileSync(cache + "/shell.json", "utf8"));
         if (!saved.threads.some((t) => t.id === "old-" + saved.environmentId)) continue;
         if (sleepingTest && saved.environmentId === "linked") {
-          const db = new Database(dir + "/" + name + "/messages.sqlite3", { readonly: true });
+          const db = new Database(cache + "/messages.sqlite3", { readonly: true });
           try {
             if (!db.query("SELECT 1 FROM messages WHERE environment = 'linked' AND thread = 'old-linked' LIMIT 1").get()) continue;
           } finally { db.close(); }
@@ -295,7 +302,8 @@ const control = Bun.serve({
       case "linked-page": await linked.finishPage(); break;
       case "backfill": {
         primary.backfill("d");
-        const db = new Database(simulatorSupportDirectory() + "/thread-cache/messages.sqlite3", { readonly: true });
+        const cache = cacheDirectories().find((dir) => JSON.parse(readFileSync(dir + "/shell.json", "utf8")).environmentId === "primary");
+        const db = new Database(cache + "/messages.sqlite3", { readonly: true });
         try {
           const deadline = Date.now() + 10000;
           const query = db.query("SELECT count(*) AS n FROM messages WHERE environment = 'primary' AND thread = 'd'");

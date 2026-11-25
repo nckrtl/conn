@@ -34,6 +34,7 @@ use conn_contract::{
     OrchestrationV2TurnItemSecretRequest as SecretRequestItem,
     OrchestrationV2TurnItemSubagent as SubagentItem,
     OrchestrationV2TurnItemSystemNotice as SystemNoticeItem,
+    OrchestrationV2TurnItemSystemNoticeLevel as SystemNoticeLevel,
     OrchestrationV2TurnItemThreadCreated as ThreadCreatedItem,
     OrchestrationV2TurnItemTodoList as TodoListItem,
     OrchestrationV2TurnItemUserInputRequest as UserInputRequestItem,
@@ -62,6 +63,27 @@ static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 
 fn next_revision() -> u64 {
     NEXT_REVISION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// How loudly a [`TimelineEntry::Notice`] speaks. Decided from the contract's own severity, never
+/// from the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoticeLevel {
+    /// A plain information divider (compaction, handoff, fork).
+    Info,
+    /// A runtime or provider warning, such as an MCP server that failed to start. Web's
+    /// `runtime.warning` row.
+    Warning,
+    /// A failure of the turn.
+    Error,
+}
+
+impl NoticeLevel {
+    /// True for [`NoticeLevel::Error`].
+    #[must_use]
+    pub const fn is_error(self) -> bool {
+        matches!(self, Self::Error)
+    }
 }
 
 /// Status of a tool call or work item row.
@@ -221,11 +243,11 @@ pub enum TimelineEntry {
         started_at: Option<String>,
         completed_at: Option<String>,
     },
-    /// An error or notice row.
+    /// An error, warning or notice row.
     Notice {
         id: String,
         text: String,
-        is_error: bool,
+        level: NoticeLevel,
     },
 }
 
@@ -2346,15 +2368,24 @@ fn map_error(item: ErrorItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.failure.message,
-        is_error: true,
+        level: NoticeLevel::Error,
     })
+}
+
+/// Web's `session-logic` marks every system notice that is not explicitly `info` as a
+/// `runtime.warning`, so a notice with no level (Codex's "MCP server … failed to start") is one too.
+fn system_notice_level(level: Option<SystemNoticeLevel>) -> NoticeLevel {
+    match level {
+        Some(SystemNoticeLevel::Info) => NoticeLevel::Info,
+        Some(SystemNoticeLevel::Warning | SystemNoticeLevel::Error) | None => NoticeLevel::Warning,
+    }
 }
 
 fn map_system_notice(item: SystemNoticeItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.message,
-        is_error: false,
+        level: system_notice_level(item.level),
     })
 }
 
@@ -2362,7 +2393,7 @@ fn map_notification(item: NotificationItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.summary,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2370,7 +2401,7 @@ fn map_run_interrupt_request(item: RunInterruptRequestItem) -> Option<TimelineEn
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.message,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2378,7 +2409,7 @@ fn map_run_interrupt_result(item: RunInterruptResultItem) -> Option<TimelineEntr
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.message,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2389,7 +2420,7 @@ fn map_compaction(item: CompactionItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2417,7 +2448,11 @@ fn map_handoff(item: HandoffItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text,
-        is_error: item.status == TurnItemStatus::Failed,
+        level: if item.status == TurnItemStatus::Failed {
+            NoticeLevel::Error
+        } else {
+            NoticeLevel::Info
+        },
     })
 }
 
@@ -2426,7 +2461,7 @@ fn map_fork(item: ForkItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 

@@ -314,7 +314,7 @@ fn kitchen_sink_thread() -> ThreadState {
         TimelineEntry::Notice {
             id: "dup-id".to_owned(),
             text: "Secondary notice reusing an ID".to_owned(),
-            is_error: false,
+            level: conn_state::NoticeLevel::Info,
         },
         TimelineEntry::ProposedPlan {
             id: "plan-1".to_owned(),

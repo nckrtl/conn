@@ -2219,6 +2219,35 @@ fn run_event(
 }
 
 #[test]
+fn system_notice_level_comes_from_the_contract_not_the_text() {
+    use conn_state::NoticeLevel;
+    // Web marks every system notice that is not explicitly `info` as a runtime warning, so the
+    // Codex "MCP server … failed to start" notice, which carries no level, is a warning too.
+    let cases = [
+        (None, NoticeLevel::Warning),
+        (Some("info"), NoticeLevel::Info),
+        (Some("warning"), NoticeLevel::Warning),
+        (Some("error"), NoticeLevel::Warning),
+    ];
+    for (index, (level, expected)) in cases.into_iter().enumerate() {
+        let mut item = json!({
+            "id": format!("notice-{index}"), "type": "system_notice", "status": "completed",
+            "message": "MCP client for `solo` failed to start: handshake failed",
+        });
+        if let Some(level) = level {
+            item["level"] = json!(level);
+        }
+        let mut state = ThreadState::new("thread-cards");
+        assert!(state.apply(turn_item_event(1, item)), "notice added");
+        assert!(
+            matches!(&state.entries[..], [TimelineEntry::Notice { level, .. }] if *level == expected),
+            "level {level:?} maps to {expected:?}, got {:?}",
+            state.entries
+        );
+    }
+}
+
+#[test]
 fn handoff_notice_shows_endpoints_without_the_provider_transcript() {
     let mut item = json!({
         "id": "handoff-row", "type": "handoff", "status": "completed",
@@ -2234,7 +2263,7 @@ fn handoff_notice_shows_endpoints_without_the_provider_transcript() {
         "handoff added"
     );
     assert!(
-        matches!(&state.entries[..], [TimelineEntry::Notice { text, is_error: false, .. }]
+        matches!(&state.entries[..], [TimelineEntry::Notice { text, level: conn_state::NoticeLevel::Info, .. }]
         if text == "Context handoff · sonnet → gpt-5"),
         "handoff shows model endpoints"
     );
@@ -2247,7 +2276,7 @@ fn handoff_notice_shows_endpoints_without_the_provider_transcript() {
         "failed handoff updated"
     );
     assert!(
-        matches!(&state.entries[..], [TimelineEntry::Notice { text, is_error: true, .. }]
+        matches!(&state.entries[..], [TimelineEntry::Notice { text, level: conn_state::NoticeLevel::Error, .. }]
         if text == "Context handoff · claude → codex"),
         "older handoffs fall back to provider endpoints"
     );

@@ -5,7 +5,9 @@
 
 use std::borrow::Cow;
 
-use conn_state::conn_tools::{ConnToolIcon, conn_tool_presentation};
+use conn_state::conn_tools::{
+    ConnToolIcon, conn_tool_command_presentation, conn_tool_presentation,
+};
 use gpui_kit::{Hsla, Styled as _, Svg, px, svg};
 
 // Timeline icons (mapped from Conn's Lucide names via superheroicons manifest.json).
@@ -79,6 +81,10 @@ fn conn_icon_path(icon: ConnToolIcon) -> &'static str {
 /// loses its `sh -c "…"` wrapper (`commandDisplayText`).
 pub(super) fn tool_display_title<'a>(kind: &str, title: &'a str) -> Cow<'a, str> {
     if kind == "command" {
+        // Some providers report an MCP tool call as a command whose whole text is the tool name.
+        if let Some(found) = conn_tool_command_presentation(title) {
+            return found.display_name;
+        }
         return Cow::Owned(super::command_label::command_row_label(title));
     }
     if is_fixed_kind(kind) {
@@ -113,7 +119,8 @@ fn is_fixed_kind(kind: &str) -> bool {
 /// contract `kind` and human-readable `title` (matching Conn's `toolGroupAction`).
 pub(super) fn tool_icon_path(kind: &str, title: &str) -> &'static str {
     match kind {
-        "command" => TERMINAL,
+        "command" => conn_tool_command_presentation(title)
+            .map_or(TERMINAL, |found| conn_icon_path(found.icon)),
         "file_change" => PENCIL,
         "file_read" | "read" => EYE,
         "file_search" => SEARCH,
@@ -279,7 +286,12 @@ mod tests {
                 "mcp__github__create_issue",
             ),
             ("dynamic_tool", "Read src/main.rs", "Read src/main.rs"),
-            ("command", "conn_thread_send", "conn_thread_send"),
+            ("command", "ls -la", "ls -la"),
+            (
+                "command",
+                "conn_thread_send --help",
+                "conn_thread_send --help",
+            ),
         ];
         for (kind, title, expected) in cases {
             assert_eq!(
@@ -288,6 +300,69 @@ mod tests {
                 "kind {kind:?} title {title:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_command_row_that_is_a_conn_tool_gets_the_conn_icon_and_label() {
+        let cases: &[(&str, &str, &str)] = &[
+            // The reported row: the provider said `command` for an MCP tool call.
+            ("mcp_conn_conn_thread_read", "Read a Conn thread", CONN_MARK),
+            (
+                "Run mcp_conn_conn_thread_read",
+                "Read a Conn thread",
+                CONN_MARK,
+            ),
+            (
+                "Run `mcp_conn_pull_request_create`",
+                "Open a pull request",
+                PULL_REQUEST,
+            ),
+            (
+                "mcp__conn__device_open",
+                "Open a device in the Device panel",
+                DEVICE,
+            ),
+            ("conn.conn_queue", "Manage queued messages", CONN_MARK),
+        ];
+        for (title, label, icon) in cases {
+            assert_eq!(tool_display_title("command", title), *label, "{title:?}");
+            assert_eq!(tool_icon_path("command", title), *icon, "{title:?}");
+        }
+    }
+
+    #[test]
+    fn real_shell_command_rows_keep_the_terminal_icon_and_their_text() {
+        for title in [
+            "ls -la",
+            "cargo test -p conn-app",
+            "echo conn_thread_read",
+            "conn_thread_read --help",
+            "./conn_thread_read",
+            "device_info",
+            "conn-cli",
+            "mcp_github_create_issue",
+            "Run cargo test",
+        ] {
+            assert_eq!(tool_icon_path("command", title), TERMINAL, "{title:?}");
+            assert_eq!(
+                tool_display_title("command", title),
+                super::super::command_label::command_row_label(title),
+                "{title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_single_underscore_spelling_gets_the_conn_icon_on_any_other_kind() {
+        assert_eq!(
+            tool_icon_path("dynamic_tool", "mcp_conn_conn_thread_read"),
+            CONN_MARK
+        );
+        assert_eq!(
+            tool_display_title("dynamic_tool", "mcp_conn_conn_thread_read"),
+            "Read a Conn thread"
+        );
+        assert_eq!(tool_icon_path("mcp", "mcp_github_create_issue"), TOOL);
     }
 
     #[test]

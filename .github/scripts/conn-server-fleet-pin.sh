@@ -35,10 +35,22 @@ case ${1:?} in
       jq -e 'length == 0' <<<"$pr" > /dev/null
       git push origin "HEAD:refs/heads/$branch"
     else
-      git fetch --depth=1 origin "refs/heads/$branch"
-      git log -1 --format=%B FETCH_HEAD | grep -Fxq "Conn-Source: $SOURCE_SHA"
-      mapfile -d '' -t changed < <(git diff --name-only -z HEAD^ HEAD)
-      git diff --exit-code FETCH_HEAD HEAD -- "${changed[@]}"
+      history=()
+      if [[ $(git rev-parse --is-shallow-repository) == true ]]; then
+        history+=(--unshallow)
+      fi
+      existing="refs/remotes/origin/$branch"
+      git fetch --no-tags "${history[@]}" origin "+refs/heads/main:refs/remotes/origin/main" "+refs/heads/$branch:$existing"
+      git log -1 --format=%B "$existing" | grep -Fxq "Conn-Source: $SOURCE_SHA"
+      base=$(git merge-base --all refs/remotes/origin/main "$existing")
+      [[ "$base" != *$'\n'* ]]
+      # GitHub's PR includes changes since the merge base, including earlier commits on the branch.
+      existing_delta=$(git diff --raw --no-abbrev --no-renames "$base" "$existing")
+      proposal_delta=$(git diff --raw --no-abbrev --no-renames HEAD^ HEAD)
+      if [[ "$existing_delta" != "$proposal_delta" ]]; then
+        echo '::error::The complete release branch diff does not match the generated pin proposal.' >&2
+        exit 1
+      fi
     fi
     if [[ $(jq -r '.html_url // empty' <<<"$pr") != '' ]]; then
       jq -e --arg sha "$SOURCE_SHA" '.body | contains("Conn-Source: " + $sha)' <<<"$pr" > /dev/null

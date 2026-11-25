@@ -102,6 +102,8 @@ struct Turn {
     item_ordinals: HashMap<String, u32>,
     user: TextStream,
     assistant: TextStream,
+    /// Unnamed assistant segments are dropped when a tool update closes them.
+    closed_assistant_warning: bool,
     reasoning: TextStream,
     tools: HashMap<String, ToolState>,
     tool_started_at: HashMap<String, String>,
@@ -424,6 +426,7 @@ impl<E: Env> Mapper<E> {
             item_ordinals: HashMap::new(),
             user: TextStream::default(),
             assistant: TextStream::default(),
+            closed_assistant_warning: false,
             reasoning: TextStream::default(),
             tools: HashMap::new(),
             tool_started_at: HashMap::new(),
@@ -706,6 +709,15 @@ impl<E: Env> Mapper<E> {
         }
         self.emit_text(kind, true, false, out);
         if let Some(turn) = self.turn.as_mut() {
+            if kind == TextKind::Assistant
+                && let Some(warning) = self.flavor.terminal_warning
+            {
+                turn.closed_assistant_warning = turn
+                    .assistant
+                    .current
+                    .as_ref()
+                    .is_some_and(|segment| segment.text.trim() == warning);
+            }
             let stream = Self::stream(turn, kind);
             if let Some(segment) = stream.current.take()
                 && let Some(source) = segment.source_message_id.clone()
@@ -1712,11 +1724,14 @@ impl<E: Env> Mapper<E> {
     pub(crate) fn prompt_outcome(&self, outcome: PromptOutcome) -> PromptOutcome {
         if let Some(warning) = self.flavor.terminal_warning
             && matches!(&outcome, PromptOutcome::Stopped(reason) if reason == "end_turn")
-            && let Some(message) = self
-                .turn
-                .as_ref()
-                .and_then(|turn| turn.assistant.current.as_ref())
-            && message.text.trim() == warning
+            && self.turn.as_ref().is_some_and(|turn| {
+                turn.assistant
+                    .current
+                    .as_ref()
+                    .map_or(turn.closed_assistant_warning, |message| {
+                        message.text.trim() == warning
+                    })
+            })
         {
             return PromptOutcome::Failed {
                 message: warning.to_owned(),

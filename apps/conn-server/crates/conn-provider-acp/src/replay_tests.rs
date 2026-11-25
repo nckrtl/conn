@@ -797,3 +797,81 @@ async fn antigravity_reports_a_terminal_network_warning_as_a_failed_turn() {
         );
     }
 }
+
+#[tokio::test]
+async fn antigravity_retries_undelivered_instructions_after_a_trailing_tool_update() {
+    let mut golden = antigravity_turn_with_thinking_level();
+    let calls = golden["calls"].as_array_mut().unwrap();
+    let mut retry = calls.last().unwrap().clone();
+    retry["input"]["providerTurnOrdinal"] = json!(2);
+    retry["input"]["runOrdinal"] = json!(2);
+    retry["input"]["runId"] = json!("retry-run");
+    retry["input"]["message"]["text"] = json!("Try again");
+    calls.push(retry);
+
+    let script = golden["transcripts"][0].as_array_mut().unwrap();
+    let at = script
+        .iter()
+        .position(|entry| {
+            entry["frame"]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+        })
+        .unwrap();
+    let original = script[at].clone();
+    let session_id = original["frame"]["params"]["sessionId"].clone();
+    let update = |body: Value| {
+        let mut event = original.clone();
+        event["frame"]["params"]["update"] = body;
+        event
+    };
+    let warning = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text",
+        "text": "\n⚠ There was a network issue connecting to the server, please try again.\n"}});
+    let tool =
+        json!({"sessionUpdate":"tool_call","toolCallId":"read","kind":"read","title":"Read"});
+    let done = json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":"completed"});
+    let reply = script[at + 1].clone();
+    let retry_prompt = json!({"type": "expect_outbound", "frame": {"kind": "request", "method": "session/prompt",
+    "params":{"sessionId":session_id,"prompt":[
+        {"type":"text","text":"<any><conn_instructions><any>Try again<any>"},
+        {"type":"text","text":"<any><runtime_info><any>"}
+    ]}}});
+    let select = script
+        .iter()
+        .position(|entry| entry["frame"]["params"]["configId"] == "thought_level")
+        .unwrap();
+    let select_request = script[select].clone();
+    let select_reply = script[select + 1].clone();
+    script.splice(
+        at..=at + 1,
+        [
+            update(tool.clone()),
+            update(warning.clone()),
+            update(done.clone()),
+            reply.clone(),
+            select_request,
+            select_reply,
+            retry_prompt,
+            update(tool),
+            update(warning),
+            update(done),
+            original,
+            reply,
+        ],
+    );
+
+    let run = replay(&crate::antigravity::ANTIGRAVITY, &golden).await;
+    let script = crate::lock(&run.script);
+    assert!(
+        script.complete(),
+        "entry {}: {:?}, {:?}",
+        script.cursor,
+        script.failure,
+        run.errors
+    );
+    let statuses: Vec<_> = run
+        .events
+        .iter()
+        .filter(|event| event["type"] == "turn.terminal")
+        .map(|event| event["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["failed", "completed"]);
+}

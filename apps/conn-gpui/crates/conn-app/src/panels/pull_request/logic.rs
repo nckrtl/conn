@@ -1255,6 +1255,11 @@ pub(super) fn label_chip_colors(tokens: &Tokens, raw_color: Option<&str>) -> (Rg
 pub(super) fn describe_rpc_error(err: &conn_client::ClientError) -> (Option<String>, String) {
     match err {
         conn_client::ClientError::Rpc(val) => {
+            let val = if val.get("_tag").and_then(serde_json::Value::as_str) == Some("Fail") {
+                val.get("error").unwrap_or(val)
+            } else {
+                val
+            };
             let tag = val.get("_tag").and_then(serde_json::Value::as_str);
             let reason = val.get("reason").and_then(serde_json::Value::as_str);
             if tag == Some("PullRequestOperationError") && reason == Some("not-found") {
@@ -1313,7 +1318,7 @@ pub(super) fn build_unified_diff_from_contents(
         new_contents.lines().collect()
     };
 
-    let edits = compute_line_diff(&old_lines, &new_lines);
+    let (edits, is_approximate) = compute_line_diff(&old_lines, &new_lines);
     let mut additions = 0usize;
     let mut deletions = 0usize;
     for edit in &edits {
@@ -1340,6 +1345,7 @@ pub(super) fn build_unified_diff_from_contents(
         additions,
         deletions,
         is_binary: false,
+        is_approximate,
         index: None,
         hunks,
     }
@@ -1347,7 +1353,7 @@ pub(super) fn build_unified_diff_from_contents(
 
 /// Computes a line-by-line edit script using LCS for reasonable file sizes, falling back to a
 /// prefix/suffix trim diff for very large files so the UI never stalls.
-fn compute_line_diff(old: &[&str], new: &[&str]) -> Vec<DiffLine> {
+fn compute_line_diff(old: &[&str], new: &[&str]) -> (Vec<DiffLine>, bool) {
     // Strip common prefix and suffix first to keep the DP table tiny.
     let prefix = old
         .iter()
@@ -1380,7 +1386,8 @@ fn compute_line_diff(old: &[&str], new: &[&str]) -> Vec<DiffLine> {
     let old_base = prefix;
     let new_base = prefix;
     // Cap DP matrix cells at 2_000_000 (~8 MB) so huge generated files remain instant.
-    if old_mid.len().saturating_mul(new_mid.len()) <= 2_000_000 {
+    let approximate = old_mid.len().saturating_mul(new_mid.len()) > 2_000_000;
+    if !approximate {
         let rows = old_mid.len() + 1;
         let cols = new_mid.len() + 1;
         let mut dp = vec![0u32; rows * cols];
@@ -1455,7 +1462,7 @@ fn compute_line_diff(old: &[&str], new: &[&str]) -> Vec<DiffLine> {
         });
     }
 
-    out
+    (out, approximate)
 }
 
 fn group_diff_hunks(lines: &[DiffLine], context: usize) -> Vec<DiffHunk> {
@@ -2140,7 +2147,7 @@ pub(super) fn section_collapse_anchor_scroll_top(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use conn_contract::{
         PullRequestCapabilities, PullRequestMergeCapabilities, PullRequestReviewCapabilities,
         PullRequestReviewerCapabilities, PullRequestViewerPermissions, ThreadPullRequestSnapshot,
@@ -2148,7 +2155,7 @@ mod tests {
 
     use super::*;
 
-    fn sample_detail() -> PullRequestDetail {
+    pub(in super::super) fn sample_detail() -> PullRequestDetail {
         PullRequestDetail {
             provider: "github".to_owned(),
             capabilities: PullRequestCapabilities {
@@ -2260,6 +2267,22 @@ mod tests {
             merge_queue_removal: None,
             maintainer_can_modify: None,
         }
+    }
+
+    #[test]
+    fn reports_the_sign_in_action_from_a_failed_list_rpc() {
+        let error = conn_client::ClientError::Rpc(serde_json::json!({
+            "_tag": "Fail",
+            "error": {
+                "_tag": "PullRequestUnavailableError",
+                "reason": "cli-unauthenticated",
+                "listResult": {"entries": []}
+            }
+        }));
+        assert_eq!(
+            super::describe_rpc_error(&error).1,
+            "Sign in to your source-control host to view pull requests."
+        );
     }
 
     #[test]
@@ -2386,6 +2409,8 @@ mod tests {
             |name: &str, status: PullRequestCheckStatus, url: Option<&str>| PullRequestCheck {
                 name: name.to_owned(),
                 status,
+                started_at: None,
+                completed_at: None,
                 description: None,
                 url: url.map(ToOwned::to_owned),
                 started_at: None,
@@ -2480,6 +2505,7 @@ mod tests {
         let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
         let new = "a\nb\nC\nd\ne\nf\ng\nh\ni\n";
         let diff = build_unified_diff_from_contents("src/lib.rs", "src/lib.rs", old, new);
+        assert!(!diff.is_approximate);
         assert_eq!(diff.display_path, "src/lib.rs");
         assert_eq!(diff.additions, 2);
         assert_eq!(diff.deletions, 1);
@@ -2668,6 +2694,8 @@ mod tests {
         let failing_check = PullRequestCheck {
             name: "cargo clippy".to_owned(),
             status: PullRequestCheckStatus::Failure,
+            started_at: None,
+            completed_at: None,
             description: Some("2 warnings".to_owned()),
             url: None,
             started_at: None,

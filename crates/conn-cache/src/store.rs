@@ -36,6 +36,9 @@ impl MessageCache {
             position INTEGER PRIMARY KEY, environment TEXT NOT NULL, thread TEXT NOT NULL,
             id TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(environment,thread,id));
             CREATE INDEX IF NOT EXISTS recent_messages ON messages(environment,thread,position);
+            CREATE TABLE IF NOT EXISTS thread_task_links (
+                environment TEXT NOT NULL, thread TEXT NOT NULL, metadata TEXT NOT NULL,
+                PRIMARY KEY(environment, thread)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS thread_outlines (
                 environment TEXT NOT NULL, thread TEXT NOT NULL, markers TEXT NOT NULL,
                 PRIMARY KEY(environment, thread)) WITHOUT ROWID",
@@ -219,6 +222,52 @@ impl MessageCache {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns the database read or decoding error.
+    pub async fn task_links(
+        &self,
+        env: &str,
+        thread: &str,
+    ) -> Result<conn_state::ThreadTaskLinks, sqlx::Error> {
+        let row: Option<sqlx::types::Json<conn_state::ThreadTaskLinks>> = sqlx::query_scalar(
+            "SELECT metadata FROM thread_task_links WHERE environment=? AND thread=?",
+        )
+        .bind(env)
+        .bind(thread)
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(row.map(|row| row.0).unwrap_or_default())
+    }
+
+    /// # Errors
+    /// Returns the database write error.
+    pub async fn save_task_links(
+        &self,
+        env: &str,
+        thread: &str,
+        links: &conn_state::ThreadTaskLinks,
+    ) -> Result<(), sqlx::Error> {
+        if *links == conn_state::ThreadTaskLinks::default() {
+            sqlx::query("DELETE FROM thread_task_links WHERE environment=? AND thread=?")
+                .bind(env)
+                .bind(thread)
+                .execute(&self.0)
+                .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO thread_task_links(environment,thread,metadata) VALUES(?,?,?)
+                ON CONFLICT(environment,thread) DO UPDATE SET metadata=excluded.metadata
+                WHERE metadata != excluded.metadata",
+            )
+            .bind(env)
+            .bind(thread)
+            .bind(sqlx::types::Json(links))
+            .execute(&self.0)
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Applies a chronological tail from the live reducer, keeping older rows up to the cap.
     ///
     /// # Errors
@@ -309,6 +358,11 @@ impl MessageCache {
     /// Returns the database write error.
     pub async fn remove(&self, env: &str, thread: &str) -> Result<(), sqlx::Error> {
         let mut tx = self.0.begin().await?;
+        sqlx::query("DELETE FROM thread_task_links WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM thread_outlines WHERE environment=? AND thread=?")
             .bind(env)
             .bind(thread)

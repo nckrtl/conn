@@ -20,10 +20,8 @@ pub(crate) const MAX_COLUMN_WIDTH_PX: f32 = 288.0;
 pub(crate) const MIN_COLUMN_WIDTH_PX: f32 = 72.0;
 /// Approximate width of one monospace character at `12px` (`text-xs`).
 const MONO_CHAR_WIDTH_PX: f32 = 7.3;
-/// Horizontal padding inside a non-first grid cell (`px-3` = 12px each side).
+/// Combined horizontal padding of a result cell.
 const CELL_PAD_X_PX: f32 = 24.0;
-/// Extra start padding on the first grid column (`first:ps-4` vs `px-3`).
-const FIRST_CELL_EXTRA_PAD_PX: f32 = 4.0;
 /// Number of rows scanned when estimating column widths.
 const WIDTH_SAMPLE_ROWS: usize = 64;
 
@@ -254,7 +252,7 @@ pub(crate) fn format_column_details(column: &DatabaseColumn) -> String {
     text
 }
 
-/// Formats the trailing summary next to the Run button (`"First 500 rows · 12 ms"` or `"12 ms"`).
+/// Formats the duration line under the editor (`"First 500 rows · 12 ms"` or `"12 ms"`).
 pub(crate) fn format_result_summary(result: &DatabaseQueryResult) -> String {
     let ms = result.duration_ms.round() as i64;
     if result.truncated {
@@ -269,8 +267,7 @@ pub(crate) fn measure_column_widths(result: &DatabaseQueryResult) -> Vec<f32> {
     result
         .columns
         .iter()
-        .enumerate()
-        .map(|(col_index, column)| {
+        .map(|column| {
             let mut max_chars = column.chars().count();
             for row in result.rows.iter().take(WIDTH_SAMPLE_ROWS) {
                 let len = match format_cell_value(row.get(column)) {
@@ -281,13 +278,7 @@ pub(crate) fn measure_column_widths(result: &DatabaseQueryResult) -> Vec<f32> {
                     max_chars = len;
                 }
             }
-            let extra_pad = if col_index == 0 {
-                FIRST_CELL_EXTRA_PAD_PX
-            } else {
-                0.0
-            };
-            let estimated =
-                (max_chars as f32) * MONO_CHAR_WIDTH_PX + CELL_PAD_X_PX + extra_pad + 6.0;
+            let estimated = (max_chars as f32) * MONO_CHAR_WIDTH_PX + CELL_PAD_X_PX + 6.0;
             estimated.clamp(MIN_COLUMN_WIDTH_PX, MAX_COLUMN_WIDTH_PX)
         })
         .collect()

@@ -5,7 +5,7 @@
 mod store;
 use conn_client::{ClientError, Connection};
 use conn_contract::ChatAttachment;
-use conn_state::{ItemStatus, ReviewComment, ThreadState, TimelineEntry};
+use conn_state::{AgentMessageSender, ItemStatus, ReviewComment, ThreadState, TimelineEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 pub use store::MessageCache;
@@ -18,6 +18,8 @@ pub enum Message {
         id: String,
         text: String,
         created_by_agent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender: Option<AgentMessageSender>,
         created_at: Option<String>,
         attachments: Vec<ChatAttachment>,
         is_steer: bool,
@@ -47,6 +49,7 @@ impl Message {
                 id,
                 text,
                 created_by_agent,
+                sender,
                 created_at,
                 attachments,
                 is_steer,
@@ -56,6 +59,7 @@ impl Message {
                 id: id.clone(),
                 text: text.clone(),
                 created_by_agent: *created_by_agent,
+                sender: sender.clone(),
                 created_at: created_at.clone(),
                 attachments: attachments.clone(),
                 is_steer: *is_steer,
@@ -84,6 +88,7 @@ impl Message {
                 id,
                 text,
                 created_by_agent,
+                sender,
                 created_at,
                 attachments,
                 is_steer,
@@ -93,6 +98,7 @@ impl Message {
                 id,
                 text,
                 created_by_agent,
+                sender,
                 created_at,
                 attachments,
                 is_steer,
@@ -163,4 +169,29 @@ pub async fn fetch_history_prefix(
         }
     }
     Ok(messages.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentMessageSender, Message, TimelineEntry};
+    use serde_json::json;
+
+    #[test]
+    fn cached_agent_messages_round_trip_and_old_rows_have_no_sender() {
+        let old = json!({"User":{"id":"m","text":"hello","created_by_agent":true,"created_at":null,"attachments":[],"is_steer":false,"run_id":null}});
+        let mut row = serde_json::from_value::<Message>(old)
+            .expect("old cache row")
+            .entry();
+        let TimelineEntry::User { sender, .. } = &mut row else {
+            panic!("user")
+        };
+        assert!(sender.is_none());
+        *sender = Some(AgentMessageSender::LinkedTitle("Release reviews".into()));
+        let saved = Message::capture(&row).expect("cached conversation entry");
+        let wire = serde_json::to_vec(&saved).expect("encoded cache row");
+        let restored = serde_json::from_slice::<Message>(&wire)
+            .expect("decoded cache row")
+            .entry();
+        assert_eq!(restored, row);
+    }
 }

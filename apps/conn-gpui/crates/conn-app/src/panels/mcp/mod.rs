@@ -6,6 +6,7 @@
 mod catalog;
 mod helpers;
 mod log;
+mod overview;
 mod server;
 mod widgets;
 
@@ -26,6 +27,7 @@ use conn_desktop::mcp::{
     McpSessions,
 };
 use conn_theme::Tokens;
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -86,9 +88,13 @@ pub(super) struct FieldInputKey {
     pub(super) field_name: String,
 }
 
+/// One 32px control plus two 8px insets and the bottom divider.
+const TAB_HEIGHT_PX: f32 = 49.0;
+
 /// The MCP panel entity.
 pub(crate) struct McpPanel {
     tokens: Tokens,
+    compact: bool,
     project_key: Option<String>,
     workspace_root: Option<String>,
     store: McpServerStore,
@@ -179,6 +185,22 @@ fn load_store() -> McpServerStore {
 }
 
 impl McpPanel {
+    fn body_inset(&self) -> f32 {
+        if self.compact { 10.0 } else { ROW_PAD_START_PX }
+    }
+
+    fn tabs(&self, id: &'static str, label: &'static str, row: gpui_kit::Div) -> AnyElement {
+        row.id(id)
+            .a11y_group(format!("panel.{id}"), label)
+            .h(px(TAB_HEIGHT_PX))
+            .gap(px(if self.compact { 12.0 } else { 16.0 }))
+            .px(px(self.body_inset()))
+            .whitespace_nowrap()
+            .overflow_x_scroll()
+            .test_support()
+            .into_any_element()
+    }
+
     pub(crate) fn new(tokens: Tokens, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let (mcp, mut events) = McpSessions::new();
 
@@ -259,6 +281,7 @@ impl McpPanel {
 
         Self {
             tokens,
+            compact: false,
             project_key: None,
             workspace_root: None,
             store: load_store(),
@@ -1055,6 +1078,7 @@ impl McpPanel {
                         entity.update(cx, |p, cx| p.toggle_menu(OpenMenu::Servers, cx));
                     }
                 })
+                .aria_label("Servers")
                 .conn_tooltip("Servers", tokens),
             ),
         );
@@ -1093,7 +1117,7 @@ impl McpPanel {
                 to_hsla(tokens.muted_foreground),
             ));
 
-        let mut transport_anchor = div().relative().pl(px(9.0)).child(transport_trigger);
+        let mut transport_anchor = div().relative().pl(px(3.0)).child(transport_trigger);
         if self.menu == Some(OpenMenu::Transport) {
             transport_anchor = transport_anchor.child(self.render_transport_menu(server, cx));
         }
@@ -1156,10 +1180,18 @@ impl McpPanel {
                 false,
                 move |_, _, cx| entity.update(cx, |p, cx| p.toggle_connection(cx)),
             )
+            .aria_label(if connected {
+                "Disconnect"
+            } else if connecting {
+                "Cancel"
+            } else {
+                "Connect"
+            })
             .conn_tooltip(connect_tooltip, tokens),
         );
 
         chrome::toolbar_row(tokens)
+            .p(px(8.0))
             .child(servers_anchor)
             .child(target_field)
             .child(conn_group)
@@ -1420,6 +1452,8 @@ impl Render for McpPanel {
                     )
                     .into_any_element(),
             )
+        } else if self.compact {
+            None
         } else {
             session.info.as_ref().map(|info| {
                 h_flex()
@@ -1499,11 +1533,31 @@ impl Render for McpPanel {
             }
         };
 
+        let weak = cx.weak_entity();
+        let compact = self.compact;
+        let measure = gpui_kit::canvas(
+            move |bounds, _, cx| {
+                let is_compact = bounds.size.width <= px(440.0);
+                if compact != is_compact {
+                    cx.defer(move |cx| {
+                        let _ = weak.update(cx, |panel, cx| {
+                            panel.compact = is_compact;
+                            cx.notify();
+                        });
+                    });
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .size_full();
         let sk_key = session_key;
         let mut root = v_flex()
             .id("mcp-panel")
             .a11y_group("panel.mcp", "MCP")
+            .relative()
             .size_full()
+            .child(measure)
             .on_key_down(cx.listener(move |panel, event: &KeyDownEvent, _, cx| {
                 let k = &event.keystroke;
                 if k.key == "escape" && panel.menu.take().is_some() {
@@ -1534,6 +1588,8 @@ impl Render for McpPanel {
             root = root.child(chrome::warning_notice(&self.tokens, error.clone()));
         }
 
-        root.child(tabs_bar).child(body).into_any_element()
+        root.child(self.tabs("mcp-main-tabs-scroll", "MCP sections", tabs_bar))
+            .child(body)
+            .into_any_element()
     }
 }

@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use conn_state::{PanelSurface, RightPanelTab};
 use conn_theme::Tokens;
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::h_flex;
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -86,6 +87,7 @@ pub(crate) fn panel_tab_label(tab: RightPanelTab) -> &'static str {
         RightPanelTab::Mcp => "MCP",
         RightPanelTab::Tasks => "Tasks",
         RightPanelTab::PullRequest => "Pull request",
+        RightPanelTab::PullRequests => "Pull requests",
         RightPanelTab::LinkedItems => "Linked items",
         RightPanelTab::Device => "Device",
         RightPanelTab::File => "File",
@@ -148,7 +150,7 @@ pub(crate) fn panel_tab_icon_path(tab: RightPanelTab) -> &'static str {
         RightPanelTab::Database => "superhero/database.svg",
         RightPanelTab::Mcp => "brand/mcp.svg",
         RightPanelTab::Tasks => "superhero/checklist.svg",
-        RightPanelTab::PullRequest => "superhero/pull-request.svg",
+        RightPanelTab::PullRequest | RightPanelTab::PullRequests => "superhero/pull-request.svg",
         RightPanelTab::LinkedItems => "superhero/link.svg",
         RightPanelTab::Device => "superhero/phone.svg",
         RightPanelTab::File => "superhero/file.svg",
@@ -357,6 +359,7 @@ pub(crate) fn render_panel_header(
     let mut add_anchor = div().relative().flex_shrink_0().child(
         div()
             .id("right-panel-add-btn")
+            .test_support()
             .a11y_button("panel.add-tab", "Add panel tab")
             .aria_expanded(props.add_menu_open)
             .size(px(ADD_BUTTON_SIZE_PX))
@@ -563,6 +566,7 @@ fn render_add_panel_menu(
 
     let mut list = div()
         .id("right-panel-add-menu")
+        .test_support()
         .a11y(gpui_kit::Role::Menu, "panel.add-menu", "Add panel")
         .flex()
         .flex_col()
@@ -587,6 +591,7 @@ fn render_add_panel_menu(
         let group = SharedString::from(format!("right-panel-add-{label}"));
         let mut row = h_flex()
             .id(group.clone())
+            .test_support()
             .group(group.clone())
             .a11y(
                 gpui_kit::Role::MenuItem,
@@ -632,14 +637,18 @@ fn render_add_panel_menu(
         list = list.child(row);
     }
 
-    deferred(
-        div()
-            .absolute()
-            .top(px(ADD_BUTTON_SIZE_PX + MENU_SIDE_OFFSET_PX))
-            .left(px(0.0))
-            .child(list),
-    )
-    .with_priority(1)
+    div()
+        .absolute()
+        .top(px(ADD_BUTTON_SIZE_PX + MENU_SIDE_OFFSET_PX))
+        .left_0()
+        .child(
+            deferred(
+                gpui_kit::anchored()
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(list),
+            )
+            .with_priority(1),
+        )
 }
 
 /// The empty right panel: Conn's `RightPanelEmptyState` (`Open a surface`), the `+` menu's rows

@@ -507,6 +507,7 @@ fn thread_snapshot_and_streaming_deltas_flip_working() {
             id: "item-u1".to_owned(),
             text: "Run tests".to_owned(),
             created_by_agent: false,
+            sender: None,
             created_at: Some("2026-11-13T09:00:00.000Z".to_owned()),
             attachments: Vec::new(),
             is_steer: false,

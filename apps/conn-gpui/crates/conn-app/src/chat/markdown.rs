@@ -104,8 +104,9 @@ pub(crate) struct MarkdownOptions<'a> {
     pub(crate) prose: Option<ProseStyle>,
     /// Heading typography style.
     pub(crate) heading_style: HeadingStyle,
-    /// Block id of the code block most recently copied, to show check feedback.
-    pub(crate) copied_code_key: Option<&'a str>,
+    /// Code blocks currently showing copy feedback, each with its own reset timer.
+    pub(crate) copied_code_blocks:
+        Option<&'a std::collections::HashMap<String, gpui_kit::Task<()>>>,
     /// Optional notification invoked after a code block's copy button writes to the clipboard.
     pub(crate) on_copy_code: Option<Rc<dyn Fn(String, &mut Window, &mut App)>>,
     /// Set of code block ids currently toggled to soft-wrap lines.
@@ -160,7 +161,10 @@ impl fmt::Debug for MarkdownOptions<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MarkdownOptions")
             .field("heading_style", &self.heading_style)
-            .field("copied_code_key", &self.copied_code_key)
+            .field(
+                "copied_code_blocks",
+                &self.copied_code_blocks.map(|blocks| blocks.keys()),
+            )
             .field("has_on_copy_code", &self.on_copy_code.is_some())
             .field(
                 "has_on_toggle_wrap_code",
@@ -866,7 +870,9 @@ fn render_code_block(
     options: &MarkdownOptions<'_>,
 ) -> AnyElement {
     let lang_label = fence_display_name(language);
-    let is_copied = options.copied_code_key == Some(block_id);
+    let is_copied = options
+        .copied_code_blocks
+        .is_some_and(|blocks| blocks.contains_key(block_id));
     let is_wrapped = options
         .wrapped_code_keys
         .is_some_and(|set| set.contains(block_id));
@@ -899,7 +905,15 @@ fn render_code_block(
     let action_hover = hsla_alpha(tokens.foreground, 0.06);
     let copy_btn = div()
         .id(SharedString::from(format!("copy-{block_id}")))
-        .a11y_button(md_ax_id(block_id, "code.copy"), "Copy code")
+        .a11y_button(
+            md_ax_id(block_id, "code.copy"),
+            if is_copied {
+                "Code copied"
+            } else {
+                "Copy code"
+            },
+        )
+        .tab_index(0)
         .flex()
         .items_center()
         .justify_center()

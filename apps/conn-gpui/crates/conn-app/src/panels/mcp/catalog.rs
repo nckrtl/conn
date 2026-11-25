@@ -1,4 +1,4 @@
-//! The Tools, Resources, and Prompts tabs (Conn `McpCatalogViews.tsx`): a filterable 208px
+//! The Tools, Resources, and Prompts tabs (Conn `McpCatalogViews.tsx`): a filterable responsive
 //! item list beside an Overview / Playground detail pane with schema-driven forms and
 //! Result / JSON response rendering.
 
@@ -17,6 +17,7 @@ use conn_desktop::mcp::servers::{
 use conn_desktop::mcp::store::{McpCall, McpDetailTab, McpSession, McpTool};
 use conn_desktop::mcp::{McpMethod, McpResponse};
 use conn_theme::{Appearance, Tokens};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -31,21 +32,22 @@ use super::helpers::{
     build_resource_entries, capitalize, decode_base64, field_type_label, filter_catalog_items,
     prompt_fields, template_fields, validate_template_variables,
 };
+use super::overview::{render_fields_list, render_tool_input, tool_badges};
 use super::widgets::{
     McpBadgeVariant, McpMenuEntry, McpMenuRow, badge, code_block, dropdown_menu, field_box,
     render_markdown,
 };
 use super::{FieldInputKey, McpPanel, OpenMenu, ResultTab};
 use crate::panels::chrome::{
-    self, ConnTooltipExt as _, ICON_BUTTON_GLYPH_PX, ROW_PAD_START_PX, SectionTab,
-    UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
+    self, ConnTooltipExt as _, ICON_BUTTON_GLYPH_PX, SectionTab, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
+    XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use crate::panels::color::to_hsla;
 use crate::panels::header::superhero_icon;
 use crate::theme::MONO_FONT;
 
-/// Width of the left item list (`w-52` = 208px).
-const LIST_WIDTH_PX: f32 = 208.0;
+/// Maximum width of the left item list (`w-52` = 208px).
+const MAX_LIST_WIDTH_PX: f32 = 208.0;
 
 /// What clicking the Playground run button executes.
 #[derive(Clone)]
@@ -227,7 +229,7 @@ impl McpPanel {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let tools = session.tools.as_deref().unwrap_or_default();
-        let selected_tool: Option<McpTool> = session.shown_tool().cloned();
+        let selected_tool = session.shown_tool();
         let items: Vec<CatalogListItem> = tools
             .iter()
             .map(|tool| CatalogListItem {
@@ -249,7 +251,7 @@ impl McpPanel {
         let list = self.render_item_list(
             "tools",
             &items,
-            selected_tool.as_ref().map(|t| t.name.as_str()),
+            selected_tool.map(|t| t.name.as_str()),
             None,
             list_error.as_deref(),
             loading,
@@ -267,12 +269,17 @@ impl McpPanel {
 
         let detail = if let Some(tool) = selected_tool {
             let fields = fields_from_schema(&tool.input_schema);
-            let badges = tool_badges(&self.tokens, &tool);
-            let overview_details =
-                (!fields.is_empty()).then(|| render_fields_list(&self.tokens, &fields));
+            let (badges, overview_details) = if session.detail_tab == McpDetailTab::Overview {
+                (
+                    tool_badges(&self.tokens, tool),
+                    render_tool_input(&self.tokens, session_key, tool, &fields, window, cx),
+                )
+            } else {
+                (Vec::new(), None)
+            };
             let spec = DetailSpec {
                 call_key: format!("tool:{}", tool.name),
-                title: tool_title(&tool).to_owned(),
+                title: tool_title(tool).to_owned(),
                 name: Some(tool.name.clone()),
                 description: tool.description.clone(),
                 badges,
@@ -282,7 +289,7 @@ impl McpPanel {
                 run_label: "Call",
                 idle_result: "Call the tool to see its result.",
                 run_action: RunAction::Tool {
-                    name: tool.name,
+                    name: tool.name.clone(),
                     fields,
                 },
             };
@@ -303,6 +310,7 @@ impl McpPanel {
             .flex_1()
             .min_h_0()
             .w_full()
+            .items_stretch()
             .child(list)
             .child(v_flex().flex_1().min_w_0().min_h_0().child(detail))
             .into_any_element()
@@ -433,6 +441,7 @@ impl McpPanel {
             .flex_1()
             .min_h_0()
             .w_full()
+            .items_stretch()
             .child(list)
             .child(v_flex().flex_1().min_w_0().min_h_0().child(detail))
             .into_any_element()
@@ -492,7 +501,7 @@ impl McpPanel {
         let detail = if let Some(prompt) = selected {
             let fields = prompt_fields(&prompt);
             let overview_details =
-                (!fields.is_empty()).then(|| render_fields_list(&self.tokens, &fields));
+                (!fields.is_empty()).then(|| render_fields_list(&self.tokens, &fields, None));
             let title = prompt.title.as_deref().unwrap_or(&prompt.name).to_owned();
             let spec = DetailSpec {
                 call_key: format!("prompt:{}", prompt.name),
@@ -527,6 +536,7 @@ impl McpPanel {
             .flex_1()
             .min_h_0()
             .w_full()
+            .items_stretch()
             .child(list)
             .child(v_flex().flex_1().min_w_0().min_h_0().child(detail))
             .into_any_element()
@@ -555,21 +565,30 @@ impl McpPanel {
         let highlight = to_hsla(tokens.shell_highlight);
         let row_hover = chrome::alpha(tokens.foreground, 0.04);
 
-        let search_bar = div().w_full().flex_shrink_0().p(px(8.0)).child(
-            chrome::soft_input_group(tokens)
-                .child(div().pl(px(9.0)).flex_shrink_0().child(superhero_icon(
-                    "superhero/search.svg",
-                    ICON_BUTTON_GLYPH_PX,
-                    muted,
-                )))
-                .child(
-                    div().flex_1().min_w_0().pl(px(8.0)).pr(px(14.0)).child(
-                        Input::new(filter_input)
-                            .appearance(false)
-                            .text_size(px(UI_TEXT_PX)),
-                    ),
-                ),
-        );
+        let search_bar = div()
+            .w_full()
+            .flex_shrink_0()
+            .px(px(chrome::LIST_INLINE_INSET_PX))
+            .pt(px(8.0))
+            .pb(px(chrome::SEARCH_LIST_GAP_PX))
+            .child(
+                chrome::soft_input_group(tokens)
+                    .id(format!("mcp-{noun}-search"))
+                    .a11y_group(format!("panel.mcp.search.{noun}"), format!("Search {noun}"))
+                    .child(div().pl(px(9.0)).flex_shrink_0().child(superhero_icon(
+                        "superhero/search.svg",
+                        ICON_BUTTON_GLYPH_PX,
+                        muted,
+                    )))
+                    .child(
+                        div().flex_1().min_w_0().pl(px(8.0)).pr(px(14.0)).child(
+                            Input::new(filter_input)
+                                .appearance(false)
+                                .text_size(px(UI_TEXT_PX)),
+                        ),
+                    )
+                    .test_support(),
+            );
 
         let visible = filter_catalog_items(items, filter_query);
         let has_query = !filter_query.trim().is_empty();
@@ -581,8 +600,9 @@ impl McpPanel {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .px(px(6.0))
-            .pb(px(8.0));
+            .px(px(chrome::LIST_INLINE_INSET_PX))
+            .gap(px(chrome::LIST_ROW_GAP_PX))
+            .pb(px(6.0));
 
         if let Some(err) = error {
             list = list.child(chrome::warning_notice(tokens, err.to_owned()));
@@ -630,11 +650,14 @@ impl McpPanel {
                 h_flex()
                     .id(SharedString::from(format!("mcp-{noun}-item-{}", item.id)))
                     .a11y_button(format!("panel.mcp.{noun}.{}", item.id), item.id.clone())
-                    .h(px(28.0))
+                    .h(px(chrome::LIST_ROW_HEIGHT_PX))
+                    .flex_shrink_0()
                     .w_full()
                     .items_center()
-                    .rounded(px(6.0))
-                    .px(px(10.0))
+                    .rounded(px(chrome::LIST_ROW_RADIUS_PX))
+                    .pt(px(5.0))
+                    .pb(px(7.0))
+                    .px(px(chrome::LIST_ROW_INSET_PX))
                     .cursor_pointer()
                     .text_size(px(UI_TEXT_PX))
                     .line_height(px(UI_LINE_HEIGHT_PX))
@@ -644,12 +667,15 @@ impl McpPanel {
                             .hover(move |s| s.bg(row_hover).text_color(fg))
                     })
                     .on_click(move |_, window, cx| on_select(item_id.clone(), window, cx))
-                    .child(div().min_w_0().truncate().child(item.label.clone())),
+                    .child(div().min_w_0().truncate().child(item.label.clone()))
+                    .test_support(),
             );
         }
 
         v_flex()
-            .w(px(LIST_WIDTH_PX))
+            .w(relative(0.35))
+            .min_w(px(116.0))
+            .max_w(px(MAX_LIST_WIDTH_PX))
             .flex_shrink_0()
             .min_h_0()
             .border_r_1()
@@ -715,7 +741,11 @@ impl McpPanel {
             },
         );
 
-        let mut root = v_flex().flex_1().min_h_0().w_full().child(tab_bar);
+        let mut root = v_flex().flex_1().min_h_0().w_full().child(self.tabs(
+            "mcp-detail-tabs-scroll",
+            "Item detail",
+            tab_bar,
+        ));
 
         if session.detail_tab == McpDetailTab::Overview {
             let mut title_row = h_flex().flex_wrap().items_center().gap(px(8.0)).child(
@@ -757,7 +787,7 @@ impl McpPanel {
                 .w_full()
                 .overflow_y_scroll()
                 .gap(px(16.0))
-                .px(px(ROW_PAD_START_PX))
+                .px(px(self.body_inset()))
                 .py(px(12.0))
                 .child(header_block);
             if let Some(details) = spec.overview_details {
@@ -792,7 +822,7 @@ impl McpPanel {
             .px(px(7.0))
             .gap(px(4.0))
             .items_center()
-            .rounded(px(9999.0))
+            .rounded(px(6.0))
             .text_size(px(XS_TEXT_PX))
             .line_height(px(XS_LINE_HEIGHT_PX))
             .font_weight(FontWeight::MEDIUM)
@@ -830,7 +860,7 @@ impl McpPanel {
                     .text_color(muted)
                     .child(spec.name.unwrap_or(spec.title)),
             )
-            .child(chrome::toolbar_group(&tokens).child(run_btn));
+            .child(run_btn);
 
         let fields_el = if spec.fields.is_empty() {
             div()
@@ -861,7 +891,7 @@ impl McpPanel {
             .gap(px(12.0))
             .border_b_1()
             .border_color(divider)
-            .px(px(ROW_PAD_START_PX))
+            .px(px(self.body_inset()))
             .py(px(12.0))
             .child(form_header)
             .child(fields_el);
@@ -958,20 +988,31 @@ impl McpPanel {
                     let entity = entity.clone();
                     div()
                         .pt(px(6.0))
-                        .child(chrome::checkbox(
-                            SharedString::from(format!("mcp-field-bool-{call_key}-{}", field.name)),
-                            checked,
-                            &tokens,
-                            move |_, _, cx| {
-                                let sk = sk.clone();
-                                let ck = ck.clone();
-                                let fname = fname.clone();
-                                entity.update(cx, |panel, cx| {
-                                    let next = if checked { "false" } else { "true" };
-                                    panel.set_form_value(&sk, &ck, fname, next.to_owned(), cx);
-                                });
-                            },
-                        ))
+                        .child(
+                            chrome::checkbox(
+                                SharedString::from(format!(
+                                    "mcp-field-bool-{call_key}-{}",
+                                    field.name
+                                )),
+                                checked,
+                                &tokens,
+                                move |_, _, cx| {
+                                    let sk = sk.clone();
+                                    let ck = ck.clone();
+                                    let fname = fname.clone();
+                                    entity.update(cx, |panel, cx| {
+                                        let next = if checked { "false" } else { "true" };
+                                        panel.set_form_value(&sk, &ck, fname, next.to_owned(), cx);
+                                    });
+                                },
+                            )
+                            .a11y_switch(
+                                format!("panel.mcp.field.{call_key}.{}", field.name),
+                                field.name.clone(),
+                                checked,
+                            )
+                            .tab_index(0),
+                        )
                         .into_any_element()
                 }
                 McpFieldType::Enum => {
@@ -1006,8 +1047,17 @@ impl McpPanel {
                             "mcp-field-enum-{call_key}-{}",
                             field.name
                         )))
-                        .h(px(24.0))
-                        .px(px(7.0))
+                        .a11y_button(
+                            format!("panel.mcp.field.{call_key}.{}", field.name),
+                            field.name.clone(),
+                        )
+                        .aria_expanded(is_open)
+                        .tab_index(0)
+                        .w_full()
+                        .min_w_0()
+                        .h(px(30.0))
+                        .justify_between()
+                        .px(px(8.0))
                         .gap(px(4.0))
                         .items_center()
                         .rounded(px(6.0))
@@ -1078,7 +1128,7 @@ impl McpPanel {
                             SharedString::from(format!("mcp-enum-menu-{call_key}-{}", field.name)),
                             &tokens,
                             entries,
-                            24.0,
+                            30.0,
                         ));
                     }
                     anchor.into_any_element()
@@ -1095,6 +1145,11 @@ impl McpPanel {
                     field_box(&tokens)
                         .child(
                             Textarea::new(&textarea)
+                                .aria_label(field.name.clone())
+                                .accessibility_id(format!(
+                                    "panel.mcp.field.{call_key}.{}",
+                                    field.name
+                                ))
                                 .appearance(false)
                                 .text_size(px(XS_TEXT_PX)),
                         )
@@ -1113,6 +1168,11 @@ impl McpPanel {
                     field_box(&tokens)
                         .child(
                             Input::new(&input)
+                                .aria_label(field.name.clone())
+                                .accessibility_id(format!(
+                                    "panel.mcp.field.{call_key}.{}",
+                                    field.name
+                                ))
                                 .appearance(false)
                                 .text_size(px(XS_TEXT_PX)),
                         )
@@ -1240,7 +1300,7 @@ impl McpPanel {
                     .items_center()
                     .justify_center()
                     .gap(px(8.0))
-                    .px(px(ROW_PAD_START_PX))
+                    .px(px(self.body_inset()))
                     .text_size(px(UI_TEXT_PX))
                     .line_height(px(UI_LINE_HEIGHT_PX))
                     .text_color(muted)
@@ -1323,7 +1383,7 @@ impl McpPanel {
             let json_text = serde_json::to_string_pretty(&response.result)
                 .unwrap_or_else(|_| response.result.to_string());
             div()
-                .px(px(ROW_PAD_START_PX))
+                .px(px(self.body_inset()))
                 .py(px(12.0))
                 .child(code_block(&tokens, &json_text, true))
                 .into_any_element()
@@ -1428,7 +1488,7 @@ impl McpPanel {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(tab_bar)
+            .child(self.tabs("mcp-result-tabs-scroll", "Call result", tab_bar))
             .child(body_wrap)
             .into_any_element()
     }
@@ -1446,7 +1506,7 @@ impl McpPanel {
             .w_full()
             .min_w_0()
             .gap(px(12.0))
-            .px(px(ROW_PAD_START_PX))
+            .px(px(self.body_inset()))
             .py(px(12.0));
 
         if let Some(messages) = messages {
@@ -1682,110 +1742,6 @@ fn tool_title(tool: &McpTool) -> &str {
         .as_deref()
         .or_else(|| tool.annotations.as_ref().and_then(|a| a.title.as_deref()))
         .unwrap_or(&tool.name)
-}
-
-fn tool_badges(tokens: &Tokens, tool: &McpTool) -> Vec<AnyElement> {
-    let Some(hints) = &tool.annotations else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if hints.read_only_hint == Some(true) {
-        out.push(badge(tokens, McpBadgeVariant::Success, "read-only", false).into_any_element());
-    }
-    if hints.destructive_hint == Some(true) {
-        out.push(badge(tokens, McpBadgeVariant::Error, "destructive", false).into_any_element());
-    }
-    if hints.idempotent_hint == Some(true) {
-        out.push(badge(tokens, McpBadgeVariant::Info, "idempotent", false).into_any_element());
-    }
-    if hints.open_world_hint == Some(true) {
-        out.push(badge(tokens, McpBadgeVariant::Outline, "open world", false).into_any_element());
-    }
-    out
-}
-
-fn render_fields_list(tokens: &Tokens, fields: &[McpField]) -> AnyElement {
-    let fg = to_hsla(tokens.foreground);
-    let muted = to_hsla(tokens.muted_foreground);
-    let divider = to_hsla(tokens.shell_divider);
-    let mono: SharedString = MONO_FONT.into();
-
-    let mut card = v_flex()
-        .w_full()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(divider);
-
-    for (idx, field) in fields.iter().enumerate() {
-        let mut header = h_flex()
-            .items_baseline()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .font_family(mono.clone())
-                    .text_size(px(UI_TEXT_PX))
-                    .line_height(px(UI_LINE_HEIGHT_PX))
-                    .text_color(fg)
-                    .child(field.name.clone()),
-            )
-            .child(
-                div()
-                    .text_size(px(XS_TEXT_PX))
-                    .line_height(px(XS_LINE_HEIGHT_PX))
-                    .text_color(muted)
-                    .child(field_type_label(field.field_type)),
-            );
-        if field.required {
-            header = header.child(
-                div()
-                    .text_size(px(XS_TEXT_PX))
-                    .line_height(px(XS_LINE_HEIGHT_PX))
-                    .text_color(muted)
-                    .child("required"),
-            );
-        }
-
-        let mut row = v_flex()
-            .w_full()
-            .gap(px(2.0))
-            .px(px(12.0))
-            .py(px(8.0))
-            .when(idx > 0, |el| el.border_t_1().border_color(divider))
-            .child(header);
-        if let Some(description) = &field.description {
-            row = row.child(
-                div()
-                    .text_size(px(XS_TEXT_PX))
-                    .line_height(px(XS_LINE_HEIGHT_PX))
-                    .text_color(muted)
-                    .child(description.clone()),
-            );
-        }
-        if !field.options.is_empty() {
-            row = row.child(
-                div()
-                    .font_family(mono.clone())
-                    .text_size(px(XS_TEXT_PX))
-                    .line_height(px(XS_LINE_HEIGHT_PX))
-                    .text_color(muted)
-                    .child(field.options.join(" | ")),
-            );
-        }
-        card = card.child(row);
-    }
-
-    v_flex()
-        .w_full()
-        .gap(px(8.0))
-        .child(
-            div()
-                .text_size(px(XS_TEXT_PX))
-                .line_height(px(XS_LINE_HEIGHT_PX))
-                .text_color(muted)
-                .child("Input"),
-        )
-        .child(card)
-        .into_any_element()
 }
 
 /// Placeholder for a catalog search input (`"Tools"`, `"Resources"`, `"Prompts"`).

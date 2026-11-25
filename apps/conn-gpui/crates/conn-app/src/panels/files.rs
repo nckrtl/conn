@@ -2179,7 +2179,7 @@ impl FilesPanel {
         muted: gpui_kit::Hsla,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
-        let hover = to_hsla(self.tokens.shell_highlight);
+        let active_bg = to_hsla(self.tokens.shell_highlight);
         let project = self.project_name();
         let crumbs = file_path::breadcrumbs(&project, path);
         let last = crumbs.len().saturating_sub(1);
@@ -2205,47 +2205,35 @@ impl FilesPanel {
                 path: crumb_path,
                 is_file,
             } = crumb;
-            let tooltip = if crumb_path.is_empty() {
-                project.clone()
-            } else {
-                crumb_path.clone()
-            };
             let slug = format!("{index}");
-            if is_file {
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("files-crumb-{slug}")))
-                        .a11y_group(format!("panel.files.crumb.{slug}"), label.clone())
-                        .flex_shrink_0()
-                        .max_w(px(160.0))
-                        .truncate()
-                        .px(px(CRUMB_PAD_PX))
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .text_color(fg)
-                        .conn_tooltip(tooltip, &self.tokens)
-                        .child(label.clone()),
-                );
+            let crumb_id = format!("panel.files.crumb.{slug}");
+            let item = div()
+                .id(SharedString::from(format!("files-crumb-{slug}")))
+                .flex_shrink_0()
+                .max_w(px(160.0))
+                .px(px(CRUMB_PAD_PX));
+            let item = if is_file {
+                item.a11y_group(crumb_id, label.clone())
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .text_color(fg)
             } else {
                 let reveal_path = crumb_path.clone();
-                row = row.child(
+                item.a11y_button(crumb_id, label.clone())
+                    .cursor_pointer()
+                    .text_color(muted)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reveal_folder(reveal_path.clone(), cx);
+                    }))
+            };
+            row = row.child(
+                item.child(
                     div()
-                        .id(SharedString::from(format!("files-crumb-{slug}")))
-                        .a11y_button(format!("panel.files.crumb.{slug}"), label.clone())
-                        .flex_shrink_0()
-                        .max_w(px(160.0))
+                        .relative()
+                        .top(px(-1.0))
                         .truncate()
-                        .rounded(px(4.0))
-                        .px(px(CRUMB_PAD_PX))
-                        .cursor_pointer()
-                        .text_color(muted)
-                        .hover(move |s| s.bg(hover).text_color(fg))
-                        .conn_tooltip(tooltip, &self.tokens)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.reveal_folder(reveal_path.clone(), cx);
-                        }))
                         .child(label.clone()),
-                );
-            }
+                ),
+            );
             if index < last {
                 let menu_root = crumb_path;
                 let open = self
@@ -2268,8 +2256,7 @@ impl FilesPanel {
                         .justify_center()
                         .rounded(px(4.0))
                         .cursor_pointer()
-                        .when(open, |el| el.bg(hover))
-                        .hover(move |s| s.bg(hover))
+                        .when(open, |el| el.bg(active_bg))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, _, cx| {

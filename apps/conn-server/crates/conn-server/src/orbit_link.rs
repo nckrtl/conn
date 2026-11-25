@@ -524,6 +524,8 @@ pub fn run_cli(
     ));
     match linked {
         Ok(link) => {
+            // The thread push follows the Gateway this link proved to work.
+            crate::thread_push::remember_gateway(state_dir, gateway_url);
             println!(
                 "Linked {} ({}) with {} access, until {}.\n",
                 link["label"].as_str().unwrap_or_default(),

@@ -354,24 +354,10 @@ pub async fn serve_with_instances(
     config.provider_set = Some(providers.clone());
     config.idle_session = session_idle;
     config.host = Some(host.clone());
+    config.turn_observer = Some(host.clone());
     // A native host tells the Orbit Gateway of each new thread (`thread_push.rs`); a container
     // server and an inert copy do not.
-    let thread_push = if inert || provision.is_some() {
-        None
-    } else {
-        crate::thread_push::sender_from_env().map(|sender| {
-            eprintln!("conn-server: telling the Orbit Gateway of new threads");
-            crate::thread_push::ThreadPush::new(
-                host.clone(),
-                sender,
-                environment.environment_id().to_owned(),
-            )
-        })
-    };
-    config.turn_observer = Some(match &thread_push {
-        Some(push) => push.clone(),
-        None => host.clone(),
-    });
+    config.thread_push = !inert && provision.is_none();
     config.checkpoints = !inert;
     config.recover_runs = !inert;
     config.restart_policy = crate::settings::restart_policy(&environment.settings.raw());
@@ -407,9 +393,6 @@ pub async fn serve_with_instances(
         SqliteEngine::start(config).await,
         "cannot open the engine",
     ));
-    if let Some(push) = &thread_push {
-        push.attach(&sqlite_engine);
-    }
     let engine: Arc<dyn Engine> = sqlite_engine.clone();
     let secrets = conn_features::secrets::SecretRequests::new(
         &state_dir,
@@ -546,6 +529,12 @@ pub async fn serve_with_instances(
             Some(start_managed(provision, &environment, &state, sqlite_engine.clone()).await)
         }
         None => {
+            crate::thread_push::spawn(
+                sqlite_engine.clone(),
+                Arc::new(crate::thread_push::CurlSender::new(state_dir.clone())),
+                crate::thread_push::registered_by(environment.auth.clone()),
+                environment.environment_id().to_owned(),
+            );
             if let Some(sender) = native_attention {
                 crate::attention::spawn(
                     sqlite_engine.clone(),

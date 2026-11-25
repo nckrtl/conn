@@ -399,28 +399,42 @@ is written.
 
 ## New threads reach the Orbit Gateway (2026-11-25)
 
-A native host tells the Gateway of a new thread when its first turn starts, so the Gateway's
-thread librarian files it in seconds instead of after its next read of this server's shell
-(5.2 MB on mini).
+A native host tells the Gateway of every new thread, so the Gateway's thread librarian files it
+in seconds. The Gateway does not poll hosts (the read of mini's shell is 5.2 MB and failed), and
+every thread is created through a Conn Server, so this push is the only way the Gateway learns
+of a thread.
 
 - **Call.** `POST {gateway}/api/v1/conn/environments/{environment_id}/threads` with
   `{"thread_id", "title"}` (Gateway route `conn:thread:record`). The Gateway knows this machine
   by its WireGuard address, so there is no credential. It goes through the system `curl`, as the
   Orbit link does. The environment id is the one in this server's own descriptor, which
   `t3-orbit-register` sent to the Gateway.
-- **On.** `ORBIT_GATEWAY_URL` set to the Gateway's http(s) URL, in the server's launch
-  environment. Registration leaves no state in this server, so the variable is the switch.
-  Container servers and inert copies never push.
-- **Once per thread.** `thread_push.rs` wraps the host's turn observer and acts on
-  `run_ordinal == 1`. It reads the thread's shell row and skips subagents, delegated tasks,
-  side chats, archived threads and threads without a title.
-- **Never in the turn's way.** The call runs on its own task, with a 5 s limit. A failure is
-  logged (never the title) and dropped; the Gateway's read stays the fallback.
-- **Not covered.** A thread whose first run never starts, or one whose title is still the
-  client's placeholder when its first turn starts (a repeat call updates the title on the
-  Gateway; this server does not send one after the generated title). Proof: `cargo test -p
-  conn-server thread_push`, with a fake sender and, for the request, a stand-in Gateway on
-  loopback.
+- **No setup.** A server pushes when Orbit has registered it: its auth store holds a live
+  session labeled "Orbit Gateway", which `t3-orbit-register` issues. A server without one drops
+  its rows and calls nothing. The check runs at each pass, so a registration that finishes after
+  the server starts counts. The Gateway is `https://gateway.orbit`, the default of the link flow
+  and the register script. `ORBIT_GATEWAY_URL` overrides it, as it does for those scripts, and
+  `environment link-orbit` saves the address it used in `orbit-gateway-url` in the state folder.
+  Container servers and inert copies never write rows.
+- **When.** The engine writes one row per thread to `thread_push_outbox` in the commit that
+  starts the thread's first run, and again in the commit that changes its title (the generated
+  title, or a rename). A newer title replaces the row, so the Gateway ends with the latest title
+  (`conn-engine/src/thread_push.rs`). It skips subagents, delegated tasks, side chats, archived
+  threads and threads without a title.
+- **Never in the turn's way.** The row is part of the commit; the call runs on its own task
+  (`thread_push.rs`, 5 s curl limit).
+- **Delivery.** The row stays until the Gateway answers 2xx. A failed call waits 1 s, 5 s, 30 s,
+  then 5 minutes, again and again. The outbox is SQLite, so rows survive a restart and a Gateway
+  outage. A refusal that may pass is retried too: 401, 403, 404, 408, 409, 423, 425, 429 and
+  5xx (for example before the Gateway has stored this server's registration). Any other refusal
+  drops the row. A repeat call is safe: the Gateway updates the thread. The log names a thread
+  id on the first failure only, never a title.
+- **Not covered.** A server that never registered with Orbit sends nothing, and a thread that
+  starts before the registration is not sent later. Memory: the outbox holds one small row per
+  unsent thread, none in memory; not measured on a live host. Proof: `cargo test -p conn-engine
+  thread_push` (rows and rules) and `cargo test -p conn-server thread_push` (sender, backoff,
+  restart, registration, the saved address, and a stand-in Gateway on loopback for the curl
+  call); no live Gateway yet.
 
 ## Typed Gateway client (2026-11-22)
 

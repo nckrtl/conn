@@ -74,15 +74,14 @@ mod streaming;
 mod streams;
 mod t3_import;
 mod thread_find;
+mod thread_push;
 mod time;
 mod titles;
 mod transcript;
 pub use conn_provider::tool_output;
 mod visibility;
 
-pub use attention::{
-    AttentionOutboxRow, RELEASED_COMPLETION_GRACE_MS, eligible as listed_host_thread,
-};
+pub use attention::{AttentionOutboxRow, RELEASED_COMPLETION_GRACE_MS};
 pub use background_wait::{BackgroundWait, BackgroundWaitError};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use engine::{
@@ -99,6 +98,7 @@ pub use streaming::ResponseStreamingMode;
 pub use t3_import::{
     ImportProgress, ImportReport, import_t3_state, import_t3_state_with_progress, open_t3_read_only,
 };
+pub use thread_push::ThreadPushRow;
 
 /// What a [`TitleGenerator`] titles: the first message of a new thread, or a whole thread whose
 /// title the user asked to regenerate.

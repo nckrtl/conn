@@ -2815,6 +2815,7 @@ impl ConnApp {
                             app.layout.selected_project_id = Some(project_id.clone());
                             app.layout.selected_thread_id = Some(final_thread_id.clone());
                         }
+                        app.record_launched_thread(&final_thread_id, &project_id);
                         app.ended_threads.remove(&final_thread_id);
                         connection.subscribe_thread(&final_thread_id);
                         app.chat.update(cx, |chat, cx| chat.set_error(None, cx));

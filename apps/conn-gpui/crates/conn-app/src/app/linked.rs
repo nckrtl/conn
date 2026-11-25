@@ -310,6 +310,17 @@ impl ConnApp {
         Some((agent.server_id.clone(), connection))
     }
 
+    /// Keeps a thread just launched in a linked project on that environment until its shell
+    /// lists it, so a follow-up sent in between goes to the same server.
+    pub(super) fn record_launched_thread(&mut self, thread_id: &str, project_id: &str) {
+        if self.shell.find_thread(thread_id).is_some() {
+            return;
+        }
+        if let Some(environment) = self.linked_environment_of_project(project_id) {
+            self.linked.opened_child = Some((thread_id.to_owned(), environment.to_owned()));
+        }
+    }
+
     /// Remembers the General scratch project `environment` made, until its shell lists it.
     pub(super) fn record_linked_scratch(&mut self, project_id: String, environment: String) {
         self.linked.opened_scratch = Some((project_id, environment));

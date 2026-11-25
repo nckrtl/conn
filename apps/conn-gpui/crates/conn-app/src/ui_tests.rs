@@ -820,6 +820,17 @@ fn spawn_scratch_server(
                                     .expect("send scratch project");
                                 } else if req.tag == "orchestration.launchThread" {
                                     let _ = launch_tx.send(req.payload);
+                                    let reply = conn_wire::FromServer::Exit {
+                                        request_id: req.id,
+                                        exit: conn_wire::Exit::success(
+                                            json!({"threadId": format!("{scratch_id}-thread")}),
+                                        ),
+                                    };
+                                    ws.send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await
+                                    .expect("send launched thread");
                                 }
                                 let _ = tags_tx.send(req.tag);
                             }
@@ -997,6 +1008,21 @@ async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppCon
             .all(|tag| tag != "projects.ensureScratch"),
         "the primary connection makes no General project"
     );
+    // Before the agent's shell lists the new thread, follow-ups still go to the agent Node.
+    let mut owner = None;
+    for _ in 0..200 {
+        cx.run_until_parked();
+        owner = cx.read(|cx| {
+            app.read(cx)
+                .linked_environment_of_thread("agent-scratch-thread")
+                .map(str::to_owned)
+        });
+        if owner.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(owner.as_deref(), Some("agent"));
 }
 
 #[gpui_kit::test]

@@ -85,6 +85,16 @@ enum KeychainStore {
         return created
     }
 
+    /// A named secret outside the session, such as the dictation sign-in.
+    static func loadSecret(account: String) -> String? { read(account: account) }
+
+    @discardableResult
+    static func saveSecret(_ value: String, account: String) -> Bool {
+        write(value, account: account) == errSecSuccess
+    }
+
+    static func deleteSecret(account: String) { delete(account: account) }
+
     private static func read(account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

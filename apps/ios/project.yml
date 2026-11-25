@@ -48,6 +48,8 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSLocalNetworkUsageDescription: Conn connects to your conn-server on the local network.
+        NSMicrophoneUsageDescription: Conn records your voice to dictate messages.
+        NSSpeechRecognitionUsageDescription: Conn uses speech recognition on this device to turn your dictation into text.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true

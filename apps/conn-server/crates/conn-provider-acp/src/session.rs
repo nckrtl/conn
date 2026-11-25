@@ -141,6 +141,7 @@ pub(crate) struct Config {
     /// The catalog's default model, used when the selection asks for the default
     /// (`applyAntigravityAcpModelSelection`'s `defaultModel`).
     pub default_model: Option<String>,
+    pub skill_cli: Option<(String, Vec<(String,String)>)>,
     /// Told about the session's config options and commands as the agent reports them.
     pub observer: Option<Observer>,
 }
@@ -220,8 +221,14 @@ struct State<E: Env> {
     prompt_request: Option<i64>,
     /// The prompt id of the running turn, for Grok's `prompt_complete`.
     active_prompt: Option<(u64, String)>,
+    last_progress: tokio::time::Instant,
+    prompt_watchdog: Option<tokio::task::JoinHandle<()>>,
+    commands: Option<Vec<String>>,
+    previous_mode: Option<String>,
     instruction_state: Option<InstructionState>,
     delivered_notes: Option<String>,
+    delivered_context: std::collections::HashMap<String, String>,
+    replay_activity: Option<(String, tokio::sync::watch::Sender<Option<tokio::time::Instant>>)>,
     /// What the running prompt delivers once it succeeds.
     delivery: Option<Delivery>,
     flush_armed: bool,
@@ -271,6 +278,7 @@ type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
 /// records `promptInstructionStates` and `promptRuntimeInstructions` in the reply callback.
 #[derive(Debug)]
 struct Delivery {
+    app_context: Vec<conn_provider::AppContextEntry>,
     instruction_state: Option<InstructionState>,
     notes: Option<String>,
     /// The compaction marker the prompt saw when it was built.
@@ -479,30 +487,12 @@ impl AcpSession {
                 .session_id
                 .clone()
                 .unwrap_or_default();
-            // `resumeMethod: "resume"` (Antigravity): `session/resume` when the agent offers it.
-            let method = if inner.config.flavor.resume
-                && !initialize["agentCapabilities"]["sessionCapabilities"]["resume"].is_null()
-            {
-                "session/resume"
-            } else {
-                "session/load"
-            };
-            let setup = match connection
-                .call(
-                    method,
-                    inner.session_setup_params(&initialize, Some(&session_id)),
-                )
-                .await
-            {
-                Ok(setup) => setup,
-                Err(error) => {
-                    inner.end_runtime().await;
-                    return Err(failed(inner.config.flavor, method, &error));
-                }
-            };
+            if let Err(error) = inner.activate(&connection, &initialize, &session_id).await {
+                inner.end_runtime().await;
+                return Err(error);
+            }
             let mut state = inner.state.lock().await;
             state.initialize = initialize;
-            state.setup = setup;
             state.restart_required = false;
             state.active_model = None;
         }
@@ -526,6 +516,15 @@ impl AcpSession {
             input.message.text.clone()
         };
         // The attachment paths check the disk: off the runtime thread.
+        let user_text = if let Some((binary,env))=&inner.config.skill_cli
+            && let Some(mention)=user_text.trim_start().strip_prefix('$') {
+            let end=mention.find(|c:char| !(c.is_ascii_alphanumeric() || matches!(c,'_' | '-' | '.'))).unwrap_or(mention.len());
+            let (name,rest)=mention.split_at(end);
+            if name.starts_with(|c:char|c.is_ascii_alphabetic()) &&
+                crate::grok_status::discover_skills(binary,env,Some(std::path::Path::new(&inner.config.cwd)),Duration::from_secs(4)).await
+                .is_some_and(|skills|skills.iter().any(|sk|sk["name"]==name && sk["enabled"]==true)) { format!("/{name}{rest}") }
+            else {user_text}
+        }else{user_text};
         let message_text = {
             let (text, attachments, dir) = (
                 user_text.clone(),
@@ -590,7 +589,7 @@ impl AcpSession {
                     .ok()
                     .is_some_and(|v| v == "plan"),
                 has_t3_mcp: inner.has_t3_mcp(),
-                has_device_tools: false,
+                has_device_tools: inner.config.mcp_servers.iter().any(|s| s.name == "conn" && s.device_tools),
             };
             // A compacted session gets T3's instructions and notes again.
             let compaction_marker = state.mapper.compaction_marker();
@@ -636,10 +635,17 @@ impl AcpSession {
                     "ACP turn requires non-empty text or attachments",
                 ));
             }
+            let app_context: Vec<_> = input.app_context.iter().filter(|entry|
+                !slash && state.delivered_context.get(&entry.key) != Some(&entry.text)
+            ).cloned().collect();
+            blocks.splice(0..0, app_context.iter().map(|entry|
+                obj().with("type", "text").with("text", format!("<external_{0}>{1}</external_{0}>", entry.key, entry.text))
+            ));
             if send_notes {
                 blocks.push(obj().with("type", "text").with("text", notes.clone()));
             }
             state.delivery = Some(Delivery {
+                app_context,
                 instruction_state: (text != message_text).then_some(instruction_state),
                 notes: send_notes.then_some(notes),
                 compaction_marker,
@@ -665,6 +671,8 @@ impl AcpSession {
             inner.deliver(&mut state, outs).await;
             // The reply comes back through the driver, in order with the turn's updates.
             state.prompt_request = connection.send("session/prompt", params).await;
+            if state.prompt_request.is_none() {return Err(ProviderError::SessionStopped)}
+            inner.arm_inactivity(&mut state);
         }
         Ok(())
     }
@@ -710,9 +718,15 @@ impl AcpSession {
                 setup: Value::Null,
                 prompt_seq: 0,
                 active_prompt: None,
+                last_progress: tokio::time::Instant::now(),
+                prompt_watchdog: None,
+                commands: None,
+                previous_mode: None,
                 prompt_request: None,
                 instruction_state: None,
                 delivered_notes: None,
+                delivered_context: Default::default(),
+                replay_activity: None,
                 delivery: None,
                 flush_armed: false,
                 subagent_flush_armed: false,
@@ -738,8 +752,9 @@ impl AcpSession {
         let steps = Self::open_steps(&inner, on_step.as_deref(), session_new.as_deref());
         let outcome = match abort {
             Some(abort) => tokio::select! {
-                outcome = steps => outcome,
+                biased;
                 () = abort => Err(OpenError::Aborted),
+                outcome = steps => outcome,
             },
             None => steps.await,
         };
@@ -936,7 +951,7 @@ impl Inner {
         self.authenticate(connection, &initialize).await?;
         record(SessionNew::Sent);
         let setup = connection
-            .call("session/new", self.session_setup_params(&initialize, None))
+            .setup_call("session/new", self.session_setup_params(&initialize, None))
             .await
             .map_err(|e| call_failed(self.config.flavor, "session/new", e))?;
         let session_id = setup["sessionId"]
@@ -972,6 +987,52 @@ impl Inner {
         Ok(session_id)
     }
 
+    /// Activate the saved native conversation before publishing its thread or accepting input.
+    async fn activate(self: &Arc<Self>, connection: &Connection, initialize: &Value, session_id: &str) -> ProviderResult<()> {
+        let agent = &initialize["agentCapabilities"];
+        let caps = &initialize["capabilities"]["session"];
+        let method = if self.config.flavor.resume && (!agent["sessionCapabilities"]["resume"].is_null() || !caps["resume"].is_null()) {
+            "session/resume"
+        } else if agent["loadSession"] == true || caps.get("load").is_some_and(Value::is_object) {
+            "session/load"
+        } else {
+            return Err(protocol_error("The ACP agent did not advertise conversation loading or resumption"));
+        };
+        let params = self.session_setup_params(initialize, Some(session_id));
+        let (tx,mut rx) = tokio::sync::watch::channel(None);
+        let allow_idle = method == "session/load" && self.config.flavor.completion == Completion::XAiPromptComplete;
+        {
+            let mut state = self.state.lock().await;
+            if state.mapper.has_turn() || state.closed { return Err(protocol_error("Cannot activate a saved ACP conversation during a turn or after close")); }
+            state.replay_activity = Some((session_id.to_owned(), tx));
+        }
+        let idle = async {
+            loop {
+                let at = *rx.borrow_and_update();
+                if let Some(at) = at {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(at + Duration::from_secs(2)) => break,
+                        changed = rx.changed() => if changed.is_err() { std::future::pending::<()>().await; },
+                    }
+                } else if rx.changed().await.is_err() { std::future::pending::<()>().await; }
+            }
+        };
+        let setup = tokio::select! {
+            biased;
+            setup = connection.setup_call(method, params) => setup,
+            () = idle, if allow_idle => Ok(json!({})),
+        };
+        let mut state = self.state.lock().await;
+        state.replay_activity = None;
+        let setup = setup.map_err(|e| failed(self.config.flavor, method, &e))?;
+        if state.closed || state.runtime.is_none() { return Err(ProviderError::SessionStopped); }
+        state.session_id = Some(session_id.to_owned());
+        state.mapper.set_root_session(session_id);
+        state.setup = setup;
+        state.active_model = None;
+        Ok(())
+    }
+
     /// Ends the current runtime as a close does, and keeps the session: a failed restart
     /// leaves no agent, no `run-*` folder and (on Linux) no process tree behind. The driver
     /// ignores its exit; when it is ending the agent already, this waits for it.
@@ -993,6 +1054,10 @@ impl Inner {
         // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
         // the agent, and the observer hears both.
         let update = &params["update"];
+        if matches!(update["sessionUpdate"].as_str(),Some("agent_message_chunk"|"agent_thought_chunk"|"agent_message"|"agent_thought"|"tool_call"|"tool_call_update"|"plan"|"plan_update"|"compaction_update"|"usage_update")) {
+            state.last_progress=tokio::time::Instant::now();
+        }
+        if update["sessionUpdate"]=="current_mode_update" {state.setup["modes"]["currentModeId"]=update["currentModeId"].clone();}
         if update["sessionUpdate"] == "config_option_update"
             && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
         {
@@ -1003,6 +1068,7 @@ impl Inner {
         if update["sessionUpdate"] == "available_commands_update"
             && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
         {
+            state.commands = commands.as_array().map(|a|a.iter().filter_map(|c|c["name"].as_str().map(str::to_owned)).collect());
             self.observe(state, HeldUpdate::AvailableCommands(commands.clone()));
         }
         let outs = state.mapper.session_update(params);
@@ -1026,7 +1092,7 @@ impl Inner {
         };
         let params = initialize_params(flavor, &name, &version, true);
         connection
-            .call("initialize", params)
+            .setup_call("initialize", params)
             .await
             .map_err(|e| call_failed(flavor, "initialize", e))
     }
@@ -1048,7 +1114,7 @@ impl Inner {
             "authenticate"
         };
         connection
-            .call(
+            .setup_call(
                 method,
                 obj().with(
                     "methodId",
@@ -1119,7 +1185,7 @@ impl Inner {
         if let Some((model_id, effort)) = &switch {
             let call = |effort: Option<&String>| {
                 let meta = effort.map(|e| obj().with("reasoningEffort", e.clone()));
-                connection.call(
+                connection.setup_call(
                     "session/set_model",
                     obj()
                         .with("sessionId", session_id.clone())
@@ -1135,7 +1201,7 @@ impl Inner {
                     if let Some((model_id, _)) = retry {
                         let meta: Option<J> = None;
                         connection
-                            .call(
+                            .setup_call(
                                 "session/set_model",
                                 obj()
                                     .with("sessionId", session_id.clone())
@@ -1187,7 +1253,7 @@ impl Inner {
         })?;
         if let Some((config_id, value)) = switch {
             let reply = connection
-                .call(
+                .setup_call(
                     "session/set_config_option",
                     obj()
                         .with("sessionId", session_id)
@@ -1225,7 +1291,7 @@ impl Inner {
             .with("sessionId", session_id)
             .with("configId", config_id.clone())
             .with("value", value.clone());
-        match connection.call("session/set_config_option", params).await {
+        match connection.setup_call("session/set_config_option", params).await {
             Ok(reply) => {
                 let mut state = self.state.lock().await;
                 self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
@@ -1400,6 +1466,36 @@ impl Inner {
         });
     }
 
+    fn arm_inactivity(self:&Arc<Self>, state:&mut State<DynEnv>){
+        if let Some(previous)=state.prompt_watchdog.take() {previous.abort();}
+        if self.config.flavor.driver!="antigravity"{return}
+        let weak=Arc::downgrade(self);
+        let generation=state.generation;
+        let request=state.prompt_request;
+        state.last_progress=tokio::time::Instant::now();
+        state.prompt_watchdog=Some(tokio::spawn(async move{
+            const LIMIT: Duration=Duration::from_secs(15*60);
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let Some(inner)=weak.upgrade() else{return};
+                let mut state=inner.state.lock().await;
+                if state.generation!=generation || state.active_prompt.is_none() || state.prompt_request!=request{return}
+                if state.mapper.waiting_for_input_or_tool(){state.last_progress=tokio::time::Instant::now();continue}
+                if state.last_progress.elapsed()<LIMIT {continue}
+                state.active_prompt=None;
+                state.prompt_request=None;
+                state.delivery=None;
+                let outs=state.mapper.prompt_settled(PromptOutcome::Failed{message:"The Antigravity agent stopped responding for 15 minutes.".into(),code:None});
+                inner.deliver(&mut state,outs).await;
+                state.restart_required=true;
+                state.prompt_watchdog.take();
+                drop(state);
+                inner.end_runtime().await;
+                return;
+            }
+        }));
+    }
+
     /// Settles the running prompt once (reply, or Grok's completion notification).
     async fn settle(
         self: &Arc<Self>,
@@ -1419,11 +1515,14 @@ impl Inner {
         if state.active_prompt.take().is_none() {
             return;
         }
+        let outcome = state.mapper.prompt_outcome(outcome);
+        if let Some(timer)=state.prompt_watchdog.take(){timer.abort();}
         let delivery = state.delivery.take();
         // Grok cancels locally, refusals discard the prompt, and errors need a retry.
         if let Some(delivery) = delivery
             && matches!(&outcome, PromptOutcome::Stopped(reason) if reason != "cancelled" && reason != "refusal" && reason != "error")
         {
+            state.delivered_context.extend(delivery.app_context.into_iter().map(|e| (e.key,e.text)));
             if let Some(instruction_state) = delivery.instruction_state {
                 state.instruction_state = Some(instruction_state);
                 state
@@ -1466,6 +1565,18 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 handle_notification(&inner, generation, &method, &params).await;
             }
             Incoming::Request { id, method, params } => {
+                if method == "elicitation/create" {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {continue}
+                    let schema = &params["requestedSchema"];
+                    let out = if state.mapper.has_turn() && params["mode"] == "form"
+                        && let Some(questions) = crate::elicitation::form_questions(schema,params["message"].as_str().unwrap_or("Choose an option.")) {
+                        let native_id = format!("{}:elicitation:{}",state.session_id.as_deref().unwrap_or(""),id.to_value());
+                        state.mapper.user_input_request(id, &native_id,&native_id,questions,mapper::Pending::Form(schema.clone()))
+                    } else { vec![Out::Reply{id,result:obj().with("action","decline")}] };
+                    inner.deliver(&mut state,out).await;
+                    continue;
+                }
                 if method == "session/request_permission" {
                     handle_permission(&inner, generation, id, &params).await;
                     continue;
@@ -1532,12 +1643,16 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     continue;
                 }
                 let outcome = match result {
-                    Ok(reply) => PromptOutcome::Stopped(
+                    Ok(reply) => {
+                        if inner.config.flavor.driver == "antigravity" {
+                            inner.state.lock().await.mapper.record_prompt_usage(&reply["usage"]);
+                        }
+                        PromptOutcome::Stopped(
                         reply["stopReason"]
                             .as_str()
                             .unwrap_or("end_turn")
                             .to_owned(),
-                    ),
+                    )},
                     Err(CallError::Rpc(error)) => PromptOutcome::Failed {
                         message: error.message,
                         code: Some(error.code),
@@ -1636,6 +1751,15 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
             .or_else(|| state.mapper.tracked_tool_kind(tool_call_id));
         (params, state.policy.clone(), kind)
     };
+    if inner.config.flavor.driver == "antigravity" && let Some(key) = params["toolCall"]["toolCallId"].as_str().filter(|s| s.starts_with("interaction_")) {
+        let mut state = inner.state.lock().await;
+        if state.generation != generation {return}
+        let out = if state.mapper.has_turn() && let Some(questions)=crate::elicitation::permission_question(&params){
+            state.mapper.user_input_request(id,key,key,questions.clone(),mapper::Pending::AntigravityQuestion(questions))
+        }else{vec![Out::Reply{id,result:obj().with("outcome",obj().with("outcome","cancelled"))}]};
+        inner.deliver(&mut state,out).await;
+        return;
+    }
     let locations: Vec<String> = params["toolCall"]["locations"]
         .as_array()
         .into_iter()
@@ -1673,6 +1797,19 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
         let mut state = inner.state.lock().await;
         if state.generation != generation {
             return;
+        }
+        if let Some((target,activity)) = &state.replay_activity
+            && params["sessionId"] == target.as_str() {
+            let update = &params["update"];
+            let progress = match update["sessionUpdate"].as_str() {
+                Some("agent_message_chunk" | "agent_thought_chunk") => update["content"]["text"].as_str().is_some_and(|t| !t.is_empty()),
+                Some("agent_message" | "agent_thought") => update["content"].as_array().is_some_and(|items| items.iter().any(|v| v["text"].as_str().is_some_and(|t| !t.is_empty()))),
+                Some("tool_call" | "tool_call_update" | "plan" | "plan_update" | "plan_removed" | "available_commands_update" | "current_mode_update" | "config_option_update" | "session_info_update" | "usage_update" | "compaction_update" | "compaction_summary_chunk") => true,
+                _ => false,
+            };
+            if params["_meta"]["isReplay"] == true || progress { activity.send_replace(Some(tokio::time::Instant::now())); }
+            // A load can replay the user's entire history. The engine already owns those turns.
+            if !is_startup_metadata(params) { return; }
         }
         let Some(root) = state.session_id.clone() else {
             // Starting: keep the latest metadata per session and kind until the root is known.
@@ -1847,6 +1984,15 @@ fn xai_prompt_complete(method: &str, params: &Value) -> Option<(String, PromptOu
 
 /// `acpMcpContext` + `sessionMcpServers` for each `/mcp` server (see
 /// `Inner::session_mcp_servers`).
+pub(crate) fn apply_thread_environment(env: &mut Vec<(String, String)>, thread_id: &str, servers: &[McpServer], command: &str) {
+    let Some(server) = servers.iter().find(|s| s.name == "conn") else { return };
+    let Some((_, auth)) = server.headers.iter().find(|(k,_)| k.eq_ignore_ascii_case("authorization")) else { return };
+    for (name, value) in [("T3CODE_THREAD_ID", thread_id), ("T3_ACP_MCP_NODE", command), ("T3_ACP_MCP_ENDPOINT", server.url.as_str()), ("T3_ACP_MCP_AUTHORIZATION", auth)] {
+        env.retain(|(k,_)| k != name);
+        env.push((name.to_owned(),value.to_owned()));
+    }
+}
+
 fn mcp_entries(
     flavor: &Flavor,
     servers: &[McpServer],
@@ -1924,6 +2070,15 @@ impl Session for AcpSession {
     ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
         Box::pin(async move {
             let mut thread = to_json(&input.provider_thread);
+            let native = thread["nativeThreadRef"]["nativeId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| protocol_error("Saved ACP conversation has no native id"))?;
+            let inner = &self.inner;
+            let state = inner.state.lock().await;
+            if state.session_id.as_deref() != Some(native) {
+                let connection = state.runtime.as_ref().ok_or(ProviderError::SessionStopped)?.connection.clone();
+                let initialize = state.initialize.clone();
+                drop(state);
+                inner.activate(&connection, &initialize, native).await?;
+            }
             thread["providerSessionId"] = json!(self.inner.config.provider_session_id);
             thread["status"] = json!("idle");
             from_json(thread).map_err(|e| protocol_error(format!("provider thread: {e}")))
@@ -1943,6 +2098,45 @@ impl Session for AcpSession {
                 *abandoned = None;
             }
             result
+        })
+    }
+
+    fn steer_turn(&self, input:conn_provider::SteerInput)->BoxFuture<'_,ProviderResult<()>> {
+        Box::pin(async move {
+            let inner=&self.inner;
+            let attachments:Vec<_>=input.message.attachments.iter().map(to_json).collect();
+            let images=inner.image_blocks(&attachments).await?;
+            let mut state=inner.state.lock().await;
+            if state.mapper.current_provider_turn_id()!=Some(input.provider_turn_id.as_str()) || state.mapper.turn_interrupted(){
+                return Err(protocol_error("The ACP turn is no longer active"));
+            }
+            let connection=state.runtime.as_ref().ok_or(ProviderError::SessionStopped)?.connection.clone();
+            let native=state.session_id.clone().ok_or(ProviderError::SessionStopped)?;
+            let entries:Vec<_>=input.app_context.into_iter().filter(|e| !input.message.text.trim_start().starts_with('/') && state.delivered_context.get(&e.key)!=Some(&e.text)).collect();
+            let notes:Vec<_>=entries.iter().map(|e|format!("<external_{0}>{1}</external_{0}>",e.key,e.text)).collect();
+            if inner.config.flavor.driver=="grok" {
+                if images.len()!=attachments.len(){return Err(ProviderError::Unsupported{operation:"steer_turn"})}
+                let text=if notes.is_empty(){input.message.text}else{[notes.join("\n"),input.message.text].join("\n\n")};
+                let params=obj().with("sessionId",native).with("text",text).with_opt("content",(!images.is_empty()).then_some(J::Arr(images)));
+                drop(state);
+                let reply=connection.setup_call("_x.ai/interject",params).await.map_err(|e|failed(inner.config.flavor,"_x.ai/interject",&e))?;
+                if reply["result"]["status"]!="queued"{return Err(protocol_error("Grok did not queue the interjection"))}
+                inner.state.lock().await.delivered_context.extend(entries.into_iter().map(|e|(e.key,e.text)));
+                return Ok(());
+            }
+            if !crate::antigravity::version_triple(state.initialize["agentInfo"]["version"].as_str()).is_some_and(|v| v>=[1,5,0]){
+                return Err(ProviderError::Unsupported{operation:"steer_turn"});
+            }
+            let mut blocks:Vec<_>=notes.into_iter().map(|s|obj().with("type","text").with("text",s)).collect();
+            blocks.push(obj().with("type","text").with("text",input.message.text));
+            blocks.extend(images);
+            let params=obj().with("sessionId",native).with("prompt",J::Arr(blocks));
+            let request=connection.send("session/prompt",params).await.ok_or(ProviderError::SessionStopped)?;
+            state.prompt_request=Some(request);
+            state.active_prompt=Some((state.generation,String::new()));
+            if let Some(delivery)=state.delivery.as_mut(){delivery.app_context.extend(entries);}
+            inner.arm_inactivity(&mut state);
+            Ok(())
         })
     }
 
@@ -2132,6 +2326,7 @@ mod spawn_tests {
             runtime_version: None,
             self_command: "/conn-server".into(),
             default_model: None,
+            skill_cli: None,
             observer: None,
         }
     }

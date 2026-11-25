@@ -87,9 +87,11 @@ impl Lane {
 /// made them. After a process loss they are cancelled, and the restart decides again from the
 /// stored runs (`restart.rs`). Every other effect is replay-safe and runs again
 /// (`REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS`).
-pub(crate) const PROCESS_BOUND: [&str; 7] = [
+pub(crate) const PROCESS_BOUND: [&str; 9] = [
     "provider-turn.start",
     "provider-turn.steer",
+    "provider-thread.rename",
+    "provider-subagent.stop",
     "provider-turn.interrupt",
     "provider-turn.abandon-start",
     "provider-turn.stop-background-work",
@@ -104,6 +106,8 @@ impl Effect {
             Self::Rollback(_) => "provider-thread.rollback",
             Self::CaptureCheckpoint { .. } => "checkpoint.capture",
             Self::StartTurn { .. } => "provider-turn.start",
+            Self::RenameThread { .. } => "provider-thread.rename",
+            Self::StopSubagent { .. } => "provider-subagent.stop",
             Self::Steer { .. } => "provider-turn.steer",
             Self::Interrupt { .. } => "provider-turn.interrupt",
             Self::AbandonStart { .. } => "provider-turn.abandon-start",
@@ -124,6 +128,8 @@ impl Effect {
             Self::Rollback(request) => &request.thread_id,
             Self::CaptureCheckpoint { thread_id, .. }
             | Self::StartTurn { thread_id, .. }
+            | Self::RenameThread { thread_id, .. }
+            | Self::StopSubagent { thread_id, .. }
             | Self::Steer { thread_id, .. }
             | Self::Interrupt { thread_id, .. }
             | Self::AbandonStart { thread_id, .. }

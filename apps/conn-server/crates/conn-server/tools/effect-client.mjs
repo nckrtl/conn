@@ -721,6 +721,9 @@ const decodeEach = (client) =>
     );
     yield* call("server.reclaimDatabaseSpace", {});
     // An unknown thread: T3's typed refusal.
+    const missingMcp = { threadId: "effect-client-none", providerThreadId:"missing", server:"example" };
+    yield* call("provider.mcpSignIn.start", missingMcp);
+    yield* call("provider.mcpSignIn.complete", {...missingMcp,callbackUrl:"http://localhost/cb"});
     yield* call("provider.uploadFeedback", { threadId: "effect-client-none" });
     yield* call("server.upsertKeybinding", { key: "mod+shift+f12", command: "sidebar.toggle" });
     yield* call("server.removeKeybinding", { key: "mod+shift+f12", command: "sidebar.toggle" });

@@ -292,7 +292,11 @@ pub async fn refresh(deps: &Deps, only: Option<&str>) {
     };
     for provider in deps.providers.snapshot() {
         let id = provider.instance_id().as_str();
-        if id == only {
+        if let (Some(instances), Some(environment)) = (&deps.instances, &deps.environment) {
+        super::source_control::refresh_login_path().await;
+        instances.reconcile_after_refresh(&deps.providers, &environment.settings.raw(), true).await;
+    }
+    if id == only {
             provider.refresh_status(instance_settings(deps, id)).await;
         }
     }

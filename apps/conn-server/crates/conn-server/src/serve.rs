@@ -46,7 +46,7 @@ pub struct ServeOptions {
     /// Started by Conn desktop with its bootstrap credential.
     pub desktop: Option<DesktopBootstrap>,
     /// How long an idle provider session stays open; `None` keeps it open.
-    pub session_idle: Option<Duration>,
+    pub session_idle: conn_engine::IdleTimeout,
     /// `--sdk-host`. Read by `main` when it builds the Claude provider.
     pub sdk_host: Option<PathBuf>,
     /// `--managed-provision`: serve managed callers on a second ingress

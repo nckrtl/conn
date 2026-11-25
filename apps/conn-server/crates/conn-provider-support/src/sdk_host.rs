@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 /// A helper line longer than this is dropped. Large tool results (images as base64) stay below.
-const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-/// Events buffered per query before the router waits for that query's driver.
+const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+/// Data events buffered per query. One extra slot always admits its terminal event.
 const QUERY_EVENT_CAPACITY: usize = 256;
 /// Environment variable naming the helper (a Node single executable, or an `.mjs` script).
 pub const HELPER_ENV: &str = "CONN_SDK_HOST";
@@ -275,7 +275,7 @@ impl Helper {
     /// Opens a query with this option object. `extra` holds the open command's other fields
     /// (`subagentStartContext`, `wrap`).
     pub fn open(&self, options: Value, extra: Value) -> ProviderResult<Query> {
-        let (tx, events) = mpsc::channel(QUERY_EVENT_CAPACITY);
+        let (tx, events) = mpsc::channel(QUERY_EVENT_CAPACITY + 1);
         let (id, writer) = {
             let mut state = self.inner.lock();
             let writer = self.inner.ensure_running(&mut state)?;
@@ -439,6 +439,9 @@ impl Inner {
         command["id"] = json!(id);
         let line = (self.driver.encode)(&command);
         drop(command);
+        if line.len() > MAX_LINE_BYTES {
+            return Err("the SDK host command exceeds the 32 MiB frame limit".into());
+        }
         let exchange = async {
             writer
                 .send(line)
@@ -628,8 +631,27 @@ async fn dispatch_sdk(inner: &Inner, mut line: Value) {
             state.queries.get(&query).map(|(_, tx)| tx.clone())
         }
     };
-    if let Some(tx) = tx {
-        let _ = tx.send(event).await;
+    let Some(tx) = tx else { return };
+    if end || tx.capacity() > 1 {
+        let _ = tx.try_send(event);
+        return;
+    }
+    // The shared reader must still dispatch other sessions' control replies. Keep all
+    // frames delivered so far in order and fail just this session at its reserved slot.
+    let writer = {
+        let mut state = inner.lock();
+        state.queries.remove(&query);
+        state.running.as_ref().map(|host| host.process.writer())
+    };
+    let _ = tx.try_send(QueryEvent::End(QueryEnd::helper_failed(
+        "Claude produced events faster than this session could consume them",
+    )));
+    if let Some(writer) = writer {
+        tokio::spawn(async move {
+            let _ = writer
+                .send(json!({"t": "abort", "sessionId": query}).to_string())
+                .await;
+        });
     }
 }
 

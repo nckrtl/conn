@@ -9,7 +9,7 @@
 //! behind one `std` mutex that is never held across an `.await`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -100,6 +100,7 @@ struct Inner {
 
 struct State {
     mapper: Mapper<SystemEnv>,
+    goal_stop_check: Option<conn_provider::GoalStopCheck>,
     events: Option<mpsc::Sender<ProviderEvent>>,
     live: Option<Live>,
     generation: u64,
@@ -107,7 +108,7 @@ struct State {
     resumable: HashSet<String>,
     mcp_servers: Vec<McpServer>,
     /// Inline attachment bytes sent so far (`claudeAttachmentBudget`).
-    attachment_bytes: u64,
+    attachment_budget: attachments::Budget,
     /// The running turn's prompt effort, for its steers.
     turn_prompt_effort: Option<String>,
     /// `resolveBypassAvailability`, cached per working directory (T3's `bypassCache`).
@@ -300,6 +301,9 @@ struct Live {
     /// The mode the CLI reported in its first `init` (T3's `openedPermissionMode`).
     opened_permission_mode: String,
     received_init: bool,
+    emitted: VecDeque<String>,
+    check_sign_ins: bool,
+    announced_sign_ins: HashSet<String>,
     mcp_apps_capable: bool,
     model: String,
     effort: Option<String>,
@@ -338,6 +342,7 @@ impl ClaudeSession {
             applied_titles,
             state: Mutex::new(State {
                 mapper,
+                goal_stop_check: None,
                 events: Some(events),
                 live: None,
                 generation: 0,
@@ -345,7 +350,7 @@ impl ClaudeSession {
                 // Registered with `setMcpServers` once the first query is initialized, as
                 // T3's query runner does, so taking them at open sends the same.
                 mcp_servers,
-                attachment_bytes: 0,
+                attachment_budget: attachments::Budget::default(),
                 turn_prompt_effort: None,
                 bypass_cache: None,
                 closed: false,
@@ -393,7 +398,17 @@ impl Inner {
         let events = self.lock().events.clone();
         for out in outs {
             match out {
-                Out::Event(event) => {
+                Out::Event(mut event) => {
+                    if let ProviderEvent::ProviderThreadUpdated { provider_thread } = &mut event {
+                        let budget = self.lock().attachment_budget;
+                        if budget.bytes > 0 || budget.pages > 0 {
+                            let mut row = to_json(provider_thread);
+                            row["nativeMetadata"]["claudeAttachmentBudget"] = budget.metadata();
+                            if let Ok(updated) = from_json(row) {
+                                *provider_thread = updated;
+                            }
+                        }
+                    }
                     if let Some(events) = &events {
                         let _ = events.send(event).await;
                     }
@@ -540,6 +555,16 @@ impl Inner {
         }
     }
 
+    fn bound_query(&self, thread: &ProviderThread) -> ProviderResult<QueryHandle> {
+        let native = native_thread_id(thread);
+        self.lock()
+            .live
+            .as_ref()
+            .filter(|l| native.as_deref() == Some(l.native_thread_id.as_str()) && l.query.is_open())
+            .map(|l| l.query.clone())
+            .ok_or(ProviderError::SessionStopped)
+    }
+
     fn mcp_app_query(&self, thread: &conn_contract::ProviderThread) -> ProviderResult<QueryHandle> {
         let native = native_thread_id(thread);
         let state = self.lock();
@@ -669,6 +694,7 @@ fn callback_request(kind: &str, args: &Value) -> Option<ControlRequest> {
                 tool_use_id: text(options, "toolUseID").unwrap_or_default(),
                 permission_suggestions: options.get("suggestions").cloned(),
                 decision_reason: text(options, "decisionReason"),
+                matched_ask_rule: options.get("matchedAskRule").cloned(),
                 title: text(options, "title"),
                 display_name: text(options, "displayName"),
                 description: text(options, "description"),
@@ -786,31 +812,93 @@ async fn drive(
     ended: watch::Sender<bool>,
     stopping: Arc<AtomicBool>,
 ) {
+    let mut flush_at = None;
+    let mut retry_at = None;
+    let mut request_at = None;
+    let budget = Duration::from_secs(600);
     loop {
         let dirty = {
             let state = inner.lock();
             state.generation == generation && state.mapper.has_dirty_streams()
         };
-        let event = if dirty {
-            tokio::select! {
-                event = rx.recv() => event,
-                _ = tokio::time::sleep(FLUSH_INTERVAL) => {
+        let read = async {
+            if dirty {
+                let at =
+                    *flush_at.get_or_insert_with(|| tokio::time::Instant::now() + FLUSH_INTERVAL);
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(at) => {
+                        flush_at = None;
+                        let outs = {
+                            let mut state = inner.lock();
+                            if state.generation != generation { return None; }
+                            state.mapper.flush()
+                        };
+                        inner.deliver(Some(&query), outs).await;
+                        return None;
+                    }
+                    event = rx.recv() => Some(event),
+                }
+            } else {
+                flush_at = None;
+                Some(rx.recv().await)
+            }
+        };
+        let deadline = retry_at.into_iter().chain(request_at).min();
+        let event = match deadline {
+            Some(at) => match tokio::time::timeout_at(at, read).await {
+                Ok(event) => event,
+                Err(_) => {
                     let outs = {
                         let mut state = inner.lock();
                         if state.generation != generation {
-                            continue;
+                            return;
                         }
-                        state.mapper.flush()
+                        if let Some(live) = &mut state.live {
+                            live.restart_needed = true;
+                        }
+                        state.mapper.expire_request()
                     };
                     inner.deliver(Some(&query), outs).await;
+                    query.abort().await;
+                    retry_at = None;
+                    request_at = None;
                     continue;
                 }
-            }
-        } else {
-            rx.recv().await
+            },
+            None => read.await,
         };
+        let Some(event) = event else { continue };
         let message = match event {
             Some(QueryEvent::Message(value)) => {
+                if matches!(value["type"].as_str(), Some("assistant" | "user"))
+                    && value["parent_tool_use_id"].is_null()
+                    && let Some(uuid) = value["uuid"].as_str()
+                    && let Some(live) = inner
+                        .lock()
+                        .live
+                        .as_mut()
+                        .filter(|l| l.generation == generation)
+                {
+                    if live.emitted.len() == 256 {
+                        live.emitted.pop_front();
+                    }
+                    live.emitted.push_back(uuid.to_owned());
+                }
+                if inner.lock().mapper.turn_active() {
+                    if value["type"] == "system"
+                        && value["subtype"] == "status"
+                        && value["status"] == "requesting"
+                    {
+                        request_at = Some(tokio::time::Instant::now() + budget);
+                    } else if value["parent_tool_use_id"].is_null()
+                        && (value["type"] == "assistant"
+                            || value["type"] == "result"
+                            || value["type"] == "stream_event")
+                    {
+                        request_at = None;
+                    }
+                }
                 if value["type"] == "system" && value["subtype"] == "init" {
                     note_init(&mut inner.lock(), generation, &value);
                 }
@@ -820,7 +908,115 @@ async fn drive(
                 {
                     inner.lock().app_context.reset();
                 }
-                Inbound::from_value(value)
+                if value["type"] == "result"
+                    && inner
+                        .lock()
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.generation == generation && l.check_sign_ins)
+                {
+                    let statuses = query
+                        .call("mcpServerStatus", json!([]), Duration::from_secs(2))
+                        .await
+                        .unwrap_or(Value::Null);
+                    let outs = {
+                        let mut state = inner.lock();
+                        let mut names = Vec::new();
+                        if let Some(live) =
+                            state.live.as_mut().filter(|l| l.generation == generation)
+                        {
+                            let servers = statuses.as_array().into_iter().flatten();
+                            live.check_sign_ins = false;
+                            for server in servers {
+                                let Some(name) = server["name"].as_str() else {
+                                    continue;
+                                };
+                                match server["status"].as_str() {
+                                    Some("connected") => {
+                                        live.announced_sign_ins.remove(name);
+                                    }
+                                    Some("pending") => live.check_sign_ins = true,
+                                    Some("needs-auth")
+                                        if server["scope"] != "claudeai"
+                                            && live.announced_sign_ins.len() < 256
+                                            && live.announced_sign_ins.insert(name.to_owned()) =>
+                                    {
+                                        names.push(name)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        state.mapper.mcp_sign_in_notices(&names)
+                    };
+                    inner.deliver(Some(&query), outs).await;
+                }
+                let mut message = Inbound::from_value(value);
+                if let Inbound::System(msg) = &mut message
+                    && msg.subtype == "task_started"
+                    && let (Some(task), Some(tool)) = (&msg.task_id, &msg.tool_use_id)
+                {
+                    let lookup = {
+                        let state = inner.lock();
+                        state
+                            .live
+                            .as_ref()
+                            .filter(|l| {
+                                l.generation == generation
+                                    && state.mapper.needs_launch_lookup(task, tool)
+                            })
+                            .map(|l| {
+                                (
+                                    l.native_thread_id.clone(),
+                                    l.cwd.clone(),
+                                    l.workflow_files_root
+                                        .parent()
+                                        .map(|p| p.to_string_lossy().into_owned()),
+                                )
+                            })
+                    };
+                    if let Some((native, cwd, home)) = lookup {
+                        let mut options = json!({"limit":1});
+                        if let Some(cwd) = cwd {
+                            options["dir"] = json!(cwd);
+                        }
+                        if let Ok(messages) = inner
+                            .helper
+                            .function(
+                                "getSubagentMessages",
+                                json!([native, task, options]),
+                                home.as_deref(),
+                                FUNCTION_TIMEOUT,
+                            )
+                            .await
+                        {
+                            msg.recovered_launch = messages
+                                .get(0)
+                                .and_then(|m| m["parent_tool_use_id"].as_str())
+                                .filter(|id| *id != tool)
+                                .map(str::to_owned);
+                        }
+                    }
+                }
+                message
+            }
+            Some(QueryEvent::Request { id, kind, .. }) if kind == "stopHook" => {
+                let check = inner.lock().goal_stop_check.clone();
+                let hold = match check {
+                    Some(check) => check().await,
+                    None => false,
+                };
+                query
+                    .answer(
+                        &id,
+                        Ok(if hold {
+                            json!({"continue": false})
+                        } else {
+                            json!({})
+                        }),
+                    )
+                    .await;
+                continue;
             }
             Some(QueryEvent::Request { id, kind, args }) => match callback_request(&kind, &args) {
                 Some(request) => Inbound::ControlRequest {
@@ -862,6 +1058,14 @@ async fn drive(
             }
             touch(&mut state, Some(generation));
             let outs = state.mapper.handle(message);
+            if state.mapper.retry_active() {
+                retry_at.get_or_insert_with(|| tokio::time::Instant::now() + budget);
+            } else {
+                retry_at = None;
+            }
+            if !state.mapper.turn_active() {
+                request_at = None;
+            }
             if let Some(status) = outs.iter().find_map(|out| match out {
                 Out::Event(ProviderEvent::TurnTerminal(terminal)) => Some(terminal.status),
                 _ => None,
@@ -878,12 +1082,30 @@ async fn drive(
 
 /// The first `init` of a query tells the mode the CLI opened in.
 fn note_init(state: &mut State, generation: u64, init: &Value) {
+    if let Some(live) = state.live.as_mut().filter(|l| l.generation == generation)
+        && let Some(id) = init["session_id"].as_str().filter(|id| !id.is_empty())
+        && id != live.native_thread_id
+    {
+        let old = std::mem::replace(&mut live.native_thread_id, id.to_owned());
+        state.resumable.remove(&old);
+        state.resumable.insert(id.to_owned());
+        state.app_context.reset();
+        state.attachment_budget = attachments::Budget::default();
+    }
     if let Some(live) = state
         .live
         .as_mut()
         .filter(|l| l.generation == generation && !l.received_init)
     {
         live.received_init = true;
+        live.check_sign_ins = init["mcp_servers"].as_array().is_some_and(|servers| {
+            servers.iter().any(|s| {
+                matches!(s["status"].as_str(), Some("needs-auth" | "pending"))
+                    && s["name"]
+                        .as_str()
+                        .is_some_and(|n| !n.starts_with("claude.ai "))
+            })
+        });
         live.mcp_apps_capable = [
             "mcp_tool_ui_meta_v1",
             "mcp_read_resource_v1",
@@ -1353,6 +1575,35 @@ impl ClaudeSession {
                 .or_insert_with(|| recorded.to_owned());
         }
 
+        let transcript = {
+            let state = inner.lock();
+            state
+                .live
+                .as_ref()
+                .filter(|l| {
+                    l.native_thread_id == native
+                        && !l.emitted.is_empty()
+                        && conversation_head(&thread).is_none()
+                        && !state.mapper.has_pending_background_work()
+                })
+                .map(|l| {
+                    (
+                        l.workflow_files_root.clone(),
+                        l.native_thread_id.clone(),
+                        l.emitted.clone(),
+                    )
+                })
+        };
+        let extended = match transcript {
+            Some((root, id, emitted)) => tokio::task::spawn_blocking(move || {
+                crate::transcript::extended(&root, &id, &emitted)
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false),
+            None => false,
+        };
         let (plan, old) = {
             let mut state = inner.lock();
             if state.closed {
@@ -1364,7 +1615,8 @@ impl ClaudeSession {
                 .iter()
                 .any(|s| s.name == T3_MCP_SERVER && s.device_tools);
             let reusable = state.live.as_ref().is_some_and(|l| {
-                l.query.is_open()
+                (!extended || state.mapper.has_pending_background_work())
+                    && l.query.is_open()
                     && !l.restart_needed
                     && l.native_thread_id == native
                     && l.cwd == cwd
@@ -1613,6 +1865,9 @@ impl ClaudeSession {
                     "the previous turn is still running",
                 ));
             }
+            let stored = attachments::Budget::restore(&to_json(&input.provider_thread));
+            state.attachment_budget.bytes = stored.bytes.max(state.attachment_budget.bytes);
+            state.attachment_budget.pages = stored.pages.max(state.attachment_budget.pages);
             state.mapper.set_catalog(models);
             if state.live.is_none() && !state.closed {
                 let mode = plain_policy(&input.runtime_policy).permission_mode;
@@ -1636,7 +1891,12 @@ impl ClaudeSession {
         let prepared = match self
             .inner
             .unless_abandoned(run_id, async {
-                Ok(self.content(&text, &input.message.attachments).await)
+                self.content(
+                    &text,
+                    &input.message.attachments,
+                    input.runtime_policy.cwd.clone(),
+                )
+                .await
             })
             .await
         {
@@ -1719,27 +1979,49 @@ impl ClaudeSession {
     }
 
     /// The prompt content with attachments. Files are read off the runtime thread.
-    async fn content(&self, text: &str, list: &[conn_contract::ChatAttachment]) -> Value {
-        if list.is_empty() {
-            return json!(text);
-        }
+    async fn content(
+        &self,
+        text: &str,
+        list: &[conn_contract::ChatAttachment],
+        cwd: Option<String>,
+    ) -> ProviderResult<Value> {
         let dir = self.inner.config.attachments_dir.clone();
-        let used = self.inner.lock().attachment_bytes;
-        let (owned_text, owned_list) = (text.to_string(), list.to_vec());
-        let built = tokio::task::spawn_blocking(move || {
-            let mut used = used;
-            let content =
-                attachments::prompt_content(&owned_text, &owned_list, dir.as_deref(), &mut used);
-            (content, used)
-        })
-        .await;
-        match built {
-            Ok((content, used)) => {
-                self.inner.lock().attachment_bytes = used;
-                content
+        let initial = self.inner.lock().attachment_budget;
+        let (text, list) = (text.to_owned(), list.to_vec());
+        let home = launch::config_dir(&self.inner.config, &Map::new());
+        let args = self.inner.config.launch_args.clone();
+        let (content, budget) = tokio::task::spawn_blocking(move || {
+            let mut budget = initial;
+            let mut content =
+                attachments::prompt_content(&text, &list, dir.as_deref(), &mut budget)?;
+            if text.contains('$') && !text.trim_start().starts_with("/goal") {
+                let skills =
+                    crate::skills::discover(&home, cwd.as_deref().map(std::path::Path::new), &args);
+                if let Some((leading, command)) = crate::skills::dispatch(&text, &skills) {
+                    let mut blocks = content.as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        if let Some(leading) = leading {
+                            blocks.push(json!({"type":"text","text":leading}));
+                        }
+                    } else if let Some(last) = blocks.last_mut()
+                        && let Some(path_text) =
+                            last["text"].as_str().and_then(|s| s.strip_prefix(&text))
+                    {
+                        last["text"] = json!(
+                            format!("{}{path_text}", leading.as_deref().unwrap_or("")).trim()
+                        );
+                    }
+                    blocks.push(json!({"type":"text","text":command}));
+                    content = json!(blocks);
+                }
             }
-            Err(_) => json!(text),
-        }
+            Ok::<_, String>((content, budget))
+        })
+        .await
+        .map_err(|e| failed_err("attachment", e.to_string()))?
+        .map_err(|detail| ProviderError::Protocol { detail })?;
+        self.inner.lock().attachment_budget = budget;
+        Ok(content)
     }
 
     async fn launch(&self, input: QueryInput, run_id: &str) -> ProviderResult<()> {
@@ -1787,6 +2069,9 @@ impl ClaudeSession {
                 permission_mode: input.policy.permission_mode.clone(),
                 opened_permission_mode: input.policy.permission_mode.clone(),
                 received_init: false,
+                emitted: VecDeque::new(),
+                check_sign_ins: false,
+                announced_sign_ins: HashSet::new(),
                 mcp_apps_capable: false,
                 policy: input.policy.clone(),
                 model: input.model.clone(),
@@ -1940,6 +2225,71 @@ fn new_thread(
 }
 
 impl Session for ClaudeSession {
+    fn start_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+    ) -> BoxFuture<'_, ProviderResult<Option<String>>> {
+        Box::pin(async move {
+            let query = self.inner.bound_query(&thread)?;
+            let reply = query
+                .call("mcpAuthenticate", json!([server]), CONTROL_TIMEOUT)
+                .await
+                .map_err(|_| {
+                    failed_err(
+                        "mcp_sign_in",
+                        format!("Claude could not start sign-in to {server}"),
+                    )
+                })?;
+            Ok(reply.as_str().map(str::to_owned))
+        })
+    }
+
+    fn complete_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+        callback_url: String,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let query = self.inner.bound_query(&thread)?;
+            let statuses = query
+                .call("mcpServerStatus", json!([]), CONTROL_TIMEOUT)
+                .await
+                .map_err(|_| failed_err("mcp_sign_in", "Could not check the MCP server status"))?;
+            if statuses.as_array().is_some_and(|s| {
+                s.iter()
+                    .any(|entry| entry["name"] == server && entry["status"] == "connected")
+            }) {
+                return Ok(());
+            }
+            query
+                .call(
+                    "mcpSubmitOAuthCallbackUrl",
+                    json!([server, callback_url]),
+                    CONTROL_TIMEOUT,
+                )
+                .await
+                .map_err(|_| {
+                    failed_err("mcp_sign_in", "Claude did not accept the callback address")
+                })?;
+            query
+                .call("reconnectMcpServer", json!([server]), CONTROL_TIMEOUT)
+                .await
+                .map_err(|_| {
+                    failed_err(
+                        "mcp_sign_in",
+                        format!("Signed in, but {server} did not reconnect"),
+                    )
+                })?;
+            Ok(())
+        })
+    }
+
+    fn set_goal_stop_check(&self, check: conn_provider::GoalStopCheck) {
+        self.inner.lock().goal_stop_check = Some(check);
+    }
+
     fn provider_session_id(&self) -> &ProviderSessionId {
         &self.id
     }
@@ -2205,7 +2555,7 @@ impl Session for ClaudeSession {
         Box::pin(async move {
             // A cold-start turn shows as running before its query exists; a steer waits for
             // the start, as T3's steer always finds the query its provider turn came with.
-            drop(self.inner.turn_control.lock().await);
+            let _serial = self.inner.turn_control.lock().await;
             // The steer's own selection when it applies live, else the running turn's (T3's
             // liveSteerSelection).
             let live_selection = match &input.model_selection {
@@ -2223,7 +2573,8 @@ impl Session for ClaudeSession {
                 None => self.inner.lock().turn_prompt_effort.clone(),
             };
             let text = catalog::prompt_text(&input.message.text, effort.as_deref());
-            let content = self.content(&text, &input.message.attachments).await;
+            let cwd = self.inner.lock().live.as_ref().and_then(|l| l.cwd.clone());
+            let content = self.content(&text, &input.message.attachments, cwd).await?;
             let uuid = SystemEnv.uuid();
             let (query, outs, content, offer) = {
                 let mut state = self.inner.lock();
@@ -2477,6 +2828,19 @@ impl Session for ClaudeSession {
             })?;
             self.release(&native).await;
             let rolled = match input.target {
+                RollbackTarget::ThreadStart { .. }
+                    if thread["nativeMetadata"]["forkHeadMessageId"].is_string() =>
+                {
+                    let mut rolled = thread.clone();
+                    rolled["nativeConversationHeadRef"] = json!({"driver": DRIVER,
+                        "nativeId": thread["nativeMetadata"]["forkHeadMessageId"], "strength": "weak"});
+                    rolled["providerSessionId"] = json!(self.id.as_str());
+                    rolled["lastRunOrdinal"] = Value::Null;
+                    rolled["status"] = json!("idle");
+                    rolled["updatedAt"] = json!(SystemEnv.now());
+                    self.inner.lock().resumable.insert(native);
+                    rolled
+                }
                 RollbackTarget::ThreadStart { .. } => {
                     // A new native session; the old transcript stays on disk.
                     let mut fresh = new_thread(
@@ -2597,7 +2961,7 @@ impl Session for ClaudeSession {
             if let Some(turn_id) = &input.provider_turn_id {
                 forked_from["providerTurnId"] = json!(turn_id.as_str());
             }
-            let thread = new_thread(
+            let mut thread = new_thread(
                 &self.inner.instance_id,
                 self.id.as_str(),
                 json!(input.target_thread_id.as_str()),
@@ -2609,6 +2973,12 @@ impl Session for ClaudeSession {
                 forked_from,
                 Value::Null,
             );
+            if let Some(head) = forked["headMessageId"].as_str() {
+                thread["nativeMetadata"]["forkHeadMessageId"] = json!(head);
+            }
+            if let Some(budget) = source["nativeMetadata"].get("claudeAttachmentBudget") {
+                thread["nativeMetadata"]["claudeAttachmentBudget"] = budget.clone();
+            }
             from_json(thread).map_err(|e| failed_err("fork_thread", e.to_string()))
         })
     }
@@ -2631,7 +3001,7 @@ impl Session for ClaudeSession {
                 if !valid {
                     return Err(failed_err(
                         "stop_task",
-                        "No running workflow task belongs to this provider thread",
+                        "No running native task belongs to this provider thread",
                     ));
                 }
                 live.ok_or(ProviderError::SessionStopped)?
@@ -2648,7 +3018,7 @@ impl Session for ClaudeSession {
             {
                 return Err(failed_err(
                     "stop_task",
-                    format!("Workflow stop request failed: {error}"),
+                    format!("Claude task stop request failed: {error}"),
                 ));
             }
             guard.accepted = true;

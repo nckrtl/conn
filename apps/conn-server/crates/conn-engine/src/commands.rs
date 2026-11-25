@@ -29,6 +29,17 @@ pub(crate) enum Effect {
         thread_id: String,
         run_id: String,
         message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_selection: Option<Value>,
+    },
+    #[serde(rename = "provider-thread.rename")]
+    RenameThread { thread_id: String, title: String },
+    #[serde(rename = "provider-subagent.stop")]
+    StopSubagent {
+        thread_id: String,
+        provider_session_id: String,
+        provider_thread: Value,
+        task_id: String,
     },
     #[serde(rename = "provider-turn.interrupt")]
     Interrupt { thread_id: String, run_id: String },
@@ -123,6 +134,7 @@ pub(crate) type Handler = fn(&mut Tx<'_>, Value) -> Outcome;
 
 pub(crate) fn handler(command_type: &str) -> Option<Handler> {
     Some(match command_type {
+        "subagent.stop" => stop_subagent,
         "thread.create" => thread_create,
         "thread.created.record" => thread_created_record,
         "message.dispatch" => message_dispatch,
@@ -189,12 +201,37 @@ pub(crate) fn refusal(command_type: &str) -> &'static str {
         "notification.delivery.accept" => {
             "Conn Server does not deliver background notifications yet."
         }
-        "subagent.stop" => {
-            "Conn Server cannot stop a single subagent yet; stop the thread instead."
-        }
 
         _ => "Conn Server does not support this command.",
     }
+}
+
+fn stop_subagent(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    let input: conn_contract::OrchestrationV2CommandSubagentStop = decode(command)?;
+    let tid = input.thread_id.as_str();
+    let rid = input.run_id.as_str();
+    let id = input.subagent_id.as_str();
+    let task = tx.entity(tid, "subagents", id)?.unwrap_or_default();
+    let native = task["nativeTaskRef"]["nativeId"].as_str();
+    if task["origin"] != "provider_native" || task["driver"] != "claudeAgent" || task["runId"] != rid
+        || task["nativeTaskRef"]["strength"] != "strong" || native.is_none() {
+        return reject("The requested native subagent cannot be stopped on this run.");
+    }
+    if !matches!(task["status"].as_str(), Some("running" | "waiting" | "pending")) {
+        return Ok(vec![]);
+    }
+    let run = tx.entity(tid, "runs", rid)?.unwrap_or_default();
+    let pt = tx.entity(tid, "providerThreads", run["providerThreadId"].as_str().unwrap_or_default())?.unwrap_or_default();
+    let Some(session_id) = pt["providerSessionId"].as_str().filter(|_| pt["driver"] == task["driver"] && pt["providerInstanceId"] == task["providerInstanceId"]) else {
+        return reject("The requested native subagent has no owning provider session.");
+    };
+    if !tx.entities(tid, "providerTurns")?.iter().any(|turn| turn["providerThreadId"] == pt["id"]) {
+        return reject("The requested native subagent has no owning provider session.");
+    }
+    let mut updated = task.clone();
+    updated["updatedAt"] = tx.now().into();
+    tx.append(Draft::new(tid,"subagent.updated",updated).run(Some(rid)).node(Some(id)).payload_instance())?;
+    Ok(vec![Effect::StopSubagent { thread_id: tid.into(), task_id: native.unwrap_or_default().into(), provider_session_id: session_id.into(), provider_thread: pt }])
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(command: Value) -> Result<T, CommandError> {
@@ -1359,6 +1396,7 @@ fn steer_into(tx: &mut Tx<'_>, c: &MessageDispatch, target: &Value) -> Outcome {
         thread_id: c.thread_id.clone(),
         run_id,
         message_id: c.message_id.clone(),
+        model_selection: c.model_selection.clone(),
     }])
 }
 
@@ -2183,7 +2221,7 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
             .cloned()
             .unwrap_or_default(),
         context: message.get("context").filter(|v| v.is_object()).cloned(),
-        model_selection: None,
+        model_selection: selection.is_object().then(|| selection.clone()),
         created_by: message["createdBy"].as_str().unwrap_or("user").to_owned(),
         creation_source: message["creationSource"]
             .as_str()
@@ -2704,7 +2742,7 @@ fn runtime_request_respond(tx: &mut Tx<'_>, command: Value) -> Outcome {
                 return reject("The question for this request was not found.");
             };
             let answers = c.answers.as_ref().and_then(Value::as_object);
-            Some(async_reply(&item, answers).map_err(|e| CommandError::Rejected(e.into()))?)
+            Some(async_reply(&item, answers, c.attachments_by_question_id.as_ref()).map_err(|e| CommandError::Rejected(e.into()))?)
         }
         _ => None,
     };
@@ -2785,6 +2823,7 @@ fn message_answer(answer: &Value) -> Option<String> {
 fn async_reply(
     item: &Value,
     answers: Option<&serde_json::Map<String, Value>>,
+    attachments: Option<&Value>,
 ) -> Result<String, &'static str> {
     const UNANSWERED: &str = "Answer each question before sending.";
     let questions = item["questions"].as_array().map_or(&[][..], Vec::as_slice);
@@ -2799,15 +2838,16 @@ fn async_reply(
     }
     let mut replies = vec![];
     for question in questions {
-        let answer = question["id"]
-            .as_str()
-            .and_then(|id| answers.get(id))
-            .and_then(message_answer);
-        match answer {
-            Some(text) => replies.push(format!(
-                "{}\n{text}",
-                question["question"].as_str().unwrap_or_default()
-            )),
+        let id = question["id"].as_str().unwrap_or_default();
+        let answer = answers.get(id);
+        let label = question["question"].as_str().unwrap_or_default();
+        match answer.and_then(message_answer) {
+            Some(text) => replies.push(format!("{label}\n{text}")),
+            None if question["multiSelect"] == true && question["required"] != true
+                && answer.and_then(Value::as_array).is_some_and(Vec::is_empty) =>
+                replies.push(format!("{label}\nNone selected")),
+            None if attachments.and_then(|map| map.get(id)).and_then(Value::as_array).is_some_and(|images| !images.is_empty()) =>
+                replies.push(label.to_owned()),
             // Clients send "" for a skipped optional question.
             None if question["required"] == false => {}
             None => return Err(UNANSWERED),
@@ -2820,7 +2860,7 @@ fn async_reply(
 }
 
 /// Whether the provider session the run's provider thread is on steers a running turn.
-fn session_steers(tx: &Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<bool> {
+pub(crate) fn session_steers(tx: &Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<bool> {
     let Some(provider_thread) = run["providerThreadId"]
         .as_str()
         .map(|id| tx.entity(thread_id, "providerThreads", id))
@@ -2881,7 +2921,8 @@ fn async_answer(tx: &mut Tx<'_>, c: &RuntimeRequestRespond, text: String) -> Out
             "threadId": c.thread_id,
             "messageId": format!("async-answer:{}", c.request_id),
             "text": text,
-            "attachments": [],
+            "attachments": c.attachments_by_question_id.as_ref().and_then(Value::as_object).into_iter()
+                .flat_map(|map| map.values()).filter_map(Value::as_array).flatten().collect::<Vec<_>>(),
             "createdBy": "user",
             "creationSource": "server",
             "dispatchMode": dispatch_mode,
@@ -3352,6 +3393,7 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
     }
     let command_id = c.command_id.clone();
     let titled = c.title.is_some();
+    let native_title = c.title.as_deref().map(str::trim).filter(|title| !title.is_empty() && old["title"] != *title).map(str::to_owned);
     let thread_id = c.thread_id.clone();
     patch_thread_for(
         tx,
@@ -3386,6 +3428,9 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
     } else {
         vec![]
     };
+    if let Some(title) = native_title {
+        effects.push(Effect::RenameThread { thread_id: thread_id.clone(), title });
+    }
     let previous_run = if workspace_changed {
         active_run(tx, &thread_id)?
     } else {

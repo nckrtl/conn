@@ -189,6 +189,7 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
         attachments_dir: None,
         auth_method: None,
         runtime_version: None,
+        skill_cli: None,
         default_model: None,
         observer: None,
     };
@@ -676,8 +677,7 @@ async fn an_abandoned_start_sends_no_prompt() {
 /// The recorded `gemini-3.8-flash` session defaults to Low thinking and offers High. A turn
 /// that chose High writes it with `session/set_config_option` before its prompt, as T3's
 /// selection loop does (`adapter.ts`, `configSelections`).
-#[tokio::test(flavor = "current_thread")]
-async fn an_antigravity_turn_applies_the_chosen_thinking_level() {
+fn antigravity_turn_with_thinking_level() -> Value {
     let recording = read_golden("antigravity", "turns");
     let mut entries = recording["entries"].as_array().cloned().unwrap();
     // The recording's sign-in method is its own; this session has none configured.
@@ -722,12 +722,20 @@ async fn an_antigravity_turn_applies_the_chosen_thinking_level() {
         }
         call
     };
-    let golden = json!({
+    json!({
         "calls": [find("openSession"), find("ensureThread"), find("startTurn")],
         "transcripts": [script],
         "events": [],
-    });
-    let run = replay(&crate::antigravity::ANTIGRAVITY, &golden).await;
+    })
+}
+
+#[tokio::test]
+async fn an_antigravity_turn_applies_the_chosen_thinking_level() {
+    let run = replay(
+        &crate::antigravity::ANTIGRAVITY,
+        &antigravity_turn_with_thinking_level(),
+    )
+    .await;
     let script = crate::lock(&run.script);
     assert!(
         script.complete(),
@@ -736,4 +744,135 @@ async fn an_antigravity_turn_applies_the_chosen_thinking_level() {
         script.failure,
         run.errors
     );
+}
+
+#[tokio::test]
+async fn antigravity_reports_a_terminal_network_warning_as_a_failed_turn() {
+    const WARNING: &str = "⚠ There was a network issue connecting to the server, please try again.";
+    for (prefix, suffix, stop, status) in [
+        ("", "", "end_turn", "failed"),
+        ("The CLI said: ", "", "end_turn", "completed"),
+        ("", " The retry worked.", "end_turn", "completed"),
+        ("", "", "cancelled", "cancelled"),
+    ] {
+        let mut golden = antigravity_turn_with_thinking_level();
+        let script = golden["transcripts"][0].as_array_mut().unwrap();
+        let position = script
+            .iter()
+            .position(|entry| {
+                entry["frame"]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+            })
+            .unwrap();
+        let mut chunk = script[position].clone();
+        script[position]["frame"]["params"]["update"]["content"]["text"] =
+            json!(format!("{prefix}\n⚠ There was a network issue "));
+        chunk["frame"]["params"]["update"]["content"]["text"] = json!(format!(
+            "connecting to the server, please try again.\n{suffix}"
+        ));
+        script.insert(position + 1, chunk);
+        script
+            .iter_mut()
+            .find(|entry| {
+                entry["frame"]["kind"] == "response" && entry["frame"]["method"] == "session/prompt"
+            })
+            .unwrap()["frame"]["result"]["stopReason"] = json!(stop);
+
+        let run = replay(&crate::antigravity::ANTIGRAVITY, &golden).await;
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        assert!(crate::lock(&run.script).complete());
+        let terminal = run
+            .events
+            .iter()
+            .find(|event| event["type"] == "turn.terminal")
+            .unwrap();
+        assert_eq!(terminal["status"], status);
+        if status == "failed" {
+            assert_eq!(terminal["failure"]["message"], WARNING);
+            assert_eq!(terminal["threadDisposition"], "reusable");
+        }
+        assert!(
+            run.events
+                .iter()
+                .any(|event| event["type"] == "message.updated"
+                    && event["message"]["text"] == format!("{prefix}\n{WARNING}\n{suffix}"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn antigravity_retries_undelivered_instructions_after_a_trailing_tool_update() {
+    let mut golden = antigravity_turn_with_thinking_level();
+    let calls = golden["calls"].as_array_mut().unwrap();
+    let mut retry = calls.last().unwrap().clone();
+    retry["input"]["providerTurnOrdinal"] = json!(2);
+    retry["input"]["runOrdinal"] = json!(2);
+    retry["input"]["runId"] = json!("retry-run");
+    retry["input"]["message"]["text"] = json!("Try again");
+    calls.push(retry);
+
+    let script = golden["transcripts"][0].as_array_mut().unwrap();
+    let at = script
+        .iter()
+        .position(|entry| {
+            entry["frame"]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+        })
+        .unwrap();
+    let original = script[at].clone();
+    let session_id = original["frame"]["params"]["sessionId"].clone();
+    let update = |body: Value| {
+        let mut event = original.clone();
+        event["frame"]["params"]["update"] = body;
+        event
+    };
+    let warning = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text",
+        "text": "\n⚠ There was a network issue connecting to the server, please try again.\n"}});
+    let tool =
+        json!({"sessionUpdate":"tool_call","toolCallId":"read","kind":"read","title":"Read"});
+    let done = json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":"completed"});
+    let reply = script[at + 1].clone();
+    let retry_prompt = json!({"type": "expect_outbound", "frame": {"kind": "request", "method": "session/prompt",
+    "params":{"sessionId":session_id,"prompt":[
+        {"type":"text","text":"<any><conn_instructions><any>Try again<any>"},
+        {"type":"text","text":"<any><runtime_info><any>"}
+    ]}}});
+    let select = script
+        .iter()
+        .position(|entry| entry["frame"]["params"]["configId"] == "thought_level")
+        .unwrap();
+    let select_request = script[select].clone();
+    let select_reply = script[select + 1].clone();
+    script.splice(
+        at..=at + 1,
+        [
+            update(tool.clone()),
+            update(warning.clone()),
+            update(done.clone()),
+            reply.clone(),
+            select_request,
+            select_reply,
+            retry_prompt,
+            update(tool),
+            update(warning),
+            update(done),
+            original,
+            reply,
+        ],
+    );
+
+    let run = replay(&crate::antigravity::ANTIGRAVITY, &golden).await;
+    let script = crate::lock(&run.script);
+    assert!(
+        script.complete(),
+        "entry {}: {:?}, {:?}",
+        script.cursor,
+        script.failure,
+        run.errors
+    );
+    let statuses: Vec<_> = run
+        .events
+        .iter()
+        .filter(|event| event["type"] == "turn.terminal")
+        .map(|event| event["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["failed", "completed"]);
 }

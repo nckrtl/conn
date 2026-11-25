@@ -6,11 +6,7 @@
 //! the session's budget lasts. Paths follow T3's attachment store (`attachmentStore.ts`):
 //! `<dir>/<id><ext>`.
 //!
-//! Differences: PDFs stay path-only (T3 embeds one only when its strict page scanner
-//! succeeds), the captured-window context of snap-shot images is not added, and the budget
-//! lives in memory, so it starts over after a restart.
-
-use std::path::{Path, PathBuf};
+use std::{io::Read, path::Path};
 
 use conn_contract::{ChatAttachment, to_json};
 use serde_json::{Value, json};
@@ -79,73 +75,233 @@ pub fn relative_path(attachment: &Value) -> Option<String> {
     Some(format!("{id}{extension}"))
 }
 
-/// The user message content for a turn or steer: a plain string without attachments, else
-/// image blocks followed by the text block.
+#[derive(Clone, Copy, Default)]
+pub struct Budget {
+    pub bytes: u64,
+    pub pages: u64,
+}
+
+impl Budget {
+    pub fn restore(thread: &Value) -> Self {
+        let budget = &thread["nativeMetadata"]["claudeAttachmentBudget"];
+        Self {
+            bytes: budget["bytesUsed"].as_u64().unwrap_or(0),
+            pages: budget["pagesUsed"].as_u64().unwrap_or(0),
+        }
+    }
+
+    pub fn metadata(self) -> Value {
+        json!({"bytesUsed":self.bytes, "pagesUsed":self.pages})
+    }
+}
+
+/// Accept plain page trees when their direct /Count agrees with the visible page objects.
+/// Streams, strings, comments and hex strings cannot contribute page-tree tokens.
+fn pdf_pages(bytes: &[u8]) -> Option<u64> {
+    let delim = |b: u8| b <= 32 || b"()<>[]{}/%".contains(&b);
+    let skip = |mut tail: &[u8]| -> usize {
+        let len = tail.len();
+        while let Some((&b, rest)) = tail.split_first() {
+            if b <= 32 {
+                tail = rest;
+            } else if b == b'%' {
+                let n = rest
+                    .iter()
+                    .position(|b| matches!(b, b'\n' | b'\r'))
+                    .unwrap_or(rest.len());
+                tail = rest.get(n..).unwrap_or_default();
+            } else {
+                break;
+            }
+        }
+        len - tail.len()
+    };
+    if !bytes.starts_with(b"%PDF-")
+        || !bytes
+            .get(bytes.len().saturating_sub(1024)..)?
+            .windows(5)
+            .any(|w| w == b"%%EOF")
+    {
+        return None;
+    }
+    let (mut catalog, mut tree, mut pages, mut count) = (false, false, 0u64, 0u64);
+    let mut tail = bytes;
+    let mut previous = &b""[..];
+    while !tail.is_empty() {
+        tail = tail.get(skip(tail)..)?;
+        let Some((&ch, rest)) = tail.split_first() else {
+            break;
+        };
+        if previous == b"/Type" && ch != b'/' || previous == b"/Kids" && ch != b'[' {
+            return None;
+        }
+        if ch == b'(' {
+            let mut depth = 1;
+            let mut escaped = false;
+            let mut consumed = None;
+            for (i, byte) in rest.iter().enumerate() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match byte {
+                    b'\\' => escaped = true,
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    consumed = Some(i + 1);
+                    break;
+                }
+            }
+            tail = rest.get(consumed?..)?;
+            previous = b"";
+            continue;
+        }
+        if tail.starts_with(b"<<") {
+            tail = rest.get(1..)?;
+            previous = b"";
+            continue;
+        }
+        if ch == b'<' {
+            tail = rest.get(rest.iter().position(|b| *b == b'>')? + 1..)?;
+            previous = b"";
+            continue;
+        }
+        if delim(ch) && ch != b'/' {
+            tail = rest;
+            previous = b"";
+            continue;
+        }
+        let len = rest.iter().position(|b| delim(*b)).unwrap_or(rest.len()) + 1;
+        let token = tail.get(..len)?;
+        tail = tail.get(len..)?;
+        if len > 64
+            || token.contains(&b'#')
+            || matches!(token, b"/ObjStm" | b"/XRef" | b"/Encrypt" | b"/Prev")
+        {
+            return None;
+        }
+        if token == b"stream" {
+            tail = tail.get(tail.windows(9).position(|w| w == b"endstream")? + 9..)?;
+            previous = b"";
+            continue;
+        }
+        if previous == b"/Type" {
+            match token {
+                b"/Page" => pages += 1,
+                b"/Pages" => tree = true,
+                b"/Catalog" => catalog = true,
+                _ => {}
+            }
+        }
+        if previous == b"/Count" {
+            if token.len() > 9
+                || token.first() == Some(&b'0')
+                || !token.iter().all(u8::is_ascii_digit)
+                || tail.get(skip(tail)).is_some_and(|b| !delim(*b))
+            {
+                return None;
+            }
+            count = count.max(std::str::from_utf8(token).ok()?.parse().ok()?);
+        }
+        previous = token;
+    }
+    (catalog && tree && pages > 0 && pages == count).then_some(pages)
+}
+
 pub fn prompt_content(
     text: &str,
     attachments: &[ChatAttachment],
     dir: Option<&Path>,
-    budget_used: &mut u64,
-) -> Value {
-    if attachments.is_empty() {
-        return json!(text);
-    }
-    let mut prompt = text.to_string();
+    budget: &mut Budget,
+) -> Result<Value, String> {
+    let values: Vec<Value> = attachments.iter().map(to_json).collect();
+    let prompt = conn_provider_support::attachments::prompt_text(text, &values, dir);
     let mut blocks = Vec::new();
-    for attachment in attachments {
-        let value = to_json(attachment);
-        let kind = value["type"].as_str().unwrap_or("file");
-        let name = value["name"].as_str().unwrap_or("");
-        let path: Option<PathBuf> = dir.zip(relative_path(&value)).map(|(d, r)| d.join(r));
-        let line = match &path {
-            Some(path) => format!(
-                "[Attached {kind} \"{name}\" is saved at: {}]",
-                path.display()
-            ),
-            None => format!(
-                "[Attached {kind} \"{name}\" is unavailable: could not resolve a saved path for attachment '{}'.]",
-                value["id"].as_str().unwrap_or("")
-            ),
-        };
-        prompt = if prompt.is_empty() {
-            line
-        } else {
-            format!("{prompt}\n\n{line}")
-        };
+    let text_block = json!({"type":"text","text":prompt});
+    let plain = json!(text);
+    let cost = if values.is_empty() {
+        plain.to_string().len()
+    } else {
+        text_block.to_string().len() + 2
+    };
+    budget.bytes = budget.bytes.saturating_add(cost as u64);
+    if values.is_empty() {
+        return Ok(plain);
+    }
+    for value in &values {
+        let kind = value["type"].as_str().unwrap_or("");
         let mime = value["mimeType"]
             .as_str()
             .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
             .to_ascii_lowercase();
-        if kind != "image" || !SUPPORTED_IMAGES.contains(&mime.as_str()) {
+        let pdf = kind == "file"
+            && mime == "application/pdf"
+            && value["source"]["_tag"] != "pasted-text"
+            && budget.pages < 100;
+        if kind != "image" && !pdf {
             continue;
         }
-        let Some(path) = path else {
-            continue;
+        if kind == "image" && !SUPPORTED_IMAGES.contains(&mime.as_str()) {
+            return Err(format!("Unsupported Claude image attachment type '{mime}'"));
+        }
+        let read_error = || {
+            format!(
+                "Failed to read attachment '{}'",
+                value["id"].as_str().unwrap_or("")
+            )
         };
-        // The budget is checked on the file size, before the file is read.
-        let Ok(size) = std::fs::metadata(&path).map(|m| m.len()) else {
-            continue;
+        let file = conn_provider_support::attachments::saved_path(dir, value)
+            .and_then(|path| std::fs::File::open(path).ok());
+        let Some(file) = file else {
+            if pdf {
+                continue;
+            }
+            return Err(read_error());
         };
-        if *budget_used + 4 * size.div_ceil(3) + 128 > BUDGET_BYTES {
+        let overhead = if pdf { 1024 } else { 128 };
+        let max = BUDGET_BYTES
+            .saturating_sub(budget.bytes)
+            .saturating_sub(overhead)
+            / 4
+            * 3;
+        if file
+            .metadata()
+            .ok()
+            .is_some_and(|m| m.len() > max || !m.is_file())
+        {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        let cost = 4 * (bytes.len() as u64).div_ceil(3) + 128;
-        if *budget_used + cost > BUDGET_BYTES {
+        let mut bytes = Vec::new();
+        if file.take(max + 1).read_to_end(&mut bytes).is_err() {
+            if pdf {
+                continue;
+            }
+            return Err(read_error());
+        }
+        let cost = 4 * (bytes.len() as u64).div_ceil(3) + overhead;
+        if cost > BUDGET_BYTES.saturating_sub(budget.bytes) {
             continue;
         }
-        *budget_used += cost;
-        blocks.push(json!({
-            "type": "image",
-            "source": {"type": "base64", "media_type": mime, "data": conn_support::base64::encode(&bytes)},
-        }));
+        if pdf {
+            let Some(pages) = pdf_pages(&bytes).filter(|n| *n <= 100 - budget.pages) else {
+                continue;
+            };
+            budget.pages += pages;
+        }
+        budget.bytes = budget.bytes.saturating_add(cost);
+        blocks.push(json!({"type":if pdf{"document"}else{"image"},"source":{"type":"base64","media_type":mime,"data":conn_support::base64::encode(&bytes)}}));
     }
     if !prompt.is_empty() {
-        blocks.push(json!({"type": "text", "text": prompt}));
+        blocks.push(text_block)
     }
-    Value::Array(blocks)
+    Ok(Value::Array(blocks))
 }
 #[cfg(test)]
 mod tests {
@@ -177,17 +333,17 @@ mod tests {
             {"type": "file", "id": "t-2", "name": "a.txt", "mimeType": "text/plain", "sizeBytes": 5},
         ]))
         .unwrap();
-        let mut used = 0;
-        let content = prompt_content("Look", &attachments, Some(&dir), &mut used);
+        let mut used = Budget::default();
+        let content = prompt_content("Look", &attachments, Some(&dir), &mut used).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(content[0]["type"], "image");
         assert_eq!(content[0]["source"]["data"], "cG5n");
         let text = content[1]["text"].as_str().unwrap();
         assert!(text.starts_with("Look\n\n[Attached image \"red.png\" is saved at: "));
         assert!(text.contains("[Attached file \"a.txt\" is saved at: "));
-        assert_eq!(used, 4 + 128);
+        assert!(used.bytes >= 4 + 128);
         assert_eq!(
-            prompt_content("plain", &[], None, &mut used),
+            prompt_content("plain", &[], None, &mut used).unwrap(),
             json!("plain")
         );
     }

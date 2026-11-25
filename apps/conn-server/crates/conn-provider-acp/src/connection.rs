@@ -235,6 +235,12 @@ impl Connection {
         crate::lock(&self.pending).failure.clone()
     }
 
+    /// ACP negotiation and setup have a deadline even when the process remains alive.
+    pub(crate) async fn setup_call(&self, method: &'static str, params: J) -> Result<Value, CallError> {
+        tokio::time::timeout(std::time::Duration::from_secs(90), self.call(method, params)).await
+            .unwrap_or_else(|_| Err(CallError::Provider(conn_provider::ProviderError::Failed { operation: method, detail: format!("{method} timed out after 90 seconds") })))
+    }
+
     /// Sends a request and waits for its reply.
     pub(crate) async fn call(&self, method: &str, params: J) -> Result<Value, CallError> {
         let (tx, rx) = oneshot::channel();

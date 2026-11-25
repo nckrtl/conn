@@ -15,6 +15,7 @@ mod antigravity;
 mod antigravity_provider;
 mod connection;
 mod diff;
+mod elicitation;
 pub mod flavor;
 mod grok;
 mod grok_background;
@@ -28,6 +29,7 @@ mod prompt;
 mod protocol;
 mod session;
 mod tools;
+mod text_generation;
 
 #[cfg(test)]
 mod replay_agent;
@@ -405,15 +407,28 @@ impl Provider for AcpProvider {
         defer: bool,
     ) -> BoxFuture<'_, bool> {
         Box::pin(async move {
-            // `shouldRefreshOnInterval`: a disabled instance has nothing to probe.
-            if !lock(&self.status).entry["enabled"]
-                .as_bool()
-                .unwrap_or(false)
-            {
-                return false;
-            }
             let settings = GrokSettings::from_instance(instance.as_ref());
+            {
+                let status = lock(&self.status);
+                if status.settings == settings && (!settings.enabled || status.entry["status"] == "ready") {
+                    return false;
+                }
+            }
             self.probe(settings, defer).await
+        })
+    }
+
+    fn generate_text(&self, request: conn_provider::TextGenerationRequest) -> BoxFuture<'_, ProviderResult<serde_json::Value>> {
+        Box::pin(async move {
+            if !self.settings().enabled || request.investigate {
+                return Err(ProviderError::Unsupported { operation: "generate_text" });
+            }
+            let cwd = request.cwd.clone();
+            text_generation::Helper {
+                spawner: process_spawner(self.launch(Some("approval-required")), cwd.clone()),
+                cwd,
+                antigravity: None,
+            }.generate(request).await
         })
     }
 
@@ -435,7 +450,7 @@ impl Provider for AcpProvider {
                     .unwrap_or_default()
             });
             let runtime_mode = launch_runtime_mode(&input);
-            let launch = self.launch(Some(&runtime_mode));
+            let mut launch = self.launch(Some(&runtime_mode));
             let policy = to_json(&input.runtime_policy);
             let config = session::Config {
                 flush_interval: self.config.text_flush_interval,
@@ -460,6 +475,7 @@ impl Provider for AcpProvider {
                 auth_method: None,
                 runtime_version: None,
                 default_model: None,
+                skill_cli: Some((launch.program.clone(), {let mut env=conn_support::login_env::child_env(); for (k,v) in &launch.env {env.retain(|(name,_)|name!=k);env.push((k.clone(),v.clone()));} env})),
                 observer: None,
                 self_command: self.config.self_command.clone().unwrap_or_else(|| {
                     std::env::current_exe()
@@ -467,6 +483,7 @@ impl Provider for AcpProvider {
                         .unwrap_or_default()
                 }),
             };
+            session::apply_thread_environment(&mut launch.env, input.thread_id.as_str(), &config.mcp_servers, &config.self_command);
             let (tx, events) = mpsc::channel(session::EVENT_CAPACITY);
             let (session, _) = AcpSession::open(
                 config,

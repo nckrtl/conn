@@ -16,6 +16,7 @@ use conn_support::time::iso_from_ms;
 
 #[path = "cli_thread.rs"]
 pub mod thread;
+pub use thread::acp_mcp_call;
 
 use crate::{
     auth::{
@@ -51,7 +52,7 @@ A repeated --scope, or --scopes <list>, replaces the default scopes. thread --wa
 when the run fails and 2 when it waits for an answer.
 Every command takes --base-dir (or $T3CODE_HOME, default ~/.t3) or --state-dir.
 --session-idle-timeout (or $CONN_SESSION_IDLE_TIMEOUT): minutes before an idle provider
-session and its process close; 0 keeps them open. Default 30, as the T3 server.
+session and its process close; 0 keeps them open. Default 2 for native-resumable sessions and 30 for other sessions.
 --sdk-host (or $CONN_SDK_HOST): the SDK host that runs Claude's Agent SDK, a single executable or
 an .mjs script run with node. Default: conn-sdk-host beside this binary, else
 sdk-host/index.mjs beside it (the release tarball), else the checkout's
@@ -75,7 +76,7 @@ pub struct ServeArgs {
     pub desktop: bool,
     pub bootstrap_fd: Option<u32>,
     /// How long an idle provider session stays open; `None` keeps it open.
-    pub session_idle: Option<std::time::Duration>,
+    pub session_idle: conn_engine::IdleTimeout,
     /// `--sdk-host`: where the SDK host is. `None`: found by the provider.
     pub sdk_host: Option<PathBuf>,
     /// `--managed-provision`: the protected input of a managed target (`managed/provision.rs`).
@@ -527,10 +528,10 @@ fn serve_args(args: &Args, state_dir: PathBuf) -> Result<Command, String> {
         .value("--session-idle-timeout")
         .or_else(|| env("CONN_SESSION_IDLE_TIMEOUT"))
     {
-        None => Some(conn_engine::DEFAULT_IDLE_SESSION),
+        None => conn_engine::IdleTimeout::ProviderDefault,
         Some(minutes) => match minutes.parse::<u64>() {
-            Ok(0) => None,
-            Ok(minutes) => Some(std::time::Duration::from_secs(minutes.saturating_mul(60))),
+            Ok(0) => conn_engine::IdleTimeout::Disabled,
+            Ok(minutes) => conn_engine::IdleTimeout::After(std::time::Duration::from_secs(minutes.saturating_mul(60))),
             Err(_) => return Err(format!("invalid --session-idle-timeout `{minutes}`")),
         },
     };

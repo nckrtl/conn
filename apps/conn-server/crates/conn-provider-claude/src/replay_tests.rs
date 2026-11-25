@@ -505,13 +505,13 @@ fn plan_dialog_and_withdrawn_requests() {
     assert_eq!(cancelled.unwrap()["status"], "cancelled");
     assert!(matches!(outs.last(), Some(Out::Write(w)) if w.contains("\"interrupt\":true")));
 
-    // Elicitations with fields, and dialogs T3 does not show, are declined at once.
+    // Required fields the approval card cannot answer are cancelled.
     let outs = mapper.handle(Inbound::from_value(json!({
         "type": "control_request", "request_id": "cli-3",
         "request": {"subtype": "elicitation", "mcp_server_name": "s", "message": "token?",
-                    "requested_schema": {"type": "object", "properties": {"t": {"type": "string"}}}},
+                    "requested_schema": {"type": "object", "required": ["t"], "properties": {"t": {"type": "string"}}}},
     })));
-    assert!(matches!(&outs[..], [Out::Write(w)] if w.contains("decline")));
+    assert!(matches!(&outs[..], [Out::Write(w)] if w.contains("cancel")));
     let outs = mapper.handle(Inbound::from_value(json!({
         "type": "control_request", "request_id": "cli-4",
         "request": {"subtype": "request_user_dialog", "dialog_kind": "other_kind", "payload": {}},

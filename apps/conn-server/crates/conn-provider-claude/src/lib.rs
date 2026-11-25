@@ -21,9 +21,11 @@ pub mod mapper;
 pub mod ordered;
 pub mod protocol;
 pub mod session;
+mod skills;
 pub mod status;
 mod tail;
 pub mod text_generation;
+mod transcript;
 
 /// Locks a std mutex. A poisoned lock means a thread panicked while it held the lock: a bug.
 /// With `panic = "abort"` a release build stops at the panic itself.
@@ -168,6 +170,31 @@ impl Provider for ClaudeProvider {
         Some(probed.unwrap_or_else(|| pending_entry(self.instance_id.as_str(), checked_at)))
     }
 
+    fn refresh_workspace(&self, cwd: String) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let home = launch::config_dir(&self.config, &serde_json::Map::new());
+            let discovered =
+                skills::list(home, Some(cwd.clone()), self.config.launch_args.clone()).await;
+            let now = conn_support::time::iso_from_ms(conn_support::time::now_ms());
+            let mut status = lock(&self.status);
+            let entry =
+                status.get_or_insert_with(|| pending_entry(self.instance_id.as_str(), &now));
+            let commands = entry["slashCommands"].clone();
+            if !entry["workspaceSnapshots"].is_array() {
+                entry["workspaceSnapshots"] = json!([]);
+            }
+            if let Some(snapshots) = entry["workspaceSnapshots"].as_array_mut() {
+                snapshots.retain(|snapshot| snapshot["cwd"] != cwd);
+                if snapshots.len() >= 64 {
+                    snapshots.remove(0);
+                }
+                snapshots.push(
+                    json!({"cwd":cwd,"checkedAt":now,"slashCommands":commands,"skills":discovered}),
+                );
+            }
+        })
+    }
+
     /// `ClaudeTextGeneration`: the `claude` CLI directly, outside any session and the SDK
     /// host (see [`text_generation`]).
     fn generate_text(
@@ -189,14 +216,7 @@ impl Provider for ClaudeProvider {
                 .await
                 .unwrap_or(false);
             let program = self.config.binary.to_string_lossy().into_owned();
-            text_generation::generate(
-                &program,
-                &env,
-                &self.config.model_manifest,
-                managed,
-                request,
-            )
-            .await
+            text_generation::generate(&program, &env, &self.config, managed, request).await
         })
     }
 
@@ -245,14 +265,23 @@ impl Provider for ClaudeProvider {
                 manifest: &self.config.model_manifest,
             };
             let helper = &self.helper;
-            let entry = status::check(input, |options, extra, timeout| async move {
+            let mut entry = status::check(input, |options, extra, timeout| async move {
                 helper
                     .function("probeCapabilities", json!([options, extra]), None, timeout)
                     .await
                     .map_err(|e| e.to_string())
             })
             .await;
-            *lock(&self.status) = Some(entry);
+            if settings.enabled {
+                let home = launch::config_dir(&self.config, &serde_json::Map::new());
+                entry["skills"] =
+                    json!(skills::list(home, None, self.config.launch_args.clone()).await);
+            }
+            let mut status = lock(&self.status);
+            if let Some(workspaces) = status.as_ref().and_then(|s| s.get("workspaceSnapshots")) {
+                entry["workspaceSnapshots"] = workspaces.clone();
+            }
+            *status = Some(entry);
         })
     }
 

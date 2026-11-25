@@ -359,7 +359,7 @@ fn with_tools<T>(state_dir: &Path, work: impl FnOnce(&mut Tools) -> Outcome<T>) 
         client: McpClient::new(&runtime.origin, &issued.token),
         origin: runtime.origin.clone(),
     };
-    let result = match tools.client.initialize() {
+    let result = match tools.client.initialize(CLIENT_NAME) {
         Ok(()) => work(&mut tools),
         Err(cause) => Err(tools.unreachable(&cause)),
     };
@@ -473,6 +473,36 @@ struct McpClient {
     next_id: u64,
 }
 
+/// Runs a single call with the current ACP thread's MCP session credential.
+pub fn acp_mcp_call(args: &[String]) -> i32 {
+    let (Ok(endpoint), Ok(authorization)) = (std::env::var("T3_ACP_MCP_ENDPOINT"), std::env::var("T3_ACP_MCP_AUTHORIZATION")) else {
+        eprintln!("acp-mcp-call requires T3_ACP_MCP_ENDPOINT and T3_ACP_MCP_AUTHORIZATION.");
+        return 2;
+    };
+    let [tool, arguments] = args else { eprintln!("acp-mcp-call requires <tool> and <arguments-json>."); return 2 };
+    let Ok(arguments) = serde_json::from_str::<Value>(arguments) else { eprintln!("acp-mcp-call arguments must be valid JSON."); return 2 };
+    if !arguments.is_object() { eprintln!("acp-mcp-call arguments must be a JSON object."); return 2; }
+    let Some(origin) = endpoint.strip_suffix("/mcp") else { eprintln!("Invalid Conn MCP endpoint."); return 1 };
+    let mut client = McpClient::new(origin, "");
+    client.authorization = authorization;
+    let result = client.initialize("t3-code-acp-cli").and_then(|()|
+        client.request("tools/call", json!({"name":tool, "arguments":arguments})));
+    client.terminate();
+    match result {
+        Ok(envelope) => {
+            let mut result = envelope["result"].clone();
+            if let Some(structured) = result.get("structuredContent").cloned()
+                && let Some(parts) = result["content"].as_array_mut() {
+                parts.retain(|part| part["type"] != "text" || !part["text"].as_str().is_some_and(|text|
+                    serde_json::from_str::<Value>(text).is_ok_and(|v| v == structured)));
+            }
+            println!("{result}");
+            0
+        }
+        Err(error) => { eprintln!("acp-mcp-call: {error}"); 1 }
+    }
+}
+
 struct HttpReply {
     status: u16,
     headers: Vec<(String, String)>,
@@ -499,13 +529,13 @@ impl McpClient {
         }
     }
 
-    fn initialize(&mut self) -> Result<(), String> {
+    fn initialize(&mut self, client_name: &str) -> Result<(), String> {
         self.request(
             "initialize",
             json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": CLIENT_NAME, "version": "0.0.0"},
+                "clientInfo": {"name": client_name, "version": "0.0.0"},
             }),
         )?;
         self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))?;

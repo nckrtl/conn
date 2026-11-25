@@ -458,6 +458,12 @@ fn selection_bool(selection: &ModelSelection, id: &str) -> Option<bool> {
         .and_then(|o| o["value"].as_bool())
 }
 
+pub fn service_tier(selection: &ModelSelection) -> Option<String> {
+    selection_option(selection, "serviceTier").or_else(|| {
+        (selection_bool(selection, "fastMode") == Some(true)).then(|| "fast".to_owned())
+    })
+}
+
 pub fn selection_model(selection: &ModelSelection) -> String {
     to_json(selection)["model"]
         .as_str()
@@ -517,9 +523,7 @@ pub fn turn_start_params(
             .starts_with("gpt-6-astra")
             .then(|| "medium".to_owned())
     });
-    let service_tier = selection_option(selection, "serviceTier").or_else(|| {
-        (selection_bool(selection, "fastMode") == Some(true)).then(|| "fast".to_owned())
-    });
+    let service_tier = service_tier(selection);
     let mut settings = json!({ "model": model });
     if let Some(effort) = &effort {
         settings["reasoning_effort"] = json!(effort);
@@ -556,6 +560,41 @@ pub fn turn_start_params(
         params["serviceTier"] = json!(tier);
     }
     params
+}
+
+/// Resolve the program only for models whose live catalog advertises it.
+pub fn cyber_program(catalog: &Value, selection: &conn_contract::ModelSelection) -> Option<String> {
+    let slug = selection_model(selection);
+    let descriptor = catalog["models"]
+        .as_array()?
+        .iter()
+        .find(|m| m["slug"] == slug)?["capabilities"]["optionDescriptors"]
+        .as_array()?
+        .iter()
+        .find(|d| d["id"] == "cyberAccessProgram" && d["type"] == "select")?;
+    [
+        selection_option(selection, "cyberAccessProgram"),
+        descriptor["currentValue"].as_str().map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|s| matches!(s.as_str(), "standard" | "daybreakBlue" | "daybreakRed"))
+}
+
+pub async fn prepare_input(
+    text: &str,
+    attachments: &[ChatAttachment],
+    directory: Option<&Path>,
+) -> Result<Value, String> {
+    if attachments.is_empty() {
+        return user_input(text, attachments, directory);
+    }
+    let text = text.to_owned();
+    let attachments = attachments.to_vec();
+    let directory = directory.map(Path::to_owned);
+    tokio::task::spawn_blocking(move || user_input(&text, &attachments, directory.as_deref()))
+        .await
+        .map_err(|e| format!("Could not prepare attachments: {e}"))?
 }
 
 /// The user input for `turn/start` and `turn/steer` (`toCodexInput`): the text, with a skill

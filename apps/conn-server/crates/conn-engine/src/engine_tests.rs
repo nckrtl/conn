@@ -3878,7 +3878,7 @@ fn title_config(db: &TempDb, titles: Option<Arc<HeldTitles>>) -> EngineConfig {
     // The engine that holds a title is the one the test drops: its idle sessions close soon,
     // so its tasks end and the test can wait for them. The next engine keeps the default.
     if titles.is_some() {
-        config.idle_session = Some(Duration::from_millis(20));
+        config.idle_session = crate::IdleTimeout::After(Duration::from_millis(20));
     }
     config.title_generator = titles.map(|t| t as Arc<dyn crate::TitleGenerator>);
     config
@@ -8852,7 +8852,7 @@ async fn engine_on_jump_clock(name: &str, first: &str) -> (TempDb, SqliteEngine,
     }];
     config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
     config.clock = clock.clone();
-    config.idle_session = Some(Duration::from_secs(30 * 60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(30 * 60));
     config.idle_max_hold = Duration::from_secs(4 * 60 * 60);
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
@@ -8905,7 +8905,7 @@ async fn an_idle_session_closes_and_the_next_turn_resumes_it() {
     }];
     config.providers = vec![provider.clone()];
     config.clock = paused_clock();
-    config.idle_session = Some(Duration::from_secs(60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(60));
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
     dispatch(&engine, message("t1", "c2", "first")).await;
@@ -9289,7 +9289,7 @@ async fn background_work_holds_an_idle_session_up_to_the_limit() {
     }];
     config.providers = vec![provider.clone()];
     config.clock = paused_clock();
-    config.idle_session = Some(Duration::from_secs(60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(60));
     config.idle_max_hold = Duration::from_secs(600);
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
@@ -9320,7 +9320,7 @@ async fn reported_background_work_holds_the_session_and_shows_in_the_shell() {
     }];
     config.providers = vec![provider.clone()];
     config.clock = paused_clock();
-    config.idle_session = Some(Duration::from_secs(60));
+    config.idle_session = crate::IdleTimeout::After(Duration::from_secs(60));
     config.idle_max_hold = Duration::from_secs(600);
     let engine = SqliteEngine::open(config).unwrap();
     dispatch(&engine, create("t1", "c1")).await;
@@ -15719,4 +15719,37 @@ async fn question_answers_claim_their_files_and_pass_their_paths() {
     dispatch(&engine, answer).await;
     assert_eq!(host.claims.lock().unwrap().len(), claims);
     assert_eq!(provider.answers.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor="current_thread")]
+async fn idle_sweep_keeps_a_session_that_started_work_while_another_closed() {
+    let db=TempDb::new("audit-idle-race");
+    let (engine,provider)=open_with(&db,FakeProvider::new("claudeAgent")
+        .with_close_delay(Duration::from_millis(240)).with_close_interrupting());
+    for id in ["ta","tb"] {
+      dispatch(&engine,create(id,&format!("create-{id}"))).await;
+      dispatch(&engine,message(id,&format!("first-{id}"),"first")).await;
+      run_to_end(&engine,id,&format!("run:{id}:1")).await;
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let inner=engine.inner().clone();
+    let sweep=tokio::spawn(async move{inner.reap_idle(crate::IdleTimeout::After(Duration::from_millis(5))).await});
+    tokio::time::timeout(Duration::from_secs(1), async {
+       while provider.closed.load(std::sync::atomic::Ordering::SeqCst)==0 { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let remaining=["ta","tb"].into_iter().find(|id|engine.inner().live_thread(id).is_some()).unwrap();
+    dispatch(&engine,message(remaining,"second","hang")).await;
+    let run=format!("run:{remaining}:2");
+    tokio::time::timeout(Duration::from_secs(1),async {
+      loop {
+        let p=projection(&engine,remaining).await;
+        if p["runs"].as_array().unwrap().iter().any(|r|r["id"]==run && r["status"]=="running"){break;}
+        tokio::task::yield_now().await;
+      }
+    }).await.unwrap();
+    assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst),1);
+    sweep.await.unwrap();
+    assert_eq!(provider.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let projection = projection(&engine, remaining).await;
+    assert!(projection["runs"].as_array().unwrap().iter().any(|r| r["id"] == run && r["status"] == "running"));
 }

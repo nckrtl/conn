@@ -334,7 +334,7 @@ pub(crate) fn remove_sessions_in(profile: &Path, cwd: &str) {
 }
 
 /// `Schema.isUUID(4)`: a version 4 UUID with the RFC variant, so the id is safe in a path.
-fn is_native_session_id(id: &str) -> bool {
+pub(crate) fn is_native_session_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     crate::grok_background::is_uuid(id)
         && bytes.get(14) == Some(&b'4')
@@ -408,7 +408,6 @@ pub(crate) fn directories(state_dir: &Path, instance_id: &str) -> Directories {
 /// `prepareAntigravityProfile`: the profile folders (0700) and `antigravity-acp/settings.json`
 /// with the sign-in method (never a credential). Blocking. The browser check T3 runs (its
 /// Node helper) is not needed: our helper is this server's own executable.
-/// Not ported: the links to the user's `~/.gemini` skills (`linkAntigravityUserSkills`).
 /// The error is T3's text; T3 raises it as a transport error (`authSupportError`), not a
 /// setup error, so a check shows its own fixed text instead.
 pub(crate) fn prepare_profile(
@@ -425,8 +424,33 @@ pub(crate) fn prepare_profile(
                 .map_err(|_| PROFILE_PERMISSIONS_FAILED)?;
         }
     }
+    #[cfg(unix)]
+    if let Some(home) = std::env::var_os("HOME") {
+        link_user_configuration(&dirs.profile, &Path::new(&home).join(".gemini"));
+    }
     std::fs::write(acp.join("settings.json"), profile_settings(settings))
         .map_err(|_| PROFILE_SETTINGS_FAILED)
+}
+
+/// Keep local profile contents unless the agent created an empty placeholder.
+#[cfg(unix)]
+fn link_user_configuration(profile: &Path, gemini: &Path) {
+    for relative in ["config/skills", "antigravity-cli/skills", "AGENTS.md", "GEMINI.md", "config/skills.json"] {
+        let target = gemini.join(relative);
+        let link = profile.join(relative);
+        let install = || -> std::io::Result<()> {
+            if let Ok(current) = std::fs::read_link(&link) {
+                if current == target && target.exists() {return Ok(())}
+                std::fs::remove_file(&link)?;
+            }
+            if !target.exists() { return Ok(()) }
+            if link.is_dir() { std::fs::remove_dir(&link)?; }
+            if link.exists() { return Ok(()) }
+            if let Some(parent)=link.parent(){std::fs::create_dir_all(parent)?;}
+            std::os::unix::fs::symlink(&target, &link)
+        };
+        if let Err(err) = install() { eprintln!("Antigravity could not link {relative}: {err}"); }
+    }
 }
 
 /// `antigravityAuthSupport.ts` texts for `prepareAntigravityProfile` (`tools/check-copies.mjs`).
@@ -496,6 +520,7 @@ pub(crate) fn launch(
     let gemini_home = dirs.profile.display().to_string();
     set(&mut env, "GEMINI_HOME", &gemini_home);
     set(&mut env, "AGY_ACP_FORCE_FILE_STORAGE", "1");
+    set(&mut env, "AGY_CLI_DISABLE_AUTO_UPDATE", "true");
     let browser = [self_command, BROWSER_SUBCOMMAND, "--", "%s"]
         .iter()
         .map(|a| quote(a))
@@ -562,7 +587,7 @@ pub fn browser_main(args: &[String]) -> i32 {
 
 // ---- the flavor ---------------------------------------------------------------------------
 
-fn version_triple(version: Option<&str>) -> Option<[u64; 3]> {
+pub(crate) fn version_triple(version: Option<&str>) -> Option<[u64; 3]> {
     let version = version?.trim();
     let mut parts = version.splitn(3, '.');
     let mut next = |last: bool| {
@@ -740,6 +765,15 @@ fn capabilities() -> Value {
     caps
 }
 
+pub(crate) fn runtime_capabilities(version: Option<&str>) -> Value {
+    let mut caps=capabilities();
+    if version_triple(version).is_some_and(|v|v >= [1,5,0]){
+        caps["turns"]["supportsActiveSteering"]=json!(true);
+        caps["turns"]["activeSteeringInterruptsTools"]=json!(true);
+    }
+    caps
+}
+
 pub static ANTIGRAVITY: Flavor = Flavor {
     driver: DRIVER,
     harness: "Antigravity",
@@ -756,7 +790,7 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     authenticate_eagerly: true,
     session_setup: Some(SessionSetup {
         meta: session_meta,
-        attachments_directory: true,
+        attachments_directory: false,
         carries_linking: appends_system_prompt,
     }),
     model_switch: ModelSwitch::ConfigOption,
@@ -769,6 +803,9 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     prompt_failure: |message, code| {
         crate::flavor::provider_failure(message, "provider_error", code)
     },
+    terminal_warning: Some(
+        "⚠ There was a network issue connecting to the server, please try again.",
+    ),
     permission_override: |_| None,
     select_model: |_, _, _, _| None,
     normalize_tool: None,

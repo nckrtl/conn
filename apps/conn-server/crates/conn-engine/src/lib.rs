@@ -83,7 +83,7 @@ pub use attention::{AttentionOutboxRow, RELEASED_COMPLETION_GRACE_MS};
 pub use background_wait::{BackgroundWait, BackgroundWaitError};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use engine::{
-    CleanupThreads, CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, ProjectConfig,
+    CleanupThreads, CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, IdleTimeout, ProjectConfig,
     RuntimePolicyOverride, STORE_IN_USE, SqliteEngine,
 };
 pub use families::{delegated_task_result, monitor_runs};

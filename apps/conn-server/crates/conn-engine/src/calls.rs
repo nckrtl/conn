@@ -11,6 +11,8 @@ use crate::projects::ProjectFailure;
 use crate::{EngineError, Subscription};
 
 pub(crate) const METHODS: &[&str] = &[
+    "provider.mcpSignIn.start",
+    "provider.mcpSignIn.complete",
     "mcpApps.callTool",
     "mcpApps.toolInfo",
     "mcpApps.readResource",
@@ -105,6 +107,7 @@ const SHELL_ERROR: &str = "OrchestrationV2GetShellSnapshotError";
 
 pub(crate) async fn call(inner: Arc<Inner>, method: String, input: Value) -> CallResult {
     match method.as_str() {
+        "provider.mcpSignIn.start" | "provider.mcpSignIn.complete" => inner.mcp_sign_in(&method, input).await,
         "mcpApps.callTool"
         | "mcpApps.toolInfo"
         | "mcpApps.readResource"

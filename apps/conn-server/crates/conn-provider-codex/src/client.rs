@@ -24,7 +24,18 @@ use crate::{launch, network_gate};
 
 /// A line longer than this is dropped. Tool results with inline images stay below it.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn deadline(method: &str) -> tokio::time::Instant {
+    let seconds = match method {
+        "initialize" => 30,
+        "config/read" | "turn/start" | "thread/start" | "thread/resume" => {
+            REQUEST_TIMEOUT.as_secs()
+        }
+        _ => 60,
+    };
+    tokio::time::Instant::now() + Duration::from_secs(seconds)
+}
 /// SIGTERM, then SIGKILL after this (`CODEX_APP_SERVER_FORCE_KILL_AFTER` in TS).
 pub const FORCE_KILL_AFTER: Duration = Duration::from_secs(2);
 /// The CLI release this crate was checked against: its printed schema (0.167.0) and the TS
@@ -60,6 +71,13 @@ fn named_children(params: &Value) -> Vec<String> {
 #[derive(Debug)]
 pub enum SessionMsg {
     Frame(Inbound),
+    /// Reliable frames exceeded this session's bounded backlog.
+    Overloaded,
+    AccountLimits,
+    ListedTerminals {
+        turn: String,
+        live: std::collections::HashSet<String>,
+    },
     /// The app-server exited; open turns end.
     Exited(String),
     /// The answer to a child thread's metadata read (`Value::Null` when none came).
@@ -128,14 +146,17 @@ struct State {
     live: Option<Live>,
     generation: u64,
     next_id: u64,
-    pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>,
+    pending: HashMap<(u64, u64), oneshot::Sender<Result<Value, RpcError>>>,
     routes: HashMap<String, mpsc::Sender<SessionMsg>>,
     /// Every open session's inbox, for exit notices; keyed by session id.
     sessions: HashMap<String, mpsc::Sender<SessionMsg>>,
     /// Set from the `initialize` answer.
     version: Option<String>,
+    limits: Value,
     /// Deltas dropped because a session's inbox was full (logged once).
     dropped_deltas: u64,
+    // One bounded relay per blocked inbox. A stalled consumer cannot block stdout reads.
+    relays: Vec<(mpsc::Sender<SessionMsg>, mpsc::Sender<SessionMsg>)>,
     /// Native threads loaded on a process (started, resumed or forked there), by generation.
     loaded: HashMap<String, u64>,
     /// At most [`UNROUTED_KEPT`] frames, oldest first, with the native thread they name.
@@ -151,6 +172,9 @@ pub struct AppServer {
     gate: Option<network_gate::Gate>,
     gate_done: tokio::sync::OnceCell<()>,
     state: Mutex<State>,
+    pub(crate) logins: crate::session::Logins,
+    closed_threads: tokio::sync::broadcast::Sender<String>,
+    process_ended: tokio::sync::Notify,
     /// Serializes start-up and `initialize`; never held by notification routing.
     starting: tokio::sync::Mutex<()>,
 }
@@ -174,6 +198,9 @@ impl AppServer {
             gate,
             gate_done: tokio::sync::OnceCell::new(),
             state: Mutex::new(State::default()),
+            logins: Default::default(),
+            closed_threads: tokio::sync::broadcast::channel(SESSION_INBOX).0,
+            process_ended: Default::default(),
             starting: tokio::sync::Mutex::new(()),
         })
     }
@@ -210,6 +237,7 @@ impl AppServer {
 
     fn detach(&self, session_id: &str, keep: &[String]) -> Option<Process> {
         let mut state = self.lock();
+        self.logins.release(session_id);
         if let Some(inbox) = state.sessions.remove(session_id) {
             state
                 .routes
@@ -231,6 +259,10 @@ impl AppServer {
     }
 
     /// Records that `native` is loaded on the running process.
+    pub fn watch_closes(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.closed_threads.subscribe()
+    }
+
     pub fn mark_loaded(&self, native: &str) {
         let mut state = self.lock();
         if let Some(generation) = state.live.as_ref().map(|l| l.generation) {
@@ -314,11 +346,20 @@ impl AppServer {
         if self.lock().sessions.is_empty() {
             return Err(CallError::Stopped);
         }
-        if let Some(live) = &self.lock().live
-            && live.initialized
-            && !live.process.has_exited()
-        {
-            return Ok(live.generation);
+        loop {
+            let ended = self.process_ended.notified();
+            tokio::pin!(ended);
+            ended.as_mut().enable();
+            {
+                let state = self.lock();
+                let Some(live) = &state.live else { break };
+                if live.initialized && !live.process.has_exited() {
+                    return Ok(live.generation);
+                }
+                // An interrupted initialization or retired transport is never reused.
+                live.process.kill();
+            }
+            ended.await;
         }
         if let Some(gate) = &self.gate {
             self.gate_done
@@ -351,7 +392,10 @@ impl AppServer {
             let mut state = self.lock();
             state.generation += 1;
             let generation = state.generation;
+            self.logins.clear();
             state.loaded.clear();
+            state.unrouted.clear();
+            state.limits = Value::Null;
             state.live = Some(Live {
                 process,
                 generation,
@@ -367,14 +411,16 @@ impl AppServer {
             Ok(result) => Some(result),
             Err(CallError::Rpc(e)) if e.message == "Already initialized" => None,
             Err(e) => {
-                let live = self.lock().live.take();
-                if let Some(live) = live {
-                    live.process.terminate(FORCE_KILL_AFTER).await;
-                }
+                self.retire(generation);
                 return Err(e);
             }
         };
-        self.write(generation, notification("initialized")).await?;
+        self.write_until(
+            generation,
+            notification("initialized"),
+            deadline("initialize"),
+        )
+        .await?;
         let version = init
             .as_ref()
             .and_then(|r| r["userAgent"].as_str())
@@ -398,6 +444,35 @@ impl AppServer {
         Ok(generation)
     }
 
+    pub fn record_limits(&self, snapshot: &Value) {
+        let Some(fields) = snapshot.as_object() else {
+            return;
+        };
+        if snapshot["limitId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && id != "codex")
+        {
+            return;
+        }
+        let mut state = self.lock();
+        for (key, value) in fields {
+            state.limits[key] = value.clone();
+        }
+    }
+
+    pub fn limit_reset(&self) -> Option<String> {
+        let windows = crate::status::rate_limit_windows(&self.lock().limits);
+        let exhausted = windows
+            .iter()
+            .filter(|w| w["usedPercent"].as_f64().is_some_and(|p| p >= 100.0));
+        exhausted
+            .map(|w| w["resetsAt"].as_str())
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .map(str::to_owned)
+    }
+
     pub fn version(&self) -> Option<String> {
         self.lock().version.clone()
     }
@@ -417,22 +492,26 @@ impl AppServer {
     /// the process: a caller that gives up on the answer knows the request went out.
     pub async fn send(self: &Arc<Self>, method: &str, params: Value) -> Result<Reply, CallError> {
         let generation = self.ensure_started().await?;
-        let (id, rx) = self.open_slot();
+        let (id, rx) = self.open_slot(generation);
+        let until = deadline(method);
         let reply = Reply {
             server: Arc::clone(self),
+            generation,
+            until,
             id,
             rx: Some(rx),
         };
-        self.write(generation, request(id, method, params)).await?;
+        self.write_until(generation, request(id, method, params), until)
+            .await?;
         Ok(reply)
     }
 
-    fn open_slot(&self) -> (u64, oneshot::Receiver<Result<Value, RpcError>>) {
+    fn open_slot(&self, generation: u64) -> (u64, oneshot::Receiver<Result<Value, RpcError>>) {
         let mut state = self.lock();
         state.next_id += 1;
         let id = state.next_id;
         let (tx, rx) = oneshot::channel();
-        state.pending.insert(id, tx);
+        state.pending.insert((generation, id), tx);
         (id, rx)
     }
 
@@ -442,16 +521,52 @@ impl AppServer {
         method: &str,
         params: Value,
     ) -> Result<Value, CallError> {
-        let (id, rx) = self.open_slot();
+        let (id, rx) = self.open_slot(generation);
+        let until = deadline(method);
         // A caller that gives up (a Stop abandons a start) takes its pending slot with it; a
         // late answer then finds none and is dropped.
-        let _slot = PendingSlot { server: self, id };
-        self.write(generation, request(id, method, params)).await?;
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        let _slot = PendingSlot {
+            server: self,
+            generation,
+            id,
+        };
+        self.write_until(generation, request(id, method, params), until)
+            .await?;
+        match tokio::time::timeout_at(until, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(e))) => Err(CallError::Rpc(e)),
             Ok(Err(_)) => Err(CallError::Stopped),
-            Err(_) => Err(CallError::Timeout),
+            Err(_) => {
+                self.retire(generation);
+                Err(CallError::Timeout)
+            }
+        }
+    }
+
+    fn retire(&self, generation: u64) {
+        if let Some(live) = self
+            .lock()
+            .live
+            .as_mut()
+            .filter(|live| live.generation == generation)
+        {
+            live.initialized = false;
+            live.process.kill();
+        }
+    }
+
+    async fn write_until(
+        &self,
+        generation: u64,
+        line: String,
+        until: tokio::time::Instant,
+    ) -> Result<(), CallError> {
+        match tokio::time::timeout_at(until, self.write(generation, line)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.retire(generation);
+                Err(CallError::Timeout)
+            }
         }
     }
 
@@ -501,17 +616,44 @@ impl AppServer {
         }
     }
 
-    async fn dispatch(&self, generation: u64, inbound: Inbound) {
+    async fn dispatch(self: &Arc<Self>, generation: u64, inbound: Inbound) {
+        if !self
+            .lock()
+            .live
+            .as_ref()
+            .is_some_and(|l| l.generation == generation)
+        {
+            return;
+        }
         // Frames of child threads that came before this frame named them.
         let mut early = Vec::new();
         let target = match &inbound {
             Inbound::Response { id, result } => {
-                if let Some(tx) = self.lock().pending.remove(id) {
+                if let Some(tx) = self.lock().pending.remove(&(generation, *id)) {
                     let _ = tx.send(result.clone());
                 }
                 return;
             }
             Inbound::Notification { method, params } => {
+                if method == "mcpServer/oauthLogin/completed" {
+                    if let (Some(name), Some(success)) =
+                        (params["name"].as_str(), params["success"].as_bool())
+                    {
+                        self.logins.finish(name, success);
+                    }
+                    return;
+                }
+                if method == "account/updated" {
+                    self.lock().limits = Value::Null;
+                }
+                if method == "account/rateLimits/updated" {
+                    self.record_limits(&params["rateLimits"]);
+                    let sessions: Vec<_> = self.lock().sessions.values().cloned().collect();
+                    for inbox in sessions {
+                        self.deliver(&inbox, SessionMsg::AccountLimits);
+                    }
+                    return;
+                }
                 let Some(thread) = params["threadId"]
                     .as_str()
                     .or_else(|| params["conversationId"].as_str())
@@ -519,6 +661,9 @@ impl AppServer {
                     return;
                 };
                 let mut state = self.lock();
+                if method == "thread/closed" {
+                    let _ = self.closed_threads.send(thread.to_owned());
+                }
                 let route = state.routes.get(thread).cloned();
                 match &route {
                     // A subagent's child thread belongs to the session of the thread that
@@ -564,33 +709,9 @@ impl AppServer {
         };
         match (target, inbound) {
             (Some(inbox), inbound) => {
-                let early_inbox = (!early.is_empty()).then(|| inbox.clone());
-                // One reader serves every session: a session whose inbox is full must not
-                // hold back the others' frames and responses. Streamed deltas are dropped
-                // then (the item's completion carries the whole text, and command output
-                // deltas are not persisted); every other frame waits for room.
-                match inbox.try_send(SessionMsg::Frame(inbound)) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(SessionMsg::Frame(frame)))
-                        if is_delta(&frame) =>
-                    {
-                        let mut state = self.lock();
-                        state.dropped_deltas = state.dropped_deltas.saturating_add(1);
-                        if state.dropped_deltas == 1 {
-                            eprintln!(
-                                "conn-provider-codex: a session's inbox is full; dropping streamed deltas for it"
-                            );
-                        }
-                    }
-                    Err(mpsc::error::TrySendError::Full(msg)) => {
-                        let _ = inbox.send(msg).await;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {}
-                }
-                if let Some(inbox) = early_inbox {
-                    for frame in early {
-                        let _ = inbox.send(SessionMsg::Frame(frame)).await;
-                    }
+                self.deliver(&inbox, SessionMsg::Frame(inbound));
+                for frame in early {
+                    self.deliver(&inbox, SessionMsg::Frame(frame));
                 }
             }
             (None, Inbound::Request { id, method, .. }) => {
@@ -605,7 +726,57 @@ impl AppServer {
         }
     }
 
-    async fn on_exit(&self, generation: u64, info: &ExitInfo) {
+    fn deliver(self: &Arc<Self>, inbox: &mpsc::Sender<SessionMsg>, msg: SessionMsg) {
+        let mut state = self.lock();
+        let relay = state
+            .relays
+            .iter()
+            .find(|(target, _)| target.same_channel(inbox));
+        let delta = matches!(&msg, SessionMsg::Frame(frame) if is_delta(frame));
+        if delta && (relay.is_some() || inbox.capacity() == 0) {
+            state.dropped_deltas = state.dropped_deltas.saturating_add(1);
+            return;
+        }
+        if let Some((_, relay)) = relay {
+            // The relay reserves its last slot to report reliable-data loss, even if
+            // this session never catches up. All later frames wait for a clean resume.
+            if relay.capacity() > 1 {
+                let _ = relay.try_send(msg);
+            } else if relay.capacity() == 1 {
+                let _ = relay.try_send(SessionMsg::Overloaded);
+            }
+            return;
+        }
+        let Err(mpsc::error::TrySendError::Full(first)) = inbox.try_send(msg) else {
+            return;
+        };
+        let (tx, mut rx) = mpsc::channel(SESSION_INBOX);
+        let target = inbox.clone();
+        state.relays.push((target.clone(), tx));
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut next = first;
+            loop {
+                let overloaded = matches!(next, SessionMsg::Overloaded);
+                let closed = target.send(next).await.is_err();
+                let Some(server) = weak.upgrade() else { break };
+                let mut state = server.lock();
+                if !overloaded
+                    && !closed
+                    && let Ok(msg) = rx.try_recv()
+                {
+                    next = msg;
+                    continue;
+                }
+                state
+                    .relays
+                    .retain(|(other, _)| !other.same_channel(&target));
+                break;
+            }
+        });
+    }
+
+    async fn on_exit(self: &Arc<Self>, generation: u64, info: &ExitInfo) {
         let inboxes: Vec<mpsc::Sender<SessionMsg>> = {
             let mut state = self.lock();
             let current = state
@@ -616,9 +787,12 @@ impl AppServer {
                 state.live = None;
             }
             // Requests waiting on the dead process fail with `Stopped`.
-            state.pending.clear();
-            let mut inboxes: Vec<mpsc::Sender<SessionMsg>> =
-                state.sessions.values().cloned().collect();
+            state.pending.retain(|(g, _), _| *g != generation);
+            let mut inboxes: Vec<_> = if current {
+                state.sessions.values().cloned().collect()
+            } else {
+                Vec::new()
+            };
             // Closed sessions that wait on this process's subagents end with it, whatever
             // their routes say now.
             let ended: Vec<String> = state
@@ -636,18 +810,19 @@ impl AppServer {
             }
             // Their child routes go with the process.
             let state = &mut *state;
-            let sessions = &state.sessions;
-            state
-                .routes
-                .retain(|_, r| sessions.values().any(|s| s.same_channel(r)));
+            state.routes.retain(|_, r| {
+                state.sessions.values().any(|s| s.same_channel(r))
+                    || state.detached.values().any(|(_, s)| s.same_channel(r))
+            });
             inboxes
         };
+        self.process_ended.notify_waiters();
         let detail = format!(
             "The Codex app-server exited unexpectedly ({}).",
             info.describe()
         );
         for inbox in inboxes {
-            let _ = inbox.send(SessionMsg::Exited(detail.clone())).await;
+            self.deliver(&inbox, SessionMsg::Exited(detail.clone()));
         }
     }
 }
@@ -680,6 +855,8 @@ fn newer_minor(version: &str, tested: &str) -> bool {
 /// late answer is dropped.
 pub struct Reply {
     server: Arc<AppServer>,
+    generation: u64,
+    until: tokio::time::Instant,
     id: u64,
     rx: Option<oneshot::Receiver<Result<Value, RpcError>>>,
 }
@@ -696,30 +873,40 @@ impl Reply {
         let Some(rx) = self.rx.take() else {
             return Err(CallError::Stopped);
         };
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        match tokio::time::timeout_at(self.until, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(e))) => Err(CallError::Rpc(e)),
             Ok(Err(_)) => Err(CallError::Stopped),
-            Err(_) => Err(CallError::Timeout),
+            Err(_) => {
+                self.server.retire(self.generation);
+                Err(CallError::Timeout)
+            }
         }
     }
 }
 
 impl Drop for Reply {
     fn drop(&mut self) {
-        self.server.lock().pending.remove(&self.id);
+        self.server
+            .lock()
+            .pending
+            .remove(&(self.generation, self.id));
     }
 }
 
 /// Removes a request's pending slot when the request ends or is dropped.
 struct PendingSlot<'a> {
     server: &'a AppServer,
+    generation: u64,
     id: u64,
 }
 
 impl Drop for PendingSlot<'_> {
     fn drop(&mut self) {
-        self.server.lock().pending.remove(&self.id);
+        self.server
+            .lock()
+            .pending
+            .remove(&(self.generation, self.id));
     }
 }
 

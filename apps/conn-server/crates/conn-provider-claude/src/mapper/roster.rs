@@ -243,8 +243,14 @@ impl Roster {
             .tasks
             .iter_mut()
             .find(|t| t["taskId"] == task["taskId"]);
-        let started_monitor =
-            task["kind"] == "monitor" && slot.as_ref().is_none_or(|t| t["kind"] != "monitor");
+        let started_wait = match task["kind"].as_str() {
+            Some("monitor") => slot.as_ref().is_none_or(|t| t["kind"] != "monitor"),
+            Some("command") => {
+                slot.as_ref().is_none_or(|t| t["command"].is_null())
+                    && task["command"].as_str().is_some_and(sleep_timer)
+            }
+            _ => false,
+        };
         if let Some(slot) = slot {
             *slot = task.clone();
         } else if self.tasks.len() < ROSTER_CAP {
@@ -252,7 +258,7 @@ impl Roster {
         } else {
             return;
         }
-        if started_monitor && let Some(id) = task["taskId"].as_str() {
+        if started_wait && let Some(id) = task["taskId"].as_str() {
             add_id(&mut self.awaited, id);
         }
         self.remember(&task);
@@ -316,6 +322,135 @@ fn tool_results(content: &[Block]) -> Vec<&str> {
 
 fn text(value: Option<&Value>) -> Option<&str> {
     value?.as_str().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Only a finite sleep followed by simple reporting commands promises a future wake.
+/// Refuse shell control operators or substitutions that could start other work.
+fn sleep_timer(command: &str) -> bool {
+    let command = command.trim_start_matches([' ', '\t', '\n']);
+    let Some(argument) = command
+        .strip_prefix("sleep")
+        .and_then(|s| s.strip_prefix([' ', '\t']))
+    else {
+        return false;
+    };
+    let argument = argument.trim_start_matches([' ', '\t']);
+    let mut end = argument
+        .find([' ', '\t', ';', '&', '\n'])
+        .unwrap_or(argument.len());
+    // An arithmetic duration can contain spaces but cannot invoke other commands.
+    if let Some(index) = argument.find("$((").filter(|i| *i <= 1) {
+        let Some(close) = argument.get(index + 3..).and_then(|s| s.find("))")) else {
+            return false;
+        };
+        end = index + 3 + close + 2 + usize::from(argument.starts_with('"'));
+    }
+    let Some(raw) = argument.get(..end) else {
+        return false;
+    };
+    let duration = raw
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(raw);
+    let numeric = |s: &str| {
+        s.starts_with(|c: char| c.is_ascii_digit())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+    };
+    let variable =
+        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let arithmetic = duration
+        .strip_prefix("$((")
+        .and_then(|s| s.strip_suffix("))"))
+        .is_some_and(|s| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || b.is_ascii_whitespace() || b"+*/%-".contains(&b))
+        });
+    let parameter = duration
+        .strip_prefix("${")
+        .and_then(|s| s.strip_suffix('}'))
+        .is_some_and(|s| {
+            if let Some(at) = s.find(['-', '=']) {
+                s.get(..at)
+                    .is_some_and(|s| variable(s.trim_end_matches(':')))
+                    && s.get(at + 1..).is_some_and(numeric)
+            } else {
+                variable(s)
+            }
+        });
+    if !numeric(duration)
+        && (raw.starts_with('\'')
+            || !(arithmetic || parameter || duration.strip_prefix('$').is_some_and(variable)))
+    {
+        return false;
+    }
+    let Some(tail) = argument.get(end..) else {
+        return false;
+    };
+    let tail = tail.trim_start_matches([' ', '\t']);
+    if tail.is_empty() {
+        return true;
+    }
+    let Some(tail) = tail
+        .strip_prefix("&&")
+        .or_else(|| tail.strip_prefix([';', '\n']))
+    else {
+        return false;
+    };
+    let report = |s: &str| {
+        let s = s.trim_matches([' ', '\t']);
+        s.is_empty()
+            || matches!(
+                s.split([' ', '\t']).next(),
+                Some("date" | "echo" | "printf" | "true" | ":")
+            )
+    };
+    let mut chars = tail.char_indices().peekable();
+    let mut quote = None;
+    let mut start = 0;
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|(_, c)| *c);
+        if quote == Some('\'') {
+            if c == '\'' {
+                quote = None
+            }
+            continue;
+        }
+        if c == '\\' {
+            if chars.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        if c == '`' || c == '$' && next.is_some_and(|c| "({'\"".contains(c)) {
+            return false;
+        }
+        if quote == Some('"') {
+            if c == '"' {
+                quote = None
+            }
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            continue;
+        }
+        if c == ';' || c == '\n' || c == '&' && next == Some('&') {
+            if !tail.get(start..i).is_some_and(report) {
+                return false;
+            }
+            start = i + 1;
+            if c == '&' {
+                chars.next();
+                start += 1;
+            }
+        } else if "|()<#&".contains(c) {
+            return false;
+        }
+    }
+    quote.is_none() && tail.get(start..).is_some_and(report)
 }
 
 /// `claudePendingBackgroundTask`.
@@ -516,5 +651,30 @@ mod tests {
         roster.upsert(task.clone());
         roster.upsert(task);
         assert_eq!(roster.awaited, VecDeque::from(["monitor-1".to_owned()]));
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::sleep_timer;
+    #[test]
+    fn background_waits_only_for_a_finite_timer() {
+        for command in [
+            "sleep 1",
+            "sleep 1m && echo done",
+            r#"sleep "$MINUTES"; date"#,
+            "sleep $(( 2 * 30 )); printf 'done'",
+        ] {
+            assert!(sleep_timer(command), "{command}");
+        }
+        for command in [
+            "sleep infinity",
+            "sleep 5 && npm run dev",
+            "sleep 2 && echo $(npm start)",
+            "sleep 1 | echo done",
+            "npm start",
+        ] {
+            assert!(!sleep_timer(command), "{command}");
+        }
     }
 }

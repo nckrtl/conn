@@ -540,7 +540,7 @@ async fn replacing_a_query_settles_its_workflow_and_refuses_a_stale_stop() {
     assert!(
         error
             .to_string()
-            .contains("No running workflow task belongs to this provider thread"),
+            .contains("No running native task belongs to this provider thread"),
         "{error}"
     );
     let seen = until(&mut events, |e| {

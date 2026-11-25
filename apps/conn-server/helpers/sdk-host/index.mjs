@@ -15,7 +15,7 @@ const DRIVER_MODULES = {
 /** The protocol version in `ready`; the server stops a host that speaks another one. */
 const PROTOCOL_VERSION = 1;
 /** A line longer than this is dropped, both ways (the server uses the same cap). */
-const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 /** Open sessions, all drivers together. */
 const MAX_SESSIONS = 256;
 /** After the input closes, how long open sessions get to end before the host exits. */
@@ -273,7 +273,7 @@ process.stdout.on("error", () => process.exit(0));
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {
   if (line.length === 0) return;
-  if (line.length > MAX_FRAME_BYTES) {
+  if (Buffer.byteLength(line) > MAX_FRAME_BYTES) {
     log("warn", `dropped a ${line.length}-character command`);
     return;
   }

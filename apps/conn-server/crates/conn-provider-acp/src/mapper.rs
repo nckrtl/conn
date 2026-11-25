@@ -102,6 +102,9 @@ struct Turn {
     item_ordinals: HashMap<String, u32>,
     user: TextStream,
     assistant: TextStream,
+    /// Unnamed assistant segments are dropped when a tool update closes them.
+    closed_assistant_warning: bool,
+    prompt_usage: Option<Value>,
     reasoning: TextStream,
     tools: HashMap<String, ToolState>,
     tool_started_at: HashMap<String, String>,
@@ -138,6 +141,8 @@ pub(crate) enum Pending {
     Approval(Vec<(String, String)>),
     /// Grok's `ask_user_question`: its params, for the answer's shape.
     XAiQuestion(Value),
+    Form(Value),
+    AntigravityQuestion(Value),
 }
 
 /// How a prompt settled.
@@ -271,6 +276,10 @@ impl<E: Env> Mapper<E> {
 
     fn turn_item_id(&self, native_item_id: &str) -> String {
         ids::turn_item_from_item(self.driver(), &self.scoped(native_item_id))
+    }
+
+    pub(crate) fn waiting_for_input_or_tool(&self)->bool {
+        !self.pending.is_empty() || self.turn.as_ref().is_some_and(|turn|turn.tools.values().any(|tool| matches!(crate::tools::item_status(tool.status.as_deref()),"running"|"pending")))
     }
 
     pub(crate) fn has_turn(&self) -> bool {
@@ -424,6 +433,8 @@ impl<E: Env> Mapper<E> {
             item_ordinals: HashMap::new(),
             user: TextStream::default(),
             assistant: TextStream::default(),
+            closed_assistant_warning: false,
+            prompt_usage: None,
             reasoning: TextStream::default(),
             tools: HashMap::new(),
             tool_started_at: HashMap::new(),
@@ -484,12 +495,15 @@ impl<E: Env> Mapper<E> {
             "completedAt": completed_at,
         });
         if status != "running" && status != "pending" {
-            // `acpPerTurnPromptUsage` without per-turn counters: unavailable.
-            set(
-                &mut payload,
-                "turnTokenUsage",
-                json!({"usageScope": "main_agent", "usageStatus": "unavailable", "hasSubagents": !turn.subagents.list.is_empty()}),
-            );
+            let mut usage = turn.prompt_usage.clone().unwrap_or_else(|| json!({}));
+            usage["usageScope"] = json!("main_agent");
+            usage["hasSubagents"] = json!(!turn.subagents.list.is_empty());
+            usage["usageStatus"] = json!(match (&turn.prompt_usage,status) {
+                (None, _) => "unavailable",
+                (Some(_),"completed") => "complete",
+                _ => "partial"
+            });
+            set(&mut payload,"turnTokenUsage",usage);
         }
         payload
     }
@@ -706,6 +720,15 @@ impl<E: Env> Mapper<E> {
         }
         self.emit_text(kind, true, false, out);
         if let Some(turn) = self.turn.as_mut() {
+            if kind == TextKind::Assistant
+                && let Some(warning) = self.flavor.terminal_warning
+            {
+                turn.closed_assistant_warning = turn
+                    .assistant
+                    .current
+                    .as_ref()
+                    .is_some_and(|segment| segment.text.trim() == warning);
+            }
             let stream = Self::stream(turn, kind);
             if let Some(segment) = stream.current.take()
                 && let Some(source) = segment.source_message_id.clone()
@@ -804,6 +827,10 @@ impl<E: Env> Mapper<E> {
         let session_id = params["sessionId"].as_str().unwrap_or("").to_owned();
         let update = &params["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or("");
+        if self.driver() == "grok" && self.root_session.as_deref() == Some(&session_id)
+            && let Some(total) = params["_meta"]["totalTokens"].as_u64() {
+            self.session_state_update(&session_id, "usage_update", &json!({"used":total}), &mut out);
+        }
         // Turn projection misses compactions that finish while idle or after settlement.
         if kind == "compaction_update"
             && update["status"] == "completed"
@@ -1580,6 +1607,8 @@ impl<E: Env> Mapper<E> {
     ) -> Option<Vec<Out>> {
         let pending = self.pending.get(request_id)?;
         let result = match &pending.kind {
+            Pending::Form(schema) => crate::elicitation::form_response(schema, answers),
+            Pending::AntigravityQuestion(questions) => crate::elicitation::permission_response(questions, answers),
             Pending::Approval(options) => match select_option(options, decision?) {
                 Some(option) => selected(&option),
                 None => obj().with("outcome", obj().with("outcome", "cancelled")),
@@ -1709,11 +1738,52 @@ impl<E: Env> Mapper<E> {
         }
     }
 
+    pub(crate) fn prompt_outcome(&self, outcome: PromptOutcome) -> PromptOutcome {
+        if let Some(warning) = self.flavor.terminal_warning
+            && matches!(&outcome, PromptOutcome::Stopped(reason) if reason == "end_turn")
+            && self.turn.as_ref().is_some_and(|turn| {
+                turn.assistant
+                    .current
+                    .as_ref()
+                    .map_or(turn.closed_assistant_warning, |message| {
+                        message.text.trim() == warning
+                    })
+            })
+        {
+            return PromptOutcome::Failed {
+                message: warning.to_owned(),
+                code: None,
+            };
+        }
+        outcome
+    }
+
+    pub(crate) fn record_prompt_usage(&mut self, usage: &Value) {
+        let (Some(turn), Some(input), Some(output)) = (self.turn.as_mut(), usage["inputTokens"].as_u64(), usage["outputTokens"].as_u64()) else { return };
+        let read = usage["cachedReadTokens"].as_u64();
+        let input = input.saturating_add(read.unwrap_or_default());
+        let mut counters = json!({"inputTokens": input, "outputTokens": output});
+        for (key,value) in [("cachedInputTokens",read),
+            ("cacheCreationTokens",usage["cachedWriteTokens"].as_u64().map(|v|v.min(input.saturating_sub(read.unwrap_or_default())))),
+            ("reasoningTokens",usage["thoughtTokens"].as_u64().map(|v|v.min(output)))] {
+            if let Some(count)=value { counters[key]=json!(count); }
+        }
+        turn.prompt_usage=Some(counters);
+    }
+
     /// The prompt settled: finalize with the status its outcome gives.
     pub(crate) fn prompt_settled(&mut self, outcome: PromptOutcome) -> Vec<Out> {
         let interrupted = self.turn_interrupted();
         match outcome {
             PromptOutcome::Stopped(reason) => {
+                let failure = match reason.as_str() {
+                    "refusal" if self.driver() == "antigravity" => Some(json!({"class":"usage_limit","message":"You have reached your Antigravity quota for this period.","code":"QUOTA_EXHAUSTED","retryable":true,"resetAt":null})),
+                    "refusal" => Some(crate::flavor::provider_failure("The agent refused this request. The agent's next turn won't include this message or its reply.", "provider_error", None)),
+                    "max_tokens" => Some(crate::flavor::provider_failure("The agent stopped because its reply reached the output token limit.", "provider_error", None)),
+                    "max_turn_requests" => Some(crate::flavor::provider_failure("The agent stopped because it reached its request limit for this turn.", "provider_error", None)),
+                    _ => None
+                };
+                if let Some(failure) = failure { return self.finalize("failed",Some(failure)); }
                 let status = if reason == "cancelled" {
                     if interrupted {
                         "interrupted"

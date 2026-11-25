@@ -90,6 +90,7 @@ fn every_effect_round_trips_under_its_effect_type() {
             thread_id: "t".into(),
             run_id: "r".into(),
             message_id: "m".into(),
+            model_selection: None,
         },
         Effect::Interrupt {
             thread_id: "t".into(),

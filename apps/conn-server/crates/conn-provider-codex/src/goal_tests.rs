@@ -49,6 +49,7 @@ while IFS= read -r line; do
   case "$line" in
 {cases}
     *'"method":"initialize"'*) emit "{{\"id\":$id,\"result\":{{\"userAgent\":\"t3code_desktop/0.167.0 (x)\"}}}}" ;;
+    *'"method":"thread/name/set"'*) emit "{{\"id\":$id,\"result\":{{}}}}" ;;
     *'"method":"model/list"'*) emit "{{\"id\":$id,\"result\":{{\"data\":[],\"nextCursor\":null}}}}" ;;
     *'"method":"thread/start"'*) emit "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"th1\",\"createdAt\":1,\"updatedAt\":2}}}}}}" ;;
     *'"method":"config/read"'*) emit "{{\"id\":$id,\"result\":{{\"config\":{{}}}}}}" ;;

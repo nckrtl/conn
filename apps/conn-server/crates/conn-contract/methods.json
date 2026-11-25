@@ -1,5 +1,5 @@
 {
-  "contractDigest": "2b83411d59ae2ebe82785dff6df71ee0bb57825e69ec7841c0018a5361ba47b8",
+  "contractDigest": "b7a906d0689702ceb1efca7e792e13af578e3080c9119e2d2d3c7354bf5dcd92",
   "methods": [
     {
       "tag": "agentSessions.import",
@@ -579,6 +579,16 @@
     {
       "tag": "provider.install.subscribe",
       "stream": true,
+      "origin": "official"
+    },
+    {
+      "tag": "provider.mcpSignIn.complete",
+      "stream": false,
+      "origin": "official"
+    },
+    {
+      "tag": "provider.mcpSignIn.start",
+      "stream": false,
       "origin": "official"
     },
     {

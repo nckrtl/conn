@@ -328,7 +328,7 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "lastError": failure_field("message"),
         "lastErrorClass": failure_field("class"),
         "lastErrorCode": failure_field("code"),
-        "usageLimitResetAt": null,
+        "usageLimitResetAt": if failure_field("class") == "usage_limit" {failure_field("resetAt")} else {Value::Null},
         "pendingRuntimeRequest": pending_summary,
         "pendingGuestMessageCount": 0,
         "latestVisibleMessage": null,

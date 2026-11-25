@@ -31,6 +31,9 @@ use crate::streaming::AssistantStreaming;
 /// A thread whose provider session is open.
 pub(crate) struct LiveThread {
     session: Arc<dyn Session>,
+    /// Grok fixes the approval mode at process launch.
+    grok_launch_mode: Option<conn_contract::RuntimeMode>,
+    native_resume: bool,
     /// The provider instance the session belongs to. A run on another instance reopens.
     instance: String,
     state: Mutex<LiveState>,
@@ -121,7 +124,8 @@ impl LiveThread {
 
     /// Idle: no run and no provider event for `idle`, and no background work, which holds the
     /// session at most `max_hold` past that (T3's idle pin).
-    pub(crate) fn idle_for(&self, now: u64, idle: Duration, max_hold: Duration) -> bool {
+    pub(crate) fn idle_for(&self, now: u64, policy: crate::IdleTimeout, max_hold: Duration) -> bool {
+        let Some(idle) = policy.duration(self.native_resume) else { return false };
         let elapsed = |since: u64| Duration::from_millis(now.saturating_sub(since));
         if lock(&self.state).active.is_some() || elapsed(*lock(&self.last_used)) < idle {
             return false;
@@ -548,6 +552,39 @@ impl Inner {
                 e.to_string()
             })?;
         let session: Arc<dyn Session> = Arc::from(opened.session);
+        if provider.driver() == "claudeAgent" && tools.is_some() {
+            let inner = Arc::downgrade(self);
+            let thread_id = thread_id.to_owned();
+            session.set_goal_stop_check(Arc::new(move || {
+                let inner = inner.clone();
+                let tid = thread_id.clone();
+                Box::pin(async move {
+                    let Some(inner) = inner.upgrade() else { return false };
+                    inner.db(move |store| -> Result<bool, String> {
+                        let tx = store.tx()?;
+                        let Some(thread) = tx.thread(&tid)? else { return Ok(false) };
+                        if !thread["archivedAt"].is_null() || !thread["deletedAt"].is_null() {
+                            return Ok(false);
+                        }
+                        let Some(active) = thread["activeProviderThreadId"].as_str() else { return Ok(false) };
+                        if !tx.entity(&tid, "providerThreads", active)?.is_some_and(|pt| pt["goal"]["status"] == "active") {
+                            return Ok(false);
+                        }
+                        for task in tx.entities(&tid, "subagents")? {
+                            if task["origin"] != "app_owned" || !matches!(task["status"].as_str(), Some("running" | "waiting" | "pending"))
+                                || matches!(task["completionDelivery"]["state"].as_str(), Some("disposed" | "delivered" | "acknowledged")) {
+                                continue;
+                            }
+                            if let Some(id) = task["runId"].as_str()
+                                && tx.entity(&tid, "runs", id)?.is_some_and(|run| run["delegatedCompletion"]["disposition"].as_str().unwrap_or("open") == "open") {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    }).await.unwrap_or(false)
+                })
+            }));
+        }
         let provider_session = to_json(&opened.provider_session);
         // `open_session` must not yield before the session is in
         // `live`: on the one runtime thread, nothing else can then open a session for
@@ -564,6 +601,8 @@ impl Inner {
         } else {
             let live = Arc::new(LiveThread {
                 session,
+                grok_launch_mode: (provider.driver() == "grok").then(|| runtime_policy.runtime_mode.clone()),
+                native_resume: provider_session["capabilities"]["turns"]["supportsNativeResume"] == true,
                 instance: instance.to_owned(),
                 state: Mutex::new(LiveState::default()),
                 last_used: Mutex::new(self.clock.now_millis()),
@@ -793,10 +832,14 @@ impl Inner {
         // (`sessionsReleasedByFreshContext`). One still running background work stays open
         // beside the new session, as closing it would end that work.
         if let Some(live) = self.live_thread(thread_id) {
+            let changed_policy = live.grok_launch_mode.as_ref().is_some_and(|mode| mode != &runtime_policy.runtime_mode);
+            if changed_policy && !context.fresh && live.has_background_work() {
+                return Err("Stop the active Grok background work before switching its permission mode.".to_owned().into());
+            }
             if context.fresh && live.has_background_work() {
                 lock(&self.live).remove(thread_id);
                 lock(&self.detached).push((thread_id.to_owned(), live));
-            } else if live.instance != instance || context.fresh || context.leaves_side_conversation
+            } else if changed_policy || live.instance != instance || context.fresh || context.leaves_side_conversation
             {
                 self.close_session(thread_id).await;
             }
@@ -1581,8 +1624,8 @@ impl Inner {
                         }
                     }
                 }
-                Translated::CreateThread(thread) => {
-                    self.create_provider_thread(thread, &live.instance).await;
+                Translated::CreateThread(thread, create_only) => {
+                    self.create_provider_thread(thread, &live.instance, create_only).await;
                 }
                 Translated::Subagent(draft, subagent) => {
                     self.commit(vec![draft]).await;
@@ -1669,14 +1712,22 @@ impl Inner {
 
     /// `app_thread.created`: the child thread a subagent's rows are written to. Created once;
     /// a provider that announces it again changes nothing.
-    async fn create_provider_thread(&self, thread: Value, instance: &str) {
+    async fn create_provider_thread(&self, thread: Value, instance: &str, create_only: bool) {
         let instance = instance.to_owned();
         let Some(id) = thread["id"].as_str().map(str::to_owned) else {
             return;
         };
         let result = self
             .write(move |tx| {
-                if tx.thread(&id)?.is_none() {
+                if let Some(mut existing) = tx.thread(&id)? {
+                    if !create_only && thread["titleRenamed"] == true && thread["title"].is_string()
+                        && existing["title"] != thread["title"] {
+                        existing["title"] = thread["title"].clone();
+                        existing["titleRenamed"] = true.into();
+                        existing["updatedAt"] = tx.now().into();
+                        tx.append(Draft::new(&id, "thread.metadata-updated", existing).provider_instance(Some(&instance)))?;
+                    }
+                } else {
                     tx.append(
                         Draft::new(&id, "thread.created", thread)
                             .provider_instance(Some(&instance)),
@@ -2040,6 +2091,7 @@ impl Inner {
         thread_id: String,
         run_id: String,
         message_id: String,
+        model_selection: Option<Value>,
     ) {
         let (tid, mid) = (thread_id.clone(), message_id.clone());
         let message = self
@@ -2080,7 +2132,7 @@ impl Inner {
                         text: provider_text(message),
                         attachments: from_json(message["attachments"].clone()).unwrap_or_default(),
                     },
-                    model_selection: None,
+                    model_selection: model_selection.as_ref().and_then(|s| from_json(s.clone()).ok()),
                     app_context: self
                         .app_context(thread_id.clone())
                         .await
@@ -2106,6 +2158,9 @@ impl Inner {
             "createdBy": message["createdBy"],
             "creationSource": message["creationSource"],
         });
+        if let Some(selection) = model_selection {
+            command["modelSelection"] = selection;
+        }
         if message["context"].is_object() {
             command["context"] = message["context"].clone();
         }
@@ -2299,14 +2354,27 @@ impl Inner {
 
     /// Closes provider sessions idle for `idle`, so an idle thread does not keep a provider
     /// process. The next turn opens a session and resumes the stored provider thread.
-    pub(crate) async fn reap_idle(self: &Arc<Self>, idle: Duration) {
+    pub(crate) async fn reap_idle(self: &Arc<Self>, idle: crate::IdleTimeout) {
         let idle_threads: Vec<String> = lock(&self.live)
             .iter()
             .filter(|(_, live)| live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold))
             .map(|(id, _)| id.clone())
             .collect();
         for thread_id in idle_threads {
-            self.close_session(&thread_id).await;
+            let live = {
+                let mut sessions = lock(&self.live);
+                if sessions.get(&thread_id).is_some_and(|live| {
+                    live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold)
+                }) {
+                    sessions.remove(&thread_id)
+                } else {
+                    None
+                }
+            };
+            if let Some(live) = live {
+                self.command_output.finish_thread(&thread_id);
+                self.release(&thread_id, live, self.now_ms()).await;
+            }
         }
         let idle_detached: Vec<(String, Arc<LiveThread>)> = lock(&self.detached)
             .extract_if(.., |(_, live)| {
@@ -2632,7 +2700,7 @@ enum Translated {
         end: RunEnd,
     },
     /// A provider-made thread (a subagent's child): created once, never overwritten.
-    CreateThread(Value),
+    CreateThread(Value, bool),
     /// A steer was taken or dropped: the user message's turn item follows.
     Steer {
         message_id: String,
@@ -2825,8 +2893,8 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
                 },
             }
         }
-        ProviderEvent::AppThreadCreated { app_thread, .. } => {
-            Translated::CreateThread(to_json(&app_thread))
+        ProviderEvent::AppThreadCreated { app_thread, create_only } => {
+            Translated::CreateThread(to_json(&app_thread), create_only.unwrap_or(false))
         }
         ProviderEvent::SteerUpdated {
             message_id, status, ..

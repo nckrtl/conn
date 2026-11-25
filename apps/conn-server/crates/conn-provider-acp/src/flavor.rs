@@ -104,6 +104,8 @@ pub struct Flavor {
     pub(crate) approval_options: fn(&[(String, String)]) -> Value,
     /// `promptFailure`: the `ProviderFailure` for a failed prompt (message, code).
     pub(crate) prompt_failure: fn(&str, Option<i64>) -> Value,
+    /// Standalone final assistant message the CLI emits when a failed prompt returns `end_turn`.
+    pub(crate) terminal_warning: Option<&'static str>,
     /// `permissionDisposition` ahead of the shared rules, when the flavor decides.
     pub(crate) permission_override: fn(&Value) -> Option<crate::mapper::Disposition>,
     /// `applyModelSelection` / the model config option: the model id to send with
@@ -378,6 +380,7 @@ fn grok_capabilities() -> Value {
     caps["subagents"]["emitsSubagentLifecycle"] = json!(true);
     caps["tools"]["supportsMcpTools"] = json!(true);
     caps["checkpointing"]["providerCanReadConversationSnapshot"] = json!(true);
+    caps["turns"]["supportsActiveSteering"] = json!(true);
     caps["turns"]["supportsSteeringByInterruptRestart"] = json!(false);
     caps
 }
@@ -398,6 +401,7 @@ pub static GROK: Flavor = Flavor {
     completion: Completion::XAiPromptComplete,
     approval_options: grok_approval_options,
     prompt_failure: grok_prompt_failure,
+    terminal_warning: None,
     permission_override: grok_permission_override,
     normalize_tool: Some(crate::grok::normalize_tool),
     // Protocol 1 sends the effort as `session/set_model` metadata; newer protocols are not

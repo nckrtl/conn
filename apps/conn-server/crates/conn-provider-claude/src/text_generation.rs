@@ -132,7 +132,7 @@ pub fn cli_args(
                 "--disallowedTools",
                 INVESTIGATION_DENIED,
                 "--setting-sources",
-                "user",
+                "",
             ]
             .map(str::to_owned),
         );
@@ -202,16 +202,142 @@ fn structured_output(stdout: &str) -> Result<Value, ProviderError> {
         .unwrap_or(Value::Null))
 }
 
+struct SettingsFile(std::path::PathBuf);
+
+impl Drop for SettingsFile {
+    fn drop(&mut self) {
+        let path = self.0.clone();
+        // A cancelled guide must also remove its private settings file.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn_blocking(move || std::fs::remove_file(path));
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn merge_settings(target: &mut Value, source: Value) {
+    if let (Some(map), Value::Object(source)) = (target.as_object_mut(), &source) {
+        for (key, value) in source {
+            merge_settings(map.entry(key).or_insert(Value::Null), value.clone());
+        }
+    } else {
+        *target = source;
+    }
+}
+
 /// One request. `env` is the Claude process environment; `program` the CLI; `manifest` the
 /// instance's live model manifest.
 pub async fn generate(
     program: &str,
     env: &[(String, String)],
-    manifest: &conn_provider::LiveManifest,
+    config: &crate::launch::ClaudeConfig,
     managed_mcp_config: bool,
     request: TextGenerationRequest,
 ) -> Result<Value, ProviderError> {
     let selection = conn_contract::to_json(&request.model_selection);
+    let mut args = cli_args(
+        &selection,
+        &config.model_manifest,
+        &request.output_schema,
+        true,
+        managed_mcp_config,
+        request.investigate,
+    );
+    let launch_args = config.launch_args.clone();
+    let project_cwd = request
+        .project_cwd
+        .clone()
+        .unwrap_or_else(|| request.cwd.clone());
+    let home = crate::launch::config_dir(
+        config,
+        &env.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
+    );
+    let investigate = request.investigate;
+    let at = args
+        .iter()
+        .position(|arg| arg == "--settings")
+        .and_then(|at| at.checked_add(1));
+    let base = at
+        .and_then(|i| args.get(i))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or_else(|| json!({}));
+    let (settings, temp_settings) = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        use std::io::Write;
+        let parsed = crate::launch_args::apply(&launch_args, Some(&project_cwd))?;
+        let launch = parsed
+            .settings
+            .map(|entries| crate::launch_args::Json::Object(entries).to_text())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or_else(|| json!({}));
+        let mut merged = if investigate {
+            std::fs::read(home.join("settings.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_else(|| json!({}))
+        } else {
+            json!({})
+        };
+        let mut denies = Vec::new();
+        for source in [&merged, &launch] {
+            for rule in source["permissions"]["deny"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r.is_string())
+            {
+                if !denies.contains(rule) {
+                    denies.push(rule.clone())
+                }
+            }
+        }
+        merge_settings(&mut merged, launch);
+        merge_settings(&mut merged, base);
+        if investigate {
+            if let Some(map) = merged.as_object_mut() {
+                map.remove("permissions");
+            }
+            if !denies.is_empty() {
+                merged["permissions"] = json!({"deny":denies});
+            }
+            let path = std::env::temp_dir().join(format!(
+                "conn-claude-settings-{}.json",
+                conn_support::uuid_v4()
+            ));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(&path).map_err(|e| e.to_string())?;
+            let guard = SettingsFile(path);
+            file.write_all(merged.to_string().as_bytes())
+                .map_err(|e| e.to_string())?;
+            return Ok((guard.0.to_string_lossy().into_owned(), Some(guard)));
+        }
+        Ok((merged.to_string(), None))
+    })
+    .await
+    .map_err(|e| failed(e.to_string()))?
+    .map_err(failed)?;
+    if let Some(slot) = at.and_then(|i| args.get_mut(i)) {
+        *slot = settings;
+    }
+    let _settings_file = temp_settings;
+    let paths = request.image_paths.clone();
+    let text = request.prompt.clone();
+    let image_input=tokio::task::spawn_blocking(move || {
+        let mut content=vec![json!({"type":"text","text":text})];
+        for path in paths {
+            let mime=match path.extension().and_then(|ext|ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(){
+                "png"=>"image/png","jpg"|"jpeg"=>"image/jpeg","webp"=>"image/webp","gif"=>"image/gif",_=>continue,
+            };
+            if let Ok(bytes)=std::fs::read(path){content.push(json!({"type":"image","source":{"type":"base64","media_type":mime,"data":conn_support::base64::encode(&bytes)}}));}
+        }
+        (content.len()>1).then(||format!("{}\n",json!({"type":"user","message":{"role":"user","content":content}})))
+    }).await.map_err(|e|failed(e.to_string()))?;
     let title = request.operation == "generateThreadTitle";
     // A thread title runs in a fresh folder of its own (`makeTempDirectoryScoped`), removed
     // after.
@@ -236,36 +362,64 @@ pub async fn generate(
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from(&request.cwd));
     let timeout = request.timeout.unwrap_or(TIMEOUT);
-    let run = |persistence: bool| {
-        let args = cli_args(
-            &selection,
-            manifest,
-            &request.output_schema,
-            persistence,
-            managed_mcp_config,
-            request.investigate,
-        );
+    let started = tokio::time::Instant::now();
+    let run = |persistence: bool, images: bool| {
+        let mut args = args.clone();
+        if !persistence {
+            args.retain(|s| s != NO_SESSION_PERSISTENCE);
+        }
+        if images && let Some(at) = args.iter().position(|s| s == "--output-format") {
+            args.splice(
+                at..at + 2,
+                [
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                ]
+                .map(str::to_owned),
+            );
+        }
         let cwd = cwd.clone();
-        let prompt = request.prompt.clone();
+        let prompt = if images {
+            image_input.as_deref().unwrap_or(&request.prompt)
+        } else {
+            &request.prompt
+        };
+        let left = timeout.saturating_sub(started.elapsed());
         async move {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            run_collect(program, &args, env, Some(&cwd), Some(&prompt), timeout).await
+            let mut out = run_collect(program, &args, env, Some(&cwd), Some(prompt), left).await?;
+            if images && let Some(out) = out.as_mut() {
+                out.stdout = out
+                    .stdout
+                    .lines()
+                    .rfind(|s| !s.trim().is_empty())
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            Ok::<_, CommandError>(out)
         }
     };
-    let started = tokio::time::Instant::now();
-    let mut result = run(true).await;
-    if let Ok(Some(out)) = &result
-        && out.code != 0
-        && out.stderr.contains(NO_SESSION_PERSISTENCE_REJECTED)
+    let attempt = |images| {
+        let run = &run;
+        async move {
+            let result = run(true, images).await;
+            if matches!(&result, Ok(Some(out)) if out.code!=0 && out.stderr.contains(NO_SESSION_PERSISTENCE_REJECTED))
+            {
+                run(false, images).await
+            } else {
+                result
+            }
+        }
+    };
+    let mut result = attempt(image_input.is_some()).await;
+    if image_input.is_some()
+        && matches!(&result,Ok(Some(out)) if out.code!=0)
+        && started.elapsed() < timeout
     {
-        let left = timeout.saturating_sub(started.elapsed());
-        result = if left.is_zero() {
-            Ok(None)
-        } else {
-            tokio::time::timeout(left, run(false))
-                .await
-                .unwrap_or(Ok(None))
-        };
+        result = attempt(false).await;
     }
     if let Some(dir) = temp {
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;

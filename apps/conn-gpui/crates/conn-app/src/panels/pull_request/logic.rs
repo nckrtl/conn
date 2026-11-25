@@ -2388,6 +2388,8 @@ mod tests {
                 status,
                 description: None,
                 url: url.map(ToOwned::to_owned),
+                started_at: None,
+                completed_at: None,
                 required: None,
                 placeholder: None,
             };
@@ -2668,6 +2670,8 @@ mod tests {
             status: PullRequestCheckStatus::Failure,
             description: Some("2 warnings".to_owned()),
             url: None,
+            started_at: None,
+            completed_at: None,
             required: Some(true),
             placeholder: None,
         };

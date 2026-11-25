@@ -45,55 +45,60 @@ struct WorkspaceRootView: View {
     @State private var pullRequests = WorkspacePullRequests()
     @State private var tasks = TasksModel()
     @FocusState private var searchFocused: Bool
-    @State private var screenInset: CGFloat = 0
 
-    /// Lab `.m-wsbar`: circles 24pt from the sides, 20pt gaps. The system tab bar's pill is 62pt tall
-    /// with icon-only items (iOS 26/27), floats 21pt above the screen's bottom edge, and cannot be
-    /// moved or resized, so the circles take its height and bottom inset. It insets itself 21pt
-    /// inside its frame.
-    private static let barHeight: CGFloat = 62
-    private static let barBottomInset: CGFloat = 21
-    private static let barSideInset: CGFloat = 24
-    private static let barGap: CGFloat = 20
-    private static let pillFrameInset: CGFloat = 21
-    /// Nick found the system's 21pt float too high; the whole row, the hosted bar included, draws
-    /// this much lower (13pt above the screen edge). Offset moves drawing and hit-testing together.
-    private static let barLowering: CGFloat = 8
-
-    private var barRow: some View {
-        HStack(spacing: Self.barGap) {
-            footerAction("more-horizontal", label: "Open settings", id: "workspace.settingsButton", size: Self.barHeight) { showingSettings = true }
-            nativeBar
-                .frame(maxWidth: .infinity).frame(height: Self.barHeight)
-                .padding(.horizontal, -Self.pillFrameInset)
-            footerAction("add", label: "New chat", id: "inbox.newThreadButton", size: Self.barHeight) {
-                navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
-            }.disabled(store.showsOffline).opacity(store.showsOffline ? 0.5 : 1)
-        }.padding(.horizontal, Self.barSideInset)
+    /// Conn mobile's `WorkspacePhoneBar`: the navigation bottom toolbar holds the settings button,
+    /// the tab switcher and the new-thread button, separated by flexible spacers. UIKit draws all of
+    /// its glass, so the circles and the switcher share one material, size and centre line.
+    @ToolbarContentBuilder
+    private var workspaceToolbar: some ToolbarContent {
+        ToolbarItem(placement: .bottomBar) {
+            Button { showingSettings = true } label: {
+                ThreadGlyph(name: "more-horizontal", size: 22).foregroundStyle(theme.primary)
+            }
+            .accessibilityLabel("Open settings").accessibilityIdentifier("workspace.settingsButton")
+        }
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        ToolbarItem(placement: .bottomBar) { workspaceSwitcher }
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        ToolbarItem(placement: .bottomBar) {
+            Button { navigationPath.append(.newThreadDraft(projectId: nil, title: "General")) } label: {
+                ThreadGlyph(name: "add", size: 22).foregroundStyle(theme.primary)
+            }
+            .disabled(store.showsOffline)
+            .accessibilityLabel("New chat").accessibilityIdentifier("inbox.newThreadButton")
+        }
     }
 
-    /// The system tab bar, in a TabView whose pages are empty: the real Liquid Glass bar and lens
-    /// selection, sized by this frame.
-    private var nativeBar: some View {
-        TabView(selection: selection) {
-            // Lab `WorkspaceBar`: icon-only items, search inside the same pill (no `.search` role,
-            // which would split it into its own circle).
-            Tab(value: WorkspaceSelection.section(.threads)) { ClearTabBackground() } label: {
-                tabIcon("thread", "Threads")
-            }.accessibilityIdentifier("workspace.tab.threads")
-            Tab(value: WorkspaceSelection.section(.tasks)) { ClearTabBackground() } label: {
-                tabIcon("checklist", "Tasks")
-            }.accessibilityIdentifier("workspace.tab.tasks")
-            Tab(value: WorkspaceSelection.section(.pullRequests)) { ClearTabBackground() } label: {
-                tabIcon("pull-request", "Pull requests")
-            }.accessibilityIdentifier("workspace.tab.pullRequests")
-            Tab(value: WorkspaceSelection.search) { ClearTabBackground() } label: {
-                tabIcon("search", "Search")
-            }.accessibilityIdentifier("workspace.searchButton")
+    /// Mobile's switcher: 48pt tall with 4pt above and below, 64pt per item, 22pt icons; the selected
+    /// item sits in a capsule of the text colour at 12% with its icon in the accent foreground.
+    private var workspaceSwitcher: some View {
+        HStack(spacing: 0) {
+            switcherItem(.section(.threads), glyph: "thread", title: "Threads", id: "workspace.tab.threads")
+            switcherItem(.section(.tasks), glyph: "checklist", title: "Tasks", id: "workspace.tab.tasks")
+            switcherItem(.section(.pullRequests), glyph: "pull-request", title: "Pull requests", id: "workspace.tab.pullRequests")
+            switcherItem(.search, glyph: "search", title: "Search", id: "workspace.searchButton")
         }
-        .tabViewStyle(.tabBarOnly)
-        // Lab: the active tab takes the accent foreground.
-        .tint(theme.accentForeground)
+        .padding(.vertical, 4)
+        .frame(height: 48)
+    }
+
+    private func switcherItem(_ value: WorkspaceSelection, glyph: String, title: String, id: String) -> some View {
+        let selected = selection.wrappedValue == value
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) { selection.wrappedValue = value }
+        } label: {
+            ThreadGlyph(name: glyph, size: 22)
+                .foregroundStyle(selected ? theme.accentForeground : theme.mutedForeground)
+                .frame(width: 64, height: 40)
+                .background {
+                    if selected { Capsule().fill(theme.foreground.opacity(0.12)) }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(id)
     }
 
     /// Lab `.m-wsbar-circle`: a 48pt glass circle with a 20pt glyph in the primary colour.
@@ -107,20 +112,9 @@ struct WorkspaceRootView: View {
             .accessibilityLabel(label).accessibilityIdentifier(id)
     }
 
-    /// An icon-only tab item from the lab's 24-unit glyphs, drawn at the lab's 22pt.
-    private func tabIcon(_ glyph: String, _ title: String) -> some View {
-        let size = CGSize(width: 22, height: 22)
-        let image = UIImage(named: "thread-" + glyph).map { source in
-            UIGraphicsImageRenderer(size: size).image { _ in source.draw(in: CGRect(origin: .zero, size: size)) }
-                .withRenderingMode(.alwaysTemplate)
-        } ?? UIImage()
-        image.accessibilityLabel = title
-        return Image(uiImage: image).accessibilityLabel(title)
-    }
-
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            // The system bar of this TabView is always hidden; `barRow` hosts the native bar.
+            // The system tab bar stays hidden; the bottom toolbar (`workspaceToolbar`) switches tabs.
             TabView(selection: selection) {
                 Tab(value: WorkspaceSelection.section(.threads)) { section(.threads) } label: { EmptyView() }
                 Tab(value: WorkspaceSelection.section(.tasks)) { section(.tasks) } label: { EmptyView() }
@@ -128,14 +122,9 @@ struct WorkspaceRootView: View {
                 Tab(value: WorkspaceSelection.search) { section(selectedTab, query: searchQuery) } label: { EmptyView() }
             }
             .tabViewStyle(.tabBarOnly)
-            .onGeometryChange(for: CGFloat.self, of: { $0.safeAreaInsets.bottom }) { screenInset = $0 }
-            .overlay(alignment: .bottom) {
-                if !isSearching {
-                    barRow.padding(.bottom, Self.barBottomInset).offset(y: Self.barLowering).ignoresSafeArea(edges: .bottom)
-                }
-            }
             .toolbar(.hidden, for: .navigationBar)
-            .toolbar(.hidden, for: .bottomBar)
+            .toolbar { if !isSearching { workspaceToolbar } }
+            .toolbar(isSearching ? .hidden : .visible, for: .bottomBar)
             .navigationDestination(for: WorkspaceRoute.self) { route in
                 switch route {
                 case let .task(id):
@@ -296,7 +285,7 @@ struct WorkspaceRootView: View {
                         }
                     }.padding(.horizontal, 24)
                 }
-            }.padding(.bottom, query == nil ? max(0, Self.barBottomInset - Self.barLowering + Self.barHeight + 8 - screenInset) : 0)
+            }.padding(.bottom, query == nil ? 8 : 0)
         }
     }
 
@@ -334,24 +323,4 @@ struct OfflinePill: View {
             .padding(.vertical, 6)
             .background(Color(red: 1, green: 0.83, blue: 0.30), in: Capsule())
     }
-}
-
-/// An empty tab page that makes its TabView's own backing views transparent. SwiftUI offers no way
-/// to do this, and the opaque backing would otherwise show as a rectangle behind the floating bar.
-private struct ClearTabBackground: UIViewControllerRepresentable {
-    final class Page: UIViewController {
-        override func viewDidLayoutSubviews() {
-            super.viewDidLayoutSubviews()
-            guard let root = tabBarController?.view else { return }
-            var current: UIView? = view
-            while let candidate = current {
-                candidate.backgroundColor = .clear
-                if candidate === root { break }
-                current = candidate.superview
-            }
-        }
-    }
-
-    func makeUIViewController(context: Context) -> Page { Page() }
-    func updateUIViewController(_ page: Page, context: Context) {}
 }

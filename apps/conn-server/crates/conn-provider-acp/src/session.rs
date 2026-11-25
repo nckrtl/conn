@@ -222,8 +222,8 @@ struct State<E: Env> {
     prompt_request: Option<i64>,
     /// Antigravity can ask us to retry an overlapping prompt once its current work is idle.
     retry_prompt: Option<J>,
-    /// A rejected initial prompt still owns its place until its delayed retry.
-    busy_prompt: Option<i64>,
+    /// Until its native echo, the first request could still be rejected as busy.
+    awaiting_initial_prompt: bool,
     /// Antigravity's overlapping prompt is provisional until its own user echo or RPC reply.
     pending_steer: Option<PendingSteer>,
     /// Once a steer is queued, subsequent steers for this turn must wait behind it.
@@ -759,9 +759,10 @@ impl AcpSession {
             state.step_boundary = step_boundary;
             state.resumed_outcome = false;
             state.queue_steers = false;
-            state.busy_prompt = None;
+            state.awaiting_initial_prompt = flavor.driver == "antigravity";
             state.prompt_texts.clear();
             if flavor.driver == "antigravity" {
+                state.prompt_texts.insert(input.message.text.clone());
                 state.prompt_texts.insert(user_text.clone());
                 state.prompt_texts.insert(text);
             }
@@ -843,7 +844,7 @@ impl AcpSession {
                 previous_mode: None,
                 prompt_request: None,
                 retry_prompt: None,
-                busy_prompt: None,
+                awaiting_initial_prompt: false,
                 pending_steer: None,
                 queue_steers: false,
                 prompt_texts: Default::default(),
@@ -1381,13 +1382,15 @@ impl Inner {
         if update["sessionUpdate"] == "user_message_chunk"
             && update["content"]["type"] == "text"
             && let Some(echo) = update["content"]["text"].as_str()
-            && state
-                .pending_steer
-                .as_ref()
-                .is_some_and(|steer| steer.echo.as_deref() == Some(echo))
-            && let Some(steer) = state.pending_steer.take()
         {
-            self.accept_steer(state, steer);
+            if state.awaiting_initial_prompt && state.prompt_texts.contains(echo) {
+                state.awaiting_initial_prompt = false;
+            } else if let Some(steer) = state
+                .pending_steer
+                .take_if(|s| s.echo.as_deref() == Some(echo))
+            {
+                self.accept_steer(state, steer);
+            }
         }
         if matches!(
             update["sessionUpdate"].as_str(),
@@ -1905,6 +1908,8 @@ impl Inner {
         if !state.mapper.has_turn() {
             state.pending_steer.take();
             state.prompt_texts.clear();
+            state.awaiting_initial_prompt = false;
+            state.queue_steers = false;
         }
         self.pending_background.store(
             state.mapper.pending_background_work(),
@@ -2168,6 +2173,7 @@ impl Inner {
             return;
         }
         state.retry_prompt = None;
+        state.awaiting_initial_prompt = false;
         if let Some(usage) = usage {
             state.mapper.record_prompt_usage(&usage);
         }
@@ -2417,7 +2423,6 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 {
                     // A new turn can be busy while the preceding turn's native work drains.
                     // A steer rejection already returned to the engine above.
-                    inner.state.lock().await.busy_prompt = Some(id);
                     let weak = Arc::downgrade(&inner);
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2430,7 +2435,6 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                         {
                             return;
                         }
-                        state.busy_prompt = None;
                         // The peer rejected this request already and has nothing left to cancel.
                         if state.mapper.turn_interrupted() {
                             drop(state);
@@ -3318,10 +3322,11 @@ impl Session for AcpSession {
                     operation: "steer_turn",
                 });
             }
-            if state.queue_steers || state.pending_steer.is_some() || state.busy_prompt.is_some() {
+            if state.queue_steers || state.pending_steer.is_some() || state.awaiting_initial_prompt
+            {
                 state.queue_steers = true;
                 return Err(protocol_error(
-                    "An earlier Antigravity steer is awaiting delivery",
+                    "An earlier Antigravity message is awaiting delivery",
                 ));
             }
             let echo =

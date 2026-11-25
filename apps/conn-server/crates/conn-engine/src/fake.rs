@@ -129,10 +129,22 @@ pub struct FakeProvider {
     /// as a provider process that exits on its own (systemd's SIGTERM reaches it too).
     process_exit: Option<Arc<tokio::sync::Notify>>,
     #[cfg(test)]
+    pub(crate) steer_receipt: SteerReceiptGate,
+    #[cfg(test)]
     pub(crate) late_start_entered: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     pub(crate) workflow_stop_entered: Arc<tokio::sync::Notify>,
 }
+
+#[cfg(test)]
+type SteerReceiptGate = Arc<
+    Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+>;
 
 impl std::fmt::Debug for FakeProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -185,6 +197,8 @@ impl FakeProvider {
             capabilities: conn_provider::testing::session_capabilities(),
             process_exit: None,
             finish_background: Arc::default(),
+            #[cfg(test)]
+            steer_receipt: Arc::default(),
             #[cfg(test)]
             late_start_entered: Arc::default(),
             #[cfg(test)]
@@ -314,6 +328,8 @@ struct Turn {
 struct FakeSession {
     #[cfg(test)]
     goal_stop_check: Arc<Mutex<Option<conn_provider::GoalStopCheck>>>,
+    #[cfg(test)]
+    steer_receipt: SteerReceiptGate,
     #[cfg(test)]
     late_start_entered: Arc<tokio::sync::Notify>,
     #[cfg(test)]
@@ -470,6 +486,8 @@ impl Provider for FakeProvider {
                 session: Box::new(FakeSession {
                     #[cfg(test)]
                     goal_stop_check: self.goal_stop_check.clone(),
+                    #[cfg(test)]
+                    steer_receipt: self.steer_receipt.clone(),
                     #[cfg(test)]
                     late_start_entered: self.late_start_entered.clone(),
                     #[cfg(test)]
@@ -1229,6 +1247,14 @@ impl Session for FakeSession {
 
     fn steer_turn(&self, input: SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
+            #[cfg(test)]
+            let held = crate::lock(&self.steer_receipt).take();
+            #[cfg(test)]
+            if let Some((entered, release)) = held {
+                let _ = entered.send(());
+                let _ = release.await;
+                return Ok(());
+            }
             if !self.steering {
                 return Err(ProviderError::Unsupported {
                     operation: "steer_turn",

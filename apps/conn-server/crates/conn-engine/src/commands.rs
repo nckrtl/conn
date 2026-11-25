@@ -300,6 +300,18 @@ pub(crate) fn active_run(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Option<Val
     tx.active_run(thread_id)
 }
 
+/// A thread Stop or settlement can outlive the native run and its interrupt request.
+/// Its committed receipt still holds a late steer or quota continuation for that attempt.
+fn thread_stopped_after_run_start(tx: &Tx<'_>, thread: &str, run: &str) -> StoreResult<bool> {
+    tx.sql().query_row(
+        "SELECT EXISTS(SELECT 1 FROM receipts WHERE owner_kind='thread' AND owner_id=?1 AND error IS NULL
+           AND command_type IN ('thread.stop', 'thread.settle', 'thread.auto-settle')
+           AND sequence >= (SELECT COALESCE(a.first_seq,r.first_seq) FROM entities r LEFT JOIN entities a
+              ON a.thread_id=r.thread_id AND a.kind='attempts' AND a.id=json_extract(r.body,'$.activeAttemptId')
+              WHERE r.thread_id=?1 AND r.kind='runs' AND r.id=?2))",
+        rusqlite::params![thread,run], |row|row.get(0)).map_err(|e|e.to_string())
+}
+
 /// Queued runs in delivery order: `queuePosition`, then ordinal.
 pub(crate) fn queued_runs(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Vec<Value>> {
     let mut runs: Vec<Value> = tx
@@ -781,7 +793,16 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
         .unwrap_or_default()
         .to_owned();
     let goal = native_goal(tx, &c.text, !c.attachments.is_empty(), &instance)?;
-    let (delivery, interrupt) = delivery(tx, &mut c, goal.as_ref())?;
+    // A native steer can resolve after Stop has finished its source run and held the queue.
+    let hold_follow_up = match c.steer_follow_up_of_run_id.as_deref() {
+        Some(source) => thread_stopped_after_run_start(tx, &c.thread_id, source)?,
+        None => false,
+    };
+    let (delivery, interrupt) = if hold_follow_up {
+        (Delivery::Queue { first: true }, None)
+    } else {
+        delivery(tx, &mut c, goal.as_ref())?
+    };
     if let Delivery::Steer(target) = delivery {
         return steer_into(tx, &c, &target);
     }
@@ -945,6 +966,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             None => false,
         };
     let held = worktree_missing
+        || hold_follow_up
         || (queued
             && !wake_skips_hold
             && queued_runs(tx, &c.thread_id)?
@@ -3541,7 +3563,7 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
             let run_id = update["runId"].as_str().unwrap_or_default();
             let stopped = auto_arm
                 && (interrupt_request(tx, &c.thread_id, run_id)?.is_some()
-                    || crate::limit_recovery::stopped_after_start(tx, &c.thread_id, run_id)?);
+                    || thread_stopped_after_run_start(tx, &c.thread_id, run_id)?);
             let setting = |key: &str| {
                 update[key]
                     .as_bool()

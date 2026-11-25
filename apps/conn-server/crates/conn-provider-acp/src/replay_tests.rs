@@ -1002,6 +1002,11 @@ async fn antigravity_retries_undelivered_instructions_after_a_trailing_tool_upda
 fn wire_request(method: &str, params: Value) -> Value {
     json!({"type":"expect_outbound","label":format!("request:{method}"),"frame":{"kind":"request","method":method,"params":params}})
 }
+fn user_echo(session: &Value, text: &Value) -> Value {
+    json!({"type":"emit_inbound","frame":{"kind":"notification","method":"session/update",
+        "params":{"sessionId":session,"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":text}}}}})
+}
+
 fn wire_result(method: &str, result: Value) -> Value {
     json!({"type":"emit_inbound","label":format!("response:{method}"),"frame":{"kind":"response","method":method,"result":result}})
 }
@@ -1168,6 +1173,7 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
             .iter()
             .position(|c| c["method"] == "startTurn")
             .unwrap();
+        let initial_text = calls[pos]["input"]["message"]["text"].clone();
         let mut steer = calls[pos].clone();
         steer["method"] = json!("steerTurn");
         steer["input"]["message"]["text"] = json!("adjust course");
@@ -1224,6 +1230,9 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
                 wire_result(method, json!({"stopReason":"refusal"})),
             ]);
         }
+        if !is_grok {
+            script.insert(prompt + 1, user_echo(&session, &initial_text));
+        }
         let flavor = if is_grok {
             &crate::flavor::GROK
         } else {
@@ -1250,7 +1259,7 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
 
 #[tokio::test(start_paused = true)]
 async fn antigravity_declines_busy_steers_in_order_and_stops_the_original_prompt() {
-    for stop in [true, false] {
+    for (stop, original_busy) in [(true, false), (false, false), (true, true)] {
         let mut fixture = antigravity_turn_with_thinking_level();
         let mut calls = fixture["calls"].as_array().unwrap().clone();
         let start = calls.last().unwrap().clone();
@@ -1278,10 +1287,13 @@ async fn antigravity_declines_busy_steers_in_order_and_stops_the_original_prompt
             .clone();
         let close = script.split_off(script.len() - 2);
         script.truncate(prompt + 1);
-        script.push(wire_request(
-            "session/prompt",
-            json!({"sessionId":session,"prompt":[{"type":"text","text":"first steer"}]}),
-        ));
+        if !original_busy {
+            script.push(user_echo(&session, &start["input"]["message"]["text"]));
+            script.push(wire_request(
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"first steer"}]}),
+            ));
+        }
         // For Stop, the original native request remains outstanding after A is rejected.
         // For failure, its earlier refusal must be retained until the outcome of A is known.
         if !stop {
@@ -1291,7 +1303,7 @@ async fn antigravity_declines_busy_steers_in_order_and_stops_the_original_prompt
             ));
         }
         script.push(json!({"type":"emit_inbound","frame":{"kind":"response","method":"session/prompt",
-            "pendingRequestIndex":usize::from(stop),"error":{"code":-32603,"message":"Agent is already processing a request."}}}));
+            "pendingRequestIndex":usize::from(stop && !original_busy),"error":{"code":-32603,"message":"Agent is already processing a request."}}}));
         if stop {
             let turn = crate::testing::turn_input(&start["input"]);
             let native = format!(
@@ -1305,17 +1317,23 @@ async fn antigravity_declines_busy_steers_in_order_and_stops_the_original_prompt
             );
             calls.push(json!({"method":"interruptTurn","input":{"providerThread":start["input"]["providerThread"],"providerTurnId":id}}));
             script.push(json!({"type":"expect_outbound","frame":{"kind":"notification","method":"session/cancel","params":{"sessionId":session}}}));
-            script.push(wire_result(
-                "session/prompt",
-                json!({"stopReason":"cancelled"}),
-            ));
+            if !original_busy {
+                script.push(wire_result(
+                    "session/prompt",
+                    json!({"stopReason":"cancelled"}),
+                ));
+            }
         }
         script.extend(close);
         fixture["calls"] = Value::Array(calls);
         let run = replay(&crate::antigravity::ANTIGRAVITY, &fixture).await;
         assert_eq!(run.errors.len(), 2, "{:?}", run.errors);
         assert!(
-            run.errors[0].contains("already processing"),
+            run.errors[0].contains(if original_busy {
+                "awaiting delivery"
+            } else {
+                "already processing"
+            }),
             "{:?}",
             run.errors
         );
@@ -1328,7 +1346,7 @@ async fn antigravity_declines_busy_steers_in_order_and_stops_the_original_prompt
                 .iter()
                 .filter(|r| r["method"] == "session/prompt")
                 .count(),
-            2
+            if original_busy { 1 } else { 2 }
         );
         let terminals: Vec<_> = run
             .events

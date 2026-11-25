@@ -6760,6 +6760,81 @@ async fn declined_steers_keep_their_message_ids_and_fifo_priority() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_steer_displaced_by_stop_respects_its_source_threads_queue_hold() {
+    for stop_thread in [true, false] {
+        let db = TempDb::new(&format!("steer-source-stop-{stop_thread}"));
+        let (engine, fake) = open_with(&db, FakeProvider::new("claudeAgent"));
+        dispatch(&engine, create("t1", "create")).await;
+        // A Stop that predates this attempt cannot hold its later follow-up.
+        dispatch(&engine, stop("t1", "old-stop")).await;
+        let mut stream = engine
+            .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+            .await
+            .unwrap();
+        next(&mut stream).await;
+        dispatch(&engine, message("t1", "p", "hang")).await;
+        until_provider_turn(&mut stream).await;
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, native_receipt) = tokio::sync::oneshot::channel();
+        *crate::lock(&fake.steer_receipt) = Some((entered, native_receipt));
+        let steer = |id, text| {
+            message_with(
+                "t1",
+                id,
+                text,
+                json!({"type":"steer_active","targetRunId":"run:t1:1"}),
+                None,
+            )
+        };
+        dispatch(&engine, steer("a", "first steer")).await;
+        timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch(&engine, steer("b", "second steer")).await;
+        let stop_command = if stop_thread {
+            stop("t1", "stop")
+        } else {
+            json!({"type":"run.interrupt","commandId":"stop","threadId":"t1","runId":"run:t1:1","holdQueue":false})
+        };
+        dispatch(&engine, stop_command).await;
+        let end = until_run_ends(&mut stream).await;
+        assert_eq!(end.last().unwrap().1["status"], "interrupted");
+        release.send(()).unwrap();
+        loop {
+            let item = next(&mut stream).await;
+            if item["event"]["type"] == "run.created"
+                && item["event"]["payload"]["userMessageId"] == "message:b"
+            {
+                let run = &item["event"]["payload"];
+                if stop_thread {
+                    assert_eq!(run["status"], "queued");
+                    assert_eq!(run["queueHeld"], true);
+                    assert_eq!(run["queuePosition"], 1);
+                } else {
+                    assert_ne!(run["queueHeld"], true);
+                }
+                break;
+            }
+        }
+        if stop_thread {
+            let p = projection(&engine, "t1").await;
+            assert_eq!(p["runs"][1]["status"], "queued");
+            assert_eq!(p["providerTurns"].as_array().unwrap().len(), 1);
+            dispatch(
+                &engine,
+                json!({"type":"queue.resume","commandId":"resume","threadId":"t1"}),
+            )
+            .await;
+        }
+        let p = run_to_end(&engine, "t1", "run:t1:2").await;
+        assert_eq!(p["runs"][1]["userMessageId"], "message:b");
+        assert_eq!(p["runs"][1]["status"], "completed");
+        assert_eq!(p["providerTurns"].as_array().unwrap().len(), 2);
+    }
+}
+
 fn open_home(db: &TempDb) -> SqliteEngine {
     let mut config = EngineConfig::new(db.path());
     config.home = Some(db.0.join("home"));

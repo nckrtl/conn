@@ -44,7 +44,10 @@ struct AgentSummary: View {
         .font(.system(size: size))
         .lineHeight(.exact(points: size * 1.625))
         .padding(.horizontal, 11)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        // The exact line height puts all its extra room under the last line, not around it, so the
+        // bottom gives that back and the text sits as far from the bottom edge as from the top.
+        .padding(.bottom, max(0, 10 - (size * 1.625 - UIFont.systemFont(ofSize: size).lineHeight)))
     }
 }
 

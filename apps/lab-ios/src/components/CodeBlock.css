@@ -1,74 +1,120 @@
 .m-code {
-  margin: 0 0 13px;
-  border-radius: 12px;
+  min-width: 0;
+  border-radius: 14px;
   overflow: hidden;
-  background: var(--color-md-code-bg);
+  background: var(--ios-code);
   color: var(--color-md-code-text);
-  /* As on desktop: only a light surface needs an edge to read against the page. */
-  border: 0.5px solid transparent;
+  border: 1px solid var(--color-border);
 }
-.m-phone[data-mobile-theme="light"] .m-code {
-  border-color: var(--color-md-hr);
+[data-ios-theme="light"] .m-code {
+  border-color: color-mix(in srgb, var(--color-border) 70%, transparent);
 }
-.m-code-header {
+.m-code-header,
+.m-code-label {
   display: flex;
   align-items: center;
+}
+.m-code-header {
   justify-content: space-between;
   gap: 8px;
-  min-height: 30px;
-  padding: 2px 6px 0 14px;
+  padding: 6px 6px 0 12px;
+  color: color-mix(in srgb, var(--color-md-code-text) 72%, transparent);
 }
 .m-code-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: color-mix(in srgb, var(--color-md-code-text) 55%, transparent);
+  gap: 6px;
+  font: 11px/16px var(--thread-mono);
 }
-.m-code-actions {
-  display: flex;
-  gap: 2px;
-  margin-left: auto;
+.m-code-label:is([data-lang="rs"], [data-lang="rust"]) {
+  --file-icon: url("../../../conn-gpui/crates/conn-app/assets/icons/files/file-tree-builtin-rust.svg");
+  --icon-color: #ffa359;
 }
-.m-code-button {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
+.m-code-label:is([data-lang="typescript"], [data-lang="ts"], [data-lang="tsx"]) {
+  --file-icon: url("../../../conn-gpui/crates/conn-app/assets/icons/files/file-tree-builtin-typescript.svg");
+  --icon-color: #69b1ff;
+}
+.m-code-label:is(
+    [data-lang="rs"],
+    [data-lang="rust"],
+    [data-lang="typescript"],
+    [data-lang="ts"],
+    [data-lang="tsx"]
+  )::before {
+  content: "";
+  width: var(--file-icon-size, 13px);
+  height: var(--file-icon-size, 13px);
+  flex: none;
+  mask: var(--file-icon) center / contain no-repeat;
+  background: var(--icon-color);
+}
+[data-ios-theme="light"] .m-code-label:is([data-lang="rs"], [data-lang="rust"]) {
+  --icon-color: #d47628;
+}
+[data-ios-theme="light"]
+  .m-code-label:is([data-lang="typescript"], [data-lang="ts"], [data-lang="tsx"]) {
+  --icon-color: #1a85d4;
+}
+/* Browser lab alternative to GPUI's single-surface, 14px code frame. */
+[data-code-cards="true"] .m-code {
+  padding: var(--thread-card-inset);
   border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: color-mix(in srgb, var(--color-md-code-text) 55%, transparent);
-  cursor: pointer;
+  border-radius: var(--thread-card-radius);
+  background: var(--thread-card-surface);
 }
-.m-code-button[data-active="true"] {
+[data-code-cards="true"] [data-ios-theme="light"] .m-code {
+  background: color-mix(in srgb, var(--thread-card-surface) 94%, var(--color-foreground));
+}
+[data-code-cards="true"] .m-code-label {
+  --file-icon-size: var(--thread-card-icon-size);
+  gap: var(--thread-card-icon-gap);
+  font-family: var(--m-font);
+}
+[data-code-cards="true"] .m-code-header {
+  color: var(--color-foreground-muted);
+}
+[data-code-cards="true"] .m-code-body {
+  border-radius: calc(var(--thread-card-radius) - var(--thread-card-inset));
+  background: var(--ios-code);
+}
+.m-code-header .m-card-action[aria-pressed="true"] {
   color: var(--color-md-code-text);
-  background: color-mix(in srgb, var(--color-md-code-text) 10%, transparent);
+}
+.m-code-header .m-card-action[aria-label="Code copied"] {
+  color: var(--thread-success);
 }
 .m-code-body {
   margin: 0;
-  padding: 4px 14px 14px;
+  padding: 12.8px 14.4px;
   overflow-x: auto;
-  scrollbar-width: none;
-  font: 13px/19px var(--m-mono);
+  font: 13px/1.625 var(--thread-mono);
   white-space: pre;
-  tab-size: 2;
+  overflow-wrap: normal;
+  tab-size: 4;
+}
+.m-code-body code {
+  font: inherit;
 }
 .m-code-body[data-wrap="true"] {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.m-code-body [data-syn="keyword"] {
-  color: var(--m-syn-keyword);
+:is(.m-code-body, .m-review-code) :is(.hljs-comment, .hljs-quote) {
+  color: var(--color-foreground-muted);
 }
-.m-code-body [data-syn="string"] {
-  color: var(--m-syn-string);
+:is(.m-code-body, .m-review-code) :is(.hljs-string, .hljs-regexp, .hljs-addition) {
+  color: var(--thread-success);
 }
-.m-code-body [data-syn="builtin"] {
-  color: var(--m-syn-builtin);
+:is(.m-code-body, .m-review-code) :is(.hljs-keyword, .hljs-selector-tag, .hljs-meta) {
+  color: var(--color-primary);
 }
-.m-code-body [data-syn="operator"] {
-  color: var(--m-syn-operator);
+:is(.m-code-body, .m-review-code) :is(.hljs-title, .hljs-function .hljs-title) {
+  color: var(--thread-info);
 }
-.m-code-body [data-syn="punct"] {
-  color: var(--m-syn-punct);
+:is(.m-code-body, .m-review-code) :is(.hljs-type, .hljs-built_in, .hljs-title.class_) {
+  color: var(--thread-warning);
+}
+:is(.m-code-body, .m-review-code) :is(.hljs-number, .hljs-literal, .hljs-deletion) {
+  color: var(--thread-destructive);
+}
+:is(.m-code-body, .m-review-code) .hljs-operator {
+  color: color-mix(in srgb, var(--color-md-code-text) 78%, transparent);
 }

@@ -41,7 +41,7 @@ struct WorkspaceRootView: View {
         Button(action: action) {
             connImage(icon).resizable().scaledToFit().frame(width: 20, height: 20)
                 .frame(width: 48, height: 48).contentShape(Circle())
-        }.buttonStyle(.plain).phoneFooterSurface(Circle())
+        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle)
             .accessibilityLabel(label).accessibilityIdentifier(id)
     }
 
@@ -86,26 +86,28 @@ struct WorkspaceRootView: View {
             .toolbar(.hidden, for: .navigationBar)
             .toolbar(.hidden, for: .bottomBar)
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                HStack(spacing: 8) {
-                    if isSearching {
-                        HStack(spacing: 8) {
-                            ConnIcon("magnifyingglass").foregroundStyle(.secondary)
-                            TextField(selectedTab.searchPlaceholder, text: $searchQuery)
-                                .focused($searchFocused).submitLabel(.search)
-                        }.padding(.horizontal, 16).frame(height: 48).phoneFooterSurface(Capsule())
-                        footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
-                            isSearching = false
-                            searchQuery = ""
+                GlassEffectContainer(spacing: 0) {
+                    HStack(spacing: 8) {
+                        if isSearching {
+                            HStack(spacing: 8) {
+                                ConnIcon("magnifyingglass").foregroundStyle(.secondary)
+                                TextField(selectedTab.searchPlaceholder, text: $searchQuery)
+                                    .focused($searchFocused).submitLabel(.search)
+                            }.padding(.horizontal, 16).frame(height: 48).glassEffect(.regular, in: .capsule)
+                            footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
+                                isSearching = false
+                                searchQuery = ""
+                            }
+                        } else {
+                            footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
+                            Spacer(minLength: 0)
+                            WorkspacePhoneSwitcher(selectedTab: $selectedTab, onSearch: { isSearching = true })
+                                .glassEffect(.regular, in: .capsule)
+                            Spacer(minLength: 0)
+                            footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
+                                navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
+                            }.disabled(store.showsOffline)
                         }
-                    } else {
-                        footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
-                        Spacer(minLength: 0)
-                        WorkspacePhoneSwitcher(selectedTab: $selectedTab, onSearch: { isSearching = true })
-                            .phoneFooterSurface(Capsule())
-                        Spacer(minLength: 0)
-                        footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
-                            navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
-                        }.disabled(store.showsOffline)
                     }
                 }.padding(.horizontal, 24).offset(y: 4)
             }
@@ -258,7 +260,7 @@ private struct WorkspacePhoneSwitcher: View {
                 .frame(maxWidth: .infinity).frame(height: 40)
                 .background {
                     if selected {
-                        Capsule().fill(theme.foreground.opacity(0.12))
+                        Capsule().fill(.selection.tertiary).tint(.primary)
                     }
                 }
                 .contentShape(Capsule())

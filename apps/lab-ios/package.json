@@ -9,6 +9,9 @@
     "typecheck": "effect-tsgo tsrs --noEmit"
   },
   "dependencies": {
+    "@pierre/diffs": "catalog:",
+    "hast-util-to-jsx-runtime": "^2.3.6",
+    "lowlight": "^3.3.0",
     "react": "catalog:",
     "react-dom": "catalog:",
     "react-markdown": "^10.1.0",

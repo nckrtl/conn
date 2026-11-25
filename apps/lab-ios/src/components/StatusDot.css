@@ -38,3 +38,6 @@
 .m-dot-core[data-state="limited"] {
   background: var(--color-warning-foreground);
 }
+.m-dot-core[data-state="merged"] {
+  background: var(--color-adaptive-violet-600-400);
+}

@@ -1,0 +1,260 @@
+[
+  {
+    "path": "apps/conn-gpui/crates/conn-app/src/app.rs",
+    "additions": 10,
+    "deletions": 6,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-gpui/crates/conn-app/src/app/linked.rs",
+    "additions": 3,
+    "deletions": 9,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-gpui/crates/conn-app/src/app/sidebar_more.rs",
+    "additions": 11,
+    "deletions": 25,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-gpui/crates/conn-app/src/sidebar/thread_list.rs",
+    "additions": 119,
+    "deletions": 42,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-gpui/crates/conn-app/src/sidebar/thread_menu.rs",
+    "additions": 14,
+    "deletions": 6,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-gpui/crates/conn-app/src/ui_tests.rs",
+    "additions": 79,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-contract/generated/report.json",
+    "additions": 7,
+    "deletions": 7,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-contract/methods.json",
+    "additions": 1,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-contract/src/generated.rs",
+    "additions": 37,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-contract/tests/fixtures/sampled.jsonl",
+    "additions": 8,
+    "deletions": 7,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-contract/tests/registry/mod.rs",
+    "additions": 1,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-engine/src/commands.rs",
+    "additions": 13,
+    "deletions": 2,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-engine/src/engine_tests.rs",
+    "additions": 34,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-engine/src/reads.rs",
+    "additions": 19,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-engine/src/shell.rs",
+    "additions": 1,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-mcp/fixtures/ts-tools-list.json",
+    "additions": 70,
+    "deletions": 2,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-mcp/src/catalog.jsonl",
+    "additions": 3,
+    "deletions": 3,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-mcp/src/instructions.txt",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-mcp/src/tests.rs",
+    "additions": 56,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-mcp/src/tools/manage.rs",
+    "additions": 9,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-mcp/src/view.rs",
+    "additions": 6,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-provider-acp/src/instructions.rs",
+    "additions": 8,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-provider-acp/testdata/instructions.json",
+    "additions": 1,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-provider-codex/src/instructions.rs",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/conn-server/crates/conn-provider-codex/testdata/instructions.json",
+    "additions": 5,
+    "deletions": 5,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/mcp/OrchestratorMcpService.ts",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/mcp/toolkits/thread/handlers.ts",
+    "additions": 14,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/mcp/toolkits/thread/tools.ts",
+    "additions": 5,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/orchestration-v2/Orchestrator.ts",
+    "additions": 1,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/orchestration-v2/ProjectionStore.test.ts",
+    "additions": 19,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
+    "additions": 19,
+    "deletions": 3,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/orchestration-v2/ShellStream.ts",
+    "additions": 17,
+    "deletions": 2,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/persistence/Migrations.ts",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/persistence/Migrations/101_ActiveShellOrbitProject.ts",
+    "additions": 29,
+    "deletions": 0,
+    "kind": "added"
+  },
+  {
+    "path": "apps/server/src/persistence/reconcileV2PreviewMigration.test.ts",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "apps/server/src/provider/agentContextBudget.json",
+    "additions": 3,
+    "deletions": 3,
+    "kind": "modified"
+  },
+  {
+    "path": "crates/conn-state/src/lib.rs",
+    "additions": 2,
+    "deletions": 1,
+    "kind": "modified"
+  },
+  {
+    "path": "crates/conn-state/src/shell.rs",
+    "additions": 94,
+    "deletions": 8,
+    "kind": "modified"
+  },
+  {
+    "path": "docs/user/thread-sidebar.md",
+    "additions": 9,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "evals/mcp-tool-use/cases/orchestration.ndjson",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "packages/contracts/src/orchestrationV2.ts",
+    "additions": 20,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "packages/contracts/src/orchestratorMcp.ts",
+    "additions": 3,
+    "deletions": 0,
+    "kind": "modified"
+  },
+  {
+    "path": "packages/provider-core/src/server/orchestrationInstructions.ts",
+    "additions": 2,
+    "deletions": 0,
+    "kind": "modified"
+  }
+]

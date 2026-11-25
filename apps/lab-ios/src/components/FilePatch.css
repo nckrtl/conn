@@ -1,0 +1,168 @@
+.m-review-scroll {
+  --review-background: var(--ios-code);
+  --review-add-bg: #0d2f28;
+  --review-delete-bg: #391415;
+  --review-add-text: #5ecc71;
+  --review-delete-text: #ff6762;
+  --review-add-bar: #00cab1;
+  --review-delete-bar: #ff2e3f;
+  background: var(--review-background);
+  color: var(--color-md-code-text);
+}
+[data-ios-theme="light"] .m-review-scroll {
+  --review-add-bg: #e5f8f5;
+  --review-delete-bg: #ffe6e7;
+  --review-add-text: #199f43;
+  --review-delete-text: #d52c36;
+}
+.m-review-scroll {
+  position: relative;
+  overflow: auto;
+  min-height: 0;
+}
+.m-thread-review .m-review-scroll {
+  flex: 1;
+  padding-bottom: 24px;
+}
+.m-changes-card .m-review-scroll {
+  max-height: 22rem;
+  border-radius: calc(var(--thread-card-radius, 14px) - var(--thread-card-inset, 3px));
+}
+.m-review-file-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 11px 10px;
+  border-top: 1px solid transparent;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--review-background);
+  font: 500 13px/18px var(--m-font);
+}
+.m-review-scroll > section + section {
+  /* The incoming header covers the previous header's bottom border as they meet. */
+  margin-top: -1px;
+}
+.m-review-scroll > section + section > .m-review-file-header {
+  border-top-color: var(--color-border);
+}
+.m-review-file-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--color-foreground-muted);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.m-review-file-path,
+.m-review-file-counts {
+  /* Align the visible text with the center of the icons and checkbox. */
+  position: relative;
+  inset-block-start: -1px;
+}
+.m-review-file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  color: var(--color-foreground);
+}
+.m-review-file-counts {
+  display: flex;
+  gap: 4px;
+}
+.m-review-viewed {
+  display: grid;
+  place-items: center;
+  flex: none;
+  padding: 0 2px;
+}
+.m-review-viewed > * {
+  grid-area: 1 / 1;
+}
+.m-review-viewed input {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--color-foreground-muted) 45%, transparent);
+  border-radius: 5px;
+  background: var(--m-hl6);
+  cursor: pointer;
+}
+.m-review-viewed input:checked {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+.m-review-viewed svg {
+  color: var(--color-primary-foreground);
+  pointer-events: none;
+}
+.m-review-code {
+  overflow-x: auto;
+  padding-bottom: 12px;
+  font: 12px/22px var(--thread-mono);
+}
+.m-review-row {
+  --review-row-bg: var(--review-background);
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+  background: var(--review-row-bg);
+}
+.m-review-row[data-kind="add"] {
+  --review-row-bg: var(--review-add-bg);
+  --review-bar: var(--review-add-bar);
+}
+.m-review-row[data-kind="delete"] {
+  --review-row-bg: var(--review-delete-bg);
+  --review-bar: repeating-linear-gradient(var(--review-delete-bar) 0 1px, transparent 1px 2px);
+}
+.m-review-row[data-kind="hunk"] {
+  --review-row-bg: color-mix(in srgb, var(--color-foreground) 10%, var(--review-background));
+  color: var(--color-foreground);
+  font-size: 11px;
+}
+.m-review-row[data-kind="notice"],
+.m-review-notice {
+  color: var(--color-foreground-muted);
+}
+.m-review-notice {
+  padding-inline: 10px;
+}
+.m-review-gutter {
+  position: sticky;
+  left: 0;
+  flex: 0 0 50px;
+  padding-inline-end: 7px;
+  background: var(--review-bar, none) 0 0 / 4px 100% no-repeat var(--review-row-bg);
+  color: var(--color-foreground-muted);
+  font-size: 11px;
+  text-align: end;
+  user-select: none;
+}
+[data-kind="add"] > .m-review-gutter,
+.m-review-file-counts [data-kind="add"] {
+  color: var(--review-add-text);
+}
+[data-kind="delete"] > .m-review-gutter,
+.m-review-file-counts [data-kind="delete"] {
+  color: var(--review-delete-text);
+}
+.m-review-source {
+  padding: 0 7px;
+  font: inherit;
+  white-space: pre;
+  tab-size: 4;
+}

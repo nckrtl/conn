@@ -3,29 +3,12 @@
   inset: 0;
   background: var(--color-screen);
 }
-.m-list-scroll {
-  position: absolute;
-  inset: 0;
-  padding: 62px 0 120px;
+.ios-filter-options + .ios-filter-options {
+  border-top: 1px solid var(--color-border);
 }
-
-/* Pills start on the same 12pt edge as the row favicons. */
-.m-pills {
-  display: flex;
-  gap: 8px;
-  padding: 2px 12px 10px;
-}
-.m-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--color-grouped-card);
-  box-shadow: inset 0 0 0 0.5px var(--color-composer-border);
-  font: 500 14px/19px var(--m-font);
+.ios-filter-heading {
+  padding: 10px 14px 2px;
+  font-size: var(--m-text-xs);
   color: var(--color-foreground-muted);
 }
 
@@ -62,7 +45,7 @@
 }
 .m-row-meta {
   padding-left: 32px;
-  font-size: 13px;
+  font-size: var(--m-text-xs);
   line-height: 17px;
   color: var(--color-foreground-muted);
   white-space: nowrap;
@@ -100,31 +83,6 @@
 .m-row[data-recede="true"] .m-favicon,
 .m-row[data-recede="true"] .m-row-meta {
   opacity: 0.6;
-}
-
-.m-favicon-host {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-}
-.m-favicon {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
-  background: color-mix(in srgb, #f5b800 22%, var(--color-screen));
-  color: #f5c518;
-  font: 700 10.3px/20px var(--m-mono);
-}
-.m-phone[data-mobile-theme="light"] .m-favicon {
-  background: #fff1c2;
-  color: #8a6400;
-}
-.m-favicon-dot {
-  position: absolute;
-  top: -4px;
-  right: -4px;
 }
 
 .m-section {

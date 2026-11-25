@@ -28,6 +28,7 @@ struct ThreadCard<Header: View, Content: View>: View {
 struct CopyTextButton: View {
     let label: String
     let text: String
+    var message = false
     @State private var copied = false
 
     var body: some View {
@@ -35,8 +36,15 @@ struct CopyTextButton: View {
             UIPasteboard.general.string = text
             copied = true
         } label: {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .frame(width: 28, height: 28)
+            Group {
+                if message && !copied {
+                    ThreadGlyph(name: "copy", size: 14)
+                } else {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                }
+            }
+            .frame(width: message ? 24 : 28, height: message ? 24 : 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(copied ? "Copied" : label)

@@ -1,17 +1,53 @@
 // Dummy data for the mobile mock. The thread shapes and the question threads are the native lab's
 // (apps/mobile/scripts/lab/fixtures.mts), copied so the web typecheck stays out of apps/mobile.
 // Edit the text here; the screens read it live.
+import handoffImage from "../../../lab-gpui/image-preview/handoff.webp";
+import claudeImage from "../../../marketing/public/95/providers/claude-code-320.webp";
+import codexImage from "../../../marketing/public/95/providers/codex-320.webp";
+import checkpointFiles from "./fileChanges.json";
 import type { Provider } from "../components/Icon";
 
+export const ADDITIONAL_THREAD_CARDS = [
+  "plan",
+  "secret",
+  "worktree",
+  "worktreeRunning",
+  "worktreeFailed",
+  "reviewComment",
+  "template",
+  "html",
+  "mcp",
+  "file",
+  "mixedFiles",
+  "fileWithText",
+  "mixedFilesWithText",
+  "video",
+] as const;
+
+export type AdditionalThreadCard = (typeof ADDITIONAL_THREAD_CARDS)[number];
+
 export type LabEntry =
-  | { readonly kind: "user"; readonly text: string; readonly minutesAgo: number }
+  | { readonly kind: "galleryCard"; readonly card: AdditionalThreadCard }
+  | { readonly kind: "work"; readonly label: string; readonly steps: readonly string[] }
+  | {
+      readonly kind: "user";
+      readonly text: string;
+      readonly minutesAgo: number;
+      readonly images?: ReadonlyArray<{ readonly src: string; readonly alt: string }>;
+    }
   | {
       readonly kind: "agentMessage";
       readonly from: string;
       readonly text: string;
       readonly minutesAgo: number;
     }
-  | { readonly kind: "assistant"; readonly text: string; readonly minutesAgo: number }
+  | { readonly kind: "orbitTask"; readonly task: TaskCardData }
+  | {
+      readonly kind: "assistant";
+      readonly text: string;
+      readonly minutesAgo: number;
+      readonly fileChanges?: typeof checkpointFiles;
+    }
   | {
       readonly kind: "delegatedNotice";
       readonly task: string;
@@ -23,7 +59,8 @@ export type LabEntry =
       readonly title: string;
       readonly status: "running" | "completed" | "failed";
       readonly elapsed: string;
-      readonly prompt: string;
+      readonly effort?: string;
+      readonly summary?: string;
       readonly instanceId: Provider;
       readonly model: string;
     }
@@ -42,12 +79,16 @@ export interface LabUserInputQuestion {
 }
 
 export interface LabThread {
+  readonly startedInGeneral?: boolean;
   readonly key: string;
   readonly title: string;
   readonly project: string;
   readonly branch?: string;
   readonly instanceId: Provider;
   readonly model: string;
+  readonly effort?: string | undefined;
+  readonly speed?: string | undefined;
+  readonly followUpBehavior?: "steer" | "queue";
   readonly minutesAgo: number;
   readonly entries: ReadonlyArray<LabEntry>;
 }
@@ -62,6 +103,18 @@ const CODE_LAB = [
   'export const releaseEvery = "hour";',
   "```",
 ].join("\n");
+
+const TLS_RENEWAL_TASK: TaskCardData = {
+  lane: "In progress",
+  id: 476,
+  project: "Orbit",
+  title: "Fix TLS renewal",
+  subtasks: "2/2",
+  node: "mini",
+  time: "3m",
+  pr: { number: 4812, state: "open" },
+  dot: "waiting",
+};
 
 export const FEED_THREAD: LabThread = {
   key: "stalled-threads",
@@ -78,9 +131,25 @@ export const FEED_THREAD: LabThread = {
       text: "Map every stalled Orbit thread and its PRs. Delegate the checks, then give me one list of what needs me.",
     },
     {
+      kind: "work",
+      label: "Worked for 13ms",
+      steps: ["Read the thread list", "Checked linked pull requests"],
+    },
+    {
       kind: "assistant",
       minutesAgo: 16,
       text: "The ingress thread sent a full report. Summary:\n\n1. **Three threads are stalled**: workers, ingress and one idle thread\n2. **Two threads are still working**, so I left them alone\n3. **Next steps**\n   - approve PR #4812\n   - settle the delivery-speed thread\n\nI'm starting one more task to check the icons work.",
+    },
+    {
+      kind: "user",
+      minutesAgo: 14,
+      text: "Here’s where the provider handoff appears in the thread.",
+      images: [
+        {
+          src: handoffImage,
+          alt: "Conn thread showing the provider handoff below the fork marker",
+        },
+      ],
     },
     {
       kind: "assistant",
@@ -95,18 +164,67 @@ export const FEED_THREAD: LabThread = {
     },
     {
       kind: "subagent",
+      title: "Check stalled pull requests",
+      status: "completed",
+      elapsed: "48s",
+      instanceId: "codex",
+      model: "GPT-6.2 Astra",
+      effort: "high",
+      summary:
+        "Checked **three pull requests** against their linked threads.\n\n- Workers is waiting for review on #4812.\n- Ingress has passed its checks and needs an owner.\n- The delivery-speed branch is already merged.\n\nThe remaining threads are still working.",
+    },
+    { kind: "orbitTask", task: TLS_RENEWAL_TASK },
+    {
+      kind: "subagent",
       title: "Conn icons: superheroicons 16 solid",
       status: "running",
       elapsed: "25m",
-      prompt: "Check the Conn icon set against superheroicons 16 solid.",
+      effort: "medium",
       instanceId: "claudeAgent",
       model: "Opus 5.5",
+    },
+    {
+      kind: "user",
+      minutesAgo: 1,
+      text: "Here are the two provider images for comparison.",
+      images: [
+        { src: claudeImage, alt: "Claude Code artwork" },
+        { src: codexImage, alt: "Codex artwork" },
+      ],
+    },
+    ...ADDITIONAL_THREAD_CARDS.map((card) => ({ kind: "galleryCard" as const, card })),
+    {
+      kind: "assistant",
+      minutesAgo: 0,
+      text: "General threads can now be filed under Orbit projects. The changes are ready for review.",
+      // Frozen diff of Conn commit d3835ceea1.
+      fileChanges: checkpointFiles,
     },
   ],
 };
 
 const SHIP_CONTEXT =
   "The worker change is finished and all 412 tests pass. It touches three files, and two things shaped the options below:\n\n- **Risk:** it changes how the queue drains, so a bad deploy stalls every worker until someone rolls it back.\n- **Speed:** auto-release ships merged work within the hour. A draft pull request waits for a review.\n\nI lean towards merging, but this is your call.";
+
+export const APPROVAL_THREAD: LabThread = {
+  key: "approval",
+  title: "Run a clean build",
+  project: "apps",
+  branch: "main",
+  instanceId: "codex",
+  model: "GPT-6.2 Astra",
+  minutesAgo: 1,
+  entries: [
+    { kind: "user", minutesAgo: 1, text: "Run a clean build." },
+    {
+      kind: "assistant",
+      minutesAgo: 0,
+      text: "I’ll clear the generated build directory before rebuilding.",
+    },
+  ],
+};
+
+const ROUTE_REPLAY_OPTION = "Route replay (Recommended)";
 
 const QUESTION_THREADS: Record<"single" | "multi" | "long", LabThread> = {
   single: {
@@ -187,7 +305,7 @@ const QUESTION_THREADS: Record<"single" | "multi" | "long", LabThread> = {
             multiSelect: true,
             options: [
               { label: "TLS renewal", description: "Renew every certificate on the new Node." },
-              { label: "Route replay", description: "Replay the last hour of traffic." },
+              { label: ROUTE_REPLAY_OPTION, description: "Replay the last hour of traffic." },
               { label: "WireGuard handshake", description: "Confirm every peer reconnects." },
             ],
           },
@@ -241,7 +359,7 @@ export interface QuestionScenario {
   readonly thread: LabThread;
   /** The step to open on. */
   readonly step: number;
-  /** Option labels (without "(Recommended)") already picked, per question id. */
+  /** Full option labels already picked, per question id. */
   readonly picked: Readonly<Record<string, ReadonlyArray<string>>>;
   /** Answers typed in the prompt box, per question id. */
   readonly custom: Readonly<Record<string, string>>;
@@ -259,7 +377,7 @@ export const QUESTION_SCENARIOS: Record<string, QuestionScenario> = {
   "multi-2": {
     thread: QUESTION_THREADS.multi,
     step: 1,
-    picked: { provider: ["UpCloud (Recommended)"], checks: ["TLS renewal", "Route replay"] },
+    picked: { provider: ["UpCloud (Recommended)"], checks: ["TLS renewal", ROUTE_REPLAY_OPTION] },
     custom: {},
   },
   "multi-3": {
@@ -273,6 +391,7 @@ export const QUESTION_SCENARIOS: Record<string, QuestionScenario> = {
 };
 
 export interface ListThread {
+  readonly key?: string;
   readonly title: string;
   readonly project: string;
   readonly branch?: string;
@@ -436,14 +555,18 @@ export const INSIGHTS: ReadonlyArray<InsightCard> = [
   },
 ];
 
+export const TASK_LANES = ["Backlog", "To do", "In progress", "Done"] as const;
+export type TaskLane = (typeof TASK_LANES)[number];
+
 export interface TaskCardData {
+  readonly lane: TaskLane;
   readonly id: number;
   readonly project: string;
   readonly title: string;
   readonly subtasks: string;
   readonly node: string;
   readonly time: string;
-  readonly pr: { readonly number: number; readonly state: "open" | "merged" } | null;
+  readonly pr: { readonly number: number; readonly state: "open" | "merged" | "closed" } | null;
   readonly dot: "working" | "waiting" | "done" | "failed";
 }
 
@@ -456,6 +579,7 @@ export const TASKS: ReadonlyArray<TaskCardData> = [
     node: "beast",
     time: "52m",
     pr: { number: 1931, state: "open" },
+    lane: "In progress",
     dot: "working",
   },
   {
@@ -465,19 +589,11 @@ export const TASKS: ReadonlyArray<TaskCardData> = [
     subtasks: "1/3",
     node: "beast",
     time: "12m",
-    pr: { number: 1928, state: "open" },
+    pr: { number: 1928, state: "closed" },
+    lane: "In progress",
     dot: "working",
   },
-  {
-    id: 476,
-    project: "Orbit",
-    title: "Fix TLS renewal",
-    subtasks: "2/2",
-    node: "mini",
-    time: "3m",
-    pr: { number: 4812, state: "open" },
-    dot: "waiting",
-  },
+  TLS_RENEWAL_TASK,
   {
     id: 471,
     project: "Conn",
@@ -487,6 +603,7 @@ export const TASKS: ReadonlyArray<TaskCardData> = [
     node: "beast",
     time: "1h 24m",
     pr: { number: 1924, state: "open" },
+    lane: "In progress",
     dot: "working",
   },
   {
@@ -497,6 +614,7 @@ export const TASKS: ReadonlyArray<TaskCardData> = [
     node: "ci-sabre-1",
     time: "2h 5m",
     pr: null,
+    lane: "Done",
     dot: "failed",
   },
   {
@@ -507,6 +625,7 @@ export const TASKS: ReadonlyArray<TaskCardData> = [
     node: "beast",
     time: "38m",
     pr: { number: 211, state: "merged" },
+    lane: "Done",
     dot: "done",
   },
   {
@@ -517,7 +636,30 @@ export const TASKS: ReadonlyArray<TaskCardData> = [
     node: "mini",
     time: "9m",
     pr: null,
+    lane: "In progress",
     dot: "working",
+  },
+  {
+    id: 474,
+    project: "Conn",
+    title: "Restore desktop tabs after restart",
+    lane: "To do",
+    subtasks: "0/2",
+    node: "mini",
+    time: "1h",
+    pr: null,
+    dot: "waiting",
+  },
+  {
+    id: 500,
+    project: "Conn",
+    title: "Drop images from Finder onto a thread",
+    lane: "Backlog",
+    subtasks: "",
+    node: "beast",
+    time: "7d",
+    pr: null,
+    dot: "waiting",
   },
 ];
 

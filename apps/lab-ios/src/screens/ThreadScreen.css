@@ -1,14 +1,80 @@
 .m-thread {
+  --thread-header-height: 116px;
+  --thread-card-inset: 3px;
+  --thread-card-icon-size: 16px;
+  --thread-card-icon-gap: 8px;
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   background: var(--color-screen);
 }
+[data-code-cards="true"] .m-thread {
+  --thread-card-radius: 14px;
+  --thread-card-header-height: 30px;
+  --thread-card-icon-size: 14px;
+  /* These 24-unit glyphs have an 18-unit drawing, so 16px paints a 12px icon. */
+  --thread-padded-glyph-size: 16px;
+}
+[data-code-cards="true"]
+  .m-feed
+  :is(.m-card-actions, .m-user-meta, .ios-message-meta)
+  button
+  > svg {
+  width: var(--thread-card-icon-size);
+  height: var(--thread-card-icon-size);
+}
+[data-code-cards="true"] .m-feed .m-code-header .m-card-action[aria-pressed] > svg {
+  width: var(--thread-padded-glyph-size);
+  height: var(--thread-padded-glyph-size);
+}
+[data-code-cards="true"] .m-feed .ios-message-meta button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+[data-code-cards="true"] .m-feed :is(.ios-message-meta, .m-user-meta) {
+  gap: 4px;
+}
 .m-feed {
   flex: 1;
   min-height: 0;
-  padding-top: 116px;
+  padding-top: var(--thread-header-height);
+}
+.m-feed .m-md,
+[data-code-cards="true"] .m-feed .m-feed-card-title {
+  font-family: inherit;
+  font-size: var(--m-text-sm);
+  line-height: 1.625;
+}
+[data-code-cards="true"]
+  .m-feed
+  :is(
+    .m-md,
+    .m-md :is(h1, h2, h3, h4, h5, h6),
+    .m-user-bubble,
+    .m-feed-card-title,
+    .m-feed-card-preview,
+    .m-code-body,
+    .m-md-code,
+    .m-agent-row,
+    .m-agent-detail,
+    .m-working ul,
+    .m-working-label,
+    .m-code-label,
+    .m-agent-message-label,
+    .m-subagent-meta,
+    .m-receipt-meta,
+    .m-task-pr,
+    .ios-message-meta,
+    .m-user-meta,
+    .m-changes-card,
+    .m-changes-header,
+    .m-change-stats
+  ) {
+  font-size: var(--m-text-xs, 13px);
 }
 .m-feed-inner {
   min-height: 100%;
@@ -28,9 +94,33 @@
 }
 .m-thread-bottom {
   flex: none;
+  display: flex;
+  flex-direction: column;
   position: relative;
   z-index: 10;
 }
+.m-thread-bottom:has(> .m-thread-panel) {
+  max-block-size: calc(100% - var(--thread-header-height) - 12px);
+}
+.m-thread-bottom > .m-composer-slot {
+  flex: none;
+}
 .m-thread-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   padding: 0 16px 8px;
+}
+.m-thread-chat {
+  display: contents;
+}
+.m-thread-review {
+  --color-screen: var(--ios-code);
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--thread-header-height);
+  background: var(--color-screen);
 }

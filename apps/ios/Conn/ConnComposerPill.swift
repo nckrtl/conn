@@ -1,9 +1,6 @@
 import DesignKit
 import SwiftUI
 
-/// Conn mobile's floating composer pill (`ComposerSurface.tsx`, `ThreadComposer.tsx`): regular
-/// Liquid Glass, radius 27, a 44pt control row inside 4×2 padding (48pt tall when collapsed), and
-/// a `0 6 28` shadow at 15% black (light) / 35% (dark). It floats over the feed; no band behind it.
 struct ConnComposerPill<Trailing: View>: View {
     let placeholder: String
     @Binding var text: String
@@ -15,9 +12,7 @@ struct ConnComposerPill<Trailing: View>: View {
     @ViewBuilder let trailing: () -> Trailing
 
     @Environment(\.connTheme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
 
-    /// `rounded-[27px]`, `paddingVertical: 2`, `px-1`, and the 44pt control row.
     private static var radius: CGFloat { 27 }
     private static var control: CGFloat { 44 }
 
@@ -25,11 +20,15 @@ struct ConnComposerPill<Trailing: View>: View {
         let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
         // Mobile's `+` (`ComposerAttachmentButton`) stays out until the core sends attachments.
         HStack(alignment: .bottom, spacing: 0) {
-            // Body text 16/23 (`useComposerTextStyle(body)`), at least 36 tall, up to four lines.
-            TextField(placeholder, text: $text, axis: .vertical)
+            TextField(
+                placeholder, text: $text,
+                prompt: Text(placeholder).foregroundStyle(Color(ffi: theme.tokens.placeholder)),
+                axis: .vertical
+            )
                 .textFieldStyle(.plain)
                 .font(.system(size: 16))
-                .lineSpacing(4)
+                .lineHeight(.exact(points: 24))
+                .tint(theme.foreground)
                 .foregroundStyle(theme.foreground)
                 .lineLimit(1...maxLines)
                 .padding(.vertical, 10)
@@ -43,8 +42,7 @@ struct ConnComposerPill<Trailing: View>: View {
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
-        .glassEffect(.regular.interactive(), in: shape)
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.35 : 0.15), radius: 14, y: 6)
+        .glassEffect(.regular, in: shape)
     }
 
     /// Mobile's send button: a 30pt primary circle with `arrow.up` 16 semibold in a 44pt target.
@@ -57,14 +55,14 @@ struct ConnComposerPill<Trailing: View>: View {
                     .fill(fill)
                     .frame(width: 30, height: 30)
                 if isBusy {
-                    KitIconImage(.stop, size: 12)
+                    ThreadGlyph(name: "stop", size: 12)
                         .foregroundStyle(theme.primaryForeground)
                 } else {
-                    ConnIcon("arrow.up")
-                        .font(.system(size: 16, weight: .semibold))
+                    ThreadGlyph(name: "arrow-up", size: 16)
                         .foregroundStyle(canSend ? theme.primaryForeground : theme.mutedForeground)
                 }
             }
+            .opacity(canSend || isBusy ? 1 : 0.55)
             .frame(width: Self.control, height: Self.control)
             .contentShape(Rectangle())
         }
@@ -75,7 +73,7 @@ struct ConnComposerPill<Trailing: View>: View {
 
     private var fill: Color {
         if isBusy || canSend { return theme.primary }
-        return theme.foreground.opacity(0.08)
+        return theme.foreground.opacity(0.06)
     }
 }
 
@@ -91,9 +89,8 @@ struct ConnComposerModelChip: View {
         Button(action: action) {
             HStack(spacing: 3.5) {
                 ProviderIcon(driver: driver, size: 16)
-                ConnIcon("chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(theme.mutedForeground)
+                ThreadGlyph(name: "chevron-down", size: 10)
+                    .foregroundStyle(theme.foreground)
             }
             .padding(.horizontal, 7)
             .frame(minHeight: 44)
@@ -105,11 +102,10 @@ struct ConnComposerModelChip: View {
     }
 }
 
-/// `ProviderIcon`: Claude's mark, Antigravity's image, Grok's package icon, and the knot for every
-/// other driver, drawn in `#e5e5e5` (dark) or `#171717` (light).
 struct ProviderIcon: View {
     let driver: String?
     var size: CGFloat = 16
+    @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -132,7 +128,7 @@ struct ProviderIcon: View {
                 .renderingMode(.template)
                 .scaledToFit()
                 .frame(width: size, height: size)
-                .foregroundStyle(colorScheme == .dark ? Color(white: 0.898) : Color(white: 0.09))
+                .foregroundStyle(theme.mutedForeground)
         }
     }
 }

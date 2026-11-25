@@ -1,143 +1,180 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { OfflinePill } from "../components/OfflinePill";
+import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { Composer } from "../components/Composer";
-import {
-  AgentMessageCard,
-  SubagentCard,
-  UserBubble,
-  WorkingDivider,
-} from "../components/FeedCards";
+import { ComposerApprovalCard, type ApprovalExample } from "../components/ComposerApprovalCard";
+import { ThreadFeedEntries } from "../components/ThreadFeedEntries";
+import { FileChangeStats, type FileReviewSelection } from "../components/FileChangesCard";
 import { GlassButton, GlassHeader } from "../components/GlassHeader";
-import { MarkdownText } from "../components/Markdown";
 import { QuestionPanel } from "../components/QuestionPanel";
-import {
-  FEED_THREAD,
-  LAB_ENVIRONMENT_LABEL,
-  QUESTION_SCENARIOS,
-  type LabEntry,
-  type LabThread,
-} from "../data/fixtures";
+import { QUESTION_SCENARIOS, type LabThread } from "../data/fixtures";
 import { contextMarkdown, useQuestionFlow } from "./useQuestionFlow";
-import { PHONE_HEIGHT } from "../components/PhoneFrame";
 import "./ThreadScreen.css";
 
-const HEADER_HEIGHT = 116;
-/** Feed the panel leaves in view above itself (apps/mobile QUESTION_PANEL_FEED_PEEK). */
-const FEED_PEEK = 96;
-const COMPOSER_SLOT = 84;
-const PANEL_MAX = 560;
+const FilePatch = lazy(() => import("../components/FilePatch"));
 
-function FeedEntry(props: { readonly entry: LabEntry }) {
-  const { entry } = props;
-  switch (entry.kind) {
-    case "user":
-      return <UserBubble text={entry.text} time="4:48 PM" />;
-    case "assistant":
-      return (
-        <div className="m-feed-text">
-          <MarkdownText markdown={entry.text} />
-        </div>
-      );
-    case "agentMessage":
-      return <AgentMessageCard from={entry.from} text={entry.text} />;
-    case "subagent":
-      return (
-        <SubagentCard
-          provider={entry.instanceId}
-          model={entry.model}
-          title={entry.title}
-          elapsed={entry.elapsed}
-          state={
-            entry.status === "running" ? "working" : entry.status === "failed" ? "failed" : "done"
-          }
-        />
-      );
-    case "delegatedNotice":
-    case "userInput":
-      return null;
-  }
-}
-
-function Feed(props: { readonly thread: LabThread; readonly workingLabel: string }) {
+function Feed(props: {
+  readonly thread: LabThread;
+  readonly agentMessageCards: boolean;
+  readonly onOpenTask: (id: number) => void;
+  readonly onReview: (selection: FileReviewSelection) => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a thread opens at its newest message
   useLayoutEffect(() => {
     const node = ref.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, []);
-  const dividerIndex = props.thread.entries.findIndex(
-    (entry) => entry.kind !== "user" && entry.kind !== "userInput",
-  );
+    if (node && props.thread.entries.length) node.scrollTop = node.scrollHeight;
+  }, [props.thread.entries.length]);
   return (
     <div className="m-feed m-scroll" ref={ref}>
       <div className="m-feed-inner">
-        {props.thread.entries.map((entry, index) => {
-          const showDivider = index === dividerIndex;
-          return (
-            // oxlint-disable-next-line react/no-array-index-key -- static fixture list
-            <div className="m-feed-item" key={index}>
-              {showDivider ? <WorkingDivider label={props.workingLabel} /> : null}
-              <FeedEntry entry={entry} />
-            </div>
-          );
-        })}
+        <ThreadFeedEntries
+          onOpenTask={props.onOpenTask}
+          thread={props.thread}
+          agentMessageCards={props.agentMessageCards}
+          onReview={props.onReview}
+        />
       </div>
     </div>
   );
 }
 
-function QuestionThread(props: { readonly scenario: string }) {
-  const scenario = QUESTION_SCENARIOS[props.scenario] ?? QUESTION_SCENARIOS.single!;
-  const flow = useQuestionFlow(scenario);
-  const maxHeight = Math.min(
-    PANEL_MAX,
-    PHONE_HEIGHT - HEADER_HEIGHT - FEED_PEEK - COMPOSER_SLOT - 8,
-  );
-  return (
-    <>
-      <Feed thread={scenario.thread} workingLabel="Working for 18m 31s" />
-      <div className="m-thread-bottom">
-        <div className="m-thread-panel">
-          <QuestionPanel flow={flow} context={contextMarkdown(scenario)} maxHeight={maxHeight} />
-        </div>
-        <Composer value={flow.draft.custom} onChange={flow.setCustom} />
-      </div>
-    </>
-  );
-}
-
-function FeedThread() {
-  const [draft, setDraft] = useState("");
-  return (
-    <>
-      <Feed thread={FEED_THREAD} workingLabel="Working for 26m 54s" />
-      <div className="m-thread-bottom">
-        <Composer value={draft} onChange={setDraft} working />
-      </div>
-    </>
-  );
-}
-
-/** The thread screen: glass header over the feed, the pending question above the prompt box. */
-export function ThreadScreen(props: {
-  readonly variant: "question" | "feed";
-  readonly scenario?: string;
+export function ThreadScreen({
+  offline = false,
+  thread,
+  agentMessageCards,
+  scenarioId,
+  approvalExample,
+  onOpenTask,
+  onBack,
+  onSend,
+  finishQuestion,
+  onModel,
+  model,
+  provider,
+}: {
+  offline?: boolean;
+  thread: LabThread;
+  agentMessageCards: boolean;
+  scenarioId?: string | undefined;
+  approvalExample?: ApprovalExample | undefined;
+  onOpenTask: (id: number) => void;
+  onBack: () => void;
+  onSend: (text: string) => void;
+  finishQuestion: (answer?: string) => void;
+  onModel: () => void;
+  model: string;
+  provider: LabThread["instanceId"];
 }) {
-  const thread =
-    props.variant === "question"
-      ? (QUESTION_SCENARIOS[props.scenario ?? ""] ?? QUESTION_SCENARIOS.single!).thread
-      : FEED_THREAD;
+  const scenario = QUESTION_SCENARIOS[scenarioId ?? "single"] ?? QUESTION_SCENARIOS.single!;
+  const flow = useQuestionFlow(scenario);
+  const questionOpen = !!scenarioId;
+  const [draft, setDraft] = useState("");
+  const [menu, setMenu] = useState(false);
+  const [review, setReview] = useState<FileReviewSelection | null>(null);
+  const feed = thread;
+  function submitAnswers() {
+    if (!flow.canSubmit) return;
+    const answer = flow.list
+      .map((q) => {
+        const { picked, custom } = flow.draftOf(q.id);
+        return [...picked, custom.trim()].filter(Boolean).join(", ");
+      })
+      .join("\n");
+    finishQuestion(answer);
+  }
+  function send() {
+    if (questionOpen) {
+      if (flow.canSubmit) submitAnswers();
+      else if (flow.draft.custom.trim() && flow.step < flow.list.length - 1)
+        flow.goTo(flow.step + 1);
+      return;
+    }
+    if (draft.trim()) {
+      onSend(draft.trim());
+      setDraft("");
+    }
+  }
   return (
     <div className="m-thread">
-      <GlassHeader
-        title={thread.title}
-        subtitle={`${thread.project} · ${LAB_ENVIRONMENT_LABEL}`}
-        leading={<GlassButton icon="chevron-left" label="Back" />}
-        trailing={<GlassButton icon="more-horizontal" label="More" />}
-      />
-      {props.variant === "question" ? (
-        <QuestionThread key={props.scenario} scenario={props.scenario ?? "single"} />
-      ) : (
-        <FeedThread />
+      <div className="m-thread-chat" inert={review !== null}>
+        <GlassHeader
+          title={feed.title}
+          subtitle={[feed.project, feed.branch].filter(Boolean).join(" · ")}
+          leading={<GlassButton label="Back" icon="chevron-left" onClick={onBack} />}
+          trailing={
+            <GlassButton
+              label="More actions"
+              icon="more-horizontal"
+              onClick={() => setMenu(!menu)}
+            />
+          }
+        />
+        {menu && (
+          <div className="ios-menu thread-menu">
+            {["Terminal", "Git controls", "Open files"].map((v) => (
+              <button key={v} onClick={() => setMenu(false)}>
+                {v}
+              </button>
+            ))}
+          </div>
+        )}
+        <Feed
+          onOpenTask={onOpenTask}
+          thread={feed}
+          agentMessageCards={agentMessageCards}
+          onReview={setReview}
+        />
+        {offline && <OfflinePill />}
+        <div className="m-thread-bottom" inert={offline}>
+          {approvalExample && (
+            <div className="m-thread-panel">
+              <ComposerApprovalCard key={approvalExample} example={approvalExample} />
+            </div>
+          )}
+          {questionOpen && (
+            <div className="m-thread-panel">
+              <QuestionPanel
+                flow={flow}
+                context={contextMarkdown(scenario)}
+                onDismiss={() => finishQuestion()}
+                onSubmit={submitAnswers}
+              />
+            </div>
+          )}
+          <Composer
+            value={questionOpen ? flow.draft.custom : draft}
+            onChange={questionOpen ? flow.setCustom : setDraft}
+            onModel={onModel}
+            model={model}
+            provider={provider}
+            onSend={send}
+            canSend={questionOpen && flow.canSubmit}
+            placeholder={questionOpen ? "Type your own answer…" : "Ask anything"}
+          />
+        </div>
+      </div>
+      {review && (
+        <section className="m-thread-review" aria-label="Review changes">
+          <GlassHeader
+            title="Latest turn"
+            subtitle={
+              <FileChangeStats
+                additions={review.files.reduce((total, file) => total + file.additions, 0)}
+                deletions={review.files.reduce((total, file) => total + file.deletions, 0)}
+              />
+            }
+            leading={
+              <GlassButton
+                label="Back to chat"
+                icon="chevron-left"
+                onClick={() => setReview(null)}
+              />
+            }
+          />
+          <Suspense fallback={<p role="status">Loading diff…</p>}>
+            <FilePatch {...review} />
+          </Suspense>
+        </section>
       )}
     </div>
   );

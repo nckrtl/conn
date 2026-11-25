@@ -1,0 +1,92 @@
+.thread-inspector {
+  position: absolute;
+  z-index: 4;
+  top: 56px;
+  right: 12px;
+  width: min(280px, calc(100% - 24px));
+  max-height: calc(100% - 68px);
+  overflow: auto;
+  outline: none;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--raised);
+  box-shadow: 0 8px 24px #0003;
+}
+.desktop[data-theme="light"] .thread-inspector {
+  background: var(--pop);
+}
+.thread-inspector section {
+  padding: 8px 8px 10px;
+}
+.thread-inspector section + section {
+  border-top: 1px solid var(--line);
+}
+.thread-inspector h3,
+.thread-inspector .inspector-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 0 10px;
+  border-radius: 8px;
+  font:
+    500 13px/20px -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  color: var(--ink);
+  text-align: left;
+}
+.thread-inspector h3 {
+  margin-bottom: 4px;
+  color: var(--muted);
+}
+.thread-inspector .icon,
+.thread-inspector small {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.thread-inspector .inspector-row > span:not(.icon):not(.inspector-project) {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.thread-inspector .inspector-project,
+.thread-inspector .inspector-copy,
+.thread-inspector .inspector-row small {
+  margin-left: auto;
+}
+.thread-inspector .inspector-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+}
+.thread-inspector .inspector-copy {
+  display: inline-flex;
+  opacity: 0;
+}
+.thread-inspector button:hover,
+.thread-inspector summary:hover {
+  background: var(--hover);
+}
+.thread-inspector button:is(:hover, :focus-visible) .inspector-copy {
+  opacity: 1;
+}
+.thread-inspector summary {
+  list-style: none;
+  cursor: pointer;
+}
+.thread-inspector summary::-webkit-details-marker {
+  display: none;
+}
+.thread-inspector details[open] > summary .icon {
+  transform: rotate(90deg);
+}
+.thread-inspector [role="status"] {
+  display: block;
+  padding-left: 10px;
+}

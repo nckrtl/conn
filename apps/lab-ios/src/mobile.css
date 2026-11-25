@@ -9,6 +9,8 @@
   --m-text-xs: 13px;
   --m-text-sm: 14px;
   --m-text-base: 16px;
+  --m-text-headline: 17px;
+  --m-paragraph-gap: 13px;
 }
 
 * {
@@ -98,19 +100,6 @@ body {
   --m-hl6: color-mix(in srgb, var(--color-foreground) 6%, transparent);
   --m-hl5: color-mix(in srgb, var(--color-foreground) 5%, transparent);
   --m-hl10: color-mix(in srgb, var(--color-foreground) 10%, transparent);
-  --m-syn-keyword: #f472b6;
-  --m-syn-string: #fb923c;
-  --m-syn-builtin: #c084fc;
-  --m-syn-operator: #22d3ee;
-  --m-syn-punct: color-mix(in srgb, var(--color-md-code-text) 45%, transparent);
-  --m-syn-fn: #a78bfa;
-}
-.m-phone[data-mobile-theme="light"] {
-  --m-syn-keyword: #d6336c;
-  --m-syn-string: #c2410c;
-  --m-syn-builtin: #7e22ce;
-  --m-syn-operator: #0e7490;
-  --m-syn-fn: #6d28d9;
 }
 
 /* iOS "continuous" corners are a gently smoothed circle, close to a plain radius. CSS's
@@ -129,11 +118,22 @@ body {
   display: none;
 }
 
-/* The card face every inline card shares: apps/mobile ThreadCardFace (card-face tokens). */
-.m-card-face {
-  overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid var(--color-card-face-border);
-  border-top-color: var(--color-card-face-edge);
-  background: var(--color-card-face);
+.mlab-launch-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.mlab-launch-controls .mlab-segment {
+  flex-wrap: wrap;
+}
+.mlab-replay {
+  border: 1px solid #55555b;
+  border-radius: 6px;
+  padding: 5px 9px;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }

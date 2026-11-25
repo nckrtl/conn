@@ -1,0 +1,107 @@
+:root {
+  color-scheme: dark;
+  font:
+    14px / 22.75px -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #171a1f;
+  color: #e5e5e6;
+}
+main {
+  max-width: 736px;
+  width: calc(100% - 32px);
+  margin: 0 auto;
+  padding: 8px 0 16px;
+}
+@media (min-width: 800px) {
+  main {
+    position: relative;
+    left: 5.5px;
+  }
+}
+p,
+figure {
+  margin: 0;
+}
+.reply {
+  padding: 0 4px;
+}
+figure {
+  width: var(--width, 80%);
+  margin: 47px 0 45px auto;
+  --image-inset: 3px;
+  padding: 11px 0 var(--image-inset);
+  display: grid;
+  gap: var(--gap, 8px);
+  background: #38414a;
+  color: #fafbfc;
+  border-top: 1px solid #49515a;
+  border-radius: var(--radius, 14px);
+}
+img {
+  display: block;
+  width: calc(100% - 2 * var(--image-inset));
+  margin-inline: auto;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: var(--image-radius, 11px);
+}
+figcaption {
+  padding-inline: var(--inset, 16px);
+}
+[contenteditable] {
+  overflow-wrap: anywhere;
+}
+[contenteditable]:focus-visible {
+  outline: 1px solid #94abbc;
+  outline-offset: 2px;
+}
+details {
+  margin: 24px 4px 0;
+  font-size: 13px;
+}
+summary,
+button,
+input {
+  cursor: pointer;
+}
+form {
+  display: grid;
+  gap: 8px;
+  max-width: 400px;
+  margin-top: 12px;
+}
+label {
+  display: grid;
+  grid-template-columns: 90px 1fr 42px;
+  align-items: center;
+  gap: 8px;
+}
+input {
+  width: 100%;
+}
+output {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+button {
+  justify-self: start;
+  font: inherit;
+}
+
+nav {
+  margin: 12px 4px;
+  font-size: 13px;
+}
+nav a {
+  color: inherit;
+}

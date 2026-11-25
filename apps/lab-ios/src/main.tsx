@@ -4,5 +4,6 @@ import ReactDOM from "react-dom/client";
 import { MobileLab } from "./MobileLab";
 import "./theme.generated.css";
 import "./mobile.css";
+import "./native.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(<MobileLab />);

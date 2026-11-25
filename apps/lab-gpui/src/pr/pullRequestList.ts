@@ -1,6 +1,7 @@
 // Lab data for the Pull requests page: edit LAB_PULL_REQUESTS to change the list. The fake
 // environment answers pullRequests.list, listStats and filterOptions from it, applying the
 // input's state, involvement, filters and search the way the host would.
+import { sidebarSweep } from "./sidebarSweep";
 import type {
   ProjectId,
   PullRequestActor,
@@ -287,18 +288,12 @@ export const LAB_PULL_REQUESTS: ReadonlyArray<PullRequestListEntry> = [
     head: "dependabot/npm_and_yarn/vite-plus-0.4.5",
   }),
   seed({
-    number: 1902,
-    title: "feat(web): sidebar sweep selects a range of threads",
+    ...sidebarSweep,
     author: ME,
-    state: "merged",
     labels: [SIZE_M, FEATURE],
     review: "approved",
-    checks: "passing",
-    additions: 301,
-    deletions: 58,
     created: 4 * DAY,
-    updated: 1 * DAY + 2 * HOUR,
-    head: "feat/sidebar-sweep-range",
+    updated: sidebarSweep.updatedHoursAgo * HOUR,
   }),
   seed({
     number: 1897,

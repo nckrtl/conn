@@ -8,9 +8,16 @@ export function GlassButton(props: {
   readonly icon: IconName;
   readonly label: string;
   readonly size?: number;
+  readonly expanded?: boolean;
+  readonly onClick?: (() => void) | undefined;
 }) {
   return (
-    <button className="m-glass-button" aria-label={props.label}>
+    <button
+      className="m-glass-button"
+      aria-label={props.label}
+      aria-expanded={props.expanded}
+      onClick={props.onClick}
+    >
       <Icon name={props.icon} size={props.size ?? 22} />
     </button>
   );
@@ -19,7 +26,7 @@ export function GlassButton(props: {
 /** The thread header: back, a centred medium title over a muted subtitle, ellipsis. Content scrolls under it. */
 export function GlassHeader(props: {
   readonly title: string;
-  readonly subtitle?: string;
+  readonly subtitle?: ReactNode;
   readonly leading?: ReactNode;
   readonly trailing?: ReactNode;
 }) {

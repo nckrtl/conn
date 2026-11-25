@@ -1,7 +1,7 @@
 import DesignKit
 import SwiftUI
 
-enum WorkspaceTab: String, Hashable, CaseIterable {
+enum WorkspaceTab: String, Hashable {
     case threads
     case tasks
     case pullRequests
@@ -13,6 +13,11 @@ enum WorkspaceTab: String, Hashable, CaseIterable {
         case .pullRequests: "Search pull requests"
         }
     }
+}
+
+private enum WorkspaceSelection: Hashable {
+    case section(WorkspaceTab)
+    case search
 }
 
 enum WorkspaceRoute: Hashable, Codable {
@@ -34,6 +39,9 @@ struct WorkspaceRootView: View {
     @State private var isSearching = false
     @State private var searchQuery = ""
     @State private var selectedProjectFilter: String? = nil
+    @State private var environmentFilter: String?
+    @State private var settledExpanded = false
+    @State private var pullRequests = WorkspacePullRequests()
     @State private var tasks = TasksModel()
     @FocusState private var searchFocused: Bool
 
@@ -47,71 +55,23 @@ struct WorkspaceRootView: View {
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            ZStack(alignment: .bottom) {
-                Group {
-                    switch selectedTab {
-                    case .threads:
-                        InboxView(
-                            store: store,
-                            searchQuery: isSearching ? searchQuery : "",
-                            selectedProjectFilter: $selectedProjectFilter,
-                            onSelectThread: { threadId, scope in
-                                if isSearching {
-                                    isSearching = false
-                                    searchQuery = ""
-                                }
-                                navigationPath.append(.thread(threadId, scope: scope))
-                            }
-                        )
-                    case .tasks:
-                        TasksTabView(
-                            model: tasks,
-                            searchQuery: isSearching ? searchQuery : ""
-                        )
-                    case .pullRequests:
-                        PullRequestsTabView(
-                            store: store,
-                            searchQuery: isSearching ? searchQuery : ""
-                        )
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.background.ignoresSafeArea())
-
-                if store.showsOffline && !store.showsSavedConnectionAlert {
-                    OfflinePill()
-                        .padding(.bottom, 12)
-                }
+            TabView(selection: selection) {
+                Tab(value: WorkspaceSelection.section(.threads)) { section(.threads) } label: {
+                    Label { Text("Threads") } icon: { connImage("text.bubble") }
+                }.accessibilityIdentifier("workspace.tab.threads")
+                Tab(value: WorkspaceSelection.section(.tasks)) { section(.tasks) } label: {
+                    Label { Text("Tasks") } icon: { connImage("checklist") }
+                }.accessibilityIdentifier("workspace.tab.tasks")
+                Tab(value: WorkspaceSelection.section(.pullRequests)) { section(.pullRequests) } label: {
+                    Label { Text("Pull requests") } icon: { connImage("arrow.triangle.pull") }
+                }.accessibilityIdentifier("workspace.tab.pullRequests")
+                Tab(value: WorkspaceSelection.search, role: .search) {
+                    section(selectedTab, query: searchQuery)
+                }.accessibilityIdentifier("workspace.searchButton")
             }
+            .tabViewStyle(.tabBarOnly)
             .toolbar(.hidden, for: .navigationBar)
             .toolbar(.hidden, for: .bottomBar)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                GlassEffectContainer(spacing: 0) {
-                    HStack(spacing: 8) {
-                        if isSearching {
-                            HStack(spacing: 8) {
-                                ConnIcon("magnifyingglass").foregroundStyle(.secondary)
-                                TextField(selectedTab.searchPlaceholder, text: $searchQuery)
-                                    .focused($searchFocused).submitLabel(.search)
-                            }.padding(.horizontal, 16).frame(height: 48).glassEffect(.regular, in: .capsule)
-                            footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
-                                isSearching = false
-                                searchQuery = ""
-                            }
-                        } else {
-                            footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
-                            Spacer(minLength: 0)
-                            WorkspacePhoneSwitcher(selectedTab: $selectedTab, onSearch: { isSearching = true })
-                                .glassEffect(.regular, in: .capsule)
-                            Spacer(minLength: 0)
-                            footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
-                                navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
-                            }.disabled(store.showsOffline)
-                        }
-                    }
-                }.padding(.horizontal, 24).offset(y: 4)
-            }
-            .onChange(of: isSearching) { _, value in searchFocused = value }
             .navigationDestination(for: WorkspaceRoute.self) { route in
                 switch route {
                 case let .task(id):
@@ -191,9 +151,71 @@ struct WorkspaceRootView: View {
             if case .newThreadDraft = route { return }
             if let data = try? JSONEncoder().encode(route) { UserDefaults.standard.set(data, forKey: key) }
         }
-        .onDisappear { store.isInboxVisible = false }
+        .onChange(of: selectedTab == .tasks && navigationPath.isEmpty, initial: true) { _, visible in
+            if visible { tasks.appear() } else { tasks.disappear() }
+        }
+        .task(id: selectedTab == .pullRequests && navigationPath.isEmpty ? (store.environmentId ?? "") : nil) {
+            guard selectedTab == .pullRequests, navigationPath.isEmpty else { return }
+            await pullRequests.load(store: store)
+        }
+        .onDisappear {
+            store.isInboxVisible = false
+            tasks.disappear()
+        }
         .onChange(of: inboxOnScreen) { _, visible in store.isInboxVisible = visible }
         .onChange(of: store.pendingLink) { _, _ in showPendingLink() }
+    }
+
+    private var selection: Binding<WorkspaceSelection> {
+        Binding(get: { isSearching ? .search : .section(selectedTab) }, set: { newValue in
+            switch newValue {
+            case .search: isSearching = true
+            case let .section(tab):
+                searchFocused = false
+                selectedTab = tab
+                isSearching = false
+                searchQuery = ""
+            }
+        })
+    }
+
+    private func section(_ tab: WorkspaceTab, query: String? = nil) -> some View {
+        Group {
+            switch tab {
+            case .threads:
+                InboxView(store: store, searchQuery: query ?? "", selectedProjectFilter: $selectedProjectFilter,
+                          environmentFilter: $environmentFilter, settledExpanded: $settledExpanded) { threadId, scope in
+                    navigationPath.append(.thread(threadId, scope: scope))
+                }
+            case .tasks: TasksTabView(model: tasks, searchQuery: query ?? "")
+            case .pullRequests: PullRequestsTabView(store: store, searchQuery: query ?? "", model: pullRequests)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background.ignoresSafeArea())
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 4) {
+                if store.showsOffline && !store.showsSavedConnectionAlert { OfflinePill() }
+                HStack(spacing: 8) {
+                    if query != nil {
+                        TextField(tab.searchPlaceholder, text: $searchQuery)
+                            .focused($searchFocused).submitLabel(.search)
+                            .accessibilityIdentifier("workspace.searchField")
+                            .padding(.horizontal, 16).frame(height: 48).glassEffect(.regular, in: .capsule)
+                            .onAppear { searchFocused = true }
+                        footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
+                            selection.wrappedValue = .section(selectedTab)
+                        }
+                    } else {
+                        footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
+                        Spacer()
+                        footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
+                            navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
+                        }.disabled(store.showsOffline)
+                    }
+                }.padding(.horizontal, 20)
+            }
+        }
     }
 
     /// The thread list is what the user sees: no thread pushed, no sheet, not searching.
@@ -213,62 +235,6 @@ struct WorkspaceRootView: View {
             ? link.environmentId
             : store.linked.first { $0.value.environmentId == link.environmentId }?.key ?? ""
         navigationPath = [.thread(link.threadId, scope: scope)]
-    }
-}
-
-// MARK: - WorkspacePhoneBar (1:1 port of WorkspacePhoneBar.tsx)
-
-private struct WorkspacePhoneSwitcher: View {
-    @Binding var selectedTab: WorkspaceTab
-    let onSearch: () -> Void
-    @Environment(\.connTheme) private var theme
-
-    var body: some View {
-        HStack(spacing: 0) {
-            item(.threads, icon: "text.bubble", label: "Threads")
-            item(.tasks, icon: "checklist", label: "Tasks")
-            item(.pullRequests, icon: "arrow.triangle.pull", label: "Pull requests")
-            Button(action: onSearch) {
-                toolbarIcon("magnifyingglass")
-                    .foregroundStyle(theme.mutedForeground)
-                    .frame(maxWidth: .infinity).frame(height: 40)
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Search")
-            .accessibilityIdentifier("workspace.searchButton")
-        }
-        .padding(4)
-        .frame(maxWidth: 238)
-    }
-
-    /// 22pt icons. A bar item lays out from UIImage sizes, so the asset is framed explicitly.
-    private func toolbarIcon(_ name: String) -> some View {
-        connImage(name)
-            .resizable()
-            .scaledToFit()
-            .frame(width: 22, height: 22)
-    }
-
-    private func item(_ tab: WorkspaceTab, icon: String, label: String) -> some View {
-        let selected = selectedTab == tab
-        return Button {
-            selectedTab = tab
-        } label: {
-            toolbarIcon(icon)
-                .foregroundStyle(selected ? theme.foreground : theme.mutedForeground)
-                .frame(maxWidth: .infinity).frame(height: 40)
-                .background {
-                    if selected {
-                        Capsule().fill(.selection.tertiary).tint(.primary)
-                    }
-                }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(selected ? [.isSelected] : [])
-        .accessibilityIdentifier("workspace.tab.\(tab.rawValue)")
     }
 }
 

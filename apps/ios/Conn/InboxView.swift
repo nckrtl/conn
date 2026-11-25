@@ -5,11 +5,11 @@ struct InboxView: View {
     @Bindable var store: CoreStore
     let searchQuery: String
     @Binding var selectedProjectFilter: String?
+    @Binding var environmentFilter: String?
+    @Binding var settledExpanded: Bool
     let onSelectThread: (String, String) -> Void
 
     @Environment(\.connTheme) private var theme
-    @State private var environmentFilter: String?
-    @State private var settledExpanded = false
     @State private var pagingOlder = false
     @State private var renameOwner: CoreStore?
     @State private var renamingThread: FfiThreadSummary?

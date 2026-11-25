@@ -184,8 +184,6 @@ struct TasksTabView: View {
             )
             .frame(height: barHeight)
         }
-        .onAppear { model.appear() }
-        .onDisappear { model.disappear() }
     }
 
     @ViewBuilder

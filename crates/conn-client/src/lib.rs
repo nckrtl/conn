@@ -21,6 +21,7 @@ mod driver;
 pub mod environments;
 pub mod history;
 pub mod perf;
+pub mod preview;
 mod wire;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

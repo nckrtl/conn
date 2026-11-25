@@ -10,6 +10,12 @@ The desktop reference is `apps/lab-gpui` at `b4f0ac5512b823431dea8cca12eb84ace65
 
 The VM also opened an Orbit task from thread details, expanded its subtask brief and deliverables, opened and returned from a workspace file, and sent GET and HEAD requests. HEAD displayed the 204 status and empty response. The pull request inbox filtered a live GitHub list through the selected Conn server, opened a three-file breakdown, then loaded the PR detail and code patch.
 
+## Agents drive the Browser panel, 25 November 2026
+
+- **Desktop tab relay (T3 `hostDesktopTab`).** Every browser tab of every thread opens a record on its thread's server (`preview.open`), registers (`preview.desktopRegister`), serves agent requests (`preview.desktopRequests` / `desktopRespond`) and reports navigation (`preview.reportStatus`). Relay logic: `crates/conn-client/src/preview/host.rs`; page work (`status`, `snapshot`, `click`, `type`, `hover`, `select`, `drag`, `press`, `scroll`, `waitFor`, `upload`, `evaluate`, `navigate`, `dialog`, `resize`, `setColorScheme`, `credentialFill`, `credentialLock`) over CEF's in-process CDP: `crates/conn-preview-driver`; app wiring: `conn-app/src/preview_host.rs`. `cdpEndpoint`, `open` and recordings answer with T3's "Not supported on desktop tabs" error.
+- **Deliberate divergence from T3: the desktop is the agent's default browser.** With a desktop connected, a preview call with no `tabId` goes to the thread's desktop tab (the agent's current one, else the newest registered); `preview_open` shows that tab (navigating it when given an address); with no tab yet the server asks the desktop to open its Browser panel (`panel_open`, no window focus) and waits for the tab to register. The server's own browser serves only a thread without a desktop, or a call that names a server tab. See `apps/conn-server/crates/conn-preview/src/relay.rs`. Needs a `conn-server` release: the running server must include this change.
+- Verified by `crates/conn-preview-driver/tests/desktop_relay_e2e.rs` against a disposable server (`CONN_RELAY_E2E_BIN`, built from the `desktop_relay_e2e` example in `apps/conn-server`).
+
 ## Milestones (from `GOAL.md`)
 
 | Phase | Area | State | Proof |

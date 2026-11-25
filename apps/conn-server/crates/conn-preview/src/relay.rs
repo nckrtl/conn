@@ -2,9 +2,19 @@
 //! server (`preview.desktopRegister`, `preview.desktopRequests`, `preview.desktopRespond`).
 //!
 //! It follows the desktop part of the T3 server's `PreviewAutomationBroker`: a desktop
-//! registers one tab, takes its request stream, and answers each request. An agent call
-//! goes to a desktop tab when it names that tab, or when its last call there made the tab
-//! its current one; `preview_open` without such a tab stays on the server's own browser.
+//! registers one tab, takes its request stream, and answers each request.
+//!
+//! # Deliberate divergence from T3: the desktop is the default browser
+//!
+//! In T3 an agent's browser is the server's own (remote, headless) one until the user says
+//! "take control": an agent call goes to a desktop tab only when it names that tab, or when its
+//! last call there made the tab its current one. Conn reverses the default, because users found
+//! the remote browser surprising. When a desktop hosts a tab for the agent's thread, a call
+//! that names no tab goes to that desktop: to the agent's current tab, else to the thread's
+//! newest registered one. The server's own browser serves a call only when no desktop hosts a
+//! tab for the thread, or when the agent names a server tab explicitly (a `tabId` no desktop
+//! hosts). Callers that want a page when no desktop tab exists yet open one first (see
+//! `conn-mcp`'s preview tool); recordings never default to a desktop (`desktop_default`).
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
@@ -46,6 +56,9 @@ pub struct RelayCall<'a> {
     pub timeout_ms: Option<u64>,
     /// False for background reads that must not change the agent's current tab.
     pub update_current_tab: bool,
+    /// Whether a call that names no tab may go to a desktop tab of the thread (see the module
+    /// documentation). False for operations only the server's browser serves.
+    pub desktop_default: bool,
 }
 
 /// A desktop's answer and the tab the request targeted (T3's `onTargetTab`).
@@ -274,8 +287,43 @@ impl Relay {
             .collect()
     }
 
-    /// Sends the call to a desktop tab when T3's broker would. `None`: the server's own
-    /// browser takes it.
+    /// The device and session hosting `tab` of `thread`, if a desktop does.
+    pub(crate) fn host_of(&self, thread: &str, tab: &str) -> Option<(String, String)> {
+        lock(&self.0)
+            .hosts
+            .iter()
+            .find(|h| h.thread == thread && h.tab == tab)
+            .map(|h| (h.device.clone(), h.session_id.clone()))
+    }
+
+    /// The desktop tab a call without a tab goes to: the agent's current one, else the thread's
+    /// newest.
+    pub(crate) fn default_tab(
+        &self,
+        environment_id: &str,
+        thread: &str,
+        agent: &str,
+    ) -> Option<String> {
+        let state = lock(&self.0);
+        let key = agent_key(environment_id, agent, thread);
+        let hosted = |h: &&Host| h.environment_id == environment_id && h.thread == thread;
+        state
+            .assignments
+            .iter()
+            .find(|a| a.key == key)
+            .and_then(|a| {
+                state
+                    .hosts
+                    .iter()
+                    .find(|h| h.connection_id == a.connection_id)
+            })
+            .filter(hosted)
+            .or_else(|| state.hosts.iter().rev().find(hosted))
+            .map(|h| h.tab.clone())
+    }
+
+    /// Sends the call to a desktop tab (see the module documentation for when). `None`: the
+    /// server's own browser takes it.
     pub(crate) async fn invoke(
         &self,
         call: RelayCall<'_>,
@@ -306,23 +354,39 @@ impl Relay {
             });
             // An explicit tab that no desktop hosts is the server's own: never send it to the
             // current desktop tab (T3 does, and the desktop then refuses it).
-            let current = if call.tab.is_some() {
+            //
+            // Without a named tab, T3 goes to a desktop tab only when the agent's last call made
+            // it current. Here the desktop is the default: the thread's newest registered tab
+            // serves an agent that has no current one (never for `open`, which the caller turns
+            // into a navigation first).
+            let newest = (call.tab.is_none() && call.desktop_default && call.operation != "open")
+                .then(|| {
+                    hosts.iter().rev().find(|h| {
+                        h.thread == call.thread && h.environment_id == call.environment_id
+                    })
+                })
+                .flatten();
+            // A server-only call (recordings) with no named tab never follows the agent's current
+            // desktop tab either: only the server's browser can serve it.
+            let current = if call.tab.is_some() || !call.desktop_default {
                 None
             } else {
-                assigned_host
+                assigned_host.or(newest)
             };
             let Some(host) = explicit.or(current) else {
                 if call.update_current_tab
+                    && call.desktop_default
                     && let Some(i) = assigned
                 {
                     state.assignments.remove(i);
                 }
                 return None;
             };
-            let (client_id, connection_id, sender) = (
+            let (client_id, connection_id, sender, host_tab) = (
                 host.client_id.clone(),
                 host.connection_id.clone(),
                 host.sender.clone(),
+                host.tab.clone(),
             );
             let timeout_ms = call.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
             let reused = assigned
@@ -348,7 +412,13 @@ impl Relay {
             let sequence = state.sequence;
             state.sequence += 1;
             let request_id = format!("preview-{sequence}");
-            let tab = call.tab.map(str::to_owned).or(reused_tab);
+            // A call routed by default names no tab: the desktop's runner serves only the tab it
+            // hosts, so the request names it.
+            let tab = call
+                .tab
+                .map(str::to_owned)
+                .or(reused_tab)
+                .or(Some(host_tab));
             let context = Context {
                 operation: call.operation.to_owned(),
                 environment_id: call.environment_id.to_owned(),

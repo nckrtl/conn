@@ -1,6 +1,7 @@
 //! Agent browser calls share the server's tab state. A call that names a tab a Conn desktop
 //! registered (or follows one there) goes to that desktop, as in T3's broker.
 use super::{Args, Cx, ToolError, ToolResult, fail, str_arg};
+use conn_contract::{AgentPanelKind, AgentPanelRequest};
 use conn_preview::relay::{RelayCall, RelayFailure};
 use conn_preview::tabs::Preview;
 use serde_json::{Map, Value, json};
@@ -89,6 +90,19 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
         }
     };
     let environment = cx.config().environment_id.as_str();
+    let tab = str_arg(args, "tabId");
+    // Deliberate divergence from T3 (see `conn_preview::relay`): the desktop's integrated browser
+    // is the agent's default. A call that names no tab goes to the thread's desktop tab, and when
+    // a desktop is connected but has no tab for the thread yet, one is opened in its Browser panel
+    // first. The server's own browser serves only a thread without a desktop, or a call that names
+    // a server tab. Recordings need the server's browser, so they never default to a desktop.
+    let default_to_desktop = !matches!(name, "preview_recording_start" | "preview_recording_stop");
+    if tab.is_none()
+        && default_to_desktop
+        && !matches!(name, "preview_status" | "conn_preview_close")
+    {
+        open_desktop_tab(cx, preview, environment, &caller.thread_id).await;
+    }
     let relay = |operation: &str,
                  input: Value,
                  tab: Option<String>,
@@ -107,12 +121,34 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
                     tab: tab.as_deref(),
                     timeout_ms,
                     update_current_tab,
+                    desktop_default: default_to_desktop,
                 })
                 .await
         }
     };
-    let tab = str_arg(args, "tabId");
     let (desktop_input, timeout_ms) = desktop_input(name, args);
+    // A desktop tab is never "opened" by the agent (T3's runner has no `open`): opening is
+    // showing the thread's desktop tab, navigated if the agent gave an address.
+    let hosted = preview.desktop_tabs(environment, &caller.thread_id);
+    let desktop_open = name == "preview_open"
+        && !hosted.is_empty()
+        && tab.is_none_or(|tab| hosted.iter().any(|h| h.tab == tab));
+    let (operation, desktop_input, timeout_ms) = if desktop_open {
+        match args
+            .get("url")
+            .map(|url| json!({ "url": url }))
+            .or_else(|| args.get("target").map(|target| json!({ "target": target })))
+        {
+            Some(input) => (
+                "navigate",
+                input,
+                args.get("timeoutMs").and_then(Value::as_u64),
+            ),
+            None => ("status", json!({}), None),
+        }
+    } else {
+        (operation, desktop_input, timeout_ms)
+    };
     let routed = if name == "conn_preview_close" {
         None
     } else {
@@ -146,7 +182,7 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
                 args.get("target"),
                 opened.get("tabId").and_then(Value::as_str),
             ) {
-                ("preview_open", Some(target), Some(id)) => {
+                ("preview_open", Some(target), Some(id)) if !desktop_open => {
                     let input = json!({ "target": target });
                     match relay("navigate", input, Some(id.to_owned()), None, true).await {
                         Some(result) => Some(result.map_err(relay_failure)?.value)
@@ -238,6 +274,16 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     if desktop && let Some(schema) = crate::catalog::result_schema(name) {
         // A desktop answers with its own runner's fields; T3 encodes them with the tool's schema.
         value = crate::catalog::prune(&schema, value);
+    }
+    if desktop && name == "preview_status" && tab.is_none() {
+        desktop_first(
+            preview,
+            environment,
+            &caller.thread_id,
+            &caller.provider_session_id,
+            &mut value,
+        )
+        .await;
     }
     if desktop && !matches!(operation, "open" | "status" | "navigate" | "snapshot") {
         let status = match relay("status", json!({}), status_tab.clone(), Some(500), false).await {
@@ -351,6 +397,7 @@ async fn add_desktop_tabs(
                 tab: Some(&tab.tab),
                 timeout_ms: Some(500),
                 update_current_tab: false,
+                desktop_default: false,
             })
             .await;
         if let Some(Ok(page)) = read {
@@ -362,9 +409,75 @@ async fn add_desktop_tabs(
         tabs.push(entry);
     }
     status["available"] = json!(true);
-    match status.get_mut("tabs").and_then(Value::as_array_mut) {
-        Some(existing) => existing.extend(tabs),
-        None => status["tabs"] = Value::Array(tabs),
+    // Desktop tabs lead: they are where an agent's calls go by default.
+    if let Some(existing) = status.get_mut("tabs").and_then(Value::as_array_mut) {
+        tabs.append(existing);
+    }
+    status["tabs"] = Value::Array(tabs);
+}
+
+/// `preview_status` for an agent whose calls default to a desktop tab: `status` is that tab's own
+/// (its `tabId` is the default target), and `tabs` lists the thread's desktop tabs first, the
+/// default tab leading them, then any server tabs.
+async fn desktop_first(
+    preview: &Preview,
+    environment: &str,
+    thread: &str,
+    agent: &str,
+    status: &mut Value,
+) {
+    let default = preview.desktop_default_tab(environment, thread, agent);
+    let mut listing = json!({});
+    add_desktop_tabs(preview, environment, thread, agent, &mut listing).await;
+    let mut tabs: Vec<Value> = listing
+        .get("tabs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // `false` sorts first, and the sort is stable: the default tab leads, the rest keep order.
+    tabs.sort_by_key(|tab| tab.get("tabId").and_then(Value::as_str) != default.as_deref());
+    let server = preview.status(thread, agent, None);
+    if let Some(server_tabs) = server.get("tabs").and_then(Value::as_array) {
+        tabs.extend(server_tabs.iter().cloned());
+    }
+    if status.is_object() && !tabs.is_empty() {
+        status["tabs"] = Value::Array(tabs);
+    }
+}
+
+/// How long a call waits for a desktop tab it asked the desktop to open.
+const DESKTOP_TAB_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// With a desktop connected and no desktop tab on the thread, asks the desktop to open its
+/// Browser panel (without taking the window's focus) and waits for the tab it makes to register.
+/// Without a desktop, or if it does not answer, nothing changes: the server's browser serves.
+async fn open_desktop_tab(cx: &Cx<'_>, preview: &Preview, environment: &str, thread: &str) {
+    if !preview.desktop_tabs(environment, thread).is_empty() {
+        return;
+    }
+    let Some(panels) = cx.config().panels.as_ref().filter(|p| p.has_desktop()) else {
+        return;
+    };
+    let request = AgentPanelRequest {
+        request_id: format!("preview-open-{}", conn_support::uuid_v4()),
+        thread_id: thread.to_owned(),
+        panel: AgentPanelKind::Browser,
+        tab_id: None,
+        sql: None,
+        connection: None,
+        run: None,
+        mcp_server: None,
+        mcp_call: None,
+        focus_window: false,
+    };
+    if panels.show(request, DESKTOP_TAB_WAIT).await.is_err() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + DESKTOP_TAB_WAIT;
+    while preview.desktop_tabs(environment, thread).is_empty()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

@@ -10,6 +10,7 @@ fn call<'a>(operation: &'a str, tab: Option<&'a str>, update: bool) -> RelayCall
         tab,
         timeout_ms: Some(50),
         update_current_tab: update,
+        desktop_default: true,
     }
 }
 
@@ -62,8 +63,6 @@ async fn calls_follow_an_explicit_desktop_tab_until_an_open() {
     let relay = Relay::default();
     let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
-    // No tab named and none current: the server's own browser.
-    assert!(relay.invoke(call("snapshot", None, true)).await.is_none());
     let worker = relay.clone();
     let named =
         tokio::spawn(async move { worker.invoke(call("snapshot", Some("tab"), true)).await });
@@ -107,9 +106,132 @@ async fn calls_follow_an_explicit_desktop_tab_until_an_open() {
         failure.message,
         "Preview tab tab was not found for click. Omit tabId to use the current tab, or call preview_open."
     );
-    // preview_open goes to the server's browser and ends the desktop assignment.
+    // `open` is never relayed: the caller turns it into a navigation of a desktop tab, or opens
+    // a server tab, and the assignment it ends falls back to the thread's newest desktop tab.
     assert!(relay.invoke(call("open", None, true)).await.is_none());
+    assert_eq!(
+        relay.default_tab("env", "thread", "agent").as_deref(),
+        Some("tab")
+    );
+}
+
+/// Conn's deliberate divergence from T3: with a desktop tab on the thread, a call without a
+/// tab goes to the desktop. See the module documentation of `crate::relay`.
+#[tokio::test]
+async fn a_call_without_a_tab_defaults_to_the_threads_desktop_tab() {
+    let relay = Relay::default();
+    // No desktop for the thread: the server's own browser.
     assert!(relay.invoke(call("snapshot", None, true)).await.is_none());
+    assert_eq!(relay.default_tab("env", "thread", "agent"), None);
+
+    let first = relay.register("s", "env", "thread", "one", "Mac").unwrap();
+    let mut first_feed = relay.requests("s", &first).unwrap();
+    let second = relay.register("s", "env", "thread", "two", "Mac").unwrap();
+    let mut second_feed = relay.requests("s", &second).unwrap();
+    // Another thread's and another environment's tabs are not this thread's.
+    let other = relay
+        .register("s", "env", "other-thread", "three", "Mac")
+        .unwrap();
+    let _other_feed = relay.requests("s", &other).unwrap();
+
+    // The agent has no current tab: the newest registered one serves it.
+    assert_eq!(
+        relay.default_tab("env", "thread", "agent").as_deref(),
+        Some("two")
+    );
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(call("snapshot", None, true)).await });
+    let event = request(&mut second_feed).await;
+    assert_eq!(event["request"]["threadId"], "thread");
+    assert_eq!(event["request"]["tabIdExplicit"], false);
+    assert_eq!(
+        event["request"]["tabId"], "two",
+        "a default-routed request still names the tab the desktop hosts"
+    );
+    answer(
+        &relay,
+        "s",
+        &event,
+        json!({"ok":true,"result":{"tabId":"two"}}),
+    );
+    assert!(task.await.unwrap().unwrap().is_ok());
+
+    // Naming the other desktop tab moves the agent there, and it stays current.
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(call("click", Some("one"), true)).await });
+    let event = request(&mut first_feed).await;
+    answer(
+        &relay,
+        "s",
+        &event,
+        json!({"ok":true,"result":{"tabId":"one"}}),
+    );
+    assert!(task.await.unwrap().unwrap().is_ok());
+    assert_eq!(
+        relay.default_tab("env", "thread", "agent").as_deref(),
+        Some("one")
+    );
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(call("click", None, true)).await });
+    let event = request(&mut first_feed).await;
+    assert_eq!(event["request"]["tabId"], "one");
+    answer(&relay, "s", &event, json!({"ok":true,"result":{}}));
+    assert!(task.await.unwrap().unwrap().is_ok());
+
+    // Another agent on the same thread gets the thread's newest tab, not this agent's.
+    let mut other_agent = call("snapshot", None, true);
+    other_agent.agent = "agent-2";
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(other_agent).await });
+    let event = request(&mut second_feed).await;
+    answer(&relay, "s", &event, json!({"ok":true,"result":{}}));
+    assert!(task.await.unwrap().unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn an_explicit_server_tab_and_server_only_calls_never_default_to_the_desktop() {
+    let relay = Relay::default();
+    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let _feed = relay.requests("s", &id).unwrap();
+    // A tab no desktop hosts is the server's own, even with a desktop tab on the thread.
+    assert!(
+        relay
+            .invoke(call("snapshot", Some("server-tab"), true))
+            .await
+            .is_none()
+    );
+    // A server-only call (recordings) stays on the server unless it names a desktop tab.
+    let mut server_only = call("recordingStart", None, true);
+    server_only.desktop_default = false;
+    assert!(relay.invoke(server_only).await.is_none());
+}
+
+/// Once an agent has a current desktop tab, a recording call without a tab still goes to the
+/// server's browser, and the agent keeps its current tab.
+#[tokio::test]
+async fn a_recording_does_not_follow_the_agents_current_desktop_tab() {
+    let relay = Relay::default();
+    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let mut feed = relay.requests("s", &id).unwrap();
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(call("snapshot", None, true)).await });
+    let event = request(&mut feed).await;
+    answer(
+        &relay,
+        "s",
+        &event,
+        json!({"ok":true,"result":{"tabId":"tab"}}),
+    );
+    assert!(task.await.unwrap().unwrap().is_ok());
+    for operation in ["recordingStart", "recordingStop"] {
+        let mut server_only = call(operation, None, true);
+        server_only.desktop_default = false;
+        assert!(relay.invoke(server_only).await.is_none());
+    }
+    assert_eq!(
+        relay.default_tab("env", "thread", "agent").as_deref(),
+        Some("tab")
+    );
 }
 
 #[tokio::test]

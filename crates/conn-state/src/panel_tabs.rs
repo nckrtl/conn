@@ -293,6 +293,48 @@ impl ThreadPanels {
             .unwrap_or_default()
     }
 
+    /// Lists every open `(owner, browser_tab_id)` across the shown thread and all parked threads.
+    #[must_use]
+    pub fn all_browser_tabs(&self, shown: &RightPanelTabs) -> Vec<(PanelOwner, BrowserTabId)> {
+        let mut out = Vec::new();
+        if let Some(owner) = &self.owner {
+            for id in shown.browser_ids() {
+                out.push((owner.clone(), id));
+            }
+        }
+        for (owner, panel) in &self.parked {
+            if self.owner.as_ref() == Some(owner) {
+                continue;
+            }
+            for id in panel.tabs.browser_ids() {
+                out.push((owner.clone(), id));
+            }
+        }
+        out
+    }
+
+    /// Finds the [`PanelOwner`] that owns browser tab `tab_id`, searching the shown thread first
+    /// and then parked threads.
+    #[must_use]
+    pub fn owner_of_browser(
+        &self,
+        tab_id: BrowserTabId,
+        shown: &RightPanelTabs,
+    ) -> Option<PanelOwner> {
+        if let Some(owner) = &self.owner
+            && shown.browser_ids().any(|id| id == tab_id)
+        {
+            return Some(owner.clone());
+        }
+        self.parked.iter().find_map(|(owner, panel)| {
+            panel
+                .tabs
+                .browser_ids()
+                .any(|id| id == tab_id)
+                .then(|| owner.clone())
+        })
+    }
+
     /// What to write to disk: the most recent [`MAX_SAVED_THREAD_PANELS`] panels that hold
     /// anything, `shown` (the owner's) included. `url` gives a browser tab's address.
     #[must_use]

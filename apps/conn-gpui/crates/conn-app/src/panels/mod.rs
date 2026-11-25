@@ -33,6 +33,7 @@ pub(crate) mod zed_preview;
 
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use conn_client::Connection;
 use conn_state::{AnnotationRecord, BrowserTabId, PanelSurface, RightPanelTab, RightPanelTabs};
@@ -88,6 +89,8 @@ pub(crate) enum RightPanelEvent {
     BrowserTitleChanged,
     /// A browser tab committed a new address, so its thread's saved layout follows.
     BrowserAddressChanged,
+    /// What agents read of a browser tab's page changed: the preview host reports it.
+    BrowserNavChanged,
 }
 
 impl gpui_kit::EventEmitter<RightPanelEvent> for RightPanel {}
@@ -132,6 +135,8 @@ pub struct RightPanel {
     browsers_by_use: Vec<BrowserTabId>,
     /// Titles of tabs whose browser was closed to stay under [`MAX_PARKED_BROWSERS`].
     parked_titles: Vec<(BrowserTabId, String)>,
+    /// The handles the preview host reads each tab's page through.
+    preview_handles: Option<Arc<crate::preview_host::Handles>>,
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
@@ -302,6 +307,7 @@ impl RightPanel {
             pending_browser_urls: Vec::new(),
             browsers_by_use: Vec::new(),
             parked_titles: Vec::new(),
+            preview_handles: None,
             connection,
             environment_id: None,
             annotations: None,
@@ -403,6 +409,7 @@ impl RightPanel {
         cx.subscribe(&browser, |_, _, event: &BrowserTabEvent, cx| match event {
             BrowserTabEvent::TitleChanged => cx.emit(RightPanelEvent::BrowserTitleChanged),
             BrowserTabEvent::AddressChanged => cx.emit(RightPanelEvent::BrowserAddressChanged),
+            BrowserTabEvent::NavChanged => cx.emit(RightPanelEvent::BrowserNavChanged),
             BrowserTabEvent::OpenTab(request) => cx.emit(RightPanelEvent::OpenBrowserTab {
                 url: request.url.clone(),
                 background: request.background,
@@ -425,12 +432,19 @@ impl RightPanel {
         let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
         let environment = self.environment_id.clone();
         let annotations = self.annotations.clone();
+        let host_handle = self
+            .preview_handles
+            .as_ref()
+            .map(|handles| handles.get_or_create(id));
         let pending = self
             .pending_browser_urls
             .iter()
             .position(|(tab, _)| *tab == id)
             .map(|index| self.pending_browser_urls.remove(index).1);
         browser.update(cx, |b, cx| {
+            if let Some(handle) = host_handle {
+                b.set_host_handle(handle);
+            }
             b.set_project(project, cx);
             b.set_workspace_root(root, cx);
             if let Some(environment) = environment {
@@ -509,10 +523,35 @@ impl RightPanel {
         }
     }
 
+    /// Browser tab `id`'s browser for an agent. A tab whose browser the cap closed gets a new one
+    /// loading its saved address, as showing it does, and makes its page even while hidden so
+    /// the command can reach it. The page's size is the other browsers' (they all fill the same
+    /// panel area), else a default.
+    pub(crate) fn host_browser(
+        &mut self,
+        id: BrowserTabId,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<BrowserPanel> {
+        // Every browser fills the same panel area, so a live one's bounds fit the new page.
+        let bounds = self
+            .browsers
+            .iter()
+            .find_map(|(_, browser)| browser.read(cx).web_bounds())
+            .or(Some(conn_web::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 900.0,
+                height: 700.0,
+            }));
+        let browser = self.ensure_browser(id, window, cx);
+        browser.update(cx, |b, cx| b.make_view_while_hidden(bounds, cx));
+        browser
+    }
+
     /// Browser tab `id`'s browser for the automation hook. `id` is a tab of the shown thread, so
     /// another thread's page is never the one acted on; none means that thread has no browser
-    /// tab. A tab whose browser the cap closed gets a new one loading its saved address, as
-    /// showing it does, and makes its page even while hidden so the command can reach it.
+    /// tab.
     #[cfg(feature = "automation")]
     fn automation_browser(
         &mut self,
@@ -524,14 +563,35 @@ impl RightPanel {
         if let Some(browser) = self.browser(id) {
             return Ok(browser);
         }
-        // Every browser fills the same panel area, so a live one's bounds fit the new page.
-        let bounds = self
-            .browsers
-            .iter()
-            .find_map(|(_, browser)| browser.read(cx).web_bounds());
-        let browser = self.ensure_browser(id, window, cx);
-        browser.update(cx, |b, cx| b.make_view_while_hidden(bounds, cx));
-        Ok(browser)
+        Ok(self.host_browser(id, window, cx))
+    }
+
+    /// Shares the handles the preview host reads each tab's page through. Browsers made from now
+    /// on, and the ones that exist, use them.
+    pub(crate) fn set_preview_handles(
+        &mut self,
+        handles: Arc<crate::preview_host::Handles>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        for (id, browser) in &self.browsers {
+            let handle = handles.get_or_create(*id);
+            browser.update(cx, |b, _| b.set_host_handle(handle));
+        }
+        self.preview_handles = Some(handles);
+    }
+
+    /// The address and title browser tab `id` shows, or will show once its browser exists.
+    pub(crate) fn browser_tab_facts(&self, id: BrowserTabId, cx: &App) -> (String, String) {
+        let url = match self.browser(id) {
+            Some(browser) => browser.read(cx).page_url(),
+            None => self
+                .pending_browser_urls
+                .iter()
+                .find(|(tab, _)| *tab == id)
+                .map(|(_, url)| url.clone())
+                .unwrap_or_default(),
+        };
+        (url, self.browser_tab_title(id, cx))
     }
 
     /// Diagnostic state of browser tab `id`.

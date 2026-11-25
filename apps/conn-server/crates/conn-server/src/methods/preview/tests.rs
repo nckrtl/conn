@@ -171,6 +171,14 @@ async fn desktop_tabs_are_records_and_their_desktop_hosts_them_for_agents() {
         .unwrap();
     let connected = feed.recv().await.unwrap().unwrap();
     conn_contract::from_json::<conn_contract::PreviewAutomationStreamEvent>(connected).unwrap();
+    // `preview.list` names the device that hosts the tab. `hostedHere` is true only for the
+    // session that registered it (every call here shares the default context's session).
+    let listed = call(&table, "preview.list", json!({"threadId":"thread"}))
+        .await
+        .unwrap();
+    assert_eq!(listed["sessions"][0]["host"], "Mac");
+    assert_eq!(listed["sessions"][0]["hostedHere"], true);
+    conn_contract::from_json::<conn_contract::PreviewListResult>(listed).unwrap();
     // An agent call that names the tab reaches the desktop; its answer comes back.
     let agent = browser.clone();
     let env = environment_id.clone();
@@ -186,6 +194,7 @@ async fn desktop_tabs_are_records_and_their_desktop_hosts_them_for_agents() {
                 tab: Some(&tab_id),
                 timeout_ms: None,
                 update_current_tab: true,
+                desktop_default: true,
             })
             .await
     });

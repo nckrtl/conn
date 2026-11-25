@@ -22,6 +22,7 @@ use conn_web::{
     Modifiers as WebModifiers, MouseButton as WebMouseButton, NewTabRequest, Rect as WebRect,
     WebRuntime, WebRuntimeState,
 };
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -37,13 +38,14 @@ use gpui_kit::{
 
 use super::annotations::{
     AnnotationAction, AnnotationSubject, AnnotationUiState, QueuePopoverAnchor,
-    QueuePopoverCallbacks, render_queue_popover,
+    QueuePopoverCallbacks, is_annotation_toggle_shortcut, render_queue_popover,
 };
 use super::browser_context_menu::{MenuActions, OpenMenu, render_context_menu};
-use super::chrome::{self, ConnTooltipExt as _};
+use super::chrome::{self, ConnTooltipExt as _, FloatingSurfaceExt as _};
 use super::color::to_hsla;
 use super::header::superhero_icon;
 use super::laravel_toolbar::{LaravelToolbar, host_script};
+use crate::preview_host::{BrowserHandle, PageFacts};
 
 const UI_TEXT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
@@ -135,6 +137,8 @@ pub(crate) enum BrowserTabEvent {
     TitleChanged,
     /// The page's committed address changed: typed, a link, a redirect, back or forward.
     AddressChanged,
+    /// What agents read of the page changed (address, title, loading, history, load failure).
+    NavChanged,
     /// The page opened a link in a new tab (`target=_blank`, Cmd-click, middle click).
     OpenTab(NewTabRequest),
 }
@@ -206,6 +210,9 @@ pub(crate) struct BrowserPanel {
     /// The user has asked for a page (typed an address, used back, forward or reload, or clicked
     /// in the page), so a load is theirs and the reload button may spin.
     user_load: bool,
+    /// What agents read of this page (`preview_status`): thread-safe, and the same handle across
+    /// the browsers the panel closes and makes again for this tab.
+    host_handle: Arc<BrowserHandle>,
     /// The tab title last reported with [`BrowserTabEvent::TitleChanged`].
     reported_title: String,
     /// The address last reported with [`BrowserTabEvent::AddressChanged`].
@@ -326,6 +333,7 @@ impl BrowserPanel {
             polling_runtime: false,
             context_menu: None,
             user_load: false,
+            host_handle: Arc::new(BrowserHandle::default()),
             reported_title: String::new(),
             reported_url: String::new(),
             #[cfg(test)]
@@ -351,6 +359,7 @@ impl BrowserPanel {
         }
         self.wake_task = None;
         self.overlay_task = None;
+        self.host_handle.set_control(None);
         let view = self.view.borrow_mut().take();
         if let Some(view) = view {
             view.close();
@@ -370,6 +379,16 @@ impl BrowserPanel {
     #[cfg(test)]
     pub(crate) fn visible_for_test(&self) -> bool {
         self.visible.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn annotations_for_test(&self) -> &AnnotationUiState {
+        &self.annotations
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focus_for_test(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        window.focus(&self.focus_handle, cx);
     }
 
     #[cfg(test)]
@@ -404,6 +423,40 @@ impl BrowserPanel {
             self.reported_url = url;
             cx.emit(BrowserTabEvent::AddressChanged);
         }
+        if self.host_handle.set_facts(self.page_facts()) {
+            cx.emit(BrowserTabEvent::NavChanged);
+        }
+    }
+
+    /// What agents read of the page now.
+    fn page_facts(&self) -> PageFacts {
+        let view = self.view.borrow();
+        let Some(view) = view.as_ref() else {
+            return PageFacts {
+                url: self.url.clone(),
+                ..PageFacts::default()
+            };
+        };
+        let url = Some(view.url())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| self.url.clone());
+        PageFacts {
+            loading: view.is_loading() && !is_blank_page(&url),
+            title: view.title(),
+            url,
+            can_go_back: view.can_go_back(),
+            can_go_forward: view.can_go_forward(),
+            load_error: view
+                .load_error()
+                .map(|error| (i64::from(error.code), error.text)),
+        }
+    }
+
+    /// Shares the tab's handle with the preview host, so one handle serves the tab for as long
+    /// as the tab lives.
+    pub(crate) fn set_host_handle(&mut self, handle: Arc<BrowserHandle>) {
+        handle.set_control(self.view.borrow().as_ref().and_then(BrowserView::control));
+        self.host_handle = handle;
     }
 
     /// A page the view committed while no frame ran, as the CEF view reports one in tests.
@@ -468,14 +521,12 @@ impl BrowserPanel {
     }
 
     /// Where the page is drawn, once it has been.
-    #[cfg(feature = "automation")]
     pub(crate) fn web_bounds(&self) -> Option<WebRect> {
         self.last_bounds.get()
     }
 
-    /// Makes this page's view while it is hidden, at `bounds` if it was never drawn, so the
-    /// automation hook can act on a tab that is not on screen.
-    #[cfg(feature = "automation")]
+    /// Makes this page's view while it is hidden, at `bounds` if it was never drawn, so an agent
+    /// can act on a tab that is not on screen.
     pub(crate) fn make_view_while_hidden(
         &mut self,
         bounds: Option<WebRect>,
@@ -517,7 +568,7 @@ impl BrowserPanel {
         }
         let next = !self.annotations.annotating;
         self.annotations.annotating = next;
-        self.annotations.queue_open = false;
+        // The popover stays open: its Annotate switch shows the mode, also after the shortcut.
         self.annotations.confirming_remove = false;
         if next {
             window.focus(&self.focus_handle, cx);
@@ -1347,6 +1398,7 @@ impl BrowserPanel {
         let visible = self.visible.clone();
         let view_while_hidden = self.view_while_hidden.clone();
         let applied_hidden = self.applied_hidden.clone();
+        let host_handle = self.host_handle.clone();
         let entity = cx.entity().downgrade();
 
         // Defer BrowserView creation until after GPUI finishes the current frame.
@@ -1365,6 +1417,7 @@ impl BrowserPanel {
             trace_browser(&format!("view created in {:?}", began.elapsed()));
             match result {
                 Ok(browser_view) => {
+                    host_handle.set_control(browser_view.control());
                     // Bounded channel (capacity 1) coalesces frame bursts into a
                     // single GPUI repaint with no busy loop when the page is idle.
                     let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -1760,6 +1813,15 @@ impl BrowserPanel {
             cx.stop_propagation();
             return;
         }
+        if is_annotation_toggle_shortcut(&event.keystroke) {
+            // Conn's `isAnnotationToggleShortcut` (`Cmd/Ctrl+Shift+A`): the page never sees it, so
+            // the overlay's own handler cannot toggle a second time.
+            if !event.is_held {
+                self.toggle_annotating_mode(window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let guard = self.view.borrow();
         let Some(view) = guard.as_ref() else {
             return;
@@ -2000,6 +2062,7 @@ impl BrowserPanel {
             .border_1()
             .border_color(border)
             .shadow_lg()
+            .floating_surface()
             .child(
                 h_flex()
                     .items_center()
@@ -2277,9 +2340,7 @@ impl BrowserPanel {
             .border_1()
             .border_color(to_hsla(tokens.foreground.with_alpha(0.08)))
             .shadow(vec![super::header::dropdown_glass_shadow(tokens)])
-            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
+            .floating_surface()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.more_menu_open = false;
                 cx.notify();
@@ -2309,86 +2370,50 @@ impl BrowserPanel {
 
         let counts = self.annotations.counts();
         let annotating = self.annotations.annotating;
-        let project_ready = self.annotations.project_ready;
         let entity = cx.entity();
 
-        let annotate_btn = div()
-            .id("browser-annotate-toggle")
-            .a11y_button(
-                "browser.annotations.toggle",
-                if annotating {
-                    "Stop annotating page"
-                } else {
-                    "Annotate page"
-                },
-            )
-            .size(px(TOOLBAR_BUTTON_SIZE_PX))
-            .rounded(px(9999.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(annotating, |el| {
-                el.bg(chrome::alpha(self.tokens.primary, 0.22))
-            })
-            .when(project_ready, |el| {
-                el.cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_annotating_mode(window, cx);
-                    }))
-            })
-            .when(!project_ready, |el| el.opacity(0.45))
-            .conn_tooltip(
-                if annotating {
-                    "Stop annotating page"
-                } else {
-                    "Annotate page"
-                },
-                &self.tokens,
-            )
-            .child(superhero_icon(
-                "superhero/comment-text.svg",
-                NAV_ICON_SIZE_PX,
-                if annotating { primary } else { fg },
-            ));
-
-        let queue_btn = div()
+        // One button for everything annotation: it opens the Annotations popover, which holds the
+        // Annotate and Watch switches. The button shows the live state: annotating (primary),
+        // watching (success) and the waiting count.
+        let annotations_open = self.annotations.queue_open;
+        let annotations_label = if counts.waiting > 0 {
+            format!("Annotations ({} waiting)", counts.waiting)
+        } else {
+            "Annotations".to_owned()
+        };
+        let annotations_btn = div()
             .id("browser-annotations-queue")
-            .a11y_button(
-                "browser.annotations.queue",
-                format!("Annotations queue ({} waiting)", counts.waiting),
-            )
+            .test_support()
+            .a11y_button("browser.annotations.queue", annotations_label.clone())
             .h(px(TOOLBAR_BUTTON_SIZE_PX))
-            .px(px(6.0))
+            .min_w(px(TOOLBAR_BUTTON_SIZE_PX))
+            .when(counts.waiting > 0, |el| el.px(px(6.0)))
             .rounded(px(9999.0))
             .flex()
             .flex_row()
             .items_center()
+            .justify_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(self.annotations.queue_open, |el| el.bg(hover_bg))
+            .when(annotations_open, |el| el.bg(hover_bg))
+            .when(annotating, |el| {
+                el.bg(chrome::alpha(self.tokens.primary, 0.22))
+            })
             .hover(move |s| s.bg(hover_bg))
-            .conn_tooltip(
-                if counts.waiting > 0 {
-                    format!("Annotations queue ({} waiting)", counts.waiting)
-                } else {
-                    "Annotations queue".to_owned()
-                },
-                &self.tokens,
-            )
+            .conn_tooltip(annotations_label, &self.tokens)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.annotations.toggle_queue();
                 cx.notify();
             }))
             .child(superhero_icon(
-                "superhero/checklist.svg",
-                13.0,
-                if self.annotations.watching {
+                "superhero/comment-text.svg",
+                NAV_ICON_SIZE_PX,
+                if annotating {
+                    primary
+                } else if self.annotations.watching {
                     to_hsla(self.tokens.success_foreground)
-                } else if counts.waiting > 0 {
-                    fg
                 } else {
-                    muted
+                    fg
                 },
             ))
             .when(counts.waiting > 0, |el| {
@@ -2442,8 +2467,7 @@ impl BrowserPanel {
                 .bg(control_bg)
                 .border_1()
                 .border_color(if annotating { primary } else { border })
-                .child(annotate_btn)
-                .child(queue_btn)
+                .child(annotations_btn)
                 .child(more_btn),
         );
 

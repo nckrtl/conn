@@ -25,6 +25,7 @@ lsp-types = "0.97"
 conn-cache = { path = "../../../../crates/conn-cache" }
 conn-client.workspace = true
 conn-desktop.workspace = true
+conn-preview-driver.workspace = true
 conn-contract.workspace = true
 conn-state.workspace = true
 conn-theme = { workspace = true, features = ["highlight"] }

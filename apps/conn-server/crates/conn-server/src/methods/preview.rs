@@ -18,9 +18,9 @@ pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
     let browser = preview.clone();
     table.on_disconnect(move |id| browser.disconnect_client(id));
     let browser = preview.clone();
-    table.unary("preview.list", move |_, input: PreviewListInput| {
+    table.unary("preview.list", move |ctx, input: PreviewListInput| {
         let browser = browser.clone();
-        async move { Ok(browser.list(&input.thread_id)) }
+        async move { Ok(browser.list_for(&input.thread_id, Some(&session(&ctx)))) }
     });
     let browser = preview.clone();
     table.unary("preview.close", move |_, input: PreviewCloseInput| {

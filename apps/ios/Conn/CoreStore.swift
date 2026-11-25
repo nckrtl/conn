@@ -53,6 +53,24 @@ final class CoreStore {
     private(set) var loadingOlder = false
     private(set) var olderError: String?
     var showsOffline: Bool { state?.showsOffline == true }
+    private var coldLaunchSession: FfiSavedSession?
+    private var choseOffline = false
+    var showsSavedConnectionAlert: Bool {
+        coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
+    }
+
+    func useSavedWorkspaceOffline() { choseOffline = true }
+
+    func retrySavedConnection() {
+        guard let saved = coldLaunchSession else { return }
+        if case .idle = state?.phase {
+            session?.launch(saved: saved)
+        } else {
+            session?.retry()
+        }
+        if let latest = session?.state() { handleState(latest) }
+    }
+
     var displayName: String { fleetLabel ?? serverURL.flatMap { URL(string: $0)?.host } ?? fleetID ?? scope }
 
     func loadOlder() async {
@@ -98,7 +116,7 @@ final class CoreStore {
     }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
-    var environmentId: String? { state?.environmentId }
+    var environmentId: String? { state?.environmentId ?? coldLaunchSession?.environmentId }
 
     var orbitConnect: OrbitConnectState? {
         var phase = state?.phase
@@ -161,7 +179,20 @@ final class CoreStore {
             return
         }
         guard !arguments.contains("--manual-pairing") else { return }
+        coldLaunchSession = saved
         session?.launch(saved: saved)
+        if let saved, let session {
+            Task {
+                guard let reader = await session.savedOfflineReader(), let snapshot = await reader.savedShell(),
+                      coldLaunchSession != nil, !hasConnected, offlineReader == nil,
+                      let identity = saved.environmentId ?? saved.orbitServerId,
+                      state?.environmentId.map({ $0 == identity }) ?? true else { return }
+                offlineReader = reader
+                shell = snapshot
+                updateWorkspaceVisibility()
+                if let id = openThreadId { restoreThread(id) }
+            }
+        }
         for id in UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? [] {
             if KeychainStore.loadSession(scope: id) != nil { linked[id] = CoreStore(scope: id, deferOrbit: true) }
         }
@@ -546,6 +577,7 @@ final class CoreStore {
     }
 
     func disconnect() {
+        coldLaunchSession = nil
         if scope.isEmpty {
             clearLinkedSessions()
             Task { await PushRegistration.shared.unregister() }
@@ -608,7 +640,10 @@ final class CoreStore {
         if newState.connectionId != shellConnection {
             shell?.synchronized = false
         }
-        if newState.identityEpoch != state?.identityEpoch ?? 0 {
+        let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
+        let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
+        if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
+            coldLaunchSession = nil
             shell = nil
             offlineReader = nil
             discoveredPrimary = nil
@@ -617,6 +652,7 @@ final class CoreStore {
             openThreadId = nil
         }
         state = newState
+        if newState.hasConnected { coldLaunchSession = nil }
         switch newState.phase {
         case let .idle(message):
             if let message { lastError = message }

@@ -1091,6 +1091,29 @@ impl ConnSession {
         self.step(|m| m.restore(saved));
     }
 
+    /// Opens existing history for the primary saved identity while gateway discovery is pending.
+    pub async fn saved_offline_reader(&self) -> Option<Arc<OfflineReader>> {
+        let dir = self.cache_dir.clone()?;
+        let saved = self.machine.lock().ok()?.saved.clone()?;
+        let identity = saved.environment_id.or(saved.orbit_server_id)?;
+        self.orbit
+            .handle()
+            .spawn(async move {
+                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
+                    .await
+                    .ok()?
+                    != identity
+                    || !dir.join("messages.sqlite3").is_file()
+                {
+                    return None;
+                }
+                OfflineReader::open(dir, identity, None).await.ok()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// The current connection's offline thread cache, once open.
     #[must_use]
     pub fn offline_reader(&self) -> Option<Arc<OfflineReader>> {

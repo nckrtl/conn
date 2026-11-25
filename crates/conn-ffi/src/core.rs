@@ -518,7 +518,7 @@ impl ConnCore {
             .spawn(crate::OfflineReader::open(
                 directory.into(),
                 identity,
-                self.connection.clone(),
+                Some(self.connection.clone()),
             ))
             .await
             .map_err(|_| FfiError::Closed)??;

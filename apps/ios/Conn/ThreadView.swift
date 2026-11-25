@@ -488,7 +488,7 @@ struct ThreadView: View {
                     if readingWindow != nil {
                         Button("Back to latest") { latest() }
                     }
-                    if store.showsOffline {
+                    if store.showsOffline && !store.showsSavedConnectionAlert {
                         OfflinePill().frame(maxWidth: .infinity)
                     }
                     // Conn mobile pins the first pending approval above the composer.

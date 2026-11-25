@@ -630,6 +630,68 @@ final class ConnSpikeUITests: XCTestCase {
 
     }
 
+    func testSavedWorkspaceGatewayFailure() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairing = env["CONN_PAIRING_URL"], let saved = env["CONN_TEST_SAVED_SESSION"],
+              let gateway = env["CONN_TEST_TASK_GATEWAY"].flatMap(URL.init(string:)) else {
+            throw XCTSkip("Requires a disposable gateway and saved Orbit session")
+        }
+        func mode(_ value: String) async throws {
+            let (_, response) = try await URLSession.shared.data(from: gateway.appending(path: "fixture-mode/" + value))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        }
+        let app = XCUIApplication()
+        let theme = env["CONN_APPEARANCE"] ?? "light"
+        app.launchEnvironment["CONN_TEST_APPEARANCE"] = theme
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = gateway.absoluteString
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        try await mode("gateway-failure")
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        let row = app.buttons["inbox.thread.thread-parity-pinned"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["Retry discovery"].waitForExistence(timeout: 12))
+        XCTAssertFalse(app.alerts["Couldn’t reach the Orbit server"].exists)
+        row.tap()
+        let reply = app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "Seeded parity response")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        app.terminate()
+        app.launchArguments = []
+        app.launchEnvironment["CONN_TEST_SAVED_SESSION"] = saved
+        try await mode("gateway-failure")
+        app.launch()
+        let alert = app.alerts["Couldn’t reach the Orbit server"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 20))
+        let evidence = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        evidence.name = theme + "-saved-gateway-failure"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        alert.buttons["Use offline"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 8))
+        XCTAssertFalse(alert.exists)
+        row.tap()
+        XCTAssertTrue(reply.waitForExistence(timeout: 8))
+        app.navigationBars.buttons.firstMatch.tap()
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(alert.waitForExistence(timeout: 20))
+        try await mode("normal")
+        alert.buttons["Try again"].tap()
+        let newThread = app.buttons["inbox.newThreadButton"]
+        let connected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: newThread)
+        await fulfillment(of: [connected], timeout: 20)
+        XCTAssertFalse(app.staticTexts["Not connected"].exists)
+        XCTAssertFalse(alert.exists)
+        XCTAssertTrue(row.exists)
+        app.buttons["workspace.tab.pullRequests"].tap()
+        XCTAssertTrue(app.buttons["pr.row.hardimpactdev/hauzer.140"].waitForExistence(timeout: 15))
+    }
+
     func testCachedThreadWhileDisconnected() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_PAIRING_URL"],
@@ -654,6 +716,7 @@ final class ConnSpikeUITests: XCTestCase {
         let (_, response) = try await URLSession.shared.data(from: url)
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
         XCTAssertTrue(app.staticTexts["Not connected"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.alerts["Couldn’t reach the Orbit server"].exists)
         XCTAssertTrue(reply.exists)
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 10))

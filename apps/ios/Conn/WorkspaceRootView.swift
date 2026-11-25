@@ -78,7 +78,7 @@ struct WorkspaceRootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(theme.background.ignoresSafeArea())
 
-                if store.showsOffline {
+                if store.showsOffline && !store.showsSavedConnectionAlert {
                     OfflinePill()
                         .padding(.bottom, 12)
                 }

@@ -1665,6 +1665,11 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     func retry() 
     
+    /**
+     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     */
+    func savedOfflineReader() async  -> OfflineReader?
+    
     func signOut() 
     
     func state()  -> FfiSessionState
@@ -1910,6 +1915,26 @@ open func retry()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     */
+open func savedOfflineReader()async  -> OfflineReader?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_connsession_saved_offline_reader(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeOfflineReader.lift,
+            errorHandler: nil
+            
+        )
 }
     
 open func signOut()  {try! rustCall() {
@@ -18215,6 +18240,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 11824) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {

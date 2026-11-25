@@ -1007,6 +1007,11 @@ void uniffi_conn_ffi_fn_method_connsession_restore(uint64_t ptr, RustBuffer save
 void uniffi_conn_ffi_fn_method_connsession_retry(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SAVED_OFFLINE_READER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SAVED_OFFLINE_READER
+uint64_t uniffi_conn_ffi_fn_method_connsession_saved_offline_reader(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SIGN_OUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SIGN_OUT
 void uniffi_conn_ffi_fn_method_connsession_sign_out(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -2064,6 +2069,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_restore(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_RETRY
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_RETRY
 uint16_t uniffi_conn_ffi_checksum_method_connsession_retry(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_SAVED_OFFLINE_READER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_SAVED_OFFLINE_READER
+uint16_t uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader(void
     
 );
 #endif

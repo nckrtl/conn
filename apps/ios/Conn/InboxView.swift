@@ -127,7 +127,7 @@ struct InboxView: View {
                 .listRowBackground(Color.clear)
             }
 
-            if store.discoveredPrimary != store.environmentId && store.discoveryError == nil {
+            if store.discovering && store.discoveredPrimary != store.environmentId && store.discoveryError == nil {
                 ProgressView("Finding environments")
             }
             if let error = store.discoveryError {

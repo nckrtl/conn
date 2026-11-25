@@ -5572,6 +5572,53 @@ fn mount_with_right_panel(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<C
 }
 
 #[gpui_kit::test]
+fn add_panel_menu_fits_at_the_right_window_edge(cx: &mut TestAppContext) {
+    use conn_state::{PanelSurface, RightPanelTab};
+
+    let (window, app) = mount_with_right_panel(cx);
+    let minimum = size(
+        px(crate::MIN_WINDOW_WIDTH_PX),
+        px(crate::MIN_WINDOW_HEIGHT_PX),
+    );
+    cx.simulate_window_resize(window, minimum);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            for n in 1..=8 {
+                app.select_right_panel_surface(PanelSurface::File(format!("document-{n}.md")), cx);
+            }
+        });
+    });
+    click_row(cx, window, "Add panel tab", MouseButton::Left);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let trigger = window.find_by_label("Add panel tab").bounds();
+        let menu = window.find_by_label("Add panel").bounds();
+        let viewport = window.viewport_size();
+        assert_eq!(viewport, minimum);
+        assert!(trigger.left() + menu.size.width > viewport.width);
+        assert!(
+            menu.right() <= viewport.width - px(8.0),
+            "{menu:?} in {viewport:?}"
+        );
+        assert!(menu.left() >= px(0.0) && menu.top() >= trigger.bottom());
+        let last = window.find("right-panel-add-Device").bounds();
+        assert!(last.bottom() <= viewport.height && last.right() <= menu.right());
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&PanelSurface::File("document-8.md".into()))
+        );
+        window.click("right-panel-add-Tasks", cx);
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Tasks))
+        );
+        assert!(window.try_find_by_label("Add panel").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn dragging_the_sidebar_seam_widens_the_sidebar_beside_an_open_right_panel(
     cx: &mut TestAppContext,
 ) {

@@ -77,17 +77,22 @@ pub(super) fn render_insights_strip(
     let grid = insight_grid_layout(shown.len());
     let height = strip_height(grid.rows);
 
+    // Include the bottom rule in both views so opening a chart cannot move the lanes.
+    let strip = div()
+        .id("tasks-insights-strip")
+        .a11y_group("panel.tasks.insights", "Task insights")
+        .w_full()
+        .h(px(height + 1.0))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .border_b_1()
+        .border_color(to_hsla(tokens.shell_divider));
     if let Some(open_spec) = expanded.and_then(|id| shown.iter().copied().find(|s| s.id == id)) {
         let result = insight_result(insights, open_spec.id);
         return Some(
-            div()
-                .w_full()
-                .flex_shrink_0()
-                .border_b_1()
-                .border_color(to_hsla(tokens.shell_divider))
+            strip
                 .child(render_insight_detail(
                     tokens,
-                    height,
                     open_spec,
                     result,
                     insights,
@@ -147,16 +152,15 @@ pub(super) fn render_insights_strip(
     }
 
     Some(
-        div()
-            .id("tasks-insights-scroll")
-            .a11y_group("panel.tasks.insights", "Task insights")
-            .w_full()
-            .flex_shrink_0()
-            .overflow_x_scroll()
-            .track_scroll(scroll)
-            .border_b_1()
-            .border_color(to_hsla(tokens.shell_divider))
-            .child(rows_col)
+        strip
+            .child(
+                div()
+                    .id("tasks-insights-scroll")
+                    .size_full()
+                    .overflow_x_scroll()
+                    .track_scroll(scroll)
+                    .child(rows_col),
+            )
             .into_any_element(),
     )
 }
@@ -291,13 +295,8 @@ fn render_insight_change(
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "renders the expanded insight detail box"
-)]
 fn render_insight_detail(
     tokens: &Tokens,
-    height: f32,
     spec: InsightSpec,
     result: InsightResult,
     insights: Option<&TaskInsights>,
@@ -315,27 +314,17 @@ fn render_insight_detail(
     let providers = insight_by_provider(insights, spec.id);
     let on_close = callbacks.on_expand;
 
-    let mut legend = h_flex()
-        .ml_auto()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(20.0))
-        .gap_y(px(4.0))
-        .text_size(px(UI_TEXT_PX))
-        .line_height(px(UI_LINE_HEIGHT_PX));
-    for entry in providers {
-        let val = entry
-            .value
-            .map(|v| format_insight_value(spec.id, v))
-            .unwrap_or_else(|| "\u{2013}".to_owned());
-        legend = legend.child(
-            h_flex()
-                .items_baseline()
-                .gap(px(6.0))
-                .child(div().text_color(fg).child(entry.provider.name()))
-                .child(div().text_color(muted).child(val)),
-        );
-    }
+    let legend = providers
+        .into_iter()
+        .map(|entry| {
+            let value = entry
+                .value
+                .map(|v| format_insight_value(spec.id, v))
+                .unwrap_or_else(|| "\u{2013}".to_owned());
+            format!("{} {value}", entry.provider.name())
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
 
     let chart_body: AnyElement = match trend {
         Some(points) if !points.is_empty() => render_trend_chart(
@@ -360,8 +349,7 @@ fn render_insight_detail(
 
     v_flex()
         .relative()
-        .w_full()
-        .h(px(height))
+        .size_full()
         .gap(px(4.0))
         .px(px(12.0))
         .pt(px(10.0))
@@ -379,32 +367,22 @@ fn render_insight_detail(
             ),
         )
         .child(
-            h_flex()
-                .items_center()
-                .gap(px(8.0))
+            div()
                 .pr(px(32.0))
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(UI_TEXT_PX))
-                        .line_height(px(UI_LINE_HEIGHT_PX))
-                        .text_color(muted)
-                        .child(spec.label),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(muted.opacity(0.65))
-                        .child(insight_hint(spec.id, insights)),
-                ),
+                .truncate()
+                .h(px(UI_LINE_HEIGHT_PX))
+                .flex_shrink_0()
+                .text_size(px(14.0))
+                .line_height(px(UI_LINE_HEIGHT_PX))
+                .text_color(muted)
+                .child(spec.label),
         )
         .child(
             h_flex()
                 .min_w_0()
+                .h(px(VALUE_LINE_HEIGHT_PX))
+                .flex_shrink_0()
+                .whitespace_nowrap()
                 .items_baseline()
                 .gap(px(8.0))
                 .child(
@@ -419,9 +397,18 @@ fn render_insight_detail(
                 .when_some(render_insight_change(tokens, spec, result), |el, change| {
                     el.child(change)
                 })
-                .child(legend),
+                .child(
+                    div()
+                        .min_w_0()
+                        .ml_auto()
+                        .truncate()
+                        .text_size(px(UI_TEXT_PX))
+                        .line_height(px(UI_LINE_HEIGHT_PX))
+                        .text_color(muted)
+                        .child(legend),
+                ),
         )
-        .child(div().mt(px(12.0)).flex_1().min_h_0().child(chart_body))
+        .child(div().flex_1().min_h_0().child(chart_body))
         .into_any_element()
 }
 

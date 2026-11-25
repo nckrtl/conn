@@ -190,8 +190,8 @@ struct HighlightedSource: View {
     let code: String
     let language: String
     @Environment(\.connTheme) private var theme
-    /// The base size: the thread text in the feed, 13 in the composer panels (lab `.m-code-body`).
-    var baseSize: CGFloat = ThreadText.size
+    /// The base size, 13 like the lab's `.m-code-body`; Dynamic Type scales it.
+    var baseSize: CGFloat = ThreadText.codeSize
     @State private var formatted: AttributedString?
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 

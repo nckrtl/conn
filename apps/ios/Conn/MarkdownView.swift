@@ -90,7 +90,10 @@ struct MarkdownView: View {
                 .textSelection(.enabled)
 
         case let .codeBlock(language, code):
+            // A code block gets 16 above and about 16 below in the feed, more than a paragraph's gap.
             CodeCard(code: code, language: language)
+                .padding(.top, messageStyle != nil && !first ? 16 - blockSpacing : 0)
+                .padding(.bottom, messageStyle != nil ? 6 : 0)
 
         case let .quote(text):
             // Lab `.m-md blockquote`: a 2 pt rule in the text colour at 35%, 12.8 gap, same text colour.
@@ -200,7 +203,7 @@ struct MarkdownView: View {
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
         guard let parsed = try? AttributedString(markdown: raw, options: options) else { return Text(raw) }
-        let codeSize = bodySize * 0.85
+        let codeSize = messageStyle != nil ? ThreadText.codeSize * feedScale : bodySize * 0.85
         let chip = theme.foreground.opacity(0.1)
         var out = AttributedString()
         for run in parsed.runs {

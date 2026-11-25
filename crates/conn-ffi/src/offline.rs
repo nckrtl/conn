@@ -1043,6 +1043,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
     async fn image_remount_and_offline_reopen_do_not_fetch_again()
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -1121,6 +1125,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
     async fn image_thumbnail_and_original_stay_online_only_after_expiry()
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -1165,6 +1173,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
     async fn image_pick_survives_queue_to_sent_without_network()
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -1267,6 +1279,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
     async fn an_omitted_settled_child_expires_after_offline_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;

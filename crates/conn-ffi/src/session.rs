@@ -1456,6 +1456,10 @@ mod tests {
     const AUTH: &str = "The server rejected this device's sign-in.";
 
     #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
     async fn image_cache_reset_isolates_pairings_with_the_same_environment()
     -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;

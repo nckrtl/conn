@@ -56,6 +56,9 @@ struct WorkspaceRootView: View {
     private static let barSideInset: CGFloat = 24
     private static let barGap: CGFloat = 20
     private static let pillFrameInset: CGFloat = 21
+    /// Nick found the system's 21pt float too high; the whole row, the hosted bar included, draws
+    /// this much lower (13pt above the screen edge). Offset moves drawing and hit-testing together.
+    private static let barLowering: CGFloat = 8
 
     private var barRow: some View {
         HStack(spacing: Self.barGap) {
@@ -96,7 +99,8 @@ struct WorkspaceRootView: View {
     /// Lab `.m-wsbar-circle`: a 48pt glass circle with a 20pt glyph in the primary colour.
     private func footerAction(_ glyph: String, label: String, id: String, size: CGFloat = 48, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            ThreadGlyph(name: glyph, size: 20)
+            // 26pt so the drawn ⋯ and + match the tabs' icons (about 18pt of ink at 22pt there).
+            ThreadGlyph(name: glyph, size: 26)
                 .foregroundStyle(theme.primary)
                 .frame(width: size, height: size).contentShape(Circle())
         }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle)
@@ -126,7 +130,9 @@ struct WorkspaceRootView: View {
             .tabViewStyle(.tabBarOnly)
             .onGeometryChange(for: CGFloat.self, of: { $0.safeAreaInsets.bottom }) { screenInset = $0 }
             .overlay(alignment: .bottom) {
-                if !isSearching { barRow.padding(.bottom, Self.barBottomInset).ignoresSafeArea(edges: .bottom) }
+                if !isSearching {
+                    barRow.padding(.bottom, Self.barBottomInset).offset(y: Self.barLowering).ignoresSafeArea(edges: .bottom)
+                }
             }
             .toolbar(.hidden, for: .navigationBar)
             .toolbar(.hidden, for: .bottomBar)
@@ -290,7 +296,7 @@ struct WorkspaceRootView: View {
                         }
                     }.padding(.horizontal, 24)
                 }
-            }.padding(.bottom, query == nil ? max(0, Self.barBottomInset + Self.barHeight + 8 - screenInset) : 0)
+            }.padding(.bottom, query == nil ? max(0, Self.barBottomInset - Self.barLowering + Self.barHeight + 8 - screenInset) : 0)
         }
     }
 

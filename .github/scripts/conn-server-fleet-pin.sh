@@ -25,13 +25,6 @@ case ${1:?} in
     [[ ${SOURCE_SHA:?} =~ ^[a-f0-9]{40}$ ]]
     verify_app
     pr=$(pin_pr)
-    if [[ $(jq -r '.html_url // empty' <<<"$pr") != '' ]]; then
-      jq -e --arg sha "$SOURCE_SHA" '.body | contains("Conn-Source: " + $sha)' <<<"$pr" > /dev/null
-      jq -er '.html_url' <<<"$pr" >> "$GITHUB_STEP_SUMMARY"
-      jq -e '.state == "open" or .merged_at != null' <<<"$pr" > /dev/null
-      exit
-    fi
-
     git config user.name 'orbit-nckrtl[bot]'
     git config user.email '331678173+orbit-nckrtl[bot]@users.noreply.github.com'
     gh auth setup-git --hostname github.com
@@ -39,6 +32,7 @@ case ${1:?} in
     git -c core.hooksPath=/dev/null commit -m "Pin $tag for Conn Server rollouts" -m "Conn-Source: $SOURCE_SHA"
     refs=$(git ls-remote --heads origin "refs/heads/$branch")
     if [[ -z "$refs" ]]; then
+      jq -e 'length == 0' <<<"$pr" > /dev/null
       git push origin "HEAD:refs/heads/$branch"
     else
       git fetch --depth=1 origin "refs/heads/$branch"
@@ -46,6 +40,13 @@ case ${1:?} in
       mapfile -d '' -t changed < <(git diff --name-only -z HEAD^ HEAD)
       git diff --exit-code FETCH_HEAD HEAD -- "${changed[@]}"
     fi
+    if [[ $(jq -r '.html_url // empty' <<<"$pr") != '' ]]; then
+      jq -e --arg sha "$SOURCE_SHA" '.body | contains("Conn-Source: " + $sha)' <<<"$pr" > /dev/null
+      jq -er '.html_url' <<<"$pr" >> "$GITHUB_STEP_SUMMARY"
+      jq -e '.state == "open" or .merged_at != null' <<<"$pr" > /dev/null
+      exit
+    fi
+
     # A successful create followed by a lost response is recovered by the next invocation.
     gh pr create --repo "$orbit" --base main --head "$branch" \
       --title "Pin $tag for Conn Server rollouts" --body-file "${PIN_BODY:?}" >> "$GITHUB_STEP_SUMMARY"

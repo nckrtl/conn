@@ -45,8 +45,29 @@ jobs:
           [[ -z "$RUN_SHA" || "$RUN_SHA" == "$sha" ]]
           printf 'tag=%s\nsha=%s\npublished=%s\n' "$TAG" "$sha" "$published" >> "$GITHUB_OUTPUT"
 
-  propose:
+  artifact_contract:
     needs: published
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version_output: ${{ steps.contract.outputs.line }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: hardimpactdev/orbit
+          ref: main
+          persist-credentials: false
+      - name: Read the released executable's launch contract
+        id: contract
+        env:
+          TAG: ${{ needs.published.outputs.tag }}
+          SOURCE_SHA: ${{ needs.published.outputs.sha }}
+        run: |
+          line=$(bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --print-contract)
+          printf 'line=%s\n' "$line" >> "$GITHUB_OUTPUT"
+
+  propose:
+    needs: [published, artifact_contract]
     concurrency:
       group: conn-server-fleet-pin-writer
       queue: max
@@ -87,8 +108,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PIN_BODY: ${{ runner.temp }}/orbit-pin-pr.md
+          VERSION_OUTPUT: ${{ needs.artifact_contract.outputs.version_output }}
         run: |
-          bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --pr-body "$PIN_BODY"
+          bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --version-output "$VERSION_OUTPUT" --pr-body "$PIN_BODY"
           git diff --check
           if ! git diff --quiet; then
             bin/docs-impact --gate --base HEAD --pr-body-file "$PIN_BODY"

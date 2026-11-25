@@ -38,7 +38,10 @@ impl MessageCache {
             CREATE INDEX IF NOT EXISTS recent_messages ON messages(environment,thread,position);
             CREATE TABLE IF NOT EXISTS thread_outlines (
                 environment TEXT NOT NULL, thread TEXT NOT NULL, markers TEXT NOT NULL,
-                PRIMARY KEY(environment, thread)) WITHOUT ROWID",
+                PRIMARY KEY(environment, thread)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS attachment_images (
+                position INTEGER PRIMARY KEY, environment TEXT NOT NULL, thread TEXT NOT NULL,
+                version TEXT NOT NULL, bytes BLOB NOT NULL, UNIQUE(environment,thread,version))",
         )
         .await?;
         Ok(Self(pool))
@@ -303,12 +306,64 @@ impl MessageCache {
         Ok(())
     }
 
+    pub async fn image(
+        &self,
+        env: &str,
+        thread: &str,
+        version: &str,
+    ) -> Result<Option<Vec<u8>>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT bytes FROM attachment_images WHERE environment=? AND thread=? AND version=?",
+        )
+        .bind(env)
+        .bind(thread)
+        .bind(version)
+        .fetch_optional(&self.0)
+        .await
+    }
+
+    pub async fn save_image(
+        &self,
+        env: &str,
+        thread: &str,
+        version: &str,
+        bytes: &[u8],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.0.begin().await?;
+        sqlx::query("INSERT OR REPLACE INTO attachment_images(environment,thread,version,bytes) VALUES(?,?,?,?)")
+            .bind(env).bind(thread).bind(version).bind(bytes).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM attachment_images WHERE position IN (SELECT position FROM (
+            SELECT position, SUM(length(bytes)) OVER (ORDER BY position DESC) AS total FROM attachment_images
+            ) WHERE total > 134217728)").execute(&mut *tx).await?;
+        tx.commit().await
+    }
+
+    pub async fn forget_image(
+        &self,
+        env: &str,
+        thread: &str,
+        version: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM attachment_images WHERE environment=? AND thread=? AND version=?")
+            .bind(env)
+            .bind(thread)
+            .bind(version)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
     /// Deletes the stored transcript of a settled or deleted thread.
     ///
     /// # Errors
     /// Returns the database write error.
     pub async fn remove(&self, env: &str, thread: &str) -> Result<(), sqlx::Error> {
         let mut tx = self.0.begin().await?;
+        sqlx::query("DELETE FROM attachment_images WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM thread_outlines WHERE environment=? AND thread=?")
             .bind(env)
             .bind(thread)

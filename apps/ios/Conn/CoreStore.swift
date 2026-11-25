@@ -39,6 +39,7 @@ final class CoreStore {
     private(set) var openThread: FfiThreadSnapshot?
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
+    @ObservationIgnored let imageThumbnails = AttachmentThumbnails()
     private var readerConnection: UInt64?
     var lastError: String?
     /// A thread to show, set by a `conn://thread/...` URL or a push tap; the workspace consumes it.
@@ -609,6 +610,7 @@ final class CoreStore {
     }
 
     func disconnect() {
+        imageThumbnails.clear()
         coldLaunchSession = nil
         if scope.isEmpty {
             clearLinkedSessions()
@@ -671,6 +673,7 @@ final class CoreStore {
         let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
         let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
+            imageThumbnails.clear()
             drafts.removeAll()
             coldLaunchSession = nil
             shell = nil

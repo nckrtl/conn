@@ -95,29 +95,38 @@ async fn within<T>(
 async fn download_bytes(
     http: reqwest::Client,
     url: url::Url,
-    bearer: Option<String>,
+    limit: Option<usize>,
     deadline: Option<std::time::Duration>,
 ) -> Result<Vec<u8>, ClientError> {
     let failed = |err: reqwest::Error| {
         if err.is_timeout() {
             ClientError::Connection("attachment download timed out".to_owned())
         } else {
-            ClientError::Connection(err.to_string())
+            ClientError::Connection(err.without_url().to_string())
         }
     };
     let mut req = http.get(url);
-    if let Some(token) = bearer {
-        req = req.bearer_auth(token);
-    }
     if let Some(deadline) = deadline {
         req = req.timeout(deadline);
     }
-    let resp = req.send().await.map_err(failed)?;
+    let mut resp = req.send().await.map_err(failed)?;
     if !resp.status().is_success() {
         return Err(ClientError::Connection(format!(
             "attachment download failed ({})",
             resp.status()
         )));
+    }
+    if let Some(limit) = limit {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(failed)? {
+            if chunk.len() > limit - bytes.len() {
+                return Err(ClientError::Connection(
+                    "attachment exceeds expected size".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
     }
     resp.bytes()
         .await
@@ -575,14 +584,10 @@ impl Connection {
         attachment_id: &str,
     ) -> Result<Vec<u8>, ClientError> {
         let created = self.create_attachment_url(attachment_id).await?;
-        let url = self.http_base_url.join(&created.relative_url)?;
+        let url = self.signed_asset_url(&created.relative_url)?;
         let http = self.http.clone();
-        let bearer = self.bearer.read().ok().and_then(|g| g.clone());
-        self.run_on_tokio(
-            download_bytes(http, url, bearer, None),
-            "attachment download",
-        )
-        .await
+        self.run_on_tokio(download_bytes(http, url, None, None), "attachment download")
+            .await
     }
 
     /// [`Self::fetch_attachment_bytes`] that gives up after `deadlines`: the `assets.createUrl`
@@ -596,6 +601,27 @@ impl Connection {
         attachment_id: &str,
         deadlines: FetchDeadlines,
     ) -> Result<Vec<u8>, ClientError> {
+        self.fetch_attachment_bytes_limited(attachment_id, deadlines, None)
+            .await
+    }
+
+    fn signed_asset_url(&self, relative: &str) -> Result<url::Url, ClientError> {
+        let url = self.http_base_url.join(relative)?;
+        if url.origin() != self.http_base_url.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(ClientError::Connection("invalid attachment origin".into()));
+        }
+        Ok(url)
+    }
+
+    pub async fn fetch_attachment_bytes_limited(
+        &self,
+        attachment_id: &str,
+        deadlines: FetchDeadlines,
+        limit: Option<usize>,
+    ) -> Result<Vec<u8>, ClientError> {
         let this = self.clone();
         let attachment_id = attachment_id.to_owned();
         self.run_on_tokio(
@@ -606,9 +632,8 @@ impl Connection {
                     this.create_attachment_url(&attachment_id),
                 )
                 .await?;
-                let url = this.http_base_url.join(&created.relative_url)?;
-                let bearer = this.bearer.read().ok().and_then(|g| g.clone());
-                download_bytes(this.http.clone(), url, bearer, Some(deadlines.download)).await
+                let url = this.signed_asset_url(&created.relative_url)?;
+                download_bytes(this.http.clone(), url, limit, Some(deadlines.download)).await
             },
             "attachment download",
         )

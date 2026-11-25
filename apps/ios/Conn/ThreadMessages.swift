@@ -74,6 +74,7 @@ struct ThreadMessage: View {
     let files: [FfiAttachment]
     let detail: FfiFeedDetail?
     let store: CoreStore
+    let threadId: String
     let onOpenThread: (String, String?) -> Void
     @Environment(\.connTheme) private var theme
 
@@ -107,7 +108,7 @@ struct ThreadMessage: View {
             } content: {
                 VStack(alignment: .leading, spacing: 3) {
                     AgentSummary(title: metadata.sender ?? "Message", text: text)
-                    if !files.isEmpty { ThreadAttachments(files: files, store: store) }
+                    if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
                 }
             }
         } else {
@@ -130,7 +131,7 @@ struct ThreadMessage: View {
                         if !review.text.isEmpty { Text(review.text).textSelection(.enabled).padding(.horizontal, 11) }
                         CodeCard(code: review.diff, language: "diff", title: [review.filePath, review.rangeLabel].filter { !$0.isEmpty }.joined(separator: " · "))
                     }
-                    if !files.isEmpty { ThreadAttachments(files: files, store: store) }
+                    if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
                 }
                 .padding(3)
                 .background(theme.messageSurface, in: .rect(cornerRadius: 14))

@@ -1117,7 +1117,7 @@ impl McpPanel {
                 to_hsla(tokens.muted_foreground),
             ));
 
-        let mut transport_anchor = div().relative().pl(px(9.0)).child(transport_trigger);
+        let mut transport_anchor = div().relative().pl(px(3.0)).child(transport_trigger);
         if self.menu == Some(OpenMenu::Transport) {
             transport_anchor = transport_anchor.child(self.render_transport_menu(server, cx));
         }

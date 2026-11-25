@@ -86,12 +86,8 @@ struct WorkGroupCard: View {
                 }
             }
 
-            // The rule closes an expanded log only; collapsed, "Worked for" sits on its message.
-            if expanded && !group.hasActive {
-                Rectangle()
-                    .fill(threadDividerColor(theme, appearance))
-                    .frame(height: 1)
-            }
+            // No closing rule: the message follows the last row by the same paragraph gap that
+            // separates "Worked for" from the first row.
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")

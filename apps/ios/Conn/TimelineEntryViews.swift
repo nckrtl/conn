@@ -45,19 +45,33 @@ struct WorkGroupCard: View {
             .buttonStyle(.plain)
 
             if expanded {
-                VStack(alignment: .leading, spacing: Kit.Space.s) {
-                    ForEach(entries, id: \.entryId) { entry in
+                // Lab `.m-work-log`: plain 44 pt rows split by subtle dividers, no cards.
+                let steps = entries.filter {
+                    if case .thinking = $0 { return true }
+                    if case .tool = $0 { return true }
+                    return false
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(steps.enumerated()), id: \.element.entryId) { index, entry in
+                        if index > 0 {
+                            Rectangle()
+                                .fill(threadDividerColor(theme, appearance).opacity(0.6))
+                                .frame(height: 1)
+                        }
                         switch entry {
                         case let .thinking(_, text, streaming, _, _):
-                            ThinkingRow(text: text, streaming: streaming)
+                            WorkLogRow(title: streaming ? "Thinking…" : "Thought",
+                                       status: streaming ? .running : .completed, duration: nil,
+                                       detail: text.isEmpty ? nil : text, monospaced: false, size: size)
                         case let .tool(_, kind, title, detail, status, _, _, durationMs):
-                            ToolRow(kind: kind, title: title, detail: detail, status: status, durationMs: durationMs)
+                            WorkLogRow(title: title.isEmpty ? kind : title, status: status,
+                                       duration: workDurationLabel(durationMs),
+                                       detail: detail?.isEmpty == false ? detail : nil, monospaced: true, size: size)
                         default:
                             EmptyView()
                         }
                     }
                 }
-                .padding(.bottom, 4)
             }
 
             Rectangle()
@@ -423,6 +437,64 @@ extension FfiTimelineEntry {
         case let .turnCheckpoint(id, _, _, _, _, _, _): id
         case let .notice(id, _, _): id
         case let .other(id, _): id
+        }
+    }
+}
+
+private func workDurationLabel(_ ms: UInt64?) -> String? {
+    guard let ms, ms > 0 else { return nil }
+    return ms < 1000 ? "\(ms)ms" : String(format: "%.1fs", Double(ms) / 1000)
+}
+
+/// One step of an expanded "Worked for" log (lab `.m-work-log li`): status glyph, title, duration and a
+/// chevron when there is detail to show; a tap reveals the detail under the row.
+private struct WorkLogRow: View {
+    let title: String
+    let status: FfiItemStatus
+    let duration: String?
+    let detail: String?
+    let monospaced: Bool
+    let size: CGFloat
+    @Environment(\.connTheme) private var theme
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                guard detail != nil else { return }
+                withAnimation(Kit.Motion.fast) { open.toggle() }
+            } label: {
+                HStack(spacing: 10) {
+                    Group {
+                        switch status {
+                        case .running: KitStatusIcon(.working, size: 16, label: "Running")
+                        case .completed: ThreadGlyph(name: "check-circle", size: 16).foregroundStyle(theme.mutedForeground)
+                        case .failed: ThreadGlyph(name: "error-circle", size: 16).foregroundStyle(theme.destructive)
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                    Text(title).font(.system(size: size)).foregroundStyle(theme.foreground).lineLimit(1)
+                    Spacer(minLength: 8)
+                    if let duration {
+                        Text(duration).font(.system(size: size).monospacedDigit()).foregroundStyle(theme.mutedForeground)
+                    }
+                    if detail != nil {
+                        ThreadGlyph(name: open ? "chevron-down" : "chevron-right", size: 14)
+                            .foregroundStyle(theme.mutedForeground.opacity(0.6))
+                    }
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open, let detail {
+                Text(detail)
+                    .font(monospaced ? .system(size: ThreadText.codeSize, design: .monospaced) : .system(size: size * 0.9))
+                    .foregroundStyle(theme.mutedForeground)
+                    .textSelection(.enabled)
+                    .padding(.leading, 26)
+                    .padding(.bottom, 10)
+            }
         }
     }
 }

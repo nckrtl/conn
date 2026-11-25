@@ -8909,6 +8909,13 @@ public struct FfiSessionState: Equatable, Hashable {
      * switch, say): the previous environment's threads are gone.
      */
     public var identityEpoch: UInt64
+    /**
+     * Diagnostics for the app's log; nothing renders them. Connection tries that failed since
+     * the last handshake, start retries used, and whether the grace window is open.
+     */
+    public var failedTries: UInt32
+    public var startRetries: UInt32
+    public var inGrace: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8929,7 +8936,11 @@ public struct FfiSessionState: Equatable, Hashable {
         /**
          * Grows when this scope connects to a different server than before (an Orbit primary
          * switch, say): the previous environment's threads are gone.
-         */identityEpoch: UInt64) {
+         */identityEpoch: UInt64, 
+        /**
+         * Diagnostics for the app's log; nothing renders them. Connection tries that failed since
+         * the last handshake, start retries used, and whether the grace window is open.
+         */failedTries: UInt32, startRetries: UInt32, inGrace: Bool) {
         self.revision = revision
         self.connectionId = connectionId
         self.phase = phase
@@ -8939,6 +8950,9 @@ public struct FfiSessionState: Equatable, Hashable {
         self.showsOffline = showsOffline
         self.hasConnected = hasConnected
         self.identityEpoch = identityEpoch
+        self.failedTries = failedTries
+        self.startRetries = startRetries
+        self.inGrace = inGrace
     }
 
     
@@ -8965,7 +8979,10 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
                 offlineReady: FfiConverterBool.read(from: &buf), 
                 showsOffline: FfiConverterBool.read(from: &buf), 
                 hasConnected: FfiConverterBool.read(from: &buf), 
-                identityEpoch: FfiConverterUInt64.read(from: &buf)
+                identityEpoch: FfiConverterUInt64.read(from: &buf), 
+                failedTries: FfiConverterUInt32.read(from: &buf), 
+                startRetries: FfiConverterUInt32.read(from: &buf), 
+                inGrace: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8979,6 +8996,9 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
         FfiConverterBool.write(value.showsOffline, into: &buf)
         FfiConverterBool.write(value.hasConnected, into: &buf)
         FfiConverterUInt64.write(value.identityEpoch, into: &buf)
+        FfiConverterUInt32.write(value.failedTries, into: &buf)
+        FfiConverterUInt32.write(value.startRetries, into: &buf)
+        FfiConverterBool.write(value.inGrace, into: &buf)
     }
 }
 

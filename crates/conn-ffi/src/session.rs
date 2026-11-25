@@ -95,6 +95,11 @@ pub struct FfiSessionState {
     /// Grows when this scope connects to a different server than before (an Orbit primary
     /// switch, say): the previous environment's threads are gone.
     pub identity_epoch: u64,
+    /// Diagnostics for the app's log; nothing renders them. Connection tries that failed since
+    /// the last handshake, start retries used, and whether the grace window is open.
+    pub failed_tries: u32,
+    pub start_retries: u32,
+    pub in_grace: bool,
 }
 
 /// Implemented in Swift. Every method is called with no internal locks held.
@@ -176,7 +181,17 @@ pub(crate) enum Effect<C> {
         id: u64,
         after: Duration,
     },
+    /// After `after`, end grace window `id` if it is still the current one.
+    EndGrace {
+        id: u64,
+        after: Duration,
+    },
 }
+
+/// A fresh first connection (launch, restore, foreground, retry) may show no offline state for
+/// this long, or until it first connects. WireGuard and the network can stay down for several
+/// seconds on a cold start, longer than the retries below.
+const GRACE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Failed tries in a row before a reconnect counts as offline. Backoff waits 250, 500, then
 /// 1000 ms, so three failures span about 1.75 s: long enough for a waking network to come up.
@@ -225,6 +240,13 @@ pub(crate) struct Machine<C> {
     /// The server identity this scope last connected to, and how often it changed.
     last_identity: Option<String>,
     identity_epoch: u64,
+    /// The open grace window, by its own id (not an attempt id: start retries replace those).
+    /// While it is open, transient trouble does not show as offline.
+    grace: Option<u64>,
+    next_grace: u64,
+    /// `rest` is a `Failed` or `Idle` that may pass (the network was down), not a definitive
+    /// outcome such as a rejection, an identity change or a manual target's error.
+    rest_transient: bool,
 }
 
 impl<C> fmt::Debug for Machine<C> {
@@ -252,7 +274,60 @@ impl<C: SessionCore> Machine<C> {
             has_connected: false,
             last_identity: None,
             identity_epoch: 0,
+            grace: None,
+            next_grace: 1,
+            rest_transient: false,
         }
+    }
+
+    /// The offline pill. Connecting never shows it; trouble that may pass waits for three failed
+    /// tries and for the grace window to close.
+    fn shows_offline(&self, phase: &FfiSessionPhase) -> bool {
+        let in_grace = self.grace.is_some();
+        match phase {
+            FfiSessionPhase::Suspended
+            | FfiSessionPhase::Live {
+                status: FfiConnectionStatus::Failed { .. },
+            } => true,
+            FfiSessionPhase::Failed { .. } | FfiSessionPhase::Idle { message: Some(_) } => {
+                !(in_grace && self.rest_transient)
+            }
+            // A drop, or a reconnect still in its first tries, is connecting, not offline.
+            FfiSessionPhase::Live {
+                status: FfiConnectionStatus::Reconnecting { .. },
+            } => {
+                !in_grace
+                    && self
+                        .attempt
+                        .as_ref()
+                        .is_some_and(|a| a.failed_tries >= OFFLINE_AFTER_FAILED_TRIES)
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens a fresh grace window, replacing any open one.
+    fn begin_grace(&mut self, fx: &mut Effects<C>) {
+        let id = self.next_grace;
+        self.next_grace += 1;
+        self.grace = Some(id);
+        fx.push(Effect::EndGrace {
+            id,
+            after: GRACE_WINDOW,
+        });
+    }
+
+    fn is_grace(&self, id: u64) -> bool {
+        self.grace == Some(id)
+    }
+
+    /// The grace window is over. A stale `id` does nothing.
+    pub(crate) fn end_grace(&mut self, id: u64) -> Effects<C> {
+        if self.is_grace(id) {
+            self.grace = None;
+            self.bump();
+        }
+        Vec::new()
     }
 
     pub(crate) fn state(&self) -> FfiSessionState {
@@ -268,28 +343,16 @@ impl<C: SessionCore> Machine<C> {
         FfiSessionState {
             revision: self.revision,
             connection_id: self.attempt.as_ref().map_or(0, |a| a.id),
-            shows_offline: match &phase {
-                FfiSessionPhase::Suspended
-                | FfiSessionPhase::Failed { .. }
-                | FfiSessionPhase::Idle { message: Some(_) }
-                | FfiSessionPhase::Live {
-                    status: FfiConnectionStatus::Failed { .. },
-                } => true,
-                // A drop, or a reconnect still in its first tries, is connecting, not offline.
-                FfiSessionPhase::Live {
-                    status: FfiConnectionStatus::Reconnecting { .. },
-                } => self
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|a| a.failed_tries >= OFFLINE_AFTER_FAILED_TRIES),
-                _ => false,
-            },
+            shows_offline: self.shows_offline(&phase),
             phase,
             server_url: self.server_url.clone(),
             environment_id: self.environment_id.clone(),
             offline_ready: self.attempt.as_ref().is_some_and(|a| a.offline_ready),
             has_connected: self.has_connected,
             identity_epoch: self.identity_epoch,
+            failed_tries: self.attempt.as_ref().map_or(0, |a| a.failed_tries),
+            start_retries: self.attempt.as_ref().map_or(0, |a| a.start_retries),
+            in_grace: self.grace.is_some(),
         }
     }
 
@@ -389,7 +452,7 @@ impl<C: SessionCore> Machine<C> {
     /// At launch: a manual session reconnects; anything else goes through Orbit.
     pub(crate) fn launch(&mut self, saved: Option<FfiSavedSession>) -> Effects<C> {
         self.saved = saved.clone();
-        match saved {
+        let mut fx = match saved {
             Some(s) if s.orbit_server_id.is_none() => self.begin(
                 FfiSessionTarget::Manual {
                     server_url: s.server_url,
@@ -398,13 +461,15 @@ impl<C: SessionCore> Machine<C> {
                 Recover::Allowed,
             ),
             _ => self.begin(FfiSessionTarget::PrimaryAgent, None, Recover::Allowed),
-        }
+        };
+        self.begin_grace(&mut fx);
+        fx
     }
 
     /// A linked environment's session at launch: its saved environment or manual server.
     pub(crate) fn restore(&mut self, saved: Option<FfiSavedSession>) -> Effects<C> {
         self.saved = saved.clone();
-        match saved {
+        let mut fx = match saved {
             Some(FfiSavedSession {
                 orbit_server_id: Some(environment_id),
                 ..
@@ -416,8 +481,10 @@ impl<C: SessionCore> Machine<C> {
                 None,
                 Recover::Allowed,
             ),
-            None => Vec::new(),
-        }
+            None => return Vec::new(),
+        };
+        self.begin_grace(&mut fx);
+        fx
     }
 
     pub(crate) fn connect_primary_agent(&mut self) -> Effects<C> {
@@ -494,7 +561,7 @@ impl<C: SessionCore> Machine<C> {
 
     /// Try again: repeat a failed attempt's target, or nudge a live connection.
     pub(crate) fn retry(&mut self) -> Effects<C> {
-        match &mut self.attempt {
+        let mut fx = match &mut self.attempt {
             Some(a) => {
                 // The nudge is a fresh try: connecting again until it fails too.
                 a.failed_tries = 0;
@@ -503,9 +570,12 @@ impl<C: SessionCore> Machine<C> {
             }
             None => match self.rest.clone() {
                 FfiSessionPhase::Failed { retry, .. } => self.begin(retry, None, Recover::Allowed),
-                _ => Vec::new(),
+                _ => return Vec::new(),
             },
-        }
+        };
+        // A fresh first connection: the network may still be waking.
+        self.begin_grace(&mut fx);
+        fx
     }
 
     /// The app came back to the foreground.
@@ -618,7 +688,7 @@ impl<C: SessionCore> Machine<C> {
     ) -> Effects<C> {
         match self.start_again_later(id) {
             Some(fx) => fx,
-            None => self.start_failed(id, message, detail),
+            None => self.fail_start(id, message, detail, true),
         }
     }
 
@@ -674,11 +744,24 @@ impl<C: SessionCore> Machine<C> {
         message: String,
         detail: Option<String>,
     ) -> Effects<C> {
+        self.fail_start(id, message, detail, false)
+    }
+
+    /// Ends the attempt as failed. `transient`: the cause may pass, so an open grace window
+    /// still hides the offline state. A manual target's error is never transient.
+    fn fail_start(
+        &mut self,
+        id: u64,
+        message: String,
+        detail: Option<String>,
+        transient: bool,
+    ) -> Effects<C> {
         if !self.is_current(id) {
             return Vec::new();
         }
         let mut fx = Vec::new();
         let target = self.attempt.as_ref().map(|a| a.target.clone());
+        self.rest_transient = transient && !matches!(target, Some(FfiSessionTarget::Manual { .. }));
         self.cancel(&mut fx);
         self.rest = match target {
             Some(FfiSessionTarget::Manual { .. }) | None => FfiSessionPhase::Idle {
@@ -724,6 +807,8 @@ impl<C: SessionCore> Machine<C> {
             attempt.start_retries = 0;
             attempt.may_recover = true;
             self.has_connected = true;
+            // The first connection worked: from here on, the tries rule decides.
+            self.grace = None;
         }
         attempt.status = status;
         Vec::new()
@@ -778,7 +863,7 @@ impl<C: SessionCore> Machine<C> {
         } else {
             (message, None)
         };
-        self.start_failed(id, message, detail)
+        self.fail_start(id, message, detail, orbit && !rejected)
     }
 
     pub(crate) fn bearer(&mut self, id: u64, mut session: FfiSavedSession) -> Effects<C> {
@@ -827,6 +912,7 @@ impl<C: SessionCore> Machine<C> {
         let mut fx = Vec::new();
         let target = self.attempt.as_ref().map(|a| a.target.clone());
         self.cancel(&mut fx);
+        self.rest_transient = false;
         if let Some(retry) = target {
             self.rest = FfiSessionPhase::Failed {
                 message: IDENTITY_CHANGED.to_owned(),
@@ -951,6 +1037,13 @@ impl ConnSession {
             .is_current(id)
     }
 
+    fn is_grace(&self, id: u64) -> bool {
+        self.machine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_grace(id)
+    }
+
     fn apply(&self, effect: Effect<Arc<ConnCore>>) {
         match effect {
             Effect::Disconnect(core) => core.disconnect(),
@@ -998,6 +1091,18 @@ impl ConnSession {
                     // A newer attempt, a cancel or a manual connect replaced this one meanwhile.
                     if this.is_current(id) {
                         this.step(|m| m.restart(id));
+                    }
+                });
+            }
+            Effect::EndGrace { id, after } => {
+                let Some(this) = self.this.upgrade() else {
+                    return;
+                };
+                self.orbit.handle().spawn(async move {
+                    tokio::time::sleep(after).await;
+                    // A later window or the first connection ended this one already.
+                    if this.is_grace(id) {
+                        this.step(|m| m.end_grace(id));
                     }
                 });
             }
@@ -1914,17 +2019,238 @@ mod tests {
             m.state().shows_offline,
             "three failed retries confirm offline"
         );
-        // Foreground nudges a fresh try: connecting again until it fails three more times.
-        let _ = m.foreground();
+        // Foreground nudges a fresh try: connecting again until it fails three more times and
+        // its grace window has closed.
+        let (window, _) = grace_window(&m.foreground()).expect("foreground opens a window");
         assert!(!m.state().shows_offline, "a foreground retry is connecting");
         let _ = m.status(1, reconnecting(1));
         let _ = m.status(1, reconnecting(2));
         assert!(!m.state().shows_offline);
         let _ = m.status(1, reconnecting(3));
+        assert!(
+            !m.state().shows_offline,
+            "the window hides three failed tries"
+        );
+        let _ = m.end_grace(window);
         assert!(m.state().shows_offline);
         let _ = m.status(1, FfiConnectionStatus::Connected);
         assert!(!m.state().shows_offline);
         let _ = m.status(1, failed("Lost connection"));
+        assert!(m.state().shows_offline);
+    }
+
+    /// The `(id, delay)` of the grace window `fx` opens, if it opens one.
+    fn grace_window(fx: &[Effect<FakeCore>]) -> Option<(u64, Duration)> {
+        fx.iter().find_map(|e| match e {
+            Effect::EndGrace { id, after } => Some((*id, *after)),
+            _ => None,
+        })
+    }
+
+    fn reconnecting(attempt: u32) -> FfiConnectionStatus {
+        FfiConnectionStatus::Reconnecting { attempt }
+    }
+
+    #[test]
+    fn a_cold_launch_shows_offline_only_after_the_grace_window_ends() {
+        let mut m = Machine::<FakeCore>::new();
+        let fx = m.launch(Some(saved("http://node/", None, Some("node"))));
+        let (window, after) = grace_window(&fx).expect("a launch opens a window");
+        assert_eq!(after, GRACE_WINDOW);
+        let _ = m.attached(1, FakeCore::default(), "http://node/".into(), None);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(1, reconnecting(attempt));
+            assert!(
+                !m.state().shows_offline,
+                "failed try {attempt} at a cold launch is still the first connection"
+            );
+        }
+        let revision = m.state().revision;
+        let _ = m.end_grace(window);
+        assert!(m.state().revision > revision, "the UI re-reads the state");
+        assert!(
+            m.state().shows_offline,
+            "three failed tries confirm offline once the window is over"
+        );
+    }
+
+    #[test]
+    fn a_window_that_ends_before_three_failed_tries_still_waits_for_them() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(1, reconnecting(1));
+        let _ = m.status(1, reconnecting(2));
+        let _ = m.end_grace(window);
+        assert!(!m.state().shows_offline, "two failed tries are connecting");
+        let _ = m.status(1, reconnecting(3));
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_start_that_exhausts_its_retries_inside_the_window_shows_offline_after_it_ends() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let mut id = 1;
+        for _ in 0..START_RETRIES {
+            let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+            id = retry_start(&fx).expect("retry").0;
+        }
+        let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+        assert!(retry_start(&fx).is_none(), "the tries are used up");
+        assert!(matches!(m.state().phase, FfiSessionPhase::Failed { .. }));
+        assert!(
+            !m.state().shows_offline,
+            "the network may still be waking: the window holds the pill back"
+        );
+        let _ = m.end_grace(window);
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn restore_and_foreground_start_a_new_window() {
+        let mut m = Machine::<FakeCore>::new();
+        assert!(
+            grace_window(&m.restore(None)).is_none(),
+            "nothing to connect, nothing to wait for"
+        );
+        let fx = m.restore(Some(saved("http://inst/", Some("inst-7"), Some("inst-7"))));
+        let (restored, _) = grace_window(&fx).expect("a restore opens a window");
+
+        let (first, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(2, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(2, FfiConnectionStatus::Connected);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES + 1 {
+            let _ = m.status(2, reconnecting(attempt));
+        }
+        assert!(m.state().shows_offline, "the window ended at Connected");
+
+        let (second, after) = grace_window(&m.foreground()).expect("foreground opens a window");
+        assert_eq!(after, GRACE_WINDOW);
+        assert!(second != first && second != restored, "a window of its own");
+        assert!(!m.state().shows_offline);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(2, reconnecting(attempt));
+        }
+        assert!(!m.state().shows_offline, "the new window holds");
+        let _ = m.end_grace(second);
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn connecting_ends_the_window_and_a_later_drop_follows_the_tries_rule() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(1, reconnecting(1));
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let revision = m.state().revision;
+        assert!(
+            m.end_grace(window).is_empty() && m.state().revision == revision,
+            "Connected already ended it: the timer finds nothing to do"
+        );
+        // The network drops: the first try after a drop is the drop itself.
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let fx = m.status(1, reconnecting(attempt));
+            assert!(grace_window(&fx).is_none(), "a drop opens no new window");
+            assert!(
+                !m.state().shows_offline,
+                "try {attempt} is still connecting"
+            );
+        }
+        let _ = m.status(1, reconnecting(OFFLINE_AFTER_FAILED_TRIES + 1));
+        assert!(
+            m.state().shows_offline,
+            "three failed tries confirm offline"
+        );
+    }
+
+    #[test]
+    fn definitive_outcomes_show_at_once_inside_the_window() {
+        // An identity change.
+        let mut m = Machine::<FakeCore>::new();
+        let fx = m.launch(None);
+        assert!(grace_window(&fx).is_some());
+        let changed = FakeCore {
+            mismatch: true,
+            ..FakeCore::default()
+        };
+        let _ = m.status(1, failed("Another server answers"));
+        let _ = m.attached(1, changed, "http://agent/".into(), Some("a".into()));
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Failed { message, .. } if message == IDENTITY_CHANGED
+        ));
+        assert!(m.state().shows_offline, "identity change");
+
+        // A rejected sign-in.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let _ = m.status(1, failed(AUTH));
+        let _ = m.attached(1, rejected(), "http://agent/".into(), Some("a".into()));
+        assert!(m.state().shows_offline, "auth rejected");
+
+        // A rejection after the connection was handed over.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let _ = m.attached(1, rejected(), "http://agent/".into(), Some("a".into()));
+        let _ = m.status(1, failed(AUTH));
+        assert!(m.state().shows_offline, "auth rejected after the handover");
+
+        // A definitive start error, such as a machine Orbit doesn't list.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.restore(Some(saved("http://inst/", Some("inst-7"), Some("inst-7"))));
+        let _ = m.start_failed(
+            1,
+            "Orbit doesn't list the environment of that thread.".into(),
+            None,
+        );
+        assert!(m.state().shows_offline, "machine not listed");
+
+        // A manual target's error, even one that would be transient for Orbit.
+        let mut m = Machine::<FakeCore>::new();
+        let fx = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
+        assert!(grace_window(&fx).is_some());
+        let _ = m.start_failed_transient(1, "Couldn't reach it.".into(), None);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Idle { message: Some(_) }
+        ));
+        assert!(m.state().shows_offline, "manual target");
+    }
+
+    #[test]
+    fn a_stale_end_grace_does_nothing() {
+        let mut m = Machine::<FakeCore>::new();
+        let (first, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(1, reconnecting(attempt));
+        }
+        let (second, _) = grace_window(&m.foreground()).expect("window");
+        assert_ne!(first, second);
+        let revision = m.state().revision;
+        assert!(m.end_grace(first).is_empty(), "the older window's timer");
+        assert!(m.end_grace(second + 100).is_empty(), "an unknown id");
+        assert_eq!(m.state().revision, revision, "nothing changed");
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(1, reconnecting(attempt));
+        }
+        assert!(!m.state().shows_offline, "the current window still holds");
+        let _ = m.end_grace(second);
+        assert!(m.state().shows_offline);
+        let revision = m.state().revision;
+        let _ = m.end_grace(second);
+        assert_eq!(m.state().revision, revision, "a window ends once");
+    }
+
+    #[test]
+    fn suspending_a_linked_scope_is_offline_even_inside_a_window() {
+        let mut m = Machine::<FakeCore>::new();
+        let (_, _) = grace_window(&m.launch(None)).expect("window");
+        let fx = m.suspend();
+        assert!(grace_window(&fx).is_none(), "suspend opens no window");
+        assert!(matches!(m.state().phase, FfiSessionPhase::Suspended));
         assert!(m.state().shows_offline);
     }
 
@@ -1969,7 +2295,7 @@ mod tests {
     #[test]
     fn three_start_failures_in_a_row_are_retried_and_the_fourth_shows_offline() {
         let mut m = Machine::<FakeCore>::new();
-        let _ = m.launch(None);
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
         let mut id = 1;
         let mut delays = Vec::new();
         for _ in 0..START_RETRIES {
@@ -1986,6 +2312,8 @@ mod tests {
         );
         let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
         assert!(retry_start(&fx).is_none(), "the tries are used up");
+        // The launch window is still open; a later test covers what it hides.
+        let _ = m.end_grace(window);
         assert!(m.state().shows_offline);
         assert!(matches!(
             m.state().phase,

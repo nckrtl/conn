@@ -8,7 +8,8 @@ final class ComposerIdentityTests: XCTestCase {
         let store = CoreStore(scope: "test-" + UUID().uuidString, deferOrbit: true)
         var session = FfiSessionState(revision: 1, connectionId: 1, phase: .idle(message: nil),
                                       serverUrl: nil, environmentId: "first", offlineReady: false,
-                                      showsOffline: false, hasConnected: true, identityEpoch: 1)
+                                      showsOffline: false, hasConnected: true, identityEpoch: 1,
+                                      failedTries: 0, startRetries: 0, inGrace: false)
         store.handleState(session)
         let key = ComposerDraftKey.new(project: nil, prompt: "")
         let draft = store.composerDraft(key, initialText: "Private draft")

@@ -1918,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_thread_survives_a_re_pair_and_closes_on_the_new_connection() {
+    fn manual_pairing_drops_the_previous_thread_and_accepts_a_new_one() {
         let mut m = Machine::<FakeCore>::new();
         let _ = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
         let _ = m.open_thread("t1".to_owned());
@@ -1926,19 +1926,16 @@ mod tests {
         assert_eq!(opens(&fx), vec!["t1"], "the open thread is subscribed");
         let _ = m.pair_manual("http://mac:3773/".to_owned(), "code".to_owned());
         let fx = m.attached(2, rejected(), "http://mac:3773/".to_owned(), None);
-        assert_eq!(
-            opens(&fx),
-            vec!["t1"],
-            "the re-paired connection subscribes it again"
-        );
+        assert!(opens(&fx).is_empty(), "a fresh pairing must not reopen t1");
+        assert_eq!(opens(&m.open_thread("t2".to_owned())), vec!["t2"]);
         assert_eq!(
             m.state().connection_id,
             2,
             "snapshots now come from the new connection"
         );
         assert_eq!(
-            closes(&m.close_thread("t1".to_owned())),
-            vec!["t1"],
+            closes(&m.close_thread("t2".to_owned())),
+            vec!["t2"],
             "closing it unsubscribes it there"
         );
     }

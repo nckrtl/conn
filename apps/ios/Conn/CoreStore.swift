@@ -92,13 +92,17 @@ final class CoreStore {
 
     var displayName: String { fleetLabel ?? serverURL.flatMap { URL(string: $0)?.host } ?? fleetID ?? scope }
 
-    func loadOlder() async {
-        guard !loadingOlder, let core, status == .connected else { return }
+    var canLoadOlder: Bool { isPaired && !loadingOlder && (shell?.olderSettledCount ?? 0) > 0 }
+
+    func loadOlder() {
+        guard canLoadOlder, let core else { return }
         loadingOlder = true
-        defer { loadingOlder = false }
         olderError = nil
-        do { try await core.loadOlderSettled() }
-        catch { olderError = error.localizedDescription }
+        Task {
+            defer { loadingOlder = false }
+            do { try await core.loadOlderSettled() }
+            catch { olderError = error.localizedDescription }
+        }
     }
 
     let scope: String
@@ -282,10 +286,9 @@ final class CoreStore {
             discoveredPrimary = primary
             let wanted = Set(targets.map(\.serverId))
             for (key, child) in linked {
-                if let id = child.fleetID, !wanted.contains(id), discovery.unresolvedEndpoints.isEmpty {
-                    child.session?.connectManually()
-                    linked.removeValue(forKey: key)
-                }
+                guard let id = child.fleetID, !wanted.contains(id),
+                      discovery.unresolvedEndpoints.isEmpty else { continue }
+                forgetLinked(key)
             }
             for target in targets {
                 let id = target.serverId
@@ -296,6 +299,10 @@ final class CoreStore {
                 child.fleetID = id
                 child.fleetLabel = target.displayTitle
                 registerLinked(child)
+                guard target.isAwake else {
+                    child.lastFleetAttempt = nil
+                    continue
+                }
                 if let attempt = child.lastFleetAttempt {
                     guard child.showsOffline, Date().timeIntervalSince(attempt) >= 300 else { continue }
                 }
@@ -605,6 +612,10 @@ final class CoreStore {
             let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
             UserDefaults.standard.set(Array(Set(disabled + [orbit])), forKey: "disabledOrbitLinks")
         }
+        forgetLinked(id)
+    }
+
+    private func forgetLinked(_ id: String) {
         linked.removeValue(forKey: id)?.disconnect()
         linkedOrder.removeAll { $0 == id }
         UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")

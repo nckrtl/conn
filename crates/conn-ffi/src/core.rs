@@ -1096,6 +1096,7 @@ struct PumpState {
     open_threads: HashSet<String>,
     ended_threads: HashSet<String>,
     shell_snapshot_required: bool,
+    pending_older_page: Option<oneshot::Sender<Option<conn_state::OlderPageRequest>>>,
     coalescer: SnapshotCoalescer,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
@@ -1284,16 +1285,13 @@ impl PumpState {
     fn handle_control(&mut self, ctrl: PumpControl) -> bool {
         match ctrl {
             PumpControl::BeginOlderPage(reply) => {
-                if !self.shell.synchronized {
+                if self.shell.synchronized {
+                    self.begin_older_page(reply);
+                } else if self.pending_older_page.is_none() {
+                    self.pending_older_page = Some(reply);
+                } else {
                     let _ = reply.send(None);
-                    return true;
                 }
-                self.shell.retry_older_page();
-                let request = self.shell.next_older_page(0, 1);
-                if let Some(ref request) = request {
-                    self.shell.older_page_started(request);
-                }
-                let _ = reply.send(request);
                 true
             }
             PumpControl::FinishOlderPage(request, page) => {
@@ -1610,6 +1608,15 @@ impl PumpState {
         }
     }
 
+    fn begin_older_page(&mut self, reply: oneshot::Sender<Option<conn_state::OlderPageRequest>>) {
+        self.shell.retry_older_page();
+        let request = self.shell.next_older_page(0, 1);
+        if let Some(ref request) = request {
+            self.shell.older_page_started(request);
+        }
+        let _ = reply.send(request);
+    }
+
     fn invalidate_shell(&mut self) {
         self.shell.synchronized = false;
         self.coalescer.reset_shell();
@@ -1631,6 +1638,9 @@ impl PumpState {
         self.sync_offline_shell();
         self.shell_watch.send_replace(Some(snapshot.clone()));
         self.listener.on_shell(snapshot);
+        if let Some(reply) = self.pending_older_page.take() {
+            self.begin_older_page(reply);
+        }
     }
 
     fn emit_or_buffer_shell(&mut self, snapshot: FfiShellSnapshot) {
@@ -1684,6 +1694,7 @@ async fn run_pump(
         open_threads: HashSet::new(),
         ended_threads: HashSet::new(),
         shell_snapshot_required: false,
+        pending_older_page: None,
         coalescer: SnapshotCoalescer::default(),
         thread_runs,
         shell_watch,

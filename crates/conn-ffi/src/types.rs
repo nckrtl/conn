@@ -706,7 +706,11 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
             .threads
             .iter()
             .chain(&shell.archived_threads)
-            .filter(|t| t.deleted_at.is_none() && !shell.is_listed(t))
+            .filter(|t| {
+                t.deleted_at.is_none()
+                    && t.archived_at.as_deref().is_none_or(str::is_empty)
+                    && !shell.is_listed(t)
+            })
             .map(|t| map_thread_summary(shell, t, ShellState::is_settled(t))),
     );
 

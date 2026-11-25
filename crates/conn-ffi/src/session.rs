@@ -1168,12 +1168,14 @@ impl ConnSession {
                     });
                 }
                 let targets: Vec<_> = fleet.nodes.into_iter().chain(fleet.instances).collect();
+                let saved = saved.into_iter().collect();
+                let disabled = disabled.into_iter().collect();
                 let plan = plan_linked_environments(&LinkedPlanInput {
                     targets: &targets,
                     primary_id: Some(&primary_id),
-                    saved: &saved.into_iter().collect(),
+                    saved: &saved,
                     held: &HashSet::new(),
-                    disabled: &disabled.into_iter().collect(),
+                    disabled: &disabled,
                     instance_opt_in: &HashSet::new(),
                     pair_attempted_at_ms: &Default::default(),
                     now_ms: 0,
@@ -1189,7 +1191,18 @@ impl ConnSession {
                         .or_default()
                         .push(target);
                 }
-                let mut linked = Vec::new();
+                // A saved, registered sleeping instance still owns its offline inventory.
+                let mut linked: Vec<_> = targets
+                    .iter()
+                    .filter(|t| {
+                        !t.is_awake()
+                            && t.server_id != primary_id
+                            && t.status == conn_orbit::fleet::OrbitTargetStatus::Registered
+                            && saved.contains(&t.server_id)
+                            && !disabled.contains(&t.server_id)
+                    })
+                    .map(|t| crate::orbit::map_orbit_environment(t, false))
+                    .collect();
                 let mut unresolved_endpoints = Vec::new();
                 let mut included = HashSet::new();
                 for (url, registrations) in endpoints {
@@ -1609,9 +1622,21 @@ mod tests {
         let gateway = MockGateway::new(|req| {
             let data = match req.path.as_str() {
                 "/me" => json!({"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}),
-                "/environments" => json!(["primary","desktop","disabled"].map(|id|
-                    json!({"environment_id":id,"label":id,"url":format!("http://{id}/"),"status":"registered","roles":[],"instance_id":null,"cleanup_pending":false})
-                )),
+                "/environments" => {
+                    let ids = [
+                        "primary", "desktop", "sleeping", "unsaved", "disabled", "expired",
+                        "cleanup",
+                    ];
+                    json!(ids.map(|id| {
+                        let sleeping = !matches!(id, "primary" | "desktop");
+                        json!({
+                            "environment_id": id, "label": id, "url": format!("http://{id}/"),
+                            "status": if id == "expired" { "session_expired" } else { "registered" },
+                            "instance_id": sleeping.then_some(19), "power_state": "stopped",
+                            "cleanup_pending": id == "cleanup",
+                        })
+                    }))
+                }
                 other => panic!("Unexpected discovery request: {other}"),
             };
             Ok(GatewayResponse {
@@ -1625,19 +1650,25 @@ mod tests {
             Arc::new(Recorder::default()),
         );
         let discover = |id: &str| {
-            futures::executor::block_on(session.linked_nodes(
-                id.to_owned(),
-                vec!["desktop".into()],
-                vec!["disabled".into()],
-            ))
+            futures::executor::block_on(
+                session.linked_nodes(
+                    id.to_owned(),
+                    [
+                        "desktop", "sleeping", "disabled", "expired", "cleanup", "removed",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    vec!["disabled".into()],
+                ),
+            )
         };
         let targets = discover("primary").unwrap().targets;
         assert_eq!(
             targets
                 .iter()
-                .map(|t| t.server_id.as_str())
-                .collect::<Vec<_>>(),
-            ["desktop"]
+                .map(|t| (t.server_id.as_str(), t.is_awake))
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([("desktop", true), ("sleeping", false)])
         );
         assert!(discover("other").is_err());
     }

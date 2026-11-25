@@ -663,8 +663,7 @@ fn non_empty_str(raw: &str) -> Option<String> {
 
 /// Projects [`ShellState`] into [`FfiShellSnapshot`].
 ///
-/// Includes non-archived projects and top-level active threads (newest first) followed by
-/// top-level settled threads flagged `settled: true` (newest first).
+/// Child summaries support scoped navigation. Their IDs remain hidden from the merged inbox.
 #[must_use]
 pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
     let projects = shell
@@ -693,7 +692,7 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
         .into_iter()
         .filter(|t| t.archived_at.as_deref().is_none_or(str::is_empty))
         .map(|thread| map_thread_summary(shell, thread, true));
-    let threads: Vec<_> = active.chain(settled).collect();
+    let mut threads: Vec<_> = active.chain(settled).collect();
     let listed: std::collections::HashSet<_> = threads.iter().map(|t| t.id.as_str()).collect();
     let hidden_thread_ids = shell
         .threads
@@ -702,6 +701,15 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
         .filter(|t| !listed.contains(t.id.as_str()))
         .map(|t| t.id.clone())
         .collect();
+
+    threads.extend(
+        shell
+            .threads
+            .iter()
+            .chain(&shell.archived_threads)
+            .filter(|t| t.deleted_at.is_none() && !shell.is_listed(t))
+            .map(|t| map_thread_summary(shell, t, ShellState::is_settled(t))),
+    );
 
     FfiShellSnapshot {
         hidden_thread_ids,
@@ -2242,7 +2250,7 @@ mod tests {
                     ),
                     thread_shell_json(
                         "t-sub",
-                        "p-active",
+                        "p-child",
                         "Child subagent",
                         "2026-11-22T12:00:00Z",
                         "running",
@@ -2318,7 +2326,14 @@ mod tests {
         assert_eq!(filed.project_id, "p-active");
         assert_eq!(filed.sidebar_project_key, "orbit-project:85");
         assert_eq!(filed.orbit_project_slug.as_deref(), Some("mini"));
-        let ids: Vec<&str> = snap.threads.iter().map(|t| t.id.as_str()).collect();
+        let child = snap.threads.iter().find(|t| t.id == "t-sub").unwrap();
+        assert_eq!(child.project_id, "p-child");
+        let ids: Vec<&str> = snap
+            .threads
+            .iter()
+            .filter(|t| !snap.hidden_thread_ids.contains(&t.id))
+            .map(|t| t.id.as_str())
+            .collect();
         assert_eq!(
             ids,
             vec![
@@ -2328,7 +2343,7 @@ mod tests {
                 "t-settled-new",
                 "t-settled-old",
             ],
-            "only sidebar rows are projected"
+            "the child is navigable but absent from the top-level inbox"
         );
         assert_eq!(snap.hidden_thread_ids, ["t-sub"]);
         assert!(!snap.threads[0].settled);

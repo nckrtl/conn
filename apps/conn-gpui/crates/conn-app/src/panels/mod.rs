@@ -1198,6 +1198,7 @@ impl RightPanel {
                 panel_open: true,
                 add_menu_open: self.add_menu_open,
                 available_tabs: &RightPanelTab::MENU_ORDER,
+                has_project: true,
                 tokens: &self.tokens,
             },
             callbacks,

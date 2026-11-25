@@ -12,7 +12,7 @@ enum FoldRow {
 
 /// The thread feed's spacing between items (messages, cards, work groups).
 enum ThreadFeed {
-    static let spacing: CGFloat = 30
+    static let spacing: CGFloat = 36
 }
 
 struct WorkGroupCard: View {

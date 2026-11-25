@@ -129,30 +129,22 @@ fn focusing_a_sign_in_field_lists_the_logins_and_a_click_fills_them(cx: &mut Tes
         shown(cx, &page),
         "the field's focus opens the picker at once"
     );
-    assert_eq!(
-        labels(cx, &page),
-        vec!["Vault · this Mac", "Checking Vault…"],
-        "while Vault answers"
-    );
+    assert_eq!(labels(cx, &page), vec!["Loading…"], "while Vault answers");
     settle_logins(cx, &page);
     assert_eq!(
         labels(cx, &page),
-        vec![
-            "Vault · this Mac",
-            "Example, me@example.com",
-            "Work, work@example.com",
-        ]
+        vec!["Example, me@example.com", "Work, work@example.com"]
     );
 
     render_frames(cx, window);
     assert!(
-        row_exists(cx, window, "browser-vault-inline-1"),
+        row_exists(cx, window, "browser-vault-inline-0"),
         "the first login is drawn"
     );
-    assert!(row_exists(cx, window, "browser-vault-inline-2"));
+    assert!(row_exists(cx, window, "browser-vault-inline-1"));
 
     let clicked = cx.update_window(window, |_, window, cx| {
-        window.click("browser-vault-inline-1", cx);
+        window.click("browser-vault-inline-0", cx);
     });
     assert!(clicked.is_ok());
     // The page shows a username and a password field: one pick fills both, in that order.
@@ -162,7 +154,7 @@ fn focusing_a_sign_in_field_lists_the_logins_and_a_click_fills_them(cx: &mut Tes
     );
     assert!(!shown(cx, &page), "a pick closes the picker");
     render_frames(cx, window);
-    assert!(!row_exists(cx, window, "browser-vault-inline-1"));
+    assert!(!row_exists(cx, window, "browser-vault-inline-0"));
 }
 
 #[gpui_kit::test]
@@ -204,25 +196,21 @@ fn arrow_keys_and_enter_pick_a_login_and_escape_closes_the_picker(cx: &mut TestA
 fn a_locked_vault_offers_unlock_and_unlocking_lists_the_logins(cx: &mut TestAppContext) {
     let (window, _app, page) = open_page(cx, "https://locked.example/");
     send(cx, &page, &field_event("focus", "username"));
-    assert_eq!(
-        labels(cx, &page),
-        vec!["Vault · this Mac", "Checking Vault…"],
-        "while Vault answers"
-    );
+    assert_eq!(labels(cx, &page), vec!["Loading…"], "while Vault answers");
     settle(cx, &page, "the unlock row", |rows| {
         rows.contains(&"Unlock Vault".to_owned())
     });
     assert_eq!(
         labels(cx, &page),
-        vec!["Vault · this Mac", "Unlock Vault"],
+        vec!["Unlock Vault"],
         "a locked answer leaves the loading state"
     );
     render_frames(cx, window);
-    assert!(row_exists(cx, window, "browser-vault-inline-1"));
+    assert!(row_exists(cx, window, "browser-vault-inline-0"));
 
     // The click asks Vault again, now allowed to prompt: the stub answers with the list.
     let clicked = cx.update_window(window, |_, window, cx| {
-        window.click("browser-vault-inline-1", cx);
+        window.click("browser-vault-inline-0", cx);
     });
     assert!(clicked.is_ok());
     settle_logins(cx, &page);
@@ -256,7 +244,6 @@ fn a_vault_error_says_so_and_offers_a_retry(cx: &mut TestAppContext) {
     assert_eq!(
         labels(cx, &page),
         vec![
-            "Vault · this Mac",
             "Vault could not answer. Open or update Vault and try again.",
             "Try again",
         ]
@@ -267,20 +254,13 @@ fn a_vault_error_says_so_and_offers_a_retry(cx: &mut TestAppContext) {
 fn a_vault_that_never_answers_ends_in_an_error_not_in_loading(cx: &mut TestAppContext) {
     let (_window, _app, page) = open_page(cx, "https://hang.example/");
     send(cx, &page, &field_event("focus", "username"));
-    assert_eq!(
-        labels(cx, &page),
-        vec!["Vault · this Mac", "Checking Vault…"]
-    );
+    assert_eq!(labels(cx, &page), vec!["Loading…"]);
     settle(cx, &page, "the timeout", |rows| {
         rows.contains(&"Try again".to_owned())
     });
     assert_eq!(
         labels(cx, &page),
-        vec![
-            "Vault · this Mac",
-            "Vault did not answer in time.",
-            "Try again"
-        ]
+        vec!["Vault did not answer in time.", "Try again"]
     );
 }
 

@@ -253,10 +253,26 @@
       if (element.type === "email" || tokens.includes("username") || tokens.includes("email") || /user|login|e-?mail|account|identifier/i.test(hint)) return "username";
       return null;
     };
+    // Many sites draw the visible field on a wrapper and inset the real input inside it. Align
+    // the picker with that wrapper, as Vault's browser extension does (`inline.js` `fieldBox`):
+    // the nearest of three ancestors that hugs the input and draws a border, background or shadow.
+    const fieldBox = (element) => {
+      const own = element.getBoundingClientRect();
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 3; node = node.parentElement, depth++) {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        if (rect.height > own.height + 24 || rect.width > own.width + 80 || rect.left > own.left || rect.right < own.right) break;
+        const drawn = parseFloat(style.borderLeftWidth) > 0 || style.boxShadow !== "none" ||
+          (style.backgroundColor !== "rgba(0, 0, 0, 0)" && style.backgroundColor !== "transparent");
+        if (drawn) return rect;
+      }
+      return own;
+    };
     const geometry = () => {
       const field = kind(input);
       if (!field || input === ignored) return null;
-      const r = input.getBoundingClientRect();
+      const r = fieldBox(input);
       if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) return null;
       return { field, page: pageFields(), x: r.x, y: r.y, width: r.width, height: r.height, viewportWidth: innerWidth, viewportHeight: innerHeight };
     };

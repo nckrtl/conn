@@ -111,6 +111,11 @@ enum OverlayBridgeMessage {
 
 enum BrowserOverlayEvent {
     CredentialInline(InlineEvent),
+    /// The page's own icon as PNG, with the address it was reported for.
+    Favicon {
+        page: String,
+        png: Vec<u8>,
+    },
     Rpc {
         request_id: String,
         op: String,
@@ -1019,7 +1024,7 @@ impl BrowserPanel {
 
         // A timer of the panel's own, in case the lookup never comes back at all (its task is
         // gone, or the runtime is stuck): the picker then shows an error to retry from, never
-        // "Checking Vault…" for good.
+        // "Loading…" for good.
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(inline::watchdog_delay(allow_unlock))
@@ -1088,11 +1093,6 @@ impl BrowserPanel {
         }
     }
 
-    fn hover_inline_row(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        self.inline_logins.hover(index);
-        cx.notify();
-    }
-
     /// A press outside the picker. A press on the field itself reopens it through the page's
     /// own focus report, so the page is not told.
     fn dismiss_inline_picker(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -1117,16 +1117,19 @@ impl BrowserPanel {
         }
         let view = self.last_bounds.get()?;
         let field = inline::anchor_rect(self.inline_logins.anchor()?, view);
-        let origin = inline::picker_origin(field, self.inline_logins.size(), view);
+        let size = self.inline_logins.size(field, view);
+        let origin = inline::picker_origin(field, size, view);
         let actions = PickerActions {
             choose: Self::choose_inline_row,
-            hover: Self::hover_inline_row,
             dismiss: Self::dismiss_inline_picker,
         };
+        let icon = self.inline_logins.icon_for(&self.current_url());
         Some(inline::render_picker(
             &self.inline_logins,
             origin,
+            size,
             &self.tokens,
+            icon.as_ref(),
             &actions,
             cx,
         ))
@@ -1745,6 +1748,13 @@ impl BrowserPanel {
                     browser_view.on_toolbar_response(move |response| {
                         let _ = response_tx.send(BrowserOverlayEvent::ToolbarResponse(response));
                     });
+                    let favicon_tx = overlay_tx.clone();
+                    browser_view.on_favicon(move |page, png| {
+                        let _ = favicon_tx.send(BrowserOverlayEvent::Favicon {
+                            page: page.to_owned(),
+                            png,
+                        });
+                    });
                     browser_view.on_load_end(move |_url, _status| {
                         let _ = overlay_tx.send(BrowserOverlayEvent::LoadEnd);
                     });
@@ -1773,6 +1783,11 @@ impl BrowserPanel {
                                     let alive = this.update(cx, |panel, cx| match ev {
                                         BrowserOverlayEvent::CredentialInline(event) => {
                                             panel.on_inline_event(event, cx);
+                                        }
+                                        BrowserOverlayEvent::Favicon { page, png } => {
+                                            if panel.inline_logins.set_icon(&page, png) {
+                                                cx.notify();
+                                            }
                                         }
                                         BrowserOverlayEvent::Rpc {
                                             request_id,

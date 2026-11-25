@@ -1,5 +1,6 @@
 //! Inline Vault login suggestions in the Browser panel (port of T3's
-//! `CredentialInlineSuggestions.tsx` and `credentialInline.ts`).
+//! `CredentialInlineSuggestions.tsx` and `credentialInline.ts`), drawn like the picker of Vault's
+//! Chrome extension (`ChromeExtension/picker.html`, `picker.js`, `inline.js`).
 //!
 //! When a username, email or password field takes focus on an HTTPS page, the page's watcher
 //! (`browser_overlay_bridge.js`) reports the field's kind and rectangle, nothing else. This
@@ -7,45 +8,87 @@
 //! native GPUI rows over the web view, so a website never receives the list. Lookups and fills
 //! go through the panel's existing Vault paths (`VaultClient::list_logins` and
 //! `login_credential`).
+//!
+//! Every size, colour and wording below is the extension's, taken from its source. The extension
+//! follows the system's light or dark look; this picker follows the app theme's.
 
 use conn_desktop::vault::{
     VaultLoginField, VaultLoginItem, VaultLoginsResponse, VaultLoginsStatus,
 };
-use conn_theme::Tokens;
+use conn_theme::{Appearance, Tokens};
 use conn_web::Rect as WebRect;
 use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, anchored, deferred, div, px,
+    AnyElement, BoxShadow, Context, FontWeight, Hsla, Image, ImageFormat, InteractiveElement as _,
+    IntoElement as _, MouseButton, ObjectFit, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, TestSupportExt as _, Window,
+    anchored, deferred, div, hsla, img, point, px, rgb, rgba, svg,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
-use super::color::to_hsla;
-use super::header::superhero_icon;
 use crate::a11y::ConnA11yExt as _;
 
-pub(super) const PICKER_WIDTH_PX: f32 = 280.0;
-/// Space between the field and the picker (`sideOffset={6}` in T3).
+// ── The extension's numbers (`picker.html`, `inline.js` `position()`) ──────────────────────────
+
+/// `Math.max(280, field width)`: the picker is as wide as the field, but not narrower than this.
+const MIN_WIDTH_PX: f32 = 280.0;
+/// `Math.min(…, 420, …)`.
+const MAX_WIDTH_PX: f32 = 420.0;
+/// Space kept to the edge of the page (`visibleWidth - 16`, `x + 8`).
+const EDGE_MARGIN_PX: f32 = 8.0;
+/// Space between the field and the picker (`box.bottom + 6`).
 const PICKER_GAP_PX: f32 = 6.0;
-const PICKER_PAD_PX: f32 = 4.0;
-const ROW_GAP_PX: f32 = 2.0;
-const PICKER_MAX_HEIGHT_PX: f32 = 280.0;
-const HEADING_HEIGHT_PX: f32 = 24.0;
-const NOTE_HEIGHT_PX: f32 = 30.0;
-/// A status line too long for one line wraps onto two.
-const NOTE_TALL_HEIGHT_PX: f32 = 46.0;
-const NOTE_ONE_LINE_CHARS: usize = 36;
-const LOGIN_HEIGHT_PX: f32 = 42.0;
-const LOGIN_PLAIN_HEIGHT_PX: f32 = 30.0;
+/// `Math.min(292, Math.max(40, …))`: the picker's height.
+const PICKER_MAX_HEIGHT_PX: f32 = 292.0;
+const PICKER_MIN_HEIGHT_PX: f32 = 40.0;
+/// The frame's `border-radius`.
+const PICKER_RADIUS_PX: f32 = 14.0;
+/// `#panel { padding: 6px }`.
+const PANEL_PAD_PX: f32 = 6.0;
+/// `.entry { padding: 9px; border-radius: 8px; gap: 10px }`.
+const ROW_PAD_PX: f32 = 9.0;
+const ROW_RADIUS_PX: f32 = 8.0;
+const ROW_GAP_PX: f32 = 10.0;
+/// `button:focus-visible { outline: 2px solid …; outline-offset: -2px }`: a ring inside the row.
+const RING_PX: f32 = 2.0;
+/// `.icon { width: 29px; height: 29px; border-radius: 7px }`, `.icon img { 21px; radius 5px }`.
+const TILE_PX: f32 = 29.0;
+const TILE_RADIUS_PX: f32 = 7.0;
+const SITE_ICON_PX: f32 = 21.0;
+const SITE_ICON_RADIUS_PX: f32 = 5.0;
+/// `.icon svg { 17px }` (the key) and `.icon svg.mark { 15px }` (the Vault mark).
+const KEY_PX: f32 = 17.0;
+const MARK_PX: f32 = 15.0;
+/// `.name { font-size: 14px; font-weight: 500 }`, `.username { font-size: 13px; margin-top: 2px }`.
+const NAME_PX: f32 = 14.0;
+const USERNAME_PX: f32 = 13.0;
+const USERNAME_TOP_PX: f32 = 2.0;
+/// The browser's `line-height: normal` for those two sizes in the system font.
+const NAME_LINE_PX: f32 = 17.0;
+const USERNAME_LINE_PX: f32 = 16.0;
+/// `#status { font-size: 14px; margin: 6px 8px; line-height: 1.4 }`.
+const STATUS_PX: f32 = 14.0;
+const STATUS_LINE_PX: f32 = 19.6;
+const STATUS_MARGIN_Y_PX: f32 = 6.0;
+const STATUS_MARGIN_X_PX: f32 = 8.0;
+/// `#status.error { font-size: 13px; padding: 9px 10px; margin: 3px 3px 6px; border-radius: 8px }`.
+const ERROR_PX: f32 = 13.0;
+const ERROR_LINE_PX: f32 = 18.2;
+const ERROR_PAD_Y_PX: f32 = 9.0;
+const ERROR_PAD_X_PX: f32 = 10.0;
+const ERROR_MARGIN_X_PX: f32 = 3.0;
+const ERROR_MARGIN_TOP_PX: f32 = 3.0;
+const ERROR_MARGIN_BOTTOM_PX: f32 = 6.0;
+/// Average glyph widths, to guess where a status line wraps (sizing only; layout wraps for real).
+const STATUS_CHAR_PX: f32 = 7.0;
+const ERROR_CHAR_PX: f32 = 6.5;
+
 /// A rectangle larger than this is not a form field.
 const MAX_ANCHOR_PX: f64 = 1_000_000.0;
 /// The largest integer a page's number can hold exactly.
 const MAX_SAFE_REVISION: u64 = 1 << 53;
-
-const VAULT_HEADING: &str = "Vault · this Mac";
 
 /// How long a lookup that never prompts may take. Vault answers a locked or unlocked list at
 /// once, so a longer wait means the relay is stuck.
@@ -242,51 +285,99 @@ pub(super) fn anchor_rect(anchor: &InlineAnchor, view: WebRect) -> WebRect {
     }
 }
 
-/// Top-left corner of a picker of `size` for a field at `field`: under it, left edges aligned,
-/// kept inside the web view. It flips above the field when it does not fit below and does fit
-/// above.
-pub(super) fn picker_origin(field: WebRect, size: (f32, f32), view: WebRect) -> (f32, f32) {
-    let (width, height) = size;
-    let below = field.y + field.height + PICKER_GAP_PX;
-    let above = field.y - PICKER_GAP_PX - height;
-    let y = if below + height <= view.y + view.height || above < view.y {
-        below
-    } else {
-        above
-    };
-    let max_x = (view.x + view.width - width).max(view.x);
-    (field.x.clamp(view.x, max_x), y)
+/// The picker's width: the field's, but at least 280 and at most 420, and never wider than the
+/// view less its margins (`Math.min(Math.max(280, box.width), 420, visibleWidth - 16)`).
+pub(super) fn picker_width(field: WebRect, view: WebRect) -> f32 {
+    field
+        .width
+        .clamp(MIN_WIDTH_PX, MAX_WIDTH_PX)
+        .min(view.width - 2.0 * EDGE_MARGIN_PX)
+        .max(0.0)
 }
 
+/// Top-left corner of a picker of `size` for a field at `field`: directly under it, left edges
+/// aligned, kept inside the web view (`inline.js` `position()`). It sits above the field when
+/// there is no room below, and then stays at least 8 px from the view's top and bottom.
+pub(super) fn picker_origin(field: WebRect, size: (f32, f32), view: WebRect) -> (f32, f32) {
+    let (width, height) = size;
+    let field_bottom = field.y + field.height;
+    let view_bottom = view.y + view.height;
+    let y = if field_bottom + height + EDGE_MARGIN_PX <= view_bottom {
+        field_bottom + PICKER_GAP_PX
+    } else {
+        let above = field.y - height - PICKER_GAP_PX;
+        let lowest = view_bottom - height - EDGE_MARGIN_PX;
+        (view.y + EDGE_MARGIN_PX).max(above.min(lowest))
+    };
+    let right_most = view.x + view.width - width - EDGE_MARGIN_PX;
+    ((view.x + EDGE_MARGIN_PX).max(field.x.min(right_most)), y)
+}
+
+/// A status line is a short line of text, or an error in a tinted box.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PickerRow {
-    Heading(&'static str),
     Login {
         id: String,
         title: String,
         username: Option<String>,
     },
-    /// A status line: not a choice.
-    Note(String),
+    /// A status line: not a choice. `error` draws it in the extension's red box.
+    Note {
+        text: String,
+        error: bool,
+    },
     Unlock {
         retry: bool,
     },
 }
 
 impl PickerRow {
+    fn status(text: impl Into<String>) -> Self {
+        Self::Note {
+            text: text.into(),
+            error: false,
+        }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self::Note {
+            text: text.into(),
+            error: true,
+        }
+    }
+
     fn actionable(&self) -> bool {
         matches!(self, Self::Login { .. } | Self::Unlock { .. })
     }
 
-    fn height(&self) -> f32 {
+    /// How many lines `text` takes where `room` px of width remain.
+    fn lines(text: &str, room: f32, char_px: f32) -> f32 {
+        let per_line = (room / char_px).floor().max(1.0);
+        (text.chars().count() as f32 / per_line).ceil().max(1.0)
+    }
+
+    /// The row's height in a picker `width` wide, as the extension's CSS lays it out.
+    fn height(&self, width: f32) -> f32 {
+        let row = |content: f32| content + 2.0 * ROW_PAD_PX;
         match self {
-            Self::Heading(_) => HEADING_HEIGHT_PX,
             Self::Login {
                 username: Some(_), ..
-            } => LOGIN_HEIGHT_PX,
-            Self::Login { .. } => LOGIN_PLAIN_HEIGHT_PX,
-            Self::Note(text) if text.chars().count() > NOTE_ONE_LINE_CHARS => NOTE_TALL_HEIGHT_PX,
-            Self::Note(_) | Self::Unlock { .. } => NOTE_HEIGHT_PX,
+            } => row(TILE_PX.max(NAME_LINE_PX + USERNAME_TOP_PX + USERNAME_LINE_PX)),
+            // The extension still lays out an empty username line under the name.
+            Self::Login { .. } | Self::Unlock { retry: false } => row(TILE_PX),
+            Self::Unlock { retry: true } => row(NAME_LINE_PX),
+            Self::Note { text, error: false } => {
+                let room = width - 2.0 * PANEL_PAD_PX - 2.0 * STATUS_MARGIN_X_PX;
+                Self::lines(text, room, STATUS_CHAR_PX) * STATUS_LINE_PX + 2.0 * STATUS_MARGIN_Y_PX
+            }
+            Self::Note { text, error: true } => {
+                let room =
+                    width - 2.0 * PANEL_PAD_PX - 2.0 * ERROR_MARGIN_X_PX - 2.0 * ERROR_PAD_X_PX;
+                Self::lines(text, room, ERROR_CHAR_PX) * ERROR_LINE_PX
+                    + 2.0 * ERROR_PAD_Y_PX
+                    + ERROR_MARGIN_TOP_PX
+                    + ERROR_MARGIN_BOTTOM_PX
+            }
         }
     }
 }
@@ -311,11 +402,26 @@ pub(super) enum KeyOutcome {
     Dismissed,
 }
 
+/// The icon the page itself declares, as PNG from the browser. The picker shows it on each login's
+/// tile when the logins are for that same site.
+struct PageIcon {
+    host: String,
+    image: Arc<Image>,
+}
+
+/// The host of an HTTPS address.
+fn https_host(address: &str) -> Option<String> {
+    let parsed = url::Url::parse(address.trim()).ok()?;
+    (parsed.scheme() == "https")
+        .then(|| parsed.host_str().map(str::to_ascii_lowercase))
+        .flatten()
+}
+
 #[derive(Default)]
 pub(super) struct InlineLogins {
     anchor: Option<InlineAnchor>,
     open: bool,
-    /// The row the keyboard or pointer is on.
+    /// The row the keyboard is on (the extension's focused button).
     cursor: Option<usize>,
     loading: bool,
     status: Option<VaultLoginsStatus>,
@@ -327,6 +433,8 @@ pub(super) struct InlineLogins {
     /// The native unlock prompt is up: the page losing focus must not close the picker.
     unlocking: bool,
     generation: u64,
+    /// The page's own icon. A reload keeps it; another site's address hides it.
+    icon: Option<PageIcon>,
 }
 
 impl InlineLogins {
@@ -337,6 +445,29 @@ impl InlineLogins {
     /// The picker is on screen.
     pub(super) fn shown(&self) -> bool {
         self.open && self.anchor.is_some()
+    }
+
+    /// Keeps the icon the browser fetched for `page`, an HTTPS address. Returns `true` when it
+    /// replaced what showed.
+    pub(super) fn set_icon(&mut self, page: &str, png: Vec<u8>) -> bool {
+        let Some(host) = https_host(page) else {
+            return false;
+        };
+        if png.is_empty() {
+            return false;
+        }
+        let image = Arc::new(Image::from_bytes(ImageFormat::Png, png));
+        self.icon = Some(PageIcon { host, image });
+        true
+    }
+
+    /// The icon for the site at `page`, if the browser reported one for that host.
+    pub(super) fn icon_for(&self, page: &str) -> Option<Arc<Image>> {
+        let host = https_host(page)?;
+        self.icon
+            .as_ref()
+            .filter(|icon| icon.host == host)
+            .map(|icon| icon.image.clone())
     }
 
     /// Takes what the watcher reported. Returns `true` when a field took focus and the picker
@@ -412,8 +543,8 @@ impl InlineLogins {
     }
 
     /// The lookup `generation` has run out of time without an answer. Shows the error row so the
-    /// picker never sits on "Checking Vault…". Returns `true` when that changed what shows; a
-    /// lookup that already answered, or was replaced, is left alone.
+    /// picker never sits on "Loading…". Returns `true` when that changed what shows; a lookup
+    /// that already answered, or was replaced, is left alone.
     pub(super) fn expire_lookup(&mut self, generation: u64) -> bool {
         if !self.loading {
             return false;
@@ -429,10 +560,12 @@ impl InlineLogins {
         }
     }
 
+    /// The picker's rows, with the extension's wording: no heading, one row per login, and a
+    /// status line or an Unlock button when there is no login to show.
     pub(super) fn rows(&self) -> Vec<PickerRow> {
-        let mut rows = vec![PickerRow::Heading(VAULT_HEADING)];
+        let mut rows = Vec::new();
         if let Some(feedback) = &self.feedback {
-            rows.push(PickerRow::Note(feedback.clone()));
+            rows.push(PickerRow::error(feedback.clone()));
         }
         rows.extend(self.items.iter().map(|item| {
             PickerRow::Login {
@@ -445,18 +578,16 @@ impl InlineLogins {
             }
         }));
         if self.loading {
-            // Wording of the Chrome extension's picker.
-            let text = if self.unlocking {
+            rows.push(PickerRow::status(if self.unlocking {
                 "Unlocking Vault…"
             } else {
-                "Checking Vault…"
-            };
-            rows.push(PickerRow::Note(text.to_owned()));
+                "Loading…"
+            }));
         } else {
             match self.status {
                 Some(VaultLoginsStatus::Locked) => rows.push(PickerRow::Unlock { retry: false }),
                 Some(VaultLoginsStatus::Error) => {
-                    rows.push(PickerRow::Note(
+                    rows.push(PickerRow::error(
                         self.error
                             .clone()
                             .filter(|error| !error.is_empty())
@@ -465,10 +596,10 @@ impl InlineLogins {
                     rows.push(PickerRow::Unlock { retry: true });
                 }
                 Some(VaultLoginsStatus::Unavailable) => {
-                    rows.push(PickerRow::Note("Vault is not installed".to_owned()));
+                    rows.push(PickerRow::status("Vault is not installed"));
                 }
                 Some(VaultLoginsStatus::Ok) if self.items.is_empty() => {
-                    rows.push(PickerRow::Note("No matching login.".to_owned()));
+                    rows.push(PickerRow::status("No matching login."));
                 }
                 Some(VaultLoginsStatus::Ok) | None => {}
             }
@@ -476,20 +607,16 @@ impl InlineLogins {
         rows
     }
 
-    /// The picker's size in logical pixels, from its rows.
-    pub(super) fn size(&self) -> (f32, f32) {
-        let rows = self.rows();
-        let gaps = ROW_GAP_PX * rows.len().saturating_sub(1) as f32;
-        let content: f32 = rows.iter().map(PickerRow::height).sum::<f32>() + gaps;
-        let height = (content + PICKER_PAD_PX * 2.0 + 2.0).min(PICKER_MAX_HEIGHT_PX);
-        (PICKER_WIDTH_PX, height)
-    }
-
-    /// Highlights the row under the pointer (a heading or a status line takes no highlight).
-    pub(super) fn hover(&mut self, index: usize) {
-        if self.rows().get(index).is_some_and(PickerRow::actionable) {
-            self.cursor = Some(index);
-        }
+    /// The picker's size in logical pixels for a field at `field` in `view`: the extension's
+    /// width rule, and the height of its rows, between 40 and 292 and within the view.
+    pub(super) fn size(&self, field: WebRect, view: WebRect) -> (f32, f32) {
+        let width = picker_width(field, view);
+        let content: f32 = self.rows().iter().map(|row| row.height(width)).sum();
+        let height = (content + 2.0 * PANEL_PAD_PX)
+            .ceil()
+            .clamp(PICKER_MIN_HEIGHT_PX, PICKER_MAX_HEIGHT_PX);
+        let room = (view.height - 2.0 * EDGE_MARGIN_PX).max(PICKER_MIN_HEIGHT_PX);
+        (width, height.min(room))
     }
 
     /// Moves the keyboard highlight to the next (`forward`) or previous row you can choose,
@@ -517,7 +644,7 @@ impl InlineLogins {
         match self.rows().into_iter().nth(index)? {
             PickerRow::Login { id, .. } => Some(RowAction::Fill(id)),
             PickerRow::Unlock { .. } => Some(RowAction::Unlock),
-            PickerRow::Heading(_) | PickerRow::Note(_) => None,
+            PickerRow::Note { .. } => None,
         }
     }
 
@@ -564,30 +691,99 @@ impl InlineLogins {
     }
 }
 
+/// The extension's colours (`picker.html`'s `light-dark(light, dark)` pairs).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Palette {
+    /// `:root { background }`.
+    pub(super) surface: Hsla,
+    /// `:root { color }`: names, and the key and Vault mark.
+    pub(super) text: Hsla,
+    /// `#status`, `.username`.
+    pub(super) muted: Hsla,
+    /// `button:hover`.
+    pub(super) hover: Hsla,
+    /// `.icon { background }`.
+    pub(super) tile: Hsla,
+    /// The focus ring: the text colour.
+    pub(super) ring: Hsla,
+    /// `#status.error { color, background }`.
+    pub(super) error_text: Hsla,
+    pub(super) error_fill: Hsla,
+}
+
+impl Palette {
+    pub(super) fn of(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Dark => Self {
+                surface: rgb(0x242426).into(),
+                text: rgb(0xeeeeee).into(),
+                muted: rgb(0xbbbbbb).into(),
+                hover: rgb(0x37373c).into(),
+                tile: rgb(0x3f3f44).into(),
+                ring: rgb(0xeeeeee).into(),
+                error_text: rgb(0xff6b61).into(),
+                error_fill: rgba(0xff453a26).into(),
+            },
+            Appearance::Light => Self {
+                surface: rgb(0xfafafa).into(),
+                text: rgb(0x202024).into(),
+                muted: rgb(0x666666).into(),
+                hover: rgb(0xeaeaf0).into(),
+                tile: rgb(0xe7e7ec).into(),
+                ring: rgb(0x202024).into(),
+                error_text: rgb(0xc4271c).into(),
+                error_fill: rgba(0xff3b3014).into(),
+            },
+        }
+    }
+}
+
 /// What the picker's rows do in the panel that owns them.
 pub(super) struct PickerActions<T> {
     pub(super) choose: fn(&mut T, usize, &mut Window, &mut Context<'_, T>),
-    pub(super) hover: fn(&mut T, usize, &mut Context<'_, T>),
     /// A press outside the picker.
     pub(super) dismiss: fn(&mut T, &mut Window, &mut Context<'_, T>),
 }
 
-/// The picker with its top-left corner at `origin` (window coordinates), above everything else.
+/// The 29 px tile at a row's start: the page's icon on a rounded square, or `fallback` (the key)
+/// when the browser reported none.
+fn tile(site_icon: Option<Arc<Image>>, fallback: AnyElement, palette: &Palette) -> AnyElement {
+    div()
+        .size(px(TILE_PX))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(TILE_RADIUS_PX))
+        .overflow_hidden()
+        .bg(palette.tile)
+        .child(match site_icon {
+            Some(image) => img(image)
+                .size(px(SITE_ICON_PX))
+                .rounded(px(SITE_ICON_RADIUS_PX))
+                .object_fit(ObjectFit::Contain)
+                .into_any_element(),
+            None => fallback,
+        })
+        .into_any_element()
+}
+
+/// The picker, `size` wide and high with its top-left corner at `origin` (window coordinates),
+/// above everything else. `site_icon` is the page's own icon, if the browser reported one.
 pub(super) fn render_picker<T: 'static>(
     state: &InlineLogins,
     origin: (f32, f32),
+    size: (f32, f32),
     tokens: &Tokens,
+    site_icon: Option<&Arc<Image>>,
     actions: &PickerActions<T>,
     cx: &mut Context<'_, T>,
 ) -> AnyElement {
-    let fg = to_hsla(tokens.foreground);
-    let muted = to_hsla(tokens.muted_foreground);
-    let highlight = to_hsla(tokens.shell_highlight);
+    let palette = Palette::of(tokens.appearance);
     let dismiss = actions.dismiss;
 
-    // Styled like the toolbar's Vault popover. The surface blocks the mouse for the whole card
-    // (what `floating_surface` does), so rows of the page behind it do not light up and a
-    // press does not reach the page.
+    // The surface blocks the mouse for the whole card (what `floating_surface` does), so rows of
+    // the page behind it do not light up and a press does not reach the page.
     let mut list = v_flex()
         .id("browser-vault-inline")
         .test_support()
@@ -595,46 +791,54 @@ pub(super) fn render_picker<T: 'static>(
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down_out(cx.listener(move |this, _, window, cx| dismiss(this, window, cx)))
-        .w(px(PICKER_WIDTH_PX))
-        .max_h(px(PICKER_MAX_HEIGHT_PX))
+        .w(px(size.0))
+        .max_h(px(size.1))
         .overflow_y_scroll()
-        .p(px(PICKER_PAD_PX))
-        .gap(px(ROW_GAP_PX))
-        .rounded(px(12.0))
-        .bg(to_hsla(tokens.popover))
-        .border_1()
-        .border_color(to_hsla(tokens.shell_inner_border))
-        .shadow_lg();
+        .p(px(PANEL_PAD_PX))
+        .rounded(px(PICKER_RADIUS_PX))
+        .bg(palette.surface)
+        .text_color(palette.text)
+        .font_family(".SystemUIFont")
+        // `box-shadow: 0 8px 32px #0004`.
+        .shadow(vec![BoxShadow {
+            color: hsla(0.0, 0.0, 0.0, 0x44 as f32 / 255.0),
+            offset: point(px(0.0), px(8.0)),
+            blur_radius: px(32.0),
+            spread_radius: px(0.0),
+            inset: false,
+        }]);
 
     for (index, row) in state.rows().into_iter().enumerate() {
         let highlighted = state.cursor == Some(index) && row.actionable();
-        let height = row.height();
         match row {
-            PickerRow::Heading(label) => {
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("browser-vault-inline-{index}")))
-                        .a11y_group(format!("browser.vault.inline.heading.{index}"), label)
-                        .h(px(height))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .text_size(px(11.0))
-                        .text_color(muted)
-                        .child(label),
-                );
-            }
-            PickerRow::Note(text) => {
+            PickerRow::Note { text, error: false } => {
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("browser-vault-inline-{index}")))
                         .a11y_group(format!("browser.vault.inline.note.{index}"), text.clone())
-                        .h(px(height))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .text_size(px(12.0))
-                        .text_color(muted)
+                        .mx(px(STATUS_MARGIN_X_PX))
+                        .my(px(STATUS_MARGIN_Y_PX))
+                        .text_size(px(STATUS_PX))
+                        .line_height(px(STATUS_LINE_PX))
+                        .text_color(palette.muted)
+                        .child(text),
+                );
+            }
+            PickerRow::Note { text, error: true } => {
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("browser-vault-inline-{index}")))
+                        .a11y_group(format!("browser.vault.inline.note.{index}"), text.clone())
+                        .mx(px(ERROR_MARGIN_X_PX))
+                        .mt(px(ERROR_MARGIN_TOP_PX))
+                        .mb(px(ERROR_MARGIN_BOTTOM_PX))
+                        .px(px(ERROR_PAD_X_PX))
+                        .py(px(ERROR_PAD_Y_PX))
+                        .rounded(px(ROW_RADIUS_PX))
+                        .bg(palette.error_fill)
+                        .text_size(px(ERROR_PX))
+                        .line_height(px(ERROR_LINE_PX))
+                        .text_color(palette.error_text)
                         .child(text),
                 );
             }
@@ -647,21 +851,30 @@ pub(super) fn render_picker<T: 'static>(
                     Some(username) => format!("{title}, {username}"),
                     None => title.clone(),
                 };
+                let key = svg()
+                    .path("brand/vault-key.svg")
+                    .size(px(KEY_PX))
+                    .flex_none()
+                    .text_color(palette.text)
+                    .into_any_element();
                 let text = v_flex()
                     .min_w_0()
                     .flex_1()
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(NAME_PX))
+                            .line_height(px(NAME_LINE_PX))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg)
+                            .text_color(palette.text)
                             .truncate()
                             .child(title),
                     )
                     .children(username.map(|username| {
                         div()
-                            .text_size(px(11.0))
-                            .text_color(muted)
+                            .mt(px(USERNAME_TOP_PX))
+                            .text_size(px(USERNAME_PX))
+                            .line_height(px(USERNAME_LINE_PX))
+                            .text_color(palette.muted)
                             .truncate()
                             .child(username)
                     }));
@@ -669,42 +882,55 @@ pub(super) fn render_picker<T: 'static>(
                     index,
                     format!("browser.vault.inline.login.{id}"),
                     label,
-                    height,
                     highlighted,
-                    highlight,
+                    &palette,
                     actions,
                     cx,
                     h_flex()
                         .w_full()
-                        .gap(px(8.0))
+                        .gap(px(ROW_GAP_PX))
                         .items_center()
-                        .child(superhero_icon("superhero/key.svg", 13.0, fg))
+                        .child(tile(site_icon.cloned(), key, &palette))
                         .child(text),
                 ));
             }
             PickerRow::Unlock { retry } => {
                 let label = if retry { "Try again" } else { "Unlock Vault" };
+                let content = h_flex().w_full().gap(px(ROW_GAP_PX)).items_center();
+                // "Try again" is plain text; "Unlock Vault" has the Vault mark on a tile.
+                let content = if retry {
+                    content.child(
+                        div()
+                            .text_size(px(NAME_PX))
+                            .line_height(px(NAME_LINE_PX))
+                            .text_color(palette.text)
+                            .child(label),
+                    )
+                } else {
+                    let mark = svg()
+                        .path("brand/vault-mark.svg")
+                        .size(px(MARK_PX))
+                        .flex_none()
+                        .text_color(palette.text)
+                        .into_any_element();
+                    content.child(tile(None, mark, &palette)).child(
+                        div()
+                            .text_size(px(NAME_PX))
+                            .line_height(px(NAME_LINE_PX))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(palette.text)
+                            .child(label),
+                    )
+                };
                 list = list.child(row_shell(
                     index,
                     "browser.vault.inline.unlock".to_owned(),
                     label.to_owned(),
-                    height,
                     highlighted,
-                    highlight,
+                    &palette,
                     actions,
                     cx,
-                    h_flex()
-                        .w_full()
-                        .gap(px(8.0))
-                        .items_center()
-                        .child(superhero_icon("superhero/lock.svg", 13.0, fg))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg)
-                                .child(label),
-                        ),
+                    content,
                 ));
             }
         }
@@ -712,48 +938,51 @@ pub(super) fn render_picker<T: 'static>(
 
     deferred(
         anchored()
-            .position(gpui_kit::point(px(origin.0), px(origin.1)))
-            .snap_to_window_with_margin(px(8.0))
+            .position(point(px(origin.0), px(origin.1)))
+            .snap_to_window_with_margin(px(EDGE_MARGIN_PX))
             .child(list),
     )
     .with_priority(6)
     .into_any_element()
 }
 
+/// One row as a button: padded, rounded, lit under the pointer, and ringed while the keyboard is
+/// on it (`.entry`, `button:hover`, `button:focus-visible`). The ring takes `RING_PX` of the
+/// padding so the content does not move.
 #[expect(
     clippy::too_many_arguments,
-    reason = "one row's look and wiring, called twice"
+    reason = "one row's look and wiring, called for each kind of row"
 )]
 fn row_shell<T: 'static>(
     index: usize,
     ax_id: String,
     label: String,
-    height: f32,
     highlighted: bool,
-    highlight: gpui_kit::Hsla,
+    palette: &Palette,
     actions: &PickerActions<T>,
     cx: &mut Context<'_, T>,
     content: gpui_kit::Div,
 ) -> impl gpui_kit::IntoElement {
     let choose = actions.choose;
-    let hover = actions.hover;
+    let hover = palette.hover;
     div()
         .id(SharedString::from(format!("browser-vault-inline-{index}")))
         .test_support()
         .a11y(gpui_kit::Role::MenuItem, ax_id, label)
         .aria_selected(highlighted)
-        .h(px(height))
-        .px(px(8.0))
+        .w_full()
         .flex()
         .items_center()
-        .rounded(px(8.0))
+        .p(px(ROW_PAD_PX - RING_PX))
+        .border(px(RING_PX))
+        .border_color(if highlighted {
+            palette.ring
+        } else {
+            gpui_kit::transparent_black()
+        })
+        .rounded(px(ROW_RADIUS_PX))
         .cursor_pointer()
-        .when(highlighted, |row| row.bg(highlight))
-        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-            if *hovered {
-                hover(this, index, cx);
-            }
-        }))
+        .hover(move |row| row.bg(hover))
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
             choose(this, index, window, cx);
@@ -768,14 +997,13 @@ impl InlineLogins {
         self.rows()
             .into_iter()
             .map(|row| match row {
-                PickerRow::Heading(label) => label.to_owned(),
                 PickerRow::Login {
                     title, username, ..
                 } => match username {
                     Some(username) => format!("{title}, {username}"),
                     None => title,
                 },
-                PickerRow::Note(text) => text,
+                PickerRow::Note { text, .. } => text,
                 PickerRow::Unlock { retry: true } => "Try again".to_owned(),
                 PickerRow::Unlock { retry: false } => "Unlock Vault".to_owned(),
             })
@@ -1073,8 +1301,11 @@ mod tests {
         };
         // Below: 276 + 120 > 300. Above: 240 - 6 - 120 = 114 >= 50.
         assert_eq!(picker_origin(field, (280.0, 120.0), view()), (150.0, 114.0));
-        // Too tall for either side: stays below, as Base UI does without room.
-        assert_eq!(picker_origin(field, (280.0, 260.0), view()), (150.0, 276.0));
+        // Too tall for either side: sits as low as it fits, 8 px from the view's bottom, and
+        // never closer than 8 px to its top (`inline.js` `position()`).
+        assert_eq!(picker_origin(field, (280.0, 260.0), view()), (150.0, 58.0));
+        // Above the field when that fits: 240 - 150 - 6.
+        assert_eq!(picker_origin(field, (280.0, 150.0), view()), (150.0, 84.0));
     }
 
     #[test]
@@ -1085,18 +1316,19 @@ mod tests {
             width: 30.0,
             height: 20.0,
         };
-        assert_eq!(picker_origin(near_right, (280.0, 80.0), view()).0, 320.0);
+        // 8 px from the view's right edge: 100 + 500 - 280 - 8.
+        assert_eq!(picker_origin(near_right, (280.0, 80.0), view()).0, 312.0);
         let left_of_view = WebRect {
             x: 20.0,
             ..near_right
         };
-        assert_eq!(picker_origin(left_of_view, (280.0, 80.0), view()).0, 100.0);
-        // A view narrower than the picker pins the picker to its left edge.
+        assert_eq!(picker_origin(left_of_view, (280.0, 80.0), view()).0, 108.0);
+        // A view narrower than the picker pins the picker 8 px from its left edge.
         let narrow = WebRect {
             width: 200.0,
             ..view()
         };
-        assert_eq!(picker_origin(near_right, (280.0, 80.0), narrow).0, 100.0);
+        assert_eq!(picker_origin(near_right, (280.0, 80.0), narrow).0, 108.0);
     }
 
     // ── Which fields one pick fills ─────────────────────────────────────────────────
@@ -1209,7 +1441,6 @@ mod tests {
         assert_eq!(
             state.labels(),
             vec![
-                VAULT_HEADING.to_owned(),
                 "Example, me@example.com".to_owned(),
                 "Work, work@example.com".to_owned(),
             ]
@@ -1230,45 +1461,42 @@ mod tests {
                 ],
             ),
         );
-        assert_eq!(state.labels()[1..], ["me@example.com", "Bare"]);
+        assert_eq!(state.labels(), ["me@example.com", "Bare"]);
     }
 
     #[test]
     fn a_locked_vault_offers_unlock_and_a_failed_one_offers_retry() {
         let mut state = InlineLogins::default();
         let generation = state.begin_lookup(false).expect("starts");
-        assert_eq!(state.labels()[1], "Checking Vault…");
+        assert_eq!(state.labels(), ["Loading…"]);
         state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[]));
-        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
-        assert_eq!(state.action(1), Some(RowAction::Unlock));
+        assert_eq!(state.labels(), ["Unlock Vault"]);
+        assert_eq!(state.action(0), Some(RowAction::Unlock));
 
         let generation = state.begin_lookup(true).expect("starts");
         assert_eq!(
             state.labels(),
-            [VAULT_HEADING, "Unlocking Vault…"],
+            ["Unlocking Vault…"],
             "while Vault's own prompt is up there is nothing to click"
         );
-        assert_eq!(state.action(1), None);
+        assert_eq!(state.action(0), None);
         let mut failed = response(VaultLoginsStatus::Error, &[]);
         failed.error = Some("Vault could not answer.".to_owned());
         state.finish_lookup(generation, failed);
-        assert_eq!(
-            state.labels(),
-            [VAULT_HEADING, "Vault could not answer.", "Try again"]
-        );
-        assert_eq!(state.action(1), None, "the message is not a choice");
-        assert_eq!(state.action(2), Some(RowAction::Unlock));
+        assert_eq!(state.labels(), ["Vault could not answer.", "Try again"]);
+        assert_eq!(state.action(0), None, "the message is not a choice");
+        assert_eq!(state.action(1), Some(RowAction::Unlock));
     }
 
     #[test]
     fn a_locked_answer_never_leaves_the_picker_loading() {
         let mut state = open_picker_locked();
         assert!(!state.loading);
-        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
+        assert_eq!(state.labels(), ["Unlock Vault"]);
         // Asking again to unlock and being cancelled comes back as locked again.
         let generation = state.begin_lookup(true).expect("an unlock starts");
         assert!(state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[])));
-        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
+        assert_eq!(state.labels(), ["Unlock Vault"]);
     }
 
     #[test]
@@ -1279,11 +1507,11 @@ mod tests {
         let unlock = state.begin_lookup(true).expect("an unlock goes ahead");
         // The first answer is for a lookup the picker has moved on from.
         assert!(!state.finish_lookup(first, response(VaultLoginsStatus::Locked, &[])));
-        assert_eq!(state.labels(), [VAULT_HEADING, "Unlocking Vault…"]);
+        assert_eq!(state.labels(), ["Unlocking Vault…"]);
         // The one it waits for settles it, whatever came before.
         assert!(state.finish_lookup(unlock, response(VaultLoginsStatus::Ok, &[])));
         assert!(!state.loading);
-        assert_eq!(state.labels(), [VAULT_HEADING, "No matching login."]);
+        assert_eq!(state.labels(), ["No matching login."]);
     }
 
     #[test]
@@ -1300,7 +1528,7 @@ mod tests {
         assert!(!state.loading);
         assert_eq!(
             state.labels(),
-            [VAULT_HEADING, "Vault did not answer in time.", "Try again"]
+            ["Vault did not answer in time.", "Try again"]
         );
         assert!(!state.expire_lookup(lost), "once only");
         // Retry runs a new lookup, and the old one's late answer changes nothing.
@@ -1310,7 +1538,7 @@ mod tests {
             retry,
             response(VaultLoginsStatus::Ok, &[("a", "Example", None)])
         ));
-        assert_eq!(state.labels()[1], "Example");
+        assert_eq!(state.labels()[0], "Example");
     }
 
     #[test]
@@ -1319,16 +1547,20 @@ mod tests {
         let generation = state.begin_lookup(false).expect("starts");
         state.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[]));
         assert!(!state.expire_lookup(generation));
-        assert_eq!(state.labels(), [VAULT_HEADING, "Unlock Vault"]);
+        assert_eq!(state.labels(), ["Unlock Vault"]);
     }
 
     #[test]
     fn a_long_error_line_gets_room_to_wrap() {
-        let short = PickerRow::Note("No matching login.".to_owned());
-        let long = PickerRow::Note(
-            "Vault could not answer. Open or update Vault and try again.".to_owned(),
+        let short = PickerRow::error("No answer.");
+        let long = PickerRow::error("Vault could not answer. Open or update Vault and try again.");
+        assert!(long.height(280.0) > short.height(280.0));
+        let status = PickerRow::status("Vault is not installed, and this line is far too long.");
+        assert!(status.height(280.0) > PickerRow::status("Short.").height(280.0));
+        assert!(
+            status.height(420.0) <= status.height(280.0),
+            "a wider picker never needs more lines"
         );
-        assert!(long.height() > short.height());
     }
 
     #[tokio::test]
@@ -1351,13 +1583,12 @@ mod tests {
         let mut state = InlineLogins::default();
         let generation = state.begin_lookup(false).expect("starts");
         state.finish_lookup(generation, response(VaultLoginsStatus::Ok, &[]));
-        assert_eq!(state.labels()[1], "No matching login.");
-        assert_eq!(state.action(1), None);
+        assert_eq!(state.labels(), ["No matching login."]);
+        assert_eq!(state.action(0), None);
         let generation = state.begin_lookup(false).expect("starts");
         state.finish_lookup(generation, response(VaultLoginsStatus::Unavailable, &[]));
-        assert_eq!(state.labels()[1], "Vault is not installed");
-        assert_eq!(state.action(1), None);
-        assert_eq!(state.action(0), None, "the heading is not a choice");
+        assert_eq!(state.labels(), ["Vault is not installed"]);
+        assert_eq!(state.action(0), None);
     }
 
     #[test]
@@ -1366,7 +1597,12 @@ mod tests {
         state.close();
         state.fail("Vault unlock cancelled.");
         assert!(state.shown());
-        assert_eq!(state.labels()[1], "Vault unlock cancelled.");
+        assert_eq!(state.labels()[0], "Vault unlock cancelled.");
+        assert_eq!(
+            state.rows()[0],
+            PickerRow::error("Vault unlock cancelled."),
+            "a failed fill is an error line"
+        );
         assert!(state.apply_event(&event("focus", "username")));
         assert!(
             !state
@@ -1379,11 +1615,19 @@ mod tests {
     #[test]
     fn the_picker_height_follows_its_rows_and_is_capped() {
         let state = open_picker();
-        // Heading 24 + two logins 42 + two gaps 2 + padding 8 + border 2.
-        assert_eq!(
-            state.size(),
-            (PICKER_WIDTH_PX, 24.0 + 42.0 * 2.0 + 4.0 + 10.0)
-        );
+        let field = WebRect {
+            x: 150.0,
+            y: 70.0,
+            width: 300.0,
+            height: 30.0,
+        };
+        let tall_view = WebRect {
+            height: 900.0,
+            ..view()
+        };
+        // Two logins with a username: 53 px each (29 px tile or 17 + 2 + 16 px of text, plus 9 px
+        // padding on both sides), and 6 px of panel padding on both sides.
+        assert_eq!(state.size(field, tall_view), (300.0, 2.0 * 53.0 + 12.0));
         let mut many = InlineLogins::default();
         let generation = many.begin_lookup(false).expect("starts");
         let items: Vec<(String, String)> = (0..30)
@@ -1394,7 +1638,123 @@ mod tests {
             .map(|(id, title)| (id.as_str(), title.as_str(), Some("user")))
             .collect();
         many.finish_lookup(generation, response(VaultLoginsStatus::Ok, &refs));
-        assert_eq!(many.size().1, PICKER_MAX_HEIGHT_PX);
+        assert_eq!(many.size(field, tall_view).1, 292.0, "capped at 292");
+        // A short view leaves 8 px above and below.
+        let short_view = WebRect {
+            height: 100.0,
+            ..view()
+        };
+        assert_eq!(many.size(field, short_view).1, 84.0);
+        // A lone status line is never less than 40 px tall.
+        let mut lone = InlineLogins::default();
+        let generation = lone.begin_lookup(false).expect("starts");
+        lone.finish_lookup(generation, response(VaultLoginsStatus::Locked, &[]));
+        assert_eq!(lone.size(field, tall_view).1, 47.0 + 12.0);
+    }
+
+    #[test]
+    fn row_heights_are_the_extensions_css() {
+        let login = |username: Option<&str>| PickerRow::Login {
+            id: "a".to_owned(),
+            title: "Name".to_owned(),
+            username: username.map(str::to_owned),
+        };
+        // A 29 px tile or the two text lines, whichever is taller, and 9 px padding on each side.
+        assert_eq!(login(Some("me")).height(300.0), 35.0 + 18.0);
+        assert_eq!(login(None).height(300.0), 29.0 + 18.0);
+        assert_eq!(
+            PickerRow::Unlock { retry: false }.height(300.0),
+            29.0 + 18.0
+        );
+        assert_eq!(PickerRow::Unlock { retry: true }.height(300.0), 17.0 + 18.0);
+        // One line of status text with 6 px above and below; an error line in its tinted box.
+        let one_line = PickerRow::status("Loading…").height(300.0);
+        assert!((one_line - (19.6 + 12.0)).abs() < 0.01, "{one_line}");
+        let error = PickerRow::error("Oops").height(300.0);
+        assert!((error - (18.2 + 18.0 + 3.0 + 6.0)).abs() < 0.01, "{error}");
+    }
+
+    #[test]
+    fn the_picker_is_as_wide_as_the_field_within_280_and_420() {
+        let field = |width| WebRect {
+            x: 120.0,
+            y: 70.0,
+            width,
+            height: 30.0,
+        };
+        let wide_view = WebRect {
+            width: 1_000.0,
+            ..view()
+        };
+        assert_eq!(picker_width(field(350.0), wide_view), 350.0, "the field's");
+        assert_eq!(picker_width(field(120.0), wide_view), 280.0, "at least 280");
+        assert_eq!(picker_width(field(900.0), wide_view), 420.0, "at most 420");
+        let narrow_view = WebRect {
+            width: 300.0,
+            ..view()
+        };
+        assert_eq!(
+            picker_width(field(350.0), narrow_view),
+            284.0,
+            "never past the view less 8 px a side"
+        );
+        let state = open_picker();
+        assert_eq!(state.size(field(350.0), view()).0, 350.0);
+    }
+
+    #[test]
+    fn the_palette_is_the_extensions_dark_and_light_pairs() {
+        let hex = |color: Hsla| {
+            let rgba = color.to_rgb();
+            (
+                (rgba.r * 255.0).round() as u8,
+                (rgba.g * 255.0).round() as u8,
+                (rgba.b * 255.0).round() as u8,
+            )
+        };
+        let dark = Palette::of(Appearance::Dark);
+        assert_eq!(hex(dark.surface), (0x24, 0x24, 0x26));
+        assert_eq!(hex(dark.text), (0xee, 0xee, 0xee));
+        assert_eq!(hex(dark.muted), (0xbb, 0xbb, 0xbb));
+        assert_eq!(hex(dark.hover), (0x37, 0x37, 0x3c));
+        assert_eq!(hex(dark.tile), (0x3f, 0x3f, 0x44));
+        assert_eq!(hex(dark.error_text), (0xff, 0x6b, 0x61));
+        let light = Palette::of(Appearance::Light);
+        assert_eq!(hex(light.surface), (0xfa, 0xfa, 0xfa));
+        assert_eq!(hex(light.text), (0x20, 0x20, 0x24));
+        assert_eq!(hex(light.muted), (0x66, 0x66, 0x66));
+        assert_eq!(hex(light.hover), (0xea, 0xea, 0xf0));
+        assert_eq!(hex(light.tile), (0xe7, 0xe7, 0xec));
+        assert_eq!(hex(light.error_text), (0xc4, 0x27, 0x1c));
+        assert!((dark.error_fill.a - 0x26 as f32 / 255.0).abs() < 0.002);
+        assert!((light.error_fill.a - 0x14 as f32 / 255.0).abs() < 0.002);
+    }
+
+    #[test]
+    fn the_page_icon_shows_for_its_own_site_only() {
+        let mut state = InlineLogins::default();
+        let png = vec![0x89, b'P', b'N', b'G'];
+        assert!(state.set_icon("https://Login.Example/sign-in?x=1", png.clone()));
+        assert!(state.icon_for("https://login.example/other").is_some());
+        assert!(
+            state.icon_for("https://other.example/").is_none(),
+            "another site gets none"
+        );
+        assert!(state.icon_for("http://login.example/").is_none());
+        assert!(
+            !state.set_icon("http://login.example/", png.clone()),
+            "HTTPS only"
+        );
+        assert!(!state.set_icon("about:blank", png));
+        assert!(
+            !state.set_icon("https://login.example/", Vec::new()),
+            "no empty icon"
+        );
+        state.reset();
+        assert!(
+            state.icon_for("https://login.example/").is_some(),
+            "a new document keeps the icon until the site changes"
+        );
     }
 
     // ── Keyboard ────────────────────────────────────────────────────────────────────
@@ -1414,17 +1774,13 @@ mod tests {
     fn arrow_keys_walk_the_logins_and_wrap() {
         let mut state = open_picker();
         assert_eq!(state.handle_key("down"), KeyOutcome::Handled);
+        assert_eq!(state.cursor, Some(0));
+        assert_eq!(state.handle_key("down"), KeyOutcome::Handled);
         assert_eq!(state.cursor, Some(1));
         assert_eq!(state.handle_key("down"), KeyOutcome::Handled);
-        assert_eq!(state.cursor, Some(2));
-        assert_eq!(state.handle_key("down"), KeyOutcome::Handled);
-        assert_eq!(
-            state.cursor,
-            Some(1),
-            "wraps past the last login, skipping the heading"
-        );
+        assert_eq!(state.cursor, Some(0), "wraps past the last login");
         assert_eq!(state.handle_key("up"), KeyOutcome::Handled);
-        assert_eq!(state.cursor, Some(2), "wraps back");
+        assert_eq!(state.cursor, Some(1), "wraps back");
     }
 
     #[test]
@@ -1443,7 +1799,7 @@ mod tests {
     fn up_from_nothing_starts_at_the_last_login() {
         let mut state = open_picker();
         assert_eq!(state.handle_key("up"), KeyOutcome::Handled);
-        assert_eq!(state.cursor, Some(2));
+        assert_eq!(state.cursor, Some(1));
     }
 
     #[test]
@@ -1485,26 +1841,20 @@ mod tests {
     }
 
     #[test]
-    fn the_highlight_follows_the_pointer_but_not_onto_a_heading_or_note() {
-        let mut state = open_picker();
-        state.hover(0);
-        assert_eq!(state.cursor, None);
-        state.hover(2);
-        assert_eq!(state.cursor, Some(2));
-        state.hover(99);
-        assert_eq!(state.cursor, Some(2));
-    }
-
-    #[test]
     fn a_new_answer_drops_a_highlight_that_no_longer_points_at_a_login() {
         let mut state = open_picker();
-        state.hover(2);
+        state.step(true);
+        state.step(true);
+        assert_eq!(state.cursor, Some(1));
         let generation = state.begin_lookup(false).expect("starts");
         state.finish_lookup(generation, response(VaultLoginsStatus::Ok, &[]));
         assert_eq!(state.cursor, None);
     }
 
     // ── Headless GPUI: the card as drawn ────────────────────────────────────────────
+
+    /// The picker's width in the harness: a field 300 px wide.
+    const HARNESS_WIDTH_PX: f32 = 300.0;
 
     struct Harness {
         state: InlineLogins,
@@ -1528,7 +1878,6 @@ mod tests {
                 .on_hover(move |hovered, _, _| behind.set(*hovered));
             let actions = PickerActions::<Self> {
                 choose: |this, index, _, _| this.chosen.borrow_mut().push(index),
-                hover: |this, index, _| this.state.hover(index),
                 dismiss: |this, _, _| this.outside_presses.set(this.outside_presses.get() + 1),
             };
             div()
@@ -1538,7 +1887,9 @@ mod tests {
                 .child(render_picker(
                     &self.state,
                     (40.0, 40.0),
+                    (HARNESS_WIDTH_PX, 200.0),
                     &self.tokens,
+                    None,
                     &actions,
                     cx,
                 ))
@@ -1603,10 +1954,10 @@ mod tests {
     fn clicking_a_login_row_chooses_it(cx: &mut TestAppContext) {
         let mounted = mount(cx, open_picker());
         let clicked = cx.update_window(mounted.window, |_, window, cx| {
-            window.click("browser-vault-inline-2", cx);
+            window.click("browser-vault-inline-1", cx);
         });
         assert!(clicked.is_ok());
-        assert_eq!(*mounted.chosen.borrow(), vec![2]);
+        assert_eq!(*mounted.chosen.borrow(), vec![1]);
     }
 
     #[gpui_kit::test]
@@ -1618,16 +1969,16 @@ mod tests {
         let mounted = mount(cx, state);
         let found = cx.update_window(mounted.window, |_, window, _| {
             (
-                window.try_find("browser-vault-inline-1").is_some(),
                 window.try_find("browser-vault-inline-0").is_some(),
+                window.try_find("browser-vault-inline-1").is_some(),
             )
         });
-        assert_eq!(found.ok(), Some((true, false)), "the heading is not a row");
+        assert_eq!(found.ok(), Some((true, false)), "Unlock is the only row");
         let clicked = cx.update_window(mounted.window, |_, window, cx| {
-            window.click("browser-vault-inline-1", cx);
+            window.click("browser-vault-inline-0", cx);
         });
         assert!(clicked.is_ok());
-        assert_eq!(*mounted.chosen.borrow(), vec![1]);
+        assert_eq!(*mounted.chosen.borrow(), vec![0]);
     }
 
     #[gpui_kit::test]
@@ -1652,7 +2003,7 @@ mod tests {
             mounted.behind_hovered.get(),
             "the page is hovered off the picker"
         );
-        move_to(cx, &|w| w.find("browser-vault-inline-1").bounds().center());
+        move_to(cx, &|w| w.find("browser-vault-inline-0").bounds().center());
         assert!(
             !mounted.behind_hovered.get(),
             "hovering a login row must not hover the page behind it"
@@ -1668,7 +2019,7 @@ mod tests {
     fn a_press_outside_the_picker_dismisses_it_and_a_press_on_it_does_not(cx: &mut TestAppContext) {
         let mounted = mount(cx, open_picker());
         let pressed = cx.update_window(mounted.window, |_, window, cx| {
-            window.click("browser-vault-inline-1", cx);
+            window.click("browser-vault-inline-0", cx);
         });
         assert!(pressed.is_ok());
         assert_eq!(
@@ -1688,5 +2039,250 @@ mod tests {
         });
         assert!(pressed.is_ok());
         assert_eq!(mounted.outside_presses.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn the_card_is_laid_out_as_the_extensions_css(cx: &mut TestAppContext) {
+        let mounted = mount(cx, open_picker());
+        let bounds = cx.update_window(mounted.window, |_, window, cx| {
+            window.render_frame(cx);
+            let card = window.find("browser-vault-inline").bounds();
+            let first = window.find("browser-vault-inline-0").bounds();
+            let second = window.find("browser-vault-inline-1").bounds();
+            (card, first, second)
+        });
+        let (card, first, second) = bounds.expect("the window is open");
+        let (left, top) = (f32::from(card.left()), f32::from(card.top()));
+        assert_eq!((left, top), (40.0, 40.0), "at the origin it was given");
+        assert_eq!(
+            f32::from(card.size.width),
+            HARNESS_WIDTH_PX,
+            "the field's width"
+        );
+        // 6 px of panel padding, then rows 53 px high with no gap between them.
+        assert_eq!(f32::from(first.top()) - top, 6.0);
+        assert_eq!(f32::from(first.left()) - left, 6.0);
+        assert_eq!(f32::from(first.size.width), HARNESS_WIDTH_PX - 12.0);
+        assert_eq!(f32::from(first.size.height), 53.0);
+        assert_eq!(f32::from(second.top()), f32::from(first.bottom()));
+        assert_eq!(f32::from(card.size.height), 2.0 * 53.0 + 12.0);
+    }
+
+    // ── Offscreen renders (`#[ignore]`d; they write PNGs) ───────────────────────────
+
+    /// A stand-in for a site's own icon, 84 px square: a blue disc with a lighter wing. (The
+    /// browser hands the real one over as PNG; the colours here are not any site's.)
+    fn sample_icon() -> Arc<Image> {
+        use image::ImageEncoder as _;
+        let size = 84_u32;
+        let mut rgba = vec![0_u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let (dx, dy) = (x as f32 - 41.5, y as f32 - 41.5);
+                let at = ((y * size + x) * 4) as usize;
+                if dx * dx + dy * dy <= 38.0 * 38.0 {
+                    let wing = (dx + 8.0).powi(2) / 400.0 + (dy - 6.0).powi(2) / 130.0 <= 1.0;
+                    let color: [u8; 4] = if wing {
+                        [0xa9, 0xd0, 0xff, 0xff]
+                    } else {
+                        [0x1c, 0x6c, 0xe6, 0xff]
+                    };
+                    rgba[at..at + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, size, size, image::ExtendedColorType::Rgba8)
+            .expect("an encoded icon");
+        Arc::new(Image::from_bytes(ImageFormat::Png, png))
+    }
+
+    /// A page with one sign-in field and the picker under it, as the Browser panel draws them.
+    struct ShotView {
+        state: InlineLogins,
+        tokens: Tokens,
+        icon: Option<Arc<Image>>,
+    }
+
+    const SHOT_VIEW: WebRect = WebRect {
+        x: 0.0,
+        y: 0.0,
+        width: 560.0,
+        height: 380.0,
+    };
+    const SHOT_FIELD: WebRect = WebRect {
+        x: 70.0,
+        y: 70.0,
+        width: 360.0,
+        height: 40.0,
+    };
+
+    impl Render for ShotView {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            let dark = self.tokens.appearance == Appearance::Dark;
+            let (page, ink, field, edge) = if dark {
+                (rgb(0x16161a), rgb(0xe8e8ec), rgb(0x1f1f24), rgb(0x3a3a42))
+            } else {
+                (rgb(0xffffff), rgb(0x1b1b1f), rgb(0xffffff), rgb(0xcfcfd6))
+            };
+            let actions = PickerActions::<Self> {
+                choose: |_, _, _, _| {},
+                dismiss: |_, _, _| {},
+            };
+            let size = self.state.size(SHOT_FIELD, SHOT_VIEW);
+            let origin = picker_origin(SHOT_FIELD, size, SHOT_VIEW);
+            div()
+                .size_full()
+                .relative()
+                .bg(page)
+                .text_color(ink)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(SHOT_FIELD.x))
+                        .top(px(SHOT_FIELD.y - 30.0))
+                        .text_size(px(13.0))
+                        .child("Email"),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(SHOT_FIELD.x))
+                        .top(px(SHOT_FIELD.y))
+                        .w(px(SHOT_FIELD.width))
+                        .h(px(SHOT_FIELD.height))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(edge)
+                        .bg(field),
+                )
+                .child(render_picker(
+                    &self.state,
+                    origin,
+                    size,
+                    &self.tokens,
+                    self.icon.as_ref(),
+                    &actions,
+                    cx,
+                ))
+        }
+    }
+
+    fn shot_state(
+        status: VaultLoginsStatus,
+        items: &[(&str, &str, Option<&str>)],
+        error: Option<&str>,
+        loading: bool,
+        keyboard_on: Option<usize>,
+    ) -> InlineLogins {
+        let mut state = InlineLogins::default();
+        state.apply_event(&event("focus", "username"));
+        let generation = state.begin_lookup(false).expect("a lookup starts");
+        if !loading {
+            let mut answer = response(status, items);
+            answer.error = error.map(str::to_owned);
+            state.finish_lookup(generation, answer);
+        }
+        for _ in 0..keyboard_on.map_or(0, |row| row + 1) {
+            state.step(true);
+        }
+        state
+    }
+
+    /// Renders the picker offscreen to PNG: dark and light, one login, several logins (with the
+    /// keyboard on the second), no site icon (the key), locked, loading, empty, and an error. It
+    /// opens no window on screen and takes no focus: GPUI's headless renderer draws into a texture.
+    ///
+    /// `CONN_PICKER_SHOTS_DIR=<dir> cargo test -p conn-app render_picker_screenshots -- --ignored`
+    #[test]
+    #[ignore = "writes PNGs; set CONN_PICKER_SHOTS_DIR"]
+    fn render_picker_screenshots() {
+        let Some(dir) = std::env::var_os("CONN_PICKER_SHOTS_DIR") else {
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).expect("an output folder");
+        // `current_platform(true)` needs the main thread, which libtest does not give a test.
+        let mut ctx = gpui_kit::HeadlessAppContext::with_platform(
+            Arc::new(gpui_apple::AppleTextSystem::new()),
+            Arc::new(crate::superhero::AppAssets),
+            gpui_kit::platform::current_headless_renderer,
+        );
+        let one = [("a", "Moneybird", Some("nick@example.com"))];
+        let several = [
+            ("a", "Moneybird", Some("nick@example.com")),
+            ("b", "Moneybird (work)", Some("accounting@example.com")),
+            ("c", "Old login", None),
+        ];
+        let long = "Vault could not answer. Open or update Vault and try again.";
+        for (theme_id, look) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+            let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+            let tokens = Tokens::derive(&theme);
+            let ok = VaultLoginsStatus::Ok;
+            let cases: Vec<(&str, InlineLogins, bool)> = vec![
+                ("one-login", shot_state(ok, &one, None, false, None), true),
+                (
+                    "several-logins",
+                    shot_state(ok, &several, None, false, Some(1)),
+                    true,
+                ),
+                (
+                    "no-site-icon",
+                    shot_state(ok, &several, None, false, None),
+                    false,
+                ),
+                (
+                    "locked",
+                    shot_state(VaultLoginsStatus::Locked, &[], None, false, None),
+                    false,
+                ),
+                ("loading", shot_state(ok, &[], None, true, None), false),
+                ("empty", shot_state(ok, &[], None, false, None), false),
+                (
+                    "error",
+                    shot_state(VaultLoginsStatus::Error, &[], Some(long), false, Some(0)),
+                    false,
+                ),
+            ];
+            for (name, state, with_icon) in cases {
+                let (window, _view) = ctx.update(|cx| {
+                    gpui_kit::init(cx);
+                    crate::fonts::register(cx);
+                    crate::theme::apply_kit_theme(&tokens, cx);
+                    let mut state = Some(state);
+                    let tokens = tokens.clone();
+                    gpui_kit::open_window(
+                        WindowOptions {
+                            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                                Point::default(),
+                                size(px(SHOT_VIEW.width), px(SHOT_VIEW.height)),
+                            ))),
+                            focus: false,
+                            show: false,
+                            ..Default::default()
+                        },
+                        cx,
+                        move |_, cx| {
+                            cx.new(|_| ShotView {
+                                state: state.take().unwrap_or_default(),
+                                tokens,
+                                icon: with_icon.then(sample_icon),
+                            })
+                        },
+                    )
+                    .expect("a window")
+                });
+                for _ in 0..4 {
+                    ctx.update_window(window, |_, w, c| w.render_frame(c))
+                        .expect("a frame");
+                    ctx.run_until_parked();
+                }
+                let image = ctx.capture_screenshot(window).expect("a screenshot");
+                image
+                    .save(dir.join(format!("{look}-{name}.png")))
+                    .expect("a saved PNG");
+            }
+        }
     }
 }

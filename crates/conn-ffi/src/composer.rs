@@ -5,11 +5,19 @@ use crate::{FfiError, FfiSendMode};
 use conn_client::Connection;
 use conn_contract::{ChatAttachment, ExecutionEnvironmentCapabilities};
 
-#[derive(Debug, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct FfiComposerFile {
     pub path: String,
     pub name: String,
     pub mime_type: String,
+}
+
+impl std::fmt::Debug for FfiComposerFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiComposerFile")
+            .field("mime_type", &self.mime_type)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, uniffi::Enum)]

@@ -1636,7 +1636,7 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
      */
     func launch(saved: FfiSavedSession?) 
     
-    func linkedNodes(primaryId: String, saved: [String], disabled: [String]) async throws  -> [FfiOrbitEnvironment]
+    func linkedNodes(primaryId: String, saved: [String], disabled: [String]) async throws  -> FfiLinkedDiscovery
     
     /**
      * The current connection's offline thread cache, once open.
@@ -1826,7 +1826,7 @@ open func launch(saved: FfiSavedSession?)  {try! rustCall() {
 }
 }
     
-open func linkedNodes(primaryId: String, saved: [String], disabled: [String])async throws  -> [FfiOrbitEnvironment]  {
+open func linkedNodes(primaryId: String, saved: [String], disabled: [String])async throws  -> FfiLinkedDiscovery  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -1837,7 +1837,7 @@ open func linkedNodes(primaryId: String, saved: [String], disabled: [String])asy
             pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypeFfiOrbitEnvironment.lift,
+            liftFunc: FfiConverterTypeFfiLinkedDiscovery_lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -5479,6 +5479,60 @@ public func FfiConverterTypeFfiInsightTrendPoint_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendPoint) -> RustBuffer {
     return FfiConverterTypeFfiInsightTrendPoint.lower(value)
+}
+
+
+public struct FfiLinkedDiscovery: Equatable, Hashable {
+    public var targets: [FfiOrbitEnvironment]
+    public var unresolvedEndpoints: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String]) {
+        self.targets = targets
+        self.unresolvedEndpoints = unresolvedEndpoints
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiLinkedDiscovery: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLinkedDiscovery: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLinkedDiscovery {
+        return
+            try FfiLinkedDiscovery(
+                targets: FfiConverterSequenceTypeFfiOrbitEnvironment.read(from: &buf), 
+                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiLinkedDiscovery, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiOrbitEnvironment.write(value.targets, into: &buf)
+        FfiConverterSequenceString.write(value.unresolvedEndpoints, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedDiscovery_lift(_ buf: RustBuffer) throws -> FfiLinkedDiscovery {
+    return try FfiConverterTypeFfiLinkedDiscovery.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLinkedDiscovery_lower(_ value: FfiLinkedDiscovery) -> RustBuffer {
+    return FfiConverterTypeFfiLinkedDiscovery.lower(value)
 }
 
 
@@ -18135,7 +18189,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_launch() != 24523) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_connsession_linked_nodes() != 16297) {
+    if (uniffi_conn_ffi_checksum_method_connsession_linked_nodes() != 18623) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_offline_reader() != 43115) {

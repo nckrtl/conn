@@ -750,6 +750,12 @@ enum Recover {
 // The runner: ConnSession
 // ---------------------------------------------------------------------------
 
+#[derive(uniffi::Record)]
+pub struct FfiLinkedDiscovery {
+    pub targets: Vec<crate::orbit::FfiOrbitEnvironment>,
+    pub unresolved_endpoints: Vec<String>,
+}
+
 /// UniFFI handle to the app's connection: one state machine plus the Orbit client it uses.
 #[derive(uniffi::Object)]
 pub struct ConnSession {
@@ -1106,7 +1112,7 @@ impl ConnSession {
         primary_id: String,
         saved: Vec<String>,
         disabled: Vec<String>,
-    ) -> Result<Vec<crate::orbit::FfiOrbitEnvironment>, FfiError> {
+    ) -> Result<FfiLinkedDiscovery, FfiError> {
         use conn_orbit::linked::{LinkedPlanInput, plan_linked_environments};
         use std::collections::HashSet;
         self.orbit.me().await?;
@@ -1132,11 +1138,47 @@ impl ConnSession {
                     now_ms: 0,
                 });
                 let wanted: HashSet<_> = plan.connect.into_iter().chain(plan.pair).collect();
-                Ok(targets
-                    .iter()
-                    .filter(|t| wanted.contains(&t.server_id))
-                    .map(|t| crate::orbit::map_orbit_environment(t, false))
-                    .collect())
+                let mut endpoints = std::collections::BTreeMap::<String, Vec<_>>::new();
+                for target in &targets {
+                    let url = url::Url::parse(&target.url)
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|_| target.url.clone());
+                    endpoints
+                        .entry(url.trim_end_matches('/').to_owned())
+                        .or_default()
+                        .push(target);
+                }
+                let mut linked = Vec::new();
+                let mut unresolved_endpoints = Vec::new();
+                let mut included = HashSet::new();
+                for (url, registrations) in endpoints {
+                    if !registrations.iter().any(|t| wanted.contains(&t.server_id)) {
+                        continue;
+                    }
+                    // Several Orbit registrations can point at one socket after a host reinstall.
+                    let target = if registrations.len() == 1 {
+                        registrations.first().copied()
+                    } else {
+                        let actual = fetch_environment_id(&url).await;
+                        registrations
+                            .into_iter()
+                            .find(|t| Some(t.server_id.as_str()) == actual.as_deref())
+                    };
+                    match target {
+                        Some(t)
+                            if wanted.contains(&t.server_id)
+                                && included.insert(t.server_id.clone()) =>
+                        {
+                            linked.push(crate::orbit::map_orbit_environment(t, false))
+                        }
+                        None => unresolved_endpoints.push(url),
+                        _ => {}
+                    }
+                }
+                Ok(FfiLinkedDiscovery {
+                    targets: linked,
+                    unresolved_endpoints,
+                })
             })
             .await
     }
@@ -1540,7 +1582,7 @@ mod tests {
                 vec!["disabled".into()],
             ))
         };
-        let targets = discover("primary").unwrap();
+        let targets = discover("primary").unwrap().targets;
         assert_eq!(
             targets
                 .iter()
@@ -1549,6 +1591,49 @@ mod tests {
             ["desktop"]
         );
         assert!(discover("other").is_err());
+    }
+
+    #[test]
+    fn duplicate_registrations_create_only_the_scope_named_by_the_descriptor() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (url, saw_bearer) = runtime.block_on(server_named("current"));
+        let gateway = MockGateway::new(move |req| {
+            let data = match req.path.as_str() {
+                "/me" => json!({"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}),
+                "/environments" => json!(["primary","stale","current"].map(|id|
+                    json!({"environment_id":id,"label":id,"url":if id == "primary" {"http://primary/".to_owned()} else if id == "stale" {url.trim_end_matches('/').to_owned()} else {url.clone()},"status":"registered","roles":[],"instance_id":null,"cleanup_pending":false})
+                )),
+                other => panic!("Discovery must not mint pairings: {other}"),
+            };
+            Ok(GatewayResponse {
+                status: 200,
+                body: json!({"data":data}).to_string(),
+            })
+        });
+        let session = ConnSession::with_orbit(
+            OrbitCore::with_transport(gateway).unwrap(),
+            None,
+            Arc::new(Recorder::default()),
+        );
+        let plan = futures::executor::block_on(session.linked_nodes(
+            "primary".into(),
+            vec!["stale".into()],
+            vec![],
+        ))
+        .unwrap();
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|t| t.server_id.as_str())
+                .collect::<Vec<_>>(),
+            ["current"]
+        );
+        assert!(plan.unresolved_endpoints.is_empty());
+        assert!(!saw_bearer.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -1933,7 +2018,12 @@ mod tests {
         let targets =
             futures::executor::block_on(restored.linked_nodes(primary_id.clone(), vec![], vec![]))
                 .unwrap();
-        assert!(targets.iter().any(|t| t.server_id == desktop_id));
+        assert!(targets.targets.iter().any(|t| t.server_id == desktop_id));
+        assert!(targets.unresolved_endpoints.is_empty());
+        eprintln!(
+            "discovered {} distinct linked servers",
+            targets.targets.len()
+        );
         let (desktop, child) = start("desktop");
         desktop.follow_environment(desktop_id.clone(), None);
         let shell = read(&child);

@@ -167,9 +167,11 @@ final class CoreStore {
         let saved = credentials.values.compactMap(\.orbitServerId)
         let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
         do {
-            let targets = try await session.linkedNodes(primaryId: primary, saved: saved, disabled: disabled)
+            let discovery = try await session.linkedNodes(primaryId: primary, saved: saved, disabled: disabled)
             guard !Task.isCancelled, generation == identityEpoch, environmentId == primary else { return }
-            discoveryError = nil
+            let targets = discovery.targets
+            discoveryError = discovery.unresolvedEndpoints.isEmpty ? nil :
+                "Could not verify the server identity at " + discovery.unresolvedEndpoints.joined(separator: ", ")
             discoveredPrimary = primary
             let wanted = Set(targets.map(\.serverId))
             for (key, child) in linked {

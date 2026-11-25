@@ -326,7 +326,7 @@ private struct ThreadListV2RowView: View {
                     .projectStatusDot(settled ? nil : statusTone)
 
                 Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
-                    .font(.system(size: 16, weight: settled ? .regular : .medium))
+                    .font(.system(size: 15, weight: settled ? .regular : .medium))
                     .foregroundStyle(settled ? theme.mutedForeground : theme.foreground)
                     .lineLimit(1)
                     .truncationMode(.tail)

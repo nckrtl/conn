@@ -59,7 +59,7 @@ private struct ThreadAgentRow: View {
                     .frame(width: iconSize, height: iconSize)
                     .projectStatusDot(tone)
                 Text(agent.title.isEmpty ? "Untitled agent" : agent.title)
-                    .font(.system(size: 16, weight: agent.settled ? .regular : .medium))
+                    .font(.system(size: 15, weight: agent.settled ? .regular : .medium))
                     .foregroundStyle(agent.settled ? theme.mutedForeground : theme.foreground)
                     .lineLimit(1)
                     .truncationMode(.tail)

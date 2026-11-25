@@ -1941,10 +1941,6 @@ mod tests {
         );
     }
 
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "the fixture asserts on the received upload"
-    )]
     async fn accept_test_upload(listener: &TcpListener) -> std::io::Result<()> {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         let (stream, _) = listener.accept().await?;

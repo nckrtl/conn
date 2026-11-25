@@ -508,6 +508,8 @@ final class ConnSpikeUITests: XCTestCase {
         app.navigationBars.buttons["Back"].tap()
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         XCTAssertEqual(field.value as? String, threadTitle)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Back should restore results without reopening the keyboard")
+        XCTAssertTrue(cancel.isHittable, "Cancel must be reachable after returning from a result")
         cancel.tap()
         XCTAssertTrue(threads.wait(for: \.isSelected, toEqual: true, timeout: 5))
     }

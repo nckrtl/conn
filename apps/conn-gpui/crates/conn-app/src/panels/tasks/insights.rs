@@ -16,12 +16,11 @@ use conn_theme::Tokens;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Bounds, FontWeight, Pixels, ScrollHandle, SharedString, Window, div,
-    linear_color_stop, linear_gradient, px,
+    AnyElement, App, Bounds, FontWeight, Pixels, ScrollHandle, SharedString, Window, div, px,
 };
 
 use super::charts::{render_sparkline, render_trend_chart};
-use super::format::{TasksSurfaceColors, insight_block_corners, insight_grid_layout, insight_hint};
+use super::format::{insight_grid_layout, insight_hint};
 use crate::panels::chrome::{self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
 use crate::panels::header::superhero_icon;
@@ -29,10 +28,6 @@ use crate::panels::header::superhero_icon;
 /// Minimum width of each insight card (130px lets all 4 columns fit a standard right panel
 /// without clipping while still enabling horizontal scrolling on narrower splits).
 const CARD_MIN_WIDTH_PX: f32 = 130.0;
-/// Gap between insight cards (`gap-0.5` = 2px).
-const GRID_GAP_PX: f32 = 2.0;
-/// Outer corner radius of the insights group (`12px`, matching lanes).
-const GROUP_RADIUS_PX: f32 = 12.0;
 /// Value font size (`text-lg leading-6` = 18px / 24px).
 const VALUE_FONT_PX: f32 = 18.0;
 const VALUE_LINE_HEIGHT_PX: f32 = 24.0;
@@ -41,19 +36,11 @@ const VALUE_LINE_HEIGHT_PX: f32 = 24.0;
 /// known and the expanded chart can take exactly the same space.
 const CARD_HEIGHT_PX: f32 = 103.0;
 
-/// Height of a strip of `rows` cards.
+/// A single row stretches to 168px; two rows retain 103px each. Opening a
+/// metric keeps that exact height so the task lanes stay in place.
 fn strip_height(rows: usize) -> f32 {
-    rows as f32 * CARD_HEIGHT_PX + rows.saturating_sub(1) as f32 * GRID_GAP_PX
+    (rows as f32 * CARD_HEIGHT_PX).max(168.0)
 }
-
-/// Height of the expanded insight chart: the two-row strip it replaces, so clicking a number
-/// moves nothing below it. (A strip of one or two numbers is a single row; the chart still gets
-/// room for two.)
-fn expanded_height(shown: usize) -> f32 {
-    strip_height(insight_grid_layout(shown).rows.max(2))
-}
-/// Width of the horizontal edge fade overlays (`w-8` = 32px).
-const EDGE_FADE_WIDTH_PX: f32 = 32.0;
 
 /// Callbacks for user interactions inside the insights strip.
 pub(super) struct InsightsCallbacks {
@@ -87,7 +74,8 @@ pub(super) fn render_insights_strip(
         return None;
     }
 
-    let surface = TasksSurfaceColors::from_tokens(tokens);
+    let grid = insight_grid_layout(shown.len());
+    let height = strip_height(grid.rows);
 
     if let Some(open_spec) = expanded.and_then(|id| shown.iter().copied().find(|s| s.id == id)) {
         let result = insight_result(insights, open_spec.id);
@@ -95,11 +83,11 @@ pub(super) fn render_insights_strip(
             div()
                 .w_full()
                 .flex_shrink_0()
-                .px(px(8.0))
+                .border_b_1()
+                .border_color(to_hsla(tokens.shell_divider))
                 .child(render_insight_detail(
                     tokens,
-                    &surface,
-                    expanded_height(shown.len()),
+                    height,
                     open_spec,
                     result,
                     insights,
@@ -122,14 +110,8 @@ pub(super) fn render_insights_strip(
         period_scope.to_owned()
     };
 
-    let grid = insight_grid_layout(shown.len());
-    let min_grid_width = grid.columns as f32 * CARD_MIN_WIDTH_PX
-        + grid.columns.saturating_sub(1) as f32 * GRID_GAP_PX;
-
-    let mut rows_col = v_flex()
-        .w_full()
-        .min_w(px(min_grid_width))
-        .gap(px(GRID_GAP_PX));
+    let min_grid_width = grid.columns as f32 * CARD_MIN_WIDTH_PX;
+    let mut rows_col = v_flex().w_full().min_w(px(min_grid_width));
 
     for row_idx in 0..grid.rows {
         let start = row_idx * grid.columns;
@@ -137,7 +119,7 @@ pub(super) fn render_insights_strip(
         if start >= end {
             continue;
         }
-        let mut row = h_flex().w_full().gap(px(GRID_GAP_PX));
+        let mut row = h_flex().w_full().items_stretch();
         for (offset, spec) in shown[start..end].iter().copied().enumerate() {
             let index = start + offset;
             let span = if index + 1 == shown.len() {
@@ -145,75 +127,38 @@ pub(super) fn render_insights_strip(
             } else {
                 1
             };
-            let corners = insight_block_corners(grid, index, shown.len());
             let result = insight_result(insights, spec.id);
             let trend = insight_trend(insights, spec.id);
             let tooltip_text = format!("{} {scope}", insight_hint(spec.id, insights));
             row = row.child(render_insight_card(
                 tokens,
-                &surface,
                 spec,
                 result,
                 trend,
                 tooltip_text,
                 span,
-                corners,
+                height / grid.rows as f32,
+                row_idx > 0,
+                offset > 0,
                 Rc::clone(&callbacks.on_expand),
             ));
         }
         rows_col = rows_col.child(row);
     }
 
-    // Subtle edge fades while scrolled or scrollable horizontally (`TasksInsights.tsx:434-441`).
-    let card_bg = to_hsla(tokens.shell_card);
-    let offset_x = f32::from(scroll.offset().x);
-    let max_scroll_x = f32::from(scroll.max_offset().x);
-    let show_start_fade = offset_x < -1.0;
-    let show_end_fade = max_scroll_x > 1.0 && (-offset_x) < max_scroll_x - 1.0;
-
-    let mut section = div().relative().w_full().flex_shrink_0().child(
+    Some(
         div()
             .id("tasks-insights-scroll")
             .a11y_group("panel.tasks.insights", "Task insights")
             .w_full()
+            .flex_shrink_0()
             .overflow_x_scroll()
             .track_scroll(scroll)
-            .px(px(8.0))
-            .child(rows_col),
-    );
-
-    if show_start_fade {
-        section = section.child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom(px(1.0))
-                .left_0()
-                .w(px(EDGE_FADE_WIDTH_PX))
-                .bg(linear_gradient(
-                    90.0,
-                    linear_color_stop(card_bg, 0.0),
-                    linear_color_stop(card_bg.opacity(0.0), 1.0),
-                )),
-        );
-    }
-    if show_end_fade {
-        section = section.child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom(px(1.0))
-                .right_0()
-                .w(px(EDGE_FADE_WIDTH_PX))
-                .bg(linear_gradient(
-                    270.0,
-                    linear_color_stop(card_bg, 0.0),
-                    linear_color_stop(card_bg.opacity(0.0), 1.0),
-                )),
-        );
-    }
-
-    Some(section.into_any_element())
+            .border_b_1()
+            .border_color(to_hsla(tokens.shell_divider))
+            .child(rows_col)
+            .into_any_element(),
+    )
 }
 
 #[expect(
@@ -222,24 +167,24 @@ pub(super) fn render_insights_strip(
 )]
 fn render_insight_card(
     tokens: &Tokens,
-    surface: &TasksSurfaceColors,
     spec: InsightSpec,
     result: InsightResult,
     trend: Option<Vec<conn_desktop::orbit::insights::TrendPoint>>,
     tooltip_text: String,
     span: usize,
-    corners: [bool; 4],
+    height: f32,
+    row_divider: bool,
+    column_divider: bool,
     on_expand: Rc<dyn Fn(Option<InsightId>, &mut Window, &mut App)>,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
     let muted = to_hsla(tokens.muted_foreground);
-    let card_bg = to_hsla(surface.card_bg);
-    let card_hover = to_hsla(surface.card_hover_bg);
+    let card_hover = to_hsla(tokens.shell_highlight);
 
     let formatted_value = result.value.map(|v| format_insight_value(spec.id, v));
-    let min_w = span as f32 * CARD_MIN_WIDTH_PX + span.saturating_sub(1) as f32 * GRID_GAP_PX;
+    let min_w = span as f32 * CARD_MIN_WIDTH_PX;
 
-    let mut card = v_flex()
+    let card = v_flex()
         .id(SharedString::from(format!("tasks-insight-{:?}", spec.id)))
         .a11y_button(
             format!("panel.tasks.insight.{:?}", spec.id),
@@ -249,37 +194,23 @@ fn render_insight_card(
                 formatted_value.as_deref().unwrap_or("no data")
             ),
         )
-        .h(px(CARD_HEIGHT_PX))
+        .h(px(height))
         .min_w(px(min_w))
         .flex_grow(span as f32)
         .flex_shrink(1.0)
         .flex_basis(px(0.0))
         .gap(px(4.0))
-        .px(px(10.0))
+        .px(px(12.0))
         .pt(px(10.0))
         .pb(px(8.0))
-        .bg(card_bg)
+        .tab_index(0)
+        .when(row_divider, |el| el.border_t_1())
+        .when(column_divider, |el| el.border_l_1())
+        .border_color(to_hsla(tokens.shell_divider))
         .cursor_pointer()
         .hover(move |s| s.bg(card_hover))
         .on_click(move |_, window, cx| on_expand(Some(spec.id), window, cx))
         .conn_tooltip(tooltip_text, tokens);
-
-    // No divider line above or below the strip; the transparent border keeps tile sizes.
-    card = card
-        .border_t_1()
-        .border_color(gpui_kit::transparent_black());
-    if corners[0] {
-        card = card.rounded_tl(px(GROUP_RADIUS_PX));
-    }
-    if corners[1] {
-        card = card.rounded_tr(px(GROUP_RADIUS_PX));
-    }
-    if corners[2] {
-        card = card.rounded_br(px(GROUP_RADIUS_PX));
-    }
-    if corners[3] {
-        card = card.rounded_bl(px(GROUP_RADIUS_PX));
-    }
 
     let value_color = if formatted_value.is_some() {
         fg
@@ -290,7 +221,7 @@ fn render_insight_card(
     card.child(
         div()
             .truncate()
-            .text_size(px(UI_TEXT_PX))
+            .text_size(px(14.0))
             .line_height(px(UI_LINE_HEIGHT_PX))
             .text_color(muted)
             .child(spec.label),
@@ -366,7 +297,6 @@ fn render_insight_change(
 )]
 fn render_insight_detail(
     tokens: &Tokens,
-    surface: &TasksSurfaceColors,
     height: f32,
     spec: InsightSpec,
     result: InsightResult,
@@ -433,10 +363,6 @@ fn render_insight_detail(
         .w_full()
         .h(px(height))
         .gap(px(4.0))
-        .rounded(px(GROUP_RADIUS_PX))
-        .border_t_1()
-        .border_color(gpui_kit::transparent_black())
-        .bg(to_hsla(surface.card_bg))
         .px(px(12.0))
         .pt(px(10.0))
         .pb(px(8.0))
@@ -504,11 +430,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_expanded_chart_takes_exactly_the_strip_it_replaces() {
-        for shown in 3..=8 {
-            assert_eq!(expanded_height(shown), strip_height(2));
-        }
-        assert_eq!(strip_height(2), 208.0);
-        assert_eq!(expanded_height(2), strip_height(2));
+    fn the_insight_strip_uses_the_same_height_when_expanded() {
+        assert_eq!(strip_height(insight_grid_layout(1).rows), 168.0);
+        assert_eq!(strip_height(insight_grid_layout(2).rows), 168.0);
+        assert_eq!(strip_height(insight_grid_layout(7).rows), 206.0);
+        assert_eq!(strip_height(insight_grid_layout(8).rows), 206.0);
     }
 }

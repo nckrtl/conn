@@ -548,10 +548,7 @@ impl ConnApp {
                     app.select_right_panel_tab(RightPanelTab::Diff, cx);
                 }
                 crate::chat::ChatEvent::OpenTask { task_id } => {
-                    let task_id = *task_id;
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.open_task(task_id, cx));
-                    app.select_right_panel_tab(RightPanelTab::Tasks, cx);
+                    app.open_task_in_panel(*task_id, cx);
                 }
                 crate::chat::ChatEvent::OpenThread {
                     thread_id,
@@ -5312,6 +5309,12 @@ impl ConnApp {
         self.sidebar.remember_widths(sidebar, panel);
     }
 
+    pub(crate) fn open_task_in_panel(&mut self, task_id: i64, cx: &mut Context<'_, Self>) {
+        self.right_panel
+            .update(cx, |panel, cx| panel.open_task(task_id, cx));
+        self.select_right_panel_tab(RightPanelTab::Tasks, cx);
+    }
+
     /// Toggles the top-right Thread Details card and loads its data when it opens.
     pub(crate) fn toggle_thread_details(
         &mut self,
@@ -5827,6 +5830,9 @@ impl ConnApp {
                     shell: &self.shell,
                     thread,
                     state: &self.thread_details,
+                    timeline: self
+                        .selected_timeline()
+                        .map_or(&[], |t| t.entries.as_slice()),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px

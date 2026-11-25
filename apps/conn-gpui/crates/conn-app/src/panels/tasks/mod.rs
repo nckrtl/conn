@@ -10,6 +10,7 @@ mod insights;
 
 use crate::a11y::ConnA11yExt as _;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -201,6 +202,7 @@ pub(crate) struct TasksPanel {
     insights_scroll: ScrollHandle,
     lanes_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
+    expanded_subtasks: HashSet<i64>,
     /// Whether the last detail frame had its bottom spacing (see `detail::bottom_padding`).
     detail_padded: Cell<bool>,
     now_ms: i64,
@@ -267,6 +269,7 @@ impl TasksPanel {
             insights_scroll: ScrollHandle::new(),
             lanes_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
+            expanded_subtasks: HashSet::new(),
             detail_padded: Cell::new(false),
             now_ms: now_epoch_ms(),
             _subscriptions: vec![search_sub],
@@ -301,6 +304,7 @@ impl TasksPanel {
         if self.project_key == project_key && self.workspace_root == workspace_root {
             return;
         }
+        self.expanded_subtasks.clear();
         self.project_key = project_key;
         self.workspace_root = workspace_root;
         self.settings_open = false;
@@ -548,6 +552,7 @@ impl TasksPanel {
     pub(crate) fn open_task(&mut self, task_id: i64, cx: &mut Context<'_, Self>) {
         let key = self.nav_key().to_owned();
         let now = now_epoch_ms().max(0) as u64;
+        self.expanded_subtasks.clear();
         self.panel_state.open_task(&key, task_id, now);
         self.settings_open = false;
         self.detail_notice = None;
@@ -671,6 +676,18 @@ impl Render for TasksPanel {
                 && let Some(task_id) = nav.task_id
             {
                 let callbacks = DetailCallbacks {
+                    expanded: &self.expanded_subtasks,
+                    toggle_expanded: {
+                        let entity = entity.clone();
+                        Rc::new(move |id, _, cx| {
+                            entity.update(cx, |p, cx| {
+                                if !p.expanded_subtasks.remove(&id) {
+                                    p.expanded_subtasks.insert(id);
+                                }
+                                cx.notify();
+                            })
+                        })
+                    },
                     on_show_board: {
                         let entity = entity.clone();
                         Rc::new(move |_, cx| entity.update(cx, |p, cx| p.show_board(cx)))

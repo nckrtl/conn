@@ -5,13 +5,14 @@
 
 use crate::a11y::ConnA11yExt as _;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use conn_desktop::orbit::board::tasks_error_notice;
 use conn_desktop::orbit::client::TasksError;
 use conn_desktop::orbit::detail::{
     AgentRow, AgentsModel, StatusTone, SubtaskLead, agent_state_text, agent_state_tone, agents_for,
-    orbit_agent_driver_kind, subtask_lead, subtask_status_text, task_usage,
+    orbit_agent_driver_kind, subtask_lead, subtask_status_text, task_status_text, task_usage,
 };
 use conn_desktop::orbit::format::{format_duration, format_tokens};
 use conn_desktop::orbit::panel::{TasksDetailTab, TasksNavigation};
@@ -23,9 +24,7 @@ use conn_desktop::orbit::tasks::{
 use conn_theme::Tokens;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
-use gpui_kit::{
-    AnyElement, App, FontWeight, Hsla, MouseButton, ScrollHandle, SharedString, Window, div, px,
-};
+use gpui_kit::{AnyElement, App, FontWeight, Hsla, ScrollHandle, SharedString, Window, div, px};
 
 use super::board::pull_request_presentation;
 use super::format::{format_diff_count, live_status_label};
@@ -36,7 +35,7 @@ use crate::panels::color::to_hsla;
 use crate::panels::header::superhero_icon;
 
 const DETAIL_PAD_X_PX: f32 = 18.0;
-const NAV_HEIGHT_PX: f32 = 36.0;
+const NAV_HEIGHT_PX: f32 = 49.0;
 const TABS_HEIGHT_PX: f32 = 48.0;
 const META_LABEL_WIDTH_PX: f32 = 120.0;
 const SM_TEXT_PX: f32 = 14.0;
@@ -52,7 +51,9 @@ pub(super) enum DetailLoadState {
 }
 
 /// Callbacks wired from the task detail view back into `TasksPanel`.
-pub(super) struct DetailCallbacks {
+pub(super) struct DetailCallbacks<'a> {
+    pub(super) expanded: &'a HashSet<i64>,
+    pub(super) toggle_expanded: Rc<dyn Fn(i64, &mut Window, &mut App)>,
     pub(super) on_show_board: Rc<dyn Fn(&mut Window, &mut App)>,
     pub(super) on_open_subtask:
         Rc<dyn Fn(Option<i64>, Option<TasksDetailTab>, &mut Window, &mut App)>,
@@ -76,7 +77,7 @@ pub(super) fn render_task_detail(
     notice: Option<&str>,
     scroll: &ScrollHandle,
     padded: &Cell<bool>,
-    callbacks: DetailCallbacks,
+    callbacks: DetailCallbacks<'_>,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
     let muted = to_hsla(tokens.muted_foreground);
@@ -104,7 +105,7 @@ pub(super) fn render_task_detail(
         .flex_shrink_0()
         .items_center()
         .gap(px(8.0))
-        .px(px(DETAIL_PAD_X_PX))
+        .px(px(8.0))
         .border_b_1()
         .border_color(divider)
         .text_size(px(UI_TEXT_PX))
@@ -116,16 +117,26 @@ pub(super) fn render_task_detail(
                 .flex_shrink_0()
                 .items_center()
                 .gap(px(4.0))
-                .rounded(px(4.0))
+                .h(px(32.0))
+                .pl(px(8.0))
+                .pr(px(10.0))
+                .rounded_full()
+                .border_1()
+                .border_color(divider)
+                .bg(to_hsla(tokens.shell_control))
+                .tab_index(0)
                 .cursor_pointer()
-                .text_color(muted)
-                .hover(move |s| s.text_color(fg))
+                .text_color(fg)
+                .hover({
+                    let hover = to_hsla(tokens.shell_highlight);
+                    move |s| s.bg(hover)
+                })
                 .on_click(move |_, window, cx| on_board(window, cx))
                 .child(superhero_icon("superhero/chevron-left.svg", 16.0, muted))
                 .child("Tasks"),
         );
 
-    if let Some(title) = title {
+    if let Some(task_id) = navigation.task_id {
         nav = nav.child(div().text_color(muted.opacity(0.60)).child("/"));
         if let Some(sub_title) = subtask_title {
             let on_up = Rc::clone(&callbacks.on_open_subtask);
@@ -133,7 +144,10 @@ pub(super) fn render_task_detail(
                 .child(
                     div()
                         .id("tasks-detail-crumb-task")
-                        .a11y_button("panel.tasks-detail-crumb-task", "Task")
+                        .a11y_button(
+                            "panel.tasks-detail-crumb-task",
+                            title.unwrap_or("Task").to_owned(),
+                        )
                         .max_w(gpui_kit::relative(0.45))
                         .min_w_0()
                         .flex_shrink(1.0)
@@ -142,7 +156,7 @@ pub(super) fn render_task_detail(
                         .text_color(muted)
                         .hover(move |s| s.text_color(fg))
                         .on_click(move |_, window, cx| on_up(None, None, window, cx))
-                        .child(title.to_owned()),
+                        .child(format!("#{task_id}")),
                 )
                 .child(div().text_color(muted.opacity(0.60)).child("/"))
                 .child(
@@ -158,7 +172,7 @@ pub(super) fn render_task_detail(
                     .min_w_0()
                     .truncate()
                     .text_color(fg.opacity(0.85))
-                    .child(title.to_owned()),
+                    .child(format!("#{task_id}")),
             );
         }
     }
@@ -281,10 +295,9 @@ fn render_detail_body(
     task: &TaskDetail,
     scroll: &ScrollHandle,
     padded: &Cell<bool>,
-    callbacks: &DetailCallbacks,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
-    let divider = to_hsla(tokens.shell_divider);
     let subtask = navigation
         .subtask_id
         .and_then(|id| task.subtasks.iter().find(|s| s.id == id));
@@ -305,10 +318,7 @@ fn render_detail_body(
         .a11y_group("panel.tasks.detail.title", title_text.to_owned())
         .w_full()
         .px(px(DETAIL_PAD_X_PX))
-        .py(px(16.0))
-        .when(subtask.is_none(), |el| {
-            el.border_b_1().border_color(divider)
-        })
+        .py(px(14.0))
         .child(
             div()
                 .text_size(px(18.0))
@@ -336,7 +346,7 @@ fn render_detail_body(
     );
 
     let tab_body: AnyElement = match tab {
-        TasksDetailTab::Agents => render_agents_list(tokens, &agents, callbacks),
+        TasksDetailTab::Agents => render_agents_list(tokens, task, subtask, &agents, callbacks),
         TasksDetailTab::Subtasks if subtask.is_none() => {
             render_subtasks_list(tokens, task, callbacks)
         }
@@ -421,7 +431,7 @@ fn render_meta_row(
 fn render_key_values(
     tokens: &Tokens,
     task: &TaskDetail,
-    callbacks: &DetailCallbacks,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let muted = to_hsla(tokens.muted_foreground);
     let destructive_fg = to_hsla(tokens.destructive_foreground);
@@ -472,12 +482,23 @@ fn render_key_values(
         div().text_color(muted).child(text).into_any_element()
     };
 
-    let mut rows = v_flex().w_full().gap(px(8.0)).child(render_meta_row(
-        tokens,
-        "superhero/server.svg",
-        "Workspace",
-        workspace_value,
-    ));
+    let mut rows = v_flex()
+        .w_full()
+        .gap(px(6.0))
+        .child(render_meta_row(
+            tokens,
+            "superhero/circle.svg",
+            "Status",
+            div()
+                .child(task_status_text(task.summary.status))
+                .into_any_element(),
+        ))
+        .child(render_meta_row(
+            tokens,
+            "superhero/server.svg",
+            "Workspace",
+            workspace_value,
+        ));
 
     if let Some(branch) = task
         .summary
@@ -516,6 +537,14 @@ fn render_key_values(
             h_flex()
                 .id("tasks-detail-pr-link")
                 .a11y_button("panel.tasks-detail-pr-link", "Linked pull request")
+                .tab_index(0)
+                .px(px(4.0))
+                .ml(px(-4.0))
+                .rounded(px(4.0))
+                .hover({
+                    let fill = to_hsla(tokens.shell_highlight);
+                    move |s| s.bg(fill)
+                })
                 .min_w_0()
                 .items_center()
                 .gap(px(6.0))
@@ -592,7 +621,7 @@ fn render_task_tabs(
     is_subtask: bool,
     active: TasksDetailTab,
     agents_count: usize,
-    callbacks: &DetailCallbacks,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
     let muted = to_hsla(tokens.muted_foreground);
@@ -612,6 +641,8 @@ fn render_task_tabs(
             .relative()
             .h(px(TABS_HEIGHT_PX))
             .px(px(2.0))
+            .when(tab == TasksDetailTab::Brief, |el| el.pl(px(0.0)))
+            .tab_index(0)
             .items_center()
             .gap(px(6.0))
             .cursor_pointer()
@@ -652,7 +683,6 @@ fn render_task_tabs(
         .gap(px(20.0))
         .px(px(DETAIL_PAD_X_PX))
         .border_b_1()
-        .when(!is_subtask, |el| el.border_t_1())
         .border_color(divider)
         .child(make_tab(TasksDetailTab::Brief, "Brief", None))
         .when(!is_subtask, |row| {
@@ -671,7 +701,6 @@ fn render_task_tabs(
 }
 
 fn render_brief(tokens: &Tokens, task: &TaskDetail, subtask: Option<&Subtask>) -> AnyElement {
-    let fg = to_hsla(tokens.foreground);
     let muted = to_hsla(tokens.muted_foreground);
 
     let attention = subtask
@@ -735,7 +764,23 @@ fn render_brief(tokens: &Tokens, task: &TaskDetail, subtask: Option<&Subtask>) -
             .into_any_element()
     };
 
-    let deliverables = subtask.filter(|s| !s.deliverables.is_empty()).map(|s| {
+    let deliverables = subtask.and_then(|s| render_deliverables(tokens, s));
+    v_flex()
+        .w_full()
+        .gap(px(20.0))
+        .when_some(subtask, |col, sub| {
+            col.child(render_subtask_summary_rows(tokens, task, sub))
+        })
+        .when_some(attention_banner, |col, banner| col.child(banner))
+        .child(brief_body)
+        .when_some(deliverables, |col, deliv| col.child(deliv))
+        .into_any_element()
+}
+
+fn render_deliverables(tokens: &Tokens, s: &Subtask) -> Option<AnyElement> {
+    let fg = to_hsla(tokens.foreground);
+    let muted = to_hsla(tokens.muted_foreground);
+    (!s.deliverables.is_empty()).then(|| {
         let mut list = v_flex().gap(px(4.0)).pl(px(16.0));
         for item in &s.deliverables {
             list = list.child(
@@ -750,28 +795,18 @@ fn render_brief(tokens: &Tokens, task: &TaskDetail, subtask: Option<&Subtask>) -
             );
         }
         v_flex()
-            .gap(px(12.0))
+            .gap(px(4.0))
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .line_height(px(24.0))
+                    .text_size(px(14.0))
+                    .line_height(px(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg)
                     .child("Deliverables"),
             )
             .child(list)
-    });
-
-    v_flex()
-        .w_full()
-        .gap(px(20.0))
-        .when_some(subtask, |col, sub| {
-            col.child(render_subtask_summary_rows(tokens, task, sub))
-        })
-        .when_some(attention_banner, |col, banner| col.child(banner))
-        .child(brief_body)
-        .when_some(deliverables, |col, deliv| col.child(deliv))
-        .into_any_element()
+            .into_any_element()
+    })
 }
 
 fn render_subtask_summary_rows(
@@ -835,7 +870,7 @@ fn render_subtask_summary_rows(
 fn render_subtasks_list(
     tokens: &Tokens,
     task: &TaskDetail,
-    callbacks: &DetailCallbacks,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let muted = to_hsla(tokens.muted_foreground);
     if task.subtasks.is_empty() {
@@ -846,9 +881,15 @@ fn render_subtasks_list(
             .child("No subtasks yet.")
             .into_any_element();
     }
-    let mut list = v_flex().mx(px(-10.0)).mt(px(-9.0)).gap(px(2.0));
-    for subtask in &task.subtasks {
-        list = list.child(render_subtask_row(tokens, task, subtask, callbacks));
+    let mut list = v_flex().w_full();
+    for (index, subtask) in task.subtasks.iter().enumerate() {
+        list = list.child(render_subtask_row(
+            tokens,
+            task,
+            subtask,
+            index == 0,
+            callbacks,
+        ));
     }
     list.into_any_element()
 }
@@ -857,72 +898,70 @@ fn render_subtask_row(
     tokens: &Tokens,
     task: &TaskDetail,
     subtask: &Subtask,
-    callbacks: &DetailCallbacks,
+    first: bool,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
     let muted = to_hsla(tokens.muted_foreground);
     let highlight = to_hsla(tokens.shell_highlight);
     let lead = subtask_lead(task, subtask);
-    let not_started = matches!(lead, SubtaskLead::NotStarted);
-    let sub_id = subtask.id;
+    let id = subtask.id;
+    let expanded = callbacks.expanded.contains(&id);
+    let toggle = Rc::clone(&callbacks.toggle_expanded);
 
-    let lead_el: AnyElement = match lead {
-        SubtaskLead::Agent { .. } => {
-            let on_agents = Rc::clone(&callbacks.on_open_subtask);
-            div()
-                .id(SharedString::from(format!("tasks-subtask-agent-{sub_id}")))
-                .a11y_button(format!("panel.tasks.subtask-agent.{sub_id}"), "Open agents")
-                .ml(px(9.0))
-                .mt(px(6.0))
-                .size(px(20.0))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .hover(move |s| s.bg(highlight))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    cx.stop_propagation();
-                    on_agents(Some(sub_id), Some(TasksDetailTab::Agents), window, cx);
-                })
-                .child(render_subtask_lead_icon(tokens, lead))
-                .into_any_element()
-        }
-        _ => div()
-            .ml(px(9.0))
-            .mt(px(6.0))
-            .size(px(20.0))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
+    let lead_icon = div()
+        .flex_shrink_0()
+        .w(px(18.0))
+        .h(px(21.0))
+        .flex()
+        .items_center()
+        .justify_center();
+    let lead_el = if matches!(lead, SubtaskLead::Agent { .. }) {
+        let on_agents = Rc::clone(&callbacks.on_open_subtask);
+        lead_icon
+            .id(SharedString::from(format!("tasks-subtask-agent-{id}")))
+            .a11y_button(format!("panel.tasks.subtask-agent.{id}"), "Open agents")
+            .tab_index(0)
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(highlight))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_agents(Some(id), Some(TasksDetailTab::Agents), window, cx);
+            })
             .child(render_subtask_lead_icon(tokens, lead))
-            .into_any_element(),
+            .into_any_element()
+    } else {
+        lead_icon
+            .child(render_subtask_lead_icon(tokens, lead))
+            .into_any_element()
     };
 
-    let on_open = Rc::clone(&callbacks.on_open_subtask);
-    h_flex()
-        .id(SharedString::from(format!("tasks-subtask-row-{sub_id}")))
-        .a11y_button(
-            format!("panel.tasks.subtask.{sub_id}"),
-            subtask.title.clone(),
-        )
+    let mut metadata = vec![subtask_status_text(subtask, task).to_owned()];
+    if let Some(tokens) = subtask.metrics.tokens {
+        metadata.push(format!("{} tokens", format_tokens(tokens)));
+    }
+    if let Some(duration) = subtask.metrics.duration_ms {
+        metadata.push(format_duration(duration));
+    }
+    let summary = h_flex()
+        .id(SharedString::from(format!("tasks-subtask-row-{id}")))
+        .a11y_button(format!("panel.tasks.subtask.{id}"), subtask.title.clone())
+        .aria_expanded(expanded)
+        .tab_index(0)
         .w_full()
+        .min_h(px(46.0))
+        .pt(px(if first { 0.0 } else { 8.0 }))
+        .pb(px(8.0))
         .items_start()
-        .rounded(px(8.0))
+        .gap(px(8.0))
         .cursor_pointer()
-        .hover(move |s| s.bg(highlight))
-        .on_click(move |_, window, cx| on_open(Some(sub_id), None, window, cx))
+        .on_click(move |_, window, cx| toggle(id, window, cx))
         .child(lead_el)
         .child(
             v_flex()
                 .min_w_0()
                 .flex_1()
-                .py(px(6.0))
-                .pl(px(8.0))
-                .pr(px(10.0))
-                .text_size(px(UI_TEXT_PX))
                 .child(
                     h_flex()
                         .w_full()
@@ -930,26 +969,79 @@ fn render_subtask_row(
                         .gap(px(8.0))
                         .child(
                             div()
-                                .min_w_0()
                                 .flex_1()
-                                .line_height(px(UI_LINE_HEIGHT_PX))
-                                .text_color(if not_started { muted } else { fg.opacity(0.85) })
+                                .min_w_0()
+                                .text_size(px(14.0))
+                                .line_height(px(21.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg)
                                 .child(subtask.title.clone()),
                         )
-                        .when(!not_started, |row| {
-                            row.child(render_subtask_diff(tokens, &subtask.metrics))
-                        }),
+                        .when(
+                            subtask.status == conn_desktop::orbit::tasks::SubtaskStatus::Completed,
+                            |row| match (subtask.metrics.lines_added, subtask.metrics.lines_deleted)
+                            {
+                                (Some(added), Some(deleted)) => {
+                                    row.child(render_diff_stat(tokens, added, deleted))
+                                }
+                                _ => row,
+                            },
+                        ),
                 )
-                .when(!not_started, |col| {
-                    col.child(
-                        div()
-                            .line_height(px(16.0))
-                            .text_color(muted)
-                            .child(subtask_meta_text(&subtask.metrics)),
-                    )
-                }),
+                .child(
+                    div()
+                        .text_size(px(UI_TEXT_PX))
+                        .line_height(px(19.0))
+                        .text_color(muted)
+                        .child(metadata.join(" · ")),
+                ),
+        );
+    let row = v_flex().w_full().child(summary);
+    if !expanded {
+        return row.into_any_element();
+    }
+
+    let on_open = Rc::clone(&callbacks.on_open_subtask);
+    let mut detail = v_flex()
+        .id(SharedString::from(format!("tasks-subtask-preview-{id}")))
+        .a11y_group(
+            format!("panel.tasks.subtask-preview.{id}"),
+            "Subtask preview",
         )
-        .into_any_element()
+        .pl(px(26.0))
+        .pt(px(3.0))
+        .pb(px(10.0))
+        .gap(px(8.0));
+    if !subtask.brief.trim().is_empty() {
+        detail = detail.child(render_markdown(
+            &format!("task-{}-expanded-{id}", task.summary.id),
+            &subtask.brief,
+            tokens,
+            &MarkdownOptions {
+                heading_style: HeadingStyle::BodySize,
+                ..MarkdownOptions::default()
+            },
+        ));
+    }
+    row.child(
+        detail.children(render_deliverables(tokens, subtask)).child(
+            h_flex()
+                .id(SharedString::from(format!("tasks-subtask-open-{id}")))
+                .a11y_button(format!("panel.tasks.subtask-open.{id}"), "Open subtask")
+                .tab_index(0)
+                .self_start()
+                .items_center()
+                .gap(px(4.0))
+                .text_color(muted)
+                .text_size(px(UI_TEXT_PX))
+                .cursor_pointer()
+                .hover(move |s| s.text_color(fg))
+                .on_click(move |_, window, cx| on_open(Some(id), None, window, cx))
+                .child("Open subtask")
+                .child(superhero_icon("superhero/chevron-right.svg", 14.0, muted)),
+        ),
+    )
+    .into_any_element()
 }
 
 fn subtask_meta_text(metrics: &TaskMetrics) -> String {
@@ -1024,8 +1116,10 @@ fn render_subtask_lead_icon(tokens: &Tokens, lead: SubtaskLead<'_>) -> AnyElemen
 
 fn render_agents_list(
     tokens: &Tokens,
+    task: &TaskDetail,
+    selected_subtask: Option<&Subtask>,
     agents: &AgentsModel<'_>,
-    callbacks: &DetailCallbacks,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let muted = to_hsla(tokens.muted_foreground);
 
@@ -1037,17 +1131,31 @@ fn render_agents_list(
             .child("No agent has started.")
             .into_any_element()
     } else {
-        let mut ul = v_flex().mx(px(-10.0)).gap(px(2.0));
-        for row in &agents.current {
-            ul = ul.child(render_agent_row(tokens, row, callbacks));
+        let mut ul = v_flex().w_full();
+        for (index, row) in agents.current.iter().enumerate() {
+            ul = ul.child(render_agent_row(
+                tokens,
+                task,
+                selected_subtask,
+                row,
+                index == 0,
+                callbacks,
+            ));
         }
         ul.into_any_element()
     };
 
     let earlier_el = (!agents.earlier.is_empty()).then(|| {
-        let mut ul = v_flex().mx(px(-10.0)).gap(px(2.0));
+        let mut ul = v_flex().w_full();
         for row in &agents.earlier {
-            ul = ul.child(render_agent_row(tokens, row, callbacks));
+            ul = ul.child(render_agent_row(
+                tokens,
+                task,
+                selected_subtask,
+                row,
+                false,
+                callbacks,
+            ));
         }
         v_flex()
             .gap(px(8.0))
@@ -1064,7 +1172,6 @@ fn render_agents_list(
 
     v_flex()
         .w_full()
-        .mt(px(-10.0))
         .gap(px(24.0))
         .child(current_el)
         .when_some(earlier_el, |col, earlier| col.child(earlier))
@@ -1073,33 +1180,47 @@ fn render_agents_list(
 
 fn render_agent_row(
     tokens: &Tokens,
+    task: &TaskDetail,
+    selected_subtask: Option<&Subtask>,
     row: &AgentRow<'_>,
-    callbacks: &DetailCallbacks,
+    first: bool,
+    callbacks: &DetailCallbacks<'_>,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
     let muted = to_hsla(tokens.muted_foreground);
     let highlight = to_hsla(tokens.shell_highlight);
     let tone = agent_state_tone(row.agent);
 
-    let mut parts = row.label.split(" \u{00b7} ");
-    let role = parts.next().unwrap_or(row.label.as_str());
-    let rest: Vec<&str> = parts.collect();
-    let mut detail_parts = Vec::new();
-    if !rest.is_empty() {
-        detail_parts.push(rest.join(" \u{00b7} "));
-    }
+    let assignment = match row.agent.subtask_ids.as_slice() {
+        [id] => task.subtasks.iter().find(|sub| sub.id == *id),
+        _ => selected_subtask,
+    };
+    let title = assignment.map_or(task.summary.title.as_str(), |sub| sub.title.as_str());
+    let mut detail: Vec<&str> = row
+        .label
+        .split(" · ")
+        .filter(|part| *part != title)
+        .collect();
     if let Some(model) = &row.agent.model {
-        detail_parts.push(model.clone());
+        detail.push(model);
     }
-    let detail = detail_parts.join(" \u{00b7} ");
+    let detail = detail.join(" · ");
 
     let mut el = h_flex()
         .id(SharedString::from(format!("tasks-agent-{}", row.agent.id)))
-        .a11y_button(format!("panel.tasks.agent.{}", row.agent.id), "Agent")
+        .a11y(
+            if row.conversation.is_some() {
+                gpui_kit::Role::Button
+            } else {
+                gpui_kit::Role::Group
+            },
+            format!("panel.tasks.agent.{}", row.agent.id),
+            title.to_owned(),
+        )
         .w_full()
-        .min_h(px(32.0))
-        .px(px(10.0))
-        .py(px(6.0))
+        .min_h(px(46.0))
+        .pt(px(if first { 0.0 } else { 8.0 }))
+        .pb(px(8.0))
         .gap(px(8.0))
         .items_start()
         .rounded(px(8.0))
@@ -1114,19 +1235,18 @@ fn render_agent_row(
                 .flex_1()
                 .child(
                     div()
-                        .truncate()
-                        .text_size(px(UI_TEXT_PX))
-                        .line_height(px(UI_LINE_HEIGHT_PX))
+                        .text_size(px(14.0))
+                        .line_height(px(21.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg.opacity(0.85))
-                        .child(role.to_owned()),
+                        .text_color(fg)
+                        .child(title.to_owned()),
                 )
                 .when(!detail.is_empty(), |col| {
                     col.child(
                         div()
                             .truncate()
                             .text_size(px(UI_TEXT_PX))
-                            .line_height(px(16.0))
+                            .line_height(px(19.0))
                             .text_color(muted)
                             .child(detail),
                     )
@@ -1139,6 +1259,7 @@ fn render_agent_row(
         let thread_id = conv.thread_id.clone();
         let on_agent = Rc::clone(&callbacks.on_open_agent);
         el = el
+            .tab_index(0)
             .cursor_pointer()
             .hover(move |s| s.bg(highlight))
             .on_click(move |_, window, cx| {

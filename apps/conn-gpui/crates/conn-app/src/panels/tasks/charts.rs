@@ -102,7 +102,7 @@ pub(super) fn render_sparkline(points: Vec<TrendPoint>, tokens: &Tokens) -> AnyE
     div()
         .w_full()
         .h(px(SPARKLINE_HEIGHT_PX))
-        .mt(px(4.0))
+        .mt_auto()
         .child(inner)
         .into_any_element()
 }

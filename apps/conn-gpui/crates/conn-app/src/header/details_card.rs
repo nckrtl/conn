@@ -294,6 +294,7 @@ pub(crate) fn pull_request_lines(thread: &ThreadShell) -> Vec<String> {
 pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
     pub(crate) thread: &'a ThreadShell,
+    pub(crate) timeline: &'a [conn_state::TimelineEntry],
     pub(crate) state: &'a ThreadDetailsState,
     pub(crate) environment_label: &'a str,
     pub(crate) max_height: f32,
@@ -466,6 +467,52 @@ pub(crate) fn render_thread_details_card(
         body = body.child(vc);
     }
 
+    let mut seen_tasks = std::collections::HashSet::new();
+    let linked_tasks = props.timeline.iter().filter_map(|entry| {
+        let conn_state::TimelineEntry::OrbitTask { task, .. } = entry else {
+            return None;
+        };
+        let id = task.get("id")?.as_i64()?;
+        let title = task.get("title")?.as_str()?;
+        seen_tasks.insert(id).then_some((id, title))
+    });
+    let mut tasks_section = None;
+    for (id, title) in linked_tasks {
+        let rows = tasks_section.take().unwrap_or_else(|| {
+            section(
+                "thread-details.linked-tasks",
+                "Linked tasks",
+                Some("Tasks".into()),
+                true,
+                None,
+                tokens,
+            )
+        });
+        let text = format!("#{id} · {title}");
+        let hover = hsla(tokens.shell_highlight);
+        tasks_section = Some(
+            rows.child(
+                row_base(SharedString::from(format!("details-task-{id}")), tokens)
+                    .a11y_button(format!("thread-details.task.{id}"), text.clone())
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .conn_tooltip(title.to_owned(), tokens)
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.toggle_thread_details(window, cx);
+                        app.open_task_in_panel(id, cx);
+                    }))
+                    .child(icons::concept(
+                        "superhero/checklist.svg",
+                        ICON_PX,
+                        hsla(tokens.muted_foreground),
+                    ))
+                    .child(label(text))
+                    .test_support(),
+            ),
+        );
+    }
+    body = body.when_some(tasks_section, |el, rows| el.child(rows));
+
     // Automations section (auto-hidden when nothing is bound and there is no error).
     let bound: Vec<&ScheduledTask> = props
         .state
@@ -555,6 +602,8 @@ fn render_workspace_section(
     } else {
         "superhero/folder.svg"
     };
+    let has_workspace = !path.is_empty();
+    let project = props.shell.project(&thread.project_id);
     let copy_path = path.clone();
     let workspace_label = if path.is_empty() {
         "No workspace path".to_owned()
@@ -612,10 +661,32 @@ fn render_workspace_section(
                         "thread-details.environment.workspace",
                         workspace_label,
                     )
-                    .flex_shrink_0()
-                    .child(icons::concept(workspace_icon, ICON_PX, muted)),
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(icons::concept(workspace_icon, ICON_PX, muted))
+                    .when_some(project, |row, project| {
+                        row.child(div().min_w_0().truncate().child(project.title.clone()))
+                    }),
             ),
     );
+
+    if has_workspace {
+        rows = rows.child(
+            row_base("thread-details-open-files", tokens)
+                .a11y_button("thread-details.files", "Open in Files")
+                .cursor_pointer()
+                .hover(move |s| s.bg(highlight))
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.toggle_thread_details(window, cx);
+                    app.select_right_panel_tab(conn_state::RightPanelTab::Files, cx);
+                }))
+                .child(icons::concept("superhero/folder-open.svg", ICON_PX, muted))
+                .child(label("Open in Files"))
+                .test_support(),
+        );
+    }
 
     // `Open in <Editor>` split row (`OpenInPicker displayMode="panel"`).
     let editor = props.state.editor();
@@ -831,9 +902,17 @@ fn render_version_control_section(
     {
         any = true;
         let copy = branch.clone();
+        let click_copy = branch.clone();
         rows = rows.child(
             row_base("thread-details-branch", tokens)
-                .a11y_group("thread-details.branch", format!("Branch {branch}"))
+                .a11y_button(
+                    "thread-details.branch",
+                    format!("Copy branch name: {branch}"),
+                )
+                .cursor_pointer()
+                .on_click(
+                    cx.listener(move |app, _, _, cx| app.copy_to_clipboard(click_copy.clone(), cx)),
+                )
                 .hover(move |s| s.bg(highlight))
                 .on_mouse_down(
                     MouseButton::Right,
@@ -846,9 +925,10 @@ fn render_version_control_section(
                         );
                     }),
                 )
-                .conn_tooltip(branch.clone(), tokens)
+                .conn_tooltip("Copy branch name", tokens)
                 .child(icons::concept("superhero/branch.svg", ICON_PX, muted))
-                .child(label(middle_truncate(&branch, 32))),
+                .child(label(middle_truncate(&branch, 32)))
+                .test_support(),
         );
     }
 

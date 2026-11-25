@@ -10717,7 +10717,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool,
+    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -10768,7 +10768,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
                 entries: FfiConverterSequenceTypeFfiTimelineEntry.read(from: &buf), 
                 feedDetails: FfiConverterDictionaryStringTypeFfiFeedDetail.read(from: &buf), 
-                delegatedTaskIds: FfiConverterDictionaryStringString.read(from: &buf),
+                delegatedTaskIds: FfiConverterDictionaryStringString.read(from: &buf), 
                 workGroups: FfiConverterSequenceTypeFfiWorkGroupTiming.read(from: &buf), 
                 working: FfiConverterBool.read(from: &buf), 
                 activeRunId: FfiConverterOptionString.read(from: &buf), 

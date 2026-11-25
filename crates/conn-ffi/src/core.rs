@@ -2464,6 +2464,7 @@ mod tests {
 
         let file = tempfile::NamedTempFile::new()?;
         std::fs::write(file.path(), b"test file")?;
+        assert!(core.published_shell().is_some());
         let mut submitted = Box::pin(core.submit_composer(
             FfiComposerTarget::Reply {
                 thread_id: launched_id.clone(),
@@ -2499,7 +2500,6 @@ mod tests {
 
         core.close_thread("thread-1".to_owned());
         core.close_thread(launched_id);
-        assert!(core.published_shell().is_some());
         let _ = stop_tx.send(());
         let _ = server_thread.join();
         assert!(listener.wait_for(Duration::from_secs(5), |state| {

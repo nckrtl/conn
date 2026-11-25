@@ -1638,14 +1638,18 @@ final class ConnSpikeUITests: XCTestCase {
         field.typeText(privateText)
         tap(app.buttons["Add attachment"].firstMatch)
         tap(app.buttons["Photos"].firstMatch)
-        if #available(iOS 27.0, *) {
-            tap(app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch)
-            tap(app.navigationBars.buttons["Done"].firstMatch)
-        } else {
-            tap(app.collectionViews.cells.firstMatch)
-            tap(app.buttons["Add"].firstMatch)
-        }
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH %@", "Photo,")).firstMatch
+        let cell = app.collectionViews.cells.firstMatch
+        let gridReady = NSPredicate { _, _ in photo.isHittable || cell.isHittable }
+        expectation(for: gridReady, evaluatedWith: nil)
+        waitForExpectations(timeout: 15)
+        tap(photo.isHittable ? photo : cell)
+        let confirm = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", ["Done", "Add"])).firstMatch
         let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch
+        let selectionReady = NSPredicate { _, _ in confirm.isHittable || chip.exists }
+        expectation(for: selectionReady, evaluatedWith: nil)
+        waitForExpectations(timeout: 15)
+        if confirm.isHittable { tap(confirm) }
         XCTAssertTrue(chip.waitForExistence(timeout: 15))
         let filename = String(chip.label.dropFirst("Remove ".count))
         XCTAssertFalse(filename.isEmpty)

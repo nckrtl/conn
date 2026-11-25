@@ -34,7 +34,14 @@ struct ConnComposerPill<Trailing: View>: View {
     private var expanded: Bool { inputFocused || !draft.text.isEmpty || !draft.files.isEmpty }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: expanded && !dictation.isActive ? 24 : 27, style: .continuous)
+        // Keyboard up: a sheet with 28 pt top corners and none below. Down: the floating pill.
+        let corner: CGFloat = expanded && !dictation.isActive ? 24 : 27
+        let top = keyboardUp ? ComposerSheet.topRadius : corner
+        let bottom = keyboardUp ? 0 : corner
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: top, bottomLeadingRadius: bottom,
+            bottomTrailingRadius: bottom, topTrailingRadius: top, style: .continuous
+        )
         VStack(alignment: .leading, spacing: 0) {
             if allowsAttachments && !draft.files.isEmpty {
                 // Lab `.m-draft-files`: above the pill, `gap 6`, `padding 0 4`, `margin 0 0 6`.
@@ -140,18 +147,22 @@ struct ConnComposerPill<Trailing: View>: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 2)
             .foregroundStyle(theme.foreground)
-            .glassEffect(.regular, in: shape)
-            .background(theme.background, in: shape)
+            .glassEffect(keyboardUp ? .identity : .regular, in: shape)
+            // The surface is a background, not part of the layout. Keyboard up it reaches past the
+            // screens' side insets to the screen edges and runs `bottomBleed` below the box, behind
+            // the keyboard. The box, and so the controls, stay where the safe area puts them.
+            .background {
+                ComposerSurface(shape: shape, fill: theme.background, hairline: theme.border, sheet: keyboardUp)
+                    .padding(.horizontal, keyboardUp ? -ComposerSheet.screenInset : 0)
+                    .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)
+            }
         }
-        // With the keyboard up the box sits 10pt above it: the 4pt the screens leave plus 6.
-        .padding(.bottom, keyboardUp ? ComposerInputMetrics.keyboardExtraGap : 0)
         .animation(Self.spring, value: expanded)
-        .animation(Self.spring, value: keyboardUp)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-            keyboardUp = KeyboardOverlap.isUp(note)
+            setKeyboardUp(KeyboardOverlap.isUp(note), note)
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            keyboardUp = false
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
+            setKeyboardUp(false, note)
         }
         .onChange(of: draft.text) { dictation.error = nil }
         .sheet(isPresented: $showingPhotos) {
@@ -160,6 +171,12 @@ struct ConnComposerPill<Trailing: View>: View {
         .fileImporter(isPresented: $showingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             importFiles(result)
         }
+    }
+
+    /// The morph runs on the keyboard's own duration and curve, so it moves with the keyboard.
+    private func setKeyboardUp(_ up: Bool, _ note: Notification) {
+        guard up != keyboardUp else { return }
+        withAnimation(KeyboardMotion.animation(note)) { keyboardUp = up }
     }
 
     private func importFiles(_ result: Result<[URL], Error>) {
@@ -355,7 +372,6 @@ enum ComposerInputMetrics {
     // Lab `.m-composer-input`: 15/22.
     static let fontSize: CGFloat = 15
     static let lineBox: CGFloat = 22
-    static let keyboardExtraGap: CGFloat = 6
 
     static var naturalLineHeight: CGFloat { UIFont.systemFont(ofSize: fontSize).lineHeight }
     static var lineSpacing: CGFloat { lineSpacing(natural: naturalLineHeight) }
@@ -377,6 +393,60 @@ enum ComposerInputMetrics {
     /// Collapsed with a + keeps the glyph's own inset as the gap (lab `padding-inline-start: 2px`).
     static func leadingInset(expanded: Bool, hasLeadingControl: Bool) -> CGFloat {
         !expanded && hasLeadingControl ? 2 : 12
+    }
+}
+
+/// The keyboard-up sheet (lab `[data-keyboard="true"] .m-composer`). The box keeps its place: its
+/// bottom is `bottomGutter` above the keyboard and its own 2 pt padding puts the controls 4 pt
+/// clear. Only the surface grows: to the screen edges, and `keyboardCover` past the keyboard's top
+/// edge, which the keyboard covers (the lab's 32 pt bottom padding, 28 of it hidden).
+enum ComposerSheet {
+    /// `ThreadComposer` and the new-thread screen inset the composer by this much on each side.
+    static let screenInset: CGFloat = 12
+    /// The screens' gap between the composer and the safe area or keyboard.
+    static let bottomGutter: CGFloat = 2
+    static let topRadius: CGFloat = 28
+    static let keyboardCover: CGFloat = 28
+    static var bottomBleed: CGFloat { bottomGutter + keyboardCover }
+}
+
+/// The composer's solid surface. As a sheet it has a 0.5 pt top edge in the border colour: the
+/// lab's `inset 0 0.5px 0`, a border layer with the fill moved down half a point over it.
+private struct ComposerSurface: View {
+    let shape: UnevenRoundedRectangle
+    let fill: Color
+    let hairline: Color
+    let sheet: Bool
+
+    var body: some View {
+        ZStack {
+            shape.fill(hairline).opacity(sheet ? 1 : 0)
+            shape.fill(fill).offset(y: sheet ? 0.5 : 0)
+        }
+        .clipShape(shape)
+    }
+}
+
+/// SwiftUI animation for a keyboard notification's duration and curve.
+enum KeyboardMotion {
+    /// The keyboard animates on UIKit's private curve 7, which SwiftUI cannot name. A stiff,
+    /// over-damped spring is the usual stand-in.
+    static var privateCurve: Animation {
+        .interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)
+    }
+
+    static func animation(_ note: Notification) -> Animation {
+        let info = note.userInfo
+        let duration = info?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        guard let raw = info?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int,
+              let curve = UIView.AnimationCurve(rawValue: raw) else { return privateCurve }
+        switch curve {
+        case .easeInOut: return .easeInOut(duration: duration)
+        case .easeIn: return .easeIn(duration: duration)
+        case .easeOut: return .easeOut(duration: duration)
+        case .linear: return .linear(duration: duration)
+        @unknown default: return privateCurve
+        }
     }
 }
 

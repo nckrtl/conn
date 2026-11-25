@@ -22,6 +22,16 @@ pub(crate) struct SnapshotCoalescer {
 }
 
 impl SnapshotCoalescer {
+    /// A new subscription starts its own publication window.
+    pub(crate) fn reset_shell(&mut self) {
+        self.pending_shell = None;
+        self.last_shell_emit = None;
+    }
+
+    pub(crate) fn has_pending_shell(&self) -> bool {
+        self.pending_shell.is_some()
+    }
+
     /// Records a new shell snapshot. Returns `Some(snapshot)` when it can be emitted immediately,
     /// or `None` when it has been buffered to flush at the end of the current 50 ms window.
     pub(crate) fn push_shell(
@@ -138,6 +148,7 @@ mod tests {
 
     fn shell_snap(synchronized: bool, project_count: usize) -> FfiShellSnapshot {
         FfiShellSnapshot {
+            hidden_thread_ids: vec![],
             older_settled_count: 0,
             projects: (0..project_count)
                 .map(|i| crate::types::FfiProject {
@@ -227,6 +238,17 @@ mod tests {
             coalescer.next_deadline().is_none(),
             "no pending work should remain after flush"
         );
+    }
+
+    #[test]
+    fn a_retry_discards_the_previous_sockets_buffer_and_publishes_its_marker_immediately() {
+        let mut buffer = SnapshotCoalescer::default();
+        let now = Instant::now();
+        assert!(buffer.push_shell(shell_snap(true, 1), now).is_some());
+        assert!(buffer.push_shell(shell_snap(true, 2), now).is_none());
+        buffer.reset_shell();
+        assert!(buffer.drain_due(now + COALESCE_WINDOW).0.is_none());
+        assert!(buffer.push_shell(shell_snap(true, 3), now).is_some());
     }
 
     #[test]

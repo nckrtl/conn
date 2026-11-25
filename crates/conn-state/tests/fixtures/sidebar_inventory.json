@@ -1,0 +1,20 @@
+{
+  "primary": [
+    {"id":"p", "pinnedAt":"2026-11-25T08:00:00Z", "pinOrderKey":"b"},
+    {"id":"b", "createdAt":"2026-11-25T10:00:00Z", "title":"Primary b"},
+    {"id":"d", "activeOrderKey":"m", "lineage":{"rootThreadId":"missing","parentThreadId":"missing","relationshipToParent":"fork"}},
+    {"id":"s", "settledAt":"2026-11-25T09:30:00Z"},
+    {"id":"hidden", "delegatedFrom":{"environmentId":"other","threadId":"missing","title":"Missing"}},
+    {"id":"side", "lineage":{"rootThreadId":"missing","parentThreadId":"missing","sideChat":true}},
+    {"id":"deleted", "deletedAt":"2026-11-25T10:00:00Z"},
+    {"id":"archived", "archivedAt":"2026-11-25T10:00:00Z"}
+  ],
+  "linked": [
+    {"id":"q", "pinnedAt":"2026-11-25T10:30:00Z", "createdAt":"2026-11-25T10:30:00Z"},
+    {"id":"a", "createdAt":"2026-11-25T08:00:00Z", "unsettledAt":"2026-11-25T10:00:00Z"},
+    {"id":"c", "activeOrderKey":"b"},
+    {"id":"t", "settledAt":"2026-11-25T09:30:00Z"},
+    {"id":"b", "title":"Shadow b", "activeOrderKey":"a"},
+    {"id":"hidden", "title":"Shadow of hidden primary"}
+  ]
+}

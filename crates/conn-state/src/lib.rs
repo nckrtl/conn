@@ -93,8 +93,8 @@ pub use crate::layout::{
 };
 pub use crate::orbit_task::{is_orbit_task_create_tool, orbit_task_create_row};
 pub use crate::order_keys::{
-    OrderAssignment, order_key_between, plan_reorder, sort_active, sort_pinned, spread_order_keys,
-    top_of_pinned_run_key,
+    OrderAssignment, SidebarOrder, order_key_between, plan_reorder, sort_active, sort_pinned,
+    spread_order_keys, top_of_pinned_run_key,
 };
 pub use crate::panel_tabs::{
     ClosedTab, MAX_SAVED_THREAD_PANELS, PanelOwner, RightPanelTabs, SavedSurface, SavedThreadPanel,

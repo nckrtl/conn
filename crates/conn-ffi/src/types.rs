@@ -154,6 +154,9 @@ pub struct FfiProject {
 /// Summary row for one thread in [`FfiShellSnapshot`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiThreadSummary {
+    pub order_group: u8,
+    pub order_key: String,
+    pub order_time_ms: i64,
     pub sidebar_project_key: String,
     pub orbit_project_slug: Option<String>,
     pub id: String,
@@ -163,7 +166,6 @@ pub struct FfiThreadSummary {
     pub activity: FfiThreadActivity,
     pub updated_at: Option<String>,
     pub settled: bool,
-    pub is_subagent: bool,
     pub pinned: bool,
     pub unread: bool,
     /// The provider's error (`lastError`) while the thread has failed; `None` otherwise.
@@ -180,6 +182,8 @@ pub struct FfiShellSnapshot {
     pub older_settled_count: u64,
     pub projects: Vec<FfiProject>,
     pub threads: Vec<FfiThreadSummary>,
+    /// IDs held by this environment that must also mask later environments in a merged inbox.
+    pub hidden_thread_ids: Vec<String>,
     pub synchronized: bool,
 }
 
@@ -681,19 +685,25 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
 
     let active = shell
         .top_level_active_threads()
+        .filter(|t| t.archived_at.as_deref().is_none_or(str::is_empty))
         .map(|thread| map_thread_summary(shell, thread, false));
     let settled = shell
         .top_level_settled_threads()
         .into_iter()
+        .filter(|t| t.archived_at.as_deref().is_none_or(str::is_empty))
         .map(|thread| map_thread_summary(shell, thread, true));
-    let children = shell
+    let threads: Vec<_> = active.chain(settled).collect();
+    let listed: std::collections::HashSet<_> = threads.iter().map(|t| t.id.as_str()).collect();
+    let hidden_thread_ids = shell
         .threads
         .iter()
-        .filter(|t| ShellState::is_subagent(t) && t.deleted_at.is_none())
-        .map(|t| map_thread_summary(shell, t, ShellState::is_settled(t)));
-    let threads = active.chain(settled).chain(children).collect();
+        .chain(&shell.archived_threads)
+        .filter(|t| !listed.contains(t.id.as_str()))
+        .map(|t| t.id.clone())
+        .collect();
 
     FfiShellSnapshot {
+        hidden_thread_ids,
         older_settled_count: if shell.older_settled().frontier.is_some() {
             shell.unloaded_older_settled(None) as u64
         } else {
@@ -703,14 +713,6 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
         threads,
         synchronized: shell.synchronized,
     }
-}
-
-fn is_pinned(thread: &ThreadShell) -> bool {
-    thread
-        .pinned_at
-        .as_ref()
-        .and_then(Option::as_deref)
-        .is_some_and(|s| !s.trim().is_empty())
 }
 
 /// Mirrors Conn's `hasUnseenCompletion`: completion after the last visit, using millisecond
@@ -740,7 +742,11 @@ fn map_thread_summary(shell: &ShellState, thread: &ThreadShell, settled: bool) -
         None
     };
 
+    let order = conn_state::SidebarOrder::for_thread(thread, settled);
     FfiThreadSummary {
+        order_group: order.group,
+        order_key: order.key.to_owned(),
+        order_time_ms: order.newest_first.0,
         sidebar_project_key: conn_state::sidebar_project_key(thread).into_owned(),
         orbit_project_slug: thread
             .orbit_project
@@ -754,8 +760,7 @@ fn map_thread_summary(shell: &ShellState, thread: &ThreadShell, settled: bool) -
         activity: shell.activity(&thread.id).into(),
         updated_at,
         settled,
-        is_subagent: ShellState::is_subagent(thread),
-        pinned: is_pinned(thread),
+        pinned: thread.pinned_at.as_ref().is_some_and(Option::is_some),
         unread: has_unseen_completion(thread),
         failure_message: failure_message(thread),
         usage_limited: is_usage_limited(thread),
@@ -2187,10 +2192,10 @@ mod tests {
                 "t-archived",
                 "t-settled-new",
                 "t-settled-old",
-                "t-sub",
             ],
-            "active and settled threads precede searchable children"
+            "only sidebar rows are projected"
         );
+        assert_eq!(snap.hidden_thread_ids, ["t-sub"]);
         assert!(!snap.threads[0].settled);
         assert!(!snap.threads[0].pinned);
         assert!(

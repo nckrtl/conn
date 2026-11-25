@@ -364,16 +364,22 @@ struct ThreadView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            VStack(spacing: 0) {
-                timeline(proxy)
-                composerArea(proxy)
-            }
-            .background(theme.background.ignoresSafeArea())
+            // The feed runs under the header and composer, and iOS's soft scroll edge blurs it
+            // there, as Conn mobile's EdgeBlur does.
+            timeline(proxy)
+                .safeAreaBar(edge: .bottom, spacing: 0) {
+                    composerArea(proxy)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
+                            if old != new && stickToBottom && readingWindow == nil {
+                                proxy.scrollTo("timeline-bottom", anchor: .bottom)
+                            }
+                        }
+                }
+                .scrollEdgeEffectStyle(.soft, for: .all)
+                .background(theme.background.ignoresSafeArea())
         }
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.background, for: .navigationBar)
-        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
         .navigationBarBackButtonHidden()
         .background { ThreadEdgePopGesture() }
         .toolbar {
@@ -617,8 +623,6 @@ struct ThreadView: View {
                 scrollTarget = nil
             }
         }
-        .scrollEdgeEffectHidden(true, for: .top)
-        .scrollEdgeEffectHidden(true, for: .bottom)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
             if old != new && stickToBottom && readingWindow == nil {
                 proxy.scrollTo("timeline-bottom", anchor: .bottom)

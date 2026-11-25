@@ -1,6 +1,6 @@
 name: Conn GPUI checks
 
-# Desktop exercises GPUI and Apple TLS on macOS. The root Rust workspace runs on Linux.
+# Desktop and the Swift bridge exercise Apple APIs on macOS. The full shared core runs on Linux.
 
 on:
   pull_request:
@@ -45,7 +45,7 @@ jobs:
         include:
           - name: GPUI desktop
             workspace: apps/conn-gpui
-            runner: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-6vcpu-macos-27' || 'macos-15' }}
+            runner: &mac-runner ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-6vcpu-macos-27' || 'macos-15' }}
           - name: Shared Rust core
             workspace: .
             runner: ubuntu-24.04
@@ -57,7 +57,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
+        with: &checkout-options
           sparse-checkout: |
             /*
             !/.repos/
@@ -109,17 +109,36 @@ jobs:
       - name: Test
         run: cargo --config "$RUNNER_TEMP/ci-cargo.toml" test --locked --workspace
 
-      - name: Test Orbit with the Apple trust store
-        if: runner.os == 'macOS'
-        run: cargo --config "$RUNNER_TEMP/ci-cargo.toml" test --locked -p conn-orbit --lib
+  apple-core:
+    name: Apple Swift bridge and TLS
+    runs-on: *mac-runner
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with: *checkout-options
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Build the host library used by Swift binding generation
+        run: |
+          cargo build --locked -p conn-ffi --lib
+          test -s target/debug/libconn_ffi.dylib
+
+      - name: Test the Swift bridge and Apple TLS
+        run: cargo test --locked -p conn-ffi -p conn-orbit --lib
 
   checks:
     name: Conn GPUI checks
     if: always()
-    needs: workspace
+    needs: [workspace, apple-core]
     runs-on: ubuntu-24.04
     steps:
-      - name: Require both workspaces
+      - name: Require every native check
         env:
-          RESULT: ${{ needs.workspace.result }}
-        run: test "$RESULT" = success
+          WORKSPACES: ${{ needs.workspace.result }}
+          APPLE_CORE: ${{ needs.apple-core.result }}
+        run: test "$WORKSPACES" = success && test "$APPLE_CORE" = success

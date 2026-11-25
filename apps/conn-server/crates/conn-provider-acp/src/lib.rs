@@ -13,6 +13,7 @@
 
 mod antigravity;
 mod antigravity_edits;
+mod antigravity_outcome;
 mod antigravity_provider;
 mod antigravity_work;
 mod connection;
@@ -524,7 +525,7 @@ impl Provider for AcpProvider {
                 "status": "ready",
                 "cwd": cwd,
                 "model": to_json(&input.model_selection)["model"],
-                "capabilities": (self.flavor.capabilities)(),
+                "capabilities": session.negotiated_capabilities((self.flavor.capabilities)()).await,
                 "createdAt": now,
                 "updatedAt": now,
                 "lastError": null,

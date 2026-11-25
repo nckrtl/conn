@@ -839,7 +839,7 @@ impl Provider for AntigravityProvider {
                 "status": "ready",
                 "cwd": cwd,
                 "model": selection["model"],
-                "capabilities": antigravity::runtime_capabilities(initialize["agentInfo"]["version"].as_str()),
+                "capabilities": session.negotiated_capabilities(antigravity::runtime_capabilities(initialize["agentInfo"]["version"].as_str())).await,
                 "createdAt": now,
                 "updatedAt": now,
                 "lastError": null,

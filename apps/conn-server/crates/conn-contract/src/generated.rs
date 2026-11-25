@@ -5621,6 +5621,8 @@ pub struct OrchestrationV2TurnCapabilities {
     pub emits_turn_started: bool,
     pub emits_turn_completed: bool,
     pub supports_interrupt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_resume: Option<bool>,
     pub supports_active_steering: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_steering_interrupts_tools: Option<bool>,

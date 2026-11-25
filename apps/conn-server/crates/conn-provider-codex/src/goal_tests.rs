@@ -101,6 +101,7 @@ impl Fixture {
             CodexConfig {
                 binary,
                 home_path: Some(dir.clone()),
+                attachments_dir: Some(dir.clone()),
                 goal_continuation_grace: grace,
                 stop_confirm_timeout: Duration::from_secs(2),
                 ..CodexConfig::default()

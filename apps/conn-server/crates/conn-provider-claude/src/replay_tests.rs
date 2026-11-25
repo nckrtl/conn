@@ -1336,6 +1336,34 @@ fn a_byte_truncated_transcript_shows_no_excerpt() {
 }
 
 #[test]
+fn a_full_steer_queue_preserves_every_accepted_message_receipt() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("steer"), "first", "full-access"),
+        "default",
+    );
+    for i in 0..64 {
+        assert!(
+            !mapper
+                .steer_sent(&format!("uuid-{i}"), &format!("msg-{i}"))
+                .is_empty()
+        );
+    }
+    assert!(mapper.steer_sent("excess", "unsent").is_empty());
+    let first = mapper.handle(Inbound::from_value(
+        json!({"type":"command_lifecycle","command_uuid":"uuid-0","state":"started"}),
+    ));
+    assert!(first.iter().any(|out| matches!(
+        out,
+        Out::Event(ProviderEvent::SteerUpdated {
+            status: conn_provider::SteerStatus::Completed,
+            ..
+        })
+    )));
+    assert!(!mapper.steer_sent("retry", "unsent").is_empty());
+}
+
+#[test]
 fn the_previous_result_cannot_acknowledge_an_unread_steer() {
     let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
     mapper.begin_turn(

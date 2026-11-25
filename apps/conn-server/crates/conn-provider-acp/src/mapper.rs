@@ -150,8 +150,12 @@ pub(crate) enum Pending {
 pub(crate) enum PromptOutcome {
     /// `stopReason` from the reply (or Grok's `prompt_complete`).
     Stopped(String),
+    Native(crate::antigravity_outcome::Failure),
     /// The request failed: T3's `makeProviderFailure` of the error.
-    Failed { message: String, code: Option<i64> },
+    Failed {
+        message: String,
+        code: Option<i64>,
+    },
 }
 
 pub(crate) struct Mapper<E: Env> {
@@ -333,6 +337,10 @@ impl<E: Env> Mapper<E> {
     // ---- threads -------------------------------------------------------------------------
 
     /// `makeProviderThread` for `ensureThread`.
+    pub(crate) fn remember_thread(&mut self, thread: &Value) {
+        self.provider_thread = Some(thread.clone());
+    }
+
     pub(crate) fn make_provider_thread(&mut self, app_thread_id: &str, session_id: &str) -> Value {
         let now = self.env.now();
         let id = join_id(
@@ -870,6 +878,18 @@ impl<E: Env> Mapper<E> {
         if self.project_detached_command(&session_id, kind, update, &mut out) {
             return out;
         }
+        if self.driver() == "antigravity" && self.is_root(&session_id) {
+            if let Some(turn) = self.turn.as_mut() {
+                if kind == "usage_update" {
+                    turn.bg.reply_open = false;
+                    self.rearm_deferred_finalize(&mut out);
+                } else if crate::antigravity::is_wake(params) {
+                    turn.bg.reply_open = true;
+                }
+            } else if kind == "usage_update" {
+                self.buffer_usage_after_wake(params);
+            }
+        }
         if kind == "usage_update" || kind == "session_info_update" {
             self.session_state_update(&session_id, kind, update, &mut out);
             return out;
@@ -1155,6 +1175,11 @@ impl<E: Env> Mapper<E> {
         let key = incoming.tool_call_id.clone();
         let previous = turn.tools.get(&key).cloned();
         let merged = tools::merge(previous.as_ref(), incoming);
+        if self.driver() == "grok"
+            && let Some(plan) = crate::grok::proposed_plan(&merged)
+        {
+            self.emit_plan("proposed-plan", PlanUpdate::Markdown(plan), out);
+        }
         let reported = merged.status.clone();
         let tool = match self.flavor.normalize_tool {
             Some(normalize) => normalize(merged),
@@ -1685,6 +1710,11 @@ impl<E: Env> Mapper<E> {
             id: pending.agent_id,
             result,
         }];
+        if self.driver() == "antigravity"
+            && let Some(turn) = self.turn.as_mut()
+        {
+            turn.bg.reply_open = true;
+        }
         self.rearm_deferred_finalize(&mut out);
         Some(out)
     }
@@ -1898,6 +1928,9 @@ impl<E: Env> Mapper<E> {
                 out.extend(self.finalize(status, None));
                 out
             }
+            PromptOutcome::Native(failure) => {
+                self.finalize_with_disposition("failed", Some(failure.detail), failure.disposition)
+            }
             PromptOutcome::Failed { message, code } => {
                 let status = if interrupted { "interrupted" } else { "failed" };
                 let failure = (self.flavor.prompt_failure)(&message, code);
@@ -1908,6 +1941,15 @@ impl<E: Env> Mapper<E> {
 
     /// `finalizeTurn`.
     pub(crate) fn finalize(&mut self, status: &str, failure: Option<Value>) -> Vec<Out> {
+        self.finalize_with_disposition(status, failure, "reusable")
+    }
+
+    fn finalize_with_disposition(
+        &mut self,
+        status: &str,
+        failure: Option<Value>,
+        disposition: &str,
+    ) -> Vec<Out> {
         let mut out = Vec::new();
         let Some(interrupted) = self.turn.as_ref().map(|turn| turn.interrupted) else {
             return out;
@@ -1976,7 +2018,7 @@ impl<E: Env> Mapper<E> {
                 "runOrdinal": turn.run_ordinal,
                 "status": settled,
                 "failure": failure.unwrap_or_else(|| json!({"class": "provider_error"})),
-                "threadDisposition": "reusable",
+                "threadDisposition": disposition,
             })
         } else {
             json!({

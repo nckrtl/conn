@@ -1219,6 +1219,21 @@ mod tests {
     }
 
     #[test]
+    fn session_idle_override_preserves_zero_and_explicit_minutes() {
+        for (minutes, policy) in [
+            (0, conn_engine::IdleTimeout::Disabled),
+            (7, conn_engine::IdleTimeout::After(Duration::from_secs(420))),
+        ] {
+            let Command::Serve(serve) =
+                parse(args(&format!("serve --session-idle-timeout {minutes}"))).unwrap()
+            else {
+                panic!("expected serve")
+            };
+            assert_eq!(serve.session_idle, policy);
+        }
+    }
+
+    #[test]
     fn reads_orbits_start_line() {
         let Command::Serve(serve) = parse(args(
             "serve --host=0.0.0.0 --port=3773 --no-browser --state-dir /tmp/x",

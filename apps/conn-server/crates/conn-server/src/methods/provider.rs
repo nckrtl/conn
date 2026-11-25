@@ -290,19 +290,20 @@ pub async fn refresh(deps: &Deps, only: Option<&str>) {
     let Some(only) = only else {
         return refresh_all(deps).await;
     };
-    for provider in deps.providers.snapshot() {
-        let id = provider.instance_id().as_str();
-        if let (Some(instances), Some(environment)) = (&deps.instances, &deps.environment) {
-            super::source_control::refresh_login_path().await;
-            instances
-                .reconcile_after_refresh(&deps.providers, &environment.settings.raw(), true)
-                .await;
-        }
-        if id == only {
-            provider.refresh_status(instance_settings(deps, id)).await;
-        }
+    discover_on_refresh(deps).await;
+    if let Some(provider) = deps.providers.get(only) {
+        provider.refresh_status(instance_settings(deps, only)).await;
     }
     deps.provider_status.bump();
+}
+
+async fn discover_on_refresh(deps: &Deps) {
+    if let (Some(instances), Some(environment)) = (&deps.instances, &deps.environment) {
+        super::source_control::refresh_login_path().await;
+        instances
+            .reconcile_after_refresh(&deps.providers, &environment.settings.raw(), true)
+            .await;
+    }
 }
 
 /// T3's `refreshAll`: one full pass at a time, which every caller joins. The pass runs on its
@@ -327,6 +328,7 @@ pub async fn refresh_all(deps: &Deps) {
                         .model_manifest
                         .as_ref()
                         .map(|manifest| manifest.current_updated_at());
+                    discover_on_refresh(&deps).await;
                     let mut probes = tokio::task::JoinSet::new();
                     for provider in deps.providers.snapshot() {
                         let settings = instance_settings(&deps, provider.instance_id().as_str());
@@ -821,6 +823,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn codex_and_claude_advertise_native_resume_through_the_typed_session_contract() {
+        for capabilities in [
+            conn_provider_codex::capabilities(),
+            conn_provider_claude::capabilities(),
+        ] {
+            let session_capabilities: conn_contract::ProviderCapabilities =
+                conn_contract::from_json(capabilities).unwrap();
+            assert_eq!(
+                session_capabilities.turns.supports_native_resume,
+                Some(true)
+            );
+        }
+    }
+
     /// Before its first probe the Claude entry is T3's pending one (`makePendingClaudeProvider`);
     /// the probe itself is proven by `tools/probe-conformance` in `conn-provider-claude`.
     #[test]
@@ -964,6 +981,8 @@ mod tests {
     struct Counted {
         id: conn_contract::ProviderInstanceId,
         calls: std::sync::atomic::AtomicUsize,
+        installed: bool,
+        explicit_probes: std::sync::atomic::AtomicUsize,
     }
 
     impl conn_provider::Provider for Counted {
@@ -996,6 +1015,17 @@ mod tests {
                 })
             })
         }
+        fn server_provider_entry(&self, _checked_at: &str) -> Option<Value> {
+            Some(
+                json!({"instanceId":self.id, "driver":"grok", "enabled":true,
+                "installed":self.installed, "probes":self.explicit_probes.load(std::sync::atomic::Ordering::SeqCst)}),
+            )
+        }
+        fn refresh_status(&self, _instance: Option<Value>) -> conn_provider::BoxFuture<'_, ()> {
+            self.explicit_probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {})
+        }
         fn refresh_status_on_interval(
             &self,
             _instance: Option<Value>,
@@ -1006,6 +1036,102 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refreshing_discovers_a_new_login_path_and_probes_the_rebuilt_instance() {
+        const MODE: &str = "CONN_TEST_REFRESH_DISCOVERY";
+        let Ok(mode) = std::env::var(MODE) else {
+            // The login environment is process-wide. Give each refresh path a clean process.
+            for mode in ["all", "named"] {
+                let (unused, dir) = deps_with_settings(&json!({}));
+                drop(unused);
+                let bin = dir.join("new-bin");
+                std::fs::create_dir(&bin).unwrap();
+                conn_support::test_util::executable(
+                    &bin.join("grok-private"),
+                    "#!/bin/sh\nexit 0\n",
+                )
+                .unwrap();
+                let shell = dir.join("sh");
+                conn_support::test_util::executable(
+                    &shell,
+                    &format!(
+                        "#!/bin/sh\nPATH='{}:/usr/bin:/bin'; export PATH\nexec /bin/sh -c \"$2\"\n",
+                        bin.display()
+                    ),
+                )
+                .unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        std::thread::current().name().unwrap(),
+                        "--nocapture",
+                    ])
+                    .env(MODE, mode)
+                    .env("SHELL", shell)
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+                    .unwrap();
+                std::fs::remove_dir_all(dir).unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let (mut deps, dir) = deps_with_settings(&json!({
+            "providerInstances":{"customGrok":{"driver":"grok", "config":{"binaryPath":"grok-private"}}}
+        }));
+        deps.providers = Default::default();
+        let registry = Arc::new(crate::instances::Instances::new(
+            &["grok"],
+            Arc::new(|id, driver, entry| {
+                assert_eq!(driver, "grok");
+                let installed = entry
+                    .and_then(|e| e["config"]["binaryPath"].as_str())
+                    .is_none_or(|name| {
+                        conn_support::login_env::var_os("PATH").is_some_and(|path| {
+                            std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+                        })
+                    });
+                Some(Arc::new(Counted {
+                    id: id.into(),
+                    installed,
+                    calls: Default::default(),
+                    explicit_probes: Default::default(),
+                }))
+            }),
+        ));
+        registry
+            .reconcile(
+                &deps.providers,
+                &deps.environment.as_ref().unwrap().settings.raw(),
+            )
+            .await;
+        deps.instances = Some(registry);
+        let healthy = deps.providers.get("grok").unwrap();
+        let missing = deps.providers.get("customGrok").unwrap();
+        assert_eq!(
+            missing.server_provider_entry("").unwrap()["installed"],
+            false
+        );
+        refresh(&deps, (mode == "named").then_some("customGrok")).await;
+        assert!(Arc::ptr_eq(&healthy, &deps.providers.get("grok").unwrap()));
+        let discovered = deps.providers.get("customGrok").unwrap();
+        assert!(!Arc::ptr_eq(&missing, &discovered));
+        let entry = discovered.server_provider_entry("").unwrap();
+        assert_eq!(entry["installed"], true);
+        assert_eq!(entry["probes"], 1);
+        assert_eq!(missing.server_provider_entry("").unwrap()["probes"], 0);
+        assert_eq!(
+            healthy.server_provider_entry("").unwrap()["probes"],
+            u8::from(mode == "all")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A thaw after a long freeze in which the monotonic clock ran on: the 5-minute interval
     /// fires once, not once per missed interval, as T3's `Effect.sleep` loop
     /// (`managedProvider.ts`). The lease here is renewed on wake.
@@ -1014,6 +1140,8 @@ mod tests {
         let counted = Arc::new(Counted {
             id: "grok".into(),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            installed: true,
+            explicit_probes: Default::default(),
         });
         let deps = Deps {
             engine: None,

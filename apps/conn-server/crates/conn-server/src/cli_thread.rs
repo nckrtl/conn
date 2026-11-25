@@ -483,10 +483,25 @@ pub fn acp_mcp_call(args: &[String]) -> i32 {
         return 2;
     };
     let [tool, arguments] = args else {
-        eprintln!("acp-mcp-call requires <tool> and <arguments-json>.");
+        eprintln!("acp-mcp-call requires <tool> and <arguments-json>, or - to read it from stdin.");
         return 2;
     };
-    let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
+    let mut input = String::new();
+    let raw = if arguments == "-" {
+        if !io::stdin()
+            .lock()
+            .take(MAX_RESPONSE_BYTES + 1)
+            .read_to_string(&mut input)
+            .is_ok_and(|len| (len as u64) <= MAX_RESPONSE_BYTES)
+        {
+            eprintln!("Could not read MCP arguments from stdin.");
+            return 2;
+        }
+        &input
+    } else {
+        arguments
+    };
+    let Ok(arguments) = serde_json::from_str::<Value>(raw) else {
         eprintln!("acp-mcp-call arguments must be valid JSON.");
         return 2;
     };
@@ -512,9 +527,9 @@ pub fn acp_mcp_call(args: &[String]) -> i32 {
             {
                 parts.retain(|part| {
                     part["type"] != "text"
-                        || !part["text"].as_str().is_some_and(|text| {
-                            serde_json::from_str::<Value>(text).is_ok_and(|v| v == structured)
-                        })
+                        || !part["text"]
+                            .as_str()
+                            .is_some_and(|text| text == structured.to_string())
                 });
             }
             println!("{result}");

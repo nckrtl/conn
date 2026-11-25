@@ -12,6 +12,7 @@ conn-contract.workspace = true
 conn-provider.workspace = true
 conn-provider-support.workspace = true
 conn-support.workspace = true
+regex-automata.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

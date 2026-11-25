@@ -474,7 +474,7 @@ impl<E: Env> Mapper<E> {
             return Vec::new();
         };
         if turn.pending_steers.len() >= STEER_CAP {
-            turn.pending_steers.remove(0);
+            return Vec::new();
         }
         turn.pending_steers
             .push((prompt_uuid.to_string(), message_id.to_string()));

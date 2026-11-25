@@ -10,7 +10,11 @@ const MAX_ROWS: i64 = 200;
 const BATCH: &str = "Antigravity subagent batch";
 
 fn native_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 fn managed_file(root: &Path, parts: &[&str]) -> Option<PathBuf> {
@@ -63,35 +67,33 @@ pub(crate) fn last_step(profile: &Path, session: &str) -> Option<i64> {
 }
 
 /// A turn that created the file after dispatch also owns its first step.
-pub(crate) fn terminal_error(profile: &Path, session: &str, after: i64) -> Option<String> {
+pub(crate) fn terminal_error(
+    profile: &Path,
+    session: &str,
+    after: i64,
+    refusal: bool,
+) -> Option<crate::antigravity_outcome::Failure> {
     let db = database(profile, session)?;
-    let (kind,bytes):(i64,Vec<u8>)=db.query_row("SELECT step_type,substr(step_payload,1,16384) FROM steps WHERE idx>?1 ORDER BY idx DESC LIMIT 1",[after],|r|Ok((r.get(0)?,r.get(1)?))).optional().ok()??;
+    let (kind, bytes): (i64, Option<Vec<u8>>) = db.query_row(
+        "SELECT step_type, substr(step_payload, 1, 16384) FROM steps WHERE idx > ?1 ORDER BY idx DESC LIMIT 1",
+        [after], |row| Ok((row.get(0)?, row.get(1)?))
+    ).optional().ok()??;
     if kind != 17 {
         return None;
     }
-    let decoded = String::from_utf8_lossy(&bytes);
-    let start = [
-        "Error ",
-        "RESOURCE_EXHAUSTED",
-        "UNAVAILABLE",
-        "PERMISSION_DENIED",
-        "INVALID_ARGUMENT",
-        "INTERNAL",
-        "There was a network issue",
-    ]
-    .iter()
-    .filter_map(|marker| decoded.find(marker))
-    .min();
-    // The remaining bytes can include native diagnostic data. Report only the bounded user-facing first line.
-    Some(
-        start
-            .and_then(|at| decoded[at..].split(|c: char| c.is_control()).next())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or("Antigravity reported a native provider error.")
-            .chars()
-            .take(1024)
-            .collect(),
-    )
+    let reached_model: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM steps WHERE idx > ?1 AND step_type = 15)",
+            [after],
+            |row| row.get(0),
+        )
+        .ok()?;
+    Some(crate::antigravity_outcome::classify(
+        &String::from_utf8_lossy(&bytes.unwrap_or_default()),
+        refusal,
+        reached_model,
+        conn_support::time::now_ms(),
+    ))
 }
 
 fn varint(input: &mut &[u8]) -> Option<u64> {
@@ -533,64 +535,6 @@ pub(crate) fn children(
     query(profile, session, task, launch, siblings).unwrap_or_default()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn test_folder() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "conn-acp-children-{}",
-            conn_provider_support::ids::Env::uuid(&mut conn_provider_support::ids::SystemEnv)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        root
-    }
-    fn write(root: &Path, relative: &str, bytes: &str) {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, bytes).unwrap();
-    }
-    #[test]
-    fn detached_children_require_the_matching_native_parent_and_call() {
-        let dir = test_folder();
-        write(
-            &dir,
-            "antigravity-acp/brain/root/.system_generated/subagents/child.json",
-            r#"{"conversationId":"child","subagentDescriptor":{"role":"researcher"}}"#,
-        );
-        write(
-            &dir,
-            "antigravity-acp/brain/child/.system_generated/messages/1.json",
-            r#"{"sender":"root","content":"Inspect the build","sourceMetadata":{"tool":{"conversationId":"root","toolCall":{"name":"invoke_subagent","id":"call"}}}}"#,
-        );
-        write(
-            &dir,
-            "antigravity-acp/brain/child/.system_generated/logs/transcript.jsonl",
-            r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"Finished"}"#,
-        );
-        let result = children(&dir, "root", "call", &Value::Null, &[]);
-        assert_eq!(result[0]["role"], "researcher");
-        assert_eq!(result[0]["steps"][0]["text"], "Finished");
-        assert!(children(&dir, "other", "call", &Value::Null, &[]).is_empty());
-        assert!(children(&dir, "root", "other", &Value::Null, &[]).is_empty());
-        assert!(children(&dir, "../root", "call", &Value::Null, &[]).is_empty());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn last_turn_error_cannot_leak_into_the_next_turn() {
-        let dir = test_folder();
-        let parent = dir.join("antigravity-acp/conversations");
-        std::fs::create_dir_all(&parent).unwrap();
-        let db = Connection::open(parent.join("root.db")).unwrap();
-        db.execute_batch("create table steps(idx integer,step_type integer,step_payload blob); insert into steps values(1,17,cast('Error 503, Message: unavailable' as blob))").unwrap();
-        let boundary = last_step(&dir, "root").unwrap();
-        assert_eq!(boundary, 1);
-        assert!(terminal_error(&dir, "root", boundary).is_none());
-        assert!(terminal_error(&dir, "root", -1).unwrap().contains("503"));
-        drop(db);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
 fn inbox(root: &Path, session: &str, budget: &mut u64) -> Option<Vec<Value>> {
     let parts = [
         "antigravity-acp",
@@ -704,4 +648,62 @@ pub(crate) fn active_children(profile: &Path, root: &str, ids: &[String]) -> Vec
         Some(matches.into_iter().collect())
     };
     inspect().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn test_folder() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "conn-acp-children-{}",
+            conn_provider_support::ids::Env::uuid(&mut conn_provider_support::ids::SystemEnv)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        root
+    }
+    fn write(root: &Path, relative: &str, bytes: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    #[test]
+    fn detached_children_require_the_matching_native_parent_and_call() {
+        let dir = test_folder();
+        write(
+            &dir,
+            "antigravity-acp/brain/root/.system_generated/subagents/child.json",
+            r#"{"conversationId":"child","subagentDescriptor":{"role":"researcher"}}"#,
+        );
+        write(
+            &dir,
+            "antigravity-acp/brain/child/.system_generated/messages/1.json",
+            r#"{"sender":"root","content":"Inspect the build","sourceMetadata":{"tool":{"conversationId":"root","toolCall":{"name":"invoke_subagent","id":"call"}}}}"#,
+        );
+        write(
+            &dir,
+            "antigravity-acp/brain/child/.system_generated/logs/transcript.jsonl",
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"Finished"}"#,
+        );
+        let result = children(&dir, "root", "call", &Value::Null, &[]);
+        assert_eq!(result[0]["role"], "researcher");
+        assert_eq!(result[0]["steps"][0]["text"], "Finished");
+        assert!(children(&dir, "other", "call", &Value::Null, &[]).is_empty());
+        assert!(children(&dir, "root", "other", &Value::Null, &[]).is_empty());
+        assert!(children(&dir, "../root", "call", &Value::Null, &[]).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn last_turn_error_cannot_leak_into_the_next_turn() {
+        let dir = test_folder();
+        let parent = dir.join("antigravity-acp/conversations");
+        std::fs::create_dir_all(&parent).unwrap();
+        let db = Connection::open(parent.join("root.db")).unwrap();
+        db.execute_batch("create table steps(idx integer,step_type integer,step_payload blob); insert into steps values(1,17,cast('Error 503, Message: unavailable' as blob))").unwrap();
+        let boundary = last_step(&dir, "root").unwrap();
+        assert_eq!(boundary, 1);
+        assert!(terminal_error(&dir, "root", boundary, false).is_none());
+        assert!(terminal_error(&dir, "root", -1, false).is_some());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

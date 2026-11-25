@@ -259,6 +259,29 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
                     Err(e) => errors.push(format!("resumeThread: {e}")),
                 }
             }
+            "forkThread" => {
+                let request = conn_provider::ForkThreadInput {
+                    source_provider_thread: from_json(input["sourceProviderThread"].clone())
+                        .unwrap(),
+                    source_provider_turns: vec![],
+                    provider_turn_id: None,
+                    target_thread_id: input["targetThreadId"].as_str().unwrap().into(),
+                    owner_node_id: None,
+                    model_selection: None,
+                    runtime_policy: None,
+                };
+                match session.fork_thread(request).await {
+                    Ok(thread) => {
+                        let thread = conn_contract::to_json(&thread);
+                        assert_eq!(thread["nativeThreadRef"]["nativeId"], "forked");
+                        assert_eq!(
+                            thread["forkedFrom"]["providerThreadId"],
+                            input["sourceProviderThread"]["id"]
+                        );
+                    }
+                    Err(e) => errors.push(format!("fork: {e}")),
+                }
+            }
             "steerTurn" => {
                 let turn = crate::testing::turn_input(input);
                 let id = crate::lock(&events)
@@ -1072,4 +1095,193 @@ async fn app_context_reaches_the_grok_prompt_as_external_text() {
     let run = replay(&crate::flavor::GROK, &fixture).await;
     assert!(run.errors.is_empty(), "{:?}", run.errors);
     assert!(crate::lock(&run.script).complete());
+}
+
+#[tokio::test]
+async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
+    for (is_grok, mut fixture) in [
+        (true, read_golden("grok", "simple")),
+        (false, antigravity_turn_with_thinking_level()),
+    ] {
+        let calls = fixture["calls"].as_array_mut().unwrap();
+        let pos = calls
+            .iter()
+            .position(|c| c["method"] == "startTurn")
+            .unwrap();
+        let mut steer = calls[pos].clone();
+        steer["method"] = json!("steerTurn");
+        steer["input"]["message"]["text"] = json!("adjust course");
+        steer["input"]["message"]["attachments"] = json!([]);
+        calls.insert(pos + 1, steer);
+        let script = fixture["transcripts"][0].as_array_mut().unwrap();
+        let init = script
+            .iter_mut()
+            .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+            .unwrap();
+        init["frame"]["result"]["agentInfo"]["version"] = json!("1.5.11");
+        let prompt = script
+            .iter()
+            .position(|r| {
+                r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request"
+            })
+            .unwrap();
+        let session = script
+            .iter()
+            .find(|r| r["frame"]["method"] == "session/new" && r["frame"]["kind"] == "response")
+            .unwrap()["frame"]["result"]["sessionId"]
+            .clone();
+        let (method, params, result) = if is_grok {
+            (
+                "_x.ai/interject",
+                json!({"sessionId":session,"text":"adjust course"}),
+                json!({"result":{"status":"queued"}}),
+            )
+        } else {
+            // A failed response to the superseded first prompt is not the new turn outcome.
+            (
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"adjust course"}]}),
+                json!({"stopReason":"refusal","usage":{"inputTokens":999,"outputTokens":100}}),
+            )
+        };
+        script.splice(prompt+1..prompt+1,[json!({"type":"expect_outbound","frame":{"kind":"request","method":method,"params":params}}),
+            json!({"type":"emit_inbound","frame":{"kind":"response","method":method,"result":result}})]);
+        let flavor = if is_grok {
+            &crate::flavor::GROK
+        } else {
+            &crate::antigravity::ANTIGRAVITY
+        };
+        let run = replay(flavor, &fixture).await;
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        let script = crate::lock(&run.script);
+        assert!(script.complete(), "{:?}", script.failure);
+        let terminals: Vec<_> = run
+            .events
+            .iter()
+            .filter(|e| e["type"] == "turn.terminal")
+            .collect();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["status"], "completed");
+    }
+}
+
+#[tokio::test]
+async fn antigravity_questions_round_trip_under_full_access() {
+    for form in [true, false] {
+        let mut fixture = antigravity_turn_with_thinking_level();
+        let calls = fixture["calls"].as_array_mut().unwrap();
+        let pos = calls
+            .iter()
+            .position(|c| c["method"] == "startTurn")
+            .unwrap();
+        let script = fixture["transcripts"][0].as_array_mut().unwrap();
+        let prompt = script
+            .iter()
+            .position(|r| {
+                r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request"
+            })
+            .unwrap();
+        let session = script
+            .iter()
+            .find(|r| r["frame"]["method"] == "session/new" && r["frame"]["kind"] == "response")
+            .unwrap()["frame"]["result"]["sessionId"]
+            .clone();
+        let (method, params, answers, reply) = if form {
+            (
+                "elicitation/create",
+                json!({"mode":"form","message":"Choose","requestedSchema":{"type":"object","properties":{"amount":{"type":"integer"}},"required":["amount"]}}),
+                json!({"amount":"2"}),
+                json!({"action":"accept","content":{"amount":2}}),
+            )
+        } else {
+            (
+                "session/request_permission",
+                json!({"sessionId":session,"toolCall":{"toolCallId":"interaction_q","title":"Choice"},"options":[{"kind":"allow_once","optionId":"a","name":"A"},{"kind":"allow_once","optionId":"b","name":"B"}]}),
+                json!({"interaction_q":"b"}),
+                json!({"outcome":{"outcome":"selected","optionId":"b"}}),
+            )
+        };
+        fixture["calls"].as_array_mut().unwrap().insert(
+            pos + 1,
+            json!({"method":"respondToRuntimeRequest","input":{"answers":answers}}),
+        );
+        let script = fixture["transcripts"][0].as_array_mut().unwrap();
+        script.splice(prompt+1..prompt+1,[json!({"type":"emit_inbound","frame":{"kind":"request","method":method,"params":params}}),
+            json!({"type":"expect_outbound","frame":{"kind":"response","method":method,"result":reply}})]);
+        let run = tokio::time::timeout(
+            Duration::from_secs(4),
+            replay(&crate::antigravity::ANTIGRAVITY, &fixture),
+        )
+        .await
+        .expect("agent must wait for human answers");
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        assert!(
+            crate::lock(&run.script).complete(),
+            "{:?}",
+            crate::lock(&run.script).failure
+        );
+        assert!(
+            run.events
+                .iter()
+                .any(|e| e["type"] == "runtime_request.updated"
+                    && e["runtimeRequest"]["status"] == "pending")
+        );
+    }
+}
+
+#[tokio::test]
+async fn fork_negotiates_native_session_and_uses_the_child_for_the_next_prompt() {
+    let mut fixture = read_golden("grok", "simple");
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    let at = calls
+        .iter()
+        .position(|c| c["method"] == "startTurn")
+        .unwrap();
+    let source = calls[at]["input"]["providerThread"].clone();
+    calls[at]["input"]["providerThread"]["nativeThreadRef"]["nativeId"] = json!("forked");
+    calls.insert(at,json!({"method":"forkThread","input":{"sourceProviderThread":source,"targetThreadId":"child"}}));
+    let entries = fixture["transcripts"][0].as_array_mut().unwrap();
+    let new = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/new" && r["frame"]["kind"] == "response")
+        .unwrap();
+    let mut child = entries[new]["frame"]["result"].clone();
+    let source = child["sessionId"].clone();
+    child["sessionId"] = json!("forked");
+    let init = entries
+        .iter_mut()
+        .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+        .unwrap();
+    init["frame"]["result"]["agentCapabilities"]["sessionCapabilities"]["fork"] = json!({});
+    let prompt = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request")
+        .unwrap();
+    for r in &mut entries[prompt..] {
+        if r["frame"]["params"]["sessionId"] == source {
+            r["frame"]["params"]["sessionId"] = json!("forked");
+        }
+    }
+    entries.splice(prompt..prompt,[json!({"type":"expect_outbound","frame":{"kind":"request","method":"session/fork","params":"<any>"}}),
+        json!({"type":"emit_inbound","frame":{"kind":"response","method":"session/fork","result":child}})]);
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    let script = crate::lock(&run.script);
+    assert!(script.complete(), "{:?}", script.failure);
+    assert_eq!(
+        script
+            .written
+            .iter()
+            .find(|v| v["method"] == "session/fork")
+            .unwrap()["params"]["sessionId"],
+        source
+    );
+    assert_eq!(
+        script
+            .written
+            .iter()
+            .find(|v| v["method"] == "session/prompt")
+            .unwrap()["params"]["sessionId"],
+        "forked"
+    );
 }

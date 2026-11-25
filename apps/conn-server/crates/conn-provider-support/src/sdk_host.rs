@@ -275,15 +275,10 @@ impl Helper {
     /// Opens a query with this option object. `extra` holds the open command's other fields
     /// (`subagentStartContext`, `wrap`).
     pub fn open(&self, options: Value, extra: Value) -> ProviderResult<Query> {
-        let (tx, events) = mpsc::channel(QUERY_EVENT_CAPACITY + 1);
-        let (id, writer) = {
+        let id = {
             let mut state = self.inner.lock();
-            let writer = self.inner.ensure_running(&mut state)?;
             state.next_id += 1;
-            let id = format!("q{}", state.next_id);
-            let generation = state.generation;
-            state.queries.insert(id.clone(), (generation, tx));
-            (id, writer)
+            format!("q{}", state.next_id)
         };
         let mut command = json!({
             "t": "open", "driver": self.inner.driver.name, "instanceId": &*self.instance_id,
@@ -292,12 +287,21 @@ impl Helper {
         if let (Some(target), Value::Object(extra)) = (command.as_object_mut(), extra) {
             target.extend(extra);
         }
-        if writer
-            .try_send((self.inner.driver.encode)(&command))
-            .is_err()
+        let line = (self.inner.driver.encode)(&command);
+        if line.len() > MAX_LINE_BYTES {
+            return Err(helper_err(
+                "the SDK host command exceeds the 32 MiB frame limit",
+            ));
+        }
+        let (tx, events) = mpsc::channel(QUERY_EVENT_CAPACITY + 1);
         {
-            self.inner.lock().queries.remove(&id);
-            return Err(helper_err("the Claude helper is not accepting input"));
+            let mut state = self.inner.lock();
+            let writer = self.inner.ensure_running(&mut state)?;
+            writer
+                .try_send(line)
+                .map_err(|_| helper_err("the Claude helper is not accepting input"))?;
+            let generation = state.generation;
+            state.queries.insert(id.clone(), (generation, tx));
         }
         Ok(Query {
             id,
@@ -793,9 +797,13 @@ impl QueryHandle {
             Ok(value) => json!({"t": "response", "sessionId": self.id, "id": id, "value": value}),
             Err(error) => json!({"t": "response", "sessionId": self.id, "id": id, "error": error}),
         };
-        let _ = writer
-            .send((self.helper.inner.driver.encode)(&command))
-            .await;
+        let line = (self.helper.inner.driver.encode)(&command);
+        let response = if line.len() <= MAX_LINE_BYTES {
+            line
+        } else {
+            json!({"t":"response","sessionId":self.id,"id":id,"error":"the SDK callback response exceeds the 32 MiB frame limit"}).to_string()
+        };
+        let _ = writer.send(response).await;
     }
 
     /// Gives up a query whose open was interrupted, as the T3 server's query runner does: the

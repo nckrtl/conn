@@ -292,8 +292,7 @@ pub(crate) enum ForkExecution {
 /// `decideForkExecution`: a native fork when the source turn finished on the same provider
 /// with a strong native thread that can fork from a turn, and no later turn runs on the
 /// source. Otherwise the history travels as a full handoff (`portable_context`), which the
-/// target must accept (`ensureContextHandoff`). A side chat forks natively or not at all:
-/// T3 gives it its own side-chat handoff, which this server does not build.
+/// target must accept (`ensureContextHandoff`). A side chat also carries a digest of later parent activity.
 pub(crate) fn decide_fork_execution(
     tx: &Tx<'_>,
     thread: &Value,

@@ -45,7 +45,7 @@ pub struct ServeOptions {
     pub cwd: PathBuf,
     /// Started by Conn desktop with its bootstrap credential.
     pub desktop: Option<DesktopBootstrap>,
-    /// How long an idle provider session stays open; `None` keeps it open.
+    /// The provider-specific default, an explicit idle timeout, or disabled idle cleanup.
     pub session_idle: conn_engine::IdleTimeout,
     /// `--sdk-host`. Read by `main` when it builds the Claude provider.
     pub sdk_host: Option<PathBuf>,

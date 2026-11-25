@@ -986,6 +986,63 @@ fn fork(command: &str, source_point: Value) -> Value {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_native_fork_refusal_recovers_the_selected_parent_history() {
+    let db = TempDb::new("fork-declined");
+    let repo = Repo::new("fork-declined");
+    let (engine, provider) = with_turns(
+        &db,
+        &repo,
+        FakeProvider::new("claudeAgent").rejecting_fork(),
+        create_in(&repo, "t1", "create"),
+        &["kept parent message", "later parent message"],
+    )
+    .await;
+    dispatch(
+        &engine,
+        fork("fork", json!({"type":"run","runId":"run:t1:1"})),
+    )
+    .await;
+    dispatch(&engine, message("t2", "after", "continue fork")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    let sent = provider.prompts.lock().unwrap();
+    assert!(!provider.forks.lock().unwrap().is_empty());
+    assert!(sent.last().unwrap().contains("kept parent message"));
+    assert!(!sent.last().unwrap().contains("later parent message"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn early_side_chat_gets_running_parent_activity_once_and_excludes_queued_work() {
+    let db = TempDb::new("early-side");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut stream).await;
+    dispatch(&engine, message("t1", "first", "hang")).await;
+    until_provider_turn(&mut stream).await;
+    dispatch(&engine, queued("queued", "invisible queued message")).await;
+    let mut side = fork("fork", json!({"type":"latest_stable"}));
+    side["sideChat"] = json!(true);
+    dispatch(&engine, side).await;
+    dispatch(&engine, message("t2", "question", "side question")).await;
+    let p = run_to_end(&engine, "t2", "run:t2:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed", "{}", p["turnItems"]);
+    dispatch(&engine, message("t2", "second", "next question")).await;
+    run_to_end(&engine, "t2", "run:t2:2").await;
+    let prompts = provider.prompts.lock().unwrap();
+    let first = &prompts[prompts.len() - 2];
+    assert!(
+        first.contains("in a side chat")
+            && first.contains("- User: hang")
+            && !first.contains("invisible queued message"),
+        "{first}"
+    );
+    assert_eq!(prompts.last().unwrap(), "next question");
+}
+#[tokio::test(flavor = "current_thread")]
 async fn a_fork_starts_from_the_source_run_with_a_native_fork() {
     let db = TempDb::new("fork");
     let repo = Repo::new("fork");

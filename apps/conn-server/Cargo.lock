@@ -349,6 +349,7 @@ dependencies = [
  "conn-provider",
  "conn-provider-support",
  "conn-support",
+ "regex-automata",
  "rusqlite",
  "rustix",
  "serde",

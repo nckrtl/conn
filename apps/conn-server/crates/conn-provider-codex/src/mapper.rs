@@ -33,6 +33,7 @@ mod goals;
 mod subagents;
 
 mod rate_limits;
+mod retries;
 pub use goals::{
     GoalCommand, describe as describe_goal, objective_too_long, parse_command, provider_goal,
 };
@@ -166,6 +167,7 @@ struct Turn {
     running_tools: Vec<Value>,
     running_compactions: Vec<String>,
     latest_failure: Option<(String, Option<String>, Value)>,
+    recovered_retries: u32,
     /// Earlier provider turns of the same run that Codex continued with this one (a goal's
     /// turns, `continuedRuns`): Stop may name any of them.
     continues: Vec<String>,
@@ -301,7 +303,7 @@ pub struct Mapper<E: Env> {
     stop_processes: VecDeque<(String, Vec<String>)>,
     goals: goals::Goals,
     // Timed from the first unanswered retry. Repeated notices only update its failure evidence.
-    retries: HashMap<String, (tokio::time::Instant, Value)>,
+    retries: HashMap<String, retries::Retry>,
     pub(crate) limit_reset: Option<String>,
     limited_item: Option<Value>,
     pub(crate) time_zone: Option<String>,
@@ -728,6 +730,7 @@ impl<E: Env> Mapper<E> {
             running_tools: Vec::new(),
             running_compactions: Vec::new(),
             latest_failure: None,
+            recovered_retries: 0,
             continues: Vec::new(),
             hook_stop_reason: None,
         }
@@ -918,7 +921,6 @@ impl<E: Env> Mapper<E> {
     pub fn on_exit(&mut self, expected: bool, detail: &str) -> Vec<Out> {
         let mut out = Vec::new();
         self.pending_turns.clear();
-        self.retries.clear();
         self.requests.clear();
         // A process that exited runs no turn; after a close the answer may still come (a
         // shared process), and [`Self::abandoned_start_answered`] stops it then.
@@ -1015,8 +1017,13 @@ impl<E: Env> Mapper<E> {
                 | "item/reasoning/textDelta"
                 | "item/reasoning/summaryTextDelta"
                 | "item/plan/delta"
-        ) {
-            self.retries.remove(turn_id);
+                | "turn/plan/updated"
+        ) && let Some(retry) = self.retries.remove(turn_id)
+        {
+            retry.end("completed", &self.env.now(), None, out);
+            if let Some(turn) = self.turns.get_mut(turn_id) {
+                turn.recovered_retries += 1;
+            }
         }
         match method {
             "turn/started" => {
@@ -1879,19 +1886,19 @@ impl<E: Env> Mapper<E> {
     }
 
     pub fn retry_deadline(&self) -> Option<tokio::time::Instant> {
-        self.retries.values().map(|(at, _)| *at).min()
+        self.retries.values().map(|retry| retry.deadline).min()
     }
 
     pub fn expire_retries(&mut self, now: tokio::time::Instant) -> Vec<Out> {
         let expired: Vec<_> = self
             .retries
             .iter()
-            .filter(|(_, (at, _))| *at <= now)
+            .filter(|(_, retry)| retry.deadline <= now)
             .map(|(id, _)| id.clone())
             .collect();
         let mut out = Vec::new();
         for id in expired {
-            let Some((_, error)) = self.retries.remove(&id) else {
+            let Some(error) = self.retries.get(&id).map(|retry| retry.error.clone()) else {
                 continue;
             };
             let Some(turn) = self.turns.get_mut(&id) else {
@@ -1902,25 +1909,10 @@ impl<E: Env> Mapper<E> {
             let message = error["message"]
                 .as_str()
                 .unwrap_or("Codex stopped making progress during a retry.");
-            let detail = trimmed(&error["additionalDetails"]).unwrap_or_else(|| message.to_owned());
-            let class = if usage_limit(code.as_deref(), info)
-                || info
-                    .as_object()
-                    .is_some_and(|o| o.values().any(|v| v["httpStatusCode"] == 429))
-            {
-                "usage_limit"
-            } else if code
-                .as_deref()
-                .is_some_and(|s| s.starts_with("http") || s.starts_with("responseStream"))
-            {
-                "transport_error"
-            } else {
-                "provider_error"
-            };
             turn.latest_failure = Some((
                 message.to_owned(),
-                code.clone(),
-                failure_json(class, &detail, code.as_deref(), Some(false)),
+                code,
+                retries::retry_failure(&error, false),
             ));
             let thread = turn.native_thread_id.clone();
             let at = self.env.now();
@@ -1993,18 +1985,16 @@ impl<E: Env> Mapper<E> {
                 .is_some_and(|(_, _, f)| f["class"] == "usage_limit")
     }
 
-    fn error(&mut self, turn_id: &str, p: &Value, _out: &mut Vec<Out>) {
+    fn error(&mut self, turn_id: &str, p: &Value, out: &mut Vec<Out>) {
         let Some(turn) = self.turns.get_mut(turn_id) else {
             return;
         };
         if p["willRetry"] == true {
-            let entry = self.retries.entry(turn_id.to_owned()).or_insert_with(|| {
-                (
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(600),
-                    Value::Null,
-                )
-            });
-            entry.1 = p["error"].clone();
+            let at = self.env.now();
+            self.retries
+                .entry(turn_id.to_owned())
+                .or_insert_with(|| retries::Retry::new(turn, &at))
+                .notice(&p["error"], &at, out);
             return;
         }
         let error = &p["error"];
@@ -2247,7 +2237,9 @@ impl<E: Env> Mapper<E> {
                 push_event(out, json!({"type":"turn_item.updated","turnItem":item}));
             }
         }
-        self.retries.remove(native);
+        if let Some(retry) = self.retries.remove(native) {
+            retry.end(terminal_status, &completed_at, failure.as_ref(), out);
+        }
         // The turn is gone: drop what was kept for it.
         self.ended_unfinished.remove(native);
         self.interrupting.remove(native);

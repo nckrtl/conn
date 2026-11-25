@@ -219,7 +219,7 @@ pub(crate) fn acp_capabilities() -> Value {
         "threads": {
             "canCreateEmptyThread": true,
             "canReadThreadSnapshot": false,
-            "canRollbackThread": false,
+            "canRollbackThread": true,
             "canForkThread": false,
             "canForkFromTurn": false,
             "canForkFromSubagentThread": false,
@@ -287,9 +287,9 @@ pub(crate) fn acp_capabilities() -> Value {
         },
         "checkpointing": {
             "appCanCheckpointFilesystem": true,
-            "supportsNestedCheckpointScopes": false,
+            "supportsNestedCheckpointScopes": true,
             "providerCanRollbackConversation": false,
-            "providerRollbackReturnsSnapshot": false,
+            "providerRollbackReturnsSnapshot": true,
             "providerCanReadConversationSnapshot": false,
         },
         "identity": {

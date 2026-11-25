@@ -2042,9 +2042,7 @@ impl ClaudeSession {
             let mut budget = initial;
             let mut content =
                 attachments::prompt_content(&text, &list, dir.as_deref(), &mut budget)?;
-            if text.contains(conn_provider_support::skill_mentions::is_currency)
-                && !text.trim_start().starts_with("/goal")
-            {
+            if crate::skills::has_mention(&text) && !text.trim_start().starts_with("/goal") {
                 let skills =
                     crate::skills::discover(&config, cwd.as_deref().map(std::path::Path::new));
                 if let Some((leading, command)) = crate::skills::dispatch(&text, &skills) {
@@ -2630,18 +2628,25 @@ impl Session for ClaudeSession {
             let uuid = SystemEnv.uuid();
             let (query, outs, content, offer) = {
                 let mut state = self.inner.lock();
-                let query = state
-                    .live
-                    .as_ref()
-                    .map(|l| l.query.clone())
-                    .ok_or(ProviderError::SessionStopped)?;
+                let Some(query) = state.live.as_ref().map(|l| l.query.clone()) else {
+                    state.attachment_budget = original_budget;
+                    return Err(ProviderError::SessionStopped);
+                };
                 if state.mapper.active_turn_id() != Some(input.provider_turn_id.as_str()) {
+                    state.attachment_budget = original_budget;
                     return Err(failed_err("steer_turn", "that turn is not running"));
                 }
                 touch(&mut state, None);
                 let outs = state
                     .mapper
                     .steer_sent(&uuid, input.message.message_id.as_str());
+                if outs.is_empty() {
+                    state.attachment_budget = original_budget;
+                    return Err(failed_err(
+                        "steer_turn",
+                        "the Claude turn already has 64 pending steers",
+                    ));
+                }
                 let native = state
                     .live
                     .as_ref()

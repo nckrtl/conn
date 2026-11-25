@@ -188,6 +188,7 @@ struct TurnContext {
     handoffs: Vec<Value>,
     /// The handoffs this run's turn delivers (`isPendingForRun`).
     ready: Vec<Value>,
+    side_note: Option<Value>,
     /// The run starts a new provider conversation (`freshContext`).
     fresh: bool,
     recover_history: bool,
@@ -575,37 +576,7 @@ impl Inner {
                     inner
                         .db(move |store| -> Result<bool, String> {
                             let tx = store.tx()?;
-                            let Some(thread) = tx.thread(&tid)? else {
-                                return Ok(false);
-                            };
-                            if !thread["archivedAt"].is_null() || !thread["deletedAt"].is_null() {
-                                return Ok(false);
-                            }
-                            for task in tx.entities(&tid, "subagents")? {
-                                if task["origin"] != "app_owned"
-                                    || !matches!(
-                                        task["status"].as_str(),
-                                        Some("running" | "waiting" | "pending")
-                                    )
-                                    || matches!(
-                                        task["completionDelivery"]["state"].as_str(),
-                                        Some("disposed" | "delivered" | "acknowledged")
-                                    )
-                                {
-                                    continue;
-                                }
-                                if let Some(id) = task["runId"].as_str()
-                                    && tx.entity(&tid, "runs", id)?.is_some_and(|run| {
-                                        run["delegatedCompletion"]["disposition"]
-                                            .as_str()
-                                            .unwrap_or("open")
-                                            == "open"
-                                    })
-                                {
-                                    return Ok(true);
-                                }
-                            }
-                            Ok(false)
+                            crate::families::delegated_task_will_wake(&tx, &tid)
                         })
                         .await
                         .unwrap_or(false)
@@ -809,6 +780,33 @@ impl Inner {
                             &run,
                         )
                     };
+                    let side_note = if thread["lineage"]["sideChat"] == true
+                        && !fresh
+                        && !crate::merge_back::defers_history(&message)
+                    {
+                        let runs = tx.entities(&tid, "runs")?;
+                        let boundary = crate::fresh::boundary(
+                            &runs,
+                            &tx.entities_where(&tid, "turnItems", "type", "user_message")?,
+                        );
+                        all_handoffs
+                            .iter()
+                            .find(|h| {
+                                h["strategy"] == "manual_context"
+                                    && h["transferId"].is_string()
+                                    && h["delivery"].is_null()
+                                    && runs.iter().any(|r| {
+                                        r["id"] == h["targetRunId"]
+                                            && r["ordinal"].as_u64().is_some_and(|n| {
+                                                n >= boundary
+                                                    && n <= run["ordinal"].as_u64().unwrap_or(0)
+                                            })
+                                    })
+                            })
+                            .cloned()
+                    } else {
+                        None
+                    };
                     handoffs.retain(|h| h.get("delivery").is_some_and(|d| !d.is_null()));
                     Ok(Some(TurnContext {
                         thread,
@@ -820,6 +818,7 @@ impl Inner {
                         fork,
                         handoffs,
                         ready,
+                        side_note,
                         recover_history,
                         fresh,
                         leaves_side_conversation,
@@ -1295,10 +1294,21 @@ impl Inner {
                 &user_text,
             )
             .await?;
-        let text = match &delivery {
-            Some(plan) => crate::handoff::with_inline_context(&plan.inline_text(), &user_text),
-            None => user_text,
-        };
+        let intro = delivery
+            .as_ref()
+            .map(|plan| plan.inline_text())
+            .into_iter()
+            .chain(
+                context
+                    .side_note
+                    .as_ref()
+                    .and_then(|note| note["summaryText"].as_str())
+                    .map(str::to_owned),
+            )
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let text = crate::handoff::with_inline_context(&intro, &user_text);
         let input = TurnInput {
             // The provider decides from the turn ordinal, as before.
             native_thread_has_turns: None,
@@ -1354,6 +1364,16 @@ impl Inner {
             .start_turn(input)
             .await
             .map_err(|e| StartError::Failed(e.to_string()));
+        if started.is_ok()
+            && let Some(native) = native_thread_id(&running_json)
+            && let Some(mut note) = context.side_note
+        {
+            note["toProviderThreadId"] = running_json["id"].clone();
+            note["delivery"] = json!({"nativeThreadId":native,"status":"inline","itemIds":[]});
+            if let Err(error) = self.persist_handoffs(thread_id, run_id, vec![note]).await {
+                eprintln!("conn-engine: could not record side chat context delivery: {error}");
+            }
+        }
         // Inline history went with the prompt, or the handoffs wait as they were.
         if let Some(plan) = delivery {
             let native = native_thread_id(&running_json);
@@ -2505,16 +2525,17 @@ impl Inner {
     /// Closes provider sessions idle for `idle`, so an idle thread does not keep a provider
     /// process. The next turn opens a session and resumes the stored provider thread.
     pub(crate) async fn reap_idle(self: &Arc<Self>, idle: crate::IdleTimeout) {
-        let idle_threads: Vec<String> = lock(&self.live)
+        let idle_threads: Vec<_> = lock(&self.live)
             .iter()
             .filter(|(_, live)| live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold))
-            .map(|(id, _)| id.clone())
+            .map(|(id, live)| (id.clone(), Arc::downgrade(live)))
             .collect();
-        for thread_id in idle_threads {
+        for (thread_id, observed) in idle_threads {
             let live = {
                 let mut sessions = lock(&self.live);
                 if sessions.get(&thread_id).is_some_and(|live| {
-                    live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold)
+                    observed.ptr_eq(&Arc::downgrade(live))
+                        && live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold)
                 }) {
                     sessions.remove(&thread_id)
                 } else {

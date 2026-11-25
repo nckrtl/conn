@@ -452,3 +452,53 @@ async fn an_unbroken_stream_flushes_before_its_final_item() {
     f.until_terminal().await;
     f.finish().await;
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn slow_attachment_reads_allow_native_controls_on_the_same_runtime() {
+    let f = Fixture::open(
+        "attachment-io",
+        &script("null", &[]),
+        Duration::from_secs(1),
+    )
+    .await;
+    let fifo = f.dir.join("slow.png");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut input = turn(&f.thread, 1, "inspect");
+    input.message.attachments = from_json(json!([{"type":"image","id":"slow","name":"image.png","mimeType":"image/png","sizeBytes":3}])).unwrap();
+    let (controlled, control) = std::sync::mpsc::channel();
+    // The fallback releases a synchronous read so a regression fails instead of hanging.
+    let writer = std::thread::spawn(move || {
+        let while_waiting = control.recv_timeout(Duration::from_secs(4)).is_ok();
+        std::fs::write(fifo, [1, 2, 3]).unwrap();
+        while_waiting
+    });
+    let (started, ()) = tokio::join!(biased;
+        f.session.start_turn(input),
+        async {
+            f.session.rename_thread("renamed while reading".into()).await.unwrap();
+            let _ = controlled.send(());
+        }
+    );
+    started.unwrap();
+    assert!(
+        writer.join().unwrap(),
+        "native rename waited for the attachment read"
+    );
+    let frames = all_frames(&f);
+    let started = frames.iter().find(|f| f["method"] == "turn/start").unwrap();
+    assert!(
+        started["params"]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["url"] == "data:image/png;base64,AQID")
+    );
+    f.finish().await;
+}

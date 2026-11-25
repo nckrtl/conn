@@ -308,6 +308,23 @@ mod tests {
     }
 
     #[test]
+    fn window_capture_elides_redundant_root_bounds_and_keeps_actionable_coordinates() {
+        let capture = json!({"type":"image","source":{"appName":"Editor","accessibility":{
+            "format":"element-tree","coordinateSpace":"image-pixels","imageSize":{"width":100,"height":200},
+            "root":{"role":"window","bounds":{"x":0,"y":0,"width":100,"height":200},
+                "children":[{"role":"button","name":"Close","description":"Close the window","actions":["press"],"bounds":{"x":4,"y":9,"width":30,"height":12}}]}}}});
+        let mut prompt = String::new();
+        append_capture_context(&mut prompt, &[capture]);
+        let data: Value = serde_json::from_str(prompt.lines().nth(1).unwrap()).unwrap();
+        let root = &data["accessibility"]["root"];
+        assert!(root.get("bounds").is_none());
+        assert_eq!(root["children"][0]["bounds"]["x"], 4);
+        assert!(root["children"][0].get("description").is_none());
+        assert!(root["children"][0].get("actions").is_none());
+        assert_eq!(data["accessibility"]["imageSize"]["height"], 200);
+    }
+
+    #[test]
     fn snapshot_metadata_remains_untrusted_and_optional() {
         let capture = json!({"type":"image","id":"i","name":"shot","source":{
             "appName":"Editor","windowTitle":"a", "accessibleText":"Find next"

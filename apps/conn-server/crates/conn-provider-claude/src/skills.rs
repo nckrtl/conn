@@ -274,6 +274,14 @@ pub(super) fn discover(config: &ClaudeConfig, cwd: Option<&Path>) -> Vec<Value> 
     found.into_values().collect()
 }
 
+pub(super) fn has_mention(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        word.chars()
+            .next()
+            .is_some_and(|sigil| is_currency(sigil) && is_skill_name(&word[sigil.len_utf8()..]))
+    })
+}
+
 pub(super) fn dispatch(text: &str, skills: &[Value]) -> Option<(Option<String>, String)> {
     let mut mentions = Vec::new();
     for (at, c) in text.char_indices() {
@@ -331,6 +339,74 @@ pub(super) async fn list(config: ClaudeConfig, cwd: Option<String>) -> Vec<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn distinct_profiles_and_workspaces_use_only_their_enabled_plugin_skills() {
+        let root = std::env::temp_dir().join(format!("conn-plugin-{}", conn_support::uuid_v4()));
+        let home = root.join("home");
+        let project = root.join("project");
+        let other = root.join("other");
+        let user = home.join("skills/regular");
+        let inline = project.join("injected/custom");
+        let installed = home.join("plugins/cache/pkg/skills/song");
+        for dir in [&user, &inline, &installed] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for dir in [&project, &other] {
+            std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        }
+        std::fs::create_dir_all(project.join("injected/.claude-plugin")).unwrap();
+        std::fs::write(user.join("SKILL.md"), "regular").unwrap();
+        std::fs::write(
+            inline.join("SKILL.md"),
+            "---\nname: act\ndisable-model-invocation: yes\n---\n",
+        )
+        .unwrap();
+        std::fs::write(installed.join("SKILL.md"), "installed").unwrap();
+        std::fs::write(
+            project.join("injected/.claude-plugin/plugin.json"),
+            r#"{"name":"inline","skills":"custom"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".claude/settings.local.json"),
+            r#"{"skillOverrides":{"regular":"off"}, "enabledPlugins":{"music@market":true}}"#,
+        )
+        .unwrap();
+        std::fs::write(home.join("plugins/installed_plugins.json"),json!({"plugins":{"music@market":[{"scope":"local","projectPath":project.canonicalize().unwrap(), "installPath":home.join("plugins/cache/pkg")}]}}).to_string()).unwrap();
+        let config = ClaudeConfig {
+            home_path: Some(home),
+            launch_args: "--plugin-dir injected".into(),
+            ..Default::default()
+        };
+        let found = discover(&config, Some(&project));
+        assert!(
+            found
+                .iter()
+                .any(|s| s["name"] == "music:song" && s["scope"] == "project")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|s| s["name"] == "regular" && s["enabled"] == false)
+        );
+        assert_eq!(
+            dispatch("€inline:act exact $", &found),
+            Some((None, "/inline:act exact $".into()))
+        );
+        let other = discover(&config, Some(&other));
+        assert!(
+            other
+                .iter()
+                .all(|s| s["name"] != "music:song" && s["name"] != "inline:act")
+        );
+        assert!(
+            other
+                .iter()
+                .any(|s| s["name"] == "regular" && s["enabled"] == true)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn selected_project_skill_becomes_the_final_command_block() {
         let root = std::env::temp_dir().join(format!("conn-skill-{}", conn_support::uuid_v4()));

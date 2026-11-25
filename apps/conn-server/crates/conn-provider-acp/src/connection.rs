@@ -345,6 +345,27 @@ impl Connection {
 mod waiting_tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn unresponsive_setup_expires_and_releases_its_pending_id() {
+        let (writer, mut written) = mpsc::channel(4);
+        let (_agent, events) = mpsc::channel(4);
+        let (connection, _incoming) = Connection::start(writer, events, 4);
+        let task = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                connection
+                    .setup_call("session/new", J::V(Value::Null))
+                    .await
+            }
+        });
+        written.recv().await.unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(89)).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(matches!(task.await.unwrap(), Err(CallError::Provider(_))));
+        assert!(crate::lock(&connection.pending).waiting.is_empty());
+    }
+
     /// Finding 9: a call whose caller stops waiting leaves no id in `waiting`.
     #[tokio::test(flavor = "current_thread")]
     async fn a_cancelled_call_frees_its_id() {

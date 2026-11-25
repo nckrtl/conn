@@ -850,12 +850,14 @@ impl Store {
     }
 
     pub(crate) fn limit_recovery_page(&self, after: &str) -> StoreResult<Vec<Value>> {
-        let mut stmt=self.conn.prepare("SELECT shell FROM threads WHERE deleted=0 AND json_extract(shell,'$.status')='failed' AND json_extract(shell,'$.lastErrorClass')='usage_limit' AND id>?1 ORDER BY id LIMIT 32").map_err(|e|e.to_string())?;
-        stmt.query_map([after], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .map(|row| {
-                serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
-            })
+        let mut statement = self.conn.prepare(
+            "SELECT shell FROM threads WHERE deleted = 0 AND json_extract(shell, '$.status') = 'failed'
+                AND json_extract(shell, '$.lastErrorClass') = 'usage_limit' AND id > ?1 ORDER BY id LIMIT 32"
+        ).map_err(err)?;
+        statement
+            .query_map([after], |row| row.get::<_, String>(0))
+            .map_err(err)?
+            .map(|row| parse(row.map_err(err)?))
             .collect()
     }
 

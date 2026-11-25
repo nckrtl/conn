@@ -509,6 +509,47 @@ async fn an_abandoned_start_aborts_the_booting_query() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn individual_native_agent_stop_leaves_its_sibling_and_parent_running() {
+    use serde_json::json;
+    if !node_available() {
+        return;
+    }
+    let dir = Scratch::new("one-native-agent");
+    let (helper, log) = fake_host(&dir.0, true);
+    let (session, mut events) = session(&helper);
+    let cwd = dir.cwd();
+    let thread = new_thread(&session, "full-access", &cwd).await;
+    let frame = |id: &str| json!({"type":"system","subtype":"task_started","task_id":id,"tool_use_id":format!("launch-{id}"),"task_type":"local_agent","subagent_type":"general-purpose","description":"work","prompt":"work","is_backgrounded":true});
+    std::fs::write(
+        format!("{}.frames", log.display()),
+        json!([frame("one"), frame("two")]).to_string(),
+    )
+    .unwrap();
+    session
+        .start_turn(turn(1, &thread, "agents", "full-access", &cwd))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        until(&mut events, |e| e["type"] == "subagent.updated").await;
+    }
+    session
+        .stop_task(conn_provider::StopTaskInput {
+            provider_thread: thread,
+            task_id: "one".into(),
+        })
+        .await
+        .unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("stop [\"one\"]"), "{text}");
+    assert!(
+        !text.contains("stop [\"two\"]") && !text.contains("call interrupt"),
+        "{text}"
+    );
+    session.close().await;
+    helper.stop_if_idle().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn workflow_stop_calls_the_sdk_without_interrupting_the_turn() {
     use conn_provider::StopTaskInput;
     if !node_available() {

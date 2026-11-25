@@ -1346,20 +1346,40 @@ fn retry_notices_share_a_deadline_while_output_clears_it() {
     turn_with_command(&mut mapper);
     let notice = json!({"method":"error","params":{"threadId":"th","turnId":"tu","willRetry":true,
         "error":{"message":"Retrying","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}});
-    feed(&mut mapper, std::slice::from_ref(&notice));
+    let first =
+        json_events(&feed(&mut mapper, std::slice::from_ref(&notice)))[0]["turnItem"].clone();
+    assert_eq!(first["title"], "Provider retry");
+    assert_eq!(first["retry"]["attempt"], 1);
+    assert_eq!(first["failure"]["class"], "usage_limit");
     let initial = mapper.retry_deadline().unwrap();
-    feed(&mut mapper, std::slice::from_ref(&notice));
+    let mut reported = notice.clone();
+    reported["params"]["error"]["message"] = json!("Reconnecting... 2 / 5");
+    let updated = json_events(&feed(&mut mapper, &[reported]))[0]["turnItem"].clone();
+    assert_eq!(updated["id"], first["id"]);
+    assert_eq!(
+        updated["retry"],
+        json!({"attempt":2,"maxAttempts":5,"retryDelayMs":null})
+    );
     assert_eq!(mapper.retry_deadline(), Some(initial));
-    feed(
+    let recovery = feed(
         &mut mapper,
         &[
             json!({"method":"item/agentMessage/delta","params":{"threadId":"th","turnId":"tu","itemId":"answer","delta":"progress"}}),
         ],
     );
+    let recovered = json_events(&recovery)[0]["turnItem"].clone();
+    assert_eq!(recovered["title"], "Provider recovered");
+    assert_eq!(recovered["id"], first["id"]);
     assert!(mapper.retry_deadline().is_none());
     feed(&mut mapper, &[notice]);
     let outs = mapper.expire_retries(mapper.retry_deadline().unwrap());
     let events = json_events(&outs);
+    let failed = events
+        .iter()
+        .find(|v| v["turnItem"]["title"] == "Usage limit reached")
+        .unwrap();
+    assert_ne!(failed["turnItem"]["id"], first["id"]);
+    assert_eq!(failed["turnItem"]["failure"]["retryable"], false);
     let end = events
         .iter()
         .find(|e| e["type"] == "turn.terminal")

@@ -194,21 +194,19 @@ prompts; our replay and the stub conformance check compare against those.
 
 ## Not built
 
-- **Grok background work, the rest:** subagents carried over to a later turn (T3's
-  `carryoverSubagents`: a subagent still running when its turn finalized as interrupted or
-  failed, finished later; its end is dropped here), the wake reports T3 attaches to the
-  continuation request as a notification (`ContinuationRequest` has no field for it), the
-  `subagentsIdleOnTurnCompletion` and agent-work-state rules (not Grok's), MCP tool
-  presentation in subagent tool rows.
-- **Grok extras:** `x.ai/exit_plan_mode`, skill mentions (`rewriteUserText`), model slug
-  aliases, `promptInactivityTimeout`, the reasoning effort on ACP protocol 2 (Grok answers
-  protocol 1), MCP tool
-  presentation (`extractMcpToolCallIdentity`), web search and fetch projections, structured
-  file changes, notices, retries.
-- **Shared runtime:** ACP protocol 2 responses (Kiro answers with v2; only `auth/login`
-  follows the reply's shape), `session/load` and resume at open, fork, config options other
-  than Antigravity's model, steering, elicitation, MCP over ACP, client terminal callbacks
-  (the registry's), file writes, authentication on `auth_required`.
+Grok supports native interjection, plan capture, leading skill mentions and late
+subagent completions. Grok and Antigravity can load a saved conversation, fork
+a negotiated session head, generate short text and accept external app context.
+The engine handles a fork or rollback at a fixed historical boundary with the
+kept conversation. Its native ACP thread stays immutable on rollback.
+
+Remaining differences include the following.
+
+- Grok continuation notifications, MCP tool presentation in subagent rows,
+  model slug aliases, ACP v2 reasoning effort, search and fetch projections,
+  structured file changes, notices and retries.
+- ACP v2 responses, MCP over ACP, registry client terminal callbacks, file writes
+  and authentication on `auth_required`.
 - **Linux launch:** T3 puts Grok's process tree in a cgroup wrapper on Linux
   (`ownDescendantProcessGroups`); we spawn it directly. macOS matches.
 - **Flavors:** Kiro, fx, the ACP registry. Antigravity's gaps are listed under "Antigravity".
@@ -315,14 +313,14 @@ more per `providerInstances` entry with that driver (`supportsMultipleInstances`
   after a confirmed exit it signals nothing. A finished throwaway session's files (the
   conversation database, `.meta` and `brain/`) go once the agent has closed, only when the
   `.meta` names the session's own scratch folder.
-- **Not built:** Google sign-in in the browser (Orbit's AI router signs providers in);
-  T3's managed runtime (`localharness_external`) and its install; links to `~/.gemini`
-  skills; `AntigravityProtocol` (tool call normalization, read repair, `interaction_*`
-  questions, the `allow_always` security warning); audio, text, PDF and video attachments as
-  ACP resources (images go as image blocks, every path in the text); background commands,
-  child work and subagents (`deferFinalizeForBackgroundWork`, `toolOutlivesPrompt`,
-  `watchPromptOutcome`); the stderr harness-failure filter; the prompt inactivity timeout;
-  per-turn usage; text generation; usage limits; a per-workspace scan (`snapshotForCwd`).
+- The driver presents `interaction_*` questions and form elicitation, delivers
+  negotiated media, records per-turn usage, and checks the current prompt's
+  native error step before reporting completion. It recovers child work from
+  the active instance's profile and reads that instance's shared Gemini settings
+  and skills. The prompt inactivity limit is 15 minutes.
+- Orbit supplies sign-in for routed instances. T3's browser sign-in and managed
+  runtime installer, the stderr harness-failure filter and a full per-workspace
+  catalog scan remain outside this adapter.
 
 ## Proofs
 

@@ -1163,12 +1163,7 @@ pub static ANTIGRAVITY: Flavor = Flavor {
         completions: |_| Vec::new(),
         text_mutations: |_| Vec::new(),
         is_persistent: |_| false,
-        is_wake: |p| {
-            matches!(
-                p["update"]["sessionUpdate"].as_str(),
-                Some("agent_message_chunk" | "agent_thought_chunk")
-            )
-        },
+        is_wake,
         lifecycle: |_, _| None,
         subagent,
     }),
@@ -1177,6 +1172,27 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     rpc_failure,
     stdout_signal: Some(stdout_signal),
 };
+
+/// Root ACP output can arrive after a prompt reply, with no new client prompt.
+pub(crate) fn is_wake(params: &Value) -> bool {
+    let update = &params["update"];
+    let text = |v: &Value| v["text"].as_str().is_some_and(|t| !t.is_empty());
+    match update["sessionUpdate"].as_str() {
+        Some("agent_message_chunk" | "agent_thought_chunk") => text(&update["content"]),
+        Some("agent_message" | "agent_thought") => update["content"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(text)),
+        Some("tool_call" | "tool_call_update") => update["toolCallId"].is_string(),
+        Some(
+            "plan"
+            | "plan_update"
+            | "plan_removed"
+            | "compaction_update"
+            | "compaction_summary_chunk",
+        ) => true,
+        _ => false,
+    }
+}
 
 /// `ProviderError::Failed` operation of an error reply that asks for a Google sign-in.
 pub(crate) const SIGN_IN_REQUIRED: &str = "sign-in-required";

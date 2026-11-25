@@ -839,6 +839,22 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
         queued: false,
         now: &now,
     };
+    if thread["lineage"]["sideChat"] == true
+        && !fresh
+        && let Some(transfer) = crate::fork::pending_fork(tx, &c.thread_id)?
+        && transfer["sourcePoint"]["runId"].is_string()
+        && !tx
+            .entities(&c.thread_id, "contextHandoffs")?
+            .iter()
+            .any(|h| h["strategy"] == "manual_context" && h["transferId"] == transfer["id"])
+    {
+        let note = crate::provider_handoff::side_chat_note(tx, &place, &transfer)?;
+        tx.append(
+            Draft::new(&c.thread_id, "context-handoff.updated", note)
+                .run(Some(&run_id))
+                .command(cid),
+        )?;
+    }
     let switch = match (&fork, from) {
         (crate::fork::ForkExecution::Portable(pending), _) => Some(
             crate::provider_handoff::prepare_fork(tx, &thread, &place, pending)?,
@@ -2942,12 +2958,45 @@ fn async_reply(
     Ok(replies.join("\n\n"))
 }
 
+/// A child completion may join a running turn only while it can do so without
+/// restarting, interrupting a tool, or attaching to a different attempt.
+pub(crate) fn can_steer_delegated_wake(
+    tx: &Tx<'_>,
+    thread_id: &str,
+    run: &Value,
+) -> StoreResult<bool> {
+    if run["status"] != "running"
+        || run["activeAttemptId"].is_null()
+        || !session_steering(tx, thread_id, run, true)?
+        || interrupt_request(tx, thread_id, run["id"].as_str().unwrap_or_default())?.is_some()
+    {
+        return Ok(false);
+    }
+    if let Some(id) = run["userMessageId"].as_str()
+        && tx
+            .entity(thread_id, "messages", id)?
+            .is_some_and(|message| is_native_maintenance(&message))
+    {
+        return Ok(false);
+    }
+    let thread = tx.thread(thread_id)?.unwrap_or_default();
+    if thread["modelSelection"]["instanceId"].is_string()
+        && thread["modelSelection"]["instanceId"] != run["providerInstanceId"]
+    {
+        return Ok(false);
+    }
+    Ok(tx
+        .entities_where(thread_id, "providerTurns", "status", "running")?
+        .iter()
+        .any(|turn| turn["runAttemptId"] == run["activeAttemptId"]))
+}
+
 /// Whether the provider session the run's provider thread is on steers a running turn.
 fn session_steers(tx: &Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<bool> {
     session_steering(tx, thread_id, run, false)
 }
 
-pub(crate) fn session_steering(
+fn session_steering(
     tx: &Tx<'_>,
     thread_id: &str,
     run: &Value,
@@ -2971,7 +3020,7 @@ pub(crate) fn session_steering(
     };
     let caps = &session["capabilities"]["turns"];
     Ok(caps["supportsActiveSteering"] == true
-        && (!preserve_tools || caps["activeSteeringInterruptsTools"] == false))
+        && (!preserve_tools || caps["activeSteeringInterruptsTools"] != true))
 }
 
 /// Sends the async answer as the user's message: it steers the active run, or queues or

@@ -65,6 +65,7 @@ pub struct ClaudeProvider {
     /// The entry the last status probe built; `None` before the first one.
     status: std::sync::Mutex<Option<Value>>,
     applied_titles: session::AppliedTitles,
+    text_only_models: text_generation::TextOnlyModels,
 }
 
 impl std::fmt::Debug for ClaudeProvider {
@@ -84,6 +85,7 @@ impl ClaudeProvider {
             helper,
             status: std::sync::Mutex::new(None),
             applied_titles: Default::default(),
+            text_only_models: Default::default(),
         }
     }
 
@@ -114,6 +116,7 @@ impl ClaudeProvider {
             helper,
             status: std::sync::Mutex::new(Some(pending)),
             applied_titles: Default::default(),
+            text_only_models: Default::default(),
         }
     }
 
@@ -214,7 +217,15 @@ impl Provider for ClaudeProvider {
                 .await
                 .unwrap_or(false);
             let program = self.config.binary.to_string_lossy().into_owned();
-            text_generation::generate(&program, &env, &self.config, managed, request).await
+            text_generation::generate(
+                &program,
+                &env,
+                &self.config,
+                &self.text_only_models,
+                managed,
+                request,
+            )
+            .await
         })
     }
 
@@ -351,6 +362,7 @@ pub fn capabilities() -> Value {
             "emitsTurnStarted": true,
             "emitsTurnCompleted": true,
             "supportsInterrupt": true,
+            "supportsNativeResume": true,
             "supportsActiveSteering": true,
             "activeSteeringInterruptsTools": false,
             "supportsSteeringByInterruptRestart": false,

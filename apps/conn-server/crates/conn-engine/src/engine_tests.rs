@@ -13,6 +13,12 @@ use tokio::time::timeout;
 use crate::fake::FakeProvider;
 use crate::{Engine, EngineConfig, EngineError, ProjectConfig, SqliteEngine, Subscription};
 
+#[path = "engine_tests/claude_control.rs"]
+mod claude_control;
+
+#[path = "engine_tests/provider_sessions.rs"]
+mod provider_sessions;
+
 const ROOT: &str = "/tmp/conn-engine-project";
 
 struct TempDb(PathBuf);
@@ -8025,6 +8031,52 @@ async fn orchestration_reads_answer_from_the_store() {
     );
 }
 
+#[tokio::test]
+async fn native_child_work_queries_only_the_owning_instance_and_session() {
+    let db = TempDb::new("native-child-work-route");
+    let owner = Arc::new(FakeProvider::new("work").with_driver("antigravity"));
+    let other = Arc::new(FakeProvider::new("personal").with_driver("antigravity"));
+    let mut config = EngineConfig::new(db.path());
+    config.providers = vec![owner.clone(), other.clone()];
+    let engine = SqliteEngine::open(config).unwrap();
+    engine.inner().db(|store| {
+        let db = store.raw();
+        for (id, node) in [("child","task"),("foreign","wrong"),("orphan","orphan")] {
+            let row = json!({"id":id,"lineage":{"parentThreadId":"parent","relationshipToParent":"subagent"},"forkedFrom":{"type":"node","nodeId":node}});
+            db.execute("INSERT INTO threads(id,project_id,activity_at,thread) VALUES (?1,'p','',?2)",rusqlite::params![id,row.to_string()]).map_err(|e|e.to_string())?;
+        }
+        let rows = [
+            ("runs","one",json!({"id":"one","providerThreadId":"pt","activeAttemptId":"attempt"})),
+            ("runs","other",json!({"id":"other","providerThreadId":"oth"})),
+            ("providerThreads","pt",json!({"providerInstanceId":"work","nativeThreadRef":{"nativeId":"old"}})),
+            ("providerThreads","oth",json!({"providerInstanceId":"work","nativeThreadRef":{"nativeId":"elsewhere"}})),
+            ("attempts","attempt",json!({"nativeThreadId":"root"})),
+        ];
+        let put = |kind:&str,id:&str,row:Value| db.execute("INSERT INTO entities(thread_id,kind,id,first_seq,seq,body) VALUES ('parent',?1,?2,1,1,?3)",rusqlite::params![kind,id,row.to_string()]).map(|_|()).map_err(|e|e.to_string());
+        for (kind,id,row) in rows { put(kind,id,row)?; }
+        for (node,child,run,instance) in [("task","child","one","work"),("sib","sibling","one","work"),("wrong","foreign","one","personal"),("else","other","other","work"),("orphan","orphan","missing","work")] {
+            put("subagents",node,json!({"id":node,"childThreadId":child,"runId":run,"providerInstanceId":instance,"origin":"provider_native","driver":"antigravity","nativeTaskRef":{"nativeId":node},"title":"Reader","prompt":node}))?;
+        }
+        Ok::<_,String>(())
+    }).await.unwrap();
+    for id in ["foreign", "orphan", "unknown", "child"] {
+        call(
+            &engine,
+            "orchestration.getNativeChildWork",
+            json!({"threadId":id}),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(other.child_queries.lock().unwrap().is_empty());
+    assert_eq!(
+        *owner.child_queries.lock().unwrap(),
+        [
+            json!({"root":"root","task":"task","launch":{"title":"Reader","prompt":"task"},"siblings":[{"nativeTaskId":"sib","title":"Reader","prompt":"sib"}]})
+        ]
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn older_settled_threads_page_and_trim() {
     let db = TempDb::new("settled");
@@ -12669,6 +12721,56 @@ async fn closing_a_secret_card_clears_the_shell_snapshot_and_resume_stream() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn mcp_sign_in_routes_to_its_live_thread_and_keeps_callback_out_of_errors_and_events() {
+    let db = TempDb::new("sign-in");
+    let (engine, provider) = open(&db);
+    for tid in ["one", "two"] {
+        dispatch(&engine, create(tid, &format!("create-{tid}"))).await;
+        dispatch(&engine, message(tid, &format!("send-{tid}"), "hello")).await;
+        run_to_end(&engine, tid, &format!("run:{tid}:1")).await;
+    }
+    let pt = projection(&engine, "one").await["providerThreads"][0].clone();
+    let mut input = json!({"threadId":"two","providerThreadId":pt["id"],"server":"test"});
+    assert!(
+        engine
+            .call("provider.mcpSignIn.start", input.clone())
+            .await
+            .is_err()
+    );
+    input["threadId"] = "one".into();
+    let reply = engine
+        .call("provider.mcpSignIn.start", input.clone())
+        .await
+        .unwrap();
+    assert_eq!(reply["authorizationUrl"], "https://example.invalid/sign-in");
+    assert!(provider.calls.lock().unwrap().contains(&format!(
+        "sign in test on {}",
+        pt["providerSessionId"].as_str().unwrap()
+    )));
+    input["callbackUrl"] = "https://example.invalid/callback?code=example-private-code".into();
+    let Err(EngineError::Rejected(error)) = engine
+        .call("provider.mcpSignIn.complete", input.clone())
+        .await
+    else {
+        panic!("expected native rejection")
+    };
+    assert!(!error.to_string().contains("example-private-code"));
+    assert!(
+        !serde_json::to_string(&engine.test_events("one").await)
+            .unwrap()
+            .contains("example-private-code")
+    );
+    engine.inner().close_session("one").await;
+    assert!(
+        engine
+            .call("provider.mcpSignIn.start", input)
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&provider.sessions), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn mcp_apps_calls_only_the_source_session_and_stores_context_without_a_session() {
     let db = TempDb::new("mcp-apps");
     struct AppSnapshots;
@@ -14240,6 +14342,65 @@ async fn a_usage_limit_blocks_only_its_provider() {
     let p = run_to_end(&engine, "t1", "run:t1:2").await;
     assert_eq!(run_for(&p, "b")["status"], "completed");
     assert_eq!(count(&codex.sessions), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_known_usage_reset_automatically_resumes_the_failed_run_only_once() {
+    struct Recover;
+    impl crate::EngineHost for Recover {
+        fn usage_limit_preferences(&self) -> (bool, bool) {
+            (true, true)
+        }
+    }
+    let db = TempDb::new("automatic-limit-recovery");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let clock = Arc::new(crate::ManualClock::at(conn_support::time::now_ms()));
+    let config = || {
+        let mut config = EngineConfig::new(db.path());
+        config.clock = clock.clone();
+        config.host = Some(Arc::new(Recover));
+        config.projects = vec![ProjectConfig {
+            title: "project".into(),
+            workspace_root: ROOT.into(),
+        }];
+        config.providers = vec![provider.clone()];
+        config
+    };
+    let engine = SqliteEngine::open(config()).unwrap();
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(&engine, message("t1", "limited", "fail-usage-limit")).await;
+    run_to_end(&engine, "t1", "run:t1:1").await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let p = projection(&engine, "t1").await;
+            if p["thread"]["limitRecovery"]["autoResume"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker armed the real usage-limit error");
+    drop(engine);
+    clock.advance(Duration::from_secs(3601));
+    let engine = SqliteEngine::open(config()).unwrap();
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(p["runs"][1]["usageLimitContinuationOfRunId"], "run:t1:1");
+    assert_eq!(p["runs"][1]["status"], "completed", "{}", p["turnItems"]);
+    drop(engine);
+    let engine = SqliteEngine::open(config()).unwrap();
+    let p = projection(&engine, "t1").await;
+    assert_eq!(p["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        provider
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.as_str() == "Continue where you left off.")
+            .count(),
+        1
+    );
 }
 
 /// Round-2 gate finding 1: after a failed worktree setup the thread has no checkout of its

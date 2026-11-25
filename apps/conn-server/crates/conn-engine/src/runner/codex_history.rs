@@ -94,13 +94,100 @@ fn rejected_on(
 }
 
 fn rejected_message(message: &str) -> bool {
+    fn code(value: &Value) -> bool {
+        let error = value.get("error").unwrap_or(value);
+        error["code"] == "invalid_encrypted_content" || error == "invalid_encrypted_content"
+    }
     if message == "invalid_encrypted_content" {
         return true;
     }
-    serde_json::from_str::<Value>(message)
-        .ok()
-        .is_some_and(|v| {
-            let error = v.get("error").unwrap_or(&v);
-            error["code"] == "invalid_encrypted_content" || error == "invalid_encrypted_content"
-        })
+    let Ok(parsed) = serde_json::from_str::<Value>(message) else {
+        return false;
+    };
+    let error = parsed.get("error").unwrap_or(&parsed);
+    code(&parsed)
+        || ["message", "additionalDetails"]
+            .into_iter()
+            .filter_map(|key| error[key].as_str())
+            .any(|inner| {
+                inner == "invalid_encrypted_content"
+                    || serde_json::from_str::<Value>(inner)
+                        .ok()
+                        .is_some_and(|v| code(&v))
+            })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_recover_when_the_latest_delivered_root_failed_on_the_current_native_thread() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE entities(thread_id TEXT, kind TEXT, id TEXT, body TEXT, PRIMARY KEY(thread_id,kind,id));").unwrap();
+        let put = |kind: &str, id: &str, v: Value| {
+            db.execute(
+                "INSERT OR REPLACE INTO entities VALUES ('t',?1,?2,?3)",
+                params![kind, id, v.to_string()],
+            )
+            .unwrap();
+        };
+        let rejected = |native: &str| rejected_on(&db, "t", "pt", native, 5).unwrap();
+        put(
+            "runs",
+            "r1",
+            json!({"id":"r1","rootNodeId":"root","status":"failed","ordinal":1,"providerThreadId":"pt","activeAttemptId":"a1"}),
+        );
+        put("attempts", "a1", json!({"nativeThreadId":"old"}));
+        put("providerTurns", "p1", json!({"runAttemptId":"a1"}));
+        let nested = json!({"error":{"message":json!({"error":{"code":"invalid_encrypted_content"}}).to_string()}}).to_string();
+        let failure = |node: &str| json!({"type":"error","runId":"r1","nodeId":node,"failure":{"message":nested}});
+        put("turnItems", "e1", failure("child"));
+        assert!(
+            !rejected("old"),
+            "a subagent's history belongs to its own native thread"
+        );
+        put("turnItems", "e1", failure("root"));
+        assert!(rejected("old"));
+        assert!(
+            !rejected("recovered"),
+            "already loaded a fresh native identity"
+        );
+        put(
+            "providerTurns",
+            "p1",
+            json!({"runAttemptId":"a1","promptDropped":true}),
+        );
+        assert!(
+            !rejected("old"),
+            "the native app never accepted this message"
+        );
+        put(
+            "providerTurns",
+            "p1",
+            json!({"runAttemptId":"a1","promptDropped":false}),
+        );
+        // Legacy attempts omitted nativeThreadId. A delivered replacement handoff covers that run.
+        put("attempts", "a1", json!({}));
+        assert!(rejected("old"));
+        put(
+            "contextHandoffs",
+            "h",
+            json!({"strategy":"full_thread_summary","toProviderThreadId":"pt",
+            "delivery":{"nativeThreadId":"recovered","status":"inline"},"coveredRunOrdinals":{"to":1}}),
+        );
+        assert!(!rejected("recovered"));
+        put(
+            "runs",
+            "r2",
+            json!({"id":"r2","rootNodeId":"root2","status":"completed","ordinal":2,"providerThreadId":"pt","activeAttemptId":"a2"}),
+        );
+        put("attempts", "a2", json!({"nativeThreadId":"old"}));
+        put("providerTurns", "p2", json!({"runAttemptId":"a2"}));
+        assert!(
+            !rejected("old"),
+            "a later accepted and successful run supersedes the failure"
+        );
+    }
 }

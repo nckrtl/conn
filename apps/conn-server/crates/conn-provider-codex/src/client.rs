@@ -26,13 +26,22 @@ use crate::{launch, network_gate};
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// An ambiguous setup or start must retire the transport (CodexAdapterV2.withAppServerDeadline).
+/// Timing out a catalog or status request leaves other sessions on the shared process intact.
+fn critical_request(method: &str) -> bool {
+    matches!(
+        method,
+        "initialize" | "config/read" | "turn/start" | "thread/start" | "thread/resume"
+    )
+}
+
 fn deadline(method: &str) -> tokio::time::Instant {
-    let seconds = match method {
-        "initialize" => 30,
-        "config/read" | "turn/start" | "thread/start" | "thread/resume" => {
-            REQUEST_TIMEOUT.as_secs()
-        }
-        _ => 60,
+    let seconds = if method == "initialize" {
+        30
+    } else if critical_request(method) {
+        REQUEST_TIMEOUT.as_secs()
+    } else {
+        60
     };
     tokio::time::Instant::now() + Duration::from_secs(seconds)
 }
@@ -427,6 +436,7 @@ impl AppServer {
             generation,
             notification("initialized"),
             deadline("initialize"),
+            true,
         )
         .await?;
         let version = init
@@ -522,11 +532,17 @@ impl AppServer {
             server: Arc::clone(self),
             generation,
             until,
+            critical: critical_request(method),
             id,
             rx: Some(rx),
         };
-        self.write_until(generation, request(id, method, params), until)
-            .await?;
+        self.write_until(
+            generation,
+            request(id, method, params),
+            until,
+            critical_request(method),
+        )
+        .await?;
         Ok(reply)
     }
 
@@ -567,14 +583,21 @@ impl AppServer {
             generation,
             id,
         };
-        self.write_until(generation, request(id, method, params), until)
-            .await?;
+        self.write_until(
+            generation,
+            request(id, method, params),
+            until,
+            critical_request(method),
+        )
+        .await?;
         match tokio::time::timeout_at(until, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(e))) => Err(CallError::Rpc(e)),
             Ok(Err(_)) => Err(CallError::Stopped),
             Err(_) => {
-                self.retire(generation);
+                if critical_request(method) {
+                    self.retire(generation);
+                }
                 Err(CallError::Timeout)
             }
         }
@@ -597,11 +620,14 @@ impl AppServer {
         generation: u64,
         line: String,
         until: tokio::time::Instant,
+        critical: bool,
     ) -> Result<(), CallError> {
         match tokio::time::timeout_at(until, self.write(generation, line)).await {
             Ok(result) => result,
             Err(_) => {
-                self.retire(generation);
+                if critical {
+                    self.retire(generation);
+                }
                 Err(CallError::Timeout)
             }
         }
@@ -906,6 +932,7 @@ pub struct Reply {
     server: Arc<AppServer>,
     generation: u64,
     until: tokio::time::Instant,
+    critical: bool,
     id: u64,
     rx: Option<oneshot::Receiver<Result<Value, RpcError>>>,
 }
@@ -927,7 +954,9 @@ impl Reply {
             Ok(Ok(Err(e))) => Err(CallError::Rpc(e)),
             Ok(Err(_)) => Err(CallError::Stopped),
             Err(_) => {
-                self.server.retire(self.generation);
+                if self.critical {
+                    self.server.retire(self.generation);
+                }
                 Err(CallError::Timeout)
             }
         }
@@ -1020,6 +1049,39 @@ read never
             )
             .await;
         assert_eq!(reply.wait().await.unwrap(), "healthy");
+        server.remove_session("live", &[]).await;
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_initialize_expires_after_thirty_seconds() {
+        let server = AppServer::new(fake("read init; read never"));
+        let (inbox, mut events) = mpsc::channel(4);
+        server.add_session("live", inbox);
+        tokio::time::pause();
+        let copy = server.clone();
+        let task = tokio::spawn(async move { copy.ensure_started().await });
+        while server.lock().pending.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(task.await.unwrap(), Err(CallError::Timeout));
+        assert!(matches!(events.recv().await, Some(SessionMsg::Exited(_))));
+        server.remove_session("live", &[]).await;
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_status_request_keeps_other_sessions_live() {
+        let server = AppServer::new(fake(DYNAMIC_INIT));
+        let (inbox, mut rx) = mpsc::channel(4);
+        server.add_session("live", inbox);
+        let generation = server.ensure_started().await.unwrap();
+        let mut reply = server.send("model/list", json!({})).await.unwrap();
+        reply.until = tokio::time::Instant::now();
+        assert_eq!(reply.wait().await, Err(CallError::Timeout));
+        assert_eq!(server.ensure_started().await.unwrap(), generation);
+        assert!(rx.try_recv().is_err());
         server.remove_session("live", &[]).await;
     }
 

@@ -473,7 +473,7 @@ lists what it serves.
 The server joins them in `src/host.rs`: each provider session gets a `/mcp` credential, messages
 claim their uploads, a `worktree` launch provisions a worktree, archive and delete close the
 thread's terminals, and a turn's end refreshes VCS status. One idle rule closes provider
-sessions (`--session-idle-timeout`, default 30 minutes, held up to 4 hours by background work).
+sessions (`--session-idle-timeout`). By default, resumable providers close after two idle minutes and other providers after thirty. Background work can hold a session for up to four hours.
 SIGTERM and SIGINT stop terminals and close every provider session before the server exits.
 
 **Proven with the real web client** (headless Chromium; `fixtures/README.md`): pairing, a turn,

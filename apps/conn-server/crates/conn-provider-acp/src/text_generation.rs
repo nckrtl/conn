@@ -58,7 +58,10 @@ impl Helper {
                 Ok(Ok(child)) => {
                     let (connection, mut incoming) =
                         Connection::start(child.writer, child.events, session::EVENT_CAPACITY);
-                    let timeout = input.timeout.unwrap_or(Duration::from_secs(180));
+                    let timeout = input
+                        .timeout
+                        .unwrap_or(Duration::from_secs(180))
+                        .min(Duration::from_secs(180));
                     let result = tokio::select! {
                         () = reply.closed() => Err(failed("Text generation was cancelled.")),
                         result = tokio::time::timeout(timeout, self.run(&input, &connection, &mut incoming, &mut output)) =>
@@ -354,6 +357,11 @@ impl Peer<'_> {
 pub(crate) fn profile_allows_generation(profile: &Path) -> bool {
     for (name, key) in [("hooks.json", "hooks"), ("mcp_config.json", "mcpServers")] {
         let path = profile.join("config").join(name);
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() <= 64_000 => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            _ => return false,
+        }
         let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

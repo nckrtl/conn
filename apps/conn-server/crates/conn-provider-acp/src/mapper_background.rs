@@ -60,6 +60,7 @@ pub(super) struct TurnBackground {
     pending_injected_report: HashSet<String>,
     early_injected_report_observed: bool,
     pub(super) prompt_settled: bool,
+    pub(super) reply_open: bool,
     pub(super) prompt_settled_status: Option<String>,
     /// `backgroundFinalizeGeneration`.
     finalize_generation: u64,
@@ -123,7 +124,11 @@ pub(super) struct SessionBackground {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Timer {
     /// `scheduleDeferredFinalize` (the debounce is the session's).
-    Finalize { turn: u64, generation: u64 },
+    Finalize {
+        turn: u64,
+        generation: u64,
+        open_reply: bool,
+    },
     /// `markAwaitingBackgroundHydration` (60 s).
     Hydration { turn: u64, task_id: String },
     /// `markPendingInjectedReport` (25 s).
@@ -255,6 +260,18 @@ impl<E: Env> Mapper<E> {
 
     /// `hasDeferredBackgroundWork`.
     pub(super) fn has_deferred_work(&self) -> bool {
+        self.blocks_settlement(false)
+    }
+
+    /// After thirty minutes of silence, a foreground command alone no longer holds the turn.
+    pub(crate) fn expire_command_hold(&mut self) -> Vec<Out> {
+        if self.has_deferred_work() && !self.blocks_settlement(true) {
+            return self.finalize("completed", None);
+        }
+        Vec::new()
+    }
+
+    fn blocks_settlement(&self, ignore_commands: bool) -> bool {
         let Some(turn) = self.turn.as_ref() else {
             return false;
         };
@@ -266,7 +283,8 @@ impl<E: Env> Mapper<E> {
                         && (matches!(
                             t.title.as_deref(),
                             Some("Running schedule" | "Run schedule")
-                        ) || (t.kind.as_deref() == Some("execute")
+                        ) || (!ignore_commands
+                            && t.kind.as_deref() == Some("execute")
                             && t.data.get("rawInput").is_none_or(|r| r["IsDaemon"] != true)))
                 }))
         {
@@ -311,6 +329,7 @@ impl<E: Env> Mapper<E> {
         out.push(Out::Timer(Timer::Finalize {
             turn: turn.seq,
             generation: turn.bg.finalize_generation,
+            open_reply: turn.bg.reply_open,
         }));
     }
 
@@ -319,7 +338,9 @@ impl<E: Env> Mapper<E> {
         let mut out = Vec::new();
         let current = self.turn.as_ref().map(|t| t.seq);
         match timer {
-            Timer::Finalize { turn, generation } => {
+            Timer::Finalize {
+                turn, generation, ..
+            } => {
                 let Some(t) = self.turn.as_ref() else {
                     return out;
                 };
@@ -725,6 +746,14 @@ impl<E: Env> Mapper<E> {
         true
     }
 
+    pub(super) fn buffer_usage_after_wake(&mut self, params: &Value) {
+        if self.is_root(params["sessionId"].as_str().unwrap_or(""))
+            && !self.bg.wake_buffer.is_empty()
+        {
+            self.buffer_wake(params);
+        }
+    }
+
     fn buffer_wake(&mut self, params: &Value) {
         if self.bg.wake_buffer.len() >= WAKE_FRAMES_KEPT {
             self.skip("a wake frame past the bound");
@@ -923,7 +952,11 @@ impl<E: Env> Mapper<E> {
         let Some(turn) = self.turn.as_ref() else {
             return false;
         };
-        if !turn.bg.prompt_settled || turn.bg.continuation || !(hooks.is_wake)(params) {
+        if self.flavor.driver == "antigravity"
+            || !turn.bg.prompt_settled
+            || turn.bg.continuation
+            || !(hooks.is_wake)(params)
+        {
             return false;
         }
         if self.has_deferred_work() {

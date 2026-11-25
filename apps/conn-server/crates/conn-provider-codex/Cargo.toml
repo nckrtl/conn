@@ -24,5 +24,9 @@ thiserror.workspace = true
 # `net`: the Orbit MCP network wait probes TCP before the first spawn (network_gate.rs).
 tokio = { workspace = true, features = ["sync", "process", "io-util", "time", "rt", "macros", "net"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+conn-support = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

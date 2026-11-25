@@ -45,7 +45,7 @@ T3 server's Claude driver and `createClaudeAdapterV2` build theirs; the server
 | `binaryPath` | trimmed, `~` expanded (`expandHomePath`), `claude` when empty: `pathToClaudeCodeExecutable`, the `--version` probe, titles |
 | `homePath` | trimmed, `~` expanded, made absolute: `CLAUDE_CONFIG_DIR` everywhere, over an instance variable of that name |
 | `environment` | each entry with a value, `~` expanded only in `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`; a sensitive value is the real one from the secret store. `Debug` prints names only |
-| `launchArgs` | per query (`launch_args`): `--add-dir` values after the cwd and attachments; `--permission-mode`, then `--dangerously-skip-permissions`, over the policy's mode; `--append-system-prompt-file` text (one trailing newline trimmed) and `--append-system-prompt` text after T3's append text; `--settings` (inline JSON or a file, comments and trailing commas allowed) beneath T3's settings keys, in its own key order; every other flag to `extraArgs` in T3's order, then `thinking-display`. A missing value or an unreadable file fails the start. Probes and titles do not use them, as in T3 |
+| `launchArgs` | per query (`launch_args`): `--add-dir` values after the cwd and attachments; `--permission-mode`, then `--dangerously-skip-permissions`, over the policy's mode; `--append-system-prompt-file` text (one trailing newline trimmed) and `--append-system-prompt` text after T3's append text; `--settings` (inline JSON or a file, comments and trailing commas allowed) beneath T3's settings keys, in its own key order; every other flag to `extraArgs` in T3's order, then `thinking-display`. A missing value or an unreadable file fails the start. Text generation uses the launch settings too. Review guides resolve settings in the original project, preserve deny rules, and pass a private settings file to the CLI |
 | `enabled` | T3's rule; a disabled instance gets T3's disabled entry, also with the probe off, and the engine refuses its turns |
 | `displayName`, `accentColor` | on the entry, pending and probed (`withInstanceIdentity`) |
 | `customModels`, `autoCompactWindow` | not read yet |
@@ -148,7 +148,7 @@ source, API provider; never a token), slash commands, models, usage windows and 
 Before the first probe the entry is T3's pending one. `CONN_CLAUDE_STATUS_PROBE=off` turns the
 probe off; every check that starts the server sets it, so no check runs this machine's
 `claude`. Not ported: reset credits (Anthropic's API), the organization id (Claude's account
-file), the version advisory (a registry lookup), plugin skill discovery, custom models and applying effort caps.
+file), the version advisory (a registry lookup), custom models and applying effort caps.
 Proof: `tools/probe-conformance/run.mjs`, 11 status scenarios against T3's own function (and
 5 title scenarios against T3's `generateThreadTitle`); `instance-settings` and
 `title-instance` run an instance with a `~` binary path, a sensitive variable and
@@ -275,7 +275,9 @@ Normalized in the comparison:
   `ClaudeTextGeneration.ts` does (`text_generation.rs`): `claude -p --output-format json
   --json-schema … --tools "" --permission-mode dontAsk`, the prompt on stdin, a fresh temp
   folder, 180 s, a retry without `--no-session-persistence` for CLIs before 2.0.63. No SDK host.
-  Proven by the four `title*` scenarios of `tools/probe-conformance`.
+  An image title uses a stream-json user message. A successful text-only retry caches a model that explicitly rejects images. The CLI boundary test captures both attempts.
+  For review guides the conformance check validates the bundled TS CLI flags and the private settings file required by upstream T3 #41972.
+- **Skills:** discovers managed, user, project, additional and plugin skill roots, including account-scoped synced plugins. The active project selects the workspace catalog. The final selected skill and its raw arguments reach the native CLI as a slash command.
 - **Stop hook and goals:** the adapter follows native goal confirmations and checks. The Stop
   hook pauses a live goal while an app-owned child still owes its parent a wake.
 - **Native session title:** a successful native `/rename` updates the Conn thread title.

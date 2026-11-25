@@ -534,7 +534,11 @@ function loginShell(sideDir) {
 const plan = selected.map((name) => {
   const dir = NodePath.join(work, name);
   const scenario = SCENARIOS[name];
-  const extra = scenario.title ? { mcpServers: scenario.title.mcpServers } : {};
+  const extra = {
+    ...(scenario.title ? { mcpServers: scenario.title.mcpServers } : {}),
+    ...(scenario.setModelBefore ? { modelReloadAfterTurns: scenario.setModelBefore.index } : {}),
+    ...(scenario.derive === "commandWake" ? { liveBackgroundCommand: true } : {}),
+  };
   const tsCodex = wrapper(NodePath.join(dir, "ts"), extra);
   const rustCodex = wrapper(NodePath.join(dir, "rust"), extra);
   const login = scenario.loginShell
@@ -956,8 +960,8 @@ const processes = (log) => {
     if (entry.kind === "in") current.frames.push(entry.frame ?? { invalid: entry.line });
     // These calls were added after the bundled TS reference and recordings.
     // The stub verifies their method, phase and payload. The current-protocol
-    // Rust tests cover workspace MCP overrides and title propagation.
-    if (entry.kind === "workspace-config-or-name") {
+    // Rust tests cover workspace MCP overrides, title propagation and command reconciliation.
+    if (entry.kind === "current-protocol-request") {
       const index = current.frames.findLastIndex((f) => f.id === entry.frame.id && f.method === entry.frame.method);
       if (index !== -1) current.frames.splice(index, 1);
       const ids = auxiliary.get(current) ?? [];

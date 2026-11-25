@@ -10,6 +10,10 @@ The desktop reference is `apps/lab-gpui` at `b4f0ac5512b823431dea8cca12eb84ace65
 
 The VM also opened an Orbit task from thread details, expanded its subtask brief and deliverables, opened and returned from a workspace file, and sent GET and HEAD requests. HEAD displayed the 204 status and empty response. The pull request inbox filtered a live GitHub list through the selected Conn server, opened a three-file breakdown, then loaded the PR detail and code patch.
 
+## Thread message text selection, 25 November 2026
+
+Assistant Markdown and user bubble text are selectable: drag across paragraphs, headings, list items, inline code and code blocks (and across messages), double-click a word, triple-click a paragraph, `Cmd+C` copies plain text, `Esc` or a click elsewhere clears it. `chat/selection.rs` registers each message's text with `gpui-base`'s window selection (`TextSelectionLayer` under `Root`) and paints the highlight with the theme's `selection` token. Links still open on a plain click; a drag that starts on one selects. Headless tests in `chat::selection` cover the drag, copy, word and paragraph picks, the link click and drag, clearing, scrolling and both appearances. Open: copy is plain text only, and work-log rows, queued bubbles and the right-panel Markdown are not selectable (`docs/parity/timeline.md`).
+
 ## Milestones (from `GOAL.md`)
 
 | Phase | Area | State | Proof |

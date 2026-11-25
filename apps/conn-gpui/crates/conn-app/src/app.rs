@@ -7545,6 +7545,12 @@ impl Render for ConnApp {
                     }
                     if event.keystroke.key == "escape" && app.escape_shell_popovers(cx) {
                         cx.stop_propagation();
+                        return;
+                    }
+                    // Escape drops a selection in the thread's text, and only then: with none, it
+                    // goes on to whatever else wants it.
+                    if crate::chat::selection::clear_on_escape(event, window, cx) {
+                        cx.stop_propagation();
                     }
                 }),
             )

@@ -31,6 +31,7 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod request_stack;
+pub(crate) mod selection;
 mod spinner;
 mod thumb_cache;
 
@@ -103,11 +104,15 @@ struct MessageBody<'a> {
     attachments: &'a [ChatAttachment],
     review_comments: &'a [conn_state::ReviewComment],
     notes: &'a [Option<String>],
+    /// Orders the text among the window's selectable text; `None` leaves it unselectable.
+    selection: Option<&'a selection::SelectionScope>,
 }
 
 /// One human user bubble's render inputs.
 struct UserBubble<'a> {
     id: &'a str,
+    /// The bubble's row in the timeline, which orders its text for selection.
+    row_idx: usize,
     text: &'a str,
     attachments: &'a [ChatAttachment],
     review_comments: &'a [conn_state::ReviewComment],
@@ -1269,6 +1274,8 @@ impl ChatView {
                 });
             })),
             prose: None,
+            // The caller of a row sets its scope: only assistant text takes part in selection.
+            selection: None,
         }
     }
 
@@ -1881,6 +1888,7 @@ impl ChatView {
                         self.render_user_bubble(
                             UserBubble {
                                 id,
+                                row_idx: *row_idx,
                                 text,
                                 attachments,
                                 review_comments,
@@ -1954,7 +1962,8 @@ impl ChatView {
                 {
                     // Lazily parse & cache Markdown only when this row enters the viewport.
                     let blocks = row.markdown_blocks();
-                    let options = self.markdown_options(cx);
+                    let mut options = self.markdown_options(cx);
+                    options.selection = Some(selection::SelectionScope::for_row(*row_idx));
                     let group = SharedString::from(format!("assistant-row-{id}"));
                     let body: AnyElement = if text.is_empty() && !*streaming {
                         // Conn: `text || (streaming ? "" : "(empty response)")`.
@@ -2167,7 +2176,13 @@ impl ChatView {
     }
 
     /// The bubble's 3px frame and the caption's 13px padding align its text with plain messages.
-    fn render_bubble_caption(&self, key: &str, text: &str, bottom_px: f32) -> AnyElement {
+    fn render_bubble_caption(
+        &self,
+        key: &str,
+        text: &str,
+        bottom_px: f32,
+        selection: Option<&selection::SelectionScope>,
+    ) -> AnyElement {
         let caption = SharedString::from(text.to_owned());
         div()
             .min_w_0()
@@ -2183,7 +2198,11 @@ impl ChatView {
                         caption.clone(),
                     )
                     .min_w_0()
-                    .child(caption),
+                    .child(selection::selectable_message_text(
+                        &format!("chat-caption-text-{key}"),
+                        &caption,
+                        selection,
+                    )),
             )
             .into_any_element()
     }
@@ -2309,6 +2328,7 @@ impl ChatView {
             attachments,
             review_comments,
             notes,
+            selection,
         } = body;
         bubble = bubble
             .relative()
@@ -2369,6 +2389,7 @@ impl ChatView {
                     caption_key,
                     text,
                     if gallery_follows { 10.0 } else { 7.0 },
+                    selection,
                 ));
             }
             for (idx, comment) in review_comments.iter().enumerate() {
@@ -2377,6 +2398,7 @@ impl ChatView {
                         &format!("{caption_key}.note.{idx}"),
                         note,
                         7.0,
+                        selection,
                     ));
                 }
                 bubble = bubble.child(self.render_review_comment(attachment_key, idx, comment));
@@ -2391,7 +2413,11 @@ impl ChatView {
                 .pt(px(10.0))
                 .pb(px(12.0));
             if !text.is_empty() {
-                bubble = bubble.child(div().min_w_0().child(text.to_owned()));
+                bubble = bubble.child(div().min_w_0().child(selection::selectable_message_text(
+                    &format!("chat-text-{caption_key}"),
+                    text,
+                    selection,
+                )));
             }
         }
 
@@ -2406,6 +2432,7 @@ impl ChatView {
     ) -> AnyElement {
         let UserBubble {
             id,
+            row_idx,
             text,
             attachments,
             review_comments,
@@ -2449,6 +2476,7 @@ impl ChatView {
         } else {
             text.chars().take(120).collect()
         };
+        let selection = selection::SelectionScope::for_row(row_idx);
         // No top highlight: a sent message is one flat surface.
         let bubble = div()
             .id(SharedString::from(format!("chat-user-{id}")))
@@ -2467,6 +2495,7 @@ impl ChatView {
                 attachments,
                 review_comments,
                 notes: &notes,
+                selection: Some(&selection),
             },
             window,
             cx,
@@ -2569,6 +2598,7 @@ impl ChatView {
                 attachments,
                 review_comments: &[],
                 notes: &[],
+                selection: None,
             },
             window,
             cx,

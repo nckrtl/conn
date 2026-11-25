@@ -939,7 +939,7 @@ fn render_code_block(
 
     let lang_icon = language
         .and_then(language_sample_filename)
-        .map(crate::file_icons::file_icon);
+        .map(|name| crate::file_icons::file_icon(name, tokens.appearance));
     let mut lang_header = div()
         .flex()
         .flex_row()
@@ -947,11 +947,7 @@ fn render_code_block(
         .gap(px(CARD_ICON_GAP_PX))
         .min_w_0();
     if let Some(icon) = lang_icon {
-        let icon_color = icon
-            .color
-            .map(|c| hsla(c.for_appearance(tokens.appearance)))
-            .unwrap_or(muted);
-        lang_header = lang_header.child(icons::icon(icon.asset, CARD_ICON_PX, icon_color));
+        lang_header = lang_header.child(crate::file_icons::icon_img(icon.asset, CARD_ICON_PX));
     }
     // The language is named in full, in the card's sans text, not in code type.
     lang_header = lang_header.child(

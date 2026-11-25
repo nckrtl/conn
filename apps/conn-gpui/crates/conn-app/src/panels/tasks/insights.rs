@@ -49,10 +49,14 @@ const BASE_MIN_STRIP_HEIGHT_PX: f32 = 168.0;
 const CARD_PAD_TOP_PX: f32 = 10.0;
 /// Flex gap between the rows inside an insight card and the open chart's box.
 const CARD_GAP_PX: f32 = 4.0;
+/// Extra room between the open chart's number row and its top y label, beyond the card's top
+/// padding, so the chart reads as its own block under the header.
+const CHART_EXTRA_TOP_GAP_PX: f32 = 8.0;
 /// Space above the chart's wrapper, on top of the box's flex gap. The visible gap from the number
-/// row to the first y label (whose text box starts `AXIS_TOP_OVERHANG_PX` above the chart) equals
-/// the card's top padding, i.e. the gap from the card's top edge to the title.
-const CHART_TOP_GAP_PX: f32 = CARD_PAD_TOP_PX - CARD_GAP_PX + AXIS_TOP_OVERHANG_PX;
+/// row to the first y label (whose text box starts `AXIS_TOP_OVERHANG_PX` above the chart) is the
+/// card's top padding plus `CHART_EXTRA_TOP_GAP_PX`. The chart gives up that height.
+const CHART_TOP_GAP_PX: f32 =
+    CARD_PAD_TOP_PX - CARD_GAP_PX + AXIS_TOP_OVERHANG_PX + CHART_EXTRA_TOP_GAP_PX;
 
 /// A single row stretches to 168px × the scale; two rows keep one card height each. Opening a
 /// metric keeps that exact height so the task lanes stay in place.
@@ -787,12 +791,12 @@ mod tests {
         assert_eq!(rel(title), 10.0);
         assert_eq!(rel(summary), 34.0);
         assert_eq!(f32::from(summary.size.height), 24.0);
-        // The chart starts where it did (34 + 24 + 4 gap + the 7px tuned gap = 69) and ends 8px
-        // above the bottom; it was 129px tall and gains all of the 51.5px.
-        assert_eq!(rel(chart), 69.0);
+        // The chart starts at 34 + 24 + 4 gap + the 7px tuned gap + the extra gap and ends 8px
+        // above the bottom; it was 129px tall, gains the 51.5px and gives up the extra gap.
+        assert_eq!(rel(chart), 69.0 + CHART_EXTRA_TOP_GAP_PX);
         assert_near(
             f32::from(chart.size.height),
-            129.0 + 206.0 * 0.25,
+            129.0 + 206.0 * 0.25 - CHART_EXTRA_TOP_GAP_PX,
             "open chart height",
         );
         assert_eq!(f32::from(card.bottom()) - f32::from(chart.bottom()), 8.0);
@@ -828,7 +832,7 @@ mod tests {
                 );
             }
             // The gap above the title is the card's top padding; the gap from the number row to
-            // the top y label's text box must be the same, so the chart does not look detached.
+            // the top y label's text box is that padding plus the open chart's extra gap.
             let top_gap = f32::from(title.origin.y) - f32::from(card.origin.y);
             let first_label_top = labels
                 .iter()
@@ -837,7 +841,7 @@ mod tests {
             let chart_gap = first_label_top - f32::from(summary.bottom());
             assert_eq!(top_gap, CARD_PAD_TOP_PX, "card top padding at {width}px");
             assert!(
-                (chart_gap - top_gap).abs() <= 0.5,
+                (chart_gap - top_gap - CHART_EXTRA_TOP_GAP_PX).abs() <= 0.5,
                 "number row to top y label is {chart_gap}px, card top to title is {top_gap}px \
                  at {width}px ({expanded:?})"
             );

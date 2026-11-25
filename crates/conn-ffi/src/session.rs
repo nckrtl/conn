@@ -2270,10 +2270,22 @@ mod tests {
             "node-new",
             "the cache now belongs to the new Node"
         );
-        assert!(
-            !dir.join("shell.json").exists(),
-            "nothing of the old Node's cache carries over"
-        );
+        match std::fs::read(dir.join("shell.json")) {
+            Ok(bytes) => {
+                let shell = conn_state::environments::LinkedShellSnapshot::from_json(&bytes)
+                    .expect("any shell already written must be a valid replacement snapshot");
+                assert_eq!(shell.environment_id, "node-new");
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("cannot inspect the new Node's shell: {err}"),
+        }
+        let cold = ConnSession::with_orbit(session.orbit.clone(), Some(dir), recorder);
+        let url = session.state().server_url.expect("connected server URL");
+        for (identity, allowed) in [("node-old", false), ("node-new", true)] {
+            cold.machine.lock().expect("machine").saved =
+                Some(saved(&url, Some(identity), Some(identity)));
+            assert_eq!(rt.block_on(cold.saved_offline_reader()).is_some(), allowed);
+        }
         if let Some(core) = session.core() {
             core.disconnect();
         }

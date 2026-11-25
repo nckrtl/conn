@@ -143,8 +143,9 @@ enum OperatorVoice {
         return try jsonRequest(url, body: nil, token: token)
     }
 
-    /// A multipart upload of the M4A recording, as the Expo flow sends it.
-    static func transcriptionRequest(speech: String, token: String, audio: Data, filename: String, boundary: String = UUID().uuidString) throws -> URLRequest {
+    /// A multipart upload of the recording: an M4A as the Expo flow sends it, or the WAV that the
+    /// stream keeps for its fallback (`audio/wav`, as Operator's iPhone app uploads it).
+    static func transcriptionRequest(speech: String, token: String, audio: Data, filename: String, contentType: String = "audio/m4a", boundary: String = UUID().uuidString) throws -> URLRequest {
         guard let url = URL(string: speech + "/v1/audio/transcriptions") else {
             throw VoiceError("The Operator dictation address is not valid. Sign in again in Settings › Microphone.")
         }
@@ -155,7 +156,7 @@ enum OperatorVoice {
         var body = Data()
         func append(_ text: String) { body.append(Data(text.utf8)) }
         append("--\(boundary)\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\njson\r\n")
-        append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\nContent-Type: audio/m4a\r\n\r\n")
+        append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\nContent-Type: \(contentType)\r\n\r\n")
         body.append(audio)
         append("\r\n--\(boundary)--\r\n")
         request.httpBody = body

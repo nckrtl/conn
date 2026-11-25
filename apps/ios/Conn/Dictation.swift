@@ -5,9 +5,11 @@ import Speech
 import SwiftUI
 import UIKit
 
-// Dictation, ported from Conn mobile: record an M4A, then transcribe it on this device (Apple
-// SpeechAnalyzer, iOS 26) or on an Operator server. An Operator failure is shown, never retried
-// on the device.
+// Dictation, ported from Conn mobile. On this device: record an M4A, then transcribe it with Apple
+// SpeechAnalyzer (iOS 26). On an Operator server: record at once, stream the audio over a
+// WebSocket while recording (DictationStream.swift) and insert the text when the stop's tail
+// arrives; if the stream fails, upload the WAV kept on disk. An Operator failure is shown, never
+// retried on the device.
 
 // MARK: Settings and Operator sign-in
 
@@ -197,10 +199,12 @@ enum VoiceTranscription {
         }
     }
 
-    private static func operatorTranscribe(_ file: URL, speech: String, token: String) async throws -> String {
+    static func operatorTranscribe(
+        _ file: URL, speech: String, token: String, filename: String = "dictation.m4a", contentType: String = "audio/m4a"
+    ) async throws -> String {
         let host = URL(string: speech)?.host ?? speech
         let request = try OperatorVoice.transcriptionRequest(
-            speech: speech, token: token, audio: try Data(contentsOf: file), filename: "dictation.m4a"
+            speech: speech, token: token, audio: try Data(contentsOf: file), filename: filename, contentType: contentType
         )
         let data: Data
         let response: URLResponse
@@ -284,6 +288,10 @@ enum OnDeviceTranscriber {
 // MARK: Controller
 
 /// One composer's dictation: tap to record, stop to transcribe and hand the text back.
+///
+/// The Operator engine records at the tap (microphone permission is asked only on first use) and
+/// streams while recording; see `OperatorCapture`. The device engine records an M4A first and
+/// transcribes it at the stop, as before.
 @MainActor @Observable
 final class DictationController {
     enum Phase: Equatable {
@@ -298,22 +306,64 @@ final class DictationController {
 
     var isActive: Bool { phase != .idle }
 
+    private static let microphoneDenied = "Allow microphone access for Conn in Settings to dictate."
+
     private let recorder = VoiceRecorder()
+    private var capture: OperatorCapture?
+    private var timeline: DictationTimeline?
     private var work: Task<Void, Never>?
+    /// Counts dictations, so a late answer of an earlier one never touches the current one.
+    private var generation = 0
+    private var pendingInsert: (@MainActor (String) -> Void)?
+    private var earlyInserted = false
 
     func start() {
         guard phase == .idle else { return }
         error = nil
-        guard OperatorVoice.route(for: VoiceSettingsModel.shared.settings) != .needsSignIn else {
-            error = OperatorVoice.signInHint
-            return
+        generation += 1
+        let settings = VoiceSettingsModel.shared.settings
+        let timeline = DictationTimeline()
+        self.timeline = timeline
+        timeline.mark("tap", "engine=\(settings.engine.rawValue)")
+        switch settings.engine {
+        case .device: startDevice(timeline)
+        case .operator: startOperator(settings, timeline)
         }
+    }
+
+    func cancel() {
+        work?.cancel()
+        work = nil
+        generation += 1
+        capture?.cancel()
+        capture = nil
+        pendingInsert = nil
+        recorder.discard()
+        timeline?.mark("cancelled")
+        phase = .idle
+    }
+
+    /// Stops recording and transcribes it. `insert` runs on success with the text.
+    func finish(insert: @escaping @MainActor (String) -> Void) {
+        guard case let .recording(since) = phase else { return }
+        let timeline = self.timeline ?? DictationTimeline()
+        if let capture {
+            finishOperator(capture, timeline: timeline, insert: insert)
+        } else {
+            finishDevice(since: since, timeline: timeline, insert: insert)
+        }
+    }
+
+    // MARK: On this device
+
+    private func startDevice(_ timeline: DictationTimeline) {
         phase = .starting
         work = Task {
             do {
                 try await recorder.start()
                 guard phase == .starting else { return recorder.discard() }
                 phase = .recording(since: Date())
+                timeline.mark("recording")
             } catch {
                 guard phase == .starting else { return }
                 phase = .idle
@@ -322,16 +372,10 @@ final class DictationController {
         }
     }
 
-    func cancel() {
-        work?.cancel()
-        work = nil
-        recorder.discard()
-        phase = .idle
-    }
-
-    /// Stops recording and transcribes it. `insert` runs on success with the text.
-    func finish(insert: @escaping @MainActor (String) -> Void) {
-        guard case .recording = phase, let file = recorder.stop() else { return }
+    private func finishDevice(since: Date, timeline: DictationTimeline, insert: @escaping @MainActor (String) -> Void) {
+        guard let file = recorder.stop() else { return }
+        let seconds = Date().timeIntervalSince(since)
+        timeline.mark("stop-tapped", "engine=device seconds=\(String(format: "%.2f", seconds))")
         phase = .transcribing
         let route = OperatorVoice.route(for: VoiceSettingsModel.shared.settings)
         work = Task {
@@ -340,7 +384,13 @@ final class DictationController {
                 let text = try await VoiceTranscription.transcribe(file, route: route)
                 guard phase == .transcribing else { return }
                 phase = .idle
-                if text.isEmpty { error = "No speech was heard." } else { insert(text) }
+                if text.isEmpty {
+                    error = "No speech was heard."
+                } else {
+                    insert(text)
+                    timeline.mark("inserted", "chars=\(text.count)")
+                }
+                timeline.mark("done", "engine=device path=device seconds=\(String(format: "%.2f", seconds))")
             } catch is CancellationError {
             } catch {
                 guard phase == .transcribing else { return }
@@ -348,5 +398,153 @@ final class DictationController {
                 self.error = error.localizedDescription
             }
         }
+    }
+
+    // MARK: On an Operator server
+
+    /// Recording starts at once when the microphone is already allowed. Nothing here waits for the
+    /// network or the sign-in: not signed in, it records anyway and shows the sign-in hint, and the
+    /// stop ends with that hint.
+    private func startOperator(_ settings: VoiceSettings, _ timeline: DictationTimeline) {
+        let route = OperatorVoice.route(for: settings)
+        if route == .needsSignIn { error = OperatorVoice.signInHint }
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            beginCapture(route, timeline)
+        case .undetermined:
+            phase = .starting
+            let id = generation
+            work = Task {
+                let allowed = await AVAudioApplication.requestRecordPermission()
+                guard phase == .starting, generation == id else { return }
+                guard allowed else {
+                    phase = .idle
+                    error = Self.microphoneDenied
+                    return
+                }
+                beginCapture(route, timeline)
+            }
+        default:
+            error = Self.microphoneDenied
+        }
+    }
+
+    private func beginCapture(_ route: VoiceRoute, _ timeline: DictationTimeline) {
+        let id = generation
+        do {
+            let capture = try OperatorCapture(route: route, timeline: timeline) { [weak self] text in
+                Task { @MainActor in self?.receivedEarly(text, generation: id) }
+            }
+            self.capture = capture
+            phase = .recording(since: Date())
+            timeline.mark("recording", "route=\(route == .needsSignIn ? "signed-out" : "operator")")
+            capture.start { [weak self] failure in
+                guard let failure else { return }
+                Task { @MainActor in self?.captureFailed(failure, generation: id) }
+            }
+        } catch {
+            phase = .idle
+            self.error = (error as? VoiceError)?.message ?? "Conn could not start recording."
+        }
+    }
+
+    /// The microphone could not open.
+    private func captureFailed(_ failure: Error, generation id: Int) {
+        guard generation == id, case .recording = phase else { return }
+        timeline?.mark("microphone-failed", failure.localizedDescription)
+        capture?.cancel()
+        capture = nil
+        phase = .idle
+        error = (failure as? VoiceError)?.message ?? "Conn could not start recording."
+    }
+
+    private func finishOperator(_ capture: OperatorCapture, timeline: DictationTimeline, insert: @escaping @MainActor (String) -> Void) {
+        timeline.mark("stop-tapped", "engine=operator")
+        self.capture = nil
+        let id = generation
+        let samples = capture.endCapture()
+        let seconds = Double(samples) / StreamProtocol.rate
+        timeline.mark("capture-ended", "samples=\(samples) seconds=\(String(format: "%.2f", seconds))")
+        phase = .transcribing
+        pendingInsert = insert
+        earlyInserted = false
+        work = Task {
+            defer { Task.detached { capture.discardFile() } }
+            await settle(capture, samples: samples, seconds: seconds, timeline: timeline, generation: id)
+        }
+    }
+
+    /// The tail arrived with the whole text: it goes into the draft now, before the final text.
+    private func receivedEarly(_ text: String, generation id: Int) {
+        guard generation == id, phase == .transcribing, !earlyInserted, let insert = pendingInsert else { return }
+        earlyInserted = true
+        pendingInsert = nil
+        phase = .idle
+        insert(text)
+        timeline?.mark("inserted", "chars=\(text.count) source=tail")
+    }
+
+    /// After the stop: the stream's final text, or, when the stream failed, the upload of the file.
+    private func settle(_ capture: OperatorCapture, samples: Int, seconds: Double, timeline: DictationTimeline, generation id: Int) async {
+        let length = String(format: "%.2f", seconds)
+        guard case let .operator(speech, token) = capture.route else {
+            guard generation == id else { return }
+            phase = .idle
+            pendingInsert = nil
+            error = OperatorVoice.signInHint
+            timeline.mark("done", "engine=operator path=signed-out seconds=\(length)")
+            return
+        }
+        var finalText: String?
+        var streamError = "no stream"
+        if let stream = capture.stream {
+            do {
+                finalText = try await stream.finish(samples: samples)
+            } catch is CancellationError {
+                return
+            } catch {
+                streamError = error.localizedDescription
+            }
+        }
+        guard generation == id else { return }
+        switch DictationFallback.afterStream(earlyInserted: earlyInserted, streamSucceeded: finalText != nil) {
+        case .skip:
+            timeline.mark("done", "engine=operator path=stream-tail seconds=\(length)")
+        case .insertStreamText:
+            complete(finalText ?? "", path: "stream", seconds: length, timeline: timeline)
+        case .upload:
+            timeline.mark("fallback", "reason=\(streamError)")
+            let file = await Task.detached { capture.closeFile() }.value
+            timeline.mark("upload-start")
+            do {
+                let text = try await VoiceTranscription.operatorTranscribe(
+                    file, speech: speech, token: token, filename: "dictation.wav", contentType: "audio/wav"
+                )
+                timeline.mark("upload-end", "ok")
+                guard generation == id else { return }
+                complete(text, path: "fallback", seconds: length, timeline: timeline)
+            } catch is CancellationError {
+            } catch {
+                timeline.mark("upload-end", "failed \(error.localizedDescription)")
+                guard generation == id, phase == .transcribing else { return }
+                phase = .idle
+                pendingInsert = nil
+                self.error = error.localizedDescription
+                timeline.mark("done", "engine=operator path=fallback-failed seconds=\(length)")
+            }
+        }
+    }
+
+    private func complete(_ text: String, path: String, seconds: String, timeline: DictationTimeline) {
+        guard phase == .transcribing, let insert = pendingInsert else { return }
+        pendingInsert = nil
+        phase = .idle
+        if text.isEmpty {
+            error = "No speech was heard."
+        } else {
+            insert(text)
+            timeline.mark("inserted", "chars=\(text.count) source=\(path)")
+        }
+        timeline.mark("done", "engine=operator path=\(path) seconds=\(seconds)")
     }
 }

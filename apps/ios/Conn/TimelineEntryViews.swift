@@ -69,16 +69,21 @@ struct WorkGroupCard: View {
                         }
                         switch entry {
                         case let .thinking(_, text, streaming, _, _):
-                            WorkLogRow(title: streaming ? "Thinking…" : "Thought",
+                            // Desktop shows the thought's first line beside the brain.
+                            let line = text.split(whereSeparator: \.isNewline).first.map {
+                                $0.trimmingCharacters(in: .whitespaces)
+                            }
+                            WorkLogRow(title: line.flatMap { $0.isEmpty ? nil : $0 } ?? (streaming ? "Thinking…" : "Thought"),
                                        status: streaming ? .running : .completed, duration: nil,
-                                       detail: text.isEmpty ? nil : text, monospaced: false, size: size)
+                                       detail: text.isEmpty ? nil : text, monospaced: false, size: size,
+                                       glyph: "work-thinking")
                         case let .tool(_, kind, title, detail, status, _, _, durationMs):
-                            // Conn's own MCP tools get desktop's label and icon (`conn_tools`).
+                            // Conn's own MCP tools get desktop's label (`conn_tools`).
                             let conn = title.isEmpty ? nil : connToolLabel(title: title)
                             WorkLogRow(title: conn?.displayName ?? (title.isEmpty ? kind : title), status: status,
                                        duration: workDurationLabel(durationMs),
                                        detail: detail?.isEmpty == false ? detail : nil, monospaced: true, size: size,
-                                       glyph: conn.map { $0.icon.glyph })
+                                       glyph: WorkLogIcon.glyph(kind: kind, title: title, conn: conn?.icon))
                         default:
                             EmptyView()
                         }
@@ -631,7 +636,7 @@ private struct WorkLogRow: View {
     let detail: String?
     let monospaced: Bool
     let size: CGFloat
-    /// A finished Conn tool shows its own icon in place of the check.
+    /// Desktop's icon for the step kind; shown unless the step runs or failed.
     var glyph: String? = nil
     @Environment(\.connTheme) private var theme
     @State private var open = false
@@ -651,7 +656,8 @@ private struct WorkLogRow: View {
                         }
                     }
                     .frame(width: 16, height: 16)
-                    Text(title).font(.system(size: size)).foregroundStyle(theme.foreground).lineLimit(1)
+                    // Muted like the "Worked for" label above the log.
+                    Text(title).font(.system(size: size)).foregroundStyle(theme.mutedForeground).lineLimit(1)
                     Spacer(minLength: 8)
                     if let duration {
                         Text(duration).font(.system(size: size).monospacedDigit()).foregroundStyle(theme.mutedForeground)
@@ -727,14 +733,47 @@ enum PrettyJSON {
 }
 
 extension FfiConnToolIcon {
-    /// The thread glyph for each Conn tool icon (GPUI's `conn_icon_path`).
+    /// The glyph for each Conn tool icon (GPUI's `conn_icon_path`).
     var glyph: String {
         switch self {
         case .connMark: "conn-mark"
-        case .browser: "globe"
-        case .device: "phone"
-        case .pullRequest: "pull-request"
-        case .credential: "key"
+        case .browser: "work-globe"
+        case .device: "work-phone"
+        case .pullRequest: "work-pull-request"
+        case .credential: "work-key"
         }
+    }
+}
+
+/// Desktop's work-log icons (GPUI `chat/icons.rs` `tool_icon_path`), from its 16 pt solid set.
+enum WorkLogIcon {
+    static func glyph(kind: String, title: String, conn: FfiConnToolIcon?) -> String {
+        switch kind {
+        case "command": return "work-terminal"
+        case "file_change": return "work-compose"
+        case "file_read", "read": return "work-show"
+        case "file_search": return "work-search"
+        case "web_search": return "work-globe"
+        case "subagent": return "work-agent"
+        case "todo_list": return "work-checklist"
+        case "thread_created": return "work-thread"
+        case "approval", "secret_request", "link_request": return "work-needs-approval"
+        default:
+            if let conn { return conn.glyph }
+            return fromTitle(title) ?? (kind == "dynamic_tool" ? "work-build" : "work-tool")
+        }
+    }
+
+    /// `infer_tool_icon_from_title`.
+    private static func fromTitle(_ title: String) -> String? {
+        let lower = title.trimmingCharacters(in: .whitespaces).lowercased()
+        func starts(_ prefixes: [String]) -> Bool { prefixes.contains { lower.hasPrefix($0) } }
+        if starts(["read ", "view ", "inspect "]) || lower == "read file" { return "work-show" }
+        if starts(["edit ", "write ", "create ", "update ", "patch ", "delete "]) { return "work-compose" }
+        if starts(["ran ", "run ", "exec ", "shell "]) { return "work-terminal" }
+        if starts(["search ", "find ", "grep ", "glob ", "list "]) { return "work-search" }
+        if starts(["web ", "fetch "]) { return "work-globe" }
+        if starts(["subagent", "delegate"]) { return "work-agent" }
+        return nil
     }
 }

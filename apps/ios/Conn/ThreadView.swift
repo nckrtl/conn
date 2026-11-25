@@ -496,7 +496,7 @@ struct ThreadView: View {
                             ThreadGlyph(name: "chevron-down", size: 16)
                                 .foregroundStyle(theme.foreground)
                                 .frame(width: 38.5, height: 38.5)
-                                .modifier(ThreadControlSurface(shape: Circle()))
+                                .glassEffect(.regular.interactive(), in: .circle)
                                 .frame(width: 44, height: 44)
                                 .contentShape(Rectangle())
                         }
@@ -626,7 +626,7 @@ struct ThreadView: View {
                         .flipsForRightToLeftLayoutDirection(true)
                         .foregroundStyle(theme.foreground)
                         .frame(width: 44, height: 44)
-                        .modifier(ThreadControlSurface(shape: Circle()))
+                        .glassEffect(.regular.interactive(), in: .circle)
                 }
                 .accessibilityLabel("Back")
             }
@@ -650,7 +650,7 @@ struct ThreadView: View {
                     ThreadGlyph(name: "more-horizontal", size: 22)
                         .foregroundStyle(theme.foreground)
                         .frame(width: 44, height: 44)
-                        .modifier(ThreadControlSurface(shape: Circle()))
+                        .glassEffect(.regular.interactive(), in: .circle)
                 }
                 .accessibilityLabel("More actions")
                 .accessibilityIdentifier("thread.moreButton")

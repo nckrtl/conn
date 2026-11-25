@@ -605,12 +605,12 @@ struct RecordChrome: ViewModifier {
                             connImage(icon).resizable().scaledToFit().frame(width: 22, height: 22)
                                 .foregroundStyle(name == selection ? theme.foreground : theme.mutedForeground)
                                 .frame(maxWidth: .infinity).frame(height: 40)
-                                .background { if name == selection { Capsule().fill(theme.foreground.opacity(0.12)) } }
+                                .background { if name == selection { Capsule().fill(.selection.tertiary).tint(.primary) } }
                                 .contentShape(Capsule())
                         }.buttonStyle(.plain).accessibilityLabel(name)
                             .accessibilityAddTraits(name == selection ? .isSelected : [])
                     }
-                }.padding(4).frame(maxWidth: 238).phoneFooterSurface(Capsule()).padding(.horizontal, 24).offset(y: 4)
+                }.padding(4).frame(maxWidth: 238).glassEffect(.regular, in: .capsule).padding(.horizontal, 24).offset(y: 4)
             }
     }
 }

@@ -122,7 +122,7 @@ struct ModelPickerSheet: View {
                                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                                     .accessibilityIdentifier("modelPicker.search")
                             }.padding(.horizontal, 14).frame(height: 44)
-                                .background(theme.settingsGroup, in: Capsule()).padding(.horizontal, 14)
+                                .glassEffect(.regular, in: .capsule).padding(.horizontal, 14)
                         }
                     }
                     .navigationTitle(pageTitle(page))

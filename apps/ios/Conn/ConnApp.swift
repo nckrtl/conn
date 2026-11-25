@@ -28,6 +28,15 @@ struct ConnApp: App {
                     // scope has connected; after that a reconnect shows inline in the workspace.
                     if store.showsWorkspace {
                         WorkspaceRootView(store: store)
+                            .alert("Couldn’t reach the Orbit server", isPresented: Binding(
+                                get: { store.showsSavedConnectionAlert },
+                                set: { _ in }
+                            )) {
+                                Button("Use offline") { store.useSavedWorkspaceOffline() }
+                                Button("Try again") { store.retrySavedConnection() }
+                            } message: {
+                                Text("Check that https://gateway.orbit is available, then try again.")
+                            }
                     } else if let orbitConnect = store.orbitConnect {
                         OrbitConnectView(store: store, state: orbitConnect)
                     } else {

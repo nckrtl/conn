@@ -1665,6 +1665,11 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     func retry() 
     
+    /**
+     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     */
+    func savedOfflineReader() async  -> OfflineReader?
+    
     func signOut() 
     
     func state()  -> FfiSessionState
@@ -1910,6 +1915,26 @@ open func retry()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     */
+open func savedOfflineReader()async  -> OfflineReader?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_connsession_saved_offline_reader(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeOfflineReader.lift,
+            errorHandler: nil
+            
+        )
 }
     
 open func signOut()  {try! rustCall() {
@@ -13739,6 +13764,7 @@ public enum FfiPullRequestOperation: Equatable, Hashable {
     case submitReview
     case diff
     case listStats
+    case checks
 
 
 
@@ -13772,6 +13798,8 @@ public struct FfiConverterTypeFfiPullRequestOperation: FfiConverterRustBuffer {
         
         case 6: return .listStats
         
+        case 7: return .checks
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -13802,6 +13830,10 @@ public struct FfiConverterTypeFfiPullRequestOperation: FfiConverterRustBuffer {
         
         case .listStats:
             writeInt(&buf, Int32(6))
+        
+        
+        case .checks:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -18208,6 +18240,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 11824) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {

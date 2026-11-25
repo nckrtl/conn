@@ -59,7 +59,7 @@ struct PendingUserInputCard: View {
         }
         .padding(3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Self.sheetRadius, style: .continuous).fill(theme.card))
+        .background(RoundedRectangle(cornerRadius: Self.sheetRadius, style: .continuous).fill(theme.settingsGroup))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.question.\(question.requestId)")
     }

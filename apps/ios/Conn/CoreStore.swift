@@ -53,6 +53,24 @@ final class CoreStore {
     private(set) var loadingOlder = false
     private(set) var olderError: String?
     var showsOffline: Bool { state?.showsOffline == true }
+    private var coldLaunchSession: FfiSavedSession?
+    private var choseOffline = false
+    var showsSavedConnectionAlert: Bool {
+        coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
+    }
+
+    func useSavedWorkspaceOffline() { choseOffline = true }
+
+    func retrySavedConnection() {
+        guard let saved = coldLaunchSession else { return }
+        if case .idle = state?.phase {
+            session?.launch(saved: saved)
+        } else {
+            session?.retry()
+        }
+        if let latest = session?.state() { handleState(latest) }
+    }
+
     var displayName: String { fleetLabel ?? serverURL.flatMap { URL(string: $0)?.host } ?? fleetID ?? scope }
 
     func loadOlder() async {
@@ -98,10 +116,21 @@ final class CoreStore {
     }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
-    var environmentId: String? { state?.environmentId }
+    var environmentId: String? { state?.environmentId ?? coldLaunchSession?.environmentId }
 
     var orbitConnect: OrbitConnectState? {
-        switch state?.phase {
+        var phase = state?.phase
+        #if DEBUG && targetEnvironment(simulator)
+        switch ProcessInfo.processInfo.environment["CONN_TEST_LAUNCH_PHASE"] {
+        case "splash": return .connecting("")
+        case "checking": phase = .connecting(target: .primaryAgent)
+        case "setup": phase = .live(status: .connecting)
+        case "finalizing": phase = .live(status: .connected)
+        default: break
+        }
+        #endif
+        return switch phase {
+        case nil: .connecting("")
         case .connecting: .connecting("Checking connection")
         case .live(.connected): .connecting("Finalizing")
         case .live: .connecting("Downloading threads")
@@ -123,7 +152,8 @@ final class CoreStore {
             try? FileManager.default.removeItem(at: Self.cacheDirectory(scope))
         }
         var gatewayURL: String?
-        #if DEBUG
+        #if DEBUG && targetEnvironment(simulator)
+        gatewayURL = ProcessInfo.processInfo.environment["CONN_TEST_TASK_GATEWAY"]
         if arguments.contains("--test-unreachable-gateway") { gatewayURL = "https://127.0.0.1:1" }
         #endif
         do {
@@ -149,7 +179,20 @@ final class CoreStore {
             return
         }
         guard !arguments.contains("--manual-pairing") else { return }
+        coldLaunchSession = saved
         session?.launch(saved: saved)
+        if let saved, let session {
+            Task {
+                guard let reader = await session.savedOfflineReader(), let snapshot = await reader.savedShell(),
+                      coldLaunchSession != nil, !hasConnected, offlineReader == nil,
+                      let identity = saved.environmentId ?? saved.orbitServerId,
+                      state?.environmentId.map({ $0 == identity }) ?? true else { return }
+                offlineReader = reader
+                shell = snapshot
+                updateWorkspaceVisibility()
+                if let id = openThreadId { restoreThread(id) }
+            }
+        }
         for id in UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? [] {
             if KeychainStore.loadSession(scope: id) != nil { linked[id] = CoreStore(scope: id, deferOrbit: true) }
         }
@@ -200,7 +243,7 @@ final class CoreStore {
             }
             UserDefaults.standard.set(Array(Set(savedScopes).union(linked.keys)), forKey: "linkedSessions")
         } catch {
-            if !Task.isCancelled && environmentId == primary { discoveryError = error.localizedDescription }
+            if !Task.isCancelled && environmentId == primary { discoveryError = connectionMessage(error) }
         }
     }
 
@@ -534,6 +577,7 @@ final class CoreStore {
     }
 
     func disconnect() {
+        coldLaunchSession = nil
         if scope.isEmpty {
             clearLinkedSessions()
             Task { await PushRegistration.shared.unregister() }
@@ -596,7 +640,10 @@ final class CoreStore {
         if newState.connectionId != shellConnection {
             shell?.synchronized = false
         }
-        if newState.identityEpoch != state?.identityEpoch ?? 0 {
+        let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
+        let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
+        if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
+            coldLaunchSession = nil
             shell = nil
             offlineReader = nil
             discoveredPrimary = nil
@@ -605,6 +652,7 @@ final class CoreStore {
             openThreadId = nil
         }
         state = newState
+        if newState.hasConnected { coldLaunchSession = nil }
         switch newState.phase {
         case let .idle(message):
             if let message { lastError = message }
@@ -720,5 +768,15 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
 
     func onProvidersChanged() {
         Task { @MainActor [weak store] in store?.handleProvidersChanged() }
+    }
+}
+
+private func connectionMessage(_ error: Error) -> String {
+    guard let error = error as? FfiError else { return error.localizedDescription }
+    switch error {
+    case let .Connection(message), let .Auth(message), let .Rpc(message), let .Orbit(message, _),
+         let .InvalidUrl(message), let .InvalidInput(message), let .InvalidTheme(message):
+        return message
+    case .Closed: return "Connection closed."
     }
 }

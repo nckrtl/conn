@@ -404,7 +404,7 @@ struct ThreadView: View {
                             }
                         }
 
-                        if snapshot.working && store.status == .connected {
+                        if snapshot.working && store.status == .connected && pendingApprovals.isEmpty && pendingQuestion == nil {
                             HStack(spacing: Kit.Space.m) {
                                 // Mobile's `RunFoldWorking` is plain text, never a spinner.
                                 Text("Working…")
@@ -435,6 +435,7 @@ struct ThreadView: View {
                 .padding(.bottom, 12)
             }
             .background(theme.background.ignoresSafeArea())
+            .defaultScrollAnchor(.bottom, for: .alignment)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .coordinateSpace(name: "timeline-viewport")
             .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
@@ -487,7 +488,7 @@ struct ThreadView: View {
                     if readingWindow != nil {
                         Button("Back to latest") { latest() }
                     }
-                    if store.showsOffline {
+                    if store.showsOffline && !store.showsSavedConnectionAlert {
                         OfflinePill().frame(maxWidth: .infinity)
                     }
                     // Conn mobile pins the first pending approval above the composer.
@@ -637,27 +638,8 @@ struct ThreadView: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showsOutline = true
-                } label: {
-                    Image(systemName: "list.bullet")
-                }
-                .accessibilityLabel("Thread outline")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button {
-                    } label: {
-                        Label("Terminal", systemImage: "terminal")
-                    }
-                    Button {
-                    } label: {
-                        Label("Git controls", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
-                    }
-                    Button {
-                    } label: {
-                        Label("Open files", systemImage: "folder")
-                    }
+                    Button { showsOutline = true } label: { Label("Thread outline", systemImage: "list.bullet") }
                 } label: {
                     Image(systemName: "ellipsis")
                 }
@@ -774,8 +756,10 @@ struct ThreadView: View {
         let entriesById = Dictionary(uniqueKeysWithValues: snapshot.entries.map { ($0.entryId, $0) })
         var items: [RenderItem] = []
 
+        let waiting = Set(pendingApprovals.map(\.entryId))
         for entry in snapshot.entries {
             let id = entry.entryId
+            if waiting.contains(id) { continue }
             if let group = groupByFirstId[id] {
                 let groupedEntries = group.entryIds.compactMap { entriesById[$0] }
                 if !groupedEntries.isEmpty {

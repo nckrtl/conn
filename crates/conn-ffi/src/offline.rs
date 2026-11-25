@@ -34,7 +34,7 @@ pub struct OfflineReader {
     dir: PathBuf,
     expires: RwLock<HashMap<String, u64>>,
     fetch_slots: tokio::sync::Semaphore,
-    connection: Connection,
+    connection: Option<Connection>,
 }
 
 fn read_error(e: impl std::fmt::Display) -> FfiError {
@@ -101,7 +101,7 @@ impl OfflineReader {
     pub(crate) async fn open(
         dir: PathBuf,
         env: String,
-        connection: Connection,
+        connection: Option<Connection>,
     ) -> Result<Arc<Self>, FfiError> {
         std::fs::create_dir_all(&dir).map_err(read_error)?;
         let db = MessageCache::open(&dir.join("messages.sqlite3"))
@@ -120,6 +120,10 @@ impl OfflineReader {
             dir,
             connection,
         }))
+    }
+
+    fn online(&self) -> Result<&Connection, FfiError> {
+        self.connection.as_ref().ok_or(FfiError::Closed)
     }
 
     fn may_read(&self, thread: &str) -> bool {
@@ -228,7 +232,7 @@ impl OfflineReader {
                 "This prompt is outside the saved history. Reconnect to read it.",
             ));
         }
-        let page = self.connection.fetch_thread_window(&thread, &id).await?;
+        let page = self.online()?.fetch_thread_window(&thread, &id).await?;
         let mut state = ThreadState::new(thread);
         state.prepend_history_page(page);
         let mut snapshot = build_thread_snapshot(&state, None);
@@ -245,7 +249,7 @@ impl OfflineReader {
     ) -> Result<FfiThreadSnapshot, FfiError> {
         let mut state = ThreadState::new(&thread);
         let page = if let Some(cursor) = continuation {
-            self.connection
+            self.online()?
                 .fetch_thread_history_page(&thread, &cursor)
                 .await?
         } else {
@@ -264,7 +268,7 @@ impl OfflineReader {
             let Some(cursor) = cursor else {
                 return Ok(build_thread_snapshot(&state, None));
             };
-            self.connection
+            self.online()?
                 .fetch_history_before_message(&thread, &cursor, &anchor)
                 .await?
         };
@@ -289,7 +293,7 @@ impl OfflineReader {
                 .map_err(read_error)?
                 .outline
         } else if online {
-            self.connection.fetch_thread_outline(&thread).await?
+            self.online()?.fetch_thread_outline(&thread).await?
         } else {
             return Ok(Vec::new());
         };
@@ -383,14 +387,14 @@ impl OfflineReader {
             })
         {
             self.save_thread(thread, &update.messages).await?;
-            let outline = self.connection.fetch_thread_outline(thread).await?;
+            let outline = self.online()?.fetch_thread_outline(thread).await?;
             self.save_index(thread, outline, &key).await?;
             *previous = Some(key);
             return Ok(());
         }
         let prefix = if let Some(cursor) = &update.cursor {
             conn_cache::fetch_history_prefix(
-                &self.connection,
+                self.online()?,
                 thread,
                 cursor,
                 conn_cache::MESSAGE_CAP.saturating_sub(update.messages.len()),
@@ -399,7 +403,7 @@ impl OfflineReader {
         } else {
             Vec::new()
         };
-        let outline = self.connection.fetch_thread_outline(thread).await?;
+        let outline = self.online()?.fetch_thread_outline(thread).await?;
         replace_history(&self.db, &self.env, thread, &prefix, &update.messages).await?;
         self.save_index(thread, outline, &key).await?;
         *previous = Some(key);
@@ -549,8 +553,10 @@ impl SyncState {
             if desired.contains(id) {
                 return true;
             }
-            if !open.contains(id) {
-                self.reader.connection.unsubscribe_thread(id);
+            if !open.contains(id)
+                && let Some(connection) = &self.reader.connection
+            {
+                connection.unsubscribe_thread(id);
             }
             false
         });
@@ -559,8 +565,10 @@ impl SyncState {
             if self.subscribed(&thread) {
                 continue;
             }
-            if !open.contains(&thread) {
-                self.reader.connection.subscribe_thread(&thread);
+            if !open.contains(&thread)
+                && let Some(connection) = &self.reader.connection
+            {
+                connection.subscribe_thread(&thread);
             }
             let reader = self.reader.clone();
             let (updates, mut rx) = watch::channel(None::<Update>);
@@ -672,8 +680,13 @@ mod tests {
             credential: conn_client::Credential::Bearer("fixture".into()),
         };
         let (connection, _events) = Connection::start(config, &tokio::runtime::Handle::current());
-        let open =
-            || OfflineReader::open(dir.path().to_owned(), "env".to_owned(), connection.clone());
+        let open = || {
+            OfflineReader::open(
+                dir.path().to_owned(),
+                "env".to_owned(),
+                Some(connection.clone()),
+            )
+        };
         let reader = open().await?;
         reader.save_thread("child", &[message("old")]).await?;
         reader.db.save_outline("env", "child", "{}").await?;

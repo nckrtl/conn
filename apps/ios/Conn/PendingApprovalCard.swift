@@ -19,7 +19,9 @@ struct PendingApprovalCard: View {
             HStack(spacing: 8) {
                 Label("Approval needed", systemImage: "lock")
                 Spacer()
-                Text(approval.title)
+                if approval.title.caseInsensitiveCompare("Command") == .orderedSame {
+                    ConnIcon("terminal").accessibilityLabel(approval.title)
+                } else { Text(approval.title) }
                 if remaining > 1 { Text("\(remaining) pending") }
             }
             .font(.system(size: 13, weight: .medium)).foregroundStyle(theme.mutedForeground)
@@ -75,22 +77,29 @@ struct PendingApprovalCard: View {
             .background(theme.codeBackground, in: .rect(cornerRadius: 24))
 
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 7) { actions }.fixedSize(horizontal: true, vertical: false)
+                HStack(spacing: 8) { actions }
                 VStack(alignment: .trailing, spacing: 4) { actions }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.horizontal, 8).padding(.vertical, 7)
         }
         .padding(3)
-        .background(theme.card, in: .rect(cornerRadius: 28))
+        .background(theme.settingsGroup, in: .rect(cornerRadius: 28))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.approval.\(approval.requestId)")
     }
     private var actions: some View {
         ForEach(approval.options, id: \.decision) { option in
+            if option.decision == .cancel {
+                Button(option.label) { onRespond(.cancel) }.font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.mutedForeground).disabled(!approval.answerable || responding)
+                    .accessibilityIdentifier("approval.option." + option.label)
+                Spacer(minLength: 0)
+            } else {
             ConnButton(label: option.label, tone: option.tone, size: .compact, disabled: !approval.answerable || responding) {
                 onRespond(option.decision)
             }.accessibilityIdentifier("approval.option.\(option.label)")
+            }
         }
     }
 
@@ -125,8 +134,8 @@ struct ConnButton: View {
                 }
             }
             // `min-h-12 px-6` / compact `min-h-10 px-5`, at 3.5pt per unit.
-            .padding(.horizontal, size == .compact ? 17.5 : 21)
-            .frame(maxWidth: size == .compact ? nil : .infinity, minHeight: size == .compact ? 35 : 42)
+            .padding(.horizontal, size == .compact ? 12 : 21)
+            .frame(maxWidth: size == .compact ? nil : .infinity, minHeight: size == .compact ? 40 : 48)
             .background(Capsule().fill(fill))
             .contentShape(Capsule())
         }

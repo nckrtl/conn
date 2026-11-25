@@ -161,7 +161,7 @@ struct ComposerDeck: ViewModifier {
             .background {
                 ForEach((1..<(layers + 1)).reversed(), id: \.self) { depth in
                     RoundedRectangle(cornerRadius: 28)
-                        .fill(theme.card)
+                        .fill(theme.settingsGroup)
                         .overlay { RoundedRectangle(cornerRadius: 28).strokeBorder(theme.border.opacity(0.5)) }
                         .shadow(color: .black.opacity(appearance == .light ? 0.07 : 0.16), radius: 16, y: 1)
                         .padding(.horizontal, CGFloat(depth * 8))

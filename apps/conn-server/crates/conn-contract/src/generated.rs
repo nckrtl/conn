@@ -16366,6 +16366,10 @@ pub enum PullRequestCheckStatus {
 pub struct PullRequestCheck {
     pub name: String,
     pub status: PullRequestCheckStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
     pub description: Option<String>,
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

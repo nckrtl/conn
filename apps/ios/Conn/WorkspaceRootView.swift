@@ -35,7 +35,15 @@ struct WorkspaceRootView: View {
     @State private var searchQuery = ""
     @State private var selectedProjectFilter: String? = nil
     @State private var tasks = TasksModel()
-    @State private var windowWidth: CGFloat = 393
+    @FocusState private var searchFocused: Bool
+
+    private func footerAction(_ icon: String, label: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            connImage(icon).resizable().scaledToFit().frame(width: 20, height: 20)
+                .frame(width: 48, height: 48).contentShape(Circle())
+        }.buttonStyle(.plain).phoneFooterSurface(Circle())
+            .accessibilityLabel(label).accessibilityIdentifier(id)
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -70,44 +78,38 @@ struct WorkspaceRootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(theme.background.ignoresSafeArea())
 
-                if store.showsOffline {
+                if store.showsOffline && !store.showsSavedConnectionAlert {
                     OfflinePill()
                         .padding(.bottom, 12)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            // `WorkspacePhoneBar.tsx`: the navigation controller's bottom UIToolbar, not a tab bar.
-            .toolbar {
-                WorkspacePhoneBar(
-                    selectedTab: $selectedTab,
-                    isSearching: $isSearching,
-                    windowWidth: windowWidth,
-                    filterActive: selectedTab == .threads
-                        ? selectedProjectFilter != nil
-                        : (selectedTab == .tasks && tasks.lane != .inProgress),
-                    projects: store.shell?.projects ?? [],
-                    selectedProjectFilter: $selectedProjectFilter,
-                    taskLanes: selectedTab == .tasks
-                        ? tasks.view(query: isSearching ? searchQuery : "").lanes
-                        : [],
-                    onSelectTaskLane: { tasks.lane = $0 },
-                    onOpenSettings: { showingSettings = true },
-                    onNewChat: {
-                        navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
+            .toolbar(.hidden, for: .bottomBar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                HStack(spacing: 8) {
+                    if isSearching {
+                        HStack(spacing: 8) {
+                            ConnIcon("magnifyingglass").foregroundStyle(.secondary)
+                            TextField(selectedTab.searchPlaceholder, text: $searchQuery)
+                                .focused($searchFocused).submitLabel(.search)
+                        }.padding(.horizontal, 16).frame(height: 48).phoneFooterSurface(Capsule())
+                        footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
+                            isSearching = false
+                            searchQuery = ""
+                        }
+                    } else {
+                        footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
+                        Spacer(minLength: 0)
+                        WorkspacePhoneSwitcher(selectedTab: $selectedTab, onSearch: { isSearching = true })
+                            .phoneFooterSurface(Capsule())
+                        Spacer(minLength: 0)
+                        footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
+                            navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))
+                        }.disabled(store.showsOffline)
                     }
-                )
+                }.padding(.horizontal, 24).offset(y: 4)
             }
-            .toolbar(.visible, for: .bottomBar)
-            // The magnifier swaps the switcher for UIKit's integrated toolbar search field.
-            .searchable(
-                text: $searchQuery,
-                isPresented: $isSearching,
-                prompt: Text(selectedTab.searchPlaceholder)
-            )
-            .onChange(of: isSearching) { _, searching in
-                if !searching { searchQuery = "" }
-            }
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
+            .onChange(of: isSearching) { _, value in searchFocused = value }
             .navigationDestination(for: WorkspaceRoute.self) { route in
                 switch route {
                 case let .task(id):
@@ -214,73 +216,8 @@ struct WorkspaceRootView: View {
 
 // MARK: - WorkspacePhoneBar (1:1 port of WorkspacePhoneBar.tsx)
 
-/// Resting: `[ellipsis] ⟷ [switcher group] ⟷ [plus]`. Searching: `[ellipsis] [filter] [search
-/// field] 8 [plus]`. The items share the toolbar's glass (`sharesBackground: true`); none draws
-/// its own.
-private struct WorkspacePhoneBar: ToolbarContent {
-    @Binding var selectedTab: WorkspaceTab
-    @Binding var isSearching: Bool
-    let windowWidth: CGFloat
-    let filterActive: Bool
-    let projects: [FfiProject]
-    @Binding var selectedProjectFilter: String?
-    let taskLanes: [FfiPhoneTaskLane]
-    let onSelectTaskLane: (FfiTaskLane) -> Void
-    let onOpenSettings: () -> Void
-    let onNewChat: () -> Void
-
-    var body: some ToolbarContent {
-        ToolbarItem(placement: .bottomBar) {
-            Button(action: onOpenSettings) {
-                connImage("ellipsis")
-            }
-            .accessibilityLabel("Open settings")
-            .accessibilityIdentifier("workspace.settingsButton")
-        }
-        if isSearching {
-            // Mobile passes no filter menu on the PR tab (`PullRequestsScreen.tsx`).
-            if selectedTab != .pullRequests {
-                ToolbarItem(placement: .bottomBar) {
-                    WorkspaceFilterMenu(
-                        selectedTab: selectedTab,
-                        filterActive: filterActive,
-                        projects: projects,
-                        selectedProjectFilter: $selectedProjectFilter,
-                        taskLanes: taskLanes,
-                        onSelectTaskLane: onSelectTaskLane
-                    )
-                }
-            }
-            DefaultToolbarItem(kind: .search, placement: .bottomBar)
-            ToolbarSpacer(.fixed, placement: .bottomBar)
-        } else {
-            ToolbarSpacer(.flexible, placement: .bottomBar)
-            ToolbarItem(placement: .bottomBar) {
-                WorkspacePhoneSwitcher(
-                    selectedTab: $selectedTab,
-                    // Mobile's `min(64 × items, W − 160)` assumes UIKit's own item padding; a SwiftUI
-                    // item adds 8pt a side, which would push the group into the overflow menu.
-                    width: min(64 * 4, windowWidth - 176),
-                    onSearch: { isSearching = true }
-                )
-            }
-            ToolbarSpacer(.flexible, placement: .bottomBar)
-        }
-        ToolbarItem(placement: .bottomBar) {
-            Button(action: onNewChat) {
-                connImage("plus")
-            }
-            .accessibilityLabel("New chat")
-            .accessibilityIdentifier("inbox.newThreadButton")
-        }
-    }
-}
-
-/// `WorkspacePhoneSwitcher`: 48 tall with 4pt vertical padding; 22pt icons; the selected one sits
-/// on a 40-tall pill (radius 20, `bg-foreground/12`, `accent-foreground`), the rest are muted.
 private struct WorkspacePhoneSwitcher: View {
     @Binding var selectedTab: WorkspaceTab
-    let width: CGFloat
     let onSearch: () -> Void
     @Environment(\.connTheme) private var theme
 
@@ -292,16 +229,15 @@ private struct WorkspacePhoneSwitcher: View {
             Button(action: onSearch) {
                 toolbarIcon("magnifyingglass")
                     .foregroundStyle(theme.mutedForeground)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity).frame(height: 40)
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Search")
             .accessibilityIdentifier("workspace.searchButton")
         }
-        .padding(.vertical, 4)
-        .frame(width: width, height: 48)
-        .fixedSize()
+        .padding(4)
+        .frame(maxWidth: 238)
     }
 
     /// 22pt icons. A bar item lays out from UIImage sizes, so the asset is framed explicitly.
@@ -318,8 +254,8 @@ private struct WorkspacePhoneSwitcher: View {
             selectedTab = tab
         } label: {
             toolbarIcon(icon)
-                .foregroundStyle(selected ? theme.accentForeground : theme.mutedForeground)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .foregroundStyle(selected ? theme.foreground : theme.mutedForeground)
+                .frame(maxWidth: .infinity).frame(height: 40)
                 .background {
                     if selected {
                         Capsule().fill(theme.foreground.opacity(0.12))
@@ -333,54 +269,6 @@ private struct WorkspacePhoneSwitcher: View {
         .accessibilityIdentifier("workspace.tab.\(tab.rawValue)")
     }
 }
-
-/// The filter beside the search field: projects on Threads, lanes on Tasks.
-private struct WorkspaceFilterMenu: View {
-    let selectedTab: WorkspaceTab
-    let filterActive: Bool
-    let projects: [FfiProject]
-    @Binding var selectedProjectFilter: String?
-    let taskLanes: [FfiPhoneTaskLane]
-    let onSelectTaskLane: (FfiTaskLane) -> Void
-    @Environment(\.connTheme) private var theme
-
-    var body: some View {
-        Menu {
-            if selectedTab == .threads {
-                Button {
-                    selectedProjectFilter = nil
-                } label: {
-                    if selectedProjectFilter == nil {
-                        Label("All projects", systemImage: "checkmark")
-                    } else {
-                        Text("All projects")
-                    }
-                }
-                ForEach(projects, id: \.id) { project in
-                    Button {
-                        selectedProjectFilter = project.id
-                    } label: {
-                        if selectedProjectFilter == project.id {
-                            Label(project.title, systemImage: "checkmark")
-                        } else {
-                            Text(project.title)
-                        }
-                    }
-                }
-            } else {
-                Section("Lanes") {
-                    TaskLaneMenuItems(lanes: taskLanes, onSelect: onSelectTaskLane)
-                }
-            }
-        } label: {
-            connImage(filterActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
-                .foregroundStyle(filterActive ? theme.primary : theme.foreground)
-        }
-        .accessibilityLabel("Filter")
-    }
-}
-
-// MARK: - HomeConnectionStatusOverlay
 
 struct OfflinePill: View {
     var body: some View {

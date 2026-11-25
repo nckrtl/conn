@@ -750,7 +750,7 @@ enum Recover {
 // The runner: ConnSession
 // ---------------------------------------------------------------------------
 
-#[derive(uniffi::Record)]
+#[derive(Debug, uniffi::Record)]
 pub struct FfiLinkedDiscovery {
     pub targets: Vec<crate::orbit::FfiOrbitEnvironment>,
     pub unresolved_endpoints: Vec<String>,
@@ -1089,6 +1089,29 @@ impl ConnSession {
     /// A linked environment's session at launch: its saved Orbit environment or manual server.
     pub fn restore(&self, saved: Option<FfiSavedSession>) {
         self.step(|m| m.restore(saved));
+    }
+
+    /// Opens existing history for the primary saved identity while gateway discovery is pending.
+    pub async fn saved_offline_reader(&self) -> Option<Arc<OfflineReader>> {
+        let dir = self.cache_dir.clone()?;
+        let saved = self.machine.lock().ok()?.saved.clone()?;
+        let identity = saved.environment_id.or(saved.orbit_server_id)?;
+        self.orbit
+            .handle()
+            .spawn(async move {
+                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
+                    .await
+                    .ok()?
+                    != identity
+                    || !dir.join("messages.sqlite3").is_file()
+                {
+                    return None;
+                }
+                OfflineReader::open(dir, identity, None).await.ok()
+            })
+            .await
+            .ok()
+            .flatten()
     }
 
     /// The current connection's offline thread cache, once open.
@@ -2016,8 +2039,7 @@ mod tests {
         restored.launch(Some(credential.clone()));
         read(&events);
         let targets =
-            futures::executor::block_on(restored.linked_nodes(primary_id.clone(), vec![], vec![]))
-                .unwrap();
+            futures::executor::block_on(restored.linked_nodes(primary_id, vec![], vec![])).unwrap();
         assert!(targets.targets.iter().any(|t| t.server_id == desktop_id));
         assert!(targets.unresolved_endpoints.is_empty());
         eprintln!(
@@ -2248,10 +2270,22 @@ mod tests {
             "node-new",
             "the cache now belongs to the new Node"
         );
-        assert!(
-            !dir.join("shell.json").exists(),
-            "nothing of the old Node's cache carries over"
-        );
+        match std::fs::read(dir.join("shell.json")) {
+            Ok(bytes) => {
+                let shell = conn_state::environments::LinkedShellSnapshot::from_json(&bytes)
+                    .expect("any shell already written must be a valid replacement snapshot");
+                assert_eq!(shell.environment_id, "node-new");
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("cannot inspect the new Node's shell: {err}"),
+        }
+        let cold = ConnSession::with_orbit(session.orbit.clone(), Some(dir), recorder);
+        let url = session.state().server_url.expect("connected server URL");
+        for (identity, allowed) in [("node-old", false), ("node-new", true)] {
+            cold.machine.lock().expect("machine").saved =
+                Some(saved(&url, Some(identity), Some(identity)));
+            assert_eq!(rt.block_on(cold.saved_offline_reader()).is_some(), allowed);
+        }
         if let Some(core) = session.core() {
             core.disconnect();
         }

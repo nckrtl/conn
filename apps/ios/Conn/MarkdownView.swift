@@ -6,10 +6,11 @@ struct MarkdownView: View {
     /// An agent's earlier text beside a question: a size smaller, in the muted colour.
     var fillsWidth = true
     var muted = false
+    var recordStyle = false
     var onTemplate: ((String) -> Void)? = nil
     @Environment(\.connTheme) private var theme
 
-    private var bodyFont: Font { muted ? .system(size: 15) : .kitBody }
+    private var bodyFont: Font { muted || recordStyle ? .system(size: 15) : .kitBody }
     private var textColor: Color { muted ? theme.mutedForeground : theme.foreground }
 
     var body: some View {
@@ -18,6 +19,7 @@ struct MarkdownView: View {
                 blockView(block)
             }
         }
+        .lineSpacing(recordStyle ? 4 : 0)
         .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
     }
 
@@ -29,7 +31,7 @@ struct MarkdownView: View {
                 .font(headingFont(for: level))
                 .foregroundStyle(textColor)
                 .textSelection(.enabled)
-                .padding(.top, level <= 2 ? Kit.Space.xs : 0)
+                .padding(.top, recordStyle ? 15 : level <= 2 ? Kit.Space.xs : 0)
 
         case let .paragraph(text):
             inlineMarkdownText(text)
@@ -96,7 +98,8 @@ struct MarkdownView: View {
     }
 
     private func headingFont(for level: Int) -> Font {
-        switch level {
+        if recordStyle { return .system(size: 16, weight: .medium) }
+        return switch level {
         case 1: .title2.weight(.semibold)
         case 2: .title3.weight(.semibold)
         case 3: .headline

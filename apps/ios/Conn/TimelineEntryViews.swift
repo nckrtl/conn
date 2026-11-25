@@ -61,7 +61,9 @@ struct WorkGroupCard: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.bottom, FoldRow.leading(size))
+                // Collapsed, the label stands in for a paragraph above its message. Expanded, the
+                // log's rule follows at the plain gap, the same gap as under the closing rule.
+                .padding(.bottom, expanded ? 0 : FoldRow.leading(size))
             }
 
             if expanded && !group.hasActive {
@@ -73,7 +75,7 @@ struct WorkGroupCard: View {
                 }
                 VStack(alignment: .leading, spacing: 0) {
                     // Rules open and close the expanded log, and split its rows.
-                    Rectangle().fill(threadDividerColor(theme, appearance)).frame(height: 1)
+                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                     ForEach(Array(steps.enumerated()), id: \.element.entryId) { index, entry in
                         if index > 0 {
                             Rectangle()
@@ -101,7 +103,7 @@ struct WorkGroupCard: View {
                             EmptyView()
                         }
                     }
-                    Rectangle().fill(threadDividerColor(theme, appearance)).frame(height: 1)
+                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                 }
             }
         }

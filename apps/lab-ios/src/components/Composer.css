@@ -15,12 +15,48 @@
 .m-composer-plus {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--color-foreground);
+}
+.m-composer-plus + .m-composer-input {
+  padding-inline-start: 0;
+}
+.m-draft-files {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin: 0 0 6px;
+  padding: 0 4px;
+  list-style: none;
+}
+.m-draft-files li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  flex: 0 0 auto;
+  padding-inline-start: 10px;
+  border-radius: 12px;
+  background: var(--color-composer-surface);
+  font-size: 13px;
+}
+.m-draft-files li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m-draft-files button {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  border: 0;
+  color: inherit;
 }
 .m-composer-input {
   flex: 1;

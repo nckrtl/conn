@@ -6,7 +6,7 @@ import { ThreadFeedEntries } from "../components/ThreadFeedEntries";
 import { FileChangeStats, type FileReviewSelection } from "../components/FileChangesCard";
 import { GlassButton, GlassHeader } from "../components/GlassHeader";
 import { QuestionPanel } from "../components/QuestionPanel";
-import { QUESTION_SCENARIOS, type LabThread } from "../data/fixtures";
+import { QUESTION_SCENARIOS, type LabAttachment, type LabThread } from "../data/fixtures";
 import { contextMarkdown, useQuestionFlow } from "./useQuestionFlow";
 import "./ThreadScreen.css";
 
@@ -59,7 +59,7 @@ export function ThreadScreen({
   approvalExample?: ApprovalExample | undefined;
   onOpenTask: (id: number) => void;
   onBack: () => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: readonly LabAttachment[]) => void;
   finishQuestion: (answer?: string) => void;
   onModel: () => void;
   model: string;
@@ -82,15 +82,15 @@ export function ThreadScreen({
       .join("\n");
     finishQuestion(answer);
   }
-  function send() {
+  function send(attachments: readonly LabAttachment[]) {
     if (questionOpen) {
       if (flow.canSubmit) submitAnswers();
       else if (flow.draft.custom.trim() && flow.step < flow.list.length - 1)
         flow.goTo(flow.step + 1);
       return;
     }
-    if (draft.trim()) {
-      onSend(draft.trim());
+    if (draft.trim() || attachments.length) {
+      onSend(draft.trim(), attachments);
       setDraft("");
     }
   }
@@ -148,6 +148,7 @@ export function ThreadScreen({
             model={model}
             provider={provider}
             onSend={send}
+            allowsAttachments={!questionOpen}
             canSend={questionOpen && flow.canSubmit}
             placeholder={questionOpen ? "Type your own answer…" : "Ask anything"}
           />

@@ -55,20 +55,21 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.metaSize
+    // The time at the thread text size, like "Worked for" (15 pt on Polar).
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {
-            // Under an agent message the icon's left edge is the text's: the 14 pt glyph sits 5 pt
+            // Under an agent message the icon's left edge is the text's: the 16 pt glyph sits 4 pt
             // inside its 24 pt tap target.
-            if !trailingCopy { copyButton.padding(.leading, -5) }
+            if !trailingCopy { copyButton.padding(.leading, -4) }
             if let date = threadDate(timestamp) { Text(date, style: .time).lineHeight(.exact(points: size * 16 / 13)) }
             if trailingCopy { copyButton }
         }.font(.system(size: size)).foregroundStyle(theme.mutedForeground)
     }
 
     @ViewBuilder private var copyButton: some View {
-        if !text.isEmpty { CopyTextButton(label: "Copy message", text: text, message: true) }
+        if !text.isEmpty { CopyTextButton(label: "Copy message", text: text, message: true, glyphSize: 16) }
     }
 }
 
@@ -145,10 +146,10 @@ struct ThreadMessage: View {
                 .background(theme.messageSurface, in: UnevenRoundedRectangle(
                     topLeadingRadius: 20, bottomLeadingRadius: 20, bottomTrailingRadius: 10, topTrailingRadius: 20,
                     style: .continuous))
-                // The copy glyph's right edge sits on the bubble's right edge (its 24 pt target pads 5).
+                // The copy glyph's right edge sits on the bubble's right edge (its 24 pt target pads 4).
                 MessageFooter(text: text, timestamp: date, trailingCopy: true)
                     .padding(.leading, 4)
-                    .padding(.trailing, -5)
+                    .padding(.trailing, -4)
             }
             .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
             .frame(maxWidth: .infinity, alignment: .trailing)

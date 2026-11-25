@@ -75,6 +75,8 @@ struct CopyTextButton: View {
     let label: String
     let text: String
     var message = false
+    /// 14 on cards; 16 under messages, the size of the work-log icons.
+    var glyphSize: CGFloat = 14
     @State private var copied = false
     @Environment(\.connTheme) private var theme
 
@@ -85,9 +87,9 @@ struct CopyTextButton: View {
         } label: {
             Group {
                 if copied && !message {
-                    ThreadGlyph(name: "check", size: 14).foregroundStyle(theme.success)
+                    ThreadGlyph(name: "check", size: glyphSize).foregroundStyle(theme.success)
                 } else {
-                    ThreadGlyph(name: copied ? "check" : "copy", size: 14)
+                    ThreadGlyph(name: copied ? "check" : "copy", size: glyphSize)
                 }
             }
             .frame(width: 24, height: 24)

@@ -832,6 +832,7 @@ impl Provider for AntigravityProvider {
                 .await?;
             let now = SystemEnv.now();
             let (initialize, _) = session.handshake().await;
+            session.bind_thread(input.thread_id.as_str()).await;
             let row = json!({
                 "id": input.provider_session_id.as_str(),
                 "driver": ANTIGRAVITY.driver,

@@ -72,6 +72,7 @@ pub(crate) struct Run {
     pub events: Vec<Value>,
     pub script: Arc<Mutex<Script>>,
     pub errors: Vec<String>,
+    pub snapshots: Vec<conn_provider::ThreadSnapshot>,
 }
 
 /// T3's `release_replay_gate` after `finish_held_run`: a gate opens once its run ended.
@@ -208,12 +209,14 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
         }
     });
     let mut errors = Vec::new();
+    let mut snapshots = Vec::new();
     let session = match AcpSession::open(config, spawner, Box::new(FixedEnv::default()), tx).await {
         Ok((session, _)) => session,
         Err(error) => {
             errors.push(format!("open: {error}"));
             return Run {
                 events: Vec::new(),
+                snapshots,
                 script,
                 errors,
             };
@@ -242,6 +245,23 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
                     .await;
                 if let Err(e) = result {
                     errors.push(format!("ensureThread: {e}"));
+                }
+            }
+            "readThreadSnapshot" => {
+                if let Some(supported) = input["expectedCapability"].as_bool() {
+                    let caps = session.negotiated_capabilities(json!({})).await;
+                    assert_eq!(caps["threads"]["canReadThreadSnapshot"], supported);
+                    assert_eq!(
+                        caps["checkpointing"]["providerCanReadConversationSnapshot"],
+                        supported
+                    );
+                }
+                match session
+                    .read_thread_snapshot(from_json(input["providerThread"].clone()).unwrap())
+                    .await
+                {
+                    Ok(snapshot) => snapshots.push(snapshot),
+                    Err(error) => errors.push(format!("readThreadSnapshot: {error}")),
                 }
             }
             "resumeThread" => {
@@ -466,6 +486,7 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
     }
     Run {
         events,
+        snapshots,
         script,
         errors,
     }
@@ -810,6 +831,14 @@ fn antigravity_turn_with_thinking_level() -> Value {
         let selection = json!({"instanceId": "antigravity", "model": "gemini-3.8-flash"});
         call["input"]["modelSelection"] = selection;
         if method == "startTurn" {
+            // The call template is Grok's. Its saved thread must identify the
+            // Antigravity conversation established by this recording's session/new.
+            let thread = &mut call["input"]["providerThread"];
+            thread["driver"] = json!("antigravity");
+            thread["providerInstanceId"] = json!("antigravity");
+            thread["nativeThreadRef"]["driver"] = json!("antigravity");
+            thread["nativeThreadRef"]["nativeId"] = json!(session);
+
             call["input"]["modelSelection"]["options"] =
                 json!([{"id": "thought_level", "value": "high"}]);
         }
@@ -1146,10 +1175,11 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
         let text = "adjust course\n\n[Attached file \"reports.zip\" is saved at: /test-attachments/archive.zip]";
         calls.insert(pos + 1, steer);
         if !is_grok {
-            calls.insert(
-                pos + 2,
-                json!({"method":"advanceTime","input":{"seconds":2}}),
-            );
+            let mut second = calls[pos + 1].clone();
+            second["input"]["message"]["messageId"] = json!("second");
+            second["input"]["message"]["text"] = json!("one more");
+            second["input"]["message"]["attachments"] = json!([]);
+            calls.insert(pos + 2, second);
         }
         let script = fixture["transcripts"][0].as_array_mut().unwrap();
         let init = script
@@ -1185,9 +1215,13 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
         script.splice(prompt+1..prompt+1,[json!({"type":"expect_outbound","frame":{"kind":"request","method":method,"params":params}}),
             json!({"type":"emit_inbound","frame":{"kind":"response","method":method,"result":result}})]);
         if !is_grok {
-            script.splice(prompt+3..prompt+3,[
-                json!({"type":"emit_inbound","frame":{"kind":"response","method":method,"error":{"code":-32603,"message":"Agent is already processing a request."}}}),
-                wire_request(method,params.clone())
+            // A's user echo admits B before A has finished. A delayed refusal for A
+            // cannot settle the turn after B's own correlated response.
+            script.splice(prompt + 3..prompt + 3, [
+                json!({"type":"emit_inbound","frame":{"kind":"notification","method":"session/update",
+                    "params":{"sessionId":session,"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":text}}}}}),
+                wire_request(method, json!({"sessionId":session,"prompt":[{"type":"text","text":"one more"}]})),
+                wire_result(method, json!({"stopReason":"refusal"})),
             ]);
         }
         let flavor = if is_grok {
@@ -1211,6 +1245,101 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
             .collect();
         assert_eq!(terminals.len(), 1);
         assert_eq!(terminals[0]["status"], "completed");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn antigravity_declines_busy_steers_in_order_and_stops_the_original_prompt() {
+    for stop in [true, false] {
+        let mut fixture = antigravity_turn_with_thinking_level();
+        let mut calls = fixture["calls"].as_array().unwrap().clone();
+        let start = calls.last().unwrap().clone();
+        for (message_id, text) in [("a", "first steer"), ("b", "second steer")] {
+            let mut steer = start.clone();
+            steer["method"] = json!("steerTurn");
+            steer["input"]["message"]["messageId"] = json!(message_id);
+            steer["input"]["message"]["text"] = json!(text);
+            calls.push(steer);
+        }
+        let script = fixture["transcripts"][0].as_array_mut().unwrap();
+        let init = script
+            .iter_mut()
+            .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+            .unwrap();
+        init["frame"]["result"]["agentInfo"]["version"] = json!("1.5.11");
+        let prompt = script
+            .iter()
+            .position(|r| r["frame"]["method"] == "session/prompt")
+            .unwrap();
+        let session = script
+            .iter()
+            .find(|r| r["frame"]["kind"] == "response" && r["frame"]["method"] == "session/new")
+            .unwrap()["frame"]["result"]["sessionId"]
+            .clone();
+        let close = script.split_off(script.len() - 2);
+        script.truncate(prompt + 1);
+        script.push(wire_request(
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":"first steer"}]}),
+        ));
+        // For Stop, the original native request remains outstanding after A is rejected.
+        // For failure, its earlier refusal must be retained until the outcome of A is known.
+        if !stop {
+            script.push(wire_result(
+                "session/prompt",
+                json!({"stopReason":"refusal"}),
+            ));
+        }
+        script.push(json!({"type":"emit_inbound","frame":{"kind":"response","method":"session/prompt",
+            "pendingRequestIndex":usize::from(stop),"error":{"code":-32603,"message":"Agent is already processing a request."}}}));
+        if stop {
+            let turn = crate::testing::turn_input(&start["input"]);
+            let native = format!(
+                "{}:turn:{}",
+                session.as_str().unwrap(),
+                turn.provider_turn_ordinal
+            );
+            let id = conn_provider_support::ids::provider_turn_id(
+                "antigravity",
+                &format!("provider-instance:antigravity:{native}"),
+            );
+            calls.push(json!({"method":"interruptTurn","input":{"providerThread":start["input"]["providerThread"],"providerTurnId":id}}));
+            script.push(json!({"type":"expect_outbound","frame":{"kind":"notification","method":"session/cancel","params":{"sessionId":session}}}));
+            script.push(wire_result(
+                "session/prompt",
+                json!({"stopReason":"cancelled"}),
+            ));
+        }
+        script.extend(close);
+        fixture["calls"] = Value::Array(calls);
+        let run = replay(&crate::antigravity::ANTIGRAVITY, &fixture).await;
+        assert_eq!(run.errors.len(), 2, "{:?}", run.errors);
+        assert!(
+            run.errors[0].contains("already processing"),
+            "{:?}",
+            run.errors
+        );
+        assert!(run.errors[1].starts_with("steerTurn:"), "{:?}", run.errors);
+        let script = crate::lock(&run.script);
+        assert!(script.complete(), "{:?}", script.failure);
+        assert_eq!(
+            script
+                .written
+                .iter()
+                .filter(|r| r["method"] == "session/prompt")
+                .count(),
+            2
+        );
+        let terminals: Vec<_> = run
+            .events
+            .iter()
+            .filter(|e| e["type"] == "turn.terminal")
+            .collect();
+        assert_eq!(terminals.len(), 1, "{terminals:?}");
+        assert_eq!(
+            terminals[0]["status"],
+            if stop { "interrupted" } else { "failed" }
+        );
     }
 }
 
@@ -1363,6 +1492,257 @@ async fn antigravity_watchdog_retires_an_unresponsive_live_prompt() {
             .unwrap()
             .contains("15 minutes")
     );
+}
+
+fn snapshot_update(session: &str, update: Value) -> Value {
+    json!({"type":"emit_inbound","frame":{"kind":"notification","method":"session/update","params":{
+        "sessionId":session,"_meta":{"isReplay":true},"update":update
+    }}})
+}
+
+#[tokio::test]
+async fn grok_snapshot_loads_only_its_native_transcript_and_caches_stable_ids() {
+    let mut fixture = read_golden("grok", "simple");
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    let mut thread =
+        calls.iter().find(|c| c["method"] == "startTurn").unwrap()["input"]["providerThread"]
+            .clone();
+    let native = "saved-snapshot";
+    thread["nativeThreadRef"]["nativeId"] = json!(native);
+    thread["appThreadId"] = Value::Null; // older strong refs fall back to the opened application thread
+    calls.retain(|c| c["method"] == "openSession" || c["method"] == "ensureThread");
+    let app_thread = calls[1]["input"]["threadId"].clone();
+    let read = json!({"method":"readThreadSnapshot","input":{"providerThread":thread}});
+    calls.extend([read.clone(), read]);
+    let entries = fixture["transcripts"][0].as_array_mut().unwrap();
+    let init = entries
+        .iter_mut()
+        .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+        .unwrap();
+    init["frame"]["result"]["agentCapabilities"]["loadSession"] = json!(true);
+    let prompt = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt")
+        .unwrap();
+    entries.truncate(prompt);
+    entries.extend([
+        wire_request("session/load",json!("<any>")),
+        snapshot_update(native,json!({"sessionUpdate":"user_message_chunk","messageId":"u","content":{"type":"text","text":"hello"}})),
+        snapshot_update(native,json!({"sessionUpdate":"user_message_chunk","messageId":"u","content":{"type":"text","text":" there"}})),
+        snapshot_update("foreign",json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"another session"}})),
+        snapshot_update(native,json!({"sessionUpdate":"agent_thought_chunk","messageId":"r","content":{"type":"text","text":"working"}})),
+        snapshot_update(native,json!({"sessionUpdate":"agent_message_chunk","messageId":"a","content":{"type":"text","text":"partial"}})),
+        snapshot_update(native,json!({"sessionUpdate":"agent_message","messageId":"a","content":[{"type":"text","text":"final answer"}]})),
+        snapshot_update(native,json!({"sessionUpdate":"tool_call","toolCallId":"tool","title":"open"})),
+        snapshot_update(native,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"anonymous"}})),
+        snapshot_update(native,json!({"sessionUpdate":"plan","entries":[]})),
+        snapshot_update(native,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"next"}})),
+        wire_result("session/load",json!({"sessionId":native})),
+        wire_request("session/close",json!({"sessionId":native})),
+        wire_result("session/close",json!({})),
+        json!({"type":"runtime_exit","status":"success"}),
+    ]);
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    let script = crate::lock(&run.script);
+    assert!(script.complete(), "{:?}", script.failure);
+    let loads: Vec<_> = script
+        .written
+        .iter()
+        .filter(|r| r["method"] == "session/load")
+        .collect();
+    assert_eq!(loads.len(), 1);
+    assert_eq!(loads[0]["params"]["sessionId"], native);
+    assert_eq!(run.snapshots.len(), 2);
+    for snapshot in &run.snapshots {
+        let texts: Vec<_> = snapshot.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "hello there",
+                "working",
+                "final answer",
+                "anonymous",
+                "next"
+            ]
+        );
+        let roles: Vec<_> = snapshot
+            .messages
+            .iter()
+            .map(|m| conn_contract::to_json(m)["role"].clone())
+            .collect();
+        assert_eq!(
+            roles,
+            json!(["user", "assistant", "assistant", "assistant", "assistant"])
+                .as_array()
+                .unwrap()
+                .as_slice()
+        );
+        assert_eq!(
+            snapshot.reasoning_message_ids,
+            [snapshot.messages[1].id.to_string()]
+        );
+        let id = conn_provider_support::ids::message_from_item(
+            "grok",
+            "provider-instance:grok:saved-snapshot:history:thought:message:r",
+        );
+        assert_eq!(snapshot.reasoning_message_ids, [id]);
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .all(|m| m.thread_id == app_thread.as_str().unwrap() && !m.streaming)
+        );
+        assert_eq!(
+            conn_contract::to_json(&snapshot.provider_thread)["status"],
+            "idle"
+        );
+        assert!(snapshot.provider_turns.is_empty() && snapshot.runtime_requests.is_empty());
+    }
+    assert_eq!(
+        conn_contract::to_json(&run.snapshots[0].messages),
+        conn_contract::to_json(&run.snapshots[1].messages)
+    );
+    assert!(
+        !run.events
+            .iter()
+            .any(|event| event["type"] == "message.updated")
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_after_a_foreign_snapshot_reactivates_its_own_native_conversation() {
+    let mut fixture = read_golden("grok", "simple");
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    let start = calls
+        .iter()
+        .position(|c| c["method"] == "startTurn")
+        .unwrap();
+    let mut thread = calls[start]["input"]["providerThread"].clone();
+    let original = thread["nativeThreadRef"]["nativeId"].clone();
+    thread["nativeThreadRef"]["nativeId"] = json!("saved");
+    calls.insert(
+        start,
+        json!({"method":"readThreadSnapshot","input":{"providerThread":thread}}),
+    );
+    let entries = fixture["transcripts"][0].as_array_mut().unwrap();
+    let init = entries
+        .iter_mut()
+        .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+        .unwrap();
+    init["frame"]["result"]["agentCapabilities"]["loadSession"] = json!(true);
+    let prompt = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt")
+        .unwrap();
+    entries.splice(
+        prompt..prompt,
+        [
+            wire_request("session/load", json!("<any>")),
+            wire_result("session/load", json!({"sessionId":"saved"})),
+            wire_request("session/load", json!("<any>")),
+            wire_result("session/load", json!({"sessionId":original})),
+        ],
+    );
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    let script = crate::lock(&run.script);
+    assert!(script.complete(), "{:?}", script.failure);
+    let route: Vec<_> = script
+        .written
+        .iter()
+        .filter(|r| r["method"] == "session/load" || r["method"] == "session/prompt")
+        .map(|r| r["params"]["sessionId"].clone())
+        .collect();
+    assert_eq!(route, vec![json!("saved"), original.clone(), original]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_needs_the_end_of_replay_before_it_can_return_rows() {
+    let mut fixture = read_golden("grok", "simple");
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    let mut thread =
+        calls.iter().find(|c| c["method"] == "startTurn").unwrap()["input"]["providerThread"]
+            .clone();
+    thread["nativeThreadRef"]["nativeId"] = json!("unconfirmed");
+    calls.retain(|c| c["method"] == "openSession" || c["method"] == "ensureThread");
+    calls.push(json!({"method":"readThreadSnapshot","input":{"providerThread":thread}}));
+    let entries = fixture["transcripts"][0].as_array_mut().unwrap();
+    let init = entries
+        .iter_mut()
+        .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+        .unwrap();
+    init["frame"]["result"]["agentCapabilities"]["loadSession"] = json!(true);
+    let prompt = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt")
+        .unwrap();
+    let close = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/close")
+        .unwrap();
+    entries.splice(prompt..close, [
+        wire_request("session/load",json!("<any>")),
+        snapshot_update("unconfirmed",json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"only the first row"}})),
+    ]);
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.snapshots.is_empty());
+    assert_eq!(run.errors.len(), 1);
+    assert!(run.errors[0].contains("timed out"), "{:?}", run.errors);
+    let script = crate::lock(&run.script);
+    assert!(script.complete(), "{:?}", script.failure);
+}
+
+#[tokio::test]
+async fn grok_snapshots_keep_live_app_ids_and_respect_missing_load_capability() {
+    for supported in [true, false] {
+        let mut fixture = read_golden("grok", "simple");
+        let calls = fixture["calls"].as_array_mut().unwrap();
+        let input = calls.iter().find(|c| c["method"] == "startTurn").unwrap()["input"].clone();
+        calls.push(json!({"method":"readThreadSnapshot","input":{"providerThread":input["providerThread"],"expectedCapability":supported}}));
+        let init = fixture["transcripts"][0]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+            .unwrap();
+        init["frame"]["result"]["agentCapabilities"]["loadSession"] = json!(supported);
+        let run = replay(&crate::flavor::GROK, &fixture).await;
+        let script = crate::lock(&run.script);
+        assert!(script.complete(), "{:?}", script.failure);
+        assert!(!script.written.iter().any(|r| r["method"] == "session/load"));
+        if supported {
+            assert!(run.errors.is_empty(), "{:?}", run.errors);
+            let snapshot = &run.snapshots[0];
+            let live: Vec<_> = run
+                .events
+                .iter()
+                .filter(|e| e["type"] == "message.updated" && e["message"]["streaming"] == false)
+                .collect();
+            assert!(!live.is_empty());
+            assert_eq!(
+                snapshot.messages[0].id,
+                input["message"]["messageId"].as_str().unwrap()
+            );
+            for event in live {
+                assert!(
+                    snapshot
+                        .messages
+                        .iter()
+                        .any(|m| m.id == event["message"]["id"].as_str().unwrap()
+                            && m.text == event["message"]["text"])
+                );
+            }
+        } else {
+            assert!(run.snapshots.is_empty());
+            assert_eq!(run.errors.len(), 1);
+            assert!(
+                run.errors[0].contains("read_thread_snapshot"),
+                "{:?}",
+                run.errors
+            );
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

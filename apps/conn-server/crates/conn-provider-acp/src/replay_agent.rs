@@ -219,8 +219,12 @@ fn inbound(
             Some("response") => {
                 let id = pending_client_requests
                     .get_mut(method)
-                    .and_then(VecDeque::pop_front)
-                    .ok_or_else(|| format!("no pending client request for {method}"))?;
+                    .and_then(|requests| {
+                        // Overlapping session/prompt requests may reply out of order.
+                        let index = frame["pendingRequestIndex"].as_u64().unwrap_or(0) as usize;
+                        requests.remove(index)
+                    })
+                    .ok_or_else(|| format!("no matching pending client request for {method}"))?;
                 message.insert("id".into(), id);
                 if let Some(result) = frame.get("result") {
                     message.insert("result".into(), result.clone());

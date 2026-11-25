@@ -81,6 +81,12 @@ write is built from `ordered::J`, which keeps T3's key order.
   the runtime notes until a prompt carrying them succeeds; Grok's `_meta.promptId` and
   `requestId` `t3-xai-prompt-N`. A prompt settles on its reply or Grok's `prompt_complete` /
   `turn_completed`, whichever comes first, in order with the updates before it.
+- **Native transcript reads** use the peer's negotiated `session/load` capability.
+  The active transcript retains application message IDs. Loading a saved conversation
+  collects its replayed messages and reasoning IDs before the load reply. Other sessions'
+  updates are excluded. An active session keeps at most 8 MiB or 16,384 transcript
+  messages in its idle cache. Larger transcripts load on demand and are released
+  after the read.
 - **Stop (Grok):** the turn ends as interrupted, then SIGTERM to the process group, SIGKILL
   after 1 s; the next turn starts a new agent and loads the session (`session/load`).
 - **Close:** `session/close` when the agent offers it, then SIGKILL to the process group at

@@ -2959,6 +2959,7 @@ impl Session for ClaudeSession {
                     .map_err(|e| failed_err("rollback_thread", e.to_string()))?,
                 provider_turns: Vec::new(),
                 messages: Vec::new(),
+                reasoning_message_ids: Vec::new(),
                 runtime_requests: Vec::new(),
             })
         })

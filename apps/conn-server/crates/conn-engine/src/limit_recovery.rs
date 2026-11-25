@@ -53,6 +53,22 @@ pub(crate) fn command(row: &Value, now: i64, auto: bool, snooze: bool) -> Option
     Some(message)
 }
 
+/// A provider may publish the reset time after its failed turn, when Stop has no active
+/// turn to interrupt and no reset time to disarm. Its committed receipt still owns the decision.
+pub(crate) fn stopped_after_start(
+    tx: &crate::store::Tx<'_>,
+    thread: &str,
+    run: &str,
+) -> crate::store::StoreResult<bool> {
+    tx.sql().query_row(
+        "SELECT EXISTS(SELECT 1 FROM receipts WHERE owner_kind='thread' AND owner_id=?1 AND error IS NULL
+           AND command_type IN ('thread.stop', 'thread.settle', 'thread.auto-settle')
+           AND sequence >= (SELECT COALESCE(a.first_seq,r.first_seq) FROM entities r LEFT JOIN entities a
+              ON a.thread_id=r.thread_id AND a.kind='attempts' AND a.id=json_extract(r.body,'$.activeAttemptId')
+              WHERE r.thread_id=?1 AND r.kind='runs' AND r.id=?2))",
+        rusqlite::params![thread,run], |row|row.get(0)).map_err(|e|e.to_string())
+}
+
 /// Record an explicit Stop or settlement even if the sweep has not armed this failure yet.
 pub(crate) fn disarmed(
     tx: &crate::store::Tx<'_>,

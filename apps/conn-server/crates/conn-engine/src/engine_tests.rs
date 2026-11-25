@@ -6674,7 +6674,7 @@ async fn a_claude_goal_resume_is_refused_before_it_stops_work() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_declined_steer_waits_first_in_the_queue() {
+async fn declined_steers_keep_their_message_ids_and_fifo_priority() {
     let db = TempDb::new("steer-declined");
     let (engine, _) = open_with(&db, FakeProvider::new("claudeAgent").without_steering());
     dispatch(&engine, create("t1", "c1")).await;
@@ -6686,22 +6686,24 @@ async fn a_declined_steer_waits_first_in_the_queue() {
     dispatch(&engine, message("t1", "c2", "hang")).await;
     until_provider_turn(&mut thread).await;
     dispatch(&engine, message("t1", "c3", "queued first")).await;
-    dispatch(
-        &engine,
-        message_with(
-            "t1",
-            "c4",
-            "steer me",
-            json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
-            None,
-        ),
-    )
-    .await;
+    for (id, text) in [("c4", "first steer"), ("c5", "second steer")] {
+        dispatch(
+            &engine,
+            message_with(
+                "t1",
+                id,
+                text,
+                json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+                None,
+            ),
+        )
+        .await;
+    }
     // The follow-up lands after the decline; wait for its run.
     loop {
         let item = next(&mut thread).await;
         if item["event"]["type"] == "run.created"
-            && item["event"]["payload"]["userMessageId"] == "message:c4"
+            && item["event"]["payload"]["userMessageId"] == "message:c5"
         {
             break;
         }
@@ -6717,23 +6719,28 @@ async fn a_declined_steer_waits_first_in_the_queue() {
     assert_eq!(
         queued,
         [
-            (json!("message:c3"), json!(2)),
-            (json!("message:c4"), json!(1))
+            (json!("message:c3"), json!(3)),
+            (json!("message:c4"), json!(1)),
+            (json!("message:c5"), json!(2))
         ]
     );
     assert_eq!(
         local_item_texts(&p),
-        ["turn_start hang", "queued_turn steer me"],
+        [
+            "turn_start hang",
+            "queued_turn first steer",
+            "queued_turn second steer"
+        ],
         "the steer item now waits in the queue"
     );
     // T3's timeline rule: a queued user message is not shown until its run starts.
     assert_eq!(item_texts(&p), ["turn_start hang"]);
     dispatch(
         &engine,
-        json!({"type": "run.interrupt", "commandId": "c5", "threadId": "t1", "runId": "run:t1:1"}),
+        json!({"type": "run.interrupt", "commandId": "stop", "threadId": "t1", "runId": "run:t1:1"}),
     )
     .await;
-    for _ in 0..3 {
+    for _ in 0..4 {
         until_run_ends(&mut thread).await;
     }
     let p = projection(&engine, "t1").await;
@@ -6741,10 +6748,12 @@ async fn a_declined_steer_waits_first_in_the_queue() {
         item_texts(&p),
         [
             "turn_start hang",
-            "queued_turn steer me",
+            "queued_turn first steer",
+            "queued_turn second steer",
             "run_interrupt_request ",
             "run_interrupt_result ",
-            "assistant_message echo: steer me",
+            "assistant_message echo: first steer",
+            "assistant_message echo: second steer",
             "queued_turn queued first",
             "assistant_message echo: queued first",
         ]
@@ -14464,6 +14473,74 @@ async fn a_user_stop_settlement_or_recovery_choice_wins_over_an_automatic_limit_
             "{action}"
         );
     }
+}
+
+#[tokio::test]
+async fn stop_on_a_failed_quota_run_survives_its_late_reset_time_and_server_restart() {
+    let db = TempDb::new("late-limit-stop");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(
+        &engine,
+        message("t1", "limited", "fail-usage-limit-unknown-reset"),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    let mut item = p["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "error")
+        .unwrap()
+        .clone();
+    assert!(item["failure"]["resetAt"].is_null());
+    dispatch(
+        &engine,
+        json!({"type":"thread.stop","threadId":"t1","commandId":"stop"}),
+    )
+    .await;
+    drop(engine);
+    let (engine, _) = open(&db);
+    item["failure"]["resetAt"] =
+        conn_support::time::iso_from_ms(conn_support::time::now_ms() + 3_600_000).into();
+    engine
+        .inner()
+        .write(move |tx| {
+            tx.append(
+                crate::store::Draft::new("t1", "turn-item.updated", item).run(Some("run:t1:1")),
+            )
+        })
+        .await
+        .unwrap();
+    let row = engine
+        .inner()
+        .db(|s| s.stored_shell("t1").map(Option::unwrap))
+        .await
+        .unwrap();
+    let arm = crate::limit_recovery::command(&row, conn_support::time::now_ms() as i64, true, true)
+        .unwrap();
+    engine
+        .inner()
+        .dispatch_value(arm)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let stored = engine
+        .inner()
+        .db(|s| s.stored_shell("t1").map(Option::unwrap))
+        .await
+        .unwrap();
+    assert_eq!(stored["limitRecovery"]["autoResume"], false);
+    assert_eq!(stored["limitRecovery"]["snooze"], false);
+    assert!(
+        crate::limit_recovery::command(
+            &stored,
+            crate::time::millis_from_iso(stored["usageLimitResetAt"].as_str().unwrap()).unwrap()
+                + 1,
+            true,
+            true
+        )
+        .is_none()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

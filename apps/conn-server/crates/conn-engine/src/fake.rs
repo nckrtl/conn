@@ -1181,6 +1181,9 @@ impl Session for FakeSession {
                         "code":if text.starts_with("reject-thinking") { "INVALID_THINKING_SIGNATURE" } else { "invalid_encrypted_content" }, "retryable":false
                     }))));
                 }
+                "fail-usage-limit-unknown-reset" => started.push(terminal(&turn, TurnStatus::Failed, Some(json!({
+                    "class":"usage_limit","message":"Usage limit reached","code":null,"retryable":false,
+                })))),
                 "fail-usage-limit" => started.push(terminal(
                     &turn,
                     TurnStatus::Failed,
@@ -1477,6 +1480,7 @@ impl Session for FakeSession {
                 })?,
                 provider_turns: vec![],
                 messages: vec![],
+                reasoning_message_ids: Vec::new(),
                 runtime_requests: vec![],
             })
         })

@@ -31,6 +31,7 @@ mod policy;
 mod prompt;
 mod protocol;
 mod session;
+mod snapshot;
 mod text_generation;
 mod tools;
 
@@ -518,6 +519,7 @@ impl Provider for AcpProvider {
             )
             .await?;
             let now = SystemEnv.now();
+            session.bind_thread(input.thread_id.as_str()).await;
             let row = json!({
                 "id": input.provider_session_id.as_str(),
                 "driver": self.flavor.driver,

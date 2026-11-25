@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 -- The store's high-water mark reads the newest receipt at open.
 CREATE INDEX IF NOT EXISTS receipts_by_sequence ON receipts(sequence);
+CREATE INDEX IF NOT EXISTS recovery_stops_by_sequence ON receipts(sequence)
+WHERE command_type IN ('thread.stop', 'thread.settle', 'thread.auto-settle');
 ";
 
 /// A command's receipt: a key lookup, never a scan of the event log.
@@ -200,7 +202,7 @@ fn streams_only(event_type: &str, payload: &Value) -> bool {
     if event_type == "turn-item.updated"
         && matches!(
             payload.get("type").and_then(Value::as_str),
-            Some("secret_request" | "link_request" | "user_message")
+            Some("secret_request" | "link_request" | "user_message" | "error")
         )
     {
         return false;

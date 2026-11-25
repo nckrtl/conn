@@ -897,9 +897,22 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
 
     let queue_position = match delivery {
         Delivery::Queue { first: true } => {
-            // Everything already queued moves down one place.
+            // Earlier declined steers stay together in send order, ahead of ordinary messages.
+            // The dispatch receipt survives process restarts and also covers older queued runs.
+            let mut insert_at = 1;
+            let mut leading_steers = c.steer_follow_up_of_run_id.is_some();
             for mut run in queued_runs(tx, &c.thread_id)? {
                 let position = run["queuePosition"].as_u64().unwrap_or(1);
+                if leading_steers
+                    && let Some(message) = run["userMessageId"].as_str()
+                    && tx
+                        .outcome(&format!("command:steer-follow-up:{message}"))?
+                        .is_some_and(|receipt| receipt.refusal.is_none())
+                {
+                    insert_at = position + 1;
+                    continue;
+                }
+                leading_steers = false;
                 run["queuePosition"] = json!(position + 1);
                 let id = run["id"].as_str().unwrap_or_default().to_owned();
                 tx.append(
@@ -908,7 +921,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
                         .command(cid),
                 )?;
             }
-            json!(1)
+            json!(insert_at)
         }
         Delivery::Queue { first: false } => {
             let last = queued_runs(tx, &c.thread_id)?
@@ -3525,13 +3538,10 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
             {
                 return Ok(vec![]);
             }
+            let run_id = update["runId"].as_str().unwrap_or_default();
             let stopped = auto_arm
-                && interrupt_request(
-                    tx,
-                    &c.thread_id,
-                    update["runId"].as_str().unwrap_or_default(),
-                )?
-                .is_some();
+                && (interrupt_request(tx, &c.thread_id, run_id)?.is_some()
+                    || crate::limit_recovery::stopped_after_start(tx, &c.thread_id, run_id)?);
             let setting = |key: &str| {
                 update[key]
                     .as_bool()

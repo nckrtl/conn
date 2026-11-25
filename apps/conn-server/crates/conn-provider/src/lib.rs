@@ -532,6 +532,8 @@ pub struct ThreadSnapshot {
     pub provider_thread: ProviderThread,
     pub provider_turns: Vec<ProviderTurn>,
     pub messages: Vec<ConversationMessage>,
+    /// Native thought messages represented as assistant transcript rows.
+    pub reasoning_message_ids: Vec<String>,
     pub runtime_requests: Vec<RuntimeRequest>,
 }
 

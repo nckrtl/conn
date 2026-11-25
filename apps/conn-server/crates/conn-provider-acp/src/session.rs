@@ -222,6 +222,14 @@ struct State<E: Env> {
     prompt_request: Option<i64>,
     /// Antigravity can ask us to retry an overlapping prompt once its current work is idle.
     retry_prompt: Option<J>,
+    /// A rejected initial prompt still owns its place until its delayed retry.
+    busy_prompt: Option<i64>,
+    /// Antigravity's overlapping prompt is provisional until its own user echo or RPC reply.
+    pending_steer: Option<PendingSteer>,
+    /// Once a steer is queued, subsequent steers for this turn must wait behind it.
+    queue_steers: bool,
+    /// Duplicate text has no unique wire echo. Its request id still proves acceptance.
+    prompt_texts: std::collections::HashSet<String>,
     /// The prompt id of the running turn, for Grok's `prompt_complete`.
     active_prompt: Option<(u64, String)>,
     detached_requests: Vec<(RequestId, Value)>,
@@ -234,6 +242,11 @@ struct State<E: Env> {
     instruction_state: Option<InstructionState>,
     delivered_notes: Option<String>,
     delivered_context: std::collections::HashMap<String, String>,
+    snapshot: crate::snapshot::Snapshot,
+    loading_snapshot: Option<crate::snapshot::Snapshot>,
+    snapshot_enabled: bool,
+    snapshot_needs_load: bool,
+    app_thread: Option<String>,
     activation_epoch: u64,
     replay_activity: Option<(
         String,
@@ -280,6 +293,17 @@ fn is_startup_metadata(params: &Value) -> bool {
         params["update"]["sessionUpdate"].as_str(),
         Some("current_mode_update" | "config_option_update" | "available_commands_update")
     )
+}
+
+struct PendingSteer {
+    request: i64,
+    echo: Option<String>,
+    entries: Vec<conn_provider::AppContextEntry>,
+    marker: Option<u64>,
+    accepted: tokio::sync::oneshot::Sender<ProviderResult<()>>,
+    // The preceding prompt can reply before this steer. It remains the active request
+    // if the peer subsequently declines the steer.
+    previous_reply: Option<(i64, Result<Value, CallError>)>,
 }
 
 type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
@@ -483,32 +507,8 @@ impl AcpSession {
         let flavor = inner.config.flavor;
         let run_id = input.run_id.as_str();
         inner.check_abandoned(run_id)?;
-        if inner.state.lock().await.restart_required {
-            // A new agent loads the session (T3 `restartRuntimeAfterTeardownIfRequired`).
-            let connection = inner.start_runtime().await?;
-            let initialize = match inner.initialize(&connection).await {
-                Ok(initialize) => initialize,
-                Err(error) => {
-                    inner.end_runtime().await;
-                    return Err(error);
-                }
-            };
-            let session_id = inner
-                .state
-                .lock()
-                .await
-                .session_id
-                .clone()
-                .unwrap_or_default();
-            if let Err(error) = inner.activate(&connection, &initialize, &session_id).await {
-                inner.end_runtime().await;
-                return Err(error);
-            }
-            let mut state = inner.state.lock().await;
-            state.initialize = initialize;
-            state.restart_required = false;
-            state.active_model = None;
-        }
+        let _transition = inner.activation.lock().await;
+        inner.ensure_active_thread(&input.provider_thread).await?;
         // The step it was in has ended; an abandoned start sends nothing more.
         inner.check_abandoned(run_id)?;
         let model = to_json(&input.model_selection)["model"]
@@ -758,7 +758,17 @@ impl AcpSession {
             };
             state.step_boundary = step_boundary;
             state.resumed_outcome = false;
+            state.queue_steers = false;
+            state.busy_prompt = None;
+            state.prompt_texts.clear();
+            if flavor.driver == "antigravity" {
+                state.prompt_texts.insert(user_text.clone());
+                state.prompt_texts.insert(text);
+            }
             state.active_prompt = Some((generation, prompt_id.unwrap_or_default()));
+            if state.snapshot_enabled {
+                state.snapshot.remember_input(&input);
+            }
             let outs = state.mapper.begin_turn(&input, &session_id, &user_text);
             inner.deliver(&mut state, outs).await;
             // The reply comes back through the driver, in order with the turn's updates.
@@ -833,9 +843,18 @@ impl AcpSession {
                 previous_mode: None,
                 prompt_request: None,
                 retry_prompt: None,
+                busy_prompt: None,
+                pending_steer: None,
+                queue_steers: false,
+                prompt_texts: Default::default(),
                 instruction_state: None,
                 delivered_notes: None,
                 delivered_context: Default::default(),
+                snapshot: Default::default(),
+                loading_snapshot: None,
+                snapshot_enabled: false,
+                snapshot_needs_load: false,
+                app_thread: None,
                 activation_epoch: 0,
                 replay_activity: None,
                 delivery: None,
@@ -904,6 +923,10 @@ impl AcpSession {
         (state.initialize.clone(), state.setup.clone())
     }
 
+    pub(crate) async fn bind_thread(&self, thread: &str) {
+        self.inner.state.lock().await.app_thread = Some(thread.to_owned());
+    }
+
     pub(crate) async fn negotiated_capabilities(&self, mut base: Value) -> Value {
         let s = self.inner.state.lock().await;
         let caps = &s.initialize["agentCapabilities"];
@@ -912,6 +935,8 @@ impl AcpSession {
                 || s.initialize["capabilities"]["session"]["fork"].is_object()
         );
         base["threads"]["canForkFromTurn"] = json!(false);
+        base["threads"]["canReadThreadSnapshot"] = json!(s.snapshot_enabled);
+        base["checkpointing"]["providerCanReadConversationSnapshot"] = json!(s.snapshot_enabled);
         base
     }
 
@@ -1086,6 +1111,7 @@ impl Inner {
             let mut state = self.state.lock().await;
             state.session_id = Some(session_id.clone());
             state.mapper.set_root_session(&session_id);
+            state.snapshot_enabled = supports_snapshots(&initialize);
             state.initialize = initialize;
             state.mapper.model_window = grok_window(&setup, &state.initialize, &self.config.model);
             state.setup = setup;
@@ -1110,22 +1136,93 @@ impl Inner {
         Ok(session_id)
     }
 
+    /// Called with the transition permit, so two starts cannot create competing subprocesses.
+    // An import or fork can change the active native conversation on this runtime.
+    // Each prompt and resume must reselect its own thread under the transition permit.
+    async fn ensure_active_thread(self: &Arc<Self>, thread: &ProviderThread) -> ProviderResult<()> {
+        let native = acp_native_thread_id(thread)?;
+        if thread.driver != self.config.flavor.driver
+            || thread.provider_instance_id != self.config.instance_id
+        {
+            return Err(protocol_error(
+                "The conversation belongs to another ACP provider instance",
+            ));
+        }
+        self.restart_if_needed(native, false).await?;
+        let state = self.state.lock().await;
+        if state.closed {
+            return Err(ProviderError::SessionStopped);
+        }
+        if state.session_id.as_deref() != Some(native) {
+            let connection = state
+                .runtime
+                .as_ref()
+                .ok_or(ProviderError::SessionStopped)?
+                .connection
+                .clone();
+            let initialize = state.initialize.clone();
+            drop(state);
+            self.activate(&connection, &initialize, native, false)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn restart_if_needed(
+        self: &Arc<Self>,
+        target: &str,
+        for_snapshot: bool,
+    ) -> ProviderResult<Option<Box<crate::snapshot::Snapshot>>> {
+        let state = self.state.lock().await;
+        if !state.restart_required {
+            return Ok(None);
+        }
+        drop(state);
+        let connection = self.start_runtime().await?;
+        let restored = async {
+            let initialize = self.initialize(&connection).await?;
+            let snapshot = self
+                .activate(&connection, &initialize, target, for_snapshot)
+                .await?;
+            Ok::<_, ProviderError>((initialize, snapshot))
+        }
+        .await;
+        let (initialize, snapshot) = match restored {
+            Ok(restored) => restored,
+            Err(e) => {
+                self.end_runtime().await;
+                return Err(e);
+            }
+        };
+        let mut state = self.state.lock().await;
+        state.snapshot_enabled = supports_snapshots(&initialize);
+        state.initialize = initialize;
+        state.restart_required = false;
+        state.active_model = None;
+        Ok(snapshot)
+    }
+
     /// Activate the saved native conversation before publishing its thread or accepting input.
     async fn activate(
         self: &Arc<Self>,
         connection: &Connection,
         initialize: &Value,
         session_id: &str,
-    ) -> ProviderResult<()> {
-        let _activation = self.activation.lock().await;
+        for_snapshot: bool,
+    ) -> ProviderResult<Option<Box<crate::snapshot::Snapshot>>> {
         let agent = &initialize["agentCapabilities"];
         let caps = &initialize["capabilities"]["session"];
-        let method = if self.config.flavor.resume
+        let method = if !for_snapshot
+            && self.config.flavor.resume
             && (agent["sessionCapabilities"]["resume"].is_object() || caps["resume"].is_object())
         {
             "session/resume"
-        } else if agent["loadSession"] == true || caps.get("load").is_some_and(Value::is_object) {
+        } else if supports_snapshots(initialize) {
             "session/load"
+        } else if for_snapshot {
+            return Err(ProviderError::Unsupported {
+                operation: "read_thread_snapshot",
+            });
         } else {
             return Err(protocol_error(
                 "The ACP agent did not advertise conversation loading or resumption",
@@ -1133,15 +1230,22 @@ impl Inner {
         };
         let params = self.session_setup_params(initialize, Some(session_id));
         let (tx, mut rx) = tokio::sync::watch::channel(None);
-        let allow_idle = method == "session/load"
+        // A prompt may proceed after Grok stops emitting replay. An import needs the
+        // load acknowledgement: a quiet interval is not the end of the transcript.
+        let allow_idle = !for_snapshot
+            && method == "session/load"
             && self.config.flavor.completion == Completion::XAiPromptComplete;
         let (epoch, generation) = {
             let mut state = self.state.lock().await;
-            if state.mapper.has_turn() || state.closed {
+            if state.mapper.has_turn()
+                || state.closed
+                || (for_snapshot && state.mapper.pending_background_work())
+            {
                 return Err(protocol_error(
-                    "Cannot activate a saved ACP conversation during a turn or after close",
+                    "Cannot activate a saved ACP conversation while work is running or after close",
                 ));
             }
+            state.loading_snapshot = Some(crate::snapshot::Snapshot::for_load(for_snapshot));
             state.activation_epoch += 1;
             state.replay_activity = Some((session_id.to_owned(), tx));
             (state.activation_epoch, state.generation)
@@ -1166,20 +1270,26 @@ impl Inner {
             result = &mut reply => Some(result.unwrap_or(Err(CallError::Closed))),
             () = idle, if allow_idle => None,
         };
+        connection.barrier().await;
         let mut state = self.state.lock().await;
         state.replay_activity = None;
+        let mut loaded = state.loading_snapshot.take().unwrap_or_default();
+        let uncached = loaded.take_uncached_read();
         let buffered = std::mem::take(&mut state.startup_updates);
         if state.closed || state.generation != generation {
             return Err(ProviderError::SessionStopped);
         }
+        let completed_load = result.is_some() && method == "session/load";
         let setup = match result {
             Some(result) => result.map_err(|e| failed(self.config.flavor, method, &e))?,
             None => {
                 let weak = Arc::downgrade(self);
+                let connection = connection.clone();
                 tokio::spawn(async move {
                     let (Ok(Ok(setup)), Some(inner)) = (reply.await, weak.upgrade()) else {
                         return;
                     };
+                    connection.barrier().await;
                     let mut state = inner.state.lock().await;
                     if state.closed
                         || state.activation_epoch != epoch
@@ -1187,6 +1297,7 @@ impl Inner {
                     {
                         return;
                     }
+                    state.snapshot_needs_load = false;
                     // A streamed config/mode change or a local write is newer than this reply.
                     if let (Some(current), Some(late)) =
                         (state.setup.as_object_mut(), setup.as_object())
@@ -1208,6 +1319,11 @@ impl Inner {
             state.commands = None;
             state.previous_mode = None;
         }
+        if method == "session/load" || state.session_id.as_deref() != Some(session_id) {
+            state.snapshot = loaded;
+            // Native resume selects a conversation without replaying its existing messages.
+            state.snapshot_needs_load = !completed_load;
+        }
         state.session_id = Some(session_id.to_owned());
         state.mapper.set_root_session(session_id);
         state.mapper.model_window = grok_window(&setup, initialize, &self.config.model);
@@ -1216,7 +1332,7 @@ impl Inner {
             self.root_update(&mut state, params).await;
         }
         state.active_model = None;
-        Ok(())
+        Ok(uncached)
     }
 
     /// Ends the current runtime as a close does, and keeps the session: a failed restart
@@ -1225,6 +1341,7 @@ impl Inner {
     async fn end_runtime(&self) {
         let stopper = {
             let mut state = self.state.lock().await;
+            state.pending_steer.take();
             state.generation += 1;
             state.runtime = None;
             state.stopper.clone()
@@ -1234,12 +1351,44 @@ impl Inner {
         }
     }
 
+    fn accept_steer(self: &Arc<Self>, state: &mut State<DynEnv>, steer: PendingSteer) {
+        state.prompt_request = Some(steer.request);
+        state.retry_prompt = None;
+        state.mapper.resume_deferred_turn();
+        state.active_prompt = Some((state.generation, String::new()));
+        if state.mapper.compaction_marker() == steer.marker {
+            state
+                .delivery
+                .get_or_insert_with(|| Delivery {
+                    app_context: Vec::new(),
+                    instruction_state: None,
+                    notes: None,
+                    compaction_marker: steer.marker,
+                })
+                .app_context
+                .extend(steer.entries);
+        }
+        self.arm_inactivity(state);
+        let _ = steer.accepted.send(Ok(()));
+    }
+
     /// One `session/update` of the root session: its config options and commands, then the
     /// mapper.
     async fn root_update(self: &Arc<Self>, state: &mut State<DynEnv>, params: &Value) {
         // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
         // the agent, and the observer hears both.
         let update = &params["update"];
+        if update["sessionUpdate"] == "user_message_chunk"
+            && update["content"]["type"] == "text"
+            && let Some(echo) = update["content"]["text"].as_str()
+            && state
+                .pending_steer
+                .as_ref()
+                .is_some_and(|steer| steer.echo.as_deref() == Some(echo))
+            && let Some(steer) = state.pending_steer.take()
+        {
+            self.accept_steer(state, steer);
+        }
         if matches!(
             update["sessionUpdate"].as_str(),
             Some(
@@ -1753,6 +1902,10 @@ impl Inner {
     /// Applies outs: events to the engine, replies to the agent, a flush timer. Runs under
     /// the state lock, so order holds.
     async fn deliver(self: &Arc<Self>, state: &mut State<DynEnv>, outs: Vec<Out>) {
+        if !state.mapper.has_turn() {
+            state.pending_steer.take();
+            state.prompt_texts.clear();
+        }
         self.pending_background.store(
             state.mapper.pending_background_work(),
             std::sync::atomic::Ordering::Release,
@@ -2088,6 +2241,11 @@ impl Inner {
 async fn deliver_one(state: &mut State<DynEnv>, out: Out) {
     match out {
         Out::Event(event) => {
+            if state.snapshot_enabled
+                && let ProviderEvent::MessageUpdated { message } = &event
+            {
+                state.snapshot.remember(message);
+            }
             if let Some(events) = &state.events
                 && events.send(event).await.is_err()
             {
@@ -2218,17 +2376,48 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     let _ = waiter.send(result);
                     continue;
                 }
-                let is_prompt = {
-                    let state = inner.state.lock().await;
-                    state.generation == generation && state.prompt_request == Some(id)
+                let (id, result) = {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        continue;
+                    }
+                    if let Some(steer) = state.pending_steer.take_if(|steer| steer.request == id) {
+                        match result {
+                            Err(error) => {
+                                state.queue_steers = true;
+                                let _ = steer.accepted.send(Err(failed(
+                                    inner.config.flavor,
+                                    "session/prompt",
+                                    &error,
+                                )));
+                                let Some(previous) = steer.previous_reply else {
+                                    continue;
+                                };
+                                previous
+                            }
+                            Ok(reply) => {
+                                inner.accept_steer(&mut state, steer);
+                                (id, Ok(reply))
+                            }
+                        }
+                    } else if state.prompt_request == Some(id) {
+                        if state.mapper.turn_interrupted() {
+                            state.pending_steer.take();
+                        } else if let Some(steer) = state.pending_steer.as_mut() {
+                            steer.previous_reply = Some((id, result));
+                            continue;
+                        }
+                        (id, result)
+                    } else {
+                        continue;
+                    }
                 };
-                if !is_prompt {
-                    continue;
-                }
                 if inner.config.flavor.driver == "antigravity"
                     && matches!(&result,Err(CallError::Rpc(error)) if error.message.starts_with("Agent is already processing"))
                 {
-                    // Keep reading the older prompt's response and progress while the peer is busy.
+                    // A new turn can be busy while the preceding turn's native work drains.
+                    // A steer rejection already returned to the engine above.
+                    inner.state.lock().await.busy_prompt = Some(id);
                     let weak = Arc::downgrade(&inner);
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2237,9 +2426,23 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                         if state.closed
                             || state.generation != generation
                             || state.prompt_request != Some(id)
-                            || state.mapper.turn_interrupted()
                             || state.active_prompt.is_none()
                         {
+                            return;
+                        }
+                        state.busy_prompt = None;
+                        // The peer rejected this request already and has nothing left to cancel.
+                        if state.mapper.turn_interrupted() {
+                            drop(state);
+                            inner
+                                .settle(
+                                    generation,
+                                    None,
+                                    Some(id),
+                                    None,
+                                    PromptOutcome::Stopped("cancelled".into()),
+                                )
+                                .await;
                             return;
                         }
                         if let (Some(runtime), Some(params)) = (&state.runtime, &state.retry_prompt)
@@ -2513,12 +2716,25 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
             if params["_meta"]["isReplay"] == true || progress {
                 activity.send_replace(Some(tokio::time::Instant::now()));
             }
+            if let Some(snapshot) = state.loading_snapshot.as_mut() {
+                snapshot.update(params, inner.config.flavor.driver == "grok");
+            }
             // A load can replay the user's entire history. The engine already owns those turns.
             if !is_startup_metadata(params) {
                 return;
             }
         }
-        if params["_meta"]["isReplay"] == true && !is_startup_metadata(params) {
+        let replay = params["_meta"]["isReplay"] == true;
+        if !loading
+            && state.snapshot_enabled
+            && params["sessionId"].as_str() == state.session_id.as_deref()
+            && (replay || !state.mapper.has_turn())
+        {
+            state
+                .snapshot
+                .update(params, inner.config.flavor.driver == "grok");
+        }
+        if replay && !is_startup_metadata(params) {
             return;
         }
         let Some(root) = state.session_id.clone().filter(|_| !loading) else {
@@ -2723,6 +2939,20 @@ pub(crate) fn apply_thread_environment(
     }
 }
 
+fn acp_native_thread_id(thread: &ProviderThread) -> ProviderResult<&str> {
+    thread
+        .native_thread_ref
+        .as_ref()
+        .and_then(|native| native.native_id.as_deref())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| protocol_error("Missing native ACP session ID"))
+}
+
+fn supports_snapshots(initialize: &Value) -> bool {
+    initialize["agentCapabilities"]["loadSession"] == true
+        || initialize["capabilities"]["session"]["load"].is_object()
+}
+
 fn grok_window(setup: &Value, initialize: &Value, model: &str) -> Option<u64> {
     let models = setup["models"]["availableModels"]
         .as_array()
@@ -2792,7 +3022,9 @@ impl Session for AcpSession {
         input: EnsureThreadInput,
     ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
         Box::pin(async move {
+            let _transition = self.inner.activation.lock().await;
             let mut state = self.inner.state.lock().await;
+            state.app_thread = Some(input.thread_id.as_str().to_owned());
             let Some(session_id) = state.session_id.clone() else {
                 return Err(protocol_error("ACP runtime did not produce a session id"));
             };
@@ -2809,23 +3041,9 @@ impl Session for AcpSession {
     ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
         Box::pin(async move {
             let mut thread = to_json(&input.provider_thread);
-            let native = thread["nativeThreadRef"]["nativeId"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| protocol_error("Saved ACP conversation has no native id"))?;
             let inner = &self.inner;
-            let state = inner.state.lock().await;
-            if state.session_id.as_deref() != Some(native) {
-                let connection = state
-                    .runtime
-                    .as_ref()
-                    .ok_or(ProviderError::SessionStopped)?
-                    .connection
-                    .clone();
-                let initialize = state.initialize.clone();
-                drop(state);
-                inner.activate(&connection, &initialize, native).await?;
-            }
+            let _transition = inner.activation.lock().await;
+            inner.ensure_active_thread(&input.provider_thread).await?;
             thread["providerSessionId"] = json!(self.inner.config.provider_session_id);
             thread["status"] = json!("idle");
             from_json(thread).map_err(|e| protocol_error(format!("provider thread: {e}")))
@@ -2845,6 +3063,73 @@ impl Session for AcpSession {
                 *abandoned = None;
             }
             result
+        })
+    }
+
+    fn read_thread_snapshot(
+        &self,
+        thread: ProviderThread,
+    ) -> BoxFuture<'_, ProviderResult<conn_provider::ThreadSnapshot>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            let native = acp_native_thread_id(&thread)?;
+            if thread.driver != inner.config.flavor.driver
+                || thread.provider_instance_id != inner.config.instance_id
+            {
+                return Err(protocol_error(
+                    "The snapshot belongs to another provider instance",
+                ));
+            }
+            let _transition = inner.activation.lock().await;
+            let mut uncached = inner.restart_if_needed(native, true).await?;
+            let mut state = inner.state.lock().await;
+            if state.closed {
+                return Err(ProviderError::SessionStopped);
+            }
+            if !state.snapshot_enabled {
+                return Err(ProviderError::Unsupported {
+                    operation: "read_thread_snapshot",
+                });
+            }
+            if uncached.is_none()
+                && (state.session_id.as_deref() != Some(native)
+                    || state.snapshot_needs_load
+                    || state.snapshot.needs_load())
+            {
+                let connection = state
+                    .runtime
+                    .as_ref()
+                    .ok_or(ProviderError::SessionStopped)?
+                    .connection
+                    .clone();
+                let initialize = state.initialize.clone();
+                drop(state);
+                uncached = inner
+                    .activate(&connection, &initialize, native, true)
+                    .await?;
+                state = inner.state.lock().await;
+            }
+            if state.closed || state.session_id.as_deref() != Some(native) {
+                return Err(ProviderError::SessionStopped);
+            }
+            if let Some(transcript) = uncached {
+                let app_thread = state.app_thread.clone();
+                let session_id = inner.config.provider_session_id.clone();
+                drop(state);
+                drop(_transition);
+                return tokio::task::spawn_blocking(move || {
+                    transcript.read(&thread, &session_id, app_thread.as_deref())
+                })
+                .await
+                .map_err(|e| {
+                    protocol_error(format!("Could not assemble the ACP transcript: {e}"))
+                })?;
+            }
+            state.snapshot.read(
+                &thread,
+                &inner.config.provider_session_id,
+                state.app_thread.as_deref(),
+            )
         })
     }
 
@@ -2919,6 +3204,9 @@ impl Session for AcpSession {
             if s.closed || s.generation != generation {
                 return Err(ProviderError::SessionStopped);
             }
+            s.snapshot = Default::default();
+            // A native fork includes its parent's transcript. ACP fork does not send it.
+            s.snapshot_needs_load = true;
             s.session_id = Some(child.clone());
             s.mapper.set_root_session(&child);
             s.mapper.model_window = grok_window(&setup, &s.initialize, &inner.config.model);
@@ -3030,6 +3318,14 @@ impl Session for AcpSession {
                     operation: "steer_turn",
                 });
             }
+            if state.queue_steers || state.pending_steer.is_some() || state.busy_prompt.is_some() {
+                state.queue_steers = true;
+                return Err(protocol_error(
+                    "An earlier Antigravity steer is awaiting delivery",
+                ));
+            }
+            let echo =
+                (!text.is_empty() && state.prompt_texts.insert(text.clone())).then(|| text.clone());
             let mut blocks: Vec<_> = notes
                 .into_iter()
                 .map(|s| obj().with("type", "text").with("text", s))
@@ -3039,27 +3335,21 @@ impl Session for AcpSession {
             let params = obj()
                 .with("sessionId", native)
                 .with("prompt", J::Arr(blocks));
-            state.retry_prompt = Some(params.clone());
             let request = connection
                 .send("session/prompt", params)
                 .await
                 .ok_or(ProviderError::SessionStopped)?;
-            state.prompt_request = Some(request);
-            state.mapper.resume_deferred_turn();
-            state.active_prompt = Some((state.generation, String::new()));
-            let marker = state.mapper.compaction_marker();
-            state
-                .delivery
-                .get_or_insert_with(|| Delivery {
-                    app_context: Vec::new(),
-                    instruction_state: None,
-                    notes: None,
-                    compaction_marker: marker,
-                })
-                .app_context
-                .extend(entries);
-            inner.arm_inactivity(&mut state);
-            Ok(())
+            let (accepted, receipt) = tokio::sync::oneshot::channel();
+            state.pending_steer = Some(PendingSteer {
+                request,
+                echo,
+                entries,
+                marker: state.mapper.compaction_marker(),
+                accepted,
+                previous_reply: None,
+            });
+            drop(state);
+            receipt.await.unwrap_or(Err(ProviderError::SessionStopped))
         })
     }
 
@@ -3197,6 +3487,7 @@ impl Session for AcpSession {
                     return Closed::RuntimeStopped;
                 }
                 state.closed = true;
+                state.pending_steer.take();
                 if let Some(timer) = state.prompt_watchdog.take() {
                     timer.abort();
                 }

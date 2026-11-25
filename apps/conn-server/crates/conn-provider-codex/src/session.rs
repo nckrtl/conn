@@ -2459,6 +2459,7 @@ impl Session for CodexSession {
                 provider_thread: from_json(row).map_err(|e| failed(OP, e.to_string()))?,
                 provider_turns: Vec::new(),
                 messages: Vec::new(),
+                reasoning_message_ids: Vec::new(),
                 runtime_requests: Vec::new(),
             })
         })

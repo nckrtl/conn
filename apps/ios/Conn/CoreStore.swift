@@ -686,7 +686,7 @@ final class CoreStore {
 
     // MARK: - Session events
 
-    fileprivate func handleState(_ newState: FfiSessionState) {
+    func handleState(_ newState: FfiSessionState) {
         if let state, newState.revision <= state.revision { return }
         // The open thread stays: the session resubscribes it on the new connection. Only a switch
         // to another server drops it, with that server's inbox.
@@ -694,7 +694,6 @@ final class CoreStore {
         let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
             imageThumbnails.clear()
-            drafts.removeAll()
             discardComposerDrafts()
             coldLaunchSession = nil
             shell = nil

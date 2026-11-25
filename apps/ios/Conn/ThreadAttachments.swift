@@ -32,6 +32,8 @@ final class AttachmentThumbnails {
 }
 
 struct ThreadAttachments: View {
+    static let radius: CGFloat = 17
+    static let tailRadius: CGFloat = 7
     let files: [FfiAttachment]
     let store: CoreStore
     let thread: String
@@ -54,16 +56,21 @@ struct ThreadAttachments: View {
                 }
             }
             ForEach(others, id: \.id) { file in
-                let top: CGFloat = images.isEmpty && file.id == others.first?.id ? 11 : 4
-                let bottom: CGFloat = file.id == others.last?.id ? 11 : 4
+                let top: CGFloat = images.isEmpty && file.id == others.first?.id ? Self.radius : 4
+                let bottom: CGFloat = file.id == others.last?.id ? Self.radius : 4
                 AttachmentTile(file: file, store: store, thread: thread)
                     .clipShape(UnevenRoundedRectangle(
                         topLeadingRadius: top, bottomLeadingRadius: bottom,
-                        bottomTrailingRadius: bottom, topTrailingRadius: top
+                        bottomTrailingRadius: file.id == others.last?.id ? Self.tailRadius : bottom,
+                        topTrailingRadius: top, style: .continuous
                     ))
             }
         }
-        .clipShape(.rect(cornerRadius: 11))
+        // Concentric with the user bubble (20, tail 10) 3 inside it.
+        .clipShape(UnevenRoundedRectangle(
+            topLeadingRadius: Self.radius, bottomLeadingRadius: Self.radius,
+            bottomTrailingRadius: Self.tailRadius, topTrailingRadius: Self.radius, style: .continuous
+        ))
     }
 }
 

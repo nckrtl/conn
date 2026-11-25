@@ -7,26 +7,44 @@ struct AgentSummary: View {
     @State private var expanded = false
     @Environment(\.connTheme) private var theme
 
+    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+
+    private var preview: String {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        let excerpt = String(text.prefix(2048))
+        let parsed = try? AttributedString(markdown: excerpt, options: options)
+        return (parsed.map { String($0.characters) } ?? excerpt).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if text.isEmpty { Text(title).font(.headline) }
-            else {
+        VStack(alignment: .leading, spacing: 6) {
+            if text.isEmpty {
+                Text(title).fontWeight(.medium)
+            } else {
                 Button { expanded.toggle() } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(title).font(.system(size: 14, weight: .medium))
-                            Spacer()
-                            Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(title).fontWeight(.medium)
+                            Spacer(minLength: 6)
+                            ThreadGlyph(name: "chevron-down", size: 14)
+                                .rotationEffect(.degrees(expanded ? 180 : 0))
+                                .foregroundStyle(theme.mutedForeground)
                         }
                         if !expanded {
-                            Text(text.replacingOccurrences(of: "\n", with: " "))
-                                .font(.system(size: 13)).foregroundStyle(theme.mutedForeground).lineLimit(2)
+                            Text(verbatim: preview).foregroundStyle(theme.mutedForeground).lineLimit(2)
                         }
                     }.contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityValue(expanded ? "Expanded" : "Collapsed")
-                if expanded { MarkdownView(source: text, muted: true) }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(title)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                if expanded { MarkdownView(source: text, messageStyle: .assistant) }
             }
-        }.padding(11)
+        }
+        .font(.system(size: size))
+        .lineHeight(.exact(points: size * 1.625))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
     }
 }
 
@@ -39,7 +57,7 @@ struct MessageFooter: View {
     var body: some View {
         HStack(spacing: 4) {
             if !trailingCopy { copyButton }
-            if let date = threadDate(timestamp) { Text(date, style: .time) }
+            if let date = threadDate(timestamp) { Text(date, style: .time).lineHeight(.exact(points: size * 16 / 13)) }
             if trailingCopy { copyButton }
         }.font(.system(size: size)).foregroundStyle(theme.mutedForeground)
     }
@@ -53,7 +71,6 @@ struct ThreadMessage: View {
     let text: String
     let date: String?
     let agent: Bool
-    let badge: String?
     let files: [FfiAttachment]
     let detail: FfiFeedDetail?
     let store: CoreStore
@@ -67,6 +84,7 @@ struct ThreadMessage: View {
     }
 
     private var displayText: String {
+        guard !metadata.reviews.isEmpty else { return text }
         var result = text
         for review in metadata.reviews {
             let id = NSRegularExpression.escapedPattern(for: review.contextId)
@@ -79,8 +97,8 @@ struct ThreadMessage: View {
     var body: some View {
         if agent {
             ThreadCard {
-                Label("Agent", systemImage: "person.crop.square")
-                if let badge { Text(badge) }
+                ThreadGlyph(name: "agent", size: 15)
+                Text("Agent")
                 Spacer()
                 if let id = metadata.thread {
                     Button { onOpenThread(id, metadata.environment) } label: { Image(systemName: "arrow.up.right").padding(6) }
@@ -94,7 +112,6 @@ struct ThreadMessage: View {
             }
         } else {
             VStack(alignment: .trailing, spacing: 2) {
-                if let badge { KitBadge(badge) }
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
                         MarkdownView(source: displayText, fillsWidth: !files.isEmpty || !metadata.reviews.isEmpty, messageStyle: .user).fixedSize(horizontal: false, vertical: true)
@@ -172,6 +189,27 @@ struct ProposedPlanCard: View {
         .fileExporter(isPresented: $saving, document: MarkdownDocument(text: markdown),
                       contentType: MarkdownDocument.readableContentTypes[0], defaultFilename: "plan.md") { result in
             if case let .failure(failure) = result { error = failure.localizedDescription }
+        }
+    }
+}
+
+extension FfiThreadSnapshot {
+    /// History pages are projected independently. Prefer the linked child when it and its wake meet.
+    mutating func removeRepeatedDelegatedResults() {
+        guard !delegatedTaskIds.isEmpty else { return }
+        struct ResultKey: Hashable {
+            let task: String
+            let body: String
+        }
+        let tasks = delegatedTaskIds
+        var seen = Set(entries.compactMap { entry -> ResultKey? in
+            guard case let .subagent(id, _, _, _, _, _, true, body?, _, _, _, _) = entry,
+                  let task = tasks[id] else { return nil }
+            return ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))
+        })
+        entries.removeAll { entry in
+            guard case let .user(id, body, _, true, _, _, _) = entry, let task = tasks[id] else { return false }
+            return !seen.insert(ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))).inserted
         }
     }
 }

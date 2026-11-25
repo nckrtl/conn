@@ -326,6 +326,7 @@ struct TrackedMessage {
     created_at: String,
     created_by_agent: bool,
     is_automatic: bool,
+    completion: Option<Vec<crate::thread_feed::DelegatedResult>>,
 }
 
 /// How the provider can take the answer to one pending runtime request (its
@@ -1046,6 +1047,11 @@ impl ThreadState {
 
         for row in rows {
             let item = row.item;
+            if let ProjectionTurnItem::Subagent(sub) = &item {
+                self.subagent_of_entry
+                    .entry(sub.id.clone())
+                    .or_insert_with(|| sub.subagent_id.clone());
+            }
             let feed_detail = projection_feed_detail(&item);
             let approval_pair = match &item {
                 ProjectionTurnItem::ApprovalRequest(i) => Some((
@@ -1258,8 +1264,40 @@ impl ThreadState {
         );
     }
 
+    pub fn delegated_results(&self, id: &str) -> Option<&[crate::thread_feed::DelegatedResult]> {
+        use crate::thread_feed::FeedDetail;
+        match self.feed_details.get(id)? {
+            FeedDetail::Delegated(results) => Some(results),
+            FeedDetail::DelegatedNotice { run, tasks } => {
+                // Older servers replace the turn item with a receipt but keep the full wake in messages.
+                let message = id
+                    .strip_prefix("turn-item:")
+                    .and_then(|key| self.messages.get(key))
+                    .or_else(|| {
+                        self.messages
+                            .get(&self.runs.get(run.as_ref()?)?.user_message_id)
+                    });
+                Some(
+                    message
+                        .and_then(|m| m.completion.as_deref())
+                        .filter(|results| results.iter().all(|result| tasks.contains(&result.task)))
+                        .unwrap_or_default(),
+                )
+            }
+            _ => None,
+        }
+    }
+
     fn record_message(&mut self, msg: &ConversationMessage) {
-        let is_automatic = msg.delegated_completion.is_some() || msg.notification.is_some();
+        let owned = msg.delegated_completion.is_some()
+            || (msg.created_by == Actor::Agent
+                && msg.creation_source == conn_contract::OrchestrationV2CreationSource::Server);
+        let completion = owned
+            .then(|| crate::thread_feed::completion_results(&msg.text))
+            .flatten();
+        let is_automatic = msg.delegated_completion.is_some()
+            || msg.notification.is_some()
+            || completion.is_some();
         self.messages.insert(
             msg.id.clone(),
             TrackedMessage {
@@ -1268,6 +1306,7 @@ impl ThreadState {
                 created_at: msg.created_at.clone(),
                 created_by_agent: is_agent_origin(msg.created_by, msg.creation_source),
                 is_automatic,
+                completion,
             },
         );
     }
@@ -1403,7 +1442,7 @@ impl ThreadState {
             }
             DomainEvent::MessageUpdated(ev) => {
                 self.record_message(&ev.payload);
-                self.reconcile_queued_runs(false)
+                self.reconcile_queued_runs(false) || ev.payload.delegated_completion.is_some()
             }
             DomainEvent::TurnItemUpdated(ev) => {
                 let item_id = turn_item_id(&ev.payload).to_owned();
@@ -1412,6 +1451,7 @@ impl ThreadState {
                     _ => (None, None),
                 };
                 let detail = match &ev.payload {
+                    TurnItem::Notification(item) => crate::thread_feed::notification_detail(item),
                     TurnItem::UserMessage(item) => crate::thread_feed::message_detail(item),
                     TurnItem::DynamicTool(item) => crate::thread_feed::tool_detail(item),
                     _ => None
@@ -1787,6 +1827,9 @@ fn projection_feed_detail(
     item: &ProjectionTurnItem,
 ) -> Option<(String, crate::thread_feed::FeedDetail)> {
     match item {
+        ProjectionTurnItem::Notification(i) => {
+            Some((i.id.clone(), crate::thread_feed::notification_detail(i)?))
+        }
         ProjectionTurnItem::UserMessage(i) => {
             Some((i.id.clone(), crate::thread_feed::message_detail(i)?))
         }

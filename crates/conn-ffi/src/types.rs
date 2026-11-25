@@ -507,6 +507,7 @@ pub struct FfiThreadSnapshot {
     pub model_label: Option<String>,
     pub entries: Vec<FfiTimelineEntry>,
     pub feed_details: HashMap<String, crate::FfiFeedDetail>,
+    pub delegated_task_ids: HashMap<String, String>,
     pub work_groups: Vec<FfiWorkGroupTiming>,
     pub working: bool,
     pub active_run_id: Option<String>,
@@ -913,7 +914,17 @@ pub(crate) fn build_thread_snapshot(
     let pending_question = crate::questions::pending_question(thread);
     let open_question = pending_question.as_ref().map(|q| q.entry_id.as_str());
 
+    let mut feed_details: HashMap<_, _> = thread
+        .feed_details
+        .iter()
+        .filter_map(|(id, detail)| Some((id.clone(), crate::FfiFeedDetail::from_detail(detail)?)))
+        .collect();
+    let mut completions = crate::feed::CompletionCards::new(thread);
     for (idx, entry) in thread.entries.iter().enumerate() {
+        if let Some(results) = thread.delegated_results(entry.id()) {
+            completions.append(entry.id(), results, &mut entries, &mut feed_details);
+            continue;
+        }
         if matches!(entry, TimelineEntry::QueuedUser { .. }) {
             queued_count = queued_count.saturating_add(1);
         }
@@ -950,11 +961,6 @@ pub(crate) fn build_thread_snapshot(
         }
     }
 
-    let mut feed_details: HashMap<_, _> = thread
-        .feed_details
-        .iter()
-        .filter_map(|(id, detail)| Some((id.clone(), crate::FfiFeedDetail::from_detail(detail)?)))
-        .collect();
     for entry in &thread.entries {
         if let TimelineEntry::Subagent {
             id, remote_child, ..
@@ -995,6 +1001,7 @@ pub(crate) fn build_thread_snapshot(
         model_label: meta.and_then(|m| m.model_label.clone()),
         entries,
         feed_details,
+        delegated_task_ids: completions.task_ids,
         work_groups,
         working: thread.working,
         active_run_id: thread.active_run_id().map(str::to_owned),
@@ -1908,6 +1915,134 @@ mod tests {
         );
         assert_eq!(ffi.work_groups.len(), 1);
         assert_eq!(ffi.work_groups[0].entry_ids, ["turn-item:cmd-1-0"]);
+    }
+
+    #[test]
+    fn delegated_completion_feed_preserves_the_result_and_user_quotes() {
+        const TASK: &str = "node:delegated-task:command:mcp:7f11fed1:remote-delegate:90d87fe0";
+        let title = "Use native Liquid Glass for iPhone floating controls";
+        let body = "**Build 5 is ready.** [Dark workspace](https://example.org/dark.png)\n\n| Screenshots | Light |\n| --- | --- |\n| Task | Detail |";
+        let transport = format!("Delegated task {TASK} ({title}) [completed]:\n{body}");
+        let raw = conn_state::testkit::synthetic_thread_snapshot_json(
+            conn_state::testkit::SyntheticThread {
+                turns: 1,
+                commands_per_turn: 0,
+                command_output_bytes: 0,
+                assistant_bytes: 10,
+            },
+        );
+        let mut snapshot: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let projection = &mut snapshot["projection"];
+        let mut wake = projection["visibleTurnItems"][0]["item"].clone();
+        wake["createdBy"] = json!("agent");
+        wake["creationSource"] = json!("server");
+        wake["text"] = json!(transport);
+        wake.as_object_mut().unwrap().remove("textOmitted");
+        let mut quote = wake.clone();
+        quote["id"] = json!("user-quote");
+        quote["createdBy"] = json!("user");
+        quote["creationSource"] = json!("mobile");
+        let mut assistant = projection["visibleTurnItems"][1]["item"].clone();
+        assistant.as_object_mut().unwrap().remove("textOmitted");
+        assistant["text"] = json!(transport);
+        let mut receipt = wake.clone();
+        receipt["id"] = json!("notice");
+        receipt["type"] = json!("notification");
+        receipt["source"] = json!({"kind":"delegated_task","taskIds":[TASK]});
+        receipt["outcome"] = json!("completed");
+        receipt["summary"] = json!("Delegated task finished");
+        let mut lookup = wake.clone();
+        lookup["id"] = json!("lookup");
+        lookup["text"] = json!(format!(
+            "Delegated task {TASK} [completed]. Use task_status with taskId {TASK} to read the result."
+        ));
+        let rows: Vec<_> = [&wake, &quote, &assistant, &receipt, &lookup].iter().enumerate().map(|(index,item)| {
+            json!({"item":item, "sourceThreadId":wake["threadId"], "sourceItemId":item["id"], "position":index, "visibility":"local"})
+        }).collect();
+        projection["visibleTurnItems"] = json!(rows);
+        let expected = |state: &ThreadState| {
+            let snap = build_thread_snapshot(state, None);
+            assert_eq!(snap.entries.len(), 3);
+            assert!(
+                matches!(&snap.entries[0], FfiTimelineEntry::User{text,created_by_agent:true,..} if text == body)
+            );
+            assert!(
+                matches!(&snap.entries[1], FfiTimelineEntry::User{text,created_by_agent:false,..} if text == &transport)
+            );
+            assert!(
+                matches!(&snap.entries[2], FfiTimelineEntry::Assistant{markdown,..} if markdown == &transport)
+            );
+            assert!(
+                matches!(&snap.feed_details["turn-item:user-0"], crate::FfiFeedDetail::Message{sender:Some(label),..} if label == &format!("{title} · Completed"))
+            );
+        };
+        let mut live = ThreadState::new("thread");
+        live.apply(serde_json::from_value(snapshot).unwrap());
+        expected(&live);
+        let mut history = ThreadState::new("thread");
+        history.prepend_history_page(serde_json::from_value(json!({"items": rows,"snapshotSequence":1, "nextCursor":null,"hasMoreHistory":false})).unwrap());
+        expected(&history);
+
+        // The older projection replaces the user turn item with a notification; the message keeps its body.
+        let mut old: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let message = &mut old["projection"]["messages"][0];
+        message["createdBy"] = json!("agent");
+        message["creationSource"] = json!("server");
+        message["text"] = json!(transport);
+        message["delegatedCompletion"] =
+            json!({"parentRunId":"parent","generation":1,"taskIds":[TASK]});
+        let mut old_row = rows[3].clone();
+        old_row["item"]["id"] = json!("turn-item:user-msg-0");
+        old["projection"]["visibleTurnItems"] = json!([old_row]);
+        let mut recorded = ThreadState::new("thread");
+        recorded.apply(serde_json::from_value(old).unwrap());
+        assert!(
+            matches!(&build_thread_snapshot(&recorded,None).entries[..], [FfiTimelineEntry::User{text,created_by_agent:true,..}] if text == body)
+        );
+
+        // An offline row saved before attribution was cached still has the Rust server's command-derived id.
+        let cached = json!({"User":{"id":format!("turn-item:message:delegated-completion:{TASK}:18"),
+            "text":transport,"created_by_agent":false,"created_at":null,"attachments":[],"is_steer":false,"run_id":null}});
+        let legacy: conn_cache::Message = serde_json::from_value(cached.clone()).unwrap();
+        assert_eq!(legacy.delegated_results().unwrap()[0].body, body);
+        let mut quote_cache = cached;
+        quote_cache["User"]["id"] = json!("turn-item:my-message");
+        assert!(
+            serde_json::from_value::<conn_cache::Message>(quote_cache)
+                .unwrap()
+                .delegated_results()
+                .is_none()
+        );
+
+        let mut child = wake.clone();
+        for (key, value) in [
+            ("id", json!("child-card")),
+            ("type", json!("subagent")),
+            ("subagentId", json!(TASK)),
+            ("origin", json!("app_owned")),
+            ("driver", json!("codex")),
+            ("providerInstanceId", json!("codex")),
+            ("title", json!(title)),
+            ("prompt", json!("Check the feed")),
+            ("result", json!(body)),
+        ] {
+            child[key] = value;
+        }
+        let frame = json!({"kind":"event","sequence":live.sequence.unwrap_or(0)+1,"event":{
+            "type":"turn-item.updated","id":"event:child-card","threadId":wake["threadId"],
+            "occurredAt":wake["updatedAt"],"payload":child
+        }});
+        assert!(live.apply(serde_json::from_value(frame).unwrap()));
+        let snap = build_thread_snapshot(&live, None);
+        assert_eq!(snap.entries.len(), 3);
+        assert!(snap.entries.iter().any(|entry| matches!(entry,FfiTimelineEntry::Subagent{summary:Some(text),..} if text == body)));
+        assert!(!snap.entries.iter().any(|entry| matches!(
+            entry,
+            FfiTimelineEntry::User {
+                created_by_agent: true,
+                ..
+            }
+        )));
     }
 
     #[expect(

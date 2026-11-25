@@ -48,6 +48,7 @@ pub enum FfiFeedDetail {
 impl FfiFeedDetail {
     pub(crate) fn from_detail(detail: &FeedDetail) -> Option<Self> {
         Some(match detail {
+            FeedDetail::Delegated(_) | FeedDetail::DelegatedNotice { .. } => return None,
             FeedDetail::Message {
                 sender,
                 thread,
@@ -91,6 +92,83 @@ impl FfiFeedDetail {
                     .into(),
             },
         })
+    }
+}
+
+/// A child card can precede its wake, follow it in a history window, or be outside the window.
+pub(crate) struct CompletionCards<'a> {
+    shown: std::collections::HashSet<(&'a str, &'a str)>,
+    pub(crate) task_ids: std::collections::HashMap<String, String>,
+}
+
+impl<'a> CompletionCards<'a> {
+    pub(crate) fn new(thread: &'a conn_state::ThreadState) -> Self {
+        let shown = thread
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let conn_state::TimelineEntry::Subagent {
+                    id,
+                    status,
+                    summary: Some(body),
+                    ..
+                } = entry
+                else {
+                    return None;
+                };
+                if !conn_state::subagent_settled(*status) {
+                    return None;
+                }
+                Some((thread.subagent_of_entry.get(id)?.as_str(), body.trim()))
+            })
+            .collect();
+        Self {
+            shown,
+            task_ids: thread.subagent_of_entry.clone(),
+        }
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        id: &str,
+        results: &'a [conn_state::thread_feed::DelegatedResult],
+        entries: &mut Vec<crate::FfiTimelineEntry>,
+        details: &mut std::collections::HashMap<String, FfiFeedDetail>,
+    ) {
+        for (index, result) in results.iter().enumerate() {
+            if !self.shown.insert((&result.task, result.body.trim())) {
+                continue;
+            }
+            let id = if index == 0 {
+                id.to_owned()
+            } else {
+                format!("{id}/result/{index}")
+            };
+            self.task_ids.insert(id.clone(), result.task.clone());
+            let sender = format!(
+                "{} · {}",
+                result.title.as_deref().unwrap_or("Delegated task"),
+                result.state
+            );
+            details.insert(
+                id.clone(),
+                FfiFeedDetail::Message {
+                    sender: Some(sender),
+                    thread: None,
+                    environment: None,
+                    reviews: vec![],
+                },
+            );
+            entries.push(crate::FfiTimelineEntry::User {
+                id,
+                text: result.body.clone(),
+                created_at: None,
+                created_by_agent: true,
+                is_steer: false,
+                run_id: None,
+                attachments: vec![],
+            });
+        }
     }
 }
 

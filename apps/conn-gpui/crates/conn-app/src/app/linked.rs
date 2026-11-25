@@ -54,6 +54,8 @@ pub(super) struct LinkedEnvironments {
     subscribed_env: Option<String>,
     /// A child opened from its parent before the linked shell lists it.
     opened_child: Option<(String, String)>,
+    /// The General scratch project a linked environment made before its shell lists it.
+    opened_scratch: Option<(String, String)>,
     /// The environment the chat and right panel were last pointed at; `None` is the primary one.
     chat_env: Option<String>,
     /// What each linked environment says it is (`EnvironmentMachineKind`), from its server config.
@@ -285,9 +287,32 @@ impl ConnApp {
     /// The environment a project of the merged list lives on; `None` is the primary one.
     pub(crate) fn linked_environment_of_project(&self, project_id: &str) -> Option<&str> {
         let origins = self.linked.origins();
-        origins
-            .is_linked_project(project_id)
-            .then(|| origins.environment_of_project(project_id))
+        if origins.is_linked_project(project_id) {
+            return Some(origins.environment_of_project(project_id));
+        }
+        self.linked
+            .opened_scratch
+            .as_ref()
+            .filter(|(project, _)| {
+                project == project_id && self.shell.project(project_id).is_none()
+            })
+            .map(|(_, environment)| environment.as_str())
+    }
+
+    /// The linked environment new General threads start on: the fleet's primary agent Node, when
+    /// it is not the primary connection and its saved session is connected here.
+    pub(super) fn general_environment(&self) -> Option<(String, Connection)> {
+        let agent = self.orbit.fleet.select_primary_agent_node(None)?;
+        if agent.server_id == self.primary_environment_id() {
+            return None;
+        }
+        let connection = self.linked_connection(&agent.server_id)?;
+        Some((agent.server_id.clone(), connection))
+    }
+
+    /// Remembers the General scratch project `environment` made, until its shell lists it.
+    pub(super) fn record_linked_scratch(&mut self, project_id: String, environment: String) {
+        self.linked.opened_scratch = Some((project_id, environment));
     }
 
     /// The label of the environment a thread lives on, for its hover card and details
@@ -805,6 +830,28 @@ impl ConnApp {
         cx.notify();
     }
 
+    /// Test helper: connects `config` as the linked environment `environment_id`.
+    #[cfg(test)]
+    pub(crate) fn connect_linked_for_test(
+        &mut self,
+        environment_id: &str,
+        config: ServerConfig,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.connect_linked(
+            environment_id.to_owned(),
+            environment_id.to_owned(),
+            config,
+            cx,
+        );
+    }
+
+    /// Test helper: the Orbit fleet the app knows.
+    #[cfg(test)]
+    pub(crate) fn set_fleet_for_test(&mut self, fleet: conn_desktop::orbit::OrbitFleet) {
+        self.orbit.fleet = fleet;
+    }
+
     /// Test helper: the scratch workspace root a linked environment reported.
     #[cfg(test)]
     pub(crate) fn set_linked_scratch_root_for_test(&mut self, environment_id: &str, root: &str) {
@@ -966,6 +1013,7 @@ impl ConnApp {
         self.linked.shells = LinkedShells::default();
         self.linked.origins = Origins::default();
         self.linked.opened_child = None;
+        self.linked.opened_scratch = None;
         self.linked.statuses.clear();
         self.linked.dirty.clear();
         if let Some(store) = &self.linked.store {

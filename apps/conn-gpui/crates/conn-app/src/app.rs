@@ -1823,15 +1823,20 @@ impl ConnApp {
         }
     }
 
-    /// Opens General on the primary server, even when the selected thread lives on a linked server.
+    /// Opens General on the fleet's primary agent Node when it is connected as a linked
+    /// environment, else on the primary server, whatever thread is selected.
     pub(crate) fn start_general_draft(
         &mut self,
         window: Option<&mut Window>,
         cx: &mut Context<'_, Self>,
     ) -> gpui_kit::Task<Option<String>> {
+        let (environment, connection) = match self.general_environment() {
+            Some((environment, connection)) => (Some(environment), Some(connection)),
+            None => (None, self.connection.clone()),
+        };
         if let Some(project) = self.shell.projects.iter().find(|p| {
             p.archived_at.is_none()
-                && self.linked_environment_of_project(&p.id).is_none()
+                && self.linked_environment_of_project(&p.id) == environment.as_deref()
                 && self.is_scratch_project(&p.id, Some(&p.workspace_root))
         }) {
             return gpui_kit::Task::ready(Some(self.open_project_draft(
@@ -1840,7 +1845,7 @@ impl ConnApp {
                 cx,
             )));
         }
-        let Some(connection) = self.connection.clone() else {
+        let Some(connection) = connection else {
             self.chat.update(cx, |chat, cx| {
                 chat.set_error(
                     Some("Connect to the agent node to start a thread.".to_owned()),
@@ -1870,7 +1875,12 @@ impl ConnApp {
                 }
                 match result {
                     Ok(project) => {
-                        app.scratch_project_id = Some(project.project_id.clone());
+                        match environment {
+                            Some(environment) => {
+                                app.record_linked_scratch(project.project_id.clone(), environment);
+                            }
+                            None => app.scratch_project_id = Some(project.project_id.clone()),
+                        }
                         let id = app.open_project_draft(project.project_id, None, cx);
                         if let Some(window) = window {
                             let chat = app.chat.clone();

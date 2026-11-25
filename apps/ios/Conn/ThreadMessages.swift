@@ -101,10 +101,6 @@ struct ThreadMessage: View {
                 ThreadGlyph(name: "agent", size: 15)
                 Text("Agent")
                 Spacer()
-                if let id = metadata.thread {
-                    Button { onOpenThread(id, metadata.environment) } label: { Image(systemName: "arrow.up.right").padding(6) }
-                        .accessibilityLabel("Open sender thread")
-                }
             } content: {
                 VStack(alignment: .leading, spacing: 3) {
                     AgentSummary(title: metadata.sender ?? "Message", text: text)

@@ -32,8 +32,7 @@ struct WorkGroupCard: View {
                         .font(.system(size: size))
                         .lineHeight(.exact(points: size * 1.625))
                         .foregroundStyle(theme.mutedForeground)
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                    ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
                         .foregroundStyle(theme.mutedForeground)
                     Spacer()
                 }

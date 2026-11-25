@@ -12770,6 +12770,58 @@ async fn mcp_sign_in_routes_to_its_live_thread_and_keeps_callback_out_of_errors_
     assert_eq!(count(&provider.sessions), 2);
 }
 
+#[tokio::test]
+async fn a_browser_sign_in_keeps_its_session_until_completion_or_expiry() {
+    let db = TempDb::new("sign-in-idle");
+    let clock = Arc::new(crate::ManualClock::at(1_800_000_000_000));
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(
+        FakeProvider::new("claudeAgent").with_native_resume(),
+    )];
+    config.clock = clock.clone();
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(&engine, message("t1", "send", "hello")).await;
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    let input =
+        json!({"threadId":"t1","providerThreadId":p["providerThreads"][0]["id"],"server":"first"});
+    let mut second = input.clone();
+    second["server"] = "second".into();
+    for login in [&input, &second] {
+        engine
+            .call("provider.mcpSignIn.start", login.clone())
+            .await
+            .unwrap();
+    }
+    clock.advance(Duration::from_secs(180));
+    engine.release_idle_sessions().await;
+    assert_eq!(engine.inner().live_count(), 1);
+    let mut callback = input;
+    callback["callbackUrl"] = "https://example.invalid/callback?code=accepted".into();
+    engine
+        .call("provider.mcpSignIn.complete", callback)
+        .await
+        .unwrap();
+    clock.advance(Duration::from_secs(120));
+    engine.release_idle_sessions().await;
+    assert_eq!(
+        engine.inner().live_count(),
+        1,
+        "second sign-in still waiting"
+    );
+    clock.advance(Duration::from_secs(300));
+    engine.release_idle_sessions().await;
+    assert_eq!(
+        engine.inner().live_count(),
+        0,
+        "abandoned browser sign-in expired"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn mcp_apps_calls_only_the_source_session_and_stores_context_without_a_session() {
     let db = TempDb::new("mcp-apps");
@@ -13972,48 +14024,53 @@ async fn an_async_question_is_answered_with_one_message_and_one_run() {
     );
 }
 
-/// A later user message continues visible history on a fresh native thread after Codex
-/// rejects an accepted turn's encrypted context. A thread with background work stays put.
+/// A later user message continues visible history on a fresh native thread after the provider
+/// rejects an accepted turn's saved context. A thread with background work stays put.
 #[tokio::test(flavor = "current_thread")]
 async fn rejected_codex_history_recovers_without_orphaning_pending_work() {
-    for pending in [false, true] {
-        let db = TempDb::new("codex-rejected-history");
-        let (engine, provider) = open_with(
-            &db,
-            FakeProvider::new("claudeAgent")
-                .with_driver("codex")
-                .with_history_injection(),
-        );
-        dispatch(&engine, create("t1", "create")).await;
-        dispatch(&engine, message("t1", "first", "the original history")).await;
-        run_to_end(&engine, "t1", "run:t1:1").await;
-        let rejection = if pending {
-            "reject-encrypted-history-with-work"
-        } else {
-            "reject-encrypted-history"
-        };
-        dispatch(&engine, message("t1", "reject", rejection)).await;
-        let rejected = run_to_end(&engine, "t1", "run:t1:2").await;
-        assert_eq!(rejected["runs"][1]["status"], "failed");
-        let original = rejected["runs"][1]["providerThreadId"].clone();
-        dispatch(
-            &engine,
-            message("t1", "continue", "continue after the rejection"),
-        )
-        .await;
-        let after = run_to_end(&engine, "t1", "run:t1:3").await;
-        let injected = crate::lock(&provider.injected).clone();
-        if pending {
-            assert_eq!(after["runs"][2]["status"], "failed", "{after}");
-            assert!(injected.is_empty());
-            assert_eq!(after["thread"]["activeProviderThreadId"], original);
-        } else {
-            assert_eq!(after["runs"][2]["status"], "completed", "{after}");
-            assert_ne!(after["runs"][2]["providerThreadId"], original);
-            assert_eq!(injected.len(), 1);
-            assert!(injected[0].1.to_string().contains("the original history"));
+    for (driver, failure) in [
+        ("codex", "reject-encrypted-history"),
+        ("antigravity", "reject-thinking-signature"),
+    ] {
+        for pending in [false, true] {
+            let db = TempDb::new("codex-rejected-history");
+            let (engine, provider) = open_with(
+                &db,
+                FakeProvider::new("claudeAgent")
+                    .with_driver(driver)
+                    .with_history_injection(),
+            );
+            dispatch(&engine, create("t1", "create")).await;
+            dispatch(&engine, message("t1", "first", "the original history")).await;
+            run_to_end(&engine, "t1", "run:t1:1").await;
+            let rejection = if pending {
+                format!("{failure}-with-work")
+            } else {
+                failure.to_owned()
+            };
+            dispatch(&engine, message("t1", "reject", &rejection)).await;
+            let rejected = run_to_end(&engine, "t1", "run:t1:2").await;
+            assert_eq!(rejected["runs"][1]["status"], "failed");
+            let original = rejected["runs"][1]["providerThreadId"].clone();
+            dispatch(
+                &engine,
+                message("t1", "continue", "continue after the rejection"),
+            )
+            .await;
+            let after = run_to_end(&engine, "t1", "run:t1:3").await;
+            let injected = crate::lock(&provider.injected).clone();
+            if pending {
+                assert_eq!(after["runs"][2]["status"], "failed", "{after}");
+                assert!(injected.is_empty());
+                assert_eq!(after["thread"]["activeProviderThreadId"], original);
+            } else {
+                assert_eq!(after["runs"][2]["status"], "completed", "{after}");
+                assert_ne!(after["runs"][2]["providerThreadId"], original);
+                assert_eq!(injected.len(), 1);
+                assert!(injected[0].1.to_string().contains("the original history"));
+            }
+            engine.shutdown().await;
         }
-        engine.shutdown().await;
     }
 }
 
@@ -14342,6 +14399,71 @@ async fn a_usage_limit_blocks_only_its_provider() {
     let p = run_to_end(&engine, "t1", "run:t1:2").await;
     assert_eq!(run_for(&p, "b")["status"], "completed");
     assert_eq!(count(&codex.sessions), 1);
+}
+
+#[tokio::test]
+async fn a_user_stop_settlement_or_recovery_choice_wins_over_an_automatic_limit_arm() {
+    for action in ["stop-before", "stop-after", "settle", "opt-out"] {
+        let db = TempDb::new(action);
+        let (engine, _) = open(&db);
+        dispatch(&engine, create("t1", "create")).await;
+        dispatch(&engine, message("t1", "limited", "fail-usage-limit")).await;
+        run_to_end(&engine, "t1", "run:t1:1").await;
+        let row = engine
+            .inner()
+            .db(|store| store.stored_shell("t1").map(Option::unwrap))
+            .await
+            .unwrap();
+        let now =
+            crate::time::millis_from_iso(row["latestRunCompletedAt"].as_str().unwrap()).unwrap();
+        let arm = crate::limit_recovery::command(&row, now, true, true).unwrap();
+        if action == "stop-after" || action == "settle" {
+            engine
+                .inner()
+                .dispatch_value(arm.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        if action == "settle" {
+            dispatch(
+                &engine,
+                json!({"type":"thread.settle","threadId":"t1","commandId":"settle"}),
+            )
+            .await;
+            dispatch(
+                &engine,
+                json!({"type":"thread.unsettle","threadId":"t1","commandId":"unsettle","reason":"user"}),
+            )
+            .await;
+        } else if action == "opt-out" {
+            dispatch(&engine,json!({"type":"thread.metadata.update","threadId":"t1","commandId":"opt-out",
+                "limitRecovery":{"runId":row["latestRunId"],"resetAt":row["usageLimitResetAt"],"autoResume":false,"snooze":false}})).await;
+        } else {
+            dispatch(
+                &engine,
+                json!({"type":"thread.stop","threadId":"t1","commandId":"stop"}),
+            )
+            .await;
+        }
+        engine
+            .inner()
+            .dispatch_value(arm)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let stored = engine
+            .inner()
+            .db(|store| store.stored_shell("t1").map(Option::unwrap))
+            .await
+            .unwrap();
+        assert_eq!(stored["limitRecovery"]["autoResume"], false, "{action}");
+        let after = crate::time::millis_from_iso(stored["usageLimitResetAt"].as_str().unwrap())
+            .unwrap()
+            + 1;
+        assert!(
+            crate::limit_recovery::command(&stored, after, true, true).is_none(),
+            "{action}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

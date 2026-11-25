@@ -1280,16 +1280,8 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                     .lock()
                     .mapper
                     .may_have_usage_limit(native, &params["turn"]["error"]["codexErrorInfo"])
-                && let Ok(Ok(result)) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    inner.server.request("account/rateLimits/read", json!({})),
-                )
-                .await
             {
-                let snapshot = result["rateLimitsByLimitId"]
-                    .get("codex")
-                    .unwrap_or(&result["rateLimits"]);
-                inner.server.record_limits(snapshot);
+                inner.server.read_usage_limits().await;
             }
             inner.lock().mapper.limit_reset = inner.server.limit_reset();
         }
@@ -1334,6 +1326,10 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                     state.mapper.reconcile_terminals(&turn, &live)
                 }
                 SessionMsg::AccountLimits => state.mapper.update_reset(inner.server.limit_reset()),
+                SessionMsg::AccountChanged => {
+                    state.mapper.forget_account();
+                    vec![]
+                }
                 SessionMsg::Overloaded => {
                     state.capacity = None;
                     if let Some((native, generation)) = &mut state.thread {

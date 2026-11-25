@@ -1870,13 +1870,19 @@ impl<E: Env> Mapper<E> {
         }
     }
 
+    pub fn forget_account(&mut self) {
+        self.limit_reset = None;
+        self.limited_item = None;
+    }
+
     pub fn update_reset(&mut self, reset: Option<String>) -> Vec<Out> {
         self.limit_reset = reset.clone();
         let mut out = Vec::new();
-        if let (Some(reset), Some(item)) = (reset, self.limited_item.as_mut())
-            && item["failure"]["resetAt"] != reset
+        if let Some(reset) = reset
+            && let Some(mut item) = self.limited_item.take()
         {
             item["failure"]["resetAt"] = json!(reset);
+            item["updatedAt"] = json!(self.env.now());
             push_event(
                 &mut out,
                 json!({"type":"turn_item.updated","turnItem":item}),
@@ -2229,7 +2235,7 @@ impl<E: Env> Mapper<E> {
             if let Some(run) = &turn.run_id {
                 // The engine writes this row when it settles the run. A later account
                 // update changes that same error so its queue can resume exactly once.
-                if !shared {
+                if !shared && failure["resetAt"].is_null() {
                     item["id"] = json!(format!("turn-item:{run}:error"));
                     self.limited_item = Some(item);
                 }

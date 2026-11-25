@@ -8,11 +8,8 @@
 //! (`Session::fork_thread`), the fork works on the new native thread, and the transfer is
 //! `consumed` with a `native_fork` resolution.
 //!
-//! Not built: T3's portable path (`portable_context`, a `full_thread_summary` handoff from
-//! `ContextHandoffService.ts`; `handoff.rs` has the parts merge-back uses) for a fork to another provider, from an unfinished source run,
-//! from a busy source, or after a failed native fork. A message that would need it is refused,
-//! and a native fork that fails fails the turn. Side chats that start before the parent's first
-//! turn need the same digest and are refused.
+//! When native forking is unavailable or refused, the server sends portable history through
+//! the selected source run. A side chat also receives a digest of later parent activity.
 
 use conn_contract::from_json;
 use conn_provider::ForkThreadInput;
@@ -257,6 +254,9 @@ pub(crate) fn thread_fork(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let source_instance = transfer["sourceProviderInstanceId"]
         .as_str()
         .map(str::to_owned);
+    if !side_chat && let Some(through) = run["ordinal"].as_u64() {
+        tx.snapshot_fork_runs(&target_id, &source_id, through)?;
+    }
     tx.append(
         Draft::new(&target_id, "thread.created", target)
             .command(Some(&command_id))

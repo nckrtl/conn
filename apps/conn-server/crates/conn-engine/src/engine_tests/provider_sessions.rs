@@ -171,7 +171,12 @@ async fn grok_reopens_on_mode_changes_and_protects_existing_background_work() {
         }
     })
     .await
-    .expect("Stop released the earlier native background task");
+    .unwrap_or_else(|_| {
+        panic!(
+            "Stop did not release the earlier native background task: {:?}",
+            crate::lock(&grok.calls)
+        )
+    });
     dispatch(
         &engine,
         message("t1", "after-stop", "continue under approvals"),
@@ -182,5 +187,49 @@ async fn grok_reopens_on_mode_changes_and_protects_existing_background_work() {
     assert_eq!(
         crate::lock(&grok.opened_policies).last().unwrap()["runtimeMode"],
         "approval-required"
+    );
+}
+
+#[tokio::test]
+async fn fresh_codex_history_respects_the_stored_native_background_item_while_starting() {
+    let db = TempDb::new("codex-durable-pending-recovery");
+    let (engine, fake) = open_with(
+        &db,
+        FakeProvider::new("claudeAgent")
+            .with_driver("codex")
+            .with_history_injection(),
+    );
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(&engine, message("t1", "first", "keep this context")).await;
+    run_to_end(&engine, "t1", "run:t1:1").await;
+    dispatch(&engine, message("t1", "bad", "reject-encrypted-history")).await;
+    let rejected = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(rejected["runs"][1]["status"], "failed");
+    // A late native event was persisted before the recovery start; the current transport
+    // has no live backlog signal. The run in 'starting' must not hide that saved work.
+    let provider_thread = rejected["runs"][1]["providerThreadId"].clone();
+    engine.inner().write(move |tx| {
+        let now = tx.now().to_owned();
+        tx.append(crate::store::Draft::new("t1","turn-item.updated",json!({
+            "id":"background-from-old-native","threadId":"t1","runId":"run:t1:1","nodeId":null,
+            "providerThreadId":provider_thread,"providerTurnId":"turn:run:t1:1","nativeItemRef":null,"parentItemId":null,"ordinal":111,
+            "type":"command_execution","input":"still running","status":"running","title":null,"startedAt":now,"completedAt":null,"updatedAt":now
+        })).payload_instance())?;
+        Ok(())
+    }).await.unwrap();
+    assert!(
+        !engine
+            .inner()
+            .live_thread("t1")
+            .unwrap()
+            .has_background_work()
+    );
+    dispatch(&engine, message("t1", "retry", "please continue")).await;
+    let guarded = run_to_end(&engine, "t1", "run:t1:3").await;
+    assert_eq!(guarded["runs"][2]["status"], "failed");
+    assert!(crate::lock(&fake.injected).is_empty());
+    assert_eq!(
+        guarded["thread"]["activeProviderThreadId"],
+        rejected["thread"]["activeProviderThreadId"]
     );
 }

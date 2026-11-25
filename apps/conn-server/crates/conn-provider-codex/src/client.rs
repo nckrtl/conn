@@ -83,6 +83,7 @@ pub enum SessionMsg {
     /// Reliable frames exceeded this session's bounded backlog.
     Overloaded,
     AccountLimits,
+    AccountChanged,
     ListedTerminals {
         turn: String,
         live: std::collections::HashSet<String>,
@@ -170,6 +171,7 @@ struct State {
     /// Set from the `initialize` answer.
     version: Option<String>,
     limits: Value,
+    limit_revision: u64,
     /// Deltas dropped because a session's inbox was full (logged once).
     dropped_deltas: u64,
     // One bounded relay per blocked inbox. A stalled consumer cannot block stdout reads.
@@ -462,19 +464,54 @@ impl AppServer {
         Ok(generation)
     }
 
-    pub fn record_limits(&self, snapshot: &Value) {
+    fn record_limits(state: &mut State, snapshot: &Value) -> bool {
         let Some(fields) = snapshot.as_object() else {
-            return;
+            return false;
         };
         if snapshot["limitId"]
             .as_str()
             .is_some_and(|id| !id.is_empty() && id != "codex")
         {
-            return;
+            return false;
         }
-        let mut state = self.lock();
         for (key, value) in fields {
             state.limits[key] = value.clone();
+        }
+        state.limit_revision = state.limit_revision.wrapping_add(1);
+        true
+    }
+
+    /// A push or account change received during a read takes precedence over its reply.
+    pub async fn read_usage_limits(&self) {
+        let (generation, revision) = {
+            let state = self.lock();
+            let Some(live) = state
+                .live
+                .as_ref()
+                .filter(|live| live.initialized && !live.process.has_exited())
+            else {
+                return;
+            };
+            (live.generation, state.limit_revision)
+        };
+        let Ok(Ok(result)) = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.request_on(generation, "account/rateLimits/read", Value::Null),
+        )
+        .await
+        else {
+            return;
+        };
+        let snapshot = result["rateLimitsByLimitId"]
+            .get("codex")
+            .filter(|s| s.is_object())
+            .unwrap_or(&result["rateLimits"]);
+        let mut state = self.lock();
+        if state.live.as_ref().is_some_and(|live| {
+            live.generation == generation && live.initialized && !live.process.has_exited()
+        }) && state.limit_revision == revision
+        {
+            Self::record_limits(&mut state, snapshot);
         }
     }
 
@@ -712,14 +749,33 @@ impl AppServer {
                     }
                     return;
                 }
-                if method == "account/updated" {
-                    self.lock().limits = Value::Null;
-                }
-                if method == "account/rateLimits/updated" {
-                    self.record_limits(&params["rateLimits"]);
-                    let sessions: Vec<_> = self.lock().sessions.values().cloned().collect();
+                if method == "account/updated" || method == "account/rateLimits/updated" {
+                    let sessions = {
+                        let mut state = self.lock();
+                        if state
+                            .live
+                            .as_ref()
+                            .is_none_or(|live| live.generation != generation)
+                        {
+                            return;
+                        }
+                        if method == "account/updated" {
+                            state.limits = Value::Null;
+                            state.limit_revision = state.limit_revision.wrapping_add(1);
+                        } else if !Self::record_limits(&mut state, &params["rateLimits"]) {
+                            return;
+                        }
+                        state.sessions.values().cloned().collect::<Vec<_>>()
+                    };
                     for inbox in sessions {
-                        self.deliver(&inbox, SessionMsg::AccountLimits);
+                        self.deliver(
+                            &inbox,
+                            if method == "account/updated" {
+                                SessionMsg::AccountChanged
+                            } else {
+                                SessionMsg::AccountLimits
+                            },
+                        );
                     }
                     return;
                 }
@@ -860,6 +916,7 @@ impl AppServer {
                 .is_some_and(|l| l.generation == generation);
             if current {
                 state.live = None;
+                state.limits = Value::Null;
             }
             // Requests waiting on the dead process fail with `Stopped`.
             state.pending.retain(|(g, _), _| *g != generation);
@@ -1069,6 +1126,80 @@ read never
         assert_eq!(task.await.unwrap(), Err(CallError::Timeout));
         assert!(matches!(events.recv().await, Some(SessionMsg::Exited(_))));
         server.remove_session("live", &[]).await;
+    }
+
+    #[tokio::test]
+    async fn a_retired_process_cannot_commit_its_last_rate_limit_read() {
+        let server = AppServer::new(fake(DYNAMIC_INIT));
+        let (inbox, mut rx) = mpsc::channel(4);
+        server.add_session("live", inbox);
+        let generation = server.ensure_started().await.unwrap();
+        let reader = server.clone();
+        let pending = tokio::spawn(async move { reader.read_usage_limits().await });
+        let id = loop {
+            if let Some(id) = server
+                .lock()
+                .pending
+                .keys()
+                .find_map(|(g, id)| (*g == generation).then_some(*id))
+            {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        };
+        // Resolve the request, then retire the generation before its waiter can commit.
+        server
+            .dispatch(
+                generation,
+                Inbound::Response {
+                    id,
+                    result: Ok(json!({"rateLimits":{
+                        "primary":{"usedPercent":100,"resetsAt":1_800_000_000_i64}
+                    }})),
+                },
+            )
+            .await;
+        server.retire(generation);
+        pending.await.unwrap();
+        assert!(server.limit_reset().is_none());
+        assert!(matches!(rx.recv().await, Some(SessionMsg::Exited(_))));
+        assert!(server.ensure_started().await.unwrap() > generation);
+        assert!(server.limit_reset().is_none());
+        server.remove_session("live", &[]).await;
+    }
+
+    #[tokio::test]
+    async fn account_changes_and_limit_pushes_win_over_outstanding_native_reads() {
+        for change in ["account/rateLimits/updated", "account/updated"] {
+            let pushed = json!({"limitId":"codex","primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1_900_000_000_i64}});
+            let stale = json!({"limitId":"codex","primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1_800_000_000_i64}});
+            let push = json!({"method":change,"params":{"rateLimits":pushed}});
+            let reply = json!({"id":2,"result":{"rateLimitsByLimitId":{"codex":stale}}});
+            let script = format!(
+                "read init\necho '{{\"id\":1,\"result\":{{}}}}'\nread initialized\nread limits\necho '{push}'\necho '{reply}'\nread never"
+            );
+            let server = AppServer::new(fake(&script));
+            let (inbox, mut rx) = mpsc::channel(4);
+            server.add_session("live", inbox);
+            server.ensure_started().await.unwrap();
+            server.read_usage_limits().await;
+            match change {
+                "account/updated" => {
+                    assert!(matches!(rx.recv().await, Some(SessionMsg::AccountChanged)));
+                    assert!(server.limit_reset().is_none());
+                }
+                _ => {
+                    assert!(matches!(rx.recv().await, Some(SessionMsg::AccountLimits)));
+                    let latest = crate::status::rate_limit_windows(&pushed);
+                    assert_eq!(
+                        server.limit_reset().as_deref(),
+                        latest[0]["resetsAt"].as_str()
+                    );
+                    assert_eq!(server.lock().limits, pushed);
+                }
+            }
+            server.remove_session("live", &[]).await;
+        }
     }
 
     #[tokio::test]

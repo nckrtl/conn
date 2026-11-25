@@ -806,12 +806,6 @@ pub(crate) fn attachment_blocks(
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        let path = conn_provider_support::attachments::saved_path(dir, a)
-            .ok_or_else(|| format!("Invalid attachment '{name}'"))?;
-        let metadata = std::fs::metadata(&path)
-            .ok()
-            .filter(std::fs::Metadata::is_file)
-            .ok_or_else(|| format!("Could not read attachment '{name}'"))?;
         let extension = Path::new(name)
             .extension()
             .and_then(|s| s.to_str())
@@ -899,6 +893,12 @@ pub(crate) fn attachment_blocks(
         } else {
             continue;
         };
+        let path = conn_provider_support::attachments::saved_path(dir, a)
+            .ok_or_else(|| format!("Invalid attachment '{name}'"))?;
+        let metadata = std::fs::metadata(&path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .ok_or_else(|| format!("Could not read attachment '{name}'"))?;
         let limit = match kind {
             "image" => 10 * 1024 * 1024,
             "audio" => 20 * 1024 * 1024,

@@ -288,6 +288,7 @@ impl<E: Env> Mapper<E> {
 
     pub(crate) fn waiting_for_input_or_tool(&self) -> bool {
         !self.pending.is_empty()
+            || self.subagents_block_settlement()
             || self.turn.as_ref().is_some_and(|turn| {
                 turn.tools.values().any(|tool| {
                     matches!(
@@ -882,6 +883,7 @@ impl<E: Env> Mapper<E> {
             if let Some(turn) = self.turn.as_mut() {
                 if kind == "usage_update" {
                     turn.bg.reply_open = false;
+                    turn.bg.native_reply_pending = false;
                     self.rearm_deferred_finalize(&mut out);
                 } else if crate::antigravity::is_wake(params) {
                     turn.bg.reply_open = true;

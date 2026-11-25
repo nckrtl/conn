@@ -343,7 +343,19 @@ for (const scenario of plan) {
     }
     const tsEnv = JSON.parse(JSON.stringify(envDelta(a.env, tsParent)).replaceAll(a.cwd, "<workspace>"));
     const rustEnv = JSON.parse(JSON.stringify(envDelta(b.env, rustParent)).replaceAll(b.cwd, "<workspace>"));
-    if (JSON.stringify(tsEnv) !== JSON.stringify(rustEnv)) {
+    // The embedded TypeScript adapter predates 16acd718's per-thread ACP bridge
+    // environment. Derive those expected fields from the scenario that issued
+    // the credentials, then compare the complete child environment.
+    if (scenario.mcp !== null) {
+      const golden = JSON.parse(NodeFS.readFileSync(scenario.golden, "utf8"));
+      const open = golden.calls.find((c) => c.method === "openSession");
+      tsEnv.T3CODE_THREAD_ID = open.input.threadId;
+      tsEnv.T3_ACP_MCP_ENDPOINT = scenario.mcp.endpoint;
+      tsEnv.T3_ACP_MCP_AUTHORIZATION = scenario.mcp.authorization;
+      tsEnv.T3_ACP_MCP_NODE = "/conn-server";
+    }
+    const sortedEnv = (env) => JSON.stringify(Object.entries(env).toSorted(([a], [b]) => a.localeCompare(b)));
+    if (sortedEnv(tsEnv) !== sortedEnv(rustEnv)) {
       problems.push(`environment of process ${i}: T3 adds ${JSON.stringify(tsEnv)}, Rust adds ${JSON.stringify(rustEnv)}`);
     }
   }

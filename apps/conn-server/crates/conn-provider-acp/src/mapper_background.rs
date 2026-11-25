@@ -61,6 +61,7 @@ pub(super) struct TurnBackground {
     early_injected_report_observed: bool,
     pub(super) prompt_settled: bool,
     pub(super) reply_open: bool,
+    pub(super) native_reply_pending: bool,
     pub(super) prompt_settled_status: Option<String>,
     /// `backgroundFinalizeGeneration`.
     finalize_generation: u64,
@@ -172,6 +173,30 @@ fn output_text(tool: &ToolState) -> String {
 }
 
 impl<E: Env> Mapper<E> {
+    pub(crate) fn pending_background_work(&self) -> bool {
+        if self.bg.quarantined || self.bg.closed {
+            return false;
+        }
+        !self.bg.running.is_empty()
+            || self.bg.continuation_requested
+            || !self.bg.wake_buffer.is_empty()
+            || self.has_deferred_work()
+            || self.carryover.as_ref().is_some_and(|turn| {
+                turn.subagents.list.iter().any(|(_, child)| {
+                    crate::grok_background::subagent_status_blocks_settlement(child.status())
+                })
+            })
+    }
+
+    pub(crate) fn resume_deferred_turn(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.bg.prompt_settled = false;
+            turn.bg.native_reply_pending = false;
+            turn.bg.prompt_settled_status = None;
+            turn.bg.finalize_generation += 1;
+        }
+    }
+
     fn hooks(&self) -> Option<BackgroundHooks> {
         self.flavor.background
     }
@@ -261,6 +286,25 @@ impl<E: Env> Mapper<E> {
     /// `hasDeferredBackgroundWork`.
     pub(super) fn has_deferred_work(&self) -> bool {
         self.blocks_settlement(false)
+    }
+
+    pub(crate) fn mark_native_reply_pending(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.bg.native_reply_pending = true;
+            turn.bg.reply_open = true;
+        }
+    }
+
+    pub(crate) fn recheck_reply(&self, timer: &Timer) -> bool {
+        matches!(timer,Timer::Finalize {turn,generation,open_reply:false}
+            if self.turn.as_ref().is_some_and(|t| t.seq==*turn && t.bg.finalize_generation==*generation && !t.interrupted) && !self.has_deferred_work())
+    }
+
+    pub(crate) fn wait_for_native_reply(&mut self) -> Vec<Out> {
+        self.mark_native_reply_pending();
+        let mut out = Vec::new();
+        self.rearm_deferred_finalize(&mut out);
+        out
     }
 
     /// After thirty minutes of silence, a foreground command alone no longer holds the turn.
@@ -621,8 +665,17 @@ impl<E: Env> Mapper<E> {
         for (task_id, end) in ends {
             self.finish_registered_background_tool(&task_id, end.status, end.output, out);
         }
-        if self.turn.is_some() && self.has_deferred_work() {
+        if self.has_deferred_work() {
             self.close_texts(out);
+            return true;
+        }
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|t| t.bg.native_reply_pending)
+        {
+            self.close_texts(out);
+            self.rearm_deferred_finalize(out);
             return true;
         }
         false

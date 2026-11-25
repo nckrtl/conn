@@ -220,6 +220,8 @@ struct State<E: Env> {
     prompt_seq: u64,
     /// The request id of the running `session/prompt`.
     prompt_request: Option<i64>,
+    /// Antigravity can ask us to retry an overlapping prompt once its current work is idle.
+    retry_prompt: Option<J>,
     /// The prompt id of the running turn, for Grok's `prompt_complete`.
     active_prompt: Option<(u64, String)>,
     detached_requests: Vec<(RequestId, Value)>,
@@ -311,6 +313,7 @@ struct Inner {
     spawner: Spawner,
     activation: Mutex<()>,
     command_updates: tokio::sync::Notify,
+    pending_background: std::sync::atomic::AtomicBool,
     state: Mutex<State<DynEnv>>,
     /// The run whose start Stop abandoned (`abandon_turn_start`). Outside `state`, which a
     /// start holds across awaits; one is enough, as a stale id matches no later run.
@@ -588,18 +591,7 @@ impl AcpSession {
         } else {
             user_text
         };
-        let message_text = {
-            let (text, attachments, dir) = (
-                user_text.clone(),
-                attachments.clone(),
-                inner.config.attachments_dir.clone(),
-            );
-            tokio::task::spawn_blocking(move || {
-                conn_provider_support::attachments::prompt_text(&text, &attachments, dir.as_deref())
-            })
-            .await
-            .map_err(|_| protocol_error("attachment paths"))?
-        };
+        let message_text = inner.attachment_text(&user_text, &attachments).await?;
         let live = inner
             .state
             .lock()
@@ -770,6 +762,7 @@ impl AcpSession {
             let outs = state.mapper.begin_turn(&input, &session_id, &user_text);
             inner.deliver(&mut state, outs).await;
             // The reply comes back through the driver, in order with the turn's updates.
+            state.retry_prompt = (flavor.driver == "antigravity").then(|| params.clone());
             state.prompt_request = connection.send("session/prompt", params).await;
             if state.prompt_request.is_none() {
                 state.active_prompt = None;
@@ -819,6 +812,7 @@ impl AcpSession {
             spawner,
             activation: Mutex::new(()),
             command_updates: tokio::sync::Notify::new(),
+            pending_background: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(State {
                 mapper,
                 events: Some(events),
@@ -838,6 +832,7 @@ impl AcpSession {
                 commands: None,
                 previous_mode: None,
                 prompt_request: None,
+                retry_prompt: None,
                 instruction_state: None,
                 delivered_notes: None,
                 delivered_context: Default::default(),
@@ -1696,6 +1691,22 @@ impl Inner {
 
     /// `resolvePromptParts`' image blocks: each native image attachment read from the
     /// attachments folder, as `{type: image, data, mimeType}` after the text.
+    async fn attachment_text(&self, text: &str, attachments: &[Value]) -> ProviderResult<String> {
+        if attachments.is_empty() {
+            return Ok(text.to_owned());
+        }
+        let (text, files, dir) = (
+            text.to_owned(),
+            attachments.to_vec(),
+            self.config.attachments_dir.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            conn_provider_support::attachments::prompt_text(&text, &files, dir.as_deref())
+        })
+        .await
+        .map_err(|_| protocol_error("attachment paths"))
+    }
+
     async fn image_blocks(&self, attachments: &[Value]) -> ProviderResult<Vec<J>> {
         use conn_provider_support::attachments::{is_native_image, saved_path};
         if self.config.flavor.driver == "antigravity" {
@@ -1742,6 +1753,10 @@ impl Inner {
     /// Applies outs: events to the engine, replies to the agent, a flush timer. Runs under
     /// the state lock, so order holds.
     async fn deliver(self: &Arc<Self>, state: &mut State<DynEnv>, outs: Vec<Out>) {
+        self.pending_background.store(
+            state.mapper.pending_background_work(),
+            std::sync::atomic::Ordering::Release,
+        );
         let mut arm = false;
         let mut arm_subagent = false;
         for out in outs {
@@ -1800,6 +1815,23 @@ impl Inner {
             tokio::time::sleep(delay).await;
             let Some(inner) = weak.upgrade() else { return };
             let mut state = inner.state.lock().await;
+            if let Some(profile) = inner.config.profile.clone()
+                && state.mapper.recheck_reply(&timer)
+                && let Some(session) = state.session_id.clone()
+            {
+                drop(state);
+                let pending = tokio::task::spawn_blocking(move || {
+                    crate::antigravity_work::pending_reply(&profile, &session)
+                })
+                .await
+                .unwrap_or(false);
+                state = inner.state.lock().await;
+                if pending && state.mapper.recheck_reply(&timer) {
+                    let out = state.mapper.wait_for_native_reply();
+                    Box::pin(inner.deliver(&mut state, out)).await;
+                    return;
+                }
+            }
             let outs = state.mapper.timer_fired(timer);
             Box::pin(inner.deliver(&mut state, outs)).await;
         });
@@ -1814,7 +1846,7 @@ impl Inner {
         }
         let weak = Arc::downgrade(self);
         let generation = state.generation;
-        let request = state.prompt_request;
+        let turn = state.mapper.current_provider_turn_id().map(str::to_owned);
         state.last_progress = tokio::time::Instant::now();
         state.prompt_watchdog = Some(tokio::spawn(async move {
             const LIMIT: Duration = Duration::from_secs(15 * 60);
@@ -1825,7 +1857,7 @@ impl Inner {
                 let mut state = inner.state.lock().await;
                 if state.generation != generation
                     || state.active_prompt.is_none()
-                    || state.prompt_request != request
+                    || state.mapper.current_provider_turn_id() != turn.as_deref()
                 {
                     return;
                 }
@@ -1840,6 +1872,7 @@ impl Inner {
                 }
                 state.active_prompt = None;
                 state.prompt_request = None;
+                state.retry_prompt = None;
                 state.delivery = None;
                 let outs = state.mapper.prompt_settled(PromptOutcome::Failed {
                     message: "The Antigravity agent stopped responding for 15 minutes.".into(),
@@ -1904,6 +1937,7 @@ impl Inner {
         }
         self.reconcile_children(generation).await;
         let mut outcome = outcome;
+        let mut native_reply_pending = false;
         if let Some(profile) = self.config.profile.clone()
             && matches!(&outcome,PromptOutcome::Stopped(r) if r=="end_turn" || r=="refusal")
         {
@@ -1915,7 +1949,7 @@ impl Inner {
             );
             drop(state);
             let refusal = matches!(&outcome, PromptOutcome::Stopped(r) if r == "refusal");
-            let (failure, next_boundary) = tokio::task::spawn_blocking(move || {
+            let (failure, next_boundary, pending) = tokio::task::spawn_blocking(move || {
                 let failure =
                     crate::antigravity_work::terminal_error(&profile, &session, after, refusal);
                 let boundary = if failure.as_ref().is_some_and(|f| f.resume) {
@@ -1923,10 +1957,14 @@ impl Inner {
                 } else {
                     None
                 };
-                (failure, boundary)
+                let pending = failure.is_none()
+                    && !refusal
+                    && crate::antigravity_work::pending_reply(&profile, &session);
+                (failure, boundary, pending)
             })
             .await
             .unwrap_or_default();
+            native_reply_pending = pending;
             if self.state.lock().await.prompt_request != request {
                 return;
             }
@@ -1950,7 +1988,9 @@ impl Inner {
                             "prompt",
                             J::Arr(vec![obj().with("type", "text").with("text", "continue")]),
                         );
+                    let retry = params.clone();
                     if let Some(id) = rt.connection.send("session/prompt", params).await {
+                        state.retry_prompt = Some(retry);
                         state.resumed_outcome = true;
                         state.prompt_request = Some(id);
                         state.step_boundary = boundary;
@@ -1974,6 +2014,7 @@ impl Inner {
         if state.active_prompt.take().is_none() {
             return;
         }
+        state.retry_prompt = None;
         if let Some(usage) = usage {
             state.mapper.record_prompt_usage(&usage);
         }
@@ -2003,6 +2044,9 @@ impl Inner {
             if let Some(notes) = delivery.notes {
                 state.delivered_notes = Some(notes);
             }
+        }
+        if native_reply_pending {
+            state.mapper.mark_native_reply_pending();
         }
         let outs = state.mapper.prompt_settled(outcome);
         self.deliver(&mut state, outs).await;
@@ -2179,6 +2223,33 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     state.generation == generation && state.prompt_request == Some(id)
                 };
                 if !is_prompt {
+                    continue;
+                }
+                if inner.config.flavor.driver == "antigravity"
+                    && matches!(&result,Err(CallError::Rpc(error)) if error.message.starts_with("Agent is already processing"))
+                {
+                    // Keep reading the older prompt's response and progress while the peer is busy.
+                    let weak = Arc::downgrade(&inner);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let Some(inner) = weak.upgrade() else { return };
+                        let mut state = inner.state.lock().await;
+                        if state.closed
+                            || state.generation != generation
+                            || state.prompt_request != Some(id)
+                            || state.mapper.turn_interrupted()
+                            || state.active_prompt.is_none()
+                        {
+                            return;
+                        }
+                        if let (Some(runtime), Some(params)) = (&state.runtime, &state.retry_prompt)
+                        {
+                            state.prompt_request = runtime
+                                .connection
+                                .send("session/prompt", params.clone())
+                                .await;
+                        }
+                    });
                     continue;
                 }
                 let usage = result
@@ -2871,11 +2942,20 @@ impl Session for AcpSession {
         })
     }
 
+    fn has_pending_background_work(&self) -> bool {
+        self.inner
+            .pending_background
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn steer_turn(&self, input: conn_provider::SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
             let inner = &self.inner;
             let attachments: Vec<_> = input.message.attachments.iter().map(to_json).collect();
             let images = inner.image_blocks(&attachments).await?;
+            let text = inner
+                .attachment_text(&input.message.text, &attachments)
+                .await?;
             let mut state = inner.state.lock().await;
             if state.mapper.current_provider_turn_id() != Some(input.provider_turn_id.as_str())
                 || state.mapper.turn_interrupted()
@@ -2905,15 +2985,10 @@ impl Session for AcpSession {
                 .map(|e| format!("<external_{0}>{1}</external_{0}>", e.key, e.text))
                 .collect();
             if inner.config.flavor.driver == "grok" {
-                if images.len() != attachments.len() {
-                    return Err(ProviderError::Unsupported {
-                        operation: "steer_turn",
-                    });
-                }
                 let text = if notes.is_empty() {
-                    input.message.text
+                    text
                 } else {
-                    [notes.join("\n"), input.message.text].join("\n\n")
+                    [notes.join("\n"), text].join("\n\n")
                 };
                 let params = obj()
                     .with("sessionId", native)
@@ -2959,16 +3034,18 @@ impl Session for AcpSession {
                 .into_iter()
                 .map(|s| obj().with("type", "text").with("text", s))
                 .collect();
-            blocks.push(obj().with("type", "text").with("text", input.message.text));
+            blocks.push(obj().with("type", "text").with("text", text));
             blocks.extend(images);
             let params = obj()
                 .with("sessionId", native)
                 .with("prompt", J::Arr(blocks));
+            state.retry_prompt = Some(params.clone());
             let request = connection
                 .send("session/prompt", params)
                 .await
                 .ok_or(ProviderError::SessionStopped)?;
             state.prompt_request = Some(request);
+            state.mapper.resume_deferred_turn();
             state.active_prompt = Some((state.generation, String::new()));
             let marker = state.mapper.compaction_marker();
             state
@@ -2997,6 +3074,33 @@ impl Session for AcpSession {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(input.run_id.as_str().to_owned());
+        })
+    }
+
+    fn stop_background_work(&self, input: InterruptInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            let thread = to_json(&input.provider_thread);
+            let mut state = inner.state.lock().await;
+            if state.mapper.has_turn()
+                || !state.mapper.pending_background_work()
+                || thread["providerInstanceId"] != inner.config.instance_id
+                || thread["nativeThreadRef"]["nativeId"].as_str() != state.session_id.as_deref()
+            {
+                return Ok(());
+            }
+            let runtime = state.runtime.take();
+            state.generation += 1;
+            state.restart_required = true;
+            state.mapper.interrupt();
+            inner
+                .pending_background
+                .store(false, std::sync::atomic::Ordering::Release);
+            drop(state);
+            if let Some(runtime) = runtime {
+                runtime.stopper.stop(StopKind::Terminate).await;
+            }
+            Ok(())
         })
     }
 

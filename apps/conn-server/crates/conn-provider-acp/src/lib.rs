@@ -589,7 +589,7 @@ pub mod testing {
             message: TurnMessage {
                 message_id: field(&message["messageId"]),
                 text: message["text"].as_str().unwrap_or("").to_owned(),
-                attachments: vec![],
+                attachments: message.get("attachments").map(field).unwrap_or_default(),
                 created_by: field(&message["createdBy"]),
                 creation_source: field(&message["creationSource"]),
                 scheduled_task_id: None,

@@ -830,6 +830,18 @@ fn read_contained_tail(
     ))
 }
 
+/// Claude can answer the root request by launching a forked skill. A parentless
+/// progress or completion frame can still belong to background work from an earlier turn.
+fn clears_unanswered_request(frame: &Value) -> bool {
+    if !frame["parent_tool_use_id"].is_null() {
+        return false;
+    }
+    let subtype = frame["subtype"].as_str().unwrap_or_default();
+    frame["type"] != "system"
+        || !subtype.starts_with("task_")
+        || subtype == "task_started" && frame["spawn_depth"].as_f64().unwrap_or(1.0) <= 1.0
+}
+
 /// The driver: one per query, ends after the query's `End`.
 async fn drive(
     inner: Arc<Inner>,
@@ -923,11 +935,7 @@ async fn drive(
                             && inner.lock().mapper.is_turn_prompt(&value["command_uuid"]))
                     {
                         request_at = Some(tokio::time::Instant::now() + budget);
-                    } else if value["parent_tool_use_id"].is_null()
-                        && (value["type"] == "assistant"
-                            || value["type"] == "result"
-                            || value["type"] == "stream_event")
-                    {
+                    } else if clears_unanswered_request(&value) {
                         request_at = None;
                     }
                 }
@@ -3161,6 +3169,37 @@ mod tests {
 
     /// `readContainedWorkflowFile`: absolute paths only, the real path inside the root, a
     /// regular file, and with a cap the whole lines at the end.
+    #[test]
+    fn only_a_root_task_start_clears_the_unanswered_request_watch() {
+        let start = json!({"type":"system","subtype":"task_started","task_id":"forked-skill"});
+        assert!(
+            clears_unanswered_request(&start),
+            "the native default spawn depth is one"
+        );
+        let mut frame = start;
+        frame["spawn_depth"] = json!(1);
+        assert!(clears_unanswered_request(&frame));
+        frame["spawn_depth"] = json!(2);
+        assert!(
+            !clears_unanswered_request(&frame),
+            "an earlier background agent can launch a nested task"
+        );
+        frame["spawn_depth"] = json!(1);
+        frame["parent_tool_use_id"] = json!("other-agent");
+        assert!(!clears_unanswered_request(&frame));
+        frame["parent_tool_use_id"] = Value::Null;
+        for subtype in ["task_progress", "task_notification"] {
+            frame["subtype"] = json!(subtype);
+            assert!(
+                !clears_unanswered_request(&frame),
+                "{subtype} can belong to a previous turn"
+            );
+        }
+        assert!(clears_unanswered_request(
+            &json!({"type":"system","subtype":"status","status":null})
+        ));
+    }
+
     #[test]
     fn member_transcripts_are_read_from_their_tail_inside_the_root() {
         use crate::mapper::TranscriptCursor;

@@ -51,13 +51,16 @@ fn database(profile: &Path, session: &str) -> Option<Connection> {
         profile,
         &["antigravity-acp", "conversations", &format!("{session}.db")],
     )?;
-    Connection::open_with_flags(
+    let db = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
-    .ok()
+    .ok()?;
+    db.busy_timeout(std::time::Duration::from_millis(100))
+        .ok()?;
+    Some(db)
 }
 
 pub(crate) fn last_step(profile: &Path, session: &str) -> Option<i64> {
@@ -650,6 +653,107 @@ pub(crate) fn active_children(profile: &Path, root: &str, ids: &[String]) -> Vec
     inspect().unwrap_or_default()
 }
 
+/// An unread high-priority inbox message or an unconsumed system message in
+/// the native trajectory means a reply is due after session/prompt settles.
+pub(crate) fn pending_reply(profile: &Path, session: &str) -> bool {
+    if !native_id(session) {
+        return false;
+    }
+    let parts = [
+        "antigravity-acp",
+        "brain",
+        session,
+        ".system_generated",
+        "messages",
+    ];
+    let unread = || -> Option<bool> {
+        let dir = managed_dir(profile, &parts)?;
+        let receipts = match dir.join("read.json").symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+            Ok(_) => read_json(&managed_file(
+                profile,
+                &[parts.as_slice(), &["read.json"]].concat(),
+            )?)?,
+            Err(_) => return None,
+        };
+        if !receipts.as_object()?.values().all(Value::is_boolean) {
+            return None;
+        }
+        let mut count = 0;
+        let mut budget = SCAN_BYTES as u64;
+        let mut waking = false;
+        for item in dir.read_dir().ok()? {
+            let item = item.ok()?;
+            let name = item.file_name();
+            let name = name.to_str()?;
+            let Some(id) = name.strip_suffix(".json").filter(|id| *id != "read") else {
+                continue;
+            };
+            count += 1;
+            if count > 256 {
+                return None;
+            }
+            if receipts[id] == true {
+                continue;
+            }
+            let path = managed_file(profile, &[parts.as_slice(), &[name]].concat())?;
+            budget = budget.checked_sub(path.metadata().ok()?.len())?;
+            let Some(msg) = read_json(&path) else {
+                continue;
+            };
+            if msg["priority"] == "MESSAGE_PRIORITY_HIGH"
+                && msg["id"].as_str().is_none_or(|id| receipts[id] != true)
+            {
+                waking = true;
+            }
+        }
+        Some(waking)
+    };
+    if unread() == Some(true) {
+        return true;
+    }
+    let pending = || -> Option<bool> {
+        let path = managed_file(
+            profile,
+            &[
+                "antigravity-acp",
+                "brain",
+                session,
+                ".system_generated",
+                "logs",
+                "transcript.jsonl",
+            ],
+        )?;
+        let mut file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        for cap in [65536u64, STEP_BYTES as u64] {
+            let start = len.saturating_sub(cap);
+            file.seek(SeekFrom::Start(start)).ok()?;
+            let mut bytes = Vec::new();
+            (&mut file).take(cap).read_to_end(&mut bytes).ok()?;
+            while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                bytes.pop();
+            }
+            let newline = bytes.iter().rposition(|b| *b == b'\n');
+            if start > 0 && newline.is_none() {
+                continue;
+            }
+            let step: Value =
+                serde_json::from_slice(&bytes[newline.map_or(0, |i| i + 1)..]).ok()?;
+            if step["type"] != "SYSTEM_MESSAGE" {
+                return Some(false);
+            }
+            let text = step["content"].as_str().unwrap_or_default();
+            return Some(
+                text.contains("priority=MESSAGE_PRIORITY_HIGH")
+                    || !text.contains("priority=MESSAGE_PRIORITY_LOW"),
+            );
+        }
+        None
+    };
+    pending() == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +796,34 @@ mod tests {
         assert!(children(&dir, "../root", "call", &Value::Null, &[]).is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn a_native_reply_stays_open_only_for_unread_high_priority_or_a_trailing_system_step() {
+        let profile = test_folder();
+        let messages = "antigravity-acp/brain/root/.system_generated/messages";
+        let log = "antigravity-acp/brain/root/.system_generated/logs/transcript.jsonl";
+        write(
+            &profile,
+            &format!("{messages}/1.json"),
+            r#"{"id":"m1","priority":"MESSAGE_PRIORITY_HIGH"}"#,
+        );
+        assert!(pending_reply(&profile, "root"));
+        write(&profile, &format!("{messages}/read.json"), r#"{"m1":true}"#);
+        assert!(!pending_reply(&profile, "root"));
+        write(
+            &profile,
+            log,
+            "{\"type\":\"SYSTEM_MESSAGE\",\"content\":\"priority=MESSAGE_PRIORITY_HIGH\"}\n",
+        );
+        assert!(pending_reply(&profile, "root"));
+        write(
+            &profile,
+            log,
+            "{\"type\":\"SYSTEM_MESSAGE\",\"content\":\"priority=MESSAGE_PRIORITY_LOW\"}\n",
+        );
+        assert!(!pending_reply(&profile, "root"));
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
     #[test]
     fn last_turn_error_cannot_leak_into_the_next_turn() {
         let dir = test_folder();

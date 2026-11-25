@@ -72,6 +72,8 @@ if (argv.includes("-p")) {
 } else if (argv.includes("--version")) {
   const version = behaviour.version ?? {};
   if (version.hang === true) {
+    // A killed writer can leave a partial next record beside the last committed one.
+    fs.writeFileSync(path.join(records, "001.json.tmp"), "{");
     setInterval(() => {}, 1000);
   } else {
     if (version.stdout) process.stdout.write(version.stdout);

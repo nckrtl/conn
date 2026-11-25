@@ -186,7 +186,9 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
         mcp_servers: Vec::new(),
         client_version: "0.0.0".into(),
         self_command: "/conn-server".into(),
-        attachments_dir: None,
+        attachments_dir: golden["attachmentsDir"]
+            .as_str()
+            .map(std::path::PathBuf::from),
         auth_method: None,
         runtime_version: None,
         profile: None,
@@ -258,6 +260,34 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
                     ),
                     Err(e) => errors.push(format!("resumeThread: {e}")),
                 }
+            }
+            "stopSettledWork" => {
+                assert!(
+                    !session.has_turn().await,
+                    "only the native background command is running"
+                );
+                assert!(session.has_pending_background_work());
+                let turn = crate::testing::turn_input(input);
+                let id = crate::lock(&events)
+                    .iter()
+                    .find_map(|e| e["providerTurn"]["id"].as_str().map(str::to_owned))
+                    .unwrap();
+                session
+                    .stop_background_work(InterruptInput {
+                        provider_thread: turn.provider_thread,
+                        provider_turn_id: id.as_str().into(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(!session.has_pending_background_work());
+            }
+            "checkActive" => assert!(
+                session.has_turn().await,
+                "foreground command must hold the turn"
+            ),
+            "advanceTime" => {
+                tokio::time::advance(Duration::from_secs(input["seconds"].as_u64().unwrap())).await;
+                tokio::task::yield_now().await;
             }
             "forkThread" => {
                 let request = conn_provider::ForkThreadInput {
@@ -1097,12 +1127,13 @@ async fn app_context_reaches_the_grok_prompt_as_external_text() {
     assert!(crate::lock(&run.script).complete());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
     for (is_grok, mut fixture) in [
         (true, read_golden("grok", "simple")),
         (false, antigravity_turn_with_thinking_level()),
     ] {
+        fixture["attachmentsDir"] = json!("/test-attachments");
         let calls = fixture["calls"].as_array_mut().unwrap();
         let pos = calls
             .iter()
@@ -1111,8 +1142,15 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
         let mut steer = calls[pos].clone();
         steer["method"] = json!("steerTurn");
         steer["input"]["message"]["text"] = json!("adjust course");
-        steer["input"]["message"]["attachments"] = json!([]);
+        steer["input"]["message"]["attachments"] = json!([{"type":"file","id":"archive","name":"reports.zip","mimeType":"application/zip","sizeBytes":5}]);
+        let text = "adjust course\n\n[Attached file \"reports.zip\" is saved at: /test-attachments/archive.zip]";
         calls.insert(pos + 1, steer);
+        if !is_grok {
+            calls.insert(
+                pos + 2,
+                json!({"method":"advanceTime","input":{"seconds":2}}),
+            );
+        }
         let script = fixture["transcripts"][0].as_array_mut().unwrap();
         let init = script
             .iter_mut()
@@ -1133,26 +1171,37 @@ async fn active_steers_use_the_native_route_and_keep_the_original_turn() {
         let (method, params, result) = if is_grok {
             (
                 "_x.ai/interject",
-                json!({"sessionId":session,"text":"adjust course"}),
+                json!({"sessionId":session,"text":text}),
                 json!({"result":{"status":"queued"}}),
             )
         } else {
             // A failed response to the superseded first prompt is not the new turn outcome.
             (
                 "session/prompt",
-                json!({"sessionId":session,"prompt":[{"type":"text","text":"adjust course"}]}),
+                json!({"sessionId":session,"prompt":[{"type":"text","text":text}]}),
                 json!({"stopReason":"refusal","usage":{"inputTokens":999,"outputTokens":100}}),
             )
         };
         script.splice(prompt+1..prompt+1,[json!({"type":"expect_outbound","frame":{"kind":"request","method":method,"params":params}}),
             json!({"type":"emit_inbound","frame":{"kind":"response","method":method,"result":result}})]);
+        if !is_grok {
+            script.splice(prompt+3..prompt+3,[
+                json!({"type":"emit_inbound","frame":{"kind":"response","method":method,"error":{"code":-32603,"message":"Agent is already processing a request."}}}),
+                wire_request(method,params.clone())
+            ]);
+        }
         let flavor = if is_grok {
             &crate::flavor::GROK
         } else {
             &crate::antigravity::ANTIGRAVITY
         };
         let run = replay(flavor, &fixture).await;
-        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        assert!(
+            run.errors.is_empty(),
+            "{:?}; wire: {:?}",
+            run.errors,
+            crate::lock(&run.script).failure
+        );
         let script = crate::lock(&run.script);
         assert!(script.complete(), "{:?}", script.failure);
         let terminals: Vec<_> = run
@@ -1283,5 +1332,140 @@ async fn fork_negotiates_native_session_and_uses_the_child_for_the_next_prompt()
             .find(|v| v["method"] == "session/prompt")
             .unwrap()["params"]["sessionId"],
         "forked"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn antigravity_watchdog_retires_an_unresponsive_live_prompt() {
+    let mut fixture = antigravity_turn_with_thinking_level();
+    fixture["calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"method":"advanceTime","input":{"seconds":901}}));
+    let entries = fixture["transcripts"][0].as_array_mut().unwrap();
+    let prompt = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request")
+        .unwrap();
+    // The simulated agent remains alive with its stdin open and sends no response.
+    entries.truncate(prompt + 1);
+    let run = replay(&crate::antigravity::ANTIGRAVITY, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    let failed = run
+        .events
+        .iter()
+        .find(|e| e["type"] == "turn.terminal")
+        .expect("terminal inactivity failure");
+    assert_eq!(failed["status"], "failed");
+    assert!(
+        failed["failure"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("15 minutes")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn grok_load_uses_replay_progress_and_survives_a_late_real_response() {
+    let mut fixture = read_golden("grok", "simple");
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    let at = calls
+        .iter()
+        .position(|c| c["method"] == "startTurn")
+        .unwrap();
+    let thread = &mut calls[at]["input"]["providerThread"];
+    thread["nativeThreadRef"]["nativeId"] = json!("restored");
+    let thread = thread.clone();
+    calls.insert(
+        at,
+        json!({"method":"resumeThread","input":{"providerThread":thread}}),
+    );
+    let entries = fixture["transcripts"][0].as_array_mut().unwrap();
+    let init = entries
+        .iter_mut()
+        .find(|r| r["frame"]["method"] == "initialize" && r["frame"]["kind"] == "response")
+        .unwrap();
+    init["frame"]["result"]["agentCapabilities"]["loadSession"] = json!(true);
+    init["frame"]["result"]["agentCapabilities"]["sessionCapabilities"]["resume"] = Value::Null;
+    let prompt = entries
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request")
+        .unwrap();
+    for r in &mut entries[prompt..] {
+        if r["frame"]["params"].get("sessionId").is_some() {
+            r["frame"]["params"]["sessionId"] = json!("restored");
+        }
+    }
+    entries.insert(
+        prompt + 1,
+        wire_result("session/load", json!({"sessionId":"restored"})),
+    );
+    entries.splice(prompt..prompt,[wire_request("session/load",json!("<any>")),
+        json!({"type":"emit_inbound","frame":{"kind":"notification","method":"session/update","params":{"sessionId":"restored","_meta":{"isReplay":true},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"history sentinel"}}}}})]);
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    let script = crate::lock(&run.script);
+    assert!(script.complete(), "{:?}", script.failure);
+    assert!(
+        !run.events
+            .iter()
+            .any(|e| e.to_string().contains("history sentinel"))
+    );
+}
+
+#[tokio::test]
+async fn a_settled_grok_command_holds_the_lane_until_explicit_stop() {
+    let mut fixture = read_golden("grok", "grok_background_bash");
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    let first = calls
+        .iter()
+        .position(|r| r["method"] == "startTurn")
+        .unwrap();
+    calls.truncate(first + 1);
+    calls.push(json!({"method":"stopSettledWork","input":calls[first]["input"]}));
+    fixture["gates"] = json!([]);
+    // The transcript next reports completion of the native task. Test the real
+    // command roster before that notification, once its foreground run has ended.
+    let script = fixture["transcripts"][0].as_array_mut().unwrap();
+    let end = script
+        .iter()
+        .position(|r| r["frame"]["method"] == "_x.ai/task_completed")
+        .unwrap();
+    script.truncate(end);
+    let run = replay(&crate::flavor::GROK, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    assert!(crate::lock(&run.script).complete());
+}
+
+#[tokio::test(start_paused = true)]
+async fn antigravity_releases_a_silent_foreground_command_after_its_bounded_hold() {
+    let mut fixture = antigravity_turn_with_thinking_level();
+    let script = fixture["transcripts"][0].as_array_mut().unwrap();
+    let prompt = script
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "request")
+        .unwrap();
+    let reply = script
+        .iter()
+        .position(|r| r["frame"]["method"] == "session/prompt" && r["frame"]["kind"] == "response")
+        .unwrap();
+    let session = script
+        .iter()
+        .find(|r| r["frame"]["method"] == "session/new" && r["frame"]["kind"] == "response")
+        .unwrap()["frame"]["result"]["sessionId"]
+        .clone();
+    script.splice(prompt+1..reply,[json!({"type":"emit_inbound","frame":{"kind":"notification","method":"session/update","params":{"sessionId":session,"update":{"sessionUpdate":"tool_call","toolCallId":"native-command","title":"Run command","kind":"execute","status":"in_progress","rawInput":{"CommandLine":"build","WaitMsBeforeAsync":1000}}}}})]);
+    let calls = fixture["calls"].as_array_mut().unwrap();
+    calls.extend([
+        json!({"method":"advanceTime","input":{"seconds":1799}}),
+        json!({"method":"checkActive"}),
+        json!({"method":"advanceTime","input":{"seconds":2}}),
+    ]);
+    let run = replay(&crate::antigravity::ANTIGRAVITY, &fixture).await;
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    assert!(
+        run.events
+            .iter()
+            .any(|e| e["type"] == "turn.terminal" && e["status"] == "completed")
     );
 }

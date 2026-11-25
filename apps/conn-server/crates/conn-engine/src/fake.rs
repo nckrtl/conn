@@ -96,6 +96,7 @@ pub struct FakeProvider {
     pub injected: Arc<Mutex<Vec<(String, Value)>>>,
     /// Sessions take injected history, as Codex's `thread/inject_items`.
     injects: bool,
+    lose_injection_reply: Arc<AtomicBool>,
     /// Provider threads made per app thread (`ensure_thread`); the second and later get a
     /// numbered id, as a real provider gives each new conversation its own.
     ensured: Arc<Mutex<std::collections::HashMap<String, usize>>>,
@@ -168,6 +169,7 @@ impl FakeProvider {
             prompts: Arc::default(),
             injected: Arc::default(),
             injects: false,
+            lose_injection_reply: Arc::default(),
             ensured: Arc::default(),
             fail_rollbacks: Arc::new(AtomicUsize::new(0)),
             fail_fork: false,
@@ -262,6 +264,12 @@ impl FakeProvider {
 
     /// A provider whose sessions take context handoff history into the native thread, as
     /// Codex does (`injectHistory`).
+    #[cfg(test)]
+    pub(crate) fn losing_one_injection_reply(self) -> Self {
+        self.lose_injection_reply.store(true, Ordering::SeqCst);
+        self.with_history_injection()
+    }
+
     pub fn with_history_injection(mut self) -> Self {
         self.injects = true;
         self
@@ -343,6 +351,7 @@ struct FakeSession {
     prompts: Arc<Mutex<Vec<String>>>,
     injected: Arc<Mutex<Vec<(String, Value)>>>,
     injects: bool,
+    lose_injection_reply: Arc<AtomicBool>,
     ensured: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     fail_rollbacks: Arc<AtomicUsize>,
     fail_fork: bool,
@@ -492,6 +501,7 @@ impl Provider for FakeProvider {
                     prompts: self.prompts.clone(),
                     injected: self.injected.clone(),
                     injects: self.injects,
+                    lose_injection_reply: self.lose_injection_reply.clone(),
                     ensured: self.ensured.clone(),
                     fail_rollbacks: self.fail_rollbacks.clone(),
                     fail_fork: self.fail_fork,
@@ -692,6 +702,9 @@ impl Session for FakeSession {
         callback: String,
     ) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
+            if callback == "https://example.invalid/callback?code=accepted" {
+                return Ok(());
+            }
             Err(ProviderError::Failed {
                 operation: "fixture",
                 detail: callback,
@@ -714,6 +727,12 @@ impl Session for FakeSession {
                     .unwrap_or("-")
                     .to_owned();
             crate::lock(&self.injected).push((native, input.items));
+            if self.lose_injection_reply.swap(false, Ordering::SeqCst) {
+                return Err(ProviderError::Failed {
+                    operation: "inject_history",
+                    detail: "Lost reply after native acceptance.".into(),
+                });
+            }
             Ok(true)
         })
     }
@@ -1152,14 +1171,14 @@ impl Session for FakeSession {
                         }})));
                     started.push(terminal(&turn, TurnStatus::Completed, None));
                 }
-                "reject-encrypted-history" | "reject-encrypted-history-with-work" => {
+                "reject-encrypted-history" | "reject-encrypted-history-with-work" | "reject-thinking-signature" | "reject-thinking-signature-with-work" => {
                     if text.ends_with("-with-work") {
                         crate::lock(&self.roster).push(("pending-shell".into(), false));
                         started.push(self.roster_update(conn_contract::to_json(&input.provider_thread)));
                     }
                     started.push(terminal(&turn, TurnStatus::Failed, Some(json!({
                         "class":"provider_error", "message":"The native history was rejected.",
-                        "code":"invalid_encrypted_content", "retryable":false
+                        "code":if text.starts_with("reject-thinking") { "INVALID_THINKING_SIGNATURE" } else { "invalid_encrypted_content" }, "retryable":false
                     }))));
                 }
                 "fail-usage-limit" => started.push(terminal(
@@ -1281,6 +1300,12 @@ impl Session for FakeSession {
                 "stop background {}",
                 input.provider_turn_id.as_str()
             ));
+            emit(
+                &self.events(),
+                vec![event(json!({"type":"background_work.updated",
+                "providerTurnId":input.provider_turn_id,"pending":false}))],
+            )
+            .await;
             Ok(())
         })
     }

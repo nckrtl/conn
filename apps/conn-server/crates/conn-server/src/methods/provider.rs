@@ -1074,6 +1074,11 @@ mod tests {
                     .unwrap();
                 std::fs::remove_dir_all(dir).unwrap();
                 assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+                    "child test did not pass for {mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
                     output.status.success(),
                     "{mode}: {}",
                     String::from_utf8_lossy(&output.stderr)

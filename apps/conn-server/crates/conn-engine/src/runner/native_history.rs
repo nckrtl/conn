@@ -1,4 +1,4 @@
-//! A successful Codex resume can still point at encrypted history the provider rejects.
+//! A successful native resume can still point at saved content the provider cannot replay.
 //! Only the last accepted attempt on this native thread can trigger a fresh conversation.
 use crate::store::{StoreResult, Tx};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -10,9 +10,11 @@ pub(super) fn rejected(
     run: &Value,
     provider: &Value,
 ) -> StoreResult<bool> {
-    if provider["driver"] != "codex" {
-        return Ok(false);
-    }
+    let (code, name) = match provider["driver"].as_str() {
+        Some("codex") => ("invalid_encrypted_content", "Codex"),
+        Some("antigravity") => ("INVALID_THINKING_SIGNATURE", "Antigravity"),
+        _ => return Ok(false),
+    };
     let (Some(provider_id), Some(native), Some(ordinal)) = (
         provider["id"].as_str(),
         provider["nativeThreadRef"]["nativeId"].as_str(),
@@ -20,17 +22,13 @@ pub(super) fn rejected(
     ) else {
         return Ok(false);
     };
-    if !rejected_on(tx.sql(), thread, provider_id, native, ordinal)? {
+    if !rejected_on(tx.sql(), thread, provider_id, native, ordinal, code)? {
         return Ok(false);
     }
-    let shell = crate::shell::thread_shell(tx, thread)?;
-    if shell["pendingBackgroundTasks"]
-        .as_array()
-        .is_some_and(|tasks| !tasks.is_empty())
-    {
-        return Err(
-            "Stop the active background work before recovering the Codex conversation.".into(),
-        );
+    if crate::shell::has_native_background_work(tx, thread, provider)? {
+        return Err(format!(
+            "Stop the active background work before recovering the {name} conversation."
+        ));
     }
     Ok(true)
 }
@@ -41,6 +39,7 @@ fn rejected_on(
     provider: &str,
     native: &str,
     ordinal: u64,
+    expected_code: &str,
 ) -> StoreResult<bool> {
     let previous = db.query_row(
         "SELECT json_extract(r.body,'$.id'), json_extract(r.body,'$.rootNodeId'),
@@ -84,8 +83,9 @@ fn rejected_on(
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let code: Option<String> = row.get(0).map_err(|e| e.to_string())?;
         let message: Option<String> = row.get(1).map_err(|e| e.to_string())?;
-        if code.as_deref() == Some("invalid_encrypted_content")
-            || message.as_deref().is_some_and(rejected_message)
+        if code.as_deref() == Some(expected_code)
+            || (expected_code == "invalid_encrypted_content"
+                && message.as_deref().is_some_and(rejected_message))
         {
             return Ok(true);
         }
@@ -133,7 +133,9 @@ mod tests {
             )
             .unwrap();
         };
-        let rejected = |native: &str| rejected_on(&db, "t", "pt", native, 5).unwrap();
+        let rejected = |native: &str| {
+            rejected_on(&db, "t", "pt", native, 5, "invalid_encrypted_content").unwrap()
+        };
         put(
             "runs",
             "r1",

@@ -161,12 +161,19 @@ impl Inner {
             .ok_or_else(stopped)?;
         let thread: ProviderThread = from_json(row).map_err(|_| stopped())?;
         let session_id = thread.provider_session_id.as_ref().ok_or_else(stopped)?;
-        let live = crate::lock(&self.live)
-            .values()
-            .find(|live| live.session().provider_session_id().as_str() == session_id)
-            .cloned()
-            .ok_or_else(stopped)?;
         let begin = method == "provider.mcpSignIn.start";
+        let (live, token, was_pending) = {
+            let sessions = crate::lock(&self.live);
+            let live = sessions
+                .values()
+                .find(|live| live.session().provider_session_id().as_str() == session_id)
+                .cloned()
+                .ok_or_else(stopped)?;
+            let now = self.clock.now_millis();
+            live.touch(now);
+            let (token, pending) = live.hold_mcp_sign_in(server, begin, now);
+            (live, token, pending)
+        };
         let safe_error = |e: ProviderError| match e {
             ProviderError::Unsupported { .. } => {
                 error("This agent can't sign MCP servers in from Conn.")
@@ -179,18 +186,25 @@ impl Inner {
         };
         let time = || conn_support::time::iso_from_ms(self.clock.now_millis());
         if begin {
-            let url = live
+            let result = live
                 .session()
                 .start_mcp_sign_in(thread, server.to_owned())
-                .await
-                .map_err(safe_error)?;
+                .await;
+            if !matches!(result, Ok(Some(_))) {
+                live.release_mcp_sign_in(server, &token);
+            }
+            let url = result.map_err(safe_error)?;
             Ok(json!({"signedInAt":url.is_none().then(time),"authorizationUrl":url}))
         } else {
             let callback = input["callbackUrl"].as_str().unwrap_or_default().to_owned();
-            live.session()
+            let result = live
+                .session()
                 .complete_mcp_sign_in(thread, server.to_owned(), callback)
-                .await
-                .map_err(safe_error)?;
+                .await;
+            if result.is_ok() || !was_pending {
+                live.release_mcp_sign_in(server, &token);
+            }
+            result.map_err(safe_error)?;
             Ok(json!({"signedInAt":time()}))
         }
     }

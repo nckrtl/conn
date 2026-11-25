@@ -522,14 +522,11 @@ pub fn acp_mcp_call(args: &[String]) -> i32 {
     match result {
         Ok(envelope) => {
             let mut result = envelope["result"].clone();
-            if let Some(structured) = result.get("structuredContent").cloned()
+            if let Some(structured) = result.get("structuredContent").map(Value::to_string)
                 && let Some(parts) = result["content"].as_array_mut()
             {
                 parts.retain(|part| {
-                    part["type"] != "text"
-                        || !part["text"]
-                            .as_str()
-                            .is_some_and(|text| text == structured.to_string())
+                    part["type"] != "text" || part["text"].as_str() != Some(structured.as_str())
                 });
             }
             println!("{result}");

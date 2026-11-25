@@ -2406,6 +2406,16 @@ fn thread_stop(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let command_id = command["commandId"].as_str().map(str::to_owned);
     let c: ThreadStop = decode(command)?;
     let mut thread = live_thread(tx, &c.thread_id)?;
+    if let Some(recovery) = crate::limit_recovery::disarmed(tx, &thread, &json!(command_id), false)?
+    {
+        thread["limitRecovery"] = recovery;
+        thread["updatedAt"] = tx.now().into();
+        tx.append(
+            Draft::new(&c.thread_id, "thread.metadata-updated", thread.clone())
+                .command(command_id.as_deref())
+                .payload_instance(),
+        )?;
+    }
     crate::link_requests::close_pending(tx, &c.thread_id)?;
     // Stop means stop: queued messages wait until the user sends again or resumes the queue.
     hold_queue(tx, &c.thread_id)?;
@@ -3509,6 +3519,19 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
             let previous = &old["limitRecovery"];
             let same =
                 previous["runId"] == update["runId"] && previous["resetAt"] == update["resetAt"];
+            let auto_arm = command["connAutomaticLimitArm"] == true;
+            if auto_arm
+                && (same || old["settledOverride"] == "settled" || !old["archivedAt"].is_null())
+            {
+                return Ok(vec![]);
+            }
+            let stopped = auto_arm
+                && interrupt_request(
+                    tx,
+                    &c.thread_id,
+                    update["runId"].as_str().unwrap_or_default(),
+                )?
+                .is_some();
             let setting = |key: &str| {
                 update[key]
                     .as_bool()
@@ -3516,7 +3539,7 @@ fn thread_metadata_update(tx: &mut Tx<'_>, mut command: Value) -> Outcome {
                     .unwrap_or(false)
             };
             Some(
-                json!({"requestId":c.command_id,"runId":update["runId"],"resetAt":update["resetAt"],"autoResume":setting("autoResume"),"snooze":setting("snooze")}),
+                json!({"requestId":c.command_id,"runId":update["runId"],"resetAt":update["resetAt"],"autoResume":!stopped && setting("autoResume"),"snooze":!stopped && setting("snooze")}),
             )
         }
     };
@@ -4113,6 +4136,7 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }
     let settled_at = command["settledAt"].clone();
     let current = live_thread(tx, &thread_id)?;
+    let disabled = crate::limit_recovery::disarmed(tx, &current, &command["commandId"], true)?;
     let again = current["settledOverride"] == "settled"
         && !is_null(&current, "settledAt")
         && is_null(&current, "pinnedAt");
@@ -4121,6 +4145,9 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
             t["settledOverride"] == "settled" && !is_null(t, "settledAt") && is_null(t, "pinnedAt");
         let snoozed = !is_null(t, "snoozedUntil") || !is_null(t, "snoozedAt");
         t["settledOverride"] = json!("settled");
+        if let Some(recovery) = disabled {
+            t["limitRecovery"] = recovery;
+        }
         crate::pull_requests::end_watches(t);
         if !already {
             t["settledAt"] = if settled_at.is_string() {

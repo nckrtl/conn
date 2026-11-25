@@ -31,7 +31,7 @@ pub(crate) fn command(row: &Value, now: i64, auto: bool, snooze: bool) -> Option
             return None;
         }
         return Some(
-            json!({"type":"thread.metadata.update","commandId":format!("limit-arm:{identity}"),"threadId":id,
+            json!({"type":"thread.metadata.update","commandId":format!("limit-arm:{identity}"),"threadId":id,"connAutomaticLimitArm":true,
             "limitRecovery":{"runId":run,"resetAt":row["usageLimitResetAt"],"autoResume":auto,"snooze":snooze && reset>now}}),
         );
     }
@@ -51,6 +51,38 @@ pub(crate) fn command(row: &Value, now: i64, auto: bool, snooze: bool) -> Option
         message["usageLimitRecoveryRequestId"] = request.clone();
     }
     Some(message)
+}
+
+/// Record an explicit Stop or settlement even if the sweep has not armed this failure yet.
+pub(crate) fn disarmed(
+    tx: &crate::store::Tx<'_>,
+    thread: &Value,
+    request: &Value,
+    settle: bool,
+) -> crate::store::StoreResult<Option<Value>> {
+    let id = thread["id"].as_str().unwrap_or_default();
+    let previous = &thread["limitRecovery"];
+    let mut next = previous.clone();
+    let latest = crate::commands::latest_executed_run(tx, id)?;
+    if let Some(ref run) = latest
+        && let Some(failure) = crate::shell::latest_root_failure(tx, id, Some(run))?
+        && failure["class"] == "usage_limit"
+        && millis(&failure, "resetAt").is_some()
+        && (previous["runId"] != run["id"] || previous["resetAt"] != failure["resetAt"])
+    {
+        next = json!({"runId":run["id"],"resetAt":failure["resetAt"],"autoResume":false,"snooze":false});
+    }
+    if !next.is_object()
+        || (&next == previous && next["autoResume"] != true && (!settle || next["snooze"] != true))
+    {
+        return Ok(None);
+    }
+    next["autoResume"] = false.into();
+    if settle {
+        next["snooze"] = false.into();
+    }
+    next["requestId"] = request.clone();
+    Ok(Some(next))
 }
 
 pub(crate) fn start(inner: &Arc<Inner>, wake: Arc<tokio::sync::Notify>) {
@@ -84,7 +116,8 @@ pub(crate) fn start(inner: &Arc<Inner>, wake: Arc<tokio::sync::Notify>) {
                     if let Some(cmd) = command(row, now, auto, snooze) {
                         let _ = inner.dispatch_value(cmd).await;
                     }
-                    if let Some(at) = millis(row, "usageLimitResetAt").filter(|t| *t > now) {
+                    let due = millis(row, "usageLimitResetAt").max(millis(row, "snoozedUntil"));
+                    if let Some(at) = due.filter(|t| *t > now) {
                         delay = delay.min(Duration::from_millis(at.abs_diff(now)));
                     }
                 }

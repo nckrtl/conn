@@ -257,50 +257,89 @@ fn items_of(
     Ok(items)
 }
 
-/// `readInheritedHandoffItems`: the history a run fork shows from its ancestors, oldest
-/// first; each ancestor's visible items through the fork run. Side chats inherit none.
+/// T3's readOwnHistoryItems. Only the history visible at the fork and after the last
+/// interactive context reset can reach the child.
+fn fork_history_segment(
+    tx: &Tx<'_>,
+    source: &Value,
+    fork: &Value,
+    source_runs: &[Value],
+    through: u64,
+) -> StoreResult<(Vec<Value>, bool)> {
+    let source_id = source["id"].as_str().unwrap_or_default();
+    let frozen = if fork["lineage"]["sideChat"] == true {
+        None
+    } else {
+        Some(tx.fork_run_ids(fork, source_id, through)?)
+    };
+    let mut runs: Vec<_> = source_runs
+        .iter()
+        .filter(|r| {
+            ordinal(r) <= through
+                && frozen
+                    .as_ref()
+                    .is_none_or(|ids| r["id"].as_str().is_some_and(|id| ids.contains(id)))
+        })
+        .cloned()
+        .collect();
+    for run in &mut runs {
+        if frozen.is_some() && run["status"] == "rolled_back" {
+            run["status"] = if run["startedAt"].is_null() {
+                "cancelled"
+            } else {
+                "completed"
+            }
+            .into();
+        }
+    }
+    let ids = runs.iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
+    let mut items = items_of(tx, source_id, &ids, source["historyOrigin"] == "v1_import")?;
+    let boundary = crate::fresh::boundary(&runs, &items);
+    if boundary > 0 {
+        let kept: std::collections::HashSet<_> = runs
+            .iter()
+            .filter(|r| ordinal(r) >= boundary)
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        items.retain(|item| item["runId"].as_str().is_some_and(|id| kept.contains(id)));
+    }
+    let attempts = tx.entities(source_id, "attempts")?;
+    let visible = crate::visibility::visible_items(&runs, &attempts, &items);
+    Ok((
+        visible.into_iter().map(|at| items[at].clone()).collect(),
+        boundary > 0,
+    ))
+}
+
+/// The history a run fork shows from its ancestors, oldest first.
 fn inherited_items(tx: &Tx<'_>, thread: &Value) -> StoreResult<Vec<Value>> {
-    let mut segments: Vec<Vec<Value>> = Vec::new();
-    let mut seen = vec![thread["id"].clone()];
+    let mut segments = Vec::new();
+    let mut seen = std::collections::HashSet::from([thread["id"].clone()]);
     let mut current = thread.clone();
     while segments.len() < MAX_FORK_ANCESTORS
         && current["forkedFrom"]["type"] == "run"
         && current["lineage"]["sideChat"] != true
-        && !seen.contains(&current["forkedFrom"]["threadId"])
+        && seen.insert(current["forkedFrom"]["threadId"].clone())
     {
         let source_id = current["forkedFrom"]["threadId"]
             .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        seen.push(json!(source_id));
-        let Some(source) = tx.thread(&source_id)? else {
+            .unwrap_or_default();
+        let Some(source) = tx.thread(source_id)? else {
             break;
         };
-        let runs = tx.entities(&source_id, "runs")?;
+        let runs = tx.entities(source_id, "runs")?;
         let Some(fork_run) = runs
             .iter()
             .find(|r| r["id"] == current["forkedFrom"]["runId"])
         else {
             break;
         };
-        let through: Vec<Value> = runs
-            .iter()
-            .filter(|r| ordinal(r) <= ordinal(fork_run))
-            .map(|r| r["id"].clone())
-            .collect();
-        let items = items_of(
-            tx,
-            &source_id,
-            &through,
-            source["historyOrigin"] == "v1_import",
-        )?;
-        let attempts = tx.entities(&source_id, "attempts")?;
-        segments.push(
-            crate::visibility::visible_items(&runs, &attempts, &items)
-                .into_iter()
-                .filter_map(|at| items.get(at).cloned())
-                .collect(),
-        );
+        let (items, cleared) =
+            fork_history_segment(tx, &source, &current, &runs, ordinal(fork_run))?;
+        segments.push(items);
+        if cleared {
+            break;
+        }
         current = source;
     }
     Ok(segments.into_iter().rev().flatten().collect())
@@ -559,36 +598,15 @@ pub(crate) fn prepare_fork(
     let items = if early {
         Vec::new()
     } else if side {
-        let through: Vec<_> = runs
-            .iter()
-            .filter(|r| ordinal(r) <= fork_ordinal)
-            .cloned()
-            .collect();
-        let ids = through.iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
-        let source = tx.thread(source_id)?.unwrap_or_default();
-        let own = items_of(tx, source_id, &ids, source["historyOrigin"] == "v1_import")?;
-        let boundary = crate::fresh::boundary(&through, &own);
-        let bounded_ids = through
-            .iter()
-            .filter(|r| ordinal(r) >= boundary)
-            .map(|r| &r["id"])
-            .collect::<std::collections::HashSet<_>>();
-        let mut items = if boundary == 0 {
-            inherited_items(tx, &source)?
+        let source = tx.thread(source_id)?.ok_or("Fork parent disappeared")?;
+        let (mut own, cleared) = fork_history_segment(tx, &source, thread, &runs, fork_ordinal)?;
+        if cleared {
+            own
         } else {
-            vec![]
-        };
-        let attempts = tx.entities(source_id, "attempts")?;
-        items.extend(
-            crate::visibility::visible_items(&through, &attempts, &own)
-                .into_iter()
-                .filter_map(|i| own.get(i))
-                .filter(|i| {
-                    bounded_ids.contains(&i["runId"]) || (boundary == 0 && i["runId"].is_null())
-                })
-                .cloned(),
-        );
-        items
+            let mut history = inherited_items(tx, &source)?;
+            history.append(&mut own);
+            history
+        }
     } else {
         inherited_items(tx, thread)?
     };

@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 CREATE INDEX IF NOT EXISTS threads_usage_limited ON threads(id)
 WHERE deleted=0 AND json_extract(shell,'$.status')='failed' AND json_extract(shell,'$.lastErrorClass')='usage_limit';
+CREATE TABLE IF NOT EXISTS fork_history (
+  fork_id TEXT PRIMARY KEY,
+  run_ids TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS entities (
   thread_id TEXT NOT NULL,
   kind      TEXT NOT NULL,
@@ -2469,6 +2473,50 @@ impl Tx<'_> {
                 |row| row.get::<_, bool>(0),
             )
             .map_err(err)
+    }
+
+    /// Freeze membership at fork creation. A later rollback in the parent must not change it.
+    pub(crate) fn snapshot_fork_runs(
+        &self,
+        fork: &str,
+        source: &str,
+        through: u64,
+    ) -> StoreResult<()> {
+        self.tx
+            .execute(
+                "INSERT OR REPLACE INTO fork_history(fork_id, run_ids)
+             SELECT ?1, json_group_array(id) FROM entities WHERE thread_id = ?2 AND kind = 'runs'
+             AND ordinal <= ?3 AND json_extract(body, '$.status') != 'rolled_back'",
+                params![fork, source, through],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Older and imported forks use the rollback timestamp, as in T3's getForkSourceRunIds.
+    pub(crate) fn fork_run_ids(
+        &self,
+        fork: &Value,
+        source: &str,
+        through: u64,
+    ) -> StoreResult<std::collections::HashSet<String>> {
+        let encoded: String = self
+            .tx
+            .query_row(
+                "SELECT COALESCE((SELECT run_ids FROM fork_history WHERE fork_id = ?1),
+               (SELECT json_group_array(id) FROM entities WHERE thread_id = ?2 AND kind = 'runs'
+               AND ordinal <= ?3 AND NOT COALESCE(json_extract(body, '$.status') = 'rolled_back'
+                 AND julianday(json_extract(body, '$.completedAt')) < julianday(?4), 0)))",
+                params![
+                    fork["id"].as_str(),
+                    source,
+                    through,
+                    fork["createdAt"].as_str()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        serde_json::from_str(&encoded).map_err(|e| format!("invalid fork run IDs: {e}"))
     }
 
     pub(crate) fn entity(

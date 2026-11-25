@@ -5,7 +5,7 @@
 //! running assistant node is never stored, and a streaming message or turn item is stored only
 //! at a Markdown boundary or after it was idle. What is stored stays in the log.
 
-mod codex_history;
+mod native_history;
 
 use std::{
     sync::{Arc, Mutex, atomic::Ordering},
@@ -86,6 +86,8 @@ struct LiveState {
     /// Provider turns whose work goes on after their terminal (`background_work.updated`).
     /// Bounded by [`MAX_BACKGROUND_TURNS`].
     background_turns: std::collections::HashSet<String>,
+    /// Per-server identity and expiry for an MCP browser sign-in on this native session.
+    mcp_sign_ins: std::collections::HashMap<String, (Arc<()>, u64)>,
     /// `responseStreamingMode` of the run's project, read at each turn start, as T3's
     /// `RunExecutionService` reads it per run.
     streaming_mode: crate::ResponseStreamingMode,
@@ -109,6 +111,32 @@ struct ActiveRun {
 impl LiveThread {
     pub(crate) fn touch(&self, now: u64) {
         *lock(&self.last_used) = now;
+    }
+
+    /// Reserve the callback window while the session is still in the live registry.
+    pub(crate) fn hold_mcp_sign_in(&self, server: &str, begin: bool, now: u64) -> (Arc<()>, bool) {
+        let mut state = lock(&self.state);
+        state.mcp_sign_ins.retain(|_, (_, until)| *until > now);
+        if !begin && let Some((token, _)) = state.mcp_sign_ins.get(server) {
+            return (token.clone(), true);
+        }
+        let token = Arc::new(());
+        state.mcp_sign_ins.insert(
+            server.to_owned(),
+            (token.clone(), now.saturating_add(600_000)),
+        );
+        (token, false)
+    }
+
+    pub(crate) fn release_mcp_sign_in(&self, server: &str, token: &Arc<()>) {
+        let mut state = lock(&self.state);
+        if state
+            .mcp_sign_ins
+            .get(server)
+            .is_some_and(|(current, _)| Arc::ptr_eq(current, token))
+        {
+            state.mcp_sign_ins.remove(server);
+        }
     }
 
     pub(crate) fn session(&self) -> &Arc<dyn Session> {
@@ -136,7 +164,11 @@ impl LiveThread {
             return false;
         };
         let elapsed = |since: u64| Duration::from_millis(now.saturating_sub(since));
-        if lock(&self.state).active.is_some() || elapsed(*lock(&self.last_used)) < idle {
+        let state = lock(&self.state);
+        let has_sign_in = state.mcp_sign_ins.values().any(|(_, until)| *until > now);
+        let active = state.active.is_some();
+        drop(state);
+        if active || has_sign_in || elapsed(*lock(&self.last_used)) < idle {
             return false;
         }
         let mut held = lock(&self.held_since);
@@ -755,10 +787,23 @@ impl Inner {
                             })
                         }
                     };
+                    let all_handoffs = tx.entities(&tid, "contextHandoffs")?;
+                    let uncertain_for = |handoff: &Value, pt: &Value| {
+                        handoff["toProviderThreadId"] == pt["id"]
+                            && handoff["delivery"]["status"] == "pending"
+                            && pt["nativeThreadRef"]["nativeId"].is_string()
+                            && handoff["delivery"]["nativeThreadId"] == pt["nativeThreadRef"]["nativeId"]
+                    };
                     let recover_history =
                         if let Some(pt) = provider_thread.as_ref().filter(|_| !fresh) {
-                            pt["nativeMetadata"]["connRestoreKeptHistory"] == true
-                                || codex_history::rejected(&tx, &tid, &run, pt)?
+                            let replace = pt["nativeMetadata"]["connRestoreKeptHistory"] == true
+                                || all_handoffs.iter().any(|h| uncertain_for(h, pt));
+                            if replace && crate::shell::has_native_background_work(&tx, &tid, pt)? {
+                                return Err(
+                                    "Stop the active background work before recovering the conversation.".into()
+                                );
+                            }
+                            replace || native_history::rejected(&tx, &tid, &run, pt)?
                         } else {
                             false
                         };
@@ -767,22 +812,21 @@ impl Inner {
                         None if fresh => None,
                         None => crate::fork::native_fork_input(&tx, &tid)?,
                     };
-                    let all_handoffs = tx.entities(&tid, "contextHandoffs")?;
                     let mut handoffs = all_handoffs.clone();
-                    // The run's turn delivers these; a compaction or goal turn none.
-                    let ready = if crate::merge_back::defers_history(&message) {
-                        vec![]
-                    } else {
-                        crate::merge_back::pending_for_run(
-                            &all_handoffs,
-                            &tx.entities(&tid, "runs")?,
-                            &tx.entities(&tid, "messages")?,
-                            &run,
-                        )
-                    };
+                    let mut ready = crate::merge_back::pending_for_run(
+                        &all_handoffs, &tx.entities(&tid,"runs")?,
+                        &tx.entities(&tid,"messages")?, &run
+                    );
+                    if recover_history && let Some(pt) = provider_thread.as_ref() {
+                        for pending in all_handoffs.iter().filter(|h| uncertain_for(h, pt)) {
+                            if !ready.iter().any(|h| h["id"] == pending["id"]) {
+                                ready.push(pending.clone());
+                            }
+                        }
+                    }
                     let side_note = if thread["lineage"]["sideChat"] == true
                         && !fresh
-                        && !crate::merge_back::defers_history(&message)
+                        && !crate::merge_back::defers_inline(&message)
                     {
                         let runs = tx.entities(&tid, "runs")?;
                         let boundary = crate::fresh::boundary(
@@ -863,6 +907,11 @@ impl Inner {
         let instance = context.run["providerInstanceId"]
             .as_str()
             .unwrap_or_default();
+        let replaced_native = context
+            .provider_thread
+            .as_ref()
+            .filter(|_| context.recover_history)
+            .and_then(native_thread_id);
         if context.recover_history {
             if self
                 .live_thread(thread_id)
@@ -895,7 +944,23 @@ impl Inner {
                     Ok(handoff)
                 })
                 .await?;
-            context.ready.push(handoff);
+            // Preserve external fork/merge history and rank it the way T3's withRecoveryHandoff
+            // does: old transfers first, replacement history next, current-run transfers last.
+            context.ready.sort_by_key(|h| h["targetRunId"] == run_id);
+            let before_current = context
+                .ready
+                .iter()
+                .position(|h| h["targetRunId"] == run_id)
+                .unwrap_or(context.ready.len());
+            context.ready.insert(before_current, handoff);
+            if let Some(previous) = &context.provider_thread {
+                for h in &mut context.ready {
+                    if h["toProviderThreadId"] == previous["id"] {
+                        h["toProviderThreadId"] =
+                            json!(crate::merge_back::provisional_provider_thread(run_id));
+                    }
+                }
+            }
             context.provider_thread = None;
         }
         // A live session of another instance closes; the run opens one on its own instance.
@@ -1091,6 +1156,12 @@ impl Inner {
             .to_owned();
         let attempt_id = format!("{run_id}:attempt:1");
         let mut provider_thread_json = to_json(&provider_thread);
+        if replaced_native.is_some() && native_thread_id(&provider_thread_json) == replaced_native {
+            self.close_session(thread_id).await;
+            return Err(StartError::Failed(
+                "The provider returned the previous native thread during context recovery.".into(),
+            ));
+        }
         if provider_thread_json.is_object() {
             provider_thread_json["providerInstanceId"] = json!(instance);
             // `runningProviderThread` in T3's `ProviderTurnStartService`.
@@ -1135,6 +1206,17 @@ impl Inner {
             attempt_id.clone(),
             root.clone(),
         );
+        // Save the destination along with the replacement provider thread. A crash between
+        // this transaction and delivery must leave the fork/merge source eligible for replay.
+        let mut rebound = Vec::new();
+        if context.recover_history {
+            for handoff in &mut context.ready {
+                if crate::merge_back::is_provisional(&handoff["toProviderThreadId"]) {
+                    handoff["toProviderThreadId"] = provider_thread_json["id"].clone();
+                    rebound.push(handoff.clone());
+                }
+            }
+        }
         let fork_transfer = context.fork.as_ref().map(|f| f.transfer.clone());
         // The running row, for the handoff delivery after the write below takes its copy.
         let running_json = provider_thread_json.clone();
@@ -1158,6 +1240,10 @@ impl Inner {
                         .run(Some(&rid))
                         .node(Some(&root_id))
                 };
+                for mut handoff in rebound {
+                    handoff["updatedAt"] = json!(now);
+                    tx.append(draft("context-handoff.updated", handoff))?;
+                }
                 let mut stored_row = None;
                 // `providerTurnOrdinal`: after every turn already on the provider thread, as a
                 // goal run Codex continued holds more turns than runs.
@@ -1408,7 +1494,9 @@ impl Inner {
         run_id: &str,
         user_text: &str,
     ) -> Result<Option<crate::handoff::Delivery>, StartError> {
-        if ready.is_empty() {
+        let defer_inline = crate::merge_back::defers_inline(message);
+        let injects = live.session.injects_history();
+        if ready.is_empty() || (defer_inline && !injects) {
             return Ok(None);
         }
         // A handoff made before its run had a provider thread now names the run's.
@@ -1451,7 +1539,6 @@ impl Inner {
             0,
             None,
         );
-        let injects = live.session.injects_history();
         let plan = crate::handoff::plan_delivery(
             &ready,
             native.as_deref(),
@@ -1493,6 +1580,16 @@ impl Inner {
                 })?;
                 return Ok(None);
             }
+        }
+        if defer_inline {
+            // Native injection declined. Undo our pending marker so this ready
+            // handoff moves to the next ordinary prompt, even after a restart.
+            self.persist_handoffs(thread_id, run_id, plan.handoffs)
+                .await
+                .map_err(|e| {
+                    StartError::Failed(format!("Could not defer the context handoff: {e}"))
+                })?;
+            return Ok(None);
         }
         Ok(Some(plan))
     }

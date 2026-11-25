@@ -1849,7 +1849,7 @@ async fn reopening_keeps_the_inline_attachment_budget() {
     j["nativeMetadata"] = json!({"claudeAttachmentBudget":{"bytesUsed":crate::attachments::BUDGET_BYTES,"pagesUsed":0}});
     let thread = from_json(j).unwrap();
     let png = b"synthetic image";
-    std::fs::write(dir.0.join("x1.png"), &png).unwrap();
+    std::fs::write(dir.0.join("x1.png"), png).unwrap();
     let mut input = turn(2, &thread, "look", "full-access", &dir.cwd());
     input.message.attachments=vec![from_json(json!({"id":"x1","type":"image","name":"x1.png","mimeType":"image/png","sizeBytes":png.len()})).unwrap()];
     session.start_turn(input).await.unwrap();
@@ -1890,6 +1890,44 @@ async fn an_unanswered_request_and_an_unrecovered_retry_end_their_turn() {
         session.close().await;
         helper.stop_if_idle().await;
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_forked_skill_can_run_past_the_unanswered_request_budget() {
+    use serde_json::json;
+    let dir = Scratch::new("forked-skill-watch");
+    let (helper, log) = fake_host(&dir.0, true);
+    let (session, mut events) = session(&helper);
+    let budget = Duration::from_millis(100);
+    let session = session.with_retry_budget(budget);
+    let cwd = dir.cwd();
+    let thread = new_thread(&session, "full-access", &cwd).await;
+    // The CLI reports requesting and then starts the skill in the same input batch.
+    std::fs::write(format!("{}.frames", log.display()),json!([{
+        "type":"system","subtype":"task_started","task_id":"forked-skill","description":"Forked skill",
+        "tool_use_id":"tool-skill","task_type":"local_agent","prompt":"work"
+    }]).to_string()).unwrap();
+    session
+        .start_turn(turn(1, &thread, "request-silence", "full-access", &cwd))
+        .await
+        .unwrap();
+    let seen = until(&mut events, |e| {
+        e["type"] == "subagent.updated" || is_terminal(e)
+    })
+    .await;
+    assert_eq!(
+        seen.last().unwrap()["type"],
+        "subagent.updated",
+        "the skill was accepted"
+    );
+    assert!(
+        tokio::time::timeout(budget * 2, until(&mut events, is_terminal))
+            .await
+            .is_err(),
+        "a healthy skill was failed as silence"
+    );
+    session.close().await;
+    helper.stop_if_idle().await;
 }
 
 #[tokio::test(flavor = "current_thread")]

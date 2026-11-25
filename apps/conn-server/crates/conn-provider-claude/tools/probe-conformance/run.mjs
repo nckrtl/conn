@@ -345,8 +345,6 @@ try {
       env: { ...sealedNodeEnv(work), HOME: home },
     },
   );
-} catch {
-  // A failed T3 run leaves entries missing; the comparison reports them.
 } finally {
   cleanup();
 }
@@ -364,7 +362,7 @@ NodeFS.writeFileSync(
 const binary = exampleBinary("conn-provider-claude", "claude_probe");
 // The example runs with a known environment, so its SDK host's is known too.
 const rustParent = { ...BASE_ENV };
-NodeChildProcess.spawnSync(binary, [planFile, rustOut], {
+NodeChildProcess.execFileSync(binary, [planFile, rustOut], {
   cwd: repoRoot,
   env: rustParent,
   stdio: ["ignore", "inherit", "inherit"],
@@ -402,6 +400,9 @@ const runs = (scenario, side, parent) => {
   const dir = NodePath.join(scenario.dir, side, "records");
   if (!NodeFS.existsSync(dir)) return [];
   return NodeFS.readdirSync(dir)
+    // The fixture replaces each numbered record atomically. Its in-progress .tmp
+    // file may still be present after a kill or while the last signal is recorded.
+    .filter((name) => /^\d+\.json$/.test(name))
     .toSorted()
     .map((f) => readJson(NodePath.join(dir, f)))
     .map((r) => scrub({ argv: r.argv, env: r.env, cwd: r.cwd, stdin: r.stdin, signals: r.signals, guide: r.guide }, scenario, side));

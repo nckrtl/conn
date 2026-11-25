@@ -11,8 +11,10 @@ use std::time::Duration;
 use crate::a11y::ConnA11yExt as _;
 use crate::runtime_warmup;
 use conn_client::Connection;
+#[cfg(not(test))]
+use conn_desktop::vault::VaultClient;
 use conn_desktop::vault::{
-    VaultClient, VaultLoginField, VaultLoginFillLookup, VaultLoginItem, VaultLoginsStatus,
+    VaultLoginField, VaultLoginFillLookup, VaultLoginItem, VaultLoginsResponse, VaultLoginsStatus,
     https_origin,
 };
 use conn_state::AnnotationRecord;
@@ -40,6 +42,9 @@ use super::annotations::{
     QueuePopoverCallbacks, render_queue_popover,
 };
 use super::browser_context_menu::{MenuActions, OpenMenu, render_context_menu};
+use super::browser_inline_logins::{
+    self as inline, InlineEvent, InlineLogins, KeyOutcome, PickerActions, RowAction,
+};
 use super::chrome::{self, ConnTooltipExt as _};
 use super::color::to_hsla;
 use super::header::superhero_icon;
@@ -97,9 +102,15 @@ enum OverlayBridgeMessage {
         #[serde(default)]
         error: Option<String>,
     },
+    /// The focused sign-in field's kind and rectangle, never a value.
+    CredentialInline {
+        #[serde(default)]
+        event: serde_json::Value,
+    },
 }
 
 enum BrowserOverlayEvent {
+    CredentialInline(InlineEvent),
     Rpc {
         request_id: String,
         op: String,
@@ -195,6 +206,8 @@ pub(crate) struct BrowserPanel {
     annotations: AnnotationUiState,
     /// Vault login autofill popover state for HTTPS pages.
     vault_logins: VaultLoginUiState,
+    /// The picker under a focused sign-in field of an HTTPS page.
+    inline_logins: InlineLogins,
     /// The Laravel debug bar under the page (`x-toolbar` headers and `__LARAVEL_TOOLBAR_DATA__`).
     laravel_toolbar: Entity<LaravelToolbar>,
     /// The toolbar's overflow menu (`PreviewMoreMenu`) is open.
@@ -228,6 +241,9 @@ pub(crate) struct BrowserPanel {
     bridge_injections: Cell<usize>,
     #[cfg(test)]
     overlay_injections: Cell<usize>,
+    /// Fields the Vault fill path put into the page, in order.
+    #[cfg(test)]
+    filled: RefCell<Vec<VaultLoginField>>,
 }
 
 impl EventEmitter<AnnotationAction> for BrowserPanel {}
@@ -321,6 +337,7 @@ impl BrowserPanel {
             preview_seq: 0,
             annotations,
             vault_logins: VaultLoginUiState::default(),
+            inline_logins: InlineLogins::default(),
             laravel_toolbar,
             more_menu_open: false,
             polling_runtime: false,
@@ -341,6 +358,8 @@ impl BrowserPanel {
             bridge_injections: Cell::new(0),
             #[cfg(test)]
             overlay_injections: Cell::new(0),
+            #[cfg(test)]
+            filled: RefCell::new(Vec::new()),
         }
         .with_reported_title()
     }
@@ -370,6 +389,41 @@ impl BrowserPanel {
     #[cfg(test)]
     pub(crate) fn visible_for_test(&self) -> bool {
         self.visible.get()
+    }
+
+    /// Feeds the page's watcher message (the JSON `credentialInline` carries) as the console
+    /// bridge would after parsing. Malformed ones are dropped, as there.
+    #[cfg(test)]
+    pub(crate) fn inline_event_for_test(
+        &mut self,
+        event: &serde_json::Value,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(event) = inline::parse_inline_event(event) {
+            self.on_inline_event(event, cx);
+        }
+    }
+
+    /// A plain key press; `true` when the picker took it.
+    #[cfg(test)]
+    pub(crate) fn inline_key_for_test(&mut self, key: &str, cx: &mut Context<'_, Self>) -> bool {
+        self.handle_inline_key(key, cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline_shown_for_test(&self) -> bool {
+        self.inline_logins.shown()
+    }
+
+    /// The picker's rows as their accessible labels.
+    #[cfg(test)]
+    pub(crate) fn inline_labels_for_test(&self) -> Vec<String> {
+        self.inline_logins.labels()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filled_for_test(&self) -> Vec<VaultLoginField> {
+        self.filled.borrow().clone()
     }
 
     #[cfg(test)]
@@ -551,6 +605,8 @@ impl BrowserPanel {
     /// A page started loading. The debug bar's host script goes in now only if it shows, as
     /// the bridge does on load end.
     fn on_load_start(&mut self, cx: &mut Context<'_, Self>) {
+        // A new document has no focused field yet; its watcher reports one once the bridge is in.
+        self.inline_logins.reset();
         if self.visible.get() {
             self.inject_host_script();
         } else {
@@ -730,31 +786,79 @@ impl BrowserPanel {
         self.vault_logins.error = None;
         self.vault_logins.feedback = None;
         self.annotations.queue_open = false;
+        // One Vault card at a time: the picker under a field gives way to the toolbar's.
+        self.inline_logins.close();
         cx.notify();
 
-        let url = self.current_url();
-
-        let task = crate::live::RT
-            .spawn(async move { VaultClient::new().list_logins(&url, allow_unlock).await });
+        let task = Self::lookup_vault_logins(self.current_url(), allow_unlock);
         cx.spawn(async move |this, cx| {
-            let outcome = task.await;
+            let resp = Self::logins_or_error(task.await);
             let _ = this.update(cx, |panel, cx| {
                 panel.vault_logins.loading = false;
-                match outcome {
-                    Ok(resp) => {
-                        panel.vault_logins.status = Some(resp.status);
-                        panel.vault_logins.items = resp.items;
-                        panel.vault_logins.error = resp.error;
-                    }
-                    Err(err) => {
-                        panel.vault_logins.status = Some(VaultLoginsStatus::Error);
-                        panel.vault_logins.error = Some(err.to_string());
-                    }
-                }
+                panel.vault_logins.status = Some(resp.status);
+                panel.vault_logins.items = resp.items;
+                panel.vault_logins.error = resp.error;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Lists the Vault logins of `url` off the UI thread. The toolbar popover and the inline
+    /// picker both look up this way.
+    #[cfg(not(test))]
+    fn lookup_vault_logins(
+        url: String,
+        allow_unlock: bool,
+    ) -> tokio::task::JoinHandle<VaultLoginsResponse> {
+        crate::live::RT
+            .spawn(async move { VaultClient::new().list_logins(&url, allow_unlock).await })
+    }
+
+    /// Tests never reach the real Vault: canned answers by host.
+    #[cfg(test)]
+    fn lookup_vault_logins(
+        url: String,
+        allow_unlock: bool,
+    ) -> tokio::task::JoinHandle<VaultLoginsResponse> {
+        crate::live::RT.spawn(async move { inline::stub_logins(&url, allow_unlock) })
+    }
+
+    /// Reads one field of a Vault login off the UI thread.
+    #[cfg(not(test))]
+    fn lookup_vault_fill(
+        url: String,
+        origin: String,
+        item_id: String,
+        field: VaultLoginField,
+    ) -> tokio::task::JoinHandle<VaultLoginFillLookup> {
+        crate::live::RT.spawn(async move {
+            VaultClient::new()
+                .login_credential(&url, &origin, &item_id, field)
+                .await
+        })
+    }
+
+    /// Tests never reach the real Vault: canned answers by login id.
+    #[cfg(test)]
+    fn lookup_vault_fill(
+        _url: String,
+        _origin: String,
+        item_id: String,
+        _field: VaultLoginField,
+    ) -> tokio::task::JoinHandle<VaultLoginFillLookup> {
+        crate::live::RT.spawn(async move { inline::stub_fill(&item_id) })
+    }
+
+    /// A lookup that could not run reads as a Vault error.
+    fn logins_or_error(
+        outcome: Result<VaultLoginsResponse, tokio::task::JoinError>,
+    ) -> VaultLoginsResponse {
+        outcome.unwrap_or_else(|err| VaultLoginsResponse {
+            status: VaultLoginsStatus::Error,
+            items: Vec::new(),
+            error: Some(err.to_string()),
+        })
     }
 
     fn fill_vault_login(
@@ -763,69 +867,247 @@ impl BrowserPanel {
         field: VaultLoginField,
         cx: &mut Context<'_, Self>,
     ) {
+        self.fill_vault_fields(item_id, vec![field], false, cx);
+    }
+
+    /// Fills `fields` of the page from one Vault login, one field at a time like T3: Vault reads
+    /// each value and the panel inserts it, and a field that cannot fill stops the rest.
+    /// `inline` says the picker under a field asked, so a failure shows there.
+    fn fill_vault_fields(
+        &mut self,
+        item_id: String,
+        fields: Vec<VaultLoginField>,
+        inline: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         let page_url = self.current_url();
 
         let Some(expected_origin) = https_origin(&page_url) else {
-            self.vault_logins.feedback = Some("Autofill requires an HTTPS page.".to_owned());
+            self.report_fill_failure("Autofill requires an HTTPS page.".to_owned(), inline);
             cx.notify();
             return;
         };
-        let expected_origin_after = expected_origin.clone();
-        let task = crate::live::RT.spawn(async move {
-            VaultClient::new()
-                .login_credential(&page_url, &expected_origin, &item_id, field)
-                .await
-        });
         cx.spawn(async move |this, cx| {
-            let outcome = task.await;
-            let _ = this.update(cx, |panel, cx| {
-                match outcome {
-                    Ok(VaultLoginFillLookup::Value(secret)) => {
-                        let live_url = panel.current_url();
-                        if https_origin(&live_url).as_deref()
-                            != Some(expected_origin_after.as_str())
-                        {
-                            panel.vault_logins.feedback =
-                                Some("Page origin changed before fill.".to_owned());
-                        } else {
-                            panel.ensure_bridge_injected();
-                            if let Some(view) = panel.view.borrow().as_ref() {
-                                let field_json = serde_json::to_string(field.as_str())
-                                    .unwrap_or_else(|_| "\"\"".to_owned());
-                                let origin_json = serde_json::to_string(&expected_origin_after)
-                                    .unwrap_or_else(|_| "\"\"".to_owned());
-                                let val_json = serde_json::to_string(&secret)
-                                    .unwrap_or_else(|_| "\"\"".to_owned());
-                                view.execute_javascript(&format!(
-                                    "window.__CONN_GPUI_OVERLAY_BRIDGE__?.fillCredential({field_json}, {origin_json}, {val_json});"
-                                ));
-                                panel.vault_logins.feedback =
-                                    Some(format!("Filled {}.", field.as_str()));
-                                panel.vault_logins.open = false;
-                            }
-                        }
-                    }
-                    Ok(VaultLoginFillLookup::OriginMismatch) => {
-                        panel.vault_logins.feedback = Some("Page origin mismatch.".to_owned());
-                    }
-                    Ok(VaultLoginFillLookup::Denied) => {
-                        panel.vault_logins.feedback = Some("Vault unlock cancelled.".to_owned());
-                    }
-                    Ok(VaultLoginFillLookup::NoValue) => {
-                        panel.vault_logins.feedback =
-                            Some(format!("Login has no {}.", field.as_str()));
-                    }
-                    Ok(VaultLoginFillLookup::ItemNotFound) => {
-                        panel.vault_logins.feedback = Some("Login item not found.".to_owned());
-                    }
-                    Ok(_) | Err(_) => {
-                        panel.vault_logins.feedback = Some("Could not fill from Vault.".to_owned());
-                    }
+            for field in fields {
+                let task = Self::lookup_vault_fill(
+                    page_url.clone(),
+                    expected_origin.clone(),
+                    item_id.clone(),
+                    field,
+                );
+                let outcome = task.await;
+                let origin = expected_origin.clone();
+                let proceed = this.update(cx, |panel, cx| {
+                    let filled = panel.apply_fill_lookup(field, &origin, outcome, inline);
+                    cx.notify();
+                    filled
+                });
+                if !matches!(proceed, Ok(true)) {
+                    break;
                 }
-                cx.notify();
+            }
+        })
+        .detach();
+    }
+
+    /// Acts on one field's Vault lookup. Returns `true` when the value went into the page.
+    fn apply_fill_lookup(
+        &mut self,
+        field: VaultLoginField,
+        expected_origin: &str,
+        outcome: Result<VaultLoginFillLookup, tokio::task::JoinError>,
+        inline: bool,
+    ) -> bool {
+        match outcome {
+            Ok(VaultLoginFillLookup::Value(secret)) => {
+                let live_url = self.current_url();
+                if https_origin(&live_url).as_deref() != Some(expected_origin) {
+                    self.report_fill_failure("Page origin changed before fill.".to_owned(), inline);
+                    return false;
+                }
+                self.ensure_bridge_injected();
+                #[cfg(test)]
+                self.filled.borrow_mut().push(field);
+                let guard = self.view.borrow();
+                let Some(view) = guard.as_ref() else {
+                    // No Chromium view to fill, as in tests: the lookup itself succeeded.
+                    return cfg!(test);
+                };
+                let field_json =
+                    serde_json::to_string(field.as_str()).unwrap_or_else(|_| "\"\"".to_owned());
+                let origin_json =
+                    serde_json::to_string(expected_origin).unwrap_or_else(|_| "\"\"".to_owned());
+                let val_json = serde_json::to_string(&secret).unwrap_or_else(|_| "\"\"".to_owned());
+                view.execute_javascript(&format!(
+                    "window.__CONN_GPUI_OVERLAY_BRIDGE__?.fillCredential({field_json}, {origin_json}, {val_json});"
+                ));
+                drop(guard);
+                if !inline {
+                    self.vault_logins.feedback = Some(format!("Filled {}.", field.as_str()));
+                    self.vault_logins.open = false;
+                }
+                return true;
+            }
+            Ok(VaultLoginFillLookup::OriginMismatch) => {
+                self.report_fill_failure("Page origin mismatch.".to_owned(), inline);
+            }
+            Ok(VaultLoginFillLookup::Denied) => {
+                self.report_fill_failure("Vault unlock cancelled.".to_owned(), inline);
+            }
+            Ok(VaultLoginFillLookup::NoValue) => {
+                self.report_fill_failure(format!("Login has no {}.", field.as_str()), inline);
+            }
+            Ok(VaultLoginFillLookup::ItemNotFound) => {
+                self.report_fill_failure("Login item not found.".to_owned(), inline);
+            }
+            Ok(_) | Err(_) => {
+                self.report_fill_failure("Could not fill from Vault.".to_owned(), inline);
+            }
+        }
+        false
+    }
+
+    /// Says why a fill did not happen: in the picker that asked, else in the toolbar popover.
+    fn report_fill_failure(&mut self, message: String, inline: bool) {
+        if inline {
+            self.inline_logins.fail(&message);
+        } else {
+            self.vault_logins.feedback = Some(message);
+        }
+    }
+
+    // ── Inline Vault login suggestions under a focused sign-in field ──────────────────────
+
+    /// The page reported its focused sign-in field (or that none is). Only an HTTPS page on
+    /// screen gets a picker.
+    fn on_inline_event(&mut self, event: InlineEvent, cx: &mut Context<'_, Self>) {
+        if !self.visible.get() || https_origin(&self.current_url()).is_none() {
+            self.inline_logins.reset();
+        } else if self.inline_logins.apply_event(&event) {
+            self.refresh_inline_logins(false, cx);
+        }
+        cx.notify();
+    }
+
+    /// Looks up the page's Vault logins for the picker, unless a lookup is running. An unlock
+    /// asks Vault to prompt.
+    fn refresh_inline_logins(&mut self, allow_unlock: bool, cx: &mut Context<'_, Self>) {
+        let url = self.current_url();
+        if https_origin(&url).is_none() {
+            return;
+        }
+        let Some(generation) = self.inline_logins.begin_lookup(allow_unlock) else {
+            return;
+        };
+        let task = Self::lookup_vault_logins(url, allow_unlock);
+        cx.spawn(async move |this, cx| {
+            let response = Self::logins_or_error(task.await);
+            let _ = this.update(cx, |panel, cx| {
+                if panel.inline_logins.finish_lookup(generation, response) {
+                    cx.notify();
+                }
             });
         })
         .detach();
+    }
+
+    /// Runs what a picker row does. A pick closes the picker and fills the page's sign-in
+    /// fields; Unlock asks Vault again with a prompt.
+    fn run_inline_action(&mut self, action: RowAction, cx: &mut Context<'_, Self>) {
+        match action {
+            RowAction::Fill(item_id) => {
+                let fields = self.inline_logins.fields_to_fill();
+                self.inline_logins.close();
+                self.dismiss_inline_in_page();
+                self.fill_vault_fields(item_id, fields, true, cx);
+            }
+            RowAction::Unlock => self.refresh_inline_logins(true, cx),
+        }
+        cx.notify();
+    }
+
+    /// A plain key while the picker may be up. Returns `true` when the picker took it and the
+    /// page must not see it. Escape closes the picker and still reaches the page, as in T3.
+    fn handle_inline_key(&mut self, key: &str, cx: &mut Context<'_, Self>) -> bool {
+        match self.inline_logins.handle_key(key) {
+            KeyOutcome::Pass => false,
+            KeyOutcome::Handled => {
+                cx.notify();
+                true
+            }
+            KeyOutcome::Run(action) => {
+                self.run_inline_action(action, cx);
+                true
+            }
+            KeyOutcome::Dismissed => {
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// Tells the page's watcher the picker is closed, so it stays closed for this field.
+    fn dismiss_inline_in_page(&self) {
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(
+                "window.__CONN_GPUI_OVERLAY_BRIDGE__?.dismissCredentialInline?.(false);",
+            );
+        }
+    }
+
+    fn choose_inline_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(action) = self.inline_logins.action(index) {
+            self.run_inline_action(action, cx);
+        }
+    }
+
+    fn hover_inline_row(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        self.inline_logins.hover(index);
+        cx.notify();
+    }
+
+    /// A press outside the picker. A press on the field itself reopens it through the page's
+    /// own focus report, so the page is not told.
+    fn dismiss_inline_picker(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.inline_logins.shown() {
+            self.inline_logins.close();
+            cx.notify();
+        }
+    }
+
+    /// The picker under the focused field, when there is one to show.
+    fn render_inline_logins_picker(
+        &self,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if !self.inline_logins.shown()
+            || !self.visible.get()
+            || self.vault_logins.open
+            || self.context_menu.is_some()
+            || self.annotations.annotating
+        {
+            return None;
+        }
+        let view = self.last_bounds.get()?;
+        let field = inline::anchor_rect(self.inline_logins.anchor()?, view);
+        let origin = inline::picker_origin(field, self.inline_logins.size(), view);
+        let actions = PickerActions {
+            choose: Self::choose_inline_row,
+            hover: Self::hover_inline_row,
+            dismiss: Self::dismiss_inline_picker,
+        };
+        Some(inline::render_picker(
+            &self.inline_logins,
+            origin,
+            &self.tokens,
+            &actions,
+            cx,
+        ))
     }
 
     fn notify_overlay_annotations_changed(&self) {
@@ -1118,6 +1400,7 @@ impl BrowserPanel {
                 }
             } else {
                 self.context_menu = None;
+                self.inline_logins.reset();
             }
             cx.notify();
         }
@@ -1412,6 +1695,13 @@ impl BrowserPanel {
                                     value,
                                     error,
                                 },
+                                OverlayBridgeMessage::CredentialInline { event } => {
+                                    // Malformed or off-page metadata is dropped.
+                                    let Some(event) = inline::parse_inline_event(&event) else {
+                                        return true;
+                                    };
+                                    BrowserOverlayEvent::CredentialInline(event)
+                                }
                             };
                             let _ = console_tx.send(ev);
                         }
@@ -1459,6 +1749,9 @@ impl BrowserPanel {
                             panel.overlay_task = Some(cx.spawn(async move |this, cx| {
                                 while let Some(ev) = overlay_rx.recv().await {
                                     let alive = this.update(cx, |panel, cx| match ev {
+                                        BrowserOverlayEvent::CredentialInline(event) => {
+                                            panel.on_inline_event(event, cx);
+                                        }
                                         BrowserOverlayEvent::Rpc {
                                             request_id,
                                             op,
@@ -1757,6 +2050,18 @@ impl BrowserPanel {
         if self.context_menu.is_some() {
             // The open menu takes the keyboard; nothing reaches the page.
             self.handle_context_menu_key(event.keystroke.key.as_str(), cx);
+            cx.stop_propagation();
+            return;
+        }
+        // The picker under a sign-in field takes the arrow keys and Enter on a highlighted row.
+        // Escape closes it and still reaches the page, as in T3.
+        let modifiers = event.keystroke.modifiers;
+        if !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.handle_inline_key(event.keystroke.key.as_str(), cx)
+        {
             cx.stop_propagation();
             return;
         }
@@ -2811,6 +3116,7 @@ impl Render for BrowserPanel {
         });
 
         let vault_popover = self.render_vault_logins_popover(cx);
+        let inline_picker = self.render_inline_logins_picker(cx);
         let laravel_bar = self
             .laravel_toolbar
             .read(cx)
@@ -2889,6 +3195,7 @@ impl Render for BrowserPanel {
             .child(body)
             .children(laravel_bar)
             .children(vault_popover)
+            .children(inline_picker)
             .children(context_menu)
     }
 }

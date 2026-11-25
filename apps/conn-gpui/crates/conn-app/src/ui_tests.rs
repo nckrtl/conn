@@ -30,6 +30,7 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+mod browser_inline_logins;
 pub(crate) mod details_tasks;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;

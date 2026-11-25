@@ -897,8 +897,8 @@ describe("CursorAdapterV2", () => {
           lastProviderTurn = providerTurn.providerTurn;
         const sent = sentMessages.at(-1)!;
         return {
-          orchestration: sent.includes("## T3 Code orchestration"),
-          devices: sent.includes("## T3 Code devices"),
+          orchestration: sent.includes("## Conn orchestration"),
+          devices: sent.includes("## Conn devices"),
         };
       });
       const told = (orchestration: boolean, devices: boolean) => ({ orchestration, devices });
@@ -2545,7 +2545,7 @@ describe("CursorAdapterV2", () => {
     };
 
     assert.deepEqual(cursorMcpServers(mcpSession), {
-      "t3-code": {
+      conn: {
         type: "http",
         url: "http://127.0.0.1:43123/mcp",
         headers: {

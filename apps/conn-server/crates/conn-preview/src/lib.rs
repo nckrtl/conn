@@ -4,8 +4,10 @@ use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::
 pub mod html;
 pub mod install;
 mod page;
+pub use page::credential_field_expression;
 mod proxy;
 mod recording;
+pub mod relay;
 mod screencast;
 mod spec;
 pub mod tabs;
@@ -175,7 +177,7 @@ impl Browser {
                 return Err(Error(spec::spec()?.root_error.clone()));
             }
             if stderr.contains("No usable sandbox") {
-                return Err(Error("This host blocks the sandbox T3's browser runs in (AppArmor on Ubuntu 23.10+). Run `t3 browser setup` on the host once to allow it, then try again.".into()));
+                return Err(Error("This host blocks the sandbox Conn's browser runs in (AppArmor on Ubuntu 23.10+). Run `t3 browser setup` on the host once to allow it, then try again.".into()));
             }
             if let Some(library) = stderr
                 .split_once("error while loading shared libraries: ")
@@ -183,7 +185,7 @@ impl Browser {
                 .filter(|s| !s.is_empty() && s.len() < 256)
             {
                 return Err(Error(format!(
-                    "This host is missing libraries T3's browser needs ({library}). Run `t3 browser setup` on the host to install them, then try again."
+                    "This host is missing libraries Conn's browser needs ({library}). Run `t3 browser setup` on the host to install them, then try again."
                 )));
             }
             return Err(error);

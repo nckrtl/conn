@@ -236,6 +236,9 @@ const CALLS = [
   ["provider.auth.removeMethod", { methodId: "chatgpt" }],
   ["provider.auth.logout", {}],
   ["provider.auth.subscribe", {}],
+  // Install (`provider.install.*`) is not compared: neither server serves it, by decision
+  // (Nick, 2026-11-20; Orbit installs and updates provider CLIs). effect-client.mjs checks
+  // that the Conn Server answers it as an unsupported method.
 ];
 
 /** The reply as the client decodes it: a value, the first stream item, or the typed error. */
@@ -277,7 +280,7 @@ async function drive(side) {
     const replies = [];
     for (const instanceId of INSTANCES) {
       for (const [tag, input] of CALLS) {
-        const stream = tag === "provider.auth.subscribe";
+        const stream = tag.endsWith(".subscribe");
         const payload = { instanceId, ...input };
         const exit = stream
           ? yield* Effect.exit(Stream.runHead(client[tag](payload)).pipe(Effect.timeoutOption("2 seconds")))

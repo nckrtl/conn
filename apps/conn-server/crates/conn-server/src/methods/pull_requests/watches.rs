@@ -8,10 +8,18 @@
 //! (T3 reads sooner after a host event and skips unchanged pull requests), the cached
 //! review-thread tails, and the watch-life log lines.
 
-use super::{Panel, ReadKey};
-use conn_source_control::pull_requests::{
-    normalize::{array, text},
-    watch::{self, Change, Wake},
+use super::{
+    Panel, ReadKey,
+    agent_ends::AgentEnds,
+    links::{self, Links, Request},
+};
+use conn_source_control::{
+    close_commands,
+    pull_requests::{
+        link_sync,
+        normalize::{array, text},
+        watch::{self, Change, Wake},
+    },
 };
 use conn_support::time::{millis_from_iso, now_ms};
 use serde_json::{Value, json};
@@ -171,6 +179,70 @@ impl Watcher {
         }
     }
 
+    /// `endedByAgent`: the watching thread's own agent merged or closed this pull request.
+    fn ended_by_agent(&self, target: &Target) -> bool {
+        let repository = format!(
+            "{}/{}",
+            text(&target.link, "host").to_lowercase(),
+            text(&target.link, "repository").to_lowercase()
+        );
+        self.panel
+            .agent_ends
+            .ends(target.thread_id(), &repository, target.number())
+    }
+
+    /// The reads after agents' close commands ended (T3's `readThreadWatches` and `done`):
+    /// each thread's watches are read at once, quietly for those its commands closed, then
+    /// the commands let go of them.
+    pub(super) async fn read_after_agents(&mut self) {
+        for (thread_id, items) in self.panel.agent_ends.take_reads() {
+            self.read_thread_watches(&thread_id).await;
+            self.panel.agent_ends.read_done(&thread_id, &items);
+        }
+    }
+
+    /// `readThreadWatches`: each watched pull request of the thread, read now and in full.
+    async fn read_thread_watches(&mut self, thread_id: &str) {
+        let Ok(shell) = self.panel.engine.shell_snapshot().await else {
+            return;
+        };
+        let Some(thread) = array(shell.get("threads"))
+            .iter()
+            .find(|t| text(t, "id") == thread_id)
+            .cloned()
+        else {
+            return;
+        };
+        let keys: Vec<String> = array(thread.get("pullRequests"))
+            .iter()
+            .filter(|l| l["watch"].is_object() && text(l, "source") != "stack-dismissed")
+            .map(pull_request_key)
+            .collect();
+        for key in keys {
+            // A read from before the merge must not stand in for this one.
+            self.last_reads
+                .remove(&format!("{} {key}", text(&thread, "projectId")));
+            self.pass(Some(&key)).await;
+        }
+    }
+
+    /// `finished`: a merged or closed pull request ends its watch, with a wake unless the
+    /// watching thread's own agent merged or closed it.
+    async fn finished(&mut self, group_key: &str, target: &Target, detail: &Value) {
+        if self.ended_by_agent(target) {
+            let _ = self.record(target, None, None, None).await;
+            return;
+        }
+        self.held.push(Held {
+            group_key: group_key.to_owned(),
+            target: target.clone(),
+            next: None,
+            ended: None,
+            wake: watch::end_message(target.number(), text(&target.link, "url"), detail),
+            includes_remarks: false,
+        });
+    }
+
     async fn send(&self, command: Value) -> Result<(), String> {
         self.panel.engine.sync_pull_request_watch(command).await
     }
@@ -232,11 +304,9 @@ impl Watcher {
         for target in targets {
             let settled = target.thread["settledOverride"] == "settled"
                 || !target.thread["settledAt"].is_null();
-            // `endsWithoutRead`: merged, settled and subagent threads stop without a read.
-            if target.link["snapshot"]["state"] == "merged"
-                || settled
-                || target.thread["lineage"]["relationshipToParent"] == "subagent"
-            {
+            // `endsWithoutRead`: settled and subagent threads stop without a read. A merged
+            // snapshot still gets one read, so the wake can name the merge commit.
+            if settled || target.thread["lineage"]["relationshipToParent"] == "subagent" {
                 ending.push(target);
                 continue;
             }
@@ -329,6 +399,21 @@ impl Watcher {
             Ok(detail) => detail,
             Err(failure) => {
                 self.last_reads.remove(&group.key);
+                // `endMergedSnapshots`: a merged watch holds its thread from settling, so it
+                // ends from its snapshot rather than wait out the host.
+                let mut unended = Vec::new();
+                for target in &group.targets {
+                    if target.link["snapshot"]["state"] == "merged" {
+                        let snapshot = target.link["snapshot"].clone();
+                        self.finished(&group.key, target, &snapshot).await;
+                    } else {
+                        unended.push(target);
+                    }
+                }
+                if unended.is_empty() {
+                    self.failures.remove(&group.key);
+                    return;
+                }
                 match failure_reason(&failure).as_deref() {
                     Some("rate-limited") => {}
                     // Transport and host failures can outlast the limit; the watch waits.
@@ -340,7 +425,7 @@ impl Watcher {
                         self.failures.insert(group.key.clone(), failures);
                         if failures >= READ_FAILURE_LIMIT {
                             self.failures.remove(&group.key);
-                            for target in &group.targets {
+                            for target in unended {
                                 self.give_up(target).await;
                             }
                         }
@@ -364,30 +449,10 @@ impl Watcher {
             }),
             false,
         );
-        let state = text(&detail, "state");
-        if state != "open" {
+        if text(&detail, "state") != "open" {
             self.last_reads.remove(&group.key);
             for target in &group.targets {
-                if state == "closed" {
-                    self.held.push(Held {
-                        group_key: group.key.clone(),
-                        target: target.clone(),
-                        next: None,
-                        ended: None,
-                        wake: Wake {
-                            text: format!(
-                                "Pull request #{} ({}) was closed, so T3 Code stopped watching it. Call watch_pull_request if it reopens.",
-                                target.number(),
-                                text(&target.link, "url")
-                            ),
-                            outcome: "updated",
-                            summary: format!("#{}: closed, stopped watching", target.number()),
-                        },
-                        includes_remarks: false,
-                    });
-                } else {
-                    let _ = self.record(target, None, None, None).await;
-                }
+                self.finished(&group.key, target, &detail).await;
             }
             return;
         }
@@ -467,7 +532,7 @@ impl Watcher {
     async fn give_up(&self, target: &Target) {
         let wake = Wake {
             text: format!(
-                "T3 Code stopped watching pull request #{} ({}) because it failed to read it from the host {READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request only if it is still open.",
+                "Conn stopped watching pull request #{} ({}) because it failed to read it from the host {READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request only if it is still open.",
                 target.number(),
                 text(&target.link, "url")
             ),
@@ -629,20 +694,90 @@ async fn read_remarks(
     Some(remarks)
 }
 
-/// Runs the loop for the server's life: a sweep every two minutes, and a read of a pull
-/// request as soon as a new watch appears on it, so CI that finishes before the next sweep
-/// is not taken as the baseline.
+/// What the shell listener remembers of a thread, to tell what an update changed.
+#[derive(Default)]
+pub(super) struct Observed {
+    watches: Vec<String>,
+    unsynced: Vec<String>,
+    run_completed: Value,
+    settled: bool,
+    branch: Value,
+}
+
+impl Observed {
+    pub(super) fn new(thread: &Value) -> Self {
+        Self {
+            watches: watches_of(thread),
+            unsynced: link_sync::visible_links(thread)
+                .filter(|l| l["snapshot"].is_null())
+                .map(link_sync::pull_request_key)
+                .collect(),
+            run_completed: thread["latestRunCompletedAt"].clone(),
+            settled: thread["settledOverride"] == "settled" || !thread["settledAt"].is_null(),
+            branch: json!([thread["branch"], thread["worktreePath"]]),
+        }
+    }
+}
+
+/// The link sweep's requests for one thread update (`links::Request`), as T3's reactors react
+/// to `thread.created`, `thread.unsettled`, `thread.metadata-updated`, a run's end,
+/// `thread.settled` and a link without a snapshot.
+pub(super) fn link_requests(
+    thread: &Value,
+    before: Option<&Observed>,
+    now: &Observed,
+) -> Vec<Request> {
+    let id = text(thread, "id").to_owned();
+    let project_id = text(thread, "projectId").to_owned();
+    let mut requests: Vec<Request> = link_sync::visible_links(thread)
+        .filter(|l| {
+            l["snapshot"].is_null()
+                && before.is_none_or(|b| !b.unsynced.contains(&link_sync::pull_request_key(l)))
+        })
+        .map(|link| Request::Unsynced {
+            project_id: project_id.clone(),
+            link: link.clone(),
+        })
+        .collect();
+    let looks_up = match before {
+        None => !thread["branch"].is_null(),
+        Some(before) => {
+            (now.run_completed != before.run_completed && !now.run_completed.is_null())
+                || (before.settled && !now.settled)
+                || now.branch != before.branch
+        }
+    };
+    if looks_up {
+        requests.push(Request::Branch(id));
+    }
+    if before.is_some_and(|b| !b.settled) && now.settled {
+        let keys = link_sync::unmerged_links(thread);
+        if !keys.is_empty() {
+            requests.push(Request::Settled(keys));
+        }
+    }
+    requests
+}
+
+/// Runs the loop for the server's life: a watch sweep every two minutes, a read of a pull
+/// request as soon as a new watch appears on it (so CI that finishes before the next sweep is
+/// not taken as the baseline), and the link sweep (`links.rs`) every minute and on its events.
 pub(super) async fn run(panel: Arc<Panel>) {
     let (tx, mut rx) = mpsc::channel::<String>(16);
-    // New watches beyond the channel's room are not lost: they ask for one more full pass.
+    let (link_tx, mut link_rx) = mpsc::channel::<Request>(64);
+    // New watches or links beyond the channels' room are not lost: they ask for a full pass.
     let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let overflowed = overflow.clone();
+    let links_overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let links_overflowed = links_overflow.clone();
+    let settles = links::Settles::default();
+    let link_settles = settles.clone();
     let input = conn_contract::from_json(json!({"requestCompletionMarker": true}));
     if let Ok(input) = input
         && let Ok(mut shell) = panel.engine.subscribe_shell(input).await
     {
         tokio::spawn(async move {
-            let mut known: Vec<(String, Vec<String>)> = Vec::new();
+            let mut known: Vec<(String, Observed)> = Vec::new();
             while let Some(Ok(item)) = shell.recv().await {
                 let item = conn_contract::to_json(&item);
                 match text(&item, "kind") {
@@ -652,23 +787,35 @@ pub(super) async fn run(panel: Arc<Panel>) {
                             .iter()
                             .take(MAX_OBSERVED_THREADS)
                         {
-                            known.push((text(thread, "id").to_owned(), watches_of(thread)));
+                            known.push((text(thread, "id").to_owned(), Observed::new(thread)));
                         }
                     }
                     "thread.updated" => {
                         let thread = item.get("thread").unwrap_or(&Value::Null);
                         let id = text(thread, "id").to_owned();
-                        let now = watches_of(thread);
+                        let now = Observed::new(thread);
                         let before = known
                             .iter()
                             .position(|(t, _)| *t == id)
-                            .map(|i| known.remove(i).1)
+                            .map(|i| known.remove(i).1);
+                        let before_watches = before
+                            .as_ref()
+                            .map(|b| b.watches.as_slice())
                             .unwrap_or_default();
-                        for life in now.iter().filter(|life| !before.contains(life)) {
+                        for life in now
+                            .watches
+                            .iter()
+                            .filter(|life| !before_watches.contains(life))
+                        {
                             if let Some((key, _)) = life.split_once(' ')
                                 && tx.try_send(key.to_owned()).is_err()
                             {
                                 overflowed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        for request in link_requests(thread, before.as_ref(), &now) {
+                            if !links::route(request, &link_tx, &settles) {
+                                links_overflowed.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         if known.len() >= MAX_OBSERVED_THREADS {
@@ -685,6 +832,35 @@ pub(super) async fn run(panel: Arc<Panel>) {
             }
         });
     }
+    // The link sweep runs in its own task: a slow GitHub lookup there must not hold back a
+    // new watch's first read, or CI that ends meanwhile becomes the baseline and never wakes.
+    let mut links = Links::new(panel.clone(), link_settles);
+    let links_task = tokio::spawn(async move {
+        let mut link_sweep = tokio::time::interval(Duration::from_millis(link_sync::SWEEP_MS));
+        link_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = link_sweep.tick() => links.tick().await,
+                Some(request) = link_rx.recv() => links.handle(request).await,
+            }
+            if links_overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                links.tick().await;
+            }
+        }
+    });
+    let _stop_links = AbortOnDrop(links_task);
+    // Ownership changes apply as events arrive; only the reads after them wait for the loop.
+    let ends = panel.agent_ends.clone();
+    let _stop_agents = match panel.engine.subscribe_command_events().await {
+        Ok(events) => Some(AbortOnDrop(tokio::spawn(agent_events(
+            events,
+            ends.clone(),
+        )))),
+        Err(e) => {
+            eprintln!("conn-server: pull request watches cannot follow agent merges: {e}");
+            None
+        }
+    };
     let mut watcher = Watcher::new(panel);
     let mut sweep = tokio::time::interval(SWEEP);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -692,10 +868,60 @@ pub(super) async fn run(panel: Arc<Panel>) {
         tokio::select! {
             _ = sweep.tick() => watcher.pass(None).await,
             Some(key) = rx.recv() => watcher.pass(Some(&key)).await,
+            () = ends.reads_ready() => watcher.read_after_agents().await,
         }
         if overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
             watcher.pass(None).await;
         }
+    }
+}
+
+/// T3's `isTerminalRunStatus`.
+fn run_ended(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "interrupted" | "cancelled" | "rolled_back"
+    )
+}
+
+/// Applies the engine's command events to [`AgentEnds`] as they arrive; a close command that
+/// ended asks it for a read. Other commands are skipped. It never waits on the watch loop.
+pub(super) async fn agent_events(mut events: mpsc::Receiver<(String, Value)>, ends: AgentEnds) {
+    // Close commands the feed saw end, for the feed's whole life, so a later update of the
+    // same item is not taken for a second merge (T3's `finished`).
+    let mut finished = std::collections::HashSet::new();
+    while let Some((thread_id, event)) = events.recv().await {
+        let payload = &event["payload"];
+        if event["type"] == "run.updated" {
+            if run_ended(text(payload, "status")) {
+                ends.run_ended(&thread_id);
+            }
+            continue;
+        }
+        let item_id = text(payload, "id").to_owned();
+        if finished.contains(&item_id) {
+            continue;
+        }
+        let Some(closed) = close_commands::closed_by(text(payload, "input")) else {
+            continue;
+        };
+        let active = matches!(text(payload, "status"), "pending" | "running" | "waiting");
+        let succeeded = (!active).then(|| {
+            // Some providers report a command that failed as completed.
+            text(payload, "status") == "completed" && !close_commands::command_failed(payload)
+        });
+        if succeeded.is_some() {
+            finished.insert(item_id.clone());
+        }
+        ends.command(&thread_id, &item_id, closed, None, succeeded);
+    }
+}
+
+/// Stops the link sweep's task when the watch loop ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

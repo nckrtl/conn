@@ -10,6 +10,7 @@ import {
   type OrbitTaskInsights,
   type OrbitTaskInsightsPeriod,
   type OrbitTasksResult,
+  type TrendPoint,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { msg, useGT, useMessages } from "gt-react";
 import { TrendingDownIcon, TrendingUpIcon, XIcon } from "lucide-react";
@@ -18,6 +19,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { m } from "~/i18n/messages";
+import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 
 import { Sparkline, TrendChart } from "./InsightCharts";
@@ -25,17 +27,37 @@ import { loadOrbitTasksClient } from "./orbitTasksClient";
 import { insightByProvider, insightProviderName } from "./tasksInsights.logic";
 import { useTasksBoardSettings } from "./tasksPanelStore";
 
+const FADE_PX = 32;
+
+/** Sets each edge fade's strength on the section: full once 32px of content is hidden on that side. */
+function updateFades(scroller: HTMLElement) {
+  const reach = scroller.scrollWidth - scroller.clientWidth;
+  const section = scroller.parentElement;
+  if (!section) return;
+  section.style.setProperty("--fade-start", String(Math.min(1, scroller.scrollLeft / FADE_PX)));
+  section.style.setProperty(
+    "--fade-end",
+    String(Math.min(1, Math.max(0, reach - scroller.scrollLeft - 1) / FADE_PX)),
+  );
+}
+
+/** Keeps the fades right when the strip or its content resizes (ref callback: returns its cleanup). */
+function watchFades(scroller: HTMLDivElement | null) {
+  if (!scroller) return;
+  updateFades(scroller);
+  return observeResize(
+    scroller.firstElementChild ? [scroller, scroller.firstElementChild] : scroller,
+    () => updateFades(scroller),
+  );
+}
+
 /** Orbit's numbers move slowly; the strip re-reads every few minutes, like Orbit's own board. */
 const INSIGHTS_POLL_MS = 300_000;
 
 type InsightsState = { readonly status: "loading" } | OrbitTasksResult<OrbitTaskInsights>;
 
 function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number | null) {
-  const [state, setState] = useState<{ key: string; value: InsightsState }>({
-    key: "",
-    value: { status: "loading" },
-  });
-  const key = `${period}:${project ?? "all"}`;
+  const [state, setState] = useState<InsightsState>({ status: "loading" });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads Orbit's insights for the board's period and Project, and re-reads on a slow poll
   useEffect(() => {
     let disposed = false;
@@ -45,7 +67,7 @@ function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number |
           ? await client.getTaskInsights(project === null ? { period } : { period, project })
           : { status: "error", reason: "unreachable", message: m(msg("No Orbit Gateway here.")) };
         // A failed re-read turns the numbers into dashes; stale numbers would read as current.
-        if (!disposed) setState({ key, value });
+        if (!disposed) setState(value);
       });
     read();
     const timer = window.setInterval(read, INSIGHTS_POLL_MS);
@@ -53,8 +75,10 @@ function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number |
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [key, period, project]);
-  return state.key === key ? state.value : ({ status: "loading" } as const);
+  }, [period, project]);
+  // A new period or Project keeps the previous numbers on screen until Orbit answers, then replaces
+  // them; dashes in between would flash the tiles empty.
+  return state;
 }
 
 /**
@@ -73,8 +97,8 @@ function insightGrid(count: number) {
 }
 
 /**
- * Card style: only the group's four outer corners stay fully round; a corner that faces another
- * block (beside or below) is half as round. Order: top-left, top-right, bottom-right, bottom-left.
+ * Card style: only the group's four outer corners are round (12px, like the lanes); a corner that faces another
+ * block (beside or below) is square. Order: top-left, top-right, bottom-right, bottom-left.
  */
 function blockRadius(
   grid: { columns: number; rows: number; lastSpan: number },
@@ -84,8 +108,8 @@ function blockRadius(
   const row = Math.floor(index / grid.columns);
   const start = index % grid.columns;
   const end = start + (index === count - 1 ? grid.lastSpan : 1);
-  const full = "var(--radius-lg)";
-  const half = "calc(var(--radius-lg) / 2)";
+  const full = "12px";
+  const half = "0px";
   const top = row === 0;
   const bottom = row === grid.rows - 1;
   // One row of one or two numbers keeps three columns; its last block is still the right edge.
@@ -95,9 +119,13 @@ function blockRadius(
     .join(" ");
 }
 
-/** A number's block, styled like a task card: lighter top border, card fill. */
+/**
+ * A number's block: the card fill, no border. The border stays transparent so sizes do not change;
+ * only the top row shows its lighter top edge (INSIGHT_TOP_EDGE).
+ */
 const INSIGHT_BLOCK =
-  "rounded-lg border border-(--shell-divider)! border-t-(--shell-card-edge)! bg-(--shell-card) px-3 pt-2.5 pb-2 dark:bg-(--shell-highlight)/70";
+  "border border-transparent! bg-(--shell-card) px-3 pt-2.5 pb-2 dark:bg-(--shell-highlight)/70";
+const INSIGHT_TOP_EDGE = "border-t-(--shell-card-edge)!";
 
 /** The overall line in the expanded chart; per-provider lines need a per-provider history. */
 const TREND_COLOR = "var(--info)";
@@ -141,9 +169,13 @@ function useInsightHint() {
   return (id: InsightId, insights: OrbitTaskInsights | null) => {
     switch (id) {
       case "completed":
-        return gt(
-          "Tasks that merged in the period. The line counts the merges in the days up to each point.",
-        );
+        return insights?.period === "24h"
+          ? gt(
+              "Tasks that merged in the period. The line counts the merges in the hours up to each point.",
+            )
+          : gt(
+              "Tasks that merged in the period. The line counts the merges in the days up to each point.",
+            );
       case "spent":
         return gt(
           "All agent tokens of the tasks that ended, replaced threads included. More tasks spend more, so a change is neither good nor bad.",
@@ -178,14 +210,15 @@ function InsightCard(props: {
   spec: InsightSpec;
   label: string;
   result: InsightResult;
-  trend: ReadonlyArray<{ date: string; value: number | null }> | null;
+  trend: ReadonlyArray<TrendPoint> | null;
   hint: string;
   scope: string;
   onExpand: () => void;
   /** Columns this cell spans, for the last cell on an odd count. */
   span: number;
-  /** Each corner's radius; a corner that faces another block is half as round. */
+  /** Each corner's radius; a corner that faces another block is square. */
   radius: string;
+  topRow: boolean;
 }) {
   const gt = useGT();
   const messages = useMessages();
@@ -210,6 +243,7 @@ function InsightCard(props: {
             className={cn(
               "flex min-w-0 cursor-pointer flex-col gap-1 text-left transition-colors outline-none hover:bg-(--shell-card)/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset dark:hover:bg-(--shell-highlight)",
               INSIGHT_BLOCK,
+              props.topRow && INSIGHT_TOP_EDGE,
             )}
           />
         }
@@ -265,7 +299,7 @@ function InsightDetail(props: {
   ));
   return (
     <div
-      className={cn("relative flex flex-col gap-1", INSIGHT_BLOCK)}
+      className={cn("relative flex flex-col gap-1 rounded-xl", INSIGHT_BLOCK, INSIGHT_TOP_EDGE)}
       style={{ height: props.height }}
       onKeyDown={(event) => {
         if (event.key === "Escape") props.onBack();
@@ -292,7 +326,7 @@ function InsightDetail(props: {
           {legend}
         </ul>
       </span>
-      <div className="mt-3 min-h-0 flex-1">
+      <div className="mt-5 min-h-0 flex-1">
         {trend ? (
           <TrendChart
             series={[{ name: gt("All providers"), color: TREND_COLOR, points: trend }]}
@@ -334,28 +368,31 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
   const open = shown.find((spec) => spec.id === expanded);
   const grid = insightGrid(shown.length);
   const days = period === "7d" ? 7 : 30;
+  const periodScope =
+    period === "24h"
+      ? gt("Last 24 hours against the 24 before.")
+      : gt("Last {days} days against the {days} before.", { days });
   const searching = props.query.trim().length > 0;
   const scope =
     state.status === "error"
       ? gt("Orbit did not answer: {message}", { message: state.message })
-      : [
-          gt("Last {days} days against the {days} before.", { days }),
-          searching ? gt("The search does not narrow these numbers.") : null,
-        ]
+      : [periodScope, searching ? gt("The search does not narrow these numbers.") : null]
           .filter((part) => part !== null)
           .join(" ");
   return (
     <section
-      aria-label={gt("Task insights, last {days} days", { days })}
-      className="@container scrollbar-inset shrink-0 overflow-x-auto overflow-y-hidden border-b border-(--shell-divider)! p-2"
+      aria-label={
+        period === "24h"
+          ? gt("Task insights, last 24 hours")
+          : gt("Task insights, last {days} days", { days })
+      }
+      className="@container relative shrink-0 [--fade-end:0] [--fade-start:0]"
     >
-      {/* One lane-style container, a task-card block per number. */}
-      {/* min-w-min: on a narrow panel the container runs on under the blocks it scrolls to. */}
+      {/* No scrollbar: the edges fade out while there is more to scroll to. */}
       <div
-        className={cn(
-          "rounded-xl bg-(--shell-highlight)/60 p-1.5 dark:bg-(--shell-highlight)/30",
-          !open && "min-w-min",
-        )}
+        ref={(scroller) => watchFades(scroller)}
+        onScroll={(event) => updateFades(event.currentTarget)}
+        className="overflow-x-auto overflow-y-hidden px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {open ? (
           <InsightDetail
@@ -363,14 +400,14 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
             label={messages(open.label)}
             result={results[open.id]}
             insights={insights}
-            // One row of cards is too short for a chart.
-            height={Math.max(gridHeight, 200)}
+            // The chart takes the grid's height, so nothing below moves; one row of cards is too short.
+            height={Math.max(gridHeight, 168)}
             onBack={() => setExpanded(null)}
           />
         ) : (
           <div
             ref={gridRef}
-            className="grid gap-1.5"
+            className="grid min-w-min gap-0.5"
             style={{ gridTemplateColumns: grid.gridTemplateColumns }}
           >
             {shown.map((spec, index) => (
@@ -384,6 +421,7 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
                 scope={scope}
                 span={index === shown.length - 1 ? grid.lastSpan : 1}
                 radius={blockRadius(grid, index, shown.length)}
+                topRow={Math.floor(index / grid.columns) === 0}
                 onExpand={() => {
                   setGridHeight(gridRef.current?.offsetHeight ?? 0);
                   setExpanded(spec.id);
@@ -393,6 +431,14 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
           </div>
         )}
       </div>
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 bottom-px left-0 w-8 bg-linear-to-r from-background to-transparent opacity-(--fade-start)"
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 bottom-px right-0 w-8 bg-linear-to-l from-background to-transparent opacity-(--fade-end)"
+      />
     </section>
   );
 }

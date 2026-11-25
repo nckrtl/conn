@@ -1,10 +1,10 @@
 use super::*;
 
-async fn running_parent(f: &Fixture) -> (Value, Caller) {
+pub(super) async fn running_parent(f: &Fixture) -> (Value, Caller) {
     let mut c = Client::open(&f.service, client(true)).await;
     let parent = c
         .ok(
-            "t3_thread_launch",
+            "conn_thread_launch",
             json!({
                 "projectId": project_id(), "title": "Parent", "message": "hang",
                 "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
@@ -18,6 +18,7 @@ async fn running_parent(f: &Fixture) -> (Value, Caller) {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     (parent, caller)
 }
@@ -103,7 +104,7 @@ async fn create_threads_inherits_checkout_records_timeline_and_retries() {
 async fn attachment_upload_is_owned_by_preparing_caller() {
     let f = fixture("upload-owner");
     let mut c = Client::open(&f.service, client(true)).await;
-    let upload = c.ok("t3_attachment_prepare_upload", json!({"upload":{"type":"file", "name":"a.txt", "mimeType":"text/plain", "sizeBytes":3}})).await;
+    let upload = c.ok("conn_attachment_prepare_upload", json!({"upload":{"type":"file", "name":"a.txt", "mimeType":"text/plain", "sizeBytes":3}})).await;
     assert!(
         upload["attachmentId"]
             .as_str()
@@ -115,13 +116,14 @@ async fn attachment_upload_is_owned_by_preparing_caller() {
         Caller::Client(ClientCaller {
             session_id: "other".into(),
             max_runtime_mode: Some("full-access"),
+            ..ClientCaller::default()
         }),
     )
     .await;
     assert_eq!(
         other
             .failure(
-                "t3_attachment_discard",
+                "conn_attachment_discard",
                 json!({"attachmentId":upload["attachmentId"]})
             )
             .await
@@ -129,13 +131,13 @@ async fn attachment_upload_is_owned_by_preparing_caller() {
         "invalid_request"
     );
     c.ok(
-        "t3_attachment_discard",
+        "conn_attachment_discard",
         json!({"attachmentId":upload["attachmentId"]}),
     )
     .await;
     assert_eq!(
         c.failure(
-            "t3_attachment_discard",
+            "conn_attachment_discard",
             json!({"attachmentId":upload["attachmentId"]})
         )
         .await
@@ -146,7 +148,7 @@ async fn attachment_upload_is_owned_by_preparing_caller() {
     assert_eq!(
         reader
             .failure(
-                "t3_attachment_prepare_upload",
+                "conn_attachment_prepare_upload",
                 json!({"upload":{"name":"a.png", "mimeType":"image/png", "sizeBytes":3}})
             )
             .await
@@ -161,24 +163,24 @@ async fn worktree_status_is_readable_after_caller_stops_and_hidden_outside() {
     let mut c = Client::open(&f.service, client(true)).await;
     for tool in [
         "create_threads",
-        "t3_worktree_status",
-        "t3_worktree_handoff",
+        "conn_worktree_status",
+        "conn_worktree_handoff",
     ] {
         not_offered(&mut c, tool, json!({})).await;
     }
     let (parent, caller) = running_parent(&f).await;
     c.ok(
-        "t3_thread_interrupt",
+        "conn_thread_interrupt",
         json!({"threadId":parent["threadId"]}),
     )
     .await;
     c.ok(
-        "t3_thread_wait",
+        "conn_thread_wait",
         json!({"threadId":parent["threadId"],"timeoutMs":10000}),
     )
     .await;
     let mut agent = Client::open(&f.service, caller).await;
-    let status = agent.ok("t3_worktree_status", json!({})).await;
+    let status = agent.ok("conn_worktree_status", json!({})).await;
     assert_eq!(status["attached"], false);
     assert_eq!(status["projectWorkspaceRoot"], ROOT);
     assert_eq!(status["defaultStartFromOrigin"], true);
@@ -207,7 +209,7 @@ impl conn_engine::EngineHost for FilesHost {
     }
 }
 
-fn git(dir: &std::path::Path, args: &[&str]) -> String {
+pub(super) fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -223,7 +225,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
-async fn git_project(f: &Fixture) -> PathBuf {
+pub(super) async fn git_project(f: &Fixture) -> PathBuf {
     let root = f.dir.join("repo");
     let path = root.clone();
     tokio::task::spawn_blocking(move || {
@@ -266,7 +268,7 @@ async fn attachments_claim_bytes_reuse_canonical_metadata_and_refuse_foreign_ids
     let f = fixture("attachment-send");
     let (parent, caller) = running_parent(&f).await;
     let mut agent = Client::open(&f.service, caller).await;
-    let prepared = agent.ok("t3_attachment_prepare_upload",json!({"upload":{"type":"file","name":"note.txt","mimeType":"text/plain","sizeBytes":3}})).await;
+    let prepared = agent.ok("conn_attachment_prepare_upload",json!({"upload":{"type":"file","name":"note.txt","mimeType":"text/plain","sizeBytes":3}})).await;
     let files = f.service.config.files.clone().unwrap();
     let id = prepared["attachmentId"].as_str().unwrap().to_owned();
     let token = prepared["relativeUrl"]
@@ -316,7 +318,7 @@ async fn attachments_claim_bytes_reuse_canonical_metadata_and_refuse_foreign_ids
     assert_eq!(
         agent
             .failure(
-                "t3_thread_send_attachments",
+                "conn_thread_send_attachments",
                 json!({"attachments":[duplicate.clone(),duplicate]})
             )
             .await,
@@ -326,9 +328,9 @@ async fn attachments_claim_bytes_reuse_canonical_metadata_and_refuse_foreign_ids
         )
     );
     let images: Vec<_> = (0..2).map(|n|json!({"type":"file","id":format!("pending-00000000-0000-4000-8000-{n:012}"),"name":"photo.png","mimeType":"image/png","sizeBytes":50*1024*1024})).collect();
-    assert_eq!(agent.failure("t3_thread_send_attachments", json!({"attachments":images})).await,
+    assert_eq!(agent.failure("conn_thread_send_attachments", json!({"attachments":images})).await,
         ("orchestration_error".into(), "Images can total up to 80 MiB per message or question response. Use smaller images or send fewer at once.".into()));
-    let result = agent.ok("t3_thread_send_attachments",json!({"attachments":[{"type":"file","id":id,"name":"note.txt","mimeType":"text/plain","sizeBytes":3}]})).await;
+    let result = agent.ok("conn_thread_send_attachments",json!({"attachments":[{"type":"file","id":id,"name":"note.txt","mimeType":"text/plain","sizeBytes":3}]})).await;
     let projection = f
         .service
         .config
@@ -361,7 +363,7 @@ async fn attachments_claim_bytes_reuse_canonical_metadata_and_refuse_foreign_ids
     let mut outside = Client::open(&f.service, client(true)).await;
     let reused = outside
         .ok(
-            "t3_thread_send_attachments",
+            "conn_thread_send_attachments",
             json!({"threadId":parent["threadId"],"attachments":[tampered]}),
         )
         .await;
@@ -384,7 +386,7 @@ async fn attachments_claim_bytes_reuse_canonical_metadata_and_refuse_foreign_ids
     assert_eq!(
         outside
             .failure(
-                "t3_thread_send_attachments",
+                "conn_thread_send_attachments",
                 json!({"threadId":parent["threadId"],"attachments":[foreign]})
             )
             .await
@@ -399,18 +401,18 @@ async fn handoff_moves_thread_ends_old_run_and_resumes_in_worktree() {
     let root = git_project(&f).await;
     let (parent, caller) = running_parent(&f).await;
     let mut agent = Client::open(&f.service, caller).await;
-    let moved = agent.ok("t3_worktree_handoff",json!({"branch":"feature/handoff","startFromOrigin":false,"continuationPrompt":"write handoff-proof.txt hello"})).await;
+    let moved = agent.ok("conn_worktree_handoff",json!({"branch":"feature/handoff","startFromOrigin":false,"continuationPrompt":"write handoff-proof.txt hello"})).await;
     assert_eq!(moved["startedFromOrigin"], false);
     assert_eq!(moved["setupScript"]["status"], "no-script");
     assert_eq!(moved["continuation"]["status"], "scheduled");
-    let status = agent.ok("t3_worktree_status", json!({})).await;
+    let status = agent.ok("conn_worktree_status", json!({})).await;
     assert_eq!(status["branch"], "feature/handoff");
     assert_eq!(status["worktreePath"], moved["worktreePath"]);
     assert_eq!(
         status["projectWorkspaceRoot"],
         root.to_string_lossy().as_ref()
     );
-    let refs = agent.ok("t3_worktree_list", json!({})).await;
+    let refs = agent.ok("conn_worktree_list", json!({})).await;
     assert!(
         refs["refs"]
             .as_array()
@@ -420,7 +422,7 @@ async fn handoff_moves_thread_ends_old_run_and_resumes_in_worktree() {
     );
     let mut c = Client::open(&f.service, client(true)).await;
     c.ok(
-        "t3_thread_wait",
+        "conn_thread_wait",
         json!({"threadId":parent["threadId"],"timeoutMs":10000}),
     )
     .await;
@@ -443,11 +445,11 @@ async fn handoff_moves_thread_ends_old_run_and_resumes_in_worktree() {
     assert!(!root.join("handoff-proof.txt").exists());
     // A second handoff must not leave a second branch or checkout.
     let error = agent
-        .failure("t3_worktree_handoff", json!({"branch":"feature/again"}))
+        .failure("conn_worktree_handoff", json!({"branch":"feature/again"}))
         .await;
     assert_eq!(error.0, "parent_not_active");
     c.ok(
-        "t3_thread_organize",
+        "conn_thread_organize",
         json!({"threadId":parent["threadId"],"action":"archive"}),
     )
     .await;
@@ -461,13 +463,13 @@ async fn nested_inputs_validate_before_access_and_trim_as_t3() {
     let mut agent = Client::open(&f.service, caller).await;
     for (tool, input, path, expected) in [
         (
-            "t3_worktree_list",
+            "conn_worktree_list",
             json!({"threadId":" "}),
             "[\"threadId\"]",
             "a non-blank string",
         ),
         (
-            "t3_worktree_list",
+            "conn_worktree_list",
             json!({"query":"x".repeat(257)}),
             "[\"query\"]",
             "a value with a length of at most 256",
@@ -485,13 +487,13 @@ async fn nested_inputs_validate_before_access_and_trim_as_t3() {
             "a value with a length of at most 120000",
         ),
         (
-            "t3_worktree_handoff",
+            "conn_worktree_handoff",
             json!({"branch":" "}),
             "[\"branch\"]",
             "a non-blank string",
         ),
         (
-            "t3_attachment_prepare_upload",
+            "conn_attachment_prepare_upload",
             json!({"upload":{"name":"shot.png","mimeType":"image/png","sizeBytes":0}}),
             "[\"upload\"][\"sizeBytes\"]",
             "a value greater than or equal to 1",
@@ -523,7 +525,7 @@ async fn metadata_binding_rejects_stale_worktrees_and_keeps_idle_continuations()
     let mut outside = Client::open(&f.service, client(true)).await;
     let idle = outside
         .ok(
-            "t3_thread_launch",
+            "conn_thread_launch",
             json!({"projectId":project_id(),"title":"Idle"}),
         )
         .await;
@@ -535,10 +537,13 @@ async fn metadata_binding_rejects_stale_worktrees_and_keeps_idle_continuations()
             .dispatch(conn_contract::from_json(value).unwrap())
     };
     assert!(dispatch(json!({"type":"thread.metadata.update","commandId":"stale","threadId":thread,"worktreePath":"/ignored","expectedWorktreePath":"/stale"})).await.is_err());
-    dispatch(json!({"type":"thread.metadata.update","commandId":"idle-move","threadId":thread,"branch":"feature","worktreePath":"/new","expectedWorktreePath":null,"continuation":{"messageId":"resume-idle","text":"hello"}})).await.unwrap();
+    // The continuation runs in the new folder, which must exist (`ProviderWorkspaceMissingError`).
+    let new = f.dir.join("new").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&new).unwrap();
+    dispatch(json!({"type":"thread.metadata.update","commandId":"idle-move","threadId":thread,"branch":"feature","worktreePath":new,"expectedWorktreePath":null,"continuation":{"messageId":"resume-idle","text":"hello"}})).await.unwrap();
     let ended = outside
         .ok(
-            "t3_thread_wait",
+            "conn_thread_wait",
             json!({"threadId":thread,"timeoutMs":10000}),
         )
         .await;
@@ -551,7 +556,7 @@ async fn metadata_binding_rejects_stale_worktrees_and_keeps_idle_continuations()
         .await
         .unwrap();
     assert_eq!(projection["runs"].as_array().unwrap().len(), 1);
-    assert_eq!(projection["thread"]["worktreePath"], "/new");
+    assert_eq!(projection["thread"]["worktreePath"], json!(new));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -581,7 +586,7 @@ async fn handoff_setup_runs_in_a_thread_terminal_with_the_project_environment() 
     let mut agent = Client::open(&f.service, caller).await;
     let moved = agent
         .ok(
-            "t3_worktree_handoff",
+            "conn_worktree_handoff",
             json!({"branch":"feature/setup","startFromOrigin":false}),
         )
         .await;
@@ -696,14 +701,14 @@ async fn handoff_fetches_remote_base_and_list_falls_back_after_worktree_cleanup(
     let mut agent = Client::open(&f.service, caller).await;
     assert_eq!(
         agent
-            .failure("t3_worktree_handoff", json!({"branch":"main"}))
+            .failure("conn_worktree_handoff", json!({"branch":"main"}))
             .await
             .0,
         "invalid_request"
     );
     let moved = agent
         .ok(
-            "t3_worktree_handoff",
+            "conn_worktree_handoff",
             json!({"branch":"feature/origin","runSetupScript":false}),
         )
         .await;
@@ -719,7 +724,7 @@ async fn handoff_fetches_remote_base_and_list_falls_back_after_worktree_cleanup(
         .unwrap();
     let mut outside = Client::open(&f.service, client(false)).await;
     let refs = outside
-        .ok("t3_worktree_list", json!({"threadId":format!("  {}  ",parent["threadId"].as_str().unwrap()),"query":"  main  "}))
+        .ok("conn_worktree_list", json!({"threadId":format!("  {}  ",parent["threadId"].as_str().unwrap()),"query":"  main  "}))
         .await;
     assert_eq!(refs["isRepo"], true);
     assert!(
@@ -743,7 +748,7 @@ async fn concurrent_handoff_is_refused_and_a_raced_binding_rolls_back_git() {
         let mut agent = Client::open(&service, first_caller).await;
         agent
             .failure(
-                "t3_worktree_handoff",
+                "conn_worktree_handoff",
                 json!({"branch":"feature/race","startFromOrigin":false}),
             )
             .await
@@ -754,7 +759,7 @@ async fn concurrent_handoff_is_refused_and_a_raced_binding_rolls_back_git() {
     let mut agent = Client::open(&f.service, caller).await;
     assert_eq!(
         agent
-            .failure("t3_worktree_handoff", json!({"branch":"feature/second"}))
+            .failure("conn_worktree_handoff", json!({"branch":"feature/second"}))
             .await
             .0,
         "handoff_in_progress"
@@ -880,7 +885,7 @@ async fn handoff_reports_the_committed_continuation_when_the_caller_ends_during_
     let service = f.service.clone();
     let handoff = tokio::spawn(async move {
         let mut agent = Client::open(&service, caller).await;
-        agent.ok("t3_worktree_handoff",json!({"branch":"feature/ended-caller","startFromOrigin":false,"continuationPrompt":"hang"})).await
+        agent.ok("conn_worktree_handoff",json!({"branch":"feature/ended-caller","startFromOrigin":false,"continuationPrompt":"hang"})).await
     });
     tokio::task::spawn_blocking(move || std::fs::read(ready).unwrap())
         .await
@@ -888,13 +893,13 @@ async fn handoff_reports_the_committed_continuation_when_the_caller_ends_during_
     let mut outside = Client::open(&f.service, client(true)).await;
     outside
         .ok(
-            "t3_thread_interrupt",
+            "conn_thread_interrupt",
             json!({"threadId":parent["threadId"],"runId":parent["runId"]}),
         )
         .await;
     outside
         .ok(
-            "t3_thread_wait",
+            "conn_thread_wait",
             json!({"threadId":parent["threadId"],"runId":parent["runId"],"timeoutMs":10000}),
         )
         .await;
@@ -906,4 +911,186 @@ async fn handoff_reports_the_committed_continuation_when_the_caller_ends_during_
         moved["continuation"],
         json!({"status":"scheduled","delivery":"started"})
     );
+}
+
+/// T3 `cleanUpSettledThread` (`ThreadSettlementService.ts:700`): a settled thread's own
+/// worktree runs the project's `runOnSettle` script in a fresh `settle-` terminal; a delegate
+/// that shares its parent's checkout runs nothing. The host's settle effect, and its
+/// once-per-settlement rule, are proven in `conn-server`'s `host.rs`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_settled_worktree_thread_runs_its_settle_script_in_its_own_checkout() {
+    let mut f = fixture("settle-script");
+    let shell = f.dir.join("shell");
+    conn_support::test_util::executable(
+        &shell,
+        "#!/bin/sh\nexport HISTFILE=/dev/null\nexec /bin/sh \"$@\"\n",
+    )
+    .unwrap();
+    let terminals = conn_terminal::TerminalManager::new(conn_terminal::TerminalConfig {
+        shells: vec![shell.to_string_lossy().into_owned()],
+        ..Default::default()
+    });
+    Arc::get_mut(&mut f.service)
+        .unwrap()
+        .config
+        .worktrees
+        .as_mut()
+        .unwrap()
+        .terminals = Some(terminals.clone());
+    git_project(&f).await;
+    f.service.config.engine.call("projects.mutate",json!({"type":"project.update","commandId":"settle-script","projectId":project_id(),"scripts":[{"id":"finish","name":"Finish","icon":"play","command":"printf 'ran\\n' >> settle-runs.txt; printf 'SETTLE-%s\\n' done","runOnSettle":true,"runOnWorktreeCreate":false}]})).await.unwrap();
+    let (parent, caller) = running_parent(&f).await;
+    let thread = parent["threadId"].as_str().unwrap().to_owned();
+    let mut agent = Client::open(&f.service, caller).await;
+    let moved = agent
+        .ok(
+            "conn_worktree_handoff",
+            json!({"branch":"feature/settle","startFromOrigin":false,"continuationPrompt":"hang"}),
+        )
+        .await;
+    let path = PathBuf::from(moved["worktreePath"].as_str().unwrap());
+    let mut operator = Client::open(&f.service, client(true)).await;
+    operator
+        .ok(
+            "conn_thread_wait",
+            json!({"threadId":thread,"runId":parent["runId"],"timeoutMs":10000}),
+        )
+        .await;
+    until_provider_turn(&f, &thread).await;
+
+    // A delegate in the parent's checkout: the checkout belongs to the parent.
+    let child = agent
+        .ok(
+            "delegate_task",
+            json!({"task":"done","mode":"wait","timeoutMs":5000}),
+        )
+        .await;
+    let child_id = child["childThreadId"].as_str().unwrap().to_owned();
+    let settle = |id: &str, n: u32| json!({"type":"thread.settle","commandId":format!("settle-{id}-{n}"),"threadId":id});
+    // The committed `settledAt` names a settlement.
+    let settled_at = |id: String| {
+        let engine = f.service.config.engine.clone();
+        async move {
+            let p = engine
+                .get_thread_projection(id.as_str().into())
+                .await
+                .unwrap();
+            p["thread"]["settledAt"].as_str().unwrap().to_owned()
+        }
+    };
+    dispatch(&f, settle(&child_id, 1)).await;
+    let child_settlement = settled_at(child_id.clone()).await;
+    assert_eq!(
+        f.service
+            .run_settle_script(&child_id, &child_settlement)
+            .await,
+        None
+    );
+
+    operator
+        .ok("conn_thread_interrupt", json!({"threadId":thread}))
+        .await;
+    operator
+        .ok(
+            "conn_thread_wait",
+            json!({"threadId":thread,"timeoutMs":10000}),
+        )
+        .await;
+    dispatch(&f, settle(&thread, 1)).await;
+    let first = settled_at(thread.clone()).await;
+    let started = f
+        .service
+        .run_settle_script(&thread, &first)
+        .await
+        .expect("the settle script starts");
+    assert_eq!(started["status"], "started");
+    let terminal = started["terminalId"].as_str().unwrap();
+    assert!(terminal.starts_with("settle-finish-"), "{terminal}");
+    let mut output = terminals
+        .observe(
+            conn_contract::from_json(json!({"threadId":thread,"terminalId":terminal})).unwrap(),
+        )
+        .unwrap();
+    // Exit 0: the script's terminal closes once its shell is idle again.
+    let mut text = String::new();
+    loop {
+        match output.next().await {
+            conn_contract::TerminalAttachStreamEvent::Output(event) => text.push_str(&event.data),
+            conn_contract::TerminalAttachStreamEvent::Snapshot(event) => {
+                text.push_str(&event.snapshot.history)
+            }
+            conn_contract::TerminalAttachStreamEvent::Closed(_) => break,
+            _ => {}
+        }
+    }
+    assert!(text.contains("SETTLE-done"), "{text}");
+    let runs_file = path.join("settle-runs.txt");
+    let runs = tokio::task::spawn_blocking(move || std::fs::read_to_string(runs_file).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(runs, "ran\n");
+    // The same settlement's close again, as a restart requeues a close whose row had not
+    // settled: the script started once already, so it does not start again.
+    assert_eq!(f.service.run_settle_script(&thread, &first).await, None);
+
+    // A new settlement whose script fails keeps its terminal for the user to read.
+    dispatch(
+        &f,
+        json!({"type":"thread.unsettle","commandId":"unsettle-1","threadId":thread,"reason":"user"}),
+    )
+    .await;
+    f.service.config.engine.call("projects.mutate",json!({"type":"project.update","commandId":"settle-script-2","projectId":project_id(),"scripts":[{"id":"finish","name":"Finish","icon":"play","command":"printf 'FAILED-%s\\n' now; exit 3","runOnSettle":true,"runOnWorktreeCreate":false}]})).await.unwrap();
+    dispatch(&f, settle(&thread, 3)).await;
+    // The undone settlement's cleanup, late, does nothing.
+    assert_eq!(f.service.run_settle_script(&thread, &first).await, None);
+    let second = settled_at(thread.clone()).await;
+    assert_ne!(second, first);
+    let started = f
+        .service
+        .run_settle_script(&thread, &second)
+        .await
+        .expect("the new settlement runs its script");
+    let terminal = started["terminalId"].as_str().unwrap().to_owned();
+    let observe = |terminal: &str| {
+        terminals
+            .observe(
+                conn_contract::from_json(json!({"threadId":thread,"terminalId":terminal})).unwrap(),
+            )
+            .unwrap()
+    };
+    let mut output = observe(&terminal);
+    let mut text = String::new();
+    while !text.contains("FAILED-now") {
+        match output.next().await {
+            conn_contract::TerminalAttachStreamEvent::Output(event) => text.push_str(&event.data),
+            conn_contract::TerminalAttachStreamEvent::Snapshot(event) => {
+                text.push_str(&event.snapshot.history)
+            }
+            conn_contract::TerminalAttachStreamEvent::Closed(_) => panic!("closed: {text}"),
+            _ => {}
+        }
+    }
+    // A round trip through the same shell after the failure: it is still open.
+    terminals
+        .write(
+            conn_contract::from_json(
+                json!({"threadId":thread,"terminalId":terminal,"data":"echo STILL-$((40+2))\r"}),
+            )
+            .unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    while !text.contains("STILL-42") {
+        match output.next().await {
+            conn_contract::TerminalAttachStreamEvent::Output(event) => text.push_str(&event.data),
+            conn_contract::TerminalAttachStreamEvent::Closed(_) => panic!("closed: {text}"),
+            _ => {}
+        }
+    }
+    assert!(
+        terminals.list().iter().any(|t| t.terminal_id == terminal),
+        "a failed settle script keeps its terminal"
+    );
+    terminals.shutdown().await;
 }

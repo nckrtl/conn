@@ -1,0 +1,376 @@
+@font-face {
+  font-family: "Conn Files Mono";
+  src: url("../../../conn-gpui/crates/conn-app/assets/fonts/jetbrains-mono/JetBrainsMono[wght].ttf")
+    format("truetype");
+  font-display: swap;
+  font-weight: 100 800;
+}
+
+.lab-files {
+  --lf-text: var(--ink, var(--color-foreground));
+  --lf-muted: var(--muted, var(--color-foreground-muted));
+  --lf-surface: var(--bg, var(--color-sheet-solid));
+  --lf-border: var(--line, var(--color-border));
+  --lf-control: var(--raised, var(--color-sheet));
+  --lf-hover: var(--hover, var(--color-border-subtle));
+  --lf-selection: color-mix(in srgb, #528bec 22%, transparent);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--lf-surface);
+  color: var(--lf-text);
+  font:
+    13px/20px -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  container-type: inline-size;
+}
+.lab-files button,
+.lab-files input {
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+}
+.lab-files button {
+  cursor: pointer;
+}
+.lab-files button:focus-visible,
+.lab-files [role="link"]:focus-visible {
+  outline: 2px solid var(--lf-muted);
+  outline-offset: -2px;
+}
+.lab-files .icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.lab-files .icon svg {
+  width: 100%;
+  height: 100%;
+}
+.lf-toolbar {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 100%;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--lf-border);
+  background: var(--lf-surface);
+}
+.lf-search,
+.lf-path-field,
+.lf-tools {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  min-width: 0;
+  border: 1px solid var(--lf-border);
+  border-radius: 999px;
+  color: var(--lf-muted);
+  background: var(--lf-control);
+}
+.lf-search,
+.lf-path-field {
+  flex: 1;
+}
+.lf-search {
+  padding-inline: 9px;
+  gap: 6px;
+}
+.lf-path-field {
+  padding-inline: 3px 9px;
+  gap: 6px;
+}
+.lf-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: var(--lf-text);
+}
+.lf-search input:focus {
+  outline: none;
+}
+.lf-search:focus-within {
+  outline: 1px solid var(--lf-muted);
+}
+.lf-search input::placeholder {
+  color: var(--lf-muted);
+}
+.lf-tools {
+  flex: none;
+  gap: 2px;
+  padding: 0 3px;
+}
+.lab-files .tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex: none;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--lf-muted);
+}
+.lab-files .tool:hover,
+.lab-files .tool[aria-pressed="true"] {
+  color: var(--lf-text);
+  background: var(--lf-hover);
+}
+.lf-tree {
+  overflow: auto;
+  padding: 8px;
+}
+.lf-tree button {
+  display: flex;
+  width: 100%;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 12px;
+  border-radius: 8px;
+  text-align: left;
+}
+.lf-tree button:hover,
+.lf-tree button:focus-visible {
+  background: var(--lf-hover);
+}
+.lf-tree button[aria-expanded] {
+  font-weight: 500;
+}
+.lf-caret {
+  width: 12px;
+  display: inline-flex;
+  color: var(--lf-muted);
+}
+.lf-caret .icon {
+  width: 12px;
+  height: 12px;
+}
+.lf-php-icon,
+.lf-ts-icon {
+  display: inline-flex;
+}
+.lf-php-icon {
+  color: light-dark(#7352aa, #b38cdb);
+}
+.lf-ts-icon {
+  color: light-dark(#286c9f, #77aed4);
+}
+.lf-empty,
+.lf-error {
+  margin: 8px 16px;
+  font-size: 13px;
+  color: var(--lf-muted);
+}
+.lf-crumb {
+  --fade-start: 0px;
+  --fade-end: 0px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start),
+    #000 calc(100% - var(--fade-end)),
+    transparent
+  );
+}
+.lf-crumb[data-fade-start] {
+  --fade-start: 14px;
+}
+.lf-crumb[data-fade-end] {
+  --fade-end: 14px;
+}
+.lf-path-field:has(.lf-crumb:focus-visible) {
+  outline: 1px solid var(--native-focus, var(--lf-muted));
+}
+.lf-crumb:focus {
+  outline: none;
+}
+.lf-crumb-segments {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: max-content;
+  flex: none;
+  font-size: 13px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.lf-crumb-separator {
+  display: inline-flex;
+}
+.lf-crumb-separator .icon {
+  width: 10px;
+  height: 10px;
+}
+.lf-crumb strong {
+  font-weight: 500;
+  color: var(--lf-text);
+}
+.lf-editor {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+  color: var(--lf-text);
+  font:
+    15px/1.6 "JetBrains Mono",
+    "Conn Files Mono",
+    ui-monospace,
+    monospace;
+  tab-size: 4;
+}
+.lf-lines {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  width: max-content;
+  min-width: 100%;
+  padding-block: 12px;
+}
+.lf-line {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+  min-height: 24px;
+}
+.lab-files .lf-number {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 0 12px 0 8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--lf-muted);
+  font-size: 12px;
+  line-height: 24px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.lf-number:hover {
+  background: var(--lf-hover);
+}
+.lf-source {
+  display: block;
+  white-space: pre;
+  font: inherit;
+  padding-inline-end: 12px;
+  color: inherit;
+}
+.lf-editor[data-wrap="true"] .lf-lines {
+  width: 100%;
+}
+.lf-editor[data-wrap="true"] .lf-source {
+  white-space: pre-wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.lf-line[data-revealed="true"] {
+  background: color-mix(in srgb, #528bec 11%, transparent);
+  box-shadow: inset 2px 0 #528bec;
+}
+.lf-line[data-selected="true"] {
+  background-color: var(--lf-selection);
+}
+.lf-line[data-selected="true"] .lf-number {
+  color: var(--lf-text);
+}
+.lf-source ::selection,
+.lf-source::selection {
+  background: color-mix(in srgb, #528bec 48%, transparent);
+}
+.lf-source [data-syntax="keyword"] {
+  color: light-dark(#8340a1, #c792dc);
+}
+.lf-source [data-syntax="variable"] {
+  color: light-dark(#a13c45, #e48a94);
+}
+.lf-source [data-syntax="string"] {
+  color: light-dark(#427329, #98c379);
+}
+.lf-source [data-syntax="number"] {
+  color: light-dark(#995620, #dca778);
+}
+.lf-source [data-syntax="call"] {
+  color: light-dark(#1a66a2, #72b7ec);
+}
+.lf-source [data-syntax="tag"],
+.lf-source [data-syntax="type"] {
+  color: light-dark(#127579, #62bdc6);
+}
+.lf-source [data-syntax="comment"] {
+  color: var(--lf-muted);
+  font-style: italic;
+}
+.lf-symbol {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.lf-symbol:hover,
+.lf-symbol:focus-visible {
+  text-decoration-style: solid;
+}
+.lf-tabs {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  overflow: auto;
+  border-bottom: 1px solid var(--lf-border);
+  scrollbar-width: thin;
+}
+.lf-tab {
+  display: flex;
+  align-items: center;
+  flex: none;
+  max-width: 230px;
+  height: 26px;
+  padding-right: 3px;
+  border-radius: 6px;
+  color: var(--lf-muted);
+}
+.lf-tab[data-active="true"] {
+  background: var(--lf-control);
+  color: var(--lf-text);
+}
+.lf-tab > button:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.lf-tab > button:first-child .icon {
+  width: 13px;
+  height: 13px;
+}
+.lf-tab .tool {
+  width: 17px;
+  height: 17px;
+}
+.lf-tab .tool .icon {
+  width: 12px;
+  height: 12px;
+}

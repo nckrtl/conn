@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use conn_contract::{ProviderSessionId, ProviderThread, from_json, to_json};
 use conn_provider::{
-    BoxFuture, EnsureThreadInput, InterruptInput, McpServer, ProviderError, ProviderEvent,
+    BoxFuture, Closed, EnsureThreadInput, InterruptInput, McpServer, ProviderError, ProviderEvent,
     ProviderResult, ResumeThreadInput, RuntimeRequestResponse, Session, TurnInput,
 };
 use conn_provider_support::ids::{Env, SystemEnv};
@@ -19,12 +19,12 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::connection::{CallError, Connection, Incoming};
-use crate::flavor::{Completion, Flavor, StopStyle};
+use crate::flavor::{Completion, Flavor, ModelSwitch, StopStyle};
 use crate::mapper::{self, Disposition, Mapper, Out, PromptOutcome};
 use crate::ordered::{J, obj};
 use crate::policy;
 use crate::prompt::{self, InstructionState};
-use crate::protocol::RequestId;
+use crate::protocol::{RequestId, RpcError};
 
 pub(crate) const EVENT_CAPACITY: usize = 256;
 /// `ACP_TEXT_FLUSH_INTERVAL`.
@@ -44,6 +44,20 @@ pub(crate) struct Spawned {
     pub stop: Box<dyn FnOnce(StopKind) -> BoxFuture<'static, ()> + Send>,
 }
 
+impl Spawned {
+    /// Stops an agent that has no reader: its input and output go first, so a full event
+    /// channel cannot hold up the exit report the stop waits for.
+    fn stop_unread(self, kind: StopKind) -> BoxFuture<'static, ()> {
+        let Self {
+            writer,
+            events,
+            stop,
+        } = self;
+        drop((writer, events));
+        stop(kind)
+    }
+}
+
 /// How a runtime ends (T3 `AcpSessionRuntime`, owned detached process group).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StopKind {
@@ -51,10 +65,52 @@ pub(crate) enum StopKind {
     Kill,
     /// `terminateProcessGroup`: SIGTERM to the group, 1 s grace, then SIGKILL.
     Terminate,
+    /// The agent exited and was reaped: only its files go. Its PID and group are no longer
+    /// ours to signal.
+    Exited,
 }
 
-/// Starts the agent for this session (the real process, or a replay agent in tests).
-pub(crate) type Spawner = Arc<dyn Fn() -> std::io::Result<Spawned> + Send + Sync>;
+/// What [`AcpSession::open_with`] adds to a plain open.
+#[derive(Default)]
+pub(crate) struct OpenControl {
+    /// Ends the open early; the agent is stopped before `open_with` returns.
+    pub abort: Option<BoxFuture<'static, ()>>,
+    /// Told when the agent has answered `initialize`, and when the session is open.
+    pub on_step: Option<Box<dyn Fn(conn_provider::CheckStep) + Send + Sync>>,
+    /// Kept up to date with what became of `session/new`, also when the open fails.
+    pub session_new: Option<Arc<std::sync::Mutex<SessionNew>>>,
+}
+
+/// What became of an open's `session/new`: whether the agent may have stored a session, and
+/// its id once the agent named it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SessionNew {
+    #[default]
+    NotSent,
+    /// Sent; no reply named the session.
+    Sent,
+    Created(String),
+}
+
+/// Starts the agent for this session (the real process, or a replay agent in tests). It may
+/// block (folders, `fork`/`exec`): the session runs it on a blocking thread.
+pub(crate) type Spawner = Arc<dyn Fn() -> Result<Spawned, SpawnError> + Send + Sync>;
+
+/// Why a [`Spawner`] started no agent.
+#[derive(Debug)]
+pub(crate) enum SpawnError {
+    /// A step the server owns before the spawn failed: T3's `ProviderSetupError`, whose text
+    /// the user sees.
+    Setup(&'static str),
+    /// The process did not start (T3's spawn error, shown as a fixed text).
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for SpawnError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 
 pub(crate) struct Config {
     /// `None` holds streamed text until the segment closes, as T3's paused test clock does.
@@ -78,18 +134,81 @@ pub(crate) struct Config {
     pub self_command: String,
     /// Where attachments are saved (`resolveAttachmentPath`); `None`: paths unavailable.
     pub attachments_dir: Option<std::path::PathBuf>,
+    /// `authMethodId`, sent eagerly when the flavor says so.
+    pub auth_method: Option<String>,
+    /// The installed agent version when known before `initialize` (`runtimeVersion`).
+    pub runtime_version: Option<String>,
+    /// The catalog's default model, used when the selection asks for the default
+    /// (`applyAntigravityAcpModelSelection`'s `defaultModel`).
+    pub default_model: Option<String>,
+    /// Told about the session's config options and commands as the agent reports them.
+    pub observer: Option<Observer>,
+}
+
+/// What the agent reported about the session's catalog (T3's `ConfigOptionsUpdated` and
+/// `AvailableCommandsUpdated` events).
+#[derive(Debug)]
+pub(crate) enum CatalogUpdate<'a> {
+    ConfigOptions(&'a Value),
+    AvailableCommands(&'a Value),
+}
+
+/// Receives [`CatalogUpdate`]s, in the order the agent sent them.
+pub(crate) type Observer = Arc<dyn Fn(CatalogUpdate<'_>) + Send + Sync>;
+
+fn notify_observer(observer: &Observer, update: &HeldUpdate) {
+    observer(match update {
+        HeldUpdate::ConfigOptions(options) => CatalogUpdate::ConfigOptions(options),
+        HeldUpdate::AvailableCommands(commands) => CatalogUpdate::AvailableCommands(commands),
+    });
 }
 
 struct Runtime {
     connection: Connection,
-    stop: Option<Box<dyn FnOnce(StopKind) -> BoxFuture<'static, ()> + Send>>,
+    stopper: Arc<Stopper>,
     generation: u64,
+}
+
+type StopFn = Box<dyn FnOnce(StopKind) -> BoxFuture<'static, ()> + Send>;
+
+/// Ends one agent and removes its files, once, whoever comes first: an explicit stop, or the
+/// drive task when the agent exited on its own. A later caller waits until the first is done,
+/// as T3's scope finalizer runs once whatever ended the scope.
+struct Stopper {
+    stop: std::sync::Mutex<Option<StopFn>>,
+    done: tokio::sync::OnceCell<()>,
+}
+
+impl Stopper {
+    fn new(stop: StopFn) -> Arc<Self> {
+        Arc::new(Self {
+            stop: std::sync::Mutex::new(Some(stop)),
+            done: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    async fn stop(&self, kind: StopKind) {
+        self.done
+            .get_or_init(|| async {
+                let stop = self
+                    .stop
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(stop) = stop {
+                    stop(kind).await;
+                }
+            })
+            .await;
+    }
 }
 
 struct State<E: Env> {
     mapper: Mapper<E>,
     events: Option<mpsc::Sender<ProviderEvent>>,
     runtime: Option<Runtime>,
+    /// The latest agent's [`Stopper`]; it stays after the drive task took `runtime`.
+    stopper: Option<Arc<Stopper>>,
     generation: u64,
     /// The ACP session id (`activeSessionId`).
     session_id: Option<String>,
@@ -114,7 +233,39 @@ struct State<E: Env> {
     active_model: Option<String>,
     /// The running turn's `ProviderAdapterV2RuntimePolicy` (or the session's), as JSON.
     policy: Value,
+    /// Requests whose reply the driver hands over in order with the agent's updates
+    /// ([`AcpSession::set_config_option_in_order`]); one per caller in flight.
+    ordered_calls: Vec<(i64, OrderedReply)>,
+    /// `config_option_update`s seen: a write's reply older than one of them stays out.
+    config_updates: u64,
+    /// T3's `startupMetadata`: metadata updates that arrived before the root session was
+    /// known, the latest per session and kind; the root's are applied once it is.
+    startup_updates: Vec<Value>,
+    /// Catalog updates for the observer, held until the driver publishes the session
+    /// ([`AcpSession::release_catalog_updates`]), the latest per kind in arrival order.
+    /// `None` once released.
+    held_updates: Option<Vec<HeldUpdate>>,
 }
+
+/// A [`CatalogUpdate`] kept for later.
+#[derive(Debug)]
+enum HeldUpdate {
+    ConfigOptions(Value),
+    AvailableCommands(Value),
+}
+
+/// `maxStartupMetadataUpdates`.
+const MAX_STARTUP_UPDATES: usize = 32;
+
+/// `isStartupMetadataUpdate`.
+fn is_startup_metadata(params: &Value) -> bool {
+    matches!(
+        params["update"]["sessionUpdate"].as_str(),
+        Some("current_mode_update" | "config_option_update" | "available_commands_update")
+    )
+}
+
+type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
 
 /// What a prompt carried (`promptParts`): recorded only when the prompt succeeds, as T3
 /// records `promptInstructionStates` and `promptRuntimeInstructions` in the reply callback.
@@ -146,6 +297,9 @@ struct Inner {
     /// The run whose start Stop abandoned (`abandon_turn_start`). Outside `state`, which a
     /// start holds across awaits; one is enough, as a stale id matches no later run.
     abandoned_run: std::sync::Mutex<Option<String>>,
+    /// The spawn in flight. A start cancelled meanwhile leaves it here, and the stop that
+    /// follows claims and stops what it started (`stop_cancelled_spawn`).
+    spawning: Mutex<Option<tokio::task::JoinHandle<Result<Spawned, SpawnError>>>>,
 }
 
 impl Inner {
@@ -188,7 +342,68 @@ fn protocol_error(detail: impl Into<String>) -> ProviderError {
     }
 }
 
-fn failed(operation: &'static str, error: &CallError) -> ProviderError {
+/// Why [`AcpSession::open_with`] opened no session. The agent is stopped in every case.
+#[derive(Debug)]
+pub(crate) enum OpenError {
+    /// [`OpenControl::abort`] fired.
+    Aborted,
+    /// The agent answered `method` with a JSON-RPC error (T3's `AcpRequestError`), with
+    /// what the flavor recognised in it (`Flavor::rpc_failure`).
+    Rpc {
+        method: &'static str,
+        error: RpcError,
+        recognised: Option<ProviderError>,
+    },
+    Other(ProviderError),
+}
+
+impl From<ProviderError> for OpenError {
+    fn from(error: ProviderError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<OpenError> for ProviderError {
+    fn from(error: OpenError) -> Self {
+        match error {
+            OpenError::Aborted => Self::Failed {
+                operation: "start",
+                detail: "The agent start was stopped.".into(),
+            },
+            OpenError::Rpc {
+                method,
+                error,
+                recognised,
+            } => recognised.unwrap_or_else(|| plain_failed(method, &CallError::Rpc(error))),
+            OpenError::Other(error) => error,
+        }
+    }
+}
+
+fn call_failed(flavor: &Flavor, method: &'static str, error: CallError) -> OpenError {
+    match error {
+        CallError::Rpc(error) => OpenError::Rpc {
+            method,
+            recognised: (flavor.rpc_failure)(&error),
+            error,
+        },
+        error => OpenError::Other(failed(flavor, method, &error)),
+    }
+}
+
+fn failed(flavor: &Flavor, operation: &'static str, error: &CallError) -> ProviderError {
+    if let CallError::Provider(error) = error {
+        return error.clone();
+    }
+    if let CallError::Rpc(rpc) = error
+        && let Some(recognised) = (flavor.rpc_failure)(rpc)
+    {
+        return recognised;
+    }
+    plain_failed(operation, error)
+}
+
+fn plain_failed(operation: &'static str, error: &CallError) -> ProviderError {
     ProviderError::Failed {
         operation,
         detail: conn_provider_support::redact::redact(&error.detail()),
@@ -205,6 +420,8 @@ pub(crate) fn initialize_params(
     client_version: &str,
     elicitation: bool,
 ) -> J {
+    // Only a session's runtime serves files; the probe (no elicitation) serves nothing.
+    let file_reads = flavor.client_file_reads && elicitation;
     let client_info = || {
         obj()
             .with("name", client_name.to_owned())
@@ -214,7 +431,7 @@ pub(crate) fn initialize_params(
         .with(
             "fs",
             obj()
-                .with("readTextFile", false)
+                .with("readTextFile", file_reads)
                 .with("writeTextFile", false),
         )
         .with("terminal", false)
@@ -248,7 +465,13 @@ impl AcpSession {
         if inner.state.lock().await.restart_required {
             // A new agent loads the session (T3 `restartRuntimeAfterTeardownIfRequired`).
             let connection = inner.start_runtime().await?;
-            let initialize = inner.initialize(&connection).await?;
+            let initialize = match inner.initialize(&connection).await {
+                Ok(initialize) => initialize,
+                Err(error) => {
+                    inner.end_runtime().await;
+                    return Err(error);
+                }
+            };
             let session_id = inner
                 .state
                 .lock()
@@ -256,13 +479,27 @@ impl AcpSession {
                 .session_id
                 .clone()
                 .unwrap_or_default();
-            let setup = connection
+            // `resumeMethod: "resume"` (Antigravity): `session/resume` when the agent offers it.
+            let method = if inner.config.flavor.resume
+                && !initialize["agentCapabilities"]["sessionCapabilities"]["resume"].is_null()
+            {
+                "session/resume"
+            } else {
+                "session/load"
+            };
+            let setup = match connection
                 .call(
-                    "session/load",
+                    method,
                     inner.session_setup_params(&initialize, Some(&session_id)),
                 )
                 .await
-                .map_err(|e| failed("session/load", &e))?;
+            {
+                Ok(setup) => setup,
+                Err(error) => {
+                    inner.end_runtime().await;
+                    return Err(failed(inner.config.flavor, method, &error));
+                }
+            };
             let mut state = inner.state.lock().await;
             state.initialize = initialize;
             state.setup = setup;
@@ -309,9 +546,11 @@ impl AcpSession {
             .as_ref()
             .map(|r| r.connection.clone());
         if let Some(connection) = live {
-            let effort = crate::grok::selection_effort(&to_json(&input.model_selection));
+            let selection = to_json(&input.model_selection);
+            let effort = crate::grok::selection_effort(&selection);
+            let options = selection["options"].as_array().cloned().unwrap_or_default();
             inner
-                .configure(&connection, &model, effort.as_deref())
+                .configure(&connection, &model, effort.as_deref(), &options)
                 .await?;
         }
         inner.check_abandoned(run_id)?;
@@ -365,7 +604,10 @@ impl AcpSession {
                 .as_str()
                 .unwrap_or("")
                 .to_owned();
-            let notes = prompt::runtime_instructions(flavor.harness, &model);
+            let linking = !flavor
+                .session_setup
+                .is_some_and(|s| (s.carries_linking)(&state.initialize));
+            let notes = prompt::runtime_instructions(flavor.harness, &model, linking);
             let slash = user_text.trim_start().starts_with('/');
             let send_notes = !slash
                 && (compaction_marker.is_some()
@@ -382,7 +624,13 @@ impl AcpSession {
                     "ACP driver did not negotiate image prompt support",
                 ));
             }
-            blocks.extend(image_blocks);
+            // Antigravity (`buildAntigravityPrompt`): without `promptCapabilities.image` an
+            // image goes as its path only, which the text already carries.
+            let images_as_paths = flavor.client_file_reads
+                && state.initialize["agentCapabilities"]["promptCapabilities"]["image"] != true;
+            if !images_as_paths {
+                blocks.extend(image_blocks);
+            }
             if blocks.is_empty() {
                 return Err(protocol_error(
                     "ACP turn requires non-empty text or attachments",
@@ -428,6 +676,20 @@ impl AcpSession {
         env: Box<dyn Env + Sync>,
         events: mpsc::Sender<ProviderEvent>,
     ) -> ProviderResult<(Self, Value)> {
+        Self::open_with(config, spawner, env, events, OpenControl::default())
+            .await
+            .map_err(ProviderError::from)
+    }
+
+    /// [`Self::open`] with an abort and step reports. On any failure the agent is stopped
+    /// and its files are removed before this returns, as T3's scoped runtime does.
+    pub(crate) async fn open_with(
+        config: Config,
+        spawner: Spawner,
+        env: Box<dyn Env + Sync>,
+        events: mpsc::Sender<ProviderEvent>,
+        control: OpenControl,
+    ) -> Result<(Self, Value), OpenError> {
         let mapper = Mapper::new(
             DynEnv(env),
             config.flavor,
@@ -441,6 +703,7 @@ impl AcpSession {
                 mapper,
                 events: Some(events),
                 runtime: None,
+                stopper: None,
                 generation: 0,
                 session_id: None,
                 initialize: Value::Null,
@@ -458,38 +721,120 @@ impl AcpSession {
                 runtime_mode,
                 policy: config.policy.clone(),
                 active_model: None,
+                ordered_calls: Vec::new(),
+                config_updates: 0,
+                startup_updates: Vec::new(),
+                held_updates: Some(Vec::new()),
             }),
             config,
             abandoned_run: std::sync::Mutex::new(None),
+            spawning: Mutex::new(None),
         });
-        let connection = inner.start_runtime().await?;
-        let initialize = inner.initialize(&connection).await?;
-        let setup = connection
-            .call("session/new", inner.session_setup_params(&initialize, None))
-            .await
-            .map_err(|e| failed("session/new", &e))?;
-        let session_id = setup["sessionId"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| protocol_error("session/new returned no session id"))?
-            .to_owned();
-        {
-            let mut state = inner.state.lock().await;
-            state.session_id = Some(session_id.clone());
-            state.mapper.set_root_session(&session_id);
-            state.initialize = initialize;
-            state.setup = setup;
-        }
-        let model = inner.config.model.clone();
-        let effort = inner.config.effort.clone();
-        inner
-            .configure(&connection, &model, effort.as_deref())
-            .await?;
-        let session = Self {
-            id: inner.config.provider_session_id.as_str().into(),
-            inner,
+        let OpenControl {
+            abort,
+            on_step,
+            session_new,
+        } = control;
+        let steps = Self::open_steps(&inner, on_step.as_deref(), session_new.as_deref());
+        let outcome = match abort {
+            Some(abort) => tokio::select! {
+                outcome = steps => outcome,
+                () = abort => Err(OpenError::Aborted),
+            },
+            None => steps.await,
         };
-        Ok((session, json!({"sessionId": session_id})))
+        match outcome {
+            Ok(session_id) => {
+                let session = Self {
+                    id: inner.config.provider_session_id.as_str().into(),
+                    inner,
+                };
+                Ok((session, json!({"sessionId": session_id})))
+            }
+            Err(error) => {
+                inner.stop_runtime().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn open_steps(
+        inner: &Arc<Inner>,
+        on_step: Option<&(dyn Fn(conn_provider::CheckStep) + Send + Sync)>,
+        session_new: Option<&std::sync::Mutex<SessionNew>>,
+    ) -> Result<String, OpenError> {
+        let step = |step: conn_provider::CheckStep| {
+            if let Some(on_step) = on_step {
+                on_step(step);
+            }
+        };
+        let connection = inner.start_runtime().await?;
+        inner.start_session(&connection, &step, session_new).await
+    }
+
+    /// The agent's `initialize` result and the session setup result, as last seen.
+    pub(crate) async fn handshake(&self) -> (Value, Value) {
+        let state = self.inner.state.lock().await;
+        (state.initialize.clone(), state.setup.clone())
+    }
+
+    /// `setConfigOption`, then `drainEvents`: sets a session config option and waits until
+    /// the driver has applied every update the agent sent before its reply. Returns the
+    /// session's config options after it.
+    pub(crate) async fn set_config_option_in_order(
+        &self,
+        config_id: &str,
+        value: &str,
+    ) -> ProviderResult<Value> {
+        let (reply_tx, reply) = tokio::sync::oneshot::channel();
+        let before = {
+            // Held across the send, so the driver sees the waiter before the reply.
+            let mut state = self.inner.state.lock().await;
+            let Some(runtime) = &state.runtime else {
+                return Err(ProviderError::SessionStopped);
+            };
+            let connection = runtime.connection.clone();
+            let params = obj()
+                .with("sessionId", state.session_id.clone().unwrap_or_default())
+                .with("configId", config_id)
+                .with("value", value);
+            let Some(id) = connection.send("session/set_config_option", params).await else {
+                return Err(ProviderError::SessionStopped);
+            };
+            state.ordered_calls.push((id, reply_tx));
+            state.config_updates
+        };
+        let reply = reply
+            .await
+            .map_err(|_| ProviderError::SessionStopped)?
+            .map_err(|e| failed(self.inner.config.flavor, "session/set_config_option", &e))?;
+        let mut state = self.inner.state.lock().await;
+        self.inner
+            .apply_config_reply(&mut state, before, config_id, value, &reply);
+        Ok(state.setup["configOptions"].clone())
+    }
+
+    /// The driver published the session (T3's `onSessionStarted`): the catalog updates held
+    /// since the start reach the observer now, in order, and later ones as they come.
+    pub(crate) async fn release_catalog_updates(&self) {
+        let mut state = self.inner.state.lock().await;
+        let held = state.held_updates.take().unwrap_or_default();
+        if let Some(observer) = &self.inner.config.observer {
+            for update in &held {
+                notify_observer(observer, update);
+            }
+        }
+    }
+
+    /// `drainEvents`: waits until the driver has handled everything the agent sent so far.
+    pub(crate) async fn drain(&self) {
+        let connection = {
+            let state = self.inner.state.lock().await;
+            state.runtime.as_ref().map(|r| r.connection.clone())
+        };
+        if let Some(connection) = connection {
+            connection.barrier().await;
+        }
     }
 
     #[cfg(test)]
@@ -514,58 +859,246 @@ impl AcpSession {
 }
 
 impl Inner {
-    /// Spawns the agent and the task that reads it.
+    /// Spawns the agent and the task that reads it. The spawn slot stays locked until the
+    /// agent is installed or stopped, so a close waits for either ([`Self::stop_cancelled_spawn`]).
     async fn start_runtime(self: &Arc<Self>) -> ProviderResult<Connection> {
-        let spawned = (self.spawner)().map_err(|error| ProviderError::Failed {
-            operation: "start",
-            detail: format!("could not start {}: {error}", self.config.flavor.driver),
+        let mut spawning = self.spawning.lock().await;
+        let spawner = self.spawner.clone();
+        let task = spawning.insert(tokio::task::spawn_blocking(move || spawner()));
+        let joined = task.await;
+        *spawning = None;
+        let spawned =
+            joined.unwrap_or_else(|error| Err(SpawnError::Io(std::io::Error::other(error))));
+        let spawned = spawned.map_err(|error| match error {
+            SpawnError::Setup(detail) => ProviderError::Failed {
+                operation: "start",
+                detail: detail.to_owned(),
+            },
+            SpawnError::Io(error) => ProviderError::Failed {
+                operation: "spawn",
+                detail: format!("could not start {}: {error}", self.config.flavor.driver),
+            },
         })?;
-        let (connection, incoming) =
-            Connection::start(spawned.writer, spawned.events, EVENT_CAPACITY);
-        let generation = {
+        let (connection, incoming, generation) = {
             let mut state = self.state.lock().await;
+            if state.closed {
+                drop(state);
+                spawned.stop_unread(StopKind::Kill).await;
+                return Err(ProviderError::SessionStopped);
+            }
+            let Spawned {
+                writer,
+                events,
+                stop,
+            } = spawned;
+            let (connection, incoming) = Connection::start_with_signal(
+                writer,
+                events,
+                EVENT_CAPACITY,
+                self.config.flavor.stdout_signal,
+            );
             state.generation += 1;
             state.prompt_seq = 0;
             state.instruction_state = None;
             state.delivered_notes = None;
             state.delivery = None;
             state.mapper.reset_compaction();
+            let stopper = Stopper::new(stop);
+            state.stopper = Some(stopper.clone());
             state.runtime = Some(Runtime {
                 connection: connection.clone(),
-                stop: Some(spawned.stop),
+                stopper,
                 generation: state.generation,
             });
-            state.generation
+            (connection, incoming, state.generation)
         };
+        drop(spawning);
         tokio::spawn(drive(Arc::downgrade(self), incoming, generation));
         Ok(connection)
+    }
+
+    /// `initialize`, `session/new` and the model (T3's `start`): returns the root session id.
+    /// Startup metadata the agent sent for that session before its reply is applied then.
+    /// `step` hears T3's check steps; `session_new` follows what became of `session/new`.
+    async fn start_session(
+        self: &Arc<Self>,
+        connection: &Connection,
+        step: &(dyn Fn(conn_provider::CheckStep) + Sync),
+        session_new: Option<&std::sync::Mutex<SessionNew>>,
+    ) -> Result<String, OpenError> {
+        let record = |state: SessionNew| {
+            if let Some(slot) = session_new {
+                *crate::lock(slot) = state;
+            }
+        };
+        let initialize = self.send_initialize(connection).await?;
+        step(conn_provider::CheckStep::Initialized);
+        self.authenticate(connection, &initialize).await?;
+        record(SessionNew::Sent);
+        let setup = connection
+            .call("session/new", self.session_setup_params(&initialize, None))
+            .await
+            .map_err(|e| call_failed(self.config.flavor, "session/new", e))?;
+        let session_id = setup["sessionId"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| protocol_error("session/new returned no session id"))?
+            .to_owned();
+        record(SessionNew::Created(session_id.clone()));
+        {
+            let mut state = self.state.lock().await;
+            state.session_id = Some(session_id.clone());
+            state.mapper.set_root_session(&session_id);
+            state.initialize = initialize;
+            state.setup = setup;
+            let buffered = std::mem::take(&mut state.startup_updates);
+            for params in buffered
+                .iter()
+                .filter(|p| p["sessionId"] == session_id.as_str())
+            {
+                self.root_update(&mut state, params).await;
+            }
+        }
+        step(conn_provider::CheckStep::Verifying);
+        let model = self.config.model.clone();
+        let effort = self.config.effort.clone();
+        self.configure(connection, &model, effort.as_deref(), &[])
+            .await?;
+        // T3's start commits only when no termination was recorded (Antigravity's sign-in
+        // URL right behind the last reply).
+        if let Some(failure) = connection.failure() {
+            return Err(failure.into());
+        }
+        Ok(session_id)
+    }
+
+    /// Ends the current runtime as a close does, and keeps the session: a failed restart
+    /// leaves no agent, no `run-*` folder and (on Linux) no process tree behind. The driver
+    /// ignores its exit; when it is ending the agent already, this waits for it.
+    async fn end_runtime(&self) {
+        let stopper = {
+            let mut state = self.state.lock().await;
+            state.generation += 1;
+            state.runtime = None;
+            state.stopper.clone()
+        };
+        if let Some(stopper) = stopper {
+            stopper.stop(StopKind::Kill).await;
+        }
+    }
+
+    /// One `session/update` of the root session: its config options and commands, then the
+    /// mapper.
+    async fn root_update(self: &Arc<Self>, state: &mut State<DynEnv>, params: &Value) {
+        // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
+        // the agent, and the observer hears both.
+        let update = &params["update"];
+        if update["sessionUpdate"] == "config_option_update"
+            && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
+        {
+            state.setup["configOptions"] = options.clone();
+            state.config_updates += 1;
+            self.observe(state, HeldUpdate::ConfigOptions(options.clone()));
+        }
+        if update["sessionUpdate"] == "available_commands_update"
+            && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
+        {
+            self.observe(state, HeldUpdate::AvailableCommands(commands.clone()));
+        }
+        let outs = state.mapper.session_update(params);
+        self.deliver(state, outs).await;
     }
 
     /// `initialize`, as `AcpSessionRuntime.initializeOnce` and effect-acp's negotiating
     /// request send it: the v2 fields, then the v1 ones.
     async fn initialize(&self, connection: &Connection) -> ProviderResult<Value> {
-        let params = initialize_params(
-            self.config.flavor,
-            "t3-code",
-            &self.config.client_version,
-            true,
-        );
+        let initialize = self.send_initialize(connection).await?;
+        self.authenticate(connection, &initialize).await?;
+        Ok(initialize)
+    }
+
+    /// The `initialize` request alone (T3's `runtime.initialize()`).
+    async fn send_initialize(&self, connection: &Connection) -> Result<Value, OpenError> {
+        let flavor = self.config.flavor;
+        let (name, version) = match flavor.client_info {
+            Some(info) => info(self.config.runtime_version.as_deref()),
+            None => ("t3-code".to_owned(), self.config.client_version.clone()),
+        };
+        let params = initialize_params(flavor, &name, &version, true);
         connection
             .call("initialize", params)
             .await
-            .map_err(|e| failed("initialize", &e))
+            .map_err(|e| call_failed(flavor, "initialize", e))
+    }
+
+    /// The eager `authenticate` that T3's `start` sends first, for a flavor that wants it.
+    async fn authenticate(
+        &self,
+        connection: &Connection,
+        initialize: &Value,
+    ) -> Result<(), OpenError> {
+        if !self.config.flavor.authenticate_eagerly {
+            return Ok(());
+        }
+        // The configured method is authoritative: Antigravity accepts methods it does not
+        // list. effect-acp names it by the protocol generation of the reply's shape.
+        let method = if initialize.get("info").is_some() {
+            "auth/login"
+        } else {
+            "authenticate"
+        };
+        connection
+            .call(
+                method,
+                obj().with(
+                    "methodId",
+                    self.config.auth_method.clone().unwrap_or_default(),
+                ),
+            )
+            .await
+            .map(drop)
+            .map_err(|e| call_failed(self.config.flavor, "authenticate", e))
+    }
+
+    /// Ends the agent of a session that did not open, and waits until it is gone and its
+    /// files are removed, also when it exited first and the drive task is ending it.
+    async fn stop_runtime(&self) {
+        {
+            let mut state = self.state.lock().await;
+            state.closed = true;
+            state.events = None;
+        }
+        self.stop_cancelled_spawn().await;
+        self.end_runtime().await;
+    }
+
+    /// Waits until a start in flight has installed or stopped its agent, and stops the agent
+    /// of a start that was cancelled while its spawn ran.
+    async fn stop_cancelled_spawn(&self) {
+        let task = self.spawning.lock().await.take();
+        if let Some(task) = task
+            && let Ok(Ok(spawned)) = task.await
+        {
+            spawned.stop_unread(StopKind::Kill).await;
+        }
     }
 
     /// `configureSession`'s model part: switch the session's model (and Grok's reasoning
     /// effort) when the flavor says so. A rejected effort is dropped and the switch sent
-    /// again without it, as T3 does.
+    /// again without it, as T3 does. A config-option flavor then applies the chosen
+    /// thinking level from `options` (the selection's).
     async fn configure(
         &self,
         connection: &Connection,
         model: &str,
         effort: Option<&str>,
+        options: &[Value],
     ) -> ProviderResult<()> {
         let key = format!("{model}\u{0}{}", effort.unwrap_or(""));
+        if self.config.flavor.model_switch == ModelSwitch::ConfigOption {
+            self.configure_option(connection, model, key).await?;
+            return self.configure_thinking(connection, options).await;
+        }
         let (session_id, switch, current) = {
             let state = self.state.lock().await;
             if state.active_model.as_deref() == Some(key.as_str()) {
@@ -610,11 +1143,11 @@ impl Inner {
                                     .with_opt("_meta", meta),
                             )
                             .await
-                            .map_err(|e| failed("session/set_model", &e))?;
+                            .map_err(|e| failed(self.config.flavor, "session/set_model", &e))?;
                         sent = Some(model_id);
                     }
                 }
-                Err(e) => return Err(failed("session/set_model", &e)),
+                Err(e) => return Err(failed(self.config.flavor, "session/set_model", &e)),
             }
         }
         let mut state = self.state.lock().await;
@@ -625,15 +1158,138 @@ impl Inner {
         Ok(())
     }
 
+    /// The model through the session's `model` config option (`applyAntigravityAcpModelSelection`,
+    /// `runtime.setModel` / `setConfigOption`).
+    async fn configure_option(
+        &self,
+        connection: &Connection,
+        model: &str,
+        key: String,
+    ) -> ProviderResult<()> {
+        let (session_id, switch, before) = {
+            let state = self.state.lock().await;
+            if state.active_model.as_deref() == Some(key.as_str()) {
+                return Ok(());
+            }
+            (
+                state.session_id.clone().unwrap_or_default(),
+                crate::antigravity::model_switch(
+                    &state.setup,
+                    model,
+                    self.config.default_model.as_deref(),
+                ),
+                state.config_updates,
+            )
+        };
+        let switch = switch.map_err(|detail| ProviderError::Failed {
+            operation: "session/set_config_option",
+            detail,
+        })?;
+        if let Some((config_id, value)) = switch {
+            let reply = connection
+                .call(
+                    "session/set_config_option",
+                    obj()
+                        .with("sessionId", session_id)
+                        .with("configId", config_id.clone())
+                        .with("value", value.clone()),
+                )
+                .await
+                .map_err(|e| failed(self.config.flavor, "session/set_config_option", &e))?;
+            let mut state = self.state.lock().await;
+            self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
+        }
+        self.state.lock().await.active_model = Some(key);
+        Ok(())
+    }
+
+    /// The chosen thinking level, after the model: T3 writes each chosen option the live
+    /// session offers, and skips a value the agent rejects as invalid (`-32602`).
+    async fn configure_thinking(
+        &self,
+        connection: &Connection,
+        options: &[Value],
+    ) -> ProviderResult<()> {
+        let (session_id, write, before) = {
+            let state = self.state.lock().await;
+            (
+                state.session_id.clone().unwrap_or_default(),
+                crate::antigravity::thinking_write(&state.setup["configOptions"], options),
+                state.config_updates,
+            )
+        };
+        let Some((config_id, value)) = write else {
+            return Ok(());
+        };
+        let params = obj()
+            .with("sessionId", session_id)
+            .with("configId", config_id.clone())
+            .with("value", value.clone());
+        match connection.call("session/set_config_option", params).await {
+            Ok(reply) => {
+                let mut state = self.state.lock().await;
+                self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
+                Ok(())
+            }
+            Err(CallError::Rpc(error)) if error.code == -32602 => Ok(()),
+            Err(e) => Err(failed(self.config.flavor, "session/set_config_option", &e)),
+        }
+    }
+
+    /// A `session/set_config_option` reply: its options, or the value written, unless the
+    /// agent pushed an update while the write was in flight; that update is newer (T3's
+    /// `configOptionUpdates` check). The observer hears the options it applied.
+    fn apply_config_reply(
+        &self,
+        state: &mut State<DynEnv>,
+        before: u64,
+        config_id: &str,
+        value: &str,
+        reply: &Value,
+    ) {
+        if state.config_updates != before {
+            return;
+        }
+        match reply.get("configOptions") {
+            Some(options) if options.is_array() => {
+                state.setup["configOptions"] = options.clone();
+            }
+            _ => crate::antigravity::set_current(&mut state.setup, config_id, value),
+        }
+        let options = state.setup["configOptions"].clone();
+        self.observe(state, HeldUpdate::ConfigOptions(options));
+    }
+
+    /// Tells the observer about `update`, or holds it until the session is published.
+    fn observe(&self, state: &mut State<DynEnv>, update: HeldUpdate) {
+        let Some(observer) = &self.config.observer else {
+            return;
+        };
+        match &mut state.held_updates {
+            Some(held) => {
+                held.retain(|h| std::mem::discriminant(h) != std::mem::discriminant(&update));
+                held.push(update);
+            }
+            None => notify_observer(observer, &update),
+        }
+    }
+
     /// `session/new` (or load) params: `cwd`, then `mcpServers` (`sessionMcpServers`).
     fn session_setup_params(&self, initialize: &Value, load: Option<&str>) -> J {
         let params = match load {
             Some(session_id) => obj().with("sessionId", session_id),
             None => obj(),
         };
+        let setup = self.config.flavor.session_setup;
+        let directories = setup
+            .filter(|s| s.attachments_directory)
+            .and(self.config.attachments_dir.as_ref())
+            .map(|dir| J::Arr(vec![J::from(dir.display().to_string())]));
         params
             .with("cwd", self.config.cwd.clone())
+            .with_opt("additionalDirectories", directories)
             .with("mcpServers", J::Arr(self.session_mcp_servers(initialize)))
+            .with_opt("_meta", setup.and_then(|s| (s.meta)(initialize)))
     }
 
     /// `sessionMcpServers` over `acpMcpContext`: the HTTP entry when the agent offers HTTP
@@ -678,7 +1334,7 @@ impl Inner {
     }
 
     fn has_t3_mcp(&self) -> bool {
-        self.config.mcp_servers.iter().any(|s| s.name == "t3-code")
+        self.config.mcp_servers.iter().any(|s| s.name == "conn")
     }
 
     /// Applies outs: events to the engine, replies to the agent, a flush timer. Runs under
@@ -814,6 +1470,10 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     handle_permission(&inner, generation, id, &params).await;
                     continue;
                 }
+                if method == "fs/read_text_file" && inner.config.flavor.client_file_reads {
+                    handle_read_text_file(&inner, generation, id, params).await;
+                    continue;
+                }
                 let mut state = inner.state.lock().await;
                 if state.generation != generation {
                     continue;
@@ -851,7 +1511,19 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 };
                 inner.deliver(&mut state, outs).await;
             }
+            Incoming::Barrier(done) => {
+                let _ = done.send(());
+            }
             Incoming::Reply { id, result } => {
+                let waiter = {
+                    let mut state = inner.state.lock().await;
+                    let at = state.ordered_calls.iter().position(|(call, _)| *call == id);
+                    at.map(|at| state.ordered_calls.swap_remove(at).1)
+                };
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(result);
+                    continue;
+                }
                 let is_prompt = {
                     let state = inner.state.lock().await;
                     state.generation == generation && state.prompt_request == Some(id)
@@ -870,26 +1542,80 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                         message: error.message,
                         code: Some(error.code),
                     },
-                    Err(CallError::Closed) => continue,
+                    Err(CallError::Closed | CallError::Provider(_)) => continue,
                 };
                 inner.settle(generation, None, outcome).await;
             }
-            Incoming::Closed(exit) => {
-                let mut state = inner.state.lock().await;
-                if state.generation != generation {
-                    return;
+            Incoming::Closed { exit, failure } => {
+                let kind = if exit.is_some() {
+                    StopKind::Exited
+                } else {
+                    StopKind::Kill
+                };
+                let stopper = {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        return;
+                    }
+                    let stopper = state.runtime.take().map(|runtime| runtime.stopper);
+                    state.active_prompt = None;
+                    state.ordered_calls.clear();
+                    state.restart_required = true;
+                    let detail = match (failure, exit) {
+                        (Some(ProviderError::Failed { detail, .. }), _) => detail,
+                        (Some(failure), _) => failure.to_string(),
+                        (None, Some(exit)) => format!("the agent exited ({})", exit.describe()),
+                        (None, None) => "the agent closed its output".to_owned(),
+                    };
+                    let outs = state.mapper.agent_exited(&detail);
+                    inner.deliver(&mut state, outs).await;
+                    stopper
+                };
+                // The agent's own folder goes; the process tree too while it still runs.
+                if let Some(stopper) = stopper {
+                    stopper.stop(kind).await;
                 }
-                state.runtime = None;
-                state.active_prompt = None;
-                state.restart_required = true;
-                let detail = exit.map_or_else(
-                    || "the agent closed its output".to_owned(),
-                    |exit| format!("the agent exited ({})", exit.describe()),
-                );
-                let outs = state.mapper.agent_exited(&detail);
-                inner.deliver(&mut state, outs).await;
                 return;
             }
+        }
+    }
+}
+
+/// `clientFileSystem.readTextFile`: a file under the turn's workspace or the attachments
+/// folder, read off the runtime thread.
+async fn handle_read_text_file(inner: &Arc<Inner>, generation: u64, id: RequestId, params: Value) {
+    let (connection, cwd) = {
+        let state = inner.state.lock().await;
+        if state.generation != generation {
+            return;
+        }
+        let Some(runtime) = &state.runtime else {
+            return;
+        };
+        let cwd = state.policy["cwd"]
+            .as_str()
+            .map_or_else(|| inner.config.cwd.clone(), str::to_owned);
+        (runtime.connection.clone(), cwd)
+    };
+    use conn_provider::{ProviderHost, ReadTextFile};
+    let mut roots = vec![std::path::PathBuf::from(cwd)];
+    roots.extend(inner.config.attachments_dir.clone());
+    let request = ReadTextFile {
+        path: params["path"].as_str().unwrap_or("").into(),
+        line: params["line"].as_u64().and_then(|n| u32::try_from(n).ok()),
+        limit: params["limit"].as_u64().and_then(|n| u32::try_from(n).ok()),
+    };
+    let read = conn_provider_support::host_files::RootedFiles::new(roots)
+        .read_text_file(request)
+        .await;
+    match read {
+        Ok(content) => {
+            connection.reply(&id, obj().with("content", content)).await;
+        }
+        Err(error) => {
+            connection
+                .reply_error(&id, error.code(), &error.to_string())
+                .await;
         }
     }
 }
@@ -948,8 +1674,30 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
         if state.generation != generation {
             return;
         }
-        let outs = state.mapper.session_update(params);
-        inner.deliver(&mut state, outs).await;
+        let Some(root) = state.session_id.clone() else {
+            // Starting: keep the latest metadata per session and kind until the root is known.
+            if is_startup_metadata(params) {
+                let kind = &params["update"]["sessionUpdate"];
+                state.startup_updates.retain(|p| {
+                    p["sessionId"] != params["sessionId"] || p["update"]["sessionUpdate"] != *kind
+                });
+                state.startup_updates.push(params.clone());
+                if state.startup_updates.len() > MAX_STARTUP_UPDATES {
+                    state.startup_updates.remove(0);
+                }
+            }
+            return;
+        };
+        if params["sessionId"] != root.as_str() {
+            // One runtime projects one root session. Only a flavor with subagents routes a
+            // child session's updates, through its mapper, never into the root's metadata.
+            if inner.config.flavor.background.is_some() {
+                let outs = state.mapper.session_update(params);
+                inner.deliver(&mut state, outs).await;
+            }
+            return;
+        }
+        inner.root_update(&mut state, params).await;
         return;
     }
     if let Some(hooks) = inner.config.flavor.background
@@ -1229,10 +1977,10 @@ impl Session for AcpSession {
                     state.active_prompt = None;
                     state.restart_required = true;
                     state.generation += 1;
-                    let stop = state.runtime.take().and_then(|mut r| r.stop.take());
+                    let stopper = state.runtime.take().map(|r| r.stopper);
                     drop(state);
-                    if let Some(stop) = stop {
-                        stop(StopKind::Terminate).await;
+                    if let Some(stopper) = stopper {
+                        stopper.stop(StopKind::Terminate).await;
                     }
                     Ok(())
                 }
@@ -1296,13 +2044,13 @@ impl Session for AcpSession {
         })
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
+    fn close(&self) -> BoxFuture<'_, Closed> {
         Box::pin(async move {
             let inner = &self.inner;
             let (connection, session_id, can_close, stop) = {
                 let mut state = inner.state.lock().await;
                 if state.closed {
-                    return;
+                    return Closed::RuntimeStopped;
                 }
                 state.closed = true;
                 state.mapper.close_background();
@@ -1313,8 +2061,8 @@ impl Session for AcpSession {
                 let runtime = state.runtime.take();
                 state.generation += 1;
                 let (connection, stop) = match runtime {
-                    Some(mut runtime) => (Some(runtime.connection.clone()), runtime.stop.take()),
-                    None => (None, None),
+                    Some(runtime) => (Some(runtime.connection.clone()), Some(runtime.stopper)),
+                    None => (None, state.stopper.clone()),
                 };
                 (connection, state.session_id.clone(), can_close, stop)
             };
@@ -1326,11 +2074,14 @@ impl Session for AcpSession {
                 )
                 .await;
             }
+            inner.stop_cancelled_spawn().await;
             if let Some(stop) = stop {
-                stop(StopKind::Kill).await;
+                stop.stop(StopKind::Kill).await;
             }
             let mut state = inner.state.lock().await;
             state.events = None;
+            // One agent process per session.
+            Closed::RuntimeStopped
         })
     }
 
@@ -1357,15 +2108,245 @@ pub(crate) fn system_env() -> Box<dyn Env + Sync> {
 }
 
 #[cfg(test)]
+mod spawn_tests {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            flush_interval: None,
+            finalize_debounce: FINALIZE_DEBOUNCE,
+            flavor: &crate::flavor::GROK,
+            instance_id: "grok".into(),
+            provider_session_id: "s".into(),
+            cwd: "/tmp".into(),
+            runtime_mode: "full-access".into(),
+            policy: json!({}),
+            effort: None,
+            model: String::new(),
+            mcp_servers: Vec::new(),
+            client_version: "0.0.0".into(),
+            attachments_dir: None,
+            auth_method: None,
+            runtime_version: None,
+            self_command: "/conn-server".into(),
+            default_model: None,
+            observer: None,
+        }
+    }
+
+    /// The spawner may block (folders, `fork` and `exec`): it runs off the runtime thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_spawner_runs_off_the_runtime_thread() {
+        let runtime_thread = std::thread::current().id();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let record = seen.clone();
+        let spawner: Spawner = Arc::new(move || {
+            *crate::lock(&record) = Some(std::thread::current().id());
+            Err(SpawnError::Setup("no agent"))
+        });
+        let (tx, _events) = mpsc::channel(8);
+        let opened =
+            AcpSession::open_with(config(), spawner, system_env(), tx, OpenControl::default())
+                .await;
+        assert!(opened.is_err());
+        let spawned_on = *crate::lock(&seen);
+        assert!(spawned_on.is_some(), "the spawner did not run");
+        assert_ne!(spawned_on, Some(runtime_thread));
+    }
+
+    /// An open aborted while its spawn runs still owns what the spawn starts: it returns
+    /// only after that agent is stopped.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_spawn_aborted_meanwhile_is_stopped_before_the_open_returns() {
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+        let abort_tx = std::sync::Mutex::new(Some(abort_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (stop_flag, release_flag) = (stopped.clone(), released.clone());
+        let spawner: Spawner = Arc::new(move || {
+            if let Some(abort) = crate::lock(&abort_tx).take() {
+                let _ = abort.send(());
+            }
+            // Only the abort releases the spawn; on the runtime thread it never could.
+            let release = crate::lock(&release_rx).recv_timeout(Duration::from_secs(5));
+            release_flag.store(release.is_ok(), SeqCst);
+            let (writer, _) = mpsc::channel(1);
+            let (_, events) = mpsc::channel(1);
+            let stop_flag = stop_flag.clone();
+            Ok(Spawned {
+                writer,
+                events,
+                stop: Box::new(move |_| Box::pin(async move { stop_flag.store(true, SeqCst) })),
+            })
+        });
+        let control = OpenControl {
+            abort: Some(Box::pin(async move {
+                let _ = abort_rx.await;
+                let _ = release_tx.send(());
+            })),
+            ..OpenControl::default()
+        };
+        let (tx, _events) = mpsc::channel(8);
+        let opened = AcpSession::open_with(config(), spawner, system_env(), tx, control).await;
+        assert!(matches!(opened, Err(OpenError::Aborted)));
+        assert!(
+            released.load(SeqCst),
+            "the abort did not run during the spawn"
+        );
+        assert!(stopped.load(SeqCst), "the spawned agent was not stopped");
+    }
+
+    /// An agent whose startup output filled the event channel still stops when its open is
+    /// aborted: nothing reads that channel, so the stop must not wait on it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_aborted_spawn_with_a_full_event_channel_still_stops() {
+        use conn_provider_support::process::{LaunchSpec, Process, wait_gone};
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+        let abort_tx = std::sync::Mutex::new(Some(abort_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let spawned_pid = pid.clone();
+        let spawner: Spawner = Arc::new(move || {
+            let lines = EVENT_CAPACITY + 64;
+            let spec = LaunchSpec {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "i=0; while [ $i -lt {lines} ]; do echo '{{}}'; i=$((i+1)); done; exec sleep 30"
+                    ),
+                ],
+                ..LaunchSpec::default()
+            };
+            let (events_tx, events) = mpsc::channel(EVENT_CAPACITY);
+            let process = Process::spawn(&spec, 1024, events_tx)?;
+            spawned_pid.store(process.pid, SeqCst);
+            // The output fills all the slots before the abort.
+            std::thread::sleep(Duration::from_millis(300));
+            if let Some(abort) = crate::lock(&abort_tx).take() {
+                let _ = abort.send(());
+            }
+            // Only the abort releases the spawn, so the open is aborted while it runs.
+            let _ = crate::lock(&release_rx).recv_timeout(Duration::from_secs(5));
+            let writer = process.writer();
+            Ok(Spawned {
+                writer,
+                events,
+                stop: Box::new(move |kind| Box::pin(crate::stop_process(process, kind))),
+            })
+        });
+        let control = OpenControl {
+            abort: Some(Box::pin(async move {
+                let _ = abort_rx.await;
+                let _ = release_tx.send(());
+            })),
+            ..OpenControl::default()
+        };
+        let (tx, _events) = mpsc::channel(8);
+        let opened = tokio::time::timeout(
+            Duration::from_secs(10),
+            AcpSession::open_with(config(), spawner, system_env(), tx, control),
+        )
+        .await;
+        assert!(
+            matches!(opened, Ok(Err(OpenError::Aborted))),
+            "the stop did not complete"
+        );
+        let pid = pid.load(SeqCst);
+        assert!(pid > 0 && wait_gone(pid, Duration::from_secs(5)).await);
+    }
+
+    /// `close` during a restart's spawn returns only after the new agent is stopped.
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_waits_for_a_restart_spawn_in_flight() {
+        let script = crate::replay_agent::Script::new(
+            vec![
+                json!({"type": "expect_outbound", "frame": {"kind": "request", "method": "initialize", "params": "<any>"}}),
+                json!({"type": "emit_inbound", "frame": {"kind": "response", "method": "initialize",
+                    "result": {"protocolVersion": 1, "agentCapabilities": {}}}}),
+                json!({"type": "expect_outbound", "frame": {"kind": "request", "method": "session/new", "params": "<any>"}}),
+                json!({"type": "emit_inbound", "frame": {"kind": "response", "method": "session/new",
+                    "result": {"sessionId": "s1"}}}),
+            ],
+            "/tmp",
+        );
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let started_tx = std::sync::Mutex::new(Some(started_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop_flag = stopped.clone();
+        let starts = std::sync::atomic::AtomicUsize::new(0);
+        let spawner: Spawner = Arc::new(move || {
+            if starts.fetch_add(1, SeqCst) == 0 {
+                // The first start: the agent that opens the session.
+                let (writer, events) = crate::replay_agent::spawn(script.clone());
+                return Ok(Spawned {
+                    writer,
+                    events,
+                    stop: Box::new(|_| Box::pin(async {})),
+                });
+            }
+            if let Some(started) = crate::lock(&started_tx).take() {
+                let _ = started.send(());
+            }
+            let _ = crate::lock(&release_rx).recv_timeout(Duration::from_secs(5));
+            let (writer, _) = mpsc::channel(1);
+            let (_, events) = mpsc::channel(1);
+            let stop_flag = stop_flag.clone();
+            Ok(Spawned {
+                writer,
+                events,
+                stop: Box::new(move |_| {
+                    Box::pin(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        stop_flag.store(true, SeqCst);
+                    })
+                }),
+            })
+        });
+        let (tx, _events) = mpsc::channel(64);
+        let (session, _) =
+            AcpSession::open_with(config(), spawner, system_env(), tx, OpenControl::default())
+                .await
+                .unwrap();
+        let inner = session.inner.clone();
+        inner.state.lock().await.restart_required = true;
+        let restart = tokio::spawn(async move { inner.start_runtime().await.map(drop) });
+        started_rx.await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = release_tx.send(());
+        });
+        session.close().await;
+        assert!(
+            stopped.load(SeqCst),
+            "close returned before the restarted agent stopped"
+        );
+        assert!(matches!(
+            restart.await.unwrap(),
+            Err(ProviderError::SessionStopped)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod mcp_tests {
     use serde_json::json;
 
-    /// The `t3-code` entry as `acpMcpContext` builds it for a flavor without `mcpOverHttp`:
+    /// The `conn` entry as `acpMcpContext` builds it for a flavor without `mcpOverHttp`:
     /// the stdio bridge, also for an agent that offers neither `http` nor `acp`.
     #[test]
     fn grok_gets_t3s_stdio_bridge() {
         let server = conn_provider::McpServer {
-            name: "t3-code".into(),
+            device_tools: false,
+            name: "conn".into(),
             url: "http://127.0.0.1:1/mcp".into(),
             headers: vec![("Authorization".into(), "Bearer t".into())],
         };
@@ -1382,7 +2363,7 @@ mod mcp_tests {
             let entry: serde_json::Value = serde_json::from_str(&entries[0].to_line()).unwrap();
             assert_eq!(
                 entry,
-                json!({"name": "t3-code", "command": "/bin/conn-server", "args": ["acp-mcp-bridge"], "env": [
+                json!({"name": "conn", "command": "/bin/conn-server", "args": ["acp-mcp-bridge"], "env": [
                     {"name": "ELECTRON_RUN_AS_NODE", "value": "1"},
                     {"name": "T3_ACP_MCP_ENDPOINT", "value": "http://127.0.0.1:1/mcp"},
                     {"name": "T3_ACP_MCP_AUTHORIZATION", "value": "Bearer t"}

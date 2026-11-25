@@ -1,5 +1,5 @@
 //! The agent wiring, end to end: a Conn Server with the scripted fake provider, one thread,
-//! and that thread's `t3-code` MCP entry written as a Claude `--mcp-config` file. Start
+//! and that thread's `conn` MCP entry written as a Claude `--mcp-config` file. Start
 //! `claude --mcp-config <file>` against it to act as that thread's agent.
 //!
 //! `cargo run -p conn-server --example mcp_agent -- <state-dir> <project-dir> <config-out>`
@@ -56,7 +56,11 @@ async fn run(state_dir: &Path, project: &Path, config_out: &Path) {
         environment: Some(environment.clone()),
         ..Deps::default()
     };
-    deps.mcp = mcp::service(&deps);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("local address");
+    deps.mcp = mcp::service(&deps, address);
     let service = deps.mcp.clone().expect("mcp service");
 
     // The thread whose agent Claude plays: launched idle, as a provider session would see it.
@@ -75,16 +79,12 @@ async fn run(state_dir: &Path, project: &Path, config_out: &Path) {
         .await
         .expect("launch the agent thread");
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let address = listener.local_addr().expect("local address");
-    service.set_listen_address(address);
     let entry = service.issue_thread_credential(ThreadCredentialRequest {
         thread_id: thread_id.into(),
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     std::fs::write(config_out, entry.claude_mcp_config().to_string()).expect("write config");
     println!(
@@ -95,7 +95,7 @@ async fn run(state_dir: &Path, project: &Path, config_out: &Path) {
     let state = AppState {
         table: Arc::new(method_table(&deps)),
         auth: AuthStore::in_memory(),
-        descriptor: Arc::new(environment.descriptor.clone()),
+        descriptor: environment.subscribe_descriptor(),
         engine: Some(engine),
         deps,
     };

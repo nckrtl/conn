@@ -65,9 +65,11 @@ fn scratch_repo(dir: &std::path::Path) -> String {
         .into_owned()
 }
 
-/// Two turns that write files on an engine that takes checkpoints, a rewind, and a fork of the
-/// first turn with one message. Returns the source's items, the fork's items and the shell rows.
-async fn checkpoint_scenario(dir: &std::path::Path) -> (Vec<Value>, Vec<Value>, Value) {
+/// Two turns that write files on an engine that takes checkpoints, a rewind, a fork of the
+/// first turn with one message, and that fork merged back into the source, which then sends a
+/// message. Returns the source's items, the fork's items, the shell rows and the source's
+/// items from the merge-back on.
+async fn checkpoint_scenario(dir: &std::path::Path) -> (Vec<Value>, Vec<Value>, Value, Vec<Value>) {
     let root = scratch_repo(dir);
     let mut config = EngineConfig::new(dir.join("checkpoints.sqlite"));
     config.projects = vec![ProjectConfig {
@@ -183,7 +185,124 @@ async fn checkpoint_scenario(dir: &std::path::Path) -> (Vec<Value>, Vec<Value>, 
     read(&mut fork, &mut fork_items, run_ended).await;
     drain(&mut fork, &mut fork_items).await;
     let shell = engine.shell_snapshot().await.unwrap();
-    (items, fork_items, shell["threads"].clone())
+
+    // The fork's turn merged back into the source, as the client asks (`mergeThreadBack`), and
+    // the source's next message, which takes the fork's delta along.
+    let mut merge_items = vec![];
+    let mut source = engine
+        .subscribe_thread(
+            from_json(json!({"threadId": "thread-cp", "requestCompletionMarker": true})).unwrap(),
+        )
+        .await
+        .unwrap();
+    read(&mut source, &mut merge_items, |item| {
+        item["kind"] == "synchronized"
+    })
+    .await;
+    engine
+        .dispatch(
+            from_json(json!({
+                "type": "thread.merge_back", "commandId": "cp-merge", "sourceThreadId": "thread-cp-fork",
+                "targetThreadId": "thread-cp", "sourcePoint": {"type": "run", "runId": "run:thread-cp-fork:1"},
+                "createdBy": "user", "creationSource": "web",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    read(&mut source, &mut merge_items, |item| {
+        item["event"]["type"] == "context-transfer.created"
+    })
+    .await;
+    engine
+        .dispatch(
+            from_json(json!({
+                "type": "message.dispatch", "commandId": "cp-after-merge", "threadId": "thread-cp",
+                "messageId": "message:cp-after-merge", "text": "use the fork's work", "attachments": [],
+                "dispatchMode": {"type": "start_immediately"}, "createdBy": "user", "creationSource": "web",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    read(&mut source, &mut merge_items, |item| {
+        run_ended(item) && item["event"]["payload"]["id"] == "run:thread-cp:3"
+    })
+    .await;
+    drain(&mut source, &mut merge_items).await;
+    (items, fork_items, shell["threads"].clone(), merge_items)
+}
+
+/// A provider switch: a turn on Claude, the thread moved to Codex (which takes injected
+/// history), then a turn there. Returns the thread's items from a snapshot before the switch.
+async fn switch_scenario(dir: &std::path::Path) -> Vec<Value> {
+    let mut config = EngineConfig::new(dir.join("switch.sqlite"));
+    config.projects = vec![ProjectConfig {
+        title: "Switch".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![
+        Arc::new(FakeProvider::new("claudeAgent")),
+        Arc::new(FakeProvider::new("codex").with_history_injection()),
+    ];
+    let engine = SqliteEngine::open(config).expect("open engine");
+    let message = |command: &str, text: &str| {
+        json!({
+            "type": "message.dispatch", "commandId": command, "threadId": "thread-sw",
+            "messageId": format!("message:{command}"), "text": text, "attachments": [],
+            "dispatchMode": {"type": "start_immediately"}, "createdBy": "user", "creationSource": "web",
+        })
+    };
+    engine
+        .dispatch(
+            from_json(json!({
+                "type": "thread.create", "commandId": "sw-create", "threadId": "thread-sw",
+                "projectId": SqliteEngine::project_id_for(ROOT), "title": "Switch",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "branch": null, "worktreePath": null, "createdBy": "user", "creationSource": "web",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut items = vec![];
+    let mut follow = engine
+        .subscribe_thread(
+            from_json(json!({"threadId": "thread-sw", "requestCompletionMarker": true})).unwrap(),
+        )
+        .await
+        .unwrap();
+    read(&mut follow, &mut items, |item| {
+        item["kind"] == "synchronized"
+    })
+    .await;
+    engine
+        .dispatch(from_json(message("sw-1", "remember blue-17")).unwrap())
+        .await
+        .unwrap();
+    read(&mut follow, &mut items, run_ended).await;
+    drain(&mut follow, &mut items).await;
+    engine
+        .dispatch(
+            from_json(json!({
+                "type": "thread.model-selection.set", "commandId": "sw-select", "threadId": "thread-sw",
+                "modelSelection": {"instanceId": "codex", "model": "gpt-5"},
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    engine
+        .dispatch(from_json(message("sw-2", "what was the marker?")).unwrap())
+        .await
+        .unwrap();
+    read(&mut follow, &mut items, |item| {
+        run_ended(item) && item["event"]["payload"]["id"] == "run:thread-sw:2"
+    })
+    .await;
+    drain(&mut follow, &mut items).await;
+    items
 }
 
 /// Reads items until `done` holds for one. A slow runner can pause longer than any quiet
@@ -490,6 +609,22 @@ async fn main() {
         .cloned()
         .unwrap();
 
+    // An undo of a settle whose anchor lands past year 9999 (T3 accepts any `Date` time).
+    for command in [
+        json!({"type": "thread.settle", "commandId": "far-1", "threadId": "thread-1"}),
+        json!({"type": "thread.unsettle", "commandId": "far-2", "threadId": "thread-1",
+               "reason": "user", "restoreUnsettledAt": "9999-12-31T23:30:00-01:00"}),
+    ] {
+        engine.dispatch(from_json(command).unwrap()).await.unwrap();
+    }
+    let far_anchor_shell = engine.shell_snapshot().await.unwrap()["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "thread-1")
+        .cloned()
+        .unwrap();
+
     // A client adds a project and removes it again.
     let added =
         std::env::temp_dir().join(format!("conn-engine-export-added-{}", std::process::id()));
@@ -541,6 +676,18 @@ async fn main() {
                "number": 9}),
         json!({"type": "thread.pull-request.link", "host": "github.com", "repository": "o/r",
                "number": 9, "url": "https://github.com/o/r/pull/9", "source": "manual"}),
+        // The link sweep's writes: #4's snapshot, then the branch's pull request.
+        json!({"type": "thread.pull-request-link.sync", "host": "github.com", "repository": "o/r",
+               "number": 4, "stack": null, "snapshot": {"state": "open", "title": "Fix the chip",
+                   "headBranch": "fix", "baseBranch": "main", "isDraft": false,
+                   "updatedAt": "2026-11-19T08:00:00.000Z", "syncedAt": "2026-11-19T09:00:00.000Z",
+                   "closedAt": null, "mergedAt": null, "checksState": "failing",
+                   "reviewDecision": "review-required", "mergeability": "mergeable"}}),
+        json!({"type": "thread.pull-request.sync", "projectId": project_id, "snapshotSequence": 0,
+               "expected": {"workspaceRoot": ROOT, "branch": null, "worktreePath": null,
+                   "linkedPullRequest": null, "branchPullRequest": null},
+               "branchPullRequest": {"projectId": project_id, "repository": "o/r", "number": 4,
+                   "url": "https://github.com/O/R/pull/4"}}),
     ]
     .into_iter()
     .enumerate()
@@ -555,7 +702,36 @@ async fn main() {
         if item["event"]["type"] == "thread.pull-request-synced" {
             synced.set(synced.get() + 1);
         }
-        synced.get() == 4
+        synced.get() == 6
+    })
+    .await;
+    // Issue links: a second spelling of the same key changes nothing; unlink, then link again.
+    let issue = |kind: &str, host: &str, key: &str| {
+        json!({"type": kind, "tracker": "github", "host": host, "scope": "o/r", "key": key,
+            "projectId": project_id, "url": format!("https://github.com/o/r/issues/{key}"),
+            "displayKey": format!("#{key}"), "title": "Broken chip", "source": "agent"})
+    };
+    for (index, command) in [
+        issue("thread.issue.link", "GitHub.com", "12"),
+        issue("thread.issue.link", "github.com", "12"),
+        issue("thread.issue.link", "github.com", "13"),
+        json!({"type": "thread.issue.unlink", "tracker": "github", "host": "github.com",
+            "scope": "O/R", "key": "13"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut command = command;
+        command["commandId"] = json!(format!("issue-link-{index}"));
+        command["threadId"] = json!("thread-1");
+        engine.dispatch(from_json(command).unwrap()).await.unwrap();
+    }
+    let issues = std::cell::Cell::new(0);
+    read(&mut links, &mut links_items, |item| {
+        if item["event"]["type"] == "thread.issue-synced" {
+            issues.set(issues.get() + 1);
+        }
+        issues.get() == 4
     })
     .await;
     drop(links);
@@ -607,7 +783,8 @@ async fn main() {
     })
     .await;
 
-    let (checkpoint_items, fork_items, checkpoint_shell) = checkpoint_scenario(&dir).await;
+    let (checkpoint_items, fork_items, checkpoint_shell, merge_items) =
+        checkpoint_scenario(&dir).await;
 
     let parent = engine
         .get_thread_projection("thread-1".into())
@@ -647,11 +824,15 @@ async fn main() {
         .unwrap()
         .unwrap();
 
+    let switch_items = switch_scenario(&dir).await;
+
     let export = json!({
+        "providerSwitchItems": switch_items,
         "createdThreadItems":created_items,
         "createdThreadSnapshot":created_child,
         "checkpointItems": checkpoint_items,
         "forkItems": fork_items,
+        "mergeBackItems": merge_items,
         "checkpointShellThreads": checkpoint_shell,
         "shellItems": shell_items,
         "launch": launch,
@@ -663,6 +844,7 @@ async fn main() {
         "stopItems": stop_items,
         "backgroundItems": background_items,
         "backgroundShell": background_shell,
+        "farAnchorShell": far_anchor_shell,
         "stopUnresponsiveAt": unresponsive_at,
         "coldStopItems": cold_stop_items,
         "coldStopAt": cold_stop_at,

@@ -371,7 +371,6 @@ async fn ws(
     let options = SessionOptions {
         frame_parts: query.contains_key(conn_wire::frame_parts::QUERY_PARAM),
         max_message_bytes: crate::http::MAX_MESSAGE_BYTES,
-        idle_timeout: Duration::from_secs(60),
         context,
         gate: Some(SessionGate(handle)),
     };
@@ -518,6 +517,15 @@ async fn preview(
         return StatusCode::NOT_FOUND.into_response();
     };
     let gate = SessionGate(handle);
-    crate::routes::preview::upgrade_viewer(ws, preview, &thread, &tab, false, &query, Some(gate))
-        .await
+    crate::routes::preview::upgrade_viewer(
+        ws,
+        preview,
+        &thread,
+        &tab,
+        false,
+        &query,
+        Some(gate),
+        None,
+    )
+    .await
 }

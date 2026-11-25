@@ -19,10 +19,10 @@ use std::{
 
 use conn_contract::{ProviderSessionId, ProviderThread, from_json, to_json};
 use conn_provider::{
-    AwaitBackgroundTasksInput, BoxFuture, EnsureThreadInput, ForkThreadInput, InterruptInput,
-    McpServer, ProviderError, ProviderEvent, ProviderResult, ResumeThreadInput, RollbackTarget,
-    RollbackThreadInput, RuntimePolicy, RuntimeRequestResponse, Session, SteerInput, StopTaskInput,
-    ThreadSnapshot, TurnInput,
+    AwaitBackgroundTasksInput, BoxFuture, Closed, EnsureThreadInput, ForkThreadInput,
+    InterruptInput, McpServer, ProviderError, ProviderEvent, ProviderResult, ResumeThreadInput,
+    RollbackTarget, RollbackThreadInput, RuntimePolicy, RuntimeRequestResponse, Session,
+    SteerInput, StopTaskInput, ThreadSnapshot, TurnInput, TurnStatus,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -60,6 +60,8 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(20);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `CLAUDE_STOP_CONFIRM_TIMEOUT_MS`: how long an interrupt waits for the CLI to exit.
 const STOP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a workflow `stopTask` may wait for the SDK (T3's `"15 seconds"`).
+const WORKFLOW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The helper's session-file calls (T3's worker timeout).
 const FUNCTION_TIMEOUT: Duration = Duration::from_secs(30);
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
@@ -117,6 +119,153 @@ struct State {
     logged_skips: HashSet<String>,
     /// Live output tails per Bash call (`taskOutputTails`); the mapper caps them per turn.
     tails: HashMap<String, crate::tail::Tail>,
+    /// MCP app notes in Claude's history, and those the running turn offered.
+    app_context: AppContextState,
+}
+
+/// Notes by key: text and the offer that sent it.
+type Notes = HashMap<String, (String, u64)>;
+/// A note an offer replaced: its key and what it held before, if anything.
+type Replaced = (String, Option<(String, u64)>);
+
+/// MCP app notes by native thread (T3's `deliveredAppContext` and `appContextOffered`).
+/// A turn's offer enters the history only when the turn completes; compaction, a
+/// conversation reset and a rollback drop the history's notes. Each offer has an id until
+/// the SDK answers it: a refusal takes back that offer's notes wherever they went, even
+/// into a completed turn's history, unless a newer offer replaced them. The maps hold only
+/// the thread's bounded app context entries.
+#[derive(Default)]
+struct AppContextState {
+    delivered: Option<(String, Notes)>,
+    offered: Option<(String, Notes)>,
+    /// Offers the SDK has not answered: the notes each replaced in `offered`.
+    pending: HashMap<u64, Vec<Replaced>>,
+    next_offer: u64,
+}
+
+impl AppContextState {
+    /// The entries the native thread has not yet seen with their current text. A steer also
+    /// counts what its running turn offered.
+    fn unseen<'a>(
+        &self,
+        native: &str,
+        entries: &'a [conn_provider::AppContextEntry],
+        with_offer: bool,
+    ) -> Vec<&'a conn_provider::AppContextEntry> {
+        let offered = self.offered.as_ref().filter(|_| with_offer);
+        let seen = offered
+            .or(self.delivered.as_ref())
+            .filter(|(id, _)| id == native)
+            .map(|(_, seen)| seen);
+        entries
+            .iter()
+            .filter(|e| seen.and_then(|seen| seen.get(&e.key)).map(|(t, _)| t) != Some(&e.text))
+            .collect()
+    }
+
+    /// Records a message that carries notes as offered: a turn's first message starts the
+    /// turn's offer, a steer replaces it with the app's current notes (T3's `commitOffer`).
+    /// Returns the offer's id for the SDK's answer.
+    fn offer(
+        &mut self,
+        native: String,
+        entries: &[conn_provider::AppContextEntry],
+        starts_turn: bool,
+    ) -> u64 {
+        self.next_offer += 1;
+        let id = self.next_offer;
+        if starts_turn || self.offered.as_ref().is_none_or(|(n, _)| *n != native) {
+            self.offered = Some((native, Notes::new()));
+        }
+        let mut replaced = Vec::new();
+        if let Some((_, notes)) = self.offered.as_mut() {
+            let removed: Vec<String> = notes
+                .keys()
+                .filter(|key| !entries.iter().any(|e| &e.key == *key))
+                .cloned()
+                .collect();
+            for key in removed {
+                let prior = notes.remove(&key);
+                replaced.push((key, prior));
+            }
+            for entry in entries {
+                if notes.get(&entry.key).map(|(t, _)| t) != Some(&entry.text) {
+                    let prior = notes.insert(entry.key.clone(), (entry.text.clone(), id));
+                    replaced.push((entry.key.clone(), prior));
+                }
+            }
+        }
+        self.pending.insert(id, replaced);
+        id
+    }
+
+    /// The SDK took the message.
+    fn accepted(&mut self, offer: u64) {
+        self.pending.remove(&offer);
+    }
+
+    /// The SDK refused the message: its notes go back to what they were, in the turn's offer
+    /// and in a history a completed turn already wrote them to.
+    fn refused(&mut self, offer: u64) {
+        let Some(replaced) = self.pending.remove(&offer) else {
+            return;
+        };
+        // A note this offer removed comes back unless a newer offer followed.
+        let latest = offer == self.next_offer;
+        for map in [self.offered.as_mut(), self.delivered.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            for (key, prior) in &replaced {
+                let current = map.1.get(key);
+                if current.is_some_and(|(_, id)| *id == offer)
+                    || (current.is_none() && prior.is_some() && latest)
+                {
+                    match prior {
+                        Some(prior) => {
+                            map.1.insert(key.clone(), prior.clone());
+                        }
+                        None => {
+                            map.1.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn turn_ended(&mut self, completed: bool) {
+        if let Some(offered) = self.offered.take()
+            && completed
+        {
+            self.delivered = Some(offered);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.delivered = None;
+        self.offered = None;
+        self.pending.clear();
+    }
+}
+
+/// Prepends MCP app notes to the prompt as quoted app data (`withClaudeAppContext`). A slash
+/// command runs only as a plain-text prompt, so its notes wait for the next turn. Returns
+/// whether it added any.
+fn with_app_context(content: Value, entries: &[&conn_provider::AppContextEntry]) -> (Value, bool) {
+    if entries.is_empty() || content.as_str().is_some_and(|text| text.starts_with('/')) {
+        return (content, false);
+    }
+    let mut blocks: Vec<Value> = entries
+        .iter()
+        .map(|e| json!({"type": "text", "text": format!("<external_{0}>{1}</external_{0}>", e.key, e.text)}))
+        .collect();
+    match content {
+        Value::String(text) => blocks.push(json!({"type": "text", "text": text})),
+        Value::Array(parts) => blocks.extend(parts),
+        other => blocks.push(other),
+    }
+    (Value::Array(blocks), true)
 }
 
 struct WorkflowStopGuard {
@@ -159,12 +308,16 @@ struct Live {
     mcp_servers: Vec<McpServer>,
     /// `allowedTools` is a launch option: gaining or losing the T3 server needs a new query.
     t3_mcp: bool,
+    /// The device text is part of the system prompt: a change needs a new query.
+    device_tools: bool,
     restart_needed: bool,
     last_activity: Instant,
     /// Since when background work keeps this idle query alive.
     held_since: Option<Instant>,
     /// Where Claude Code writes task output (`claudeTaskOutputRoot`), from the CLI's environment.
     task_output_root: std::path::PathBuf,
+    /// `workflowFilesRoot`: where this query's CLI writes workflow transcripts.
+    workflow_files_root: std::path::PathBuf,
 }
 
 impl ClaudeSession {
@@ -199,6 +352,7 @@ impl ClaudeSession {
                 abandoned_run: None,
                 logged_skips: HashSet::new(),
                 tails: HashMap::new(),
+                app_context: AppContextState::default(),
             }),
             turn_control: tokio::sync::Mutex::new(()),
             abandon: tokio::sync::Notify::new(),
@@ -232,7 +386,7 @@ impl Inner {
     }
 
     /// Sends events and callback answers in order. Holds no lock.
-    async fn deliver(&self, query: Option<&QueryHandle>, outs: Vec<Out>) {
+    async fn deliver(self: &Arc<Self>, query: Option<&QueryHandle>, outs: Vec<Out>) {
         if outs.is_empty() {
             return;
         }
@@ -278,6 +432,46 @@ impl Inner {
                         tail.finish().await;
                     }
                 }
+                Out::StopTask { task_id } => {
+                    // `stopTask` only on a live query that is not already stopping.
+                    let query = {
+                        let state = self.lock();
+                        state
+                            .live
+                            .as_ref()
+                            .filter(|l| !l.stopping.load(Ordering::Relaxed) && !*l.ended.borrow())
+                            .map(|l| l.query.clone())
+                    };
+                    if let Some(query) = query {
+                        // An unanswered stop must not hold the turn's settlement.
+                        tokio::spawn(async move {
+                            let _ = query
+                                .call("stopTask", json!([task_id]), WORKFLOW_STOP_TIMEOUT)
+                                .await;
+                        });
+                    }
+                }
+                Out::ReadMemberTranscript(member) => {
+                    let root = self
+                        .lock()
+                        .live
+                        .as_ref()
+                        .map(|l| l.workflow_files_root.clone());
+                    if let Some(delay) = member.delay {
+                        // The flush wait runs on its own timer, so this driver keeps draining
+                        // its query and the shared SDK router never blocks on it.
+                        let inner = Arc::downgrade(self);
+                        let query = query.cloned();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            if let Some(inner) = inner.upgrade() {
+                                inner.import_member(query.as_ref(), member, root).await;
+                            }
+                        });
+                        continue;
+                    }
+                    self.import_member(query, member, root).await;
+                }
                 Out::Skipped(kind) => {
                     let mut state = self.lock();
                     // Kinds come from the CLI; remember a bounded number of them.
@@ -290,6 +484,30 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Reads a member transcript off the runtime thread and shows what it gained. Boxed as
+    /// `Send`: it and `deliver` call each other, and the flush timer spawns it.
+    fn import_member<'a>(
+        self: &'a Arc<Self>,
+        query: Option<&'a QueryHandle>,
+        member: crate::mapper::MemberTranscript,
+        root: Option<std::path::PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let answers = match root {
+                Some(root) => {
+                    let job = member.clone();
+                    tokio::task::spawn_blocking(move || read_member_transcript(&job, &root))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            };
+            let outs = self.lock().mapper.member_transcript(member, answers);
+            self.deliver(query, outs).await;
+        })
     }
 
     fn start_abandoned(&self, run_id: &str) -> bool {
@@ -390,6 +608,24 @@ impl Inner {
                 failed.join(", ")
             );
         }
+        // A Claude session loads its servers once: without `conn` the thread would keep no
+        // conn tools. One reconnect per registration, so a failure never loops.
+        if failed.iter().any(|name| name == T3_MCP_SERVER) {
+            let reconnected = self
+                .call(
+                    "reconnectMcpServer",
+                    json!([T3_MCP_SERVER]),
+                    MCP_REGISTRATION_TIMEOUT,
+                )
+                .await;
+            match reconnected {
+                Ok(_) => eprintln!("conn-provider-claude: MCP server {T3_MCP_SERVER} reconnected"),
+                Err(ProviderError::SessionStopped) => return Err(ProviderError::SessionStopped),
+                Err(_) => eprintln!(
+                    "conn-provider-claude: MCP server {T3_MCP_SERVER} is still unavailable"
+                ),
+            }
+        }
         if let Some(live) = &mut self.lock().live {
             live.mcp_servers = servers.to_vec();
         }
@@ -457,6 +693,90 @@ fn callback_request(kind: &str, args: &Value) -> Option<ControlRequest> {
     }
 }
 
+/// The bytes one member transcript read takes at most (T3 drains 512 KiB reads unbounded).
+const MEMBER_TRANSCRIPT_BYTE_CAP: u64 = 8 * 1024 * 1024;
+
+/// Reads a settled member's transcript under `root`.
+pub(crate) fn read_member_transcript(
+    member: &crate::mapper::MemberTranscript,
+    root: &std::path::Path,
+) -> Option<crate::mapper::MemberAnswers> {
+    let file = member.dir.join(format!("agent-{}.jsonl", member.agent_id));
+    read_contained_tail(root, &file, MEMBER_TRANSCRIPT_BYTE_CAP, member.cursor)
+        .map(|(text, cursor)| crate::mapper::transcript_answers(&text, cursor))
+}
+
+/// `readContainedWorkflowFile` with `fromOffset`: the whole lines an absolute `.jsonl` file
+/// gained since `cursor`, whose real path stays inside `root`, and the cursor after them. Past
+/// `cap` bytes the read keeps the last whole lines, so the final answer stays. `None` when the
+/// file is missing, outside `root`, or not a regular file.
+fn read_contained_tail(
+    root: &std::path::Path,
+    file: &std::path::Path,
+    cap: u64,
+    cursor: crate::mapper::TranscriptCursor,
+) -> Option<(String, crate::mapper::TranscriptCursor)> {
+    use std::io::{Read, Seek, SeekFrom};
+    if !file.is_absolute() || file.extension()? != "jsonl" {
+        return None;
+    }
+    let root = std::fs::canonicalize(root).ok()?;
+    let resolved = std::fs::canonicalize(file).ok()?;
+    if !resolved.starts_with(&root) || resolved.extension()? != "jsonl" {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A leaf swapped for a symlink since the check fails to open; a FIFO cannot block.
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let mut handle = options.open(&resolved).ok()?;
+    let meta = handle.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let identity = None;
+    let base = if identity.is_some() && cursor.identity == identity && cursor.offset <= meta.len() {
+        cursor.offset
+    } else {
+        0
+    };
+    let start = base.max(meta.len().saturating_sub(cap));
+    handle.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    handle.take(cap).read_to_end(&mut bytes).ok()?;
+    let first = if start > base {
+        bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |at| at + 1)
+    } else {
+        0
+    };
+    let end = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1)
+        .max(first);
+    let lines = bytes.get(first..end).unwrap_or_default();
+    let offset = start.saturating_add(u64::try_from(end).ok()?);
+    Some((
+        String::from_utf8_lossy(lines).into_owned(),
+        crate::mapper::TranscriptCursor { offset, identity },
+    ))
+}
+
 /// The driver: one per query, ends after the query's `End`.
 async fn drive(
     inner: Arc<Inner>,
@@ -493,6 +813,12 @@ async fn drive(
             Some(QueryEvent::Message(value)) => {
                 if value["type"] == "system" && value["subtype"] == "init" {
                     note_init(&mut inner.lock(), generation, &value);
+                }
+                // The conversation lost the turns that carried app notes.
+                if value["type"] == "conversation_reset"
+                    || (value["type"] == "system" && value["subtype"] == "compact_boundary")
+                {
+                    inner.lock().app_context.reset();
                 }
                 Inbound::from_value(value)
             }
@@ -535,7 +861,16 @@ async fn drive(
                 continue;
             }
             touch(&mut state, Some(generation));
-            state.mapper.handle(message)
+            let outs = state.mapper.handle(message);
+            if let Some(status) = outs.iter().find_map(|out| match out {
+                Out::Event(ProviderEvent::TurnTerminal(terminal)) => Some(terminal.status),
+                _ => None,
+            }) {
+                state
+                    .app_context
+                    .turn_ended(status == TurnStatus::Completed);
+            }
+            outs
         };
         inner.deliver(Some(&query), outs).await;
     }
@@ -660,7 +995,7 @@ fn abandoned_error() -> ProviderError {
     )
 }
 
-async fn on_end(inner: &Inner, generation: u64, end: &QueryEnd, stopping: bool) {
+async fn on_end(inner: &Arc<Inner>, generation: u64, end: &QueryEnd, stopping: bool) {
     let outs = {
         let mut state = inner.lock();
         let current = state
@@ -724,8 +1059,9 @@ fn end_detail(end: &QueryEnd) -> String {
 /// `compileClaudeModelSelection`: API model id, effort, settings and the prompt effort.
 fn model_selection(
     selection: &conn_contract::ModelSelection,
+    manifest: &conn_provider::LiveManifest,
 ) -> (String, Option<String>, Map<String, Value>) {
-    let compiled = catalog::compile(&to_json(selection));
+    let compiled = catalog::compile(&to_json(selection), manifest);
     (compiled.api_model_id, compiled.effort, compiled.settings)
 }
 
@@ -995,7 +1331,8 @@ impl ClaudeSession {
         let inner = &self.inner;
         let native = native_thread_id(&input.provider_thread)
             .ok_or_else(|| failed_err("start_turn", "provider thread has no native Claude id"))?;
-        let (model, effort, selection_settings) = model_selection(&input.model_selection);
+        let (model, effort, selection_settings) =
+            model_selection(&input.model_selection, &inner.config.model_manifest);
         // `resolveSettings` may wait for the SDK host to launch; nothing is open yet.
         let run_id = input.run_id.as_str();
         let policy = self
@@ -1022,6 +1359,10 @@ impl ClaudeSession {
                 return Err(ProviderError::SessionStopped);
             }
             let t3_mcp = state.mcp_servers.iter().any(|s| s.name == T3_MCP_SERVER);
+            let device_tools = state
+                .mcp_servers
+                .iter()
+                .any(|s| s.name == T3_MCP_SERVER && s.device_tools);
             let reusable = state.live.as_ref().is_some_and(|l| {
                 l.query.is_open()
                     && !l.restart_needed
@@ -1029,6 +1370,7 @@ impl ClaudeSession {
                     && l.cwd == cwd
                     && l.policy == policy
                     && l.t3_mcp == t3_mcp
+                    && l.device_tools == device_tools
                     && (same_selection(l, &model, &effort, &selection_settings)
                         // canApplyClaudeSelectionLive, and a model change only when the CLI
                         // opened in the policy's mode (T3's openedPermissionMode check).
@@ -1073,6 +1415,7 @@ impl ClaudeSession {
                     resume_at: conversation_head(&thread),
                     title: title.clone(),
                     t3_mcp,
+                    device_tools,
                     prompt_suggestions: false,
                 };
                 (Plan::Launch(Box::new(query)), state.live.take())
@@ -1203,7 +1546,8 @@ impl ClaudeSession {
         native: Option<&str>,
         model_change: ModelChange,
     ) -> ProviderResult<bool> {
-        let (model, effort, settings) = model_selection(selection);
+        let (model, effort, settings) =
+            model_selection(selection, &self.inner.config.model_manifest);
         let live_change = {
             let state = self.inner.lock();
             state.live.as_ref().is_some_and(|live| {
@@ -1259,6 +1603,8 @@ impl ClaudeSession {
         // the client shows it running as T3's does; what the CLI receives does not change.
         // With a live query the host is up, and frames of that query must not reach the new
         // turn before `prepare` decided to keep or close it, so the turn opens after it.
+        let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
+        let models = catalog::current_provider_models(&self.inner.config.model_manifest, now);
         let early = {
             let mut state = self.inner.lock();
             if state.mapper.turn_active() {
@@ -1267,6 +1613,7 @@ impl ClaudeSession {
                     "the previous turn is still running",
                 ));
             }
+            state.mapper.set_catalog(models);
             if state.live.is_none() && !state.closed {
                 let mode = plain_policy(&input.runtime_policy).permission_mode;
                 Some(state.mapper.begin_turn(&input, &mode))
@@ -1280,7 +1627,11 @@ impl ClaudeSession {
         }
         let run_id = input.run_id.as_str();
         // T3 reads the attachments before it opens the query (`ClaudeAdapterV2` startTurn).
-        let effort = catalog::compile(&to_json(&input.model_selection)).prompt_effort;
+        let effort = catalog::compile(
+            &to_json(&input.model_selection),
+            &self.inner.config.model_manifest,
+        )
+        .prompt_effort;
         let text = catalog::prompt_text(&input.message.text, effort.as_deref());
         let prepared = match self
             .inner
@@ -1309,7 +1660,7 @@ impl ClaudeSession {
         };
         self.inner.lock().turn_prompt_effort = effort.clone();
         let inner = &self.inner;
-        let (outs, query, uuid) = {
+        let (outs, query, uuid, content, offer) = {
             let mut state = inner.lock();
             let query = state
                 .live
@@ -1330,7 +1681,16 @@ impl ClaudeSession {
             };
             let uuid = SystemEnv.uuid();
             state.mapper.set_prompt_uuid(&uuid);
-            (outs, query, uuid)
+            let native = state
+                .live
+                .as_ref()
+                .map(|l| l.native_thread_id.clone())
+                .unwrap_or_default();
+            let unseen = state.app_context.unseen(&native, &input.app_context, false);
+            let (content, offered) = with_app_context(content, &unseen);
+            state.app_context.offered = None;
+            let offer = offered.then(|| state.app_context.offer(native, &input.app_context, true));
+            (outs, query, uuid, content, offer)
         };
         inner.deliver(Some(&query), outs).await;
         let offered = query
@@ -1340,12 +1700,20 @@ impl ClaudeSession {
             )
             .await;
         if offered.is_err() {
-            let outs = inner
-                .lock()
-                .mapper
-                .on_exit(false, "The Claude process stopped before the turn started.");
+            let outs = {
+                let mut state = inner.lock();
+                if let Some(offer) = offer {
+                    state.app_context.refused(offer);
+                }
+                state
+                    .mapper
+                    .on_exit(false, "The Claude process stopped before the turn started.")
+            };
             inner.deliver(None, outs).await;
             return Err(ProviderError::SessionStopped);
+        }
+        if let Some(offer) = offer {
+            inner.lock().app_context.accepted(offer);
         }
         Ok(())
     }
@@ -1379,8 +1747,9 @@ impl ClaudeSession {
         let env = self.environment(&input.thread_id, input.resume).await;
         // T3 resolves a relative CLAUDE_CODE_TMPDIR against the real cwd; this uses the cwd
         // as given (it differs only through a symlinked cwd and a relative value).
-        let task_output_root =
-            crate::tail::output_root(&env, input.cwd.as_deref().map(std::path::Path::new));
+        let cwd_path = input.cwd.as_deref().map(std::path::Path::new);
+        let task_output_root = crate::tail::output_root(&env, cwd_path);
+        let workflow_files_root = launch::workflow_files_root(&env, cwd_path);
         // `launchArgs`: files read off the runtime thread; a value the CLI would refuse fails
         // the start, as T3's query runner does.
         let (args, cwd) = (inner.config.launch_args.clone(), input.cwd.clone());
@@ -1390,8 +1759,13 @@ impl ClaudeSession {
                 .map_err(|e| failed_err("start_turn", e.to_string()))?
                 .map_err(|e| failed_err("start_turn", e))?;
         let options = launch::query_options(&inner.config, &input, env, &applied);
-        // T3's `openQuery` gives every turn's query its `onStop` hook.
-        let mut query = inner.helper.open(options, json!({"stopHook": true}))?;
+        // T3's `openQuery` gives every turn's query its `onStop` hook, and a session with the
+        // device tools its SubagentStart hook.
+        let mut command = json!({"stopHook": true});
+        if let Some(device) = launch::device_text(&inner.config, &input) {
+            command["subagentStartContext"] = json!(device);
+        }
+        let mut query = inner.helper.open(options, command)?;
         let Some(rx) = query.take_events() else {
             return Err(failed_err("start_turn", "the query has no event stream"));
         };
@@ -1420,10 +1794,12 @@ impl ClaudeSession {
                 selection_settings: input.selection_settings.clone(),
                 mcp_servers: Vec::new(),
                 t3_mcp: input.t3_mcp,
+                device_tools: input.device_tools,
                 restart_needed: false,
                 last_activity: Instant::now(),
                 held_since: None,
                 task_output_root,
+                workflow_files_root,
             });
             generation
         };
@@ -1682,7 +2058,7 @@ impl Session for ClaudeSession {
             let Some(name) = item
                 .get("toolName")
                 .and_then(Value::as_str)
-                .filter(|n| n.starts_with("mcp__") && !n.starts_with("mcp__t3-code__"))
+                .filter(|n| n.starts_with("mcp__") && !n.starts_with("mcp__conn__"))
             else {
                 return Ok(None);
             };
@@ -1840,13 +2216,16 @@ impl Session for ClaudeSession {
                 None => None,
             };
             let effort = match live_selection {
-                Some(selection) => catalog::compile(&to_json(selection)).prompt_effort,
+                Some(selection) => {
+                    catalog::compile(&to_json(selection), &self.inner.config.model_manifest)
+                        .prompt_effort
+                }
                 None => self.inner.lock().turn_prompt_effort.clone(),
             };
             let text = catalog::prompt_text(&input.message.text, effort.as_deref());
             let content = self.content(&text, &input.message.attachments).await;
             let uuid = SystemEnv.uuid();
-            let (query, outs) = {
+            let (query, outs, content, offer) = {
                 let mut state = self.inner.lock();
                 let query = state
                     .live
@@ -1860,7 +2239,18 @@ impl Session for ClaudeSession {
                 let outs = state
                     .mapper
                     .steer_sent(&uuid, input.message.message_id.as_str());
-                (query, outs)
+                let native = state
+                    .live
+                    .as_ref()
+                    .map(|l| l.native_thread_id.clone())
+                    .unwrap_or_default();
+                let unseen = state.app_context.unseen(&native, &input.app_context, true);
+                let (content, offered) = with_app_context(content, &unseen);
+                // Recorded as it goes out, so a turn that ends before the SDK answers still
+                // counts it; a refusal takes it back.
+                let offer =
+                    offered.then(|| state.app_context.offer(native, &input.app_context, false));
+                (query, outs, content, offer)
             };
             self.inner.deliver(Some(&query), outs).await;
             let offered = query
@@ -1870,9 +2260,18 @@ impl Session for ClaudeSession {
                 )
                 .await;
             if offered.is_err() {
-                let outs = self.inner.lock().mapper.steer_failed(&uuid);
+                let outs = {
+                    let mut state = self.inner.lock();
+                    if let Some(offer) = offer {
+                        state.app_context.refused(offer);
+                    }
+                    state.mapper.steer_failed(&uuid)
+                };
                 self.inner.deliver(None, outs).await;
                 return Err(ProviderError::SessionStopped);
+            }
+            if let Some(offer) = offer {
+                self.inner.lock().app_context.accepted(offer);
             }
             Ok(())
         })
@@ -2070,6 +2469,8 @@ impl Session for ClaudeSession {
     ) -> BoxFuture<'_, ProviderResult<ThreadSnapshot>> {
         Box::pin(async move {
             self.require_idle("roll back")?;
+            // The rewound history may no longer hold the turns that carried app notes.
+            self.inner.lock().app_context.reset();
             let thread = to_json(&input.provider_thread);
             let native = native_thread_id(&input.provider_thread).ok_or_else(|| {
                 failed_err("rollback_thread", "provider thread has no native Claude id")
@@ -2242,7 +2643,7 @@ impl Session for ClaudeSession {
                 accepted: false,
             };
             if let Err(error) = query
-                .call("stopTask", json!([input.task_id]), Duration::from_secs(15))
+                .call("stopTask", json!([input.task_id]), WORKFLOW_STOP_TIMEOUT)
                 .await
             {
                 return Err(failed_err(
@@ -2277,11 +2678,12 @@ impl Session for ClaudeSession {
         })
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
+    fn close(&self) -> BoxFuture<'_, Closed> {
         Box::pin(async move {
             let live = {
                 let mut state = self.inner.lock();
                 state.closed = true;
+                state.mapper.begin_close();
                 state.live.take()
             };
             if let Some(live) = live {
@@ -2298,6 +2700,8 @@ impl Session for ClaudeSession {
             let mut state = self.inner.lock();
             state.events = None;
             state.tails.clear();
+            // Each session runs its own Claude query; the SDK host holds no MCP client.
+            Closed::RuntimeStopped
         })
     }
 }
@@ -2326,6 +2730,59 @@ fn require_unambiguous_server(statuses: &Value, server: &str) -> ProviderResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `readContainedWorkflowFile`: absolute paths only, the real path inside the root, a
+    /// regular file, and with a cap the whole lines at the end.
+    #[test]
+    fn member_transcripts_are_read_from_their_tail_inside_the_root() {
+        use crate::mapper::TranscriptCursor;
+        let dir = std::env::temp_dir().join(format!("conn-claude-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("projects");
+        std::fs::create_dir_all(root.join("dir.jsonl")).unwrap();
+        let file = root.join("agent-a1.jsonl");
+        std::fs::write(&file, "first\nsecond\nthird\npartial").unwrap();
+        let start = TranscriptCursor::default();
+        let text = |read: Option<(String, TranscriptCursor)>| read.map(|(text, _)| text);
+        let (whole, cursor) = read_contained_tail(&root, &file, 1024, start).unwrap();
+        assert_eq!(whole, "first\nsecond\nthird\n");
+        // The cap cuts into "second": the read starts at the next whole line.
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 18, start)),
+            Some("third\n".to_owned())
+        );
+        // From the cursor: only what was flushed since, and the partial line once it is whole.
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 1024, cursor)),
+            Some(String::new())
+        );
+        std::fs::write(&file, "first\nsecond\nthird\npartial\nmore\n").unwrap();
+        assert_eq!(
+            text(read_contained_tail(&root, &file, 1024, cursor)),
+            Some("partial\nmore\n".to_owned())
+        );
+        assert_eq!(
+            read_contained_tail(
+                &root,
+                std::path::Path::new("projects/agent-a1.jsonl"),
+                1024,
+                start
+            ),
+            None
+        );
+        assert_eq!(
+            read_contained_tail(&root, &root.join("dir.jsonl"), 1024, start),
+            None
+        );
+        let outside = dir.join("outside.jsonl");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.jsonl")).unwrap();
+        assert_eq!(
+            read_contained_tail(&root, &root.join("link.jsonl"), 1024, start),
+            None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn callbacks_become_the_control_requests_the_mapper_reads() {

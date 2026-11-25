@@ -9,9 +9,218 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 "Released and running in Orbit"); the web and iOS clients were tested against it in a VM
 (see "Client parity, wave 1").
 
+PR checks now include GitHub’s start and completion timestamps when available. Clients can show elapsed time for completed runs.
+
+**Effect outbox (2026-11-23):** effects commit with their command in `effect_outbox` and one
+worker runs them, as T3's `EffectOutbox.ts` and `EffectWorker.ts`. Before, they started after
+the commit returned, so a closed socket could lose a committed turn start (the run stayed
+`starting`). The in-memory lanes are gone. Proof: engine tests for an aborted launch and an
+aborted archive (both fail with the old order), commit order per thread, and the outbox store
+tests from T3's `FoundationPersistence.test.ts`. Each commit publishes its own sequence, so an
+aborted caller cannot hide it from clients. An engine takes an `engine_epoch` lease at open;
+every write checks it in its transaction, so a dropped or replaced engine never writes again. A
+settlement retries while the store is locked and otherwise settles the row `failed`, so its
+lane frees without running the effect again. Pruning lets the store go between batches. A
+restart follows T3's process-loss split: process-bound effects are cancelled and replay-safe
+ones run again, in place, so a rollback keeps its place ahead of later work and goes on by the
+phase its row recorded (`pending_rollbacks` is folded into the outbox; an old table migrates).
+A run whose start never returned (its `provider-turn.start` row did not settle) is not
+continued and not sent again on its own: a user's prompt waits at the head of the held queue,
+unattended work is sent again at most 3 times and never to a resting thread, and anything else
+is cancelled (T3's `reconcileProjection`). Both follow `continueThreadsAfterServerUpdate` per
+project. A replayed capture wakes a parent once, and the server starts the worker after its
+host services. Proof: engine tests for each case, failing without the change. Left: T3's worker
+retries (a planned follow-up).
+
 **Input validators (2026-11-17):** RPC limits and MCP input decode share
 `conn-support/src/input.rs` and the generator walk `tools/schema-rules.mjs`. Proof:
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
+
+**Side chats follow their parent (2026-11-23):** as T3's `Orchestrator.ts`, `thread.delete`
+with `onlyIfUnused` keeps a thread that has a message or a run. Archive refuses a thread that is
+already archived or has running delegated tasks, then takes the parent's active side chats (found
+by lineage, so one with no fork run too), except one waiting on delegated tasks. Each archived
+thread cancels its queued and preparing runs and detaches its live provider sessions. Unarchive
+refuses a thread that is not archived and restores only the side chats archived with or after
+the parent. Delete takes them all. Proof: five `checkpoint_tests.rs` tests and
+`t3_import::tests::an_imported_side_chat_without_a_fork_run_follows_its_parent`.
+
+**Undo of a settle and thread times (2026-11-23):** `thread.unsettle` reads
+`restoreUnsettledAt`, as T3's `Orchestrator.ts`: a time restores the Active anchor the settle
+cleared, `null` restores no anchor, a time that does not parse refuses the command, and a
+thread already active keeps its anchor and `updatedAt` but still records `thread.unsettled`.
+- Command times (`restoreUnsettledAt`, `snoozedUntil`, `visitedAt`) parse as T3's
+  `DateTime.make`: `conn-support/src/js_date.rs` ports V8's `Date.parse`, legacy forms
+  included, after Effect's zone rule; a time without a zone is local, in the server's zone
+  (`EngineConfig::zone`). Wire times outside years 0000 to 9999 get `toISOString`'s signed
+  six-digit year.
+- An archived thread refuses settle, auto-settle, unsettle, snooze, unsnooze, auto-settle set,
+  pin, unpin and both reorders before any other check, with T3's message.
+- The thread's `updatedAt` follows T3's `ProjectionStore.ts`: a thread event writes its
+  payload's, every other event its own time, in the row and the stored thread
+  (`PAYLOAD_UPDATED_AT_EVENTS`, generated). Pin and settle keep `updatedAt` where T3's deciders
+  do.
+- The event envelope names `providerInstanceId` where T3's does: a run's events the run's, a
+  provider event the session's, a thread event the thread's; none for a request answered by
+  message, closed link requests and remote delegation rows (`store::Instance`).
+
+- Command receipts are kept for good and record refusals, as T3's `CommandReceiptV2`: a retry
+  gets the recorded refusal again (`Command … was previously rejected: …`), and a receipt
+  answers only for its owner (`owner_kind` thread or project, `owner_id`; T3's
+  `commandThreadId`, so a fork's and a merge-back's is the target thread). Receipts from
+  before owners (main's schema 4) keep none, so a retry of a command from before the upgrade
+  is refused, never run twice. The upgrade adds only the columns a store lacks. A store a pre-merge build of readable search wrote at 6 (with `message_keys.search_text`) drops that column and opens at 5; the search index then holds each message's readable text, folded (fold mark 4). A project command takes
+  its id inside its write (insert-if-absent; a receipt is never replaced), records its project
+  and T3's command type (`project.update` is `project.meta.update`), and records a refusal
+  from planning, which a retry gets again (T3's `commitRejectedProjectCommand`).
+  Refusals made before the decision (access, a disabled provider) stay open, as T3's
+  mode-limit refusals. A replayed `queue.resume` or `queued-run.start` checks the queue
+  again. The queue start resolves the run's effective selection (a message that follows the
+  conversation takes the thread's), and holds the queue when that provider is off by T3's queue
+  rule: only an explicit project override or a machine entry turns it off. A command that writes nothing answers its own thread's latest sequence.
+- Thread setters record their event even when nothing changes, as T3's deciders do.
+  `thread.auto-settle` refuses a thread set active or changed after its snapshot, then
+  settles. A settle whose `expectedLatestRunId` is not the latest run is refused. `thread.visit` keeps the later visit and records `thread.visit-recorded`.
+- The receipts' high-water mark reads an index. Opening the engine off the runtime thread
+  is #261's.
+
+Proof: `a_fork_receipt_belongs_to_its_target_thread`,
+`receipts_from_before_owners_name_them_or_refuse`,
+`a_repin_records_its_event_and_a_quiet_stop_answers_its_thread`,
+`a_replayed_queue_resume_starts_what_waits`, `auto_settle_rechecks_the_thread_against_its_snapshot`,
+`a_settle_for_a_stale_run_is_refused`,
+`a_delayed_visit_keeps_the_later_time`, `a_merge_back_first_message_names_its_instance`,
+`the_receipt_high_water_reads_an_index`, `a_partial_receipt_upgrade_finishes_on_open`, `a_version_6_store_without_receipt_owners_gets_them`, `a_v4_store_upgrades_and_refuses_its_old_retries`,
+`a_command_id_keeps_its_outcome_across_a_reopen` (audit 1.6, 1.7),
+`a_planned_project_refusal_is_replayed`, `a_project_replay_without_its_row_is_a_read_error`,
+`a_receipt_is_never_replaced`, `the_queue_starts_on_the_effective_selection`,
+`a_project_write_checks_the_receipt_it_would_reuse`, `a_replayed_resume_holds_a_queue_whose_provider_is_off`,
+`a_stale_visit_loses_to_a_mark_in_mains_format`, `persists_rejected_command_receipts_across_retries` and the duplicate-create retry in
+`a_retried_command_returns_its_receipt` (T3's own tests, ported),
+`an_old_retry_after_an_undo_leaves_the_thread_as_it_is` (4,400 writes later),
+`date_input_matches_t3s` (T3's own answers for 1683 strings in five zones,
+`tools/gen-date-cases.mjs --check`), `each_event_type_sets_the_thread_updated_at_as_t3`,
+`thread_commands_move_updated_at_as_t3`, `an_archived_thread_refuses_lifecycle_commands_first`,
+`a_turns_events_name_the_provider_instance` and `thread_lifecycle_commands_reach_the_shell_row`
+in `conn-engine`; `client-check.mjs` (a year-10000 anchor decodes with T3's shell schema);
+`thread-cli-diff.mjs` compares every event type's `providerInstanceId` with the T3 server's.
+
+**Provider sign-in (2026-11-23):** `provider.auth.*` serves one flow: Antigravity's credential
+check (`authMethod` `gemini-api-key` or `agent-platform`, with an API or AI router key), as
+T3's `AntigravityAuth.ts` runs it without a browser (start, cancel, subscribe, one flow per
+instance owned by the starting session, T3's texts). Those entries say `canAuthenticate: true`
+and `auth.canLogout: false`. Agent Platform without a key would use Application Default
+Credentials, outside the key-only rule: it says `canAuthenticate: false` and never starts
+`agy` for a check.
+Left out by Nick's 2026-11-20 decision (providers sign in through Orbit's AI router, the
+server holds no provider sign-in): managed Codex and its token broker, and Antigravity's
+Google sign-in (`oauth-personal`, `oauth-business`: the link, `complete`'s redirect
+forward, `logout`); those entries now say `canAuthenticate: false`. Claude, Codex and Grok
+have no controller in T3 either. As in T3: a flow belongs to the provider instance that
+started it, and replacing or removing the instance stops its check and ends its streams;
+the stream sends every step (`starting`, `verifying`, the result) and the 90 s and 30 s
+hints; the 300 s timeout picks T3's text by step; a subscriber that falls behind gets the state
+now and only newer changes; cancel answers after the agent has stopped and both temp folders
+are gone, a start meanwhile is refused, and the check itself ends that state, so a client that
+leaves mid-cancel changes nothing; an agent that exits on its own is cleaned up by the same
+path as a stop, and a failed start waits for it; every signal by an agent's PID or group goes
+through its process supervisor before the reap, so a reused PID is never signalled; the agent
+starts (folders, spawn, cleanup of a failed spawn) on a blocking thread, and a check cancelled
+meanwhile still stops what it started; after a check the agent's session files for the
+check's workspace go (`removeAntigravitySessionFiles`: an absent file counts as removed, other
+errors stop it, `.meta` goes last); beyond T3, a check that ended with `session/new` sent and
+unanswered also removes the session stored meanwhile (found by its `.meta`; no scan when no
+session could exist), and a symlinked `.meta`, an `antigravity-acp` symlink, or a
+`conversations` or `brain` folder outside the profile is never followed; a custom executable may have
+any name (`resolveCommandPath`); the server's own setup errors (a missing executable, an
+unusable scratch folder) keep T3's texts, while a profile it cannot prepare shows the check's
+and the refresh's fixed texts, as T3's transport error does; known ACP errors
+(`-32602`, `session/new` `-32603`, `SUBSCRIPTION_REQUIRED`, access denied) get T3's fixed
+texts, and the agent's own message never reaches a client. By design: a check does not stop
+the instance's running sessions (T3 does), since it changes no credential. Proof: the
+`provider_auth` tests (gated stub provider, paused clock), the stub-`agy` tests in
+`antigravity_provider.rs` (process and folders after cancel and after a rejected key), the
+Antigravity entry test, `check-copies.mjs` for the texts, and `provider-auth-diff.mjs`
+(unchanged) for the others.
+
+**Model catalog refresh (2026-11-23):** `server.refreshProviders` follows T3's `ws.ts`.
+- `modelCatalogOnly` answers no providers, refetches a manifest older than 5 minutes, and
+  joins the shared full probe pass until the providers were probed with the manifest now
+  known (`refreshModelCatalog`). One pass runs at a time on its own task; a cancelled caller
+  does not stop it, and it records its manifest only when every probe ended normally.
+- An accepted manifest (`conn_provider::LiveManifest`) reaches Codex, Claude and Antigravity,
+  as T3's drivers read `ModelCatalog.current`.
+- `refreshModels` fetches the manifest at once, probes, then runs each targeted, enabled and
+  installed provider's model refresh (Antigravity only, as in T3). A failure answers
+  `ProviderSetupError` (`refresh-models`) after the config streams heard the entry change.
+- Antigravity: per-model thinking levels, T3's stale-reply rule, slash commands, the drain
+  before close, and the sign-in signals (error replies, stdout and stderr URLs) that sign the
+  entry out and notify the config streams (`conn_provider::StatusNotifier`).
+- A refresh with `instanceId` and `cwd` does not scan the workspace: it probes the instance
+  and answers every entry, as before. Without a `cwd` the reply follows `omitProviders`,
+  `workspaceSnapshotsOnDemand` and `usageLimitsCommand`.
+- The manifest is refused, fetched or cached, unless its Claude adapters and compatibility
+  policies decode as T3's schema requires; the last valid one stays.
+
+Proof: tests in `methods::server`, `catalog` and `lib` (Claude), `antigravity`,
+`antigravity_provider`, `connection` and `process`, including ports of T3's
+`AntigravityProvider.test.ts` and `AntigravityDriver.test.ts` cases; each fails with its fix
+reverted. `check-copies.mjs` holds the T3 texts. Not ported: workspace-scoped refreshes
+(`snapshotForCwd`, the per-workspace snapshot cache, `workspaceScanDirectory`, the scoped
+reply with `providerCatalogsOnDemand` and `machineCatalog`) and advertising
+`providerWorkspaceSnapshotsOnDemand`; T3's rescans; Claude's capability-probe and latest-version caches (this server keeps neither).
+Claude selections compile against the catalog the picker shows (`compileClaudeModelSelection`
+over the accepted manifest, proven equal to T3's output on the bundled one).
+
+**Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
+T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left
+out, the child bound to it; a refused or replayed command removes it. Proof: the `conn-mcp`
+tests (`tests/delegate_worktree.rs`) and live Claude and Codex children on a scratch server.
+The child's run waits in `preparing` (T3's `defer_start` with a workspace) while `/mcp` runs
+the project's `runOnWorktreeCreate` script in the child's checkout, after the command commits,
+as T3's `prepareRun` does; the checkout itself runs no script, so it runs once. A script
+marked `async: false` must end first, and its failure fails the run with
+`workspace_preparation_failed` before it reaches the provider (`prepared-run.release`/`fail`,
+2026-11-23); any other script overlaps the agent. The end is seen through T3's sentinel
+wrapper for POSIX shells and fish. Left: T3's generated branch name (also open for a worktree
+launch), `prepared-run.retry` and `prepared-run.progress`, and a concurrent retry of one
+delegate, which prepares a second checkout and can start the script a second time. One
+difference by design: when the checkout fails, the call is
+refused and no child is made; T3 makes the child and fails its run in preparation.
+
+**Setup script on worktree launch (2026-11-23):** a thread launched into a new worktree runs
+the project's `runOnWorktreeCreate` script in terminal `setup-<id>`, as T3's launch
+preparation does (a `delegate_task` worktree child runs it in its `preparing` run, above). A
+script with `async: false` holds the launch until it exits; a non-zero exit fails it and removes the worktree. Any
+other script is async, as in T3 (`script.async !== false`): the launch answers at once, and
+the setup ends when both the agent and the script are done; a launch with no first message
+ends its agent stage when it commits. The setup card's tail gets the script's output lines.
+A thread a link below full access starts, and a delegate of such a thread, runs no script
+(`linkOriginIsFenced`); the delegate's child starts at once. Proof: `conn-vcs` provision tests and `conn-server`
+`a_worktree_launch_runs_the_setup_script_through_the_host` (it failed with the old
+`setup_script: None`). One difference by design: a failed blocking script refuses the
+launch and leaves no thread; T3 keeps the thread with a failed run.
+
+**Worktree cleanup (2026-11-23):** the `storageCleanup` worktree rules and the per-project
+`worktreeCleanup` override now remove managed worktrees, as T3's `StorageCleanup` does: after N
+days without activity, N days after settling, a merged pull request, a deleted thread, or a
+finished thread with nothing beyond the default branch. Every rule is off by default. A sweep
+runs at start, hourly, on a rule change, on a thread delete, and when a session stops while a
+deleted thread's worktree waits. T3's keep reasons hold: running or pending threads, open
+terminals and sessions, shared or unowned checkouts, symlinked or unmanaged folders, project
+checkouts, nested repositories, a changed branch, local and hidden changes (the executable bit
+too), and submodule commits on no remote. Two keep reasons go beyond T3, which loses the data:
+a locked worktree (found before any file changes; there is no `git clean` first), and commits
+only the worktree's HEAD log holds. The checks, the nested-repository walk included, repeat
+under the checkout's lease (the checkpoint workspace lock) before `git worktree remove`, which
+keeps the branch. Turn starts and terminal starts take the same lease, as in T3. A dev home in a
+git worktree manages only its own `worktrees` folder. The server stops cleanup before it drains
+terminals and sessions. Proof: `conn-vcs/tests/cleanup.rs` (14) and `conn-server`
+`worktree_cleanup` (30). Not ported: the cleanup report and its RPCs
+(`server.runStorageCleanup`, `getStorageCleanupReport`, still unserved), orphan folder reports,
+scratch folders, browser artifact and log retention, checkpoint ref pruning, and following a
+branch switched while idle (the worktree is kept instead). A thread whose worktree was removed
+does not get its checkout back on the next turn yet.
 
 **Known difference, stop in progress (2026-11-18):** with the provider's reply to
 `turn/interrupt` held, T3 reported the run interrupted on one slow CI run (cause not proven).
@@ -19,13 +228,862 @@ Conn ends a stopped run only on the provider's terminal event: the Codex adapter
 reply, then waits up to 10 s for the terminal; past that the Stop is marked unresponsive and
 the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff` lists the
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
-match T3 is open.
+match T3 is open. After Stop completes, the transcript check waits for T3 to commit the
+run's checkpoint so the transcript and snapshot include the same final row.
+
+**WebSocket heartbeat as T3 (2026-11-23):** the server no longer closes a socket after 60 s
+without inbound frames. As in T3, the client pings every 5 s and decides when the server is
+gone (Effect `RpcClient` `makePinger`); the server only answers `Pong` (`RpcServer` `Ping`).
+A laptop that wakes sends its queued ping into a socket that is still open. A dead peer ends
+the session through the transport: a failed write, or a read error after TCP keepalive (10 min
+idle, 5 probes 60 s apart, about Linux's 15 min write give-up). T3 sets no keepalive; we do,
+because a silent dead socket would otherwise hold its session forever. Proof: session tests
+`a_suspended_client_stays_connected` (failed with 1001 before), `disconnect_stops_every_stream`,
+`a_dead_peer_is_cleaned_up_on_a_failed_write`, `accepted_sockets_get_keepalive`.
+
+## Automatic settlement and idle compaction (2026-11-23)
+
+- **Automatic settlement** (`settlement.rs`, T3's `ThreadSettlementService`): a sweep at start,
+  every minute, after a settings change and after a settlement. It settles a thread idle longer
+  than `sidebarAutoSettleAfterDays` at its last activity, a thread whose stored pull request link
+  merged or closed after the user's last action, and a delegate whose parent is gone, archived
+  or settled. The candidates come from the engine (`getSettlementCandidates`: no pin, no opt-out,
+  no running work, request, waiting link card or pending guest message; the server's own
+  compactions are no activity). Each settlement reads the settings right before its command, and
+  `thread.auto-settle` refuses a thread that changed after the sweep read it, as T3.
+  **Not built:** settling on a pull request found by a branch lookup on the host.
+- **Idle compaction** (`idle_compaction.rs`, T3's `IdleCompactionService`): after a completed
+  run on a Claude instance in `beforeCacheExpires` mode, a timer sends `/compact` two minutes
+  before the prompt cache of the run's last request expires, with every condition checked
+  again then. `message.dispatch` takes `idleCompaction` and is a no-op while the thread is busy
+  or a delegated result waits for delivery; the shell leaves the compaction run out
+  (`isSilentRunForShell`). Timers live in memory, as T3's; archive and delete cancel a thread's
+  timer, and both services stop before the engine at shutdown.
+- **Proof:** T3's settlement and compaction cases as unit tests; the sweep, its loop and the
+  compaction on a real engine with a moved clock, including user activity between the decision
+  and its command; the host's turn end starting the compaction (`host.rs`).
+## Provider switch handoff (2026-11-22)
+
+**Forks on another provider (2026-11-23):** as T3's `decideForkExecution`, a fork's first
+message forks natively when it can, and otherwise carries the history the fork inherits through
+its fork point as a full handoff (`portable_context`); later source turns stay out. The target
+must take a handoff (`ensureContextHandoff`). A side chat still forks natively or is refused: T3
+gives it a side-chat handoff, which this server does not build. Proof:
+`a_fork_on_another_provider_carries_its_history` (audit 1.5).
+
+A thread can move between Claude, Codex, Grok and Antigravity mid-thread, and the new provider
+gets the conversation. Before, every provider said
+`supportsProviderSwitchingViaHandoff: false`, so clients locked the model picker to the
+thread's provider, and a switch made another way started the new provider with no history.
+
+- **What runs** (`conn-engine/src/provider_handoff.rs`, T3's `dispatchMessage` and
+  `startNextQueuedRun`). A run on another instance than the conversation's gets a consumed
+  `provider_handoff` transfer, a context handoff (`handoff::prepare_provider_handoff`, T3's
+  `prepareProviderHandoff`), `contextHandoffId` and a "Provider handoff" item. The first run on
+  a provider with no native thread of this conversation gets the whole history
+  (`full_thread_summary`); a return to a provider gets what happened since its thread last took
+  part (`delta_since_target_last_seen`). The turn start delivers it as merge-back does:
+  injected into Codex's thread, inline for Claude, Grok and Antigravity.
+- **Capabilities.** Claude, Codex, Grok and Antigravity now say
+  `supportsProviderSwitchingViaHandoff: true` (T3 says `true` for all four) and
+  `acceptsSyntheticUserContext`, `canConsumeHandoffSummaries`, `supportsDeltaHandoff`,
+  `supportsFullThreadHandoff: true`, which the switch checks (`ensureContextHandoff`). They
+  still say `false` for `acceptsSystemContext`, `acceptsDeveloperContext` and
+  `canGenerateSummaries`, where T3 says `true` for Claude and Codex (and for summaries, ACP):
+  nothing in T3 or here reads them, and this server does not serve them.
+- **Fix found on the way:** when a delivery's coverage is too long, the condensed text names
+  the provider thread's app thread for `conn_thread_read`, as T3 does; it named the first
+  handoff's thread.
+- **Proof:** `cargo test -p conn-engine`: `a_provider_switch_hands_the_history_to_the_new_provider`
+  (Claude to Codex in full and injected, back to Claude as a delta inline),
+  `a_queued_run_on_another_provider_carries_the_history`,
+  `a_switch_to_a_provider_without_handoff_is_refused`; the first two fail on the commit before.
+  `gen-handoff-cases.mjs`: 90 cases (was 81), with T3's own `prepareProviderHandoff` for both
+  strategies, run statuses, a source thread and no transfer, and four deliveries of provider
+  handoffs. `client-check`: a switch through the client's reducers, with the client's own
+  `threadSupportsProviderHandoff` true on the live session (the picker opens).
+- **Not proven:** T3's `ProviderSwitch.integration.test.ts` runs on T3's in-process harness
+  (its own adapters and event sink), so it does not run on this engine; the switch rules here
+  come from reading `Orchestrator.ts`. No live provider was switched.
+- **Steer on another provider:** the running turn stops and the message restarts on the new
+  instance with a handoff (`a_steer_to_another_provider_restarts_there`). After `/clear`, a
+  return to a provider starts a new native thread, never the cleared one.
+- **Not built** (T3 has them): the v1-import recovery handoff (`prepareLegacyImport`) for an
+  imported thread with no completed run; the turn start's resume-fallback and missed-run retry
+  handoffs; resume across instances that share
+  native history (here every instance change hands off); the capability check for a queued
+  run (all four providers pass it); the provider thread's `handoffIds`. The budget still
+  knows no model window and no native estimate (as for merge-back).
+
+## Unserved methods: triage (2026-11-21)
+
+Of 251 contract methods, 198 were served and 21 are skipped by decision (FORK.md, "Not
+served, by decision"). This triage covers the other 32. **Build** means the UI needs it;
+**trivial** means match T3's answer; **ask Nick** means it looks unneeded for this fork.
+Nothing here was skipped without asking. RPC **203 of 251** after this step; `/mcp` 104 tools.
+
+| Method | Verdict | Why |
+| --- | --- | --- |
+| `server.getSettings` | trivial, built | No client calls it; T3 answers the client view of the settings. |
+| `server.getTraceDiagnostics` | build, built | Settings › Diagnostics. This server writes no trace, but a home a T3 server used holds its trace files; they are read as T3 reads them. |
+| `server.getDatabaseStorage` (stream) | trivial, built | Settings › Storage. T3 sends `null` when its offline `t3 doctor` does not repair this database; this server has no such command, so `null`. |
+| `server.reclaimDatabaseSpace` | trivial, built | Only reachable from a non-null status; refuses with `DatabaseReclaimError`. |
+| `provider.uploadFeedback` | build, built | The composer's `/feedback` (Codex). Codex `feedback/upload` through the running app-server, as T3. |
+| `server.getNpmRelease` | ask Nick | The update-track dialog asks npm for the `t3` package; Orbit ships the Conn Server. |
+| `server.updateServer`, `server.updateServerWithProgress`, `server.commitDesktopUpdate` | ask Nick | Download a T3 release from GitHub and swap the server; Orbit releases the Conn Server. |
+| `server.checkOtlpEndpoint` | ask Nick | Tests a user's OTLP URL, but this server exports no OTLP, so the setting does nothing here. |
+| `server.checkSecretSource` | ask Nick | Reads a secret through a secret provider (1Password `op read`); this server keeps references but resolves none. |
+| `server.getStorageCleanupReport` (stream), `server.runStorageCleanup` | ask Nick | A large port that deletes worktrees, logs and browser artifacts (engine, VCS, terminals). Every rule is off by default, and Orbit Instances are disposable. |
+| `server.prepareTriage` | ask Nick | Clones `pingdotgg/t3code` and writes a bug-report context for T3 itself. |
+| `cloud.getRelayClientStatus`, `cloud.installRelayClient` (stream) | ask Nick | T3's cloud relay client (download and install a binary); Conn links through the Orbit Gateway. |
+| `guestShare.create` | ask Nick | Needs T3 cloud's managed endpoint (connector hostname); a beta, off by default. |
+| `provider.chatgpt.handoff.subscribe` (stream), `provider.chatgpt.import-profile`, `provider.chatgpt.reconnect-profile` | ask Nick | T3's own ChatGPT OAuth with tokens in its store; Nick's 2026-11-20 decision: no ChatGPT token here, providers sign in through Orbit's AI router. Proposal: add to FORK.md's skips. |
+| `provider.consumeResetCredit` | ask Nick | Spends an account's rate-limit reset credit. Codex goes through the app-server, Claude calls Anthropic's API with the login (forbidden here); with Orbit's AI router there is no account credit. |
+| `server.searchAcpRegistry`, `server.prepareAcpRegistryAgent`, `server.uninstallAcpRegistryManagedBinary`, `server.acceptAcpRegistryUrlAuth`, `server.listAcpRegistrySessions`, `server.importAcpRegistrySession`, `server.deleteAcpRegistrySession`, `server.listAcpRegistryProviders`, `server.setAcpRegistryProvider`, `server.disableAcpRegistryProvider`, `server.logoutAcpRegistry` | ask Nick | The ACP registry provider is not built. Nick decided on 2026-11-14: no index download and no install; Orbit installs CLIs. Search and prepare need the index; the other nine act on a registry provider instance that does not exist here. |
+
+**What changed:**
+
+- `server.getSettings`, `server.getDatabaseStorage`, `server.reclaimDatabaseSpace`
+  (`methods/server.rs`); `server.getTraceDiagnostics` (`trace_diagnostics.rs`, T3's
+  `TraceDiagnostics.read` and its aggregator: rotations oldest first, line by line on a
+  blocking thread, bounded top lists, strings trimmed as T3's schema encodes them);
+  `provider.uploadFeedback`
+  (`methods/provider.rs`, `conn-engine/src/feedback.rs`, `Session::upload_feedback`, the
+  Codex session's `feedback/upload`).
+- **Fix:** clients now get `idleCompaction` and `compactIdleThreads` before the first settings
+  write, as T3 adds them on load (`withIdleCompaction`). Before, a fresh server sent neither,
+  so clients took it for a server from before idle compaction modes and showed the old switch.
+  This also changes `server.getConfig` and `settingsUpdated`.
+- **Proof:** `server-misc-diff.mjs` (new check) starts both servers: `getSettings` equal after
+  the client's decode and equal to `getConfig`'s settings on each side; the trace answer on a
+  fixture set of trace files (rotations, a folder in a file's place, parse errors, failures,
+  interruptions, log events, more spans than the top lists hold, `\n`, `\r\n` and `\r`
+  line ends, names of JavaScript-only whitespace) equal to T3's own `readTraceDiagnostics` on the same folder; `getDatabaseStorage`
+  `null` here (T3 sends a status, its repair command targets its own database);
+  `reclaimDatabaseSpace` and `uploadFeedback` for an unknown thread refused with T3's tags.
+  `effect-client.mjs` decodes all five with the client's schemas. `cargo test -p conn-engine
+  upload_feedback`: T3's texts for no session yet, an unsupported provider and a stopped
+  session.
+- **Known differences:** a trace timestamp outside the years 0000 to 9999, or written in
+  hex, counts as unparsable (T3 accepts both); so does a span whose name's total duration
+  would overflow to infinity (T3 sends `null` there, which its own client refuses); the reclaim refusal says "This server cannot reclaim database space." (T3 names
+  its `t3 doctor` command); an unknown thread's upload cause is our own text; with no active provider thread, the
+  upload falls back to the thread's own provider threads in T3's order, but T3's set also
+  holds provider threads owned through nodes and subagents. **Not proven:**
+  Codex's `feedback/upload` frame against T3's on a stub `codex`. T3 has no replay fixture for
+  it, so the conformance tool cannot drive it yet; the parameters follow
+  `CodexAdapterV2.uploadFeedback` (`classification: "bug"`, `includeLogs: true`, `reason`,
+  `threadId`).
+
+## Attention events for iOS push (2026-11-22)
+
+The server side of nckrtl/conn#229, section 7 step 1: the server reports when a thread needs
+the user, and Orbit sends the push. Off unless `CONN_ATTENTION_PUSH=1`; with it off, nothing
+is written.
+
+- **Contract.** `conn-contract/src/attention.rs`: `ConnAttentionKind`, `ConnAttentionEvent`
+  (version 1), the body the Gateway takes. The title (64 characters at most) is the only
+  content.
+- **Emit points.** `conn-engine/src/attention.rs`: the commit that changes a shell row writes
+  `attention` (`approval`, `input`, `turn_finished`, `turn_failed`) or `attention_cleared` to
+  the `attention_outbox` table in the same transaction. The desktop's rules apply: top-level
+  threads only, snooze, the Monitor hold, the 5 s grace for a background wake, each key once.
+- **Sender.** `conn-server/src/attention.rs`: drains the outbox with backoff 1 s, 5 s, 30 s,
+  then every 5 minutes; drops events older than one hour; resumes after a restart. Container
+  servers send `POST /api/v1/conn/managed/attention` through the managed Gateway client.
+- **Not built.** Native servers (mini, nick.local) have no Gateway client:
+  `attention::native_sender` is a TODO, and a native server keeps the events off. The
+  shell's `latestRunBackgroundWake` is always false here, so the grace and the Monitor hold
+  wait on that field. Proof: `cargo test` (the attention tests in conn-contract, conn-support,
+  conn-engine and conn-server), with a fake sender; no live Gateway yet.
+
+## Typed Gateway client (2026-11-22)
+
+`crates/conn-gateway-api` (#227): types and one value per operation, generated from Orbit's
+OpenAPI document (pinned from Orbit `7eeccf8`, `docs-site` branch). The `gateway-api --check`
+step fails a stale generation. **Not yet:** no client uses it; the Conn Server's
+`managed/gateway.rs` moves first, then `orbit_link.rs`, then `conn-orbit`. `--fetch` waits for
+Orbit group 6200's `GET /api/v1/openapi.json`, which also types the untyped objects.
+
+## T3 state import (2026-11-21)
+
+A Conn Server that starts in a T3 server's state folder has the same threads (Nick,
+2026-11-21: "we need to have the same threads"). Before, it started empty there.
+
+- **What runs.** `serve`, before it listens, calls `conn_engine::import_t3_state`
+  (`conn-engine/src/t3_import.rs`) when the folder holds `statev2.sqlite` and no
+  `engine.sqlite`. It attaches T3's file read-only (`mode=ro`; `immutable=1` when a cleanly
+  stopped T3 left no `-wal` and none can be made), copies in one transaction the projects
+  (`projection_projects`, as T3's `OrchestrationProjectShell` plus `deletedAt`), the threads
+  (archived and deleted ones too) and every projection row (runs, attempts, nodes, subagents,
+  provider sessions per `provider_session_bindings`, provider threads and turns, runtime
+  requests, messages, plans, turn items, checkpoint scopes, checkpoints, context handoffs and
+  transfers, MCP app model context) with its id and its JSON body, unchanged. `first_seq`
+  follows the order T3's `ProjectionStore` reads each collection in; turn items and runs keep
+  their ordinals; final message texts go into search. A provider thread without a thread of
+  its own goes to its owner node's thread, as T3 reads it. The engine then computes each shell
+  row. The store is built as `engine.sqlite.t3-import` and renamed into place only when
+  complete. A table or project column an older T3 lacks reads as empty or as its default.
+- **Boundary.** `meta.imported_through` is above the imported rows and above the last sequence
+  T3 gave out (`orchestration_v2_projection_metadata`, the event counter). New sequences start
+  above it. A client cursor at or below it may be T3's, and the imported rows have no events
+  here, so the thread and shell streams answer it with a snapshot (`streams::can_replay`; the
+  shell's pruned mark is set to it too). A new run takes the ordinal after the
+  thread's highest, not its run count + 1: T3 leaves gaps when it moves a queued run forward
+  (6 threads on mini).
+- **Why this way.** Reading T3's tables in place would put a second schema under every engine
+  read and write. The engine already stores T3's encoded `OrchestrationV2*` bodies, so a
+  one-time copy keeps its code as it is. T3's file is never written: the T3 server can take
+  over again (rollback) with every thread it had; threads made on the Conn Server do not go
+  back. An existing `engine.sqlite` is never touched; a partial import is removed and redone.
+- **Sessions, pairing codes, peer links and scheduled tasks** (2026-11-21, `t3_carry.rs`):
+  at the same first start, before the stores open, T3's live rows go to the server's own
+  files; a file this server wrote itself is never replaced. Until the thread import of that
+  start is in place (`t3-carry.pending`), a later start reads the carried files again from
+  T3, which may have run in between (a revoked session, a spent code). Paired devices keep
+  their tokens: a
+  carried-over session (`auth.json`, `t3Signed`) accepts the token T3 signed, checked as T3's
+  `SessionStore.verify` does (HMAC with T3's `server-signing-key` from the shared secret
+  store, claims version, kind, subject (it picks the native or MCP audience, as in T3),
+  expiry, the session not revoked; the claims' `rtc`/`plk` apply on `/mcp`).
+  Revoking it here works as for any session. Unspent one-time pairing codes stay usable,
+  peer-link codes (`mcp-approval:peer-link:*`) included.
+  Peer links keep their rows (T3's order; a link made before fencing shows as expired, as
+  T3 shows it) and their tokens under the same secret names. Scheduled tasks keep schedule,
+  state, counters, next run and webhook credentials, as T3's `decodeRow` builds them.
+- **Not carried over:** T3's event log (compacted; clients read projections), command
+  receipts, browser cookie and DPoP-bound sessions (this server checks neither; none on
+  mini), pairing codes bound to an MCP sign-in in progress or waiting for T3 Connect
+  approval; for webhook tasks (none on mini) the delivery log, replay keys and deliveries
+  waiting for dispatch, and coalescing, which this server lacks (an imported coalescing task
+  runs once per delivery); tasks over 500 (mini: 8); the grouped `XXXX-XXXX-XXXX` spelling
+  of a pairing code (the compact one works). Session import
+  (`agentSessions.*`) stays unserved; it is a different thing.
+- **Proof on a copy of mini's T3 home** (12.3 GB `statev2.sqlite` taken with sqlite `.backup`;
+  `~/.t3` untouched): `crates/conn-server/tools/t3-import-diff.mjs` starts the T3 server and the
+  Conn Server on APFS clones of the copy and compares what a client reads. Import: 6 projects,
+  1,531 threads, 18,960 runs, 230,292 nodes, 68,170 messages, 318,032 turn items, 19,788
+  checkpoints, 3,654 context transfers, 761 session bindings; 183 s to 259 s on mini, once.
+  The boundary became 1,862,638, T3's last sequence.
+  - Byte for byte, every T3 row against the engine row: none missing; every row identical
+    except rows of threads that each server's restart recovery changed (runs live at the copy).
+  - Shell: 5 projects and 1,529 threads on both. Every thread's projection, through T3's wire
+    projection and the contract decode: no difference outside the known list below. Settings
+    (decoded) and the 88 keybindings: equal. The environment id: equal.
+  - Continued: in a one-thread copy, the Conn Server imported the thread (a Haiku thread from
+    2026-11-13, 10 messages), served its old messages, and ran two new Claude Haiku turns in
+    it (runs 6 and 7) on the same provider thread and Claude session; asked how many
+    subagents "we agreed on earlier", it answered "Four." from the old conversation.
+- **Known, not from the import** (each holds for every thread this server serves, and the
+  import keeps the rows it is computed from): T3 also lists a context transfer on its source
+  thread, this engine on its target only (2,806 such listings on mini); the shell row has
+  `tags: []`, `latestRunStopRequested: false`, `latestRunBackgroundWake: false` and `null` for
+  absent fields where T3 omits or reads them; it shows no waiting link card; its
+  `latestUserAuthoredMessageAt` reads only the newest user message; a run fork's shell counts
+  only its own items; projects have no `repositoryIdentity`; serde_json re-reads floats without
+  `float_roundtrip` (last digit of `opens.score`) and keeps object keys sorted (the order of a
+  dynamic tool's wire summary). The HTTP thread route serves outputs that T3's wire projection
+  omits; the check applies T3's own projection to both sides.
+- **First start takes minutes** on a large T3 home (mini: 3 to 5 minutes and as much free
+  disk as `statev2.sqlite`). An interrupted import starts over at the next start and loses
+  nothing. The server listens only after it, as the T3 server listens only after its
+  migrations: a client gets "connection refused" meanwhile, as during a T3 upgrade, and
+  reconnects. The log carries T3's migration messages ("Running database migrations",
+  "Upgrading database: T3 import step 12 of 18 (turnItems), 63 s", thread counts in the last
+  step, "Migrations ran successfully"), so the desktop's readiness check keeps waiting past
+  its 3 minutes instead of reporting a failed start (`isRunningDatabaseMigrations`).
+- **Proof of the carry-over** (2026-11-21, a fresh `.backup` copy of mini's 12.4 GB
+  `statev2.sqlite`, an APFS clone of it per run; `~/.t3` and the running servers untouched;
+  copies deleted afterwards). Carried: 13 sessions (12 live on mini, plus one issued on the
+  clone by T3's own CLI, `t3 auth session issue`), 1 pairing code (issued the same way),
+  6 peer links, 8 scheduled tasks; import 309 s.
+  - Sessions: the token T3's CLI issued reads `authenticated: true` on `/api/auth/session`,
+    gets the shell (5 projects, 1,536 threads) and a WebSocket ticket; a changed signature
+    gets 401. beast's real peer-link token for mini (an MCP client session, 15 days left)
+    initializes `/mcp` and lists 62 tools, and gets 401 on the native API, as on T3. The T3
+    pairing code exchanged once for a token; a second exchange got 401.
+  - Peer links: `conn_environment_links` lists all 6 with T3's labels, access, expiry and last
+    errors; `conn_thread_list` through the nick link answered (2 threads). beast answers with
+    the error T3 itself has recorded for that link ("did not match this version").
+  - Schedules: the 8 tasks came over with their run counts. One task, changed on the clone
+    to a harmless prompt on Claude Haiku in a new thread, fired on its own timer three times
+    (runs 22 to 24, from T3's 21). Runs 22 and 23 failed for proof-setup reasons (the
+    worktree had no SDK helper installed; a model slug this account lacks); run 24 started
+    its thread and got the answer "pong".
+  - Client meanwhile: `/.well-known/t3/environment` refused connections for 5 min, then 200.
+
+## Merge-back (2026-11-21)
+
+`thread.merge_back` is served, so `conn_thread_transfer` `merge_back` and the client's "Merge
+back" work. Before, the engine refused it ("Conn Server cannot merge a fork back yet.").
+
+- **The command** (`conn-engine/src/merge_back.rs`, T3's `dispatchThreadMergeBack`): T3's
+  checks and texts (a fork of the target, the target idle with an empty queue, no other fork's
+  pending context, a provider-finished source run, a fork transfer), then a pending
+  `merge_back` context transfer on the target; an older one from the same fork is superseded.
+- **The next message** on the target (`dispatchMessage`): refused when it would queue, when
+  forks of two threads are pending, or with `/clear`, with T3's texts. Otherwise the fork's
+  visible items through the source run become a `fork_delta_summary` handoff
+  (`ContextHandoffService.prepareForkDelta`), the transfer is `consumed` with a
+  `fork_delta_context` resolution, the run carries `contextHandoffId`, and a "Merge-back
+  context" item shows before the message.
+- **Delivery** (`runner.rs`, `ContextHandoffDelivery.deliverContextHandoffs`): T3's budget and
+  selection (`conn-engine/src/handoff.rs`, `handoffBudget.ts`). Codex gets the history through
+  `thread/inject_items` (a new `Session::inject_history`; an unknown method falls back to
+  inline); Claude and the other providers get it inline ahead of the user's text. Each step is
+  recorded on the handoff's `delivery` (`pending`, then `injected` or `inline`).
+- **Proof:** T3's own merge-back test (`ThreadMergeBack.integration.test.ts`: two sibling forks
+  merged into the source, then a recall) runs on this engine in `t3-fixture-replay` for Codex
+  and Claude and passes T3's assertions: summaries, transfer statuses and source runs, native
+  ids, visible text; every provider frame matches the recording (Claude's inline prompt with
+  T3's `normalizeContextHandoffText`; Codex's two injections checked as T3's test checks them).
+  Fixture replay 71 of 164 (was 69 of 162). `gen-handoff-cases.mjs` (new check): 81 cases of
+  T3's `historicalMessage`, `selectHistory`, `renderHistory`, `historyResponseItems`,
+  `historyCost`, `handoffBudget`, the token cap, `visibleDeltaRunOrdinals`,
+  `prepareForkDelta` and `deliverContextHandoffs`, equal in `cargo test -p conn-engine
+  handoff`. `client-check`: a fork merged back, then the source's next run, through the
+  client's reducers. `parity.mjs`: merge-backs that reach both engines (not a fork, into
+  itself, an unknown run) with equal texts. `cargo test -p conn-mcp thread_transfer`: a
+  refused, then an accepted merge-back, pending on the source. RPC 198 of 251, `/mcp` 104
+  tools (unchanged).
+- **As T3:** a run that fails, is stopped, or is a `/compact` or `/goal` turn leaves its
+  handoff to the next run (`isPendingForRun`); the `pending` and `injected` records must be
+  written before the turn goes on. A handoff made before its run has a provider thread (a
+  first run, or after a provider switch) names a provisional one until delivery.
+- **Known differences:** the budget does not estimate native context without provider usage
+  (T3 counts the delivered history) and knows no model window; `/goal` is matched by its
+  prefix, not T3's parser; a fork's first user message
+  has no `providerThreadId`, so its history line says `provider-thread=none`.
+
+## `pull_request_create` (2026-11-20)
+
+Agents can open a PR from their thread's pushed branch: `pull_request_create`
+(`conn-mcp/src/tools/pull_request_forge.rs`, T3's `pullRequests/handlers.ts`). The server runs
+T3's `GitManager.createPullRequest` (`conn-source-control/src/pull_requests/create.rs`):
+the upstream fetch and branch read of `statusDetails`, `resolveBranchHeadContext` (forks,
+foreign remotes, `gh`'s target), the open-PR lookup per head, the unpushed-commit refusal,
+`resolvePrBase` (`t3-merge-base-ref`, `t3-merge-base`, `gh-merge-base`, the upstream, GitHub's
+default branch, the remote's HEAD, `main`), `POST repos/{o}/{n}/pulls`, the lookup again, and a
+draft through the panel's own `summary` and `runAction`. The tool links the PR as `created`.
+RPC 202 of 251 (unchanged by this step); `/mcp` 104 tools.
+
+- **Repository choice:** `resolveRepository` now follows T3's `resolveGitHubRepository`
+  (`gh repo set-default` marks, then `upstream`, `github`, `origin`), not the first GitHub
+  remote. Repository lookup, clone and PR checkout use it too.
+- **Proof:** `gen-pr-cases.mjs` runs T3's real `GitManager` and GitHub provider on temporary
+  checkouts and an in-memory GitHub (`tools/pr-create-recordings.mjs`, 19 cases: created,
+  not listed yet, already open, another head's PR, explicit and recorded bases, an upstream
+  under another name, an unreadable repository, a fork remote, a refusal, unpushed, not
+  pushed, detached, four draft cases); `create_pull_request_matches_t3s_recorded_runs` replays
+  them: every request body, result, error text and draft call equal. 20 cases of T3's
+  `resolveGitHubRepository`. `parity.mjs`: 6 calls (input checks, refusal outside a thread). `/mcp` input decode now lists every missing required key, as T3 does.
+  `cargo test -p conn-mcp create_links`: the link as `created`, no second link, the "not
+  listed yet" refusal.
+- **Not built:** the client's stacked `create_pr` and `commit_push_pr` (`git.runStackedAction`
+  still answers that push and PR creation are Orbit's): they need push and T3's generated PR
+  text. Not run against live GitHub.
+- **Known differences:** T3 clears its VCS status cache after a create; here `pr` in VCS
+  status is not served, so the panel only refreshes. The background head lookups
+  (`pull_requests_by_heads`) still omit `operationName`.
+
+## Desktop tab relay (2026-11-20)
+
+Agents on this server can drive a browser tab that is open in a Conn desktop, as with the T3
+server. The desktop registers the tab (`preview.desktopRegister`), takes its request stream
+(`preview.desktopRequests`) and answers each request (`preview.desktopRespond`). RPC 202 of
+251. No capability names the relay in the contract; the desktop registers each tab it shows
+itself, so nothing new is advertised.
+
+- **Desktop tabs:** `preview.open` without `runtime: "server"` (T3's default, `desktop`) now
+  makes a record, as T3's `PreviewManager` does; it no longer fails. `reportStatus`, `resize`,
+  `adjust`, `close`, `list` and `subscribePreviewEvents` serve these records
+  (`conn-preview/src/tabs/desktop.rs`). A desktop that kept a tab across a server restart
+  restores it when it registers again.
+- **Routing (`conn-preview/src/relay.rs`, `conn-mcp/src/tools/preview.rs`):** a `preview_*`
+  call goes to the desktop when it names the desktop's tab, or when the agent's last call
+  made that tab current; `preview_open` without such a tab stays on the server's browser.
+  The request input is T3's (`pixelsRequired`, `fullScreenshot`, `reuseExistingTab`, `open`
+  and `show`, act inputs without `action`). The answer is encoded with the tool's output
+  schema; remote errors read as T3's typed errors. `preview_status` adds the thread's desktop
+  tabs; `conn_preview_close` closes a desktop tab's record. Recording on a desktop tab answers
+  T3's refusal. `preview_cdp_endpoint` on a desktop tab returns the desktop's endpoint.
+- **Proof:** `crates/conn-mcp/tools/desktop-relay-parity.mjs` (in `parity.mjs`): T3's own
+  `PreviewManager`, `PreviewAutomationBroker`, `DesktopTabRelay` and preview toolkits against
+  ours, with one stand-in desktop: 23 MCP cases equal (explicit and followed tabs, eleven
+  remote error kinds, a withheld screenshot, recording, open, status, list, close) and the
+  requests the desktop received equal. `effect-client.mjs`: open a desktop tab, a refused and an accepted
+  registration, the stream's `connected` event and an answer over the real socket. Unit
+  tests: conflict, session ownership, the 30 s registration expiry, timeouts that release a
+  silent desktop, pending requests failed when the desktop leaves.
+- **Known differences:** a call that names a server tab stays on the server's browser while
+  a desktop tab is current (T3 sends it to the desktop, which refuses it). A desktop cannot
+  restore an unknown tab id from this server's own allocator. `preview.list` gives no
+  `host`/`hostedHere` (as T3's `preview.list`); `fill_credential` reads the server browser
+  only. Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
+  records, 256 pending requests, 256 agent assignments, 64 queued requests per desktop (a
+  full queue answers `RequestQueueClosedError`). `preview_status` reads the desktop tabs one
+  after another (T3: four at a time). `preview_act` input is not decoded per action before it
+  reaches the desktop (T3 answers `invalid_request` first).
+
+## Remote delegation and the Orbit Gateway link (2026-11-20)
+
+An agent here can delegate to, and message, threads in another linked environment, as in T3
+(`RemoteDelegation.ts`). This server can also link a server that Orbit lists
+(`OrbitEnvironmentLink.ts`).
+
+- **Delegation** (`conn-mcp/src/remote_tasks.rs`): `delegate_task` with `target.environmentId`
+  launches the child there with `conn_thread_launch` and `delegatedFrom`, then records the task
+  here without a child thread. Internal engine commands do the recording:
+  `delegated_task.remote.request`, `.complete` and `.stop` (`Engine::remote_task`). They
+  never reach client dispatch. Provider, model and modes inherit as in T3. The project there
+  is matched by repository or named. `isolation: worktree` is refused there with T3's text
+  (T3 refuses it for remote targets too).
+- **The follower**: one per open task, at most 1,024. It waits on the thread there in 45 s
+  steps (the forwarder's cap) and races each step against the task ending here. It reads the
+  last reply, paging and following truncated text. Then it completes the task, which wakes
+  the parent as a local child does. A final refusal (link revoked or forgotten, thread or run
+  gone) fails the task. Any other failure is retried with back-off up to 5 min. After three
+  engine failures in a row the task fails, naming its thread there. On start, the server
+  follows every open task again (`Engine::open_remote_tasks`).
+- **Stop and cancel**: a Stop of the parent ends an open remote task as interrupted, without a
+  wake. A task that already has its result then owes a stop there. The engine tells the host
+  (`EngineHost::remote_task_changed`), and the follower sends that stop at once.
+  `task_cancel` stops the thread there, then records the cancel. A machine that is down
+  still cancels here, and the follower sends the stop later.
+- **Follow-up record**: a forwarded `conn_thread_send` that started or queued a run on a
+  finished task's thread becomes a new task here. The send returns its `taskId`, and the task
+  is completed the same way.
+- **`delegatedFrom`**: a thread that a link launches keeps the parent named in the launch
+  (thread and shell row). Only stamped work gets it, as in T3.
+- **Orbit link** (`conn-server/src/orbit_link.rs`): `conn-server environment link-orbit <id>
+  [--access] [--gateway-url]`. As its own Node, the server asks the Gateway
+  (`/api/v1/conn/environments`, the pairing and its Operation) for a one-time pairing link
+  through the system `curl`, as T3 does. It takes the code and links with the expected
+  environment id. The code never reaches output, an error or storage. The codes and messages
+  are T3's (`node_access_required`, `session_expired`, `pairing_pending`, `pairing_failed`,
+  `environment_not_found`, `gateway_unreachable`, `links_off`, `target_links_off`,
+  `link_failed`).
+
+Proof:
+- `crates/conn-server/tools/remote-delegation-diff.mjs` (in `tools/check.sh`) runs 20 steps
+  T3 → T3, Conn → Conn, Conn → T3 and T3 → Conn. Steps: the refusals, a delegated task
+  that finishes there and wakes the agent here, a retry, the thread there naming its parent,
+  the parent's task row, a forwarded send that becomes a follow-up task and finishes, a
+  retried send, a send to a thread that is no task, and a cancel of a finished task. All
+  equal.
+- `crates/conn-server/tools/orbit-link-diff.mjs` (in `tools/check.sh`) runs 14 cases of both
+  command lines against a stand-in Gateway on loopback, in the same four pairings. All equal.
+- `parity.mjs` compares `delegate_task` and `conn_thread_send` with an `environmentId` from an
+  outside client, with links on.
+- `cargo test -p conn-engine remote_task` covers the record, the replay, the completion and
+  its single wake, a refused second report, the stop a Stop owes, stop counts, and a Stop of
+  an open task.
+- By hand on mini, the CLI linked a Conn and a T3 server on the WireGuard address 10.44.0.9
+  through a stand-in Gateway. It printed T3's line, and the link lists as reachable.
+
+Known differences: both servers refuse to send an Orbit code to a loopback address
+(`answeringAs`), so the checks prove a successful Orbit link only up to that refusal; the
+hand run proves it. A follower waits in 45 s steps where T3 asks for 10 min; the forwarder
+caps both at 45 s. A remote task's `task_status` acknowledges the result as T3's does; a
+local one still does not. `environment link`, `list` and `unlink` on the command line are not
+built.
+
+## Antigravity (2026-11-20)
+
+Google Antigravity runs as an agent: the `agy` CLI over ACP (`agy acp`), as T3's Antigravity
+driver runs it (`conn-provider-acp/src/antigravity.rs`, `antigravity_provider.rs`; details and
+gaps in the crate README, "Antigravity"). The server lists the default `antigravity` instance
+(off) and each `providerInstances` entry with that driver.
+
+- **Credential (Nick's decision):** the instance's `apiKey` setting, a settings secret as in T3,
+  passed to `agy` only (`GEMINI_API_KEY` for `gemini-api-key`). In Orbit containers Orbit fills
+  that setting with the AI router key and sets `GOOGLE_GEMINI_BASE_URL` to the router; this
+  server has no Orbit names. Orbit must also put `agy` on `PATH` in the container image or
+  through its tool provisioning: this server installs nothing.
+- **Proof:** `tools/antigravity-conformance.mjs` (new check): T3's driver and adapter and ours
+  on one stub `agy` that replays a recording of a live `agy acp` 1.5.4
+  (`testdata/antigravity/turns.json`); argv, environment and every frame equal in two
+  scenarios (7 frames each: initialize, authenticate, session/new, the model, two prompts,
+  close). `cargo test -p conn-provider-acp antigravity`: model selection, client name, session
+  meta, settings. Live (2026-11-20): one turn on `gemini-3.8-flash` through Orbit's AI router,
+  answered "antigravity ok"; the key moved from `settings.json` to the secret store.
+- **The ACP registry stays unregistered** (Nick, 2026-11-14: no index download or install). RPC
+  196 of 251 and `/mcp` 103 tools, unchanged.
+- **Known differences:** `BROWSER` names this server's helper, not T3's Node script.
+- **Models before the first thread (2026-11-23):** while the account is unknown, a health check
+  opens a throwaway session in a scratch folder and closes it, as T3's health check now does,
+  so the entry is `ready` with its models after start. `--version` keeps the version.
+
+## Environment themes (2026-11-20)
+
+Agents can restyle the clients with `conn_theme_read` and `conn_theme_set`, and clients that ask
+get the published themes on `subscribeServerConfig` (`environmentThemesUpdated`, capability
+`environmentThemes`). The service is `conn-files/src/themes.rs` (T3's
+`EnvironmentThemeService`); the tools are `conn-mcp/src/tools/themes.rs`.
+
+- **The folder:** `<state-dir>/themes`, as in T3. A theme is `<id>.json`, read without
+  following links or blocking on a FIFO, at most 32 files and 2 MiB in total; its background
+  is `<id>.webp|png|jpg|jpeg` beside it (16 MiB, no links), served by the asset route
+  (`environment-theme-background`). Publishing writes a staging file and renames it, checks
+  that the theme is served without pushing another out, and puts the old file back when the
+  settings write that selects it fails. Selecting sets `defaultTheme`/`defaultAppearance` and
+  their `SetAt` times; `t3-code` is stored as the empty stock default.
+- **Changes:** T3 watches the folder. Here each theme subscription looks at the folder once a
+  second and reads the files again only when the listing (names, inodes, sizes, times)
+  changed; a publish notifies at once.
+- **Proof:** `gen-theme-cases.mjs` (new check) records T3's `EnvironmentThemeFile` decode and
+  pretty encode, `environmentThemeFileHasColors`, the id pattern, the reserved ids and
+  `themeCssLoadsRemoteFiles` (123 cases), and the guide text and built-in ids the tool returns
+  (`themes/upstream.json`); `cargo test -p conn-files themes` matches them and covers publish,
+  revert and each refusal. `files.rs` covers the background route (no link, no bad id).
+  `parity.mjs`: each refusal, a publish, a read and three switches, values equal to T3.
+  `effect-client.mjs`: a theme file reaches a subscriber that asks, decoded by T3's client.
+- **Known differences:** key order in a published file is alphabetical (serde_json), not
+  T3's schema order; the content is the same. A theme file with a lone surrogate escape in a
+  string is skipped (T3's `JSON.parse` keeps it). The `/mcp` input rules check a colors
+  record's values before dropping keys that miss the key pattern; T3 drops those keys
+  unchecked. `conn_theme_set` does not take the caller thread's command lock (T3's
+  `executor.withLock`), as `conn_environment_preferences_update` here. T3's `t3 theme` CLI is
+  not built.
+## Issues (2026-11-20)
+
+GitHub issues are served: 11 `issues.*` methods (`list`, `detail`, `comments`, `templates`,
+`candidates`, `create`, `comment`, `update`, `setState`, `react`, `linkedThreads`) and 8 `/mcp`
+tools (`list_issues`, `read_issue`, `create_issue`, `comment_on_issue`, `set_issue_state`,
+`link_issue`, `unlink_issue`, `list_thread_issues`). Before, all were unregistered and the
+engine refused `thread.issue.link`.
+
+- **The tracker** (`conn-source-control/src/pull_requests/issues.rs`, T3's
+  `GitHubIssueTracker` and `gitHubIssueJson`): search with T3's query, the detail with its
+  labels, assignees and closing references paged to the end, comments, create, comment,
+  update (refused when GitHub silently drops labels or assignees), state with close reasons,
+  reactions on the issue or one of its comments, candidates, templates.
+- **The service** (`conn-server/src/methods/pull_requests/issues.rs`, T3's `IssueService`): a
+  project's issues live in its GitHub repository; another repository on the host is read
+  through it, read-only. Listing reads each scope once and pages per scope.
+- **Links** (`conn-engine`): `thread.issue.link` and `thread.issue.unlink` as T3's decider,
+  `thread.issue-synced` with the whole thread, `issues` in the shell row when present.
+- **Proof:** `gen-pr-cases.mjs` records T3's `GitHubIssueTracker` (22 cases: search queries,
+  paging, missing issues, every write and refusal) on an in-memory GitHub;
+  `issue_tracker_matches_t3s_recorded_http_requests` replays them: results, failures and every
+  request equal. `client-check`: links, a second spelling of one key, an unlink, through the
+  client's reducers. `parity.mjs`: the tools' refusals outside a thread. The Effect client
+  decodes all 11 methods.
+- **Not built:** standalone trackers (Linear) and `issueTrackers.list/connect/bindProject`;
+  YAML issue forms in `templates` (`blank_issues_enabled: false` in `config.yml` is read);
+  issue URLs are read only in GitHub's canonical `/<owner>/<repo>/issues/<n>` form.
+- **Known differences (review, 2026-11-20):** a project on a GitHub Enterprise host is
+  classified by its remote's host name, so its issue URLs are refused; `link_issue` checks the
+  caller's limits once, not again under the target's lock; `issues.linkedThreads` reads active
+  and archived threads in two snapshots, so a thread archived between them can show twice; a
+  missing `gh` reads as signed out.
+
+## `fill_credential` (2026-11-20)
+
+Agents can fill a saved test login into a sign-in form in their browser tab:
+`fill_credential` (`conn-mcp/src/tools/test_logins.rs`, T3's `CredentialAutofill.fill`).
+
+- **The rules:** the login must exist; the tab must have a page; the tab's origin must match
+  the login's saved URL (`test_logins/origin.rs`, `matchingOrigin`: same host without `www.`,
+  same port, https unless the saved URL says http or names a development host); the value is
+  the username, the password, or a one-time code (`test_logins/totp.rs`, `totpCode`: base32 or
+  `otpauth://totp`, SHA-1/256/512). Only a status and T3's message come back.
+- **The fill** (`conn-preview` `credentialFill`, `fillCredential`): the field expression,
+  T3's prepare and insert functions (generated into `spec.json` by `gen-spec.mjs`, which
+  fails if `credentialFieldExpression` stops taking its inputs as JSON), the origin checked
+  before and after the field is found. The value goes only to CDP; inserted inputs are
+  redacted from later snapshots by the existing sensitive-value read.
+- **Proof:** `gen-credential-cases.mjs` (new check): 223 cases of T3's `matchingOrigin`,
+  `parseSavedUrl`, `parseTotpSetup` and `totpCode`, equal in `cargo test -p conn-features`.
+  `parity.mjs`: the refusals outside a thread and bad input. `cargo test -p conn-mcp
+  fill_credential`: an unknown login, a saved login with no tab (status only, no value).
+- **Known differences:** `credentialAutofill.allowSubdomains` is not honoured (T3 uses the
+  public-suffix list; subdomains never match here); `credentials.listForSite` and
+  `fillForSite` (the browser's key menu) are not served; no live fill was run against a page.
+
+## `conn_thread_transfer` (2026-11-20)
+
+`conn_thread_transfer` is served (`conn-mcp/src/tools/manage.rs`, T3's `thread/handlers.ts`):
+`status` lists the thread's context transfers; `fork` dispatches `thread.fork` into
+`<commandId>:fork` from `sourcePoint` (default `latest_stable`), with `title`; `merge_back`
+reads both threads and dispatches `thread.merge_back`. Access as T3: `status` reads,
+the others write both threads.
+
+- **Merge-back** works since 2026-11-21 (see "Merge-back").
+- **Proof:** `parity.mjs`: 12 calls on both servers (status, a fork with no stable run,
+  merge-back refusals in the tool and in the engine, missing threads, bad input).
+  `cargo test -p conn-mcp thread_transfer`: a fork of a finished run, its transfer in the
+  fork's `status`, a merge-back.
+## PR forge tools and CI (2026-11-20)
+
+Agents can read, list, update, answer, review and merge a thread's PR, and read and re-run its
+CI, through `/mcp`: `pull_request_read`, `pull_request_list`, `pull_request_update`,
+`pull_request_respond`, `pull_request_review`, `pull_request_merge`, `ci_logs`, `ci_rerun`
+(`conn-mcp/src/tools/pull_request_forge.rs`, T3's `pullRequests/handlers.ts`). Before, they
+were unregistered. `pull_request_create` is served since 2026-11-20 (next section).
+
+- **The panel acts now.** `pullRequests.runAction` ran nothing before ("This host cannot …").
+  It now runs T3's GitHub flow for `merge`, `enable-auto-merge`, `disable-auto-merge`,
+  `ready`, `draft`, `close`, `reopen`, `revert` and `update-branch`
+  (`conn-source-control/src/pull_requests/run_action.rs`), after T3's service checks: merge
+  and update methods, the viewer's permission (`ViewerPermissions`, or the detail read for a
+  branch update), the pinned head, and `removeAgentCreditsOnMerge` (`merge_message.rs`,
+  `removeAgentCredits`). The capabilities advertise these actions and methods. Not built,
+  still refused and not advertised: deleting the source branch, approving fork workflows and
+  stack actions (so `pull_request_merge` with `stack` is refused after T3's stack pinning).
+- **CI** (`checks.rs`): `readCheckLogs` (the job log through GitHub's redirect, 16 MiB, the
+  last lines as `tailLogLines`) and `rerunChecks` (a run's failed jobs together when they are
+  exactly the selection, else one job); the panel picks the failing checks or the named one
+  (`selectChecks`, five logs at most). A re-run reopens a watch's finished checks.
+- **Forge filter.** The 8 tools are hidden from an agent whose project is on no forge the
+  server reads (`hiddenWithoutForge`; `gen-tools.mjs` writes `forge-hidden.txt`); read per
+  request, kept a minute, at most 1,000 threads.
+- **Review lines** are placed by the PR's diff (`review_position_in_patch`,
+  `reviewPositionInPatch`), up to ten diff pages.
+- **Proof:** `gen-pr-cases.mjs` records T3's `runPullRequestAction` (22 cases: every action,
+  merge methods, merge queue, auto-merge on a clean PR, credit removal, branch update, a
+  missing PR), `readCheckLogs` (2) and `rerunChecks` (3) on an in-memory GitHub;
+  `run_actions_and_ci_match_t3s_recorded_http_requests` replays them on the same answers:
+  results and request traces equal (CI requests as a set; T3 sends them concurrently).
+  Characterizations from T3's functions: `removeAgentCredits` (15), `gitHubActionsJobId` (11),
+  `tailLogLines` (7), the light viewer permissions (49). `parity.mjs`: 23 calls of the new
+  tools on both servers (input checks, refusals outside a thread). Server tests: the
+  service's refusals, the head pin, actions refresh, a summary on request, an unknown check
+  name. A REST 404 no longer carries GitHub's text, as T3's policy reports it.
+- **Known differences:** the action summary T3 decodes from the mutation is read again
+  (`replyWithSummary`); no merged-PR event after a confirmed merge (link sync reads it on its
+  next sweep); node ids are read each time (T3 caches 1,000); GitHub only.
+
+## Project tools (2026-11-20)
+
+Agents can add, change, remove and clone projects through `/mcp`: `conn_project_create`,
+`conn_project_update`, `conn_project_delete`, `conn_project_clone`
+(`conn-mcp/src/tools/projects.rs`, T3's `project/handlers.ts`). Before, they were unregistered.
+
+- **On the engine's own calls:** a folder registers with `projects.mutate`
+  (`project.create`, id from the `mcp:` command id); no folder makes a repository from the
+  title (`projects.createNew`, with `commitError`); update and delete use `projects.mutate`.
+  Errors are worded as T3's `projectFailure`. The scratch project is refused, as
+  `isScratchProject` (a new engine call, `projects.isScratchRoot`, compares its folder). A
+  clone runs the server's `sourceControl.cloneRepository` (`McpConfig::clone_repository`).
+- **Access as T3's `writesEnvironment`:** full access; linked work may create and clone, not
+  update or delete. Returned projects drop the engine's `hasCustomTitle`.
+- **Changed:** a missing folder without `createWorkspaceRootIfMissing` is a
+  `ProjectOperationError` (T3 fails to normalize the folder), not `ProjectInvalidError`.
+- **Proof:** `parity.mjs`: 10 new calls on both servers (a registered folder, title-only with
+  scripts, a missing folder, a new folder, rename, delete, refusals, a failed clone, bad
+  input); values compared where they are not ids or paths. `cargo test -p conn-mcp
+  project_writes`: create, conflict, rename, delete, the scratch refusal.
+- **Known differences:** a clone keeps the server's clone timeout (T3 sets none for agents);
+  `projectClone.*` (the UI's tracked clone) is not served; T3's `ProjectCloneTracker.discard`
+  on delete has nothing to discard here.
+
+## Review guide writing (2026-11-19)
+
+`pullRequests.generateReviewGuide` and `write_pull_request_guides` write a PR's review guide
+as T3's `PullRequestReviewGuideService` does. Before, the RPC answered "This server cannot
+generate review guides yet." and the tool was unregistered.
+
+- **The run** (`conn-server/src/methods/pull_requests/guide_writer.rs`): only for a PR of the
+  project's own repository (T3's refusal text otherwise); the head is read, then claimed under
+  one lock with a second read, so a stale click cannot replace a newer head's run; a request
+  for the same head joins the run (`running` in the tool). In the background: the remote that
+  matches the project's remote URL, the base branch fetched into `refs/t3/review-guide/<run>/
+  base`, the head from local objects, the commit, the branch or `refs/pull/<n>/head` (T3's
+  order and texts), stack layers' heads, a detached worktree with hooks off in the worktrees
+  folder, the merge base, then the model and the `base...HEAD` diff together. The checkout
+  and the base ref are removed after. A run that fails keeps `Failed` with its detail; at most
+  256 finished runs are kept (T3 keeps them all).
+- **The model:** the review guide model, else the source control writer, else the text
+  generation model (`resolveReviewGuideModelSelection`); a text generator cannot write guides.
+  Codex and Claude run with `investigate` (15 minutes): Claude gets T3's read-only tools,
+  allow and deny lists and `--setting-sources user`. Another driver is refused with T3's text.
+- **The guide:** T3's prompt (generated parts, `REVIEW_GUIDE_*` in `generated.rs`), the
+  settled review from the PR's resolved and outdated threads, the answer decoded as the output
+  schema and normalized as `normalizeReviewGuide` (`text_generation/review_guide.rs`). Stored in
+  `review-guides.sqlite` (T3's table); `reviewGuide` reads it first, then a T3 server's
+  `statev2.sqlite`, and reports the run.
+- **Proof:** `textgen-diff` compares the prompt (9 inputs: limits, surrogates, stacks,
+  preferences), the change parser and normalizer (14 answers on one patch: quoted, deleted,
+  binary and space-named files, merges, clamps, decode failures) and the settled review with
+  T3's functions; a changed excerpt limit fails it. `claude probe conformance` runs T3's
+  `generateReviewGuide` and ours on a stub CLI: same argv, environment and stdin. `parity.mjs`:
+  4 tool calls on both servers (per-target failures, input limits). Server tests on a real git
+  remote (an ssh stand-in) and a stub GitHub: a run fetches a head that exists only in the
+  remote, a second request joins it, the model sees the checkout, the guide is clamped and
+  placed, the worktree and ref are gone after, the guide survives a restart; a failed run
+  reports its detail; another repository is refused.
+- **Known differences:** no fallback to another provider when the chosen one is unusable
+  (`fallbackTextGenerationModelSelection`, as for titles); GitHub only (the panel's host);
+  git failures report git's stderr where T3 has its own `GitCommandError` texts.
+
+## Peer link and device follow-ups (2026-11-20)
+
+The four non-blocking review findings of #151 and #150's device text:
+
+- **Union results are checked.** A linked environment's answer for `conn_thread_organize`,
+  `conn_pending_request`, `conn_queue`, `conn_thread_configure`, `conn_workflow_stop` (and the other
+  union-shaped tools) is decoded with T3's own output schema, which `tools/list` leaves out
+  (`conn-mcp/src/result-schemas.jsonl`, generated by `gen-tools.mjs`). Before, `{}` passed.
+- **Result checks follow Effect's decode:** `1.0` is the integer 1; string lengths
+  (`maxLength`, `minLength`, UTF-16), number bounds and item counts are checked (`catalog::conforms`).
+- **The last sign-in slot is taken once:** a sign-in reserves its pending-code slot under the
+  lock before it spends the pairing code, so two sign-ins can no longer both pass at 255.
+- **Hidden codes stay hidden:** spending, expiring or reloading an approval or peer-link code
+  no longer announces `pairingLinkRemoved` (`consumeAvailable` skips approval subjects).
+- **Device text:** a session whose MCP credential has the `device` capability passes it on
+  (`McpServer.device_tools`). Claude gets T3's `T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH`
+  after the MCP text and as the SubagentStart hook's context (generated:
+  `conn-mcp/src/device-instructions.txt`); Codex gets its device section in `additionalContext`.
+- **Proof:** Claude conformance `device_turn` and Codex conformance `device` scenarios equal to
+  T3 with `capabilities: device` (dropping the text fails the Claude one); unit tests for the
+  union results, the bounds, the slot and the hidden-code events.
+
+## PR link sync from GitHub (2026-11-19)
+
+Linked PR rows now get their title, state, checks and review state, and the sidebar chip shows
+the thread branch's PR. Before, the engine refused `thread.pull-request-link.sync` and
+`thread.pull-request.sync`, so rows kept "Waiting for host state".
+
+- **Served:** both commands, with T3's deciders and guards (`conn-engine/src/pull_requests.rs`,
+  `commands.rs`): a link sync replaces the link's snapshot and stack and keeps `updatedAt`; a
+  branch sync is refused with T3's text when the thread, its project or its pull requests
+  changed after the lookup. The shell row carries `branchPullRequest` and `linkedPullRequest`
+  when the thread has them, as T3's does. A host sync (link, branch, watch read) no longer
+  moves the thread's `updatedAt` in the sidebar; before, every `thread.pull-request-synced`
+  did.
+- **The sweeps** (`conn-source-control/src/pull_requests/link_sync.rs` decides,
+  `conn-server/src/methods/pull_requests/links.rs` reads GitHub through the panel's client and
+  `gh`'s login). They run in their own task beside the #146 watch loop, one read at a time, so
+  a slow lookup never holds back a new watch's first read. T3's cadence and triggers: every
+  minute; at once for a new link, a settle (open and closed links), and a thread's own events
+  for its branch (created, run ended, unsettled, branch changed); T3's start-up backfill of
+  settled threads. The minute branch lookup after the first runs only while a client is in
+  the foreground (`shouldRunOpportunisticWork`: a visible, focused or recently used lease,
+  not held back by low power under the `pauseWhenClientLowPower` setting); events always
+  look up. Branch lookups share one GraphQL document per host and 25 heads, as T3's
+  background head resolver. A branch with an upstream is looked up by the head it pushes to
+  (`branch.<b>.merge` in `branch.<b>.remote`'s repository), so a checkout of a fork's PR
+  (`t3code/pr-42/feature`) finds it. A saved branch PR is cleared only after its summary was
+  read; a failed read leaves the thread for a later sweep, also when the found PR predates
+  the thread. A stack read that finds a different layer list makes the older members of that
+  stack read theirs again. Every map is pruned to the current links and branches each sweep;
+  pending requests stop at 1,024.
+- **Proof:** `pr-link-sync-diff` (new check, group 4) runs T3's own `PullRequestSyncReactor`,
+  `ThreadPullRequestService` and `BackgroundPolicy` on stub services and Effect's test clock,
+  and ours through `conn-engine/examples/pr_link_sync_cases.rs` and
+  `conn-server/examples/background_gate.rs`, minute by minute on the same host answers. Each
+  side applies its own commands. 22 cases, 157 sweeps: reads, commands and final threads
+  equal (new link, quiet cadence, merged final plus request, not found, backoff, unknown
+  mergeability, settled thread, stack layers, stale sibling stacks, shared read, closed
+  cadence, tombstone; branch found, rechecks after 30 minutes, historical, checked out,
+  replaced, settled thread's event, kept merged PR, saved PR checked before a historical one,
+  unreadable saved PR kept, subagent). 21 gate cases (profiles, custom overrides, the older
+  profile setting, low power, focus, visibility) give T3's answers. Changing one cadence
+  constant, or dropping the sibling flag or the saved-PR checks, fails it. Engine test: both
+  syncs, the stale refusal, the shell field, no sidebar move. `client-check`: the client's own
+  reducers show the snapshot and the branch PR. Server tests on a stub GitHub with a stub
+  `gh`: one sweep writes the link snapshot and the branch PR, later sweeps look branches up
+  only with a foreground client; a fork checkout is found by its published head, two
+  branches in one document; an unreadable saved PR stays; a new watch is read while a branch
+  lookup is held open (fails when both run in one loop). A listener test covers the
+  triggers. Live (mini, scratch profile, Conn dev desktop): three threads that linked
+  nckrtl/conn#14 got its title and failing checks on the first sweep; a new thread on the
+  PR's head branch got #14 as its branch PR at the end of its turn. The linked row shows
+  title, failed-checks icon, author and "synced 1m ago"; the sidebar chip reads
+  "PR #14 - Open: <title>" (it read "status pending").
+- **Known differences:** no per-host pause until a rate limit's reset time (a limited read
+  backs off as T3 does without one); no host power state in the activity gate (as T3 with no
+  desktop telemetry); no replacement of an older single `linkedPullRequest`; an agent's
+  `gh pr merge` or a panel action is not re-read at once (the next sweep reads it); no lookup
+  caches or fresh-git-state confirmation; no owner page fallback when 100 PRs share a head
+  name. A link sync writes `thread.pull-request-synced` (whole thread) where T3 writes
+  `thread.pull-request-link-updated` (one link); clients end in the same state. Link reads
+  run one at a time (T3 runs up to 100).
+
+## Peer links and linked environments (2026-11-19)
+
+An agent or a client here can link another environment and act there with the `/mcp`
+tools that take `environmentId`, as in T3. Both sides are served, so Conn and T3 link each
+other in either direction.
+
+- **Linking here** (`src/peers.rs`): `peerLinks.list`, `link`, `unlink`, `answerRequest`.
+  A link probes the peer's descriptor, needs its `mcpModeLimitHeader` and `linkFence`, and
+  signs in to its `/mcp` with MCP OAuth (register, a `pairing-code` decision, the PKCE code
+  exchange). The token goes to the secret store; the rest to `peer-links.json`, at most 256
+  links. Plain http only on loopback, Tailscale and Orbit WireGuard; redirects never followed.
+- **Forwarding** (`conn-mcp/src/peers.rs`): the 31 tools whose `environmentId` is
+  `OrchestratorMcpEnvironmentTarget` (generated: `linked-targets.txt`) run in the linked
+  environment. Each checks the caller here first, then goes with `T3-Mode-Limit`,
+  `T3-Sender-Thread`, a caller-scoped retry key and a 45 s wait cap. One MCP session per peer
+  and address, at most 64.
+- **Tools:** `conn_environment_links`, `conn_environment_link` (a link card; the engine's new
+  `link_request.record` records it and wakes the agent with a notification),
+  `conn_environment_unlink`, `conn_environment_preferences_update`. `conn_environment_read` now
+  reports the settings (defaults generated from T3: `preference-defaults.json`).
+- **Being linked** (`src/oauth.rs`): `POST /oauth/mcp/register`, `/decision` (pairing code
+  only), `/token`; peer-link codes from `/api/auth/pairing-token` (`purpose: "peer-link"`).
+  `/mcp` takes the MCP client session at its access, narrowed by `T3-Mode-Limit`, and refuses
+  a link with 403 while links are off. The link fence: work a link starts carries its
+  `linkOrigin` (also in the shell row); below full access it changes only that work and never
+  the environment's links, settings or scheduled tasks. Managed access is untouched.
+- **Advertised:** `peerLinks`, `mcpModeLimitHeader`, `linkFence`, `peerLinkPairingCodes`.
+
+Proof: `crates/conn-server/tools/peer-links-diff.mjs` (in `tools/check.sh`) runs the same
+50 steps T3 → T3, Conn → Conn, Conn → T3 and T3 → Conn: the link errors, the link, list,
+forwarded reads, writes and refusals, the fence, an agent's link cards with each answer, the
+wake messages, unlink. All equal. `parity.mjs` compares the 4 tools with links on and off.
+`cargo test -p conn-mcp peers` covers forwarding, links off and the fence.
+
+Known differences: no `cause` on `PeerLinkRequestError`; probe failures name fewer Node error
+codes and no certificate code; `T3-Sender-Thread` is read but not stored (the engine has no
+`linkedSender`); a bearer session that is not an MCP client still works on `/mcp` (as before).
+Not built: the browser OAuth approval page and the `.well-known` OAuth metadata (no browser
+sessions here); MCP approval codes (`AUTO-…`). Remote delegation and the Orbit Gateway link
+were built on 2026-11-20 (see that section).
+
+Review fixes (Codex, 6 findings, each with a test that fails without it): MCP client tokens
+are refused on native bearer, ticket and WebSocket paths, as T3's `rejectMcpClientAudience`;
+a native bearer session on `/mcp` keeps its scopes (`settings:write` for preferences,
+`access:read`/`access:write` for the link tools); the fence fails closed when the calling
+thread cannot be read; `/mcp` authentication and pairing-code writes run off the runtime
+thread; a link card answer runs in its own task, so it finishes and frees the card after the
+client leaves; at most 16 probes run at once (every supplied address is probed, as in T3). A native session's
+scopes are checked before a call goes local or to a linked environment, so a forwarded
+preference update needs `settings:write` too.
+
+## A handoff releases the caller's credential with its process (2026-11-19)
+
+A worktree handoff detaches the calling thread's provider session. T3 revokes that session's
+MCP credential when its process ends (`releaseEntry` in `ProviderSessionManager.ts`), and
+keeps it while a process shared by several threads still runs; the next session of the thread
+reuses it. Conn kept the old credential for every provider, so `conn_worktree_status` with it
+stayed `ok` here and turned into a 401 on the T3 server a few milliseconds after the handoff
+returned. That race made `parity` fail at random.
+
+Now `Session::close` answers `Closed::RuntimeStopped` or `Closed::RuntimeShared`. Claude
+(one query process per session) and ACP (one agent per session) stop; Codex stops only with
+its last session, since one `app-server` per instance serves every Codex thread. The engine
+revokes after the close when the process stopped, together with the credentials it kept for
+that instance. When the process still runs, it keeps the credential for the thread and the
+next session reuses it while it still fits (instance, subagent, browser access), as T3's
+`prepareMcpSession` does. Deleting the thread revokes a kept credential. `parity` waits until
+both servers refuse the old Claude credential (15 s limit) and compares the 401 replies.
+Proofs: engine tests `a_workspace_handoff_revokes_the_old_session_tools` and
+`a_handoff_on_a_shared_process_keeps_and_reuses_the_tools`; Codex
+`close_reports_whether_the_app_server_keeps_running`; `/mcp`
+`a_handoff_on_a_shared_codex_process_keeps_and_reuses_the_credential` (real Codex provider on a
+scripted app-server, two threads, an MCP call with the continuation's credential).
+
+Still different from T3, not changed here: archiving a thread does not close its session or
+revoke its live credential (T3 detaches with `revokeMcpCredential`). With one Codex thread,
+Conn stops the app-server on close, so its handoff revokes; T3 keeps its shared process.
 
 ## Forks show their inherited history (2026-11-19)
 
 - **Served:** a run fork that is not a side chat opens with the history it inherits, in every
   thread view read: the thread snapshot route, `subscribeThread`'s snapshot (compact turn
-  items too), the managed ingress snapshot and the engine's projection (`t3_thread_read`).
+  items too), the managed ingress snapshot and the engine's projection (`conn_thread_read`).
   As T3's `buildVisibleTurnItems`: the source's rows through the fork run as `inherited`
   (forks of forks recursively, with each fork marker), then the `synthetic` fork marker, then
   the fork's own `local` rows, numbered from 0. A deleted source keeps its rows in the fork;
@@ -44,9 +1102,8 @@ match T3 is open.
   keeps its cached empty view: the client resumes it from its last sequence, and no event
   follows.
 - **Known differences:** the shell's `visibleItemCount` stays the thread's own item count
-  (T3 adds the inherited rows and the marker); clients only test it for zero. No bounded
-  snapshots or `/history` paging yet (listed below), so the fork's rows load whole, as every
-  thread view here does.
+  (T3 adds the inherited rows and the marker); clients only test it for zero. A bounded
+  snapshot (2026-11-23) cuts the fork's rows like any other thread's.
 
 ## Thread transcript route (2026-11-19)
 
@@ -82,19 +1139,39 @@ match T3 is open.
   item, "Stopped by an agent." with a full stop. Without the protocol header T3 answers an
   empty 400; the client always sends it. Size near the limit: T3 counts its in-memory rows,
   this server the JSON it sends.
-- **`preview.stopLocalServer` stays unregistered.** Its one caller, the thread Servers panel,
-  lists only servers that `subscribeDiscoveredLocalServers` found and offers Stop only when the
-  environment advertises `localServerStop`. Neither is served or advertised, so no client can
-  reach it. Serving it means T3's port scan first (`PortScanner.ts`, about 1,240 lines:
-  socket owners, process groups, terminal and agent attribution); not small.
+- **`preview.stopLocalServer`** came later with the port scan (see "Local servers for
+  previews").
+
+## Local servers for previews (2026-11-19)
+
+The thread's Servers panel lists the servers a thread's terminal or agent started and can stop
+them, as with T3 (`PortScanner.ts`). Before, `subscribeDiscoveredLocalServers` and
+`preview.stopLocalServer` were unregistered and `localServerStop` was not advertised.
+
+- **Served** (`src/local_servers/`): the subscription (first list at once, then changes;
+  every 3 seconds while subscribed and a client is in the foreground) and the stop. Listeners
+  from `/proc/net/tcp{,6}` with a bounded fd walk on Linux, else `lsof`; owners from a
+  terminal's process tree (background jobs too), or `T3CODE_THREAD_ID` in the listener's
+  launch environment (agent CLIs themselves excluded); configured loopback URLs get one GET
+  (1 s, no redirects, 15-second cache) and are listed when they answer HTML. A stop takes only
+  a listed, owned server whose group holds neither this server, its ancestors nor a direct
+  child; SIGTERM, then SIGKILL after 3 s if a member is still in the group. T3's parsers,
+  limits and texts (`parse.rs`). Advertised: `localServerStop` (not on Windows).
+- **Proof:** `local-servers-diff` (new check, group 4): five listeners of its own (three with
+  an agent thread, an HTML page, a JSON server) on both servers: the first list with five
+  configured URLs, two refused stops (unowned, wrong port), one stop on each side, a terminal's
+  background server, and the list after; equal. Without the background-job fix it fails. Unit tests for the parsers and the stop guard.
+- **Known differences:** terminal ownership is read from the process table at the scan, where
+  T3 registers it from its terminal subprocess poll; listener environments are read whenever
+  a panel subscribes (T3 skips them while no agent ran); Codex is not told that a stopped
+  command was a user stop (`watchAgentCommandStops`); no Windows listener scan.
 
 ## PR watching and review guides (2026-11-19)
 
 Served: `watch_pull_request`, `unwatch_pull_request` and `read_pull_request_guide` (70 of 87
 tools), and the engine commands `thread.pull-request.watch` and the server-only
 `thread.pull-request-watch.sync` and `thread.pull-request-watch.checks-reopen`.
-`write_pull_request_guides` stays unregistered: the server has no review guide generator
-(T3 runs a model in a temporary checkout), so the tool could only fail.
+`write_pull_request_guides` came later (see "Review guide writing").
 
 - **The watch works.** A loop in the server (`methods/pull_requests/watches.rs`) reads each
   watched PR from GitHub every 2 minutes, and at once when a new watch appears, through the
@@ -104,8 +1181,11 @@ tools), and the engine commands `thread.pull-request.watch` and the server-only
   `queue_after_active`, `createdBy: agent`, `creationSource: server`. Checks, approvals,
   remarks (review-thread pages included), conflicts, rebases, merge-queue removals, "no checks
   after 15 minutes", 10 comment-only wakes, closed and merged PRs, and 8 failed reads all
-  follow T3. Watches live on the thread's links, so they survive a restart. Archive, settle
-  and Stop end them. New watches that overflow the loop's queue ask for one more full pass.
+  follow T3. A merge or close wakes the thread with the base branch, merger and commit, except
+  one the watching thread's own agent ran: the engine's command feed and `close_commands.rs`
+  (T3's `agentEnds` and host close commands, generated) end that watch quietly. A merged link
+  the host cannot read ends from its snapshot. Watches live on the thread's links, so they
+  survive a restart. Archive, settle and Stop end them. New watches that overflow the loop's queue ask for one more full pass.
 - **Queued wakes are checked when they start** (`startNextQueuedRun`): a wake whose watches
   all ended or moved is cancelled; a wake for several PRs is narrowed to the current ones.
 - **A push reopens checks.** When an agent's push command finishes (`isPushCommand`, ported
@@ -150,6 +1230,34 @@ the stubs on both sides. Not built: T3's managed Codex sign-in (`setupMode: mana
 `provider.chatgpt.*`. That flow is T3's own OAuth against `auth.openai.com`, with tokens in
 T3's secret store; AGENTS.md "Providers" forbids it here.
 
+## Provider install and update: not served, by decision (2026-11-20)
+
+Nick decided on 2026-11-20 that Orbit installs and updates every provider CLI and owns
+`PATH`. Conn and this server never install or update one; each CLI is found on `PATH` only.
+Providers authenticate through Orbit's AI router: this server holds no ChatGPT or
+managed-Codex token, and T3's token broker (`CodexManagedRuntime.ts`, `CodexChatGptAuth.ts`)
+is not ported. The T3 server in this tree stops mounting the same methods in a parallel
+change; the contract keeps their definitions.
+
+- **Not served:** `provider.install.start`, `cancel`, `remove`, `subscribe` and
+  `server.updateProvider`. They stay unregistered and answer "not supported", as the other
+  methods not served by decision (FORK.md, "Conn Server"). The managed-Codex path that
+  answered "succeeded, local" for Orbit's bundled `codex` (`conn-provider-codex`
+  `install.rs`) is removed.
+- **Every provider entry says `setup.canInstall: false`**, Antigravity included (T3 says
+  `true` for its managed runtime), so no client offers an install.
+- **Antigravity version:** each health check runs `<agy> --version` (5 s limit; about 0.4 s
+  for 1.5.13) and shows what it prints. A missing binary or a failed `--version` shows no
+  version, so an earlier version never sticks after Orbit replaces the binary on `PATH`. A
+  session's `initialize` still sets it, as T3's `onSessionStarted`. T3 runs no `--version`
+  here; it keeps the last version it saw. Claude, Codex and Grok already read the version in
+  every probe.
+- **Proof:** unit tests `install_and_update_are_not_served` (`methods/provider.rs`) and
+  `version_follows_the_binary_on_path` (`conn-provider-acp` `antigravity.rs`);
+  `effect-client.mjs` calls the five methods for `codex` and a managed Codex instance and
+  needs a failure from each, and checks that no entry in `server.getConfig` offers an
+  install. `provider-auth-diff.mjs` compares sign-in only.
+
 ## Managed access, target side (item 4)
 
 `serve --managed-provision <file>` serves Orbit callers on a separate managed ingress and
@@ -161,10 +1269,13 @@ against a fake Gateway on loopback; not yet against a lab Gateway. Legacy peer l
 The task worker grant (item 6) rides on it: a fixed allowlist per admitted turn and an
 engine `DispatchGuard` that checks ownership atomically with each command.
 
-## Orbit Instance facts at startup
+## Orbit Instance facts at startup, and live
 
 Conn Server reads Orbit’s existing `/etc/orbit/instance` at startup and publishes the optional
 `orbitInstance` in the environment descriptor, alongside its persisted environment ID.
+Since 2026-11-21 it also re-reads the file and the label while it runs: on `SIGHUP`, on an
+inotify event in `/etc/orbit/` (Linux), and every 2 s. Open config streams get a new
+`snapshot`; sockets stay open. See `docs/orbit-instance-reload.md`.
 The descriptor requires both positive, JavaScript-safe IDs. It keeps the optional Project,
 Instance and Node labels, plus a valid HTTP(S) URL. A host without the file or an older file
 without both IDs still starts. The reader caps the file at 64 KiB.
@@ -173,6 +1284,36 @@ The Rust tests consume the TypeScript server’s fixture and cover absent and ol
 invalid IDs and URLs, comments and values containing spaces or equals signs. This step adds
 no bootstrap command. Orbit still supplies live lifecycle state and still configures the
 workspace project and access separately.
+
+## Devices (2026-11-19)
+
+`device.*` (10), real `subscribeDeviceState`, `/api/device-hub/*` and the tools `device_list`,
+`device_open`, `device_screenshot` and `device_close` are served by `crates/conn-devices`.
+Hosts: an SSH host (the main path from a Linux container: T3's Node bootstrap on the Mac, one
+`ssh -L` for the hub and the agent-device daemon, reconnects after three missed probes) and
+this machine (npm installs under `<home>/tools`, the hub and daemon as children; the hub
+stops with SIGTERM, then SIGKILL after 5 s). Config writes run on the blocking pool; one lock
+covers launcher bind, release and prune, as T3's; shutdown stops all hosts at once. Detail and
+actions use simctl, serve-sim's helper and adb as T3 does. A thread gets the `device`
+capability as T3 grants it (`enableDeviceSupport` and agent access); archive and delete close
+its sessions. The bootstrap script, the launcher, the tool pins and the proxy allow-lists are
+generated from `apps/server` (`tools/gen-devices.mjs --check`).
+
+Proof: `crates/conn-devices/tools/conformance.mjs` (in `tools/check.sh`) runs both servers on
+a stand-in `ssh` (a Mac, its hub and daemon) and `npm`: 61 checks equal after normalising
+ids, ports and paths, among them every RPC answer, the hub proxy (MJPEG still frame included),
+the four tools, the launcher's agent-device runs, every distinct ssh argv and stdin and hub
+request, and both servers' answers through the contract decoders. `effect-client.mjs` decodes
+all 10 methods. Live on mini (2026-11-19): `device.testHost` probed nick.local read-only (iOS
+available, 4.6 s); the local host installed expo-device-hub 0.22.1, ran the hub, and reported
+iOS incomplete (Command Line Tools only, no simctl), through the proxy too.
+
+Known differences: Expo and Simlock hosts are not served (`supportsEasHosts` and
+`supportsSimlockHosts` left out; `device.easAccount` and `device.simlockIdentity` answer the T3
+device service's own typed error for that case). Since 2026-11-20 the agents get T3's device
+text when their session has the device tools (see "Peer link and device follow-ups"). The local hub is restarted at the next use, not supervised; old
+tool versions are not pruned. The open context (`workspaceRoot`) is not passed: only Expo
+hosts read it.
 
 ## Released and running in Orbit (2026-11-16)
 
@@ -200,8 +1341,8 @@ workspace project and access separately.
 Codex builds each slice; an independent Gemini review checks it; findings go back to the
 builder with a test that fails without the fix.
 
-- **Thread handoff** (PR #103): `t3_attachment_prepare_upload`, `t3_attachment_discard`,
-  `t3_thread_send_attachments`, `create_threads`, `t3_worktree_list`, `t3_worktree_handoff`.
+- **Thread handoff** (PR #103): `conn_attachment_prepare_upload`, `conn_attachment_discard`,
+  `conn_thread_send_attachments`, `create_threads`, `conn_worktree_list`, `conn_worktree_handoff`.
   `tools/check.sh` 44/44; the live comparison calls all seven tools on both servers with no
   difference. Known differences: pending upload owners cap at 4,096 and concurrent handoffs
   at 256; a sent upload frees its owner slot, so a later discard of it is refused (T3 keeps
@@ -252,18 +1393,18 @@ builder with a test that fails without the fix.
   A deleted thread's renders are removed with it. T3's `toolOutput.ts` is ported once
   (`conn_provider::tool_output`) and shared with MCP App parsing.
 - **Workflows, tool search, restart** (PR #101): `orchestration.getWorkflowScript`,
-  `orchestration.stopWorkflow`, `t3_workflow_stop`, `tool_search`, and `server.restart`
+  `orchestration.stopWorkflow`, `conn_workflow_stop`, `tool_search`, and `server.restart`
   (only under systemd's `t3.service` with automatic restart, and with
   `environment:maintain`). Each thread dispatches under its own lock, as in T3.
 - **Headless previews** (PR #111): `html_preview`, the 13 `preview_*` tools,
-  `t3_preview_list` / `t3_preview_close`, eight client RPCs and the authenticated JPEG
+  `conn_preview_list` / `conn_preview_close`, eight client RPCs and the authenticated JPEG
   stream. Orbit sets `CONN_SERVER_BROWSER_PATH` to its shared pinned Chrome bundle;
   a missing or wrong-version configured browser fails without a runtime download.
   Generated `chrome.json` exports the release pin. Limits: 32 tabs, eight per agent, four
   browser hosts, two recordings and two HTML captures. Downloads, viewer HTTP
-  file transfer and clipboard are unserved; iframe snapshots fail closed; desktop relay,
-  local-server discovery and stop RPCs stay unregistered. `preview_cdp_endpoint` returns
-  T3's desktop-only error. Native GUI interaction and the Orbit image remain unproven.
+  file transfer and clipboard are unserved; iframe snapshots fail closed; local-server
+  discovery and stop RPCs stay unregistered (the desktop relay is served since 2026-11-20).
+  `preview_cdp_endpoint` on a server tab returns T3's desktop-only error. Native GUI interaction and the Orbit image remain unproven.
 - **Clients** (VMPal macOS VM, Conn `c969c3ebd1`): the web client (through a host T3 as a
   remote environment) and the iOS dev client in a simulator (paired straight to the Conn
   Server) each ran a Haiku turn against the Conn Server on macOS. Retested on the iOS client
@@ -272,6 +1413,21 @@ builder with a test that fails without the fix.
   inline, `preview_open` and `preview_snapshot` in headless Chrome, and `save_test_login`
   with `request_credentials`. MCP Apps rest on the parity checks alone.
 - **Release `conn-server-v0.2.0`**: every wave-1 slice; the version bump is its own PR.
+- **Release `conn-server-v0.3.0`**: provider install through Orbit's AI router (#181),
+  Antigravity over ACP (#183) and the ACP MCP bridge memory fix (#184); the version bump is
+  its own PR.
+- **Release `conn-server-v0.4.0`**: desktop tab relay (#191), `pull_request_create` (#192),
+  remote delegation and the Orbit Gateway link (#190), Orbit-managed provider CLIs (#194),
+  fork merge-back with context handoff (#195), T3 state import at first start (#196, #198,
+  #200), unserved method triage (#197), thread shell `subagentCount` with v4 upgrade backfill
+  and compact `orbitTask` receipts (#201, #205); the version bump is its own PR.
+- **Release `conn-server-v0.4.1`**: live reload of the label and Orbit Instance facts
+  (#202: SIGHUP, inotify on `/etc/orbit/`, 2 s poll); the version bump is its own PR.
+- **Release `conn-server-v0.4.2`**: Conn naming in agent instructions, tool titles and server
+  messages (#210), `delegate_task` isolation `"worktree"` (#211); the version bump is its own PR.
+- **Release `conn-server-v0.5.0`**: sessions that last until revoked, `clients/extend` and self `logout` (#336), the T3-parity audit fixes (#266-#332), and a Developer-ID-signed macOS app in each release (#334); the version bump is its own PR.
+- **Release `conn-server-v0.5.1`**: existing peer links extend themselves to until-revoked, with no re-pair (#338); the version bump is its own PR.
+- **Release `conn-server-v0.5.2`**: filing General threads under Orbit projects (#351), native thread-card server support (#352), Zed PHP navigation (#343), and upload and recording fixes (#331, #346); the version bump is its own PR.
 
 ## Partly followed to Conn `444f032be7` (the 2026-11-18 sync)
 
@@ -291,7 +1447,6 @@ Still red:
 - `round_trip`: the new `get_config` sample has `worktreeCleanup: null` in a project override.
   `optionalKey(NullOr(T))` is generated as `Option<T>`, so null is dropped. Fixing it in
   `gen-contract.mjs` changes about 2,330 fields.
-- parity: `t3_worktree_status` after a handoff is an RPC error on the T3 server and `ok` here.
 - On mini: claude conformance (`env: : No such file`, red on 2026-11-17 as well) and canary
   (writes to the decoy home from the CommandLineTools python cache).
 
@@ -327,8 +1482,7 @@ Compat only, no new features (Nick, 2026-11-19):
 `tools/follow-conn.sh --capture`, then each red check followed as T3 does it:
 
 - Contract and generated tables regenerated (T3 server version 0.1.10).
-- Assets: `environment-theme-background` (#36680) is answered "not found": this server
-  publishes no environment themes, so no theme has a background.
+- Assets: `environment-theme-background` (#36680); served since "Environment themes".
 - Payload limits: T3's theme id pattern starts with a negative lookahead, which Rust's regex
   lacks; a leading `^(?!X)` now compiles to a deny regex beside the allow regex.
 - Thread titles: title instructions replace the 3-8 word length rule and go under "Title
@@ -352,14 +1506,14 @@ Compat only, no new features (Nick, 2026-11-19):
   change request host comes from the resolved web URL first (#29784).
 - Codex: full access sends the granular approval policy that keeps MCP prompts, accepts an
   MCP access prompt without asking, and cancels (not declines) one it cannot answer (#37104);
-  `delegate_task` joins `t3_thread_wait` on the direct-only server (#30019); title runs turn
+  `delegate_task` joins `conn_thread_wait` on the direct-only server (#30019); title runs turn
   hooks off and drop a launch arg that enables them (#35203).
 - Claude: a Monitor that starts is awaited (#37085).
 - Grok: a completed turn keeps the rows of its background commands, so a dev server that
   keeps running no longer holds the run open, and its later output and end land on that run
   (#32109).
 - Known difference: T3's `thread_not_found` text adds a hint about linked environments
-  (#31946); this server serves none, so it does not name `t3_environment_links`
+  (#31946); this server serves none, so it does not name `conn_environment_links`
   (`thread-cli-diff.mjs`, `KNOWN_TEXT`).
 
 ## Moved into the monorepo (2026-11-15)
@@ -651,9 +1805,9 @@ for three picked at the quartiles, all anon, no swap.
   session works.
 - A client WebSocket on the host survives 30 s: the three pings it sent into the frozen server
   are answered at the thaw, and the next auth change reaches it. After 10 minutes the server
-  closes it at the thaw (1001, "idle"): the 60 s idle timer has expired and wins over the
-  buffered pings, as the timer table above says. The client reconnects and gets a new snapshot;
-  the T3 client ends such a socket itself by its ping timeout.
+  closed it at the thaw (1001, "idle"): the 60 s idle timer had expired and won over the
+  buffered pings. The client reconnected and got a new snapshot. Since 2026-11-23 the idle
+  timer is gone (see "WebSocket heartbeat as T3").
 - The provider status probe does not run: it runs only while a client holds an activity lease.
 - Orbit's idle verdict (its `fromShell` rule, window 1 h): a fresh server may sleep; after a
   turn it stays awake for 1 hour from the turn; a held turn keeps it awake; a turn that waits
@@ -733,9 +1887,9 @@ are built and proven against the T3 server's own CLI on macOS.
   `parity`'s T3 server could (it ran with the real HOME and default settings).
 - **A project-folder launch records the folder's branch** (`EngineHost::current_branch`), as
   T3's `launchBranch`.
-- Two `/mcp` faults found on the way and fixed: `t3_thread_wait` ended on a run in `waiting`
+- Two `/mcp` faults found on the way and fixed: `conn_thread_wait` ended on a run in `waiting`
   (the step between a provider's end and its checkpoint), and it ignored
-  `untilDelegatedWorkSettled` and `resultRun`; `t3_thread_launch` answered a text T3 does not
+  `untilDelegatedWorkSettled` and `resultRun`; `conn_thread_launch` answered a text T3 does not
   have for an unknown instance and left a thread behind. Both now follow T3.
 
 Proven (macOS): `thread-cli-diff` runs Orbit's commands on the T3 server with its `t3` and on
@@ -776,7 +1930,7 @@ pin; Effect's clock reads `Date.now()` and sleeps on `setTimeout` (monotonic).
 | Text generator model cache (`text_generation/mod.rs:228`) | none | never expires by time; `refresh` or a config change | the same (`textGeneration/TextGenerators.ts:146-153`) | none: no clock to move |
 | Login environment refresh, 10 s (`methods/source_control.rs:288`) | monotonic | monotonic still: one refresh within 10 s of the wake may be skipped | wall (`sourceControl/SourceControlDiscovery.ts:85`, Effect `cachedWithTTL`) | none: `std::time::Instant`, no seam; the difference lasts at most 10 s, and a wall TTL would block refreshes after a wall clock stepped back |
 | SDK host stop-when-idle (`conn-provider-support/src/sdk_host.rs:305`) | no timer: stops when the last query closes | follows the engine release above | T3 keeps the SDK in process | covered by the engine test and the existing host tests |
-| WebSocket idle close, 60 s (`session.rs:163`, `:188`) | monotonic | monotonic ran on: the idle timer and buffered client pings are ready together; `select!` may close a live socket; the client reconnects | the server has none; the client's ping timeout ends a frozen connection (Effect `RpcClient.ts:1231`) | none |
+| WebSocket liveness (`session.rs`, `keep_alive`) | **fixed** (2026-11-23): no idle timer; TCP keepalive after 10 min, 5 probes 60 s apart | a socket open across a freeze or a client's sleep stays open; the buffered pings are answered | the server has none; the client's ping timeout ends a frozen connection (Effect `RpcClient.ts` `makePinger`) | `a_suspended_client_stays_connected` |
 | Short monotonic waits: flushes, debounces, request and stop timeouts, VCS and terminal polls, the run follower (24 h), title retries | monotonic, one-shot | each fires once at the thaw; none catches up | the same, on `setTimeout` | none |
 
 Fixed: the lease, `/mcp` credential and interval rows (above). Not fixed, for Nick:
@@ -942,9 +2096,9 @@ remembering: an own server brings its own defects.
 
 ## `/mcp` tools, batch 1 (2026-11-14)
 
-`/mcp` serves 20 of 87 tools, up from 16: `send_to_user`, `t3_thread_organize` (with T3's
-settle at the end of the agent's own turn), `t3_queue` and `t3_thread_configure`, each with
-a unit test and parity steps. `t3_thread_search` now reads the engine's message index with
+`/mcp` serves 20 of 87 tools, up from 16: `send_to_user`, `conn_thread_organize` (with T3's
+settle at the end of the agent's own turn), `conn_queue` and `conn_thread_configure`, each with
+a unit test and parity steps. `conn_thread_search` now reads the engine's message index with
 T3's slot rule; its ranking is not ported. The argument check now answers type, length,
 range and literal failures in Effect's words and keeps `null` where the schema takes it
 (generated). `crates/conn-mcp/README.md` has a table of all 87 tools with what each unserved
@@ -1129,7 +2283,7 @@ restart queue. It is refused while a fork is pending, and while the session hold
 work unless a schedule sent it. It releases the live session and starts a new provider
 thread. A schedule's fresh run is a side conversation: the next plain message goes back to
 the thread's own provider thread. `fresh_session` scheduled tasks are stored and run fresh
-(T3's test ported), and `/mcp` `t3_thread_send` serves `freshContext`. Proven by engine
+(T3's test ported), and `/mcp` `conn_thread_send` serves `freshContext`. Proven by engine
 tests and the ported test; no T3 fixture covers it. Not ported: T3 checks a session's
 background work with the live session's probe; this server reads the provider threads'
 rosters.
@@ -1829,7 +2983,7 @@ lane, and a Claude cold start showed "Stopping" for up to about 6.5 minutes.
   thread has no provider thread while `starting`, so a Stop then writes no request or result
   item (T3 has one); after the running write it does.
 
-## `t3_background_wait` (2026-11-14)
+## `conn_background_wait` (2026-11-14)
 
 `/mcp` serves it as T3's `toolkits/orchestrator` does (`tools.ts:143`, `handlers.ts:64`):
 a live thread caller only (`actsAsCaller`), `taskIds` 1 to 20 trimmed non-blank strings,
@@ -1843,7 +2997,7 @@ with T3's texts. Claude marks the tasks on its roster; the engine stores nothing
 and is proven by the engine test `marks_and_clears_awaited_tasks_on_the_live_session` on the fake provider). Named in our
 instruction texts and still unserved (13): `create_threads`, `device_list`, `device_open`,
 `device_screenshot`, `html_preview`, `html_render`, `preview_open`, `preview_status` (and the
-other `preview_*`), `request_secret`, `t3_environment_link`, `t3_environment_links`,
+other `preview_*`), `request_secret`, `conn_environment_link`, `conn_environment_links`,
 `watch_pull_request`, `unwatch_pull_request`.
 
 ## Codex: the abandoned start and the status probe (2026-11-15)
@@ -2070,7 +3224,7 @@ T3 Code.
    subagents, …" and "Engine, part 3". Codex passes all 25; buffered delivery is done. Next:
    the replay gate in the ACP stub with `finish_held_run` (4 Grok variants, which also need
    Grok background tasks), Grok subagents, Claude's background wakes.
-5. **Engine.** Merge-back and the portable fork path (both need T3's `ContextHandoffService`);
+5. **Engine.** The portable fork path (merge-back is done, 2026-11-21);
    prepared runs and setup scripts in a `setup-<id>` terminal; bounded thread snapshots and the `/history` and `/bounded`
    routes (a full snapshot of a long thread peaks at about 13 bytes per byte of
    JSON); a workspace strategy for delegated tasks; search details (no NFC normalization, the
@@ -2094,7 +3248,7 @@ T3 Code.
 7. **Small leftovers.** Done on 2026-11-14 (`docs/server-area.md`, end): the contract's
    limits on terminal environment variables and `assets.createUrl` strings (generated,
    `limits-diff` check); `git` children are reaped (a test). Left:
-   T3's search ranking (`scoreThreadSearch`, `rankMessageMatches`) for `t3_thread_search` and
+   T3's search ranking (`scoreThreadSearch`, `rankMessageMatches`) for `conn_thread_search` and
    `orchestration.searchThreads`; `@` file search ranks with nucleo, not T3's fff (`@hello`
    finds `hello.ts`, T3 also `helper.ts`); the Linux systemd scope for provider processes;
    a cap on the blocking pool or one store thread (measure first: each store call takes its
@@ -2112,7 +3266,7 @@ T3 Code.
 
 The reports are not in this repository. They are the last messages of archived T3 threads on
 Nick's Mac (environment `f4f0396f-abce-4d69-ab4d-fb7a3deb4a59`). Read one with
-`t3_thread_read` and the thread id
+`conn_thread_read` and the thread id
 `thread:delegated-task:command%3Amcp%3A5683d32c-4438-47d4-b4f5-f332534338a4%3Adelegate-task%3A<id>`.
 The check is the one to trust; several review findings did not hold.
 

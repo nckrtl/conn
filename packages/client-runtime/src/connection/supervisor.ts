@@ -395,6 +395,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   }));
 
   const attemptEntry = Effect.gen(function* () {
+    // Conn: a promoted Orbit pairing keeps this supervisor; its next attempt uses the saved route.
+    if (options?.latestEntry !== undefined) {
+      const registered = yield* options.latestEntry;
+      if (Option.isSome(registered)) yield* Ref.set(currentEntry, registered.value);
+    }
     const latest = yield* Ref.get(currentEntry);
     const routes = connectionRoutes(latest);
     const preferred = yield* Ref.getAndSet(preferredRouteId, Option.none());

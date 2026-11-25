@@ -72,11 +72,12 @@ async fn main() {
                 .filter_map(|g| Some((g["label"].as_str()?.to_owned(), g["afterRun"].as_u64()?)))
                 .collect(),
         };
-        // The `/mcp` scenario: the server's `t3-code` entry, as the engine passes it.
+        // The `/mcp` scenario: the server's `conn` entry, as the engine passes it.
         let mcp: Vec<conn_provider::McpServer> = scenario["mcp"]["endpoint"]
             .as_str()
             .map(|endpoint| conn_provider::McpServer {
-                name: "t3-code".into(),
+                device_tools: false,
+                name: "conn".into(),
                 url: endpoint.to_owned(),
                 headers: vec![(
                     "Authorization".into(),

@@ -189,7 +189,14 @@ impl Provider for ClaudeProvider {
                 .await
                 .unwrap_or(false);
             let program = self.config.binary.to_string_lossy().into_owned();
-            text_generation::generate(&program, &env, managed, request).await
+            text_generation::generate(
+                &program,
+                &env,
+                &self.config.model_manifest,
+                managed,
+                request,
+            )
+            .await
         })
     }
 
@@ -199,7 +206,15 @@ impl Provider for ClaudeProvider {
         Box::pin(async move {
             let settings = self.status_settings(instance.as_ref());
             // A disabled instance spawns nothing, so its entry is built even with the probe off.
+            // With the probe off the entry stays pending, with the current catalog's models.
             if !self.config.status_probe && settings.enabled {
+                let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
+                if let Some(entry) = lock(&self.status).as_mut() {
+                    entry["models"] = Value::Array(catalog::current_provider_models(
+                        &self.config.model_manifest,
+                        now,
+                    ));
+                }
                 return;
             }
             let config_dir = launch::config_dir(
@@ -227,6 +242,7 @@ impl Provider for ClaudeProvider {
                 settings_base_url: base_url,
                 cwd: self.config.status_cwd.clone(),
                 checked_at: conn_support::time::now_iso(),
+                manifest: &self.config.model_manifest,
             };
             let helper = &self.helper;
             let entry = status::check(input, |options, extra, timeout| async move {
@@ -284,14 +300,15 @@ impl Provider for ClaudeProvider {
     }
 }
 
-/// `ClaudeProviderCapabilitiesV2`, with what this crate does not do switched off: handoff and
-/// context injection, queued messages, dynamic tool callbacks, nested checkpoint scopes.
+/// `ClaudeProviderCapabilitiesV2`, with what this crate does not do switched off: system,
+/// developer and summary context, queued messages, dynamic tool callbacks, nested checkpoint
+/// scopes. Provider switches carry the history inline (the engine's `provider_handoff.rs`).
 pub fn capabilities() -> Value {
     json!({
         "sessions": {
             "supportsMultipleProviderThreadsPerSession": false,
             "supportsModelSwitchInSession": true,
-            "supportsProviderSwitchingViaHandoff": false,
+            "supportsProviderSwitchingViaHandoff": true,
             "supportsRuntimeModeSwitchInSession": false,
             "pendingRequestsSurviveRestart": false,
         },
@@ -357,11 +374,11 @@ pub fn capabilities() -> Value {
         "context": {
             "acceptsSystemContext": false,
             "acceptsDeveloperContext": false,
-            "acceptsSyntheticUserContext": false,
+            "acceptsSyntheticUserContext": true,
             "canGenerateSummaries": false,
-            "canConsumeHandoffSummaries": false,
-            "supportsDeltaHandoff": false,
-            "supportsFullThreadHandoff": false,
+            "canConsumeHandoffSummaries": true,
+            "supportsDeltaHandoff": true,
+            "supportsFullThreadHandoff": true,
             "maxRecommendedHandoffChars": null,
         },
         "checkpointing": {
@@ -416,6 +433,11 @@ pub fn pending_entry_for(
     checked_at: &str,
 ) -> Value {
     let mut entry = pending_entry(instance_id, checked_at);
+    let now = conn_support::time::millis_from_iso(checked_at).unwrap_or(0);
+    entry["models"] = Value::Array(catalog::current_provider_models(
+        &config.model_manifest,
+        now,
+    ));
     let env = launch::query_env(
         config,
         "",
@@ -430,7 +452,7 @@ pub fn pending_entry_for(
     if !settings.enabled {
         entry["enabled"] = json!(false);
         entry["status"] = json!("disabled");
-        entry["message"] = json!("Claude is disabled in T3 Code settings.");
+        entry["message"] = json!("Claude is disabled in Conn settings.");
     }
     if let Some(name) = &settings.display_name {
         entry["displayName"] = json!(name);
@@ -505,5 +527,41 @@ mod tests {
             decoded.is_ok(),
             "the entry decodes as a ServerProvider: {decoded:?}"
         );
+    }
+
+    /// T3's Claude driver lists `resolveClaudeModelCatalog(ModelCatalog.current)`: a fetched
+    /// manifest's Claude default reaches the instance's entry at the next check.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_fetched_manifest_reaches_the_claude_entry() {
+        let live = conn_provider::LiveManifest::default();
+        let config = ClaudeConfig {
+            status_probe: false,
+            model_manifest: live.clone(),
+            ..ClaudeConfig::default()
+        };
+        let host = helper::claude_host(config.helper.clone(), DRIVER);
+        let provider = ClaudeProvider::for_instance("claudeAgent".into(), config, None, &host);
+        let default_slug = |provider: &ClaudeProvider| {
+            let entry = provider
+                .server_provider_entry("2026-11-23T00:00:00.000Z")
+                .unwrap();
+            entry["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["isDefault"] == true)
+                .map(|m| m["slug"].clone())
+        };
+        assert_eq!(default_slug(&provider), Some(json!("claude-opus-5-5")));
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../server/src/provider/model-manifest.json"
+        );
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        manifest["providers"]["claudeAgent"]["defaults"]["chat"] = json!("claude-sonnet-5-5");
+        live.set(manifest);
+        provider.refresh_status(None).await;
+        assert_eq!(default_slug(&provider), Some(json!("claude-sonnet-5-5")));
     }
 }

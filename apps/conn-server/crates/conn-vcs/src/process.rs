@@ -209,7 +209,41 @@ impl ProcessError {
             _ => "",
         }
     }
+
+    /// Whether the child ran to its end and exited with a code; a signal leaves it without one.
+    pub fn is_completed_exit(&self) -> bool {
+        matches!(self, ProcessError::Exit { code, .. } if *code != SIGNALLED)
+    }
 }
+
+/// Kills a process group with `SIGKILL` when dropped, unless disarmed.
+pub(crate) struct GroupKill(Option<rustix::process::Pid>);
+
+impl GroupKill {
+    /// The group a child started with `process_group(0)` leads.
+    pub(crate) fn of(pid: Option<u32>) -> Self {
+        Self(
+            pid.and_then(|id| i32::try_from(id).ok())
+                .and_then(rustix::process::Pid::from_raw),
+        )
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take() {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// The code in [`ProcessError::Exit`] for a child that a signal ended (`ExitStatus::code` is
+/// `None`). T3 fails such a command before a caller sees an exit code.
+pub const SIGNALLED: i32 = -1;
 
 async fn run(command: GitCommand, scan: Option<Scanner<'_>>) -> Result<GitOutput, ProcessError> {
     let context = ProcessContext {
@@ -240,6 +274,9 @@ async fn run(command: GitCommand, scan: Option<Scanner<'_>>) -> Result<GitOutput
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Its own group: a run that is stopped (a cancelled setup, a timeout) kills git and
+        // what it started, such as a `post-checkout` hook and the hook's children.
+        .process_group(0)
         .kill_on_drop(true);
     // The login shell's PATH (`conn_support::login_env`); the caller's own variables win.
     child.envs(conn_support::login_env::vars());
@@ -253,6 +290,7 @@ async fn run(command: GitCommand, scan: Option<Scanner<'_>>) -> Result<GitOutput
         not_found: e.kind() == std::io::ErrorKind::NotFound,
     })?;
 
+    let mut group = GroupKill::of(child.id());
     let stdin = command.stdin.clone();
     let mut stdin_pipe = child.stdin.take();
     let mut stdout = child.stdout.take().expect("piped stdout");
@@ -299,7 +337,11 @@ async fn run(command: GitCommand, scan: Option<Scanner<'_>>) -> Result<GitOutput
         };
 
     let status = match tokio::time::timeout(command.timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
+        Ok(Ok(status)) => {
+            // Git ended on its own: what it left running in the background stays.
+            group.disarm();
+            status
+        }
         Ok(Err(e)) => {
             return Err(ProcessError::Spawn {
                 context,
@@ -333,7 +375,7 @@ async fn run(command: GitCommand, scan: Option<Scanner<'_>>) -> Result<GitOutput
         };
     }
 
-    let code = status.code().unwrap_or(-1);
+    let code = status.code().unwrap_or(SIGNALLED);
     if code != 0 && !command.allow_exit.contains(&code) {
         return Err(ProcessError::Exit {
             context,

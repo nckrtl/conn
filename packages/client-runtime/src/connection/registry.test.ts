@@ -10,6 +10,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -22,6 +23,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Tracer from "effect/Tracer";
 
+import { withTargetLabel } from "./serverLabel.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
 import {
@@ -47,6 +49,7 @@ import {
   ConnectionTransientError,
   ConnectionBlockedError,
   BearerConnectionTarget,
+  type PersistedConnectionTarget,
   PrimaryConnectionTarget,
   RelayConnectionTarget,
   SshConnectionTarget,
@@ -117,6 +120,29 @@ const BEARER_PROFILE = new BearerConnectionProfile({
 });
 const BEARER_CREDENTIAL = new BearerConnectionCredential({
   token: "bearer-token",
+});
+
+const PROVISIONAL_TARGET = new BearerConnectionTarget({
+  environmentId: EnvironmentId.make("environment-clone"),
+  label: "Clone",
+  connectionId: "bearer:orbit-reservation:install-1",
+  provisionalPairingId: "install-1",
+});
+const PROMOTED_TARGET = new BearerConnectionTarget({
+  environmentId: PROVISIONAL_TARGET.environmentId,
+  label: PROVISIONAL_TARGET.label,
+  connectionId: PROVISIONAL_TARGET.connectionId,
+});
+const PROVISIONAL_REGISTRATION = new BearerConnectionRegistration({
+  target: PROVISIONAL_TARGET,
+  profile: new BearerConnectionProfile({
+    connectionId: PROVISIONAL_TARGET.connectionId,
+    environmentId: PROVISIONAL_TARGET.environmentId,
+    label: PROVISIONAL_TARGET.label,
+    httpBaseUrl: "http://clone.test:3800",
+    wsBaseUrl: "ws://clone.test:3800",
+  }),
+  credential: new BearerConnectionCredential({ token: "clone-token" }),
 });
 
 const SSH_TARGET: DesktopSshEnvironmentTarget = {
@@ -221,7 +247,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         );
         switch (registration._tag) {
           case "RelayConnectionRegistration":
-            return;
+            return true;
           case "BearerConnectionRegistration":
           case "SshConnectionRegistration":
             yield* Ref.update(storedProfiles, (current) => {
@@ -234,8 +260,47 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
               next.set(registration.target.connectionId, registration.credential);
               return next;
             });
-            return;
+            return true;
         }
+      }),
+    settleProvisionalPairing: (environmentId, installId, keep) =>
+      Ref.modify(storedTargets, (current) => {
+        const owned = (target: ConnectionTarget) =>
+          target.environmentId === environmentId &&
+          target._tag === "BearerConnectionTarget" &&
+          target.provisionalPairingId === installId;
+        const next = keep
+          ? current.map((target) => {
+              if (!owned(target) || target._tag !== "BearerConnectionTarget") return target;
+              const { provisionalPairingId: _owner, ...committed } = target;
+              return new BearerConnectionTarget(committed);
+            })
+          : current.filter((target) => !owned(target));
+        const routes = next.filter(
+          (target) => target.environmentId === environmentId,
+        ) as ReadonlyArray<PersistedConnectionTarget>;
+        return [{ routes, promoted: keep && current.some(owned) }, next];
+      }),
+    learnLabel: (environmentId, expected, label) =>
+      Ref.modify(storedTargets, (current) => {
+        const updated: Array<PersistedConnectionTarget> = [];
+        if (
+          current.some((target) => target.environmentId === environmentId && target.labelSetByUser)
+        ) {
+          return [updated, current];
+        }
+        const targets = current.map((target) => {
+          if (
+            target._tag === "PrimaryConnectionTarget" ||
+            target.label === label ||
+            !expected.some((previous) => Equal.equals(previous, target))
+          )
+            return target;
+          const named = withTargetLabel(target, label);
+          updated.push(named);
+          return named;
+        });
+        return [updated, targets];
       }),
     setRoutes: (environmentId, routes) =>
       Ref.update(storedTargets, (current) => replaceRoutes(current, environmentId, routes)),
@@ -1731,6 +1796,79 @@ describe("EnvironmentRegistry", () => {
         expect(yield* Ref.get(attempts)).toBeGreaterThanOrEqual(2);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
+  );
+
+  it.effect("Conn: promoting a provisional pairing keeps its live session", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([]);
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.register(PROVISIONAL_REGISTRATION);
+        yield* awaitConnectionState(
+          registry,
+          PROVISIONAL_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+
+        expect(
+          yield* registry.settleProvisionalPairing(
+            PROVISIONAL_TARGET.environmentId,
+            "install-1",
+            true,
+          ),
+        ).toBe(true);
+
+        const entry = (yield* SubscriptionRef.get(registry.entries)).get(
+          PROVISIONAL_TARGET.environmentId,
+        );
+        expect(entry?.target).toEqual(PROMOTED_TARGET);
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
+        expect(yield* Ref.get(harness.releasedSessions)).toBe(0);
+        expect(yield* registry.state(PROVISIONAL_TARGET.environmentId)).toMatchObject({
+          phase: "connected",
+          generation: 1,
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect(
+    "Conn: a discard that finds the pairing replaced by another window starts a new session",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness([]);
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.register(PROVISIONAL_REGISTRATION);
+          yield* awaitConnectionState(
+            registry,
+            PROVISIONAL_TARGET.environmentId,
+            (state) => state.phase === "connected",
+          );
+          // Another window saved its own credential for this route before this one discards.
+          yield* Ref.update(harness.storedTargets, (current) =>
+            current.map((target) =>
+              Equal.equals(target, PROVISIONAL_TARGET) ? PROMOTED_TARGET : target,
+            ),
+          );
+
+          expect(
+            yield* registry.settleProvisionalPairing(
+              PROVISIONAL_TARGET.environmentId,
+              "install-1",
+              false,
+            ),
+          ).toBe(false);
+
+          yield* awaitConnectionState(
+            registry,
+            PROVISIONAL_TARGET.environmentId,
+            (state) => state.phase === "connected" && state.generation === 1,
+          );
+          expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
+          expect(yield* Ref.get(harness.sessions)).toHaveLength(2);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
   );
 
   it.effect("starts platform environments without persisting or removing them", () =>

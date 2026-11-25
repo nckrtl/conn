@@ -215,7 +215,7 @@ const probeFailure = (
   }
   return new PeerLinkError({
     reason: "not_a_t3_environment",
-    message: `${origin} answered, but not as a T3 Code environment this version understands.`,
+    message: `${origin} answered, but not as a Conn environment this version understands.`,
   });
 };
 
@@ -535,10 +535,10 @@ const make = Effect.gen(function* () {
     if (!linkLimitsHold(peer)) {
       return yield* new PeerLinkError({
         reason: "incompatible",
-        message: `${peer.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
+        message: `${peer.label} runs a Conn version that cannot keep a linked agent's limits. Update it, then link again.`,
       });
     }
-    const issued = yield* signIn(primary, input, `T3 Code · ${self.label}`);
+    const issued = yield* signIn(primary, input, `Conn · ${self.label}`);
     const now = yield* DateTime.now;
     const linked: PeerLink = {
       environmentId: peer.environmentId,
@@ -650,7 +650,7 @@ const make = Effect.gen(function* () {
     function* (environmentId) {
       const notLinked = new PeerLinkError({
         reason: "unknown_link",
-        message: `This environment is not linked to ${environmentId}. t3_environment_links lists the linked ones.`,
+        message: `This environment is not linked to ${environmentId}. conn_environment_links lists the linked ones.`,
       });
       const row = yield* readRow(environmentId);
       if (Option.isNone(row)) return yield* notLinked;
@@ -696,7 +696,7 @@ const make = Effect.gen(function* () {
       if (!linkLimitsHold(peer)) {
         return yield* new PeerLinkError({
           reason: "incompatible",
-          message: `${link.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
+          message: `${link.label} runs a Conn version that cannot keep a linked agent's limits. Update it, then link again.`,
         });
       }
       return {

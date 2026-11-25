@@ -17,6 +17,8 @@
 //!
 //! To add a provider: make a crate that depends on this one and implements both traits.
 
+pub mod goal;
+pub mod manifest;
 pub mod mcp_apps;
 mod set;
 pub mod tool_output;
@@ -33,6 +35,7 @@ use conn_contract::{
 };
 
 pub use conn_contract::AppThread as ProviderAppThread;
+pub use manifest::{LiveManifest, StatusNotifier};
 use serde::{Deserialize, Serialize};
 pub use set::ProviderSet;
 use tokio::sync::mpsc;
@@ -91,6 +94,32 @@ pub trait Provider: Send + Sync {
         Box::pin(async {})
     }
 
+    /// T3's `ProviderInstance.refreshModels`, for `server.refreshProviders` with
+    /// `refreshModels`: list the models again even when the last check listed them. `None`:
+    /// this provider has no such refresh. An error's `Failed` detail is shown to the user.
+    fn refresh_models(&self) -> Option<BoxFuture<'_, ProviderResult<()>>> {
+        None
+    }
+
+    /// Whether [`Provider::credential_check`] is served: the only in-app sign-in this server
+    /// serves (`provider.auth.start`). Account sign-ins through a browser are not served;
+    /// providers sign in through Orbit's AI router.
+    fn has_credential_check(&self) -> bool {
+        false
+    }
+
+    /// A check of the credentials the instance's settings hold, as T3's Antigravity sign-in
+    /// does without a browser. It reports its steps through `check.on_step`. When
+    /// `check.abort` fires, it stops its process and removes its files before it returns.
+    /// An error's `Failed` detail is shown to the user.
+    fn credential_check(&self, _check: CredentialCheck) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async {
+            Err(ProviderError::Unsupported {
+                operation: "credential_check",
+            })
+        })
+    }
+
     /// The periodic probe (`ManagedServerProvider` `refreshOnInterval` with `deferFailure`):
     /// a disabled instance is not probed, and a failed check over a ready entry keeps that
     /// entry. `true` asks for a recheck after 30 s (`FAILED_CHECK_RECHECK_DELAY`); `defer`
@@ -125,6 +154,9 @@ pub struct TextGenerationRequest {
     /// The request's deadline when the caller sets one (`investigate.timeoutMs`); else the
     /// provider's own.
     pub timeout: Option<std::time::Duration>,
+    /// `investigate`: the model reads the checkout in `cwd` with read-only tools across turns
+    /// (review guides). A provider that cannot keep that read-only refuses the request.
+    pub investigate: bool,
 }
 
 /// `ProviderSelectionTransitionInput`.
@@ -166,6 +198,17 @@ impl std::fmt::Debug for OpenedSession {
     }
 }
 
+/// What [`Session::close`] left running. T3 revokes a session's MCP credential when its
+/// process ends (`releaseEntry` in `ProviderSessionManager.ts`), and keeps it while a shared
+/// process still runs: that process's MCP client may still use it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closed {
+    /// The session's process ended with it.
+    RuntimeStopped,
+    /// The process keeps serving other sessions (Codex's shared `app-server`).
+    RuntimeShared,
+}
+
 /// One live native session. Methods return once the provider accepted the request; results
 /// arrive as events.
 pub trait Session: Send + Sync {
@@ -189,6 +232,20 @@ pub trait Session: Send + Sync {
     /// Adds a message to the running turn.
     fn steer_turn(&self, _input: SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
         unsupported("steer_turn")
+    }
+
+    /// Whether [`Session::inject_history`] can add history to a native thread
+    /// (`injectHistory` on T3's session). Without it, the engine sends the history inline,
+    /// ahead of the user's text.
+    fn injects_history(&self) -> bool {
+        false
+    }
+
+    /// `injectHistory`: adds context handoff history to the native thread before a turn.
+    /// `Ok(false)` when the provider turns the request down before it changes the history
+    /// (Codex: an unknown method); the engine then sends the history inline.
+    fn inject_history(&self, _input: InjectHistoryInput) -> BoxFuture<'_, ProviderResult<bool>> {
+        Box::pin(async { Ok(false) })
     }
 
     /// Stops the running turn. Its `TurnTerminal` reports `interrupted`.
@@ -238,8 +295,9 @@ pub trait Session: Send + Sync {
         input: RuntimeRequestResponse,
     ) -> BoxFuture<'_, ProviderResult<()>>;
 
-    /// Ends the native process. The event channel closes after it.
-    fn close(&self) -> BoxFuture<'_, ()>;
+    /// Ends the session. The event channel closes after it. The answer says whether the
+    /// native process ended with it, or keeps serving other sessions.
+    fn close(&self) -> BoxFuture<'_, Closed>;
 
     /// Requests use the existing provider process; they never open a session or a turn.
     fn mcp_app_request(
@@ -324,11 +382,22 @@ pub trait Session: Send + Sync {
         unsupported("await_background_tasks")
     }
 
-    /// `injectHistory`: gives the native thread earlier conversation as context. `Ok(false)`
-    /// means the native protocol cannot take it.
-    fn inject_history(&self, _input: InjectHistoryInput) -> BoxFuture<'_, ProviderResult<bool>> {
-        unsupported("inject_history")
+    /// `uploadFeedback`: sends this provider thread and the provider's logs to the vendor
+    /// through the official binary, and answers the vendor's feedback id. Only Codex has it in
+    /// T3; `Unsupported` means "does not support feedback uploads".
+    fn upload_feedback(
+        &self,
+        _input: UploadFeedbackInput,
+    ) -> BoxFuture<'_, ProviderResult<String>> {
+        unsupported("upload_feedback")
     }
+}
+
+/// [`Session::upload_feedback`]'s input: the provider thread and the user's optional reason.
+#[derive(Clone, Debug)]
+pub struct UploadFeedbackInput {
+    pub provider_thread: ProviderThread,
+    pub reason: Option<String>,
 }
 
 /// One MCP server a session passes to its agent (`McpServerConfig`, HTTP transport).
@@ -338,6 +407,10 @@ pub struct McpServer {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+    /// The session may use the device tools (T3's `device` MCP capability): the agent then
+    /// gets T3's device text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_tools: bool,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -414,14 +487,6 @@ pub struct ThreadSnapshot {
     pub provider_turns: Vec<ProviderTurn>,
     pub messages: Vec<ConversationMessage>,
     pub runtime_requests: Vec<RuntimeRequest>,
-}
-
-/// `ProviderAdapterV2HistoricalContext` plus the thread.
-#[derive(Clone, Debug)]
-pub struct InjectHistoryInput {
-    pub provider_thread: ProviderThread,
-    pub messages: Vec<ConversationMessage>,
-    pub context: String,
 }
 
 /// What [`ProviderEvent::ContinuationRequested`] carries (`ProviderContinuationRequest`).
@@ -704,6 +769,17 @@ pub struct SteerInput {
     pub provider_turn_id: ProviderTurnId,
     pub message: TurnMessage,
     pub model_selection: Option<ModelSelection>,
+    /// `appContext`: the thread's MCP app notes; a steer sends those the native thread has
+    /// not seen with their current text.
+    pub app_context: Vec<AppContextEntry>,
+}
+
+/// `ProviderAdapterV2HistoricalContext` for one native thread: the history items as Codex's
+/// `thread/inject_items` takes them (`historyResponseItems`).
+#[derive(Clone, Debug)]
+pub struct InjectHistoryInput {
+    pub provider_thread: ProviderThread,
+    pub items: serde_json::Value,
 }
 
 /// `ProviderAdapterV2InterruptInput`.
@@ -821,6 +897,35 @@ pub struct TurnTerminal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ProviderRetry>,
     pub thread_disposition: ThreadDisposition,
+    /// A failed root whose native children keep running: they settle without it, so the
+    /// run's end leaves them open (`childTurnsContinue`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child_turns_continue: bool,
+    /// What ended the turn. The adapter sets [`TerminalCause::SessionClosed`] on every terminal
+    /// it produces once [`Session::close`] began, so the engine never takes a close's own end
+    /// for a Stop the provider confirmed.
+    #[serde(default, skip_serializing_if = "TerminalCause::is_provider")]
+    pub cause: TerminalCause,
+    /// Why the provider stopped a turn it reports as completed (a Codex hook that stopped
+    /// it); the engine keeps it as a warning on the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What ended a turn: the provider's own report, or the session's close.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalCause {
+    #[default]
+    Provider,
+    /// The session's close ended the turn; the run detaches.
+    SessionClosed,
+}
+
+impl TerminalCause {
+    fn is_provider(&self) -> bool {
+        *self == Self::Provider
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,6 +943,29 @@ pub enum TurnStatus {
 pub enum ThreadDisposition {
     Reusable,
     Broken,
+}
+
+/// The controls of one [`Provider::credential_check`].
+pub struct CredentialCheck {
+    /// Fires to end the check early (cancel, timeout, or the instance went away).
+    pub abort: BoxFuture<'static, ()>,
+    /// Called as the check passes each step, in order.
+    pub on_step: Box<dyn Fn(CheckStep) + Send + Sync>,
+}
+
+impl std::fmt::Debug for CredentialCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialCheck").finish_non_exhaustive()
+    }
+}
+
+/// The steps of T3's `runSignIn` that its auth flow shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckStep {
+    /// The agent answered `initialize`.
+    Initialized,
+    /// The agent signed in and opened a session; the models load next.
+    Verifying,
 }
 
 /// A provider failure, condensed from the `ProviderAdapterV2Error` union.
@@ -899,7 +1027,7 @@ pub mod testing {
             "sessions": {
                 "supportsMultipleProviderThreadsPerSession": false,
                 "supportsModelSwitchInSession": true,
-                "supportsProviderSwitchingViaHandoff": false,
+                "supportsProviderSwitchingViaHandoff": true,
                 "supportsRuntimeModeSwitchInSession": false,
                 "pendingRequestsSurviveRestart": false,
             },
@@ -965,11 +1093,11 @@ pub mod testing {
             "context": {
                 "acceptsSystemContext": false,
                 "acceptsDeveloperContext": false,
-                "acceptsSyntheticUserContext": false,
+                "acceptsSyntheticUserContext": true,
                 "canGenerateSummaries": false,
-                "canConsumeHandoffSummaries": false,
-                "supportsDeltaHandoff": false,
-                "supportsFullThreadHandoff": false,
+                "canConsumeHandoffSummaries": true,
+                "supportsDeltaHandoff": true,
+                "supportsFullThreadHandoff": true,
                 "maxRecommendedHandoffChars": null,
             },
             "checkpointing": {
@@ -1092,6 +1220,9 @@ mod tests {
                     failure: None,
                     retry: None,
                     thread_disposition: ThreadDisposition::Reusable,
+                    child_turns_continue: false,
+                    cause: TerminalCause::Provider,
+                    reason: None,
                 }))
                 .await
                 .map_err(|_| ProviderError::SessionStopped)
@@ -1106,8 +1237,8 @@ mod tests {
         ) -> BoxFuture<'_, ProviderResult<()>> {
             Box::pin(async { Ok(()) })
         }
-        fn close(&self) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
+        fn close(&self) -> BoxFuture<'_, Closed> {
+            Box::pin(async { Closed::RuntimeStopped })
         }
     }
 

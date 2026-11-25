@@ -35,7 +35,7 @@ import type {
   PersistedConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
-import { ConnectionBlockedError } from "./model.ts";
+import { BearerConnectionTarget, ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -112,6 +112,11 @@ export class EnvironmentRegistry extends Context.Service<
       registration: ConnectionRegistration,
       options?: { readonly knownAddressOnly?: boolean },
     ) => Effect.Effect<boolean, Persistence.ConnectionPersistenceError | ConnectionBlockedError>;
+    readonly settleProvisionalPairing: (
+      environmentId: EnvironmentId,
+      installId: string,
+      keep: boolean,
+    ) => Effect.Effect<boolean, Persistence.ConnectionPersistenceError | ConnectionAttemptError>;
     /**
      * Fails when the route would add a new address to a saved user environment. Pairing that does
      * not target an environment checks this, because the server reports its own environment id.
@@ -222,6 +227,30 @@ export class EnvironmentRegistry extends Context.Service<
     ) => Stream.Stream<A, E, Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>>;
   }
 >()("@t3tools/client-runtime/connection/registry/EnvironmentRegistry") {}
+
+function withoutProvisionalTarget(target: ConnectionTarget): ConnectionTarget {
+  if (target._tag !== "BearerConnectionTarget" || target.provisionalPairingId === undefined) {
+    return target;
+  }
+  const { provisionalPairingId: _owner, ...committed } = target;
+  return new BearerConnectionTarget(committed);
+}
+
+/** The entry as it is once its provisional pairing is promoted. */
+function withoutProvisionalPairing(entry: ConnectionCatalogEntry): ConnectionCatalogEntry {
+  return {
+    ...entry,
+    target: withoutProvisionalTarget(entry.target),
+    ...(entry.alternateRoutes === undefined
+      ? {}
+      : {
+          alternateRoutes: entry.alternateRoutes.map((route) => ({
+            ...route,
+            target: withoutProvisionalTarget(route.target),
+          })),
+        }),
+  };
+}
 
 interface EnvironmentServiceScope {
   readonly entry: ConnectionCatalogEntry;
@@ -524,7 +553,11 @@ export const make = Effect.gen(function* () {
 
   const installEntryLocked = Effect.fn("EnvironmentRegistry.installEntryLocked")(function* (
     entry: ConnectionCatalogEntry,
-    options?: { readonly retainEquivalentRuntime?: boolean },
+    options?: {
+      readonly retainEquivalentRuntime?: boolean;
+      /** The provisional pairing whose own credential the store just promoted. */
+      readonly promotedPairingId?: string;
+    },
   ) {
     const target = entry.target;
     const previous = (yield* SubscriptionRef.get(entries)).get(target.environmentId);
@@ -536,6 +569,27 @@ export const make = Effect.gen(function* () {
       existingScope !== undefined &&
       Equal.equals(existingScope.entry, entry)
     ) {
+      return;
+    }
+    // Conn: promoting a provisional pairing changes no address or credential. Its live session
+    // stays; the supervisor takes the saved route at its next attempt (`latestEntry`). Only the
+    // promotion of the pairing that session uses: a discard or another credential needs a new one.
+    const promoted = options?.promotedPairingId;
+    if (
+      promoted !== undefined &&
+      existingScope !== undefined &&
+      connectionRoutes(existingScope.entry).some(
+        ({ target: route }) =>
+          route._tag === "BearerConnectionTarget" && route.provisionalPairingId === promoted,
+      ) &&
+      Equal.equals(withoutProvisionalPairing(existingScope.entry), withoutProvisionalPairing(entry))
+    ) {
+      yield* SubscriptionRef.update(entries, (current) =>
+        new Map(current).set(target.environmentId, entry),
+      );
+      yield* SubscriptionRef.update(serviceScopes, (current) =>
+        new Map(current).set(target.environmentId, { ...existingScope, entry }),
+      );
       return;
     }
 
@@ -617,6 +671,12 @@ export const make = Effect.gen(function* () {
           yield* assertKnownAddress(route);
         }
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (
+          previous !== undefined &&
+          route.target._tag === "BearerConnectionTarget" &&
+          route.target.provisionalPairingId !== undefined
+        )
+          return false;
         let entry = registered;
         if (previous !== undefined) {
           const existing = connectionRoutes(previous);
@@ -635,7 +695,7 @@ export const make = Effect.gen(function* () {
           }
           entry = next.entry;
         }
-        yield* registrations.register(registration, persistedRoutes(entry));
+        if (!(yield* registrations.register(registration, persistedRoutes(entry)))) return false;
         yield* Ref.update(persistedEnvironmentIds, (current) =>
           new Set(current).add(environmentId),
         );
@@ -644,6 +704,77 @@ export const make = Effect.gen(function* () {
       }),
     );
   });
+
+  const settleProvisionalPairing = Effect.fn("EnvironmentRegistry.settleProvisionalPairing")(
+    function* (environmentId: EnvironmentId, installId: string, keep: boolean) {
+      return yield* withLeaseLock(
+        environmentId,
+        Effect.gen(function* () {
+          const settled = yield* registrations.settleProvisionalPairing(
+            environmentId,
+            installId,
+            keep,
+          );
+          if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) return false;
+          const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
+          // Startup hides old provisional records even if their first recovery write failed.
+          // Do not reintroduce one into this registry when settling a different install.
+          const active = new Set(
+            previous === undefined
+              ? []
+              : connectionRoutes(previous).flatMap(({ target }) =>
+                  target._tag === "BearerConnectionTarget" &&
+                  target.provisionalPairingId !== undefined
+                    ? [target.provisionalPairingId]
+                    : [],
+                ),
+          );
+          const routes = yield* Effect.forEach(
+            settled.routes.filter(
+              (target) =>
+                target._tag !== "BearerConnectionTarget" ||
+                target.provisionalPairingId === undefined ||
+                active.has(target.provisionalPairingId),
+            ),
+            loadRoute,
+          );
+          const first = routes[0];
+          if (first !== undefined) {
+            yield* Ref.update(persistedEnvironmentIds, (current) =>
+              new Set(current).add(environmentId),
+            );
+            yield* installEntryLocked(
+              entryWithRoutes(previous ?? { ...first, enabled: true }, routes),
+              {
+                retainEquivalentRuntime: true,
+                ...(keep && settled.promoted ? { promotedPairingId: installId } : {}),
+              },
+            );
+          } else if (
+            previous !== undefined &&
+            connectionRoutes(previous).some(
+              ({ target }) =>
+                target._tag === "BearerConnectionTarget" &&
+                target.provisionalPairingId === installId,
+            )
+          ) {
+            yield* Ref.update(persistedEnvironmentIds, (current) => {
+              const next = new Set(current);
+              next.delete(environmentId);
+              return next;
+            });
+            yield* closeServiceScope(environmentId);
+            yield* SubscriptionRef.update(entries, (current) => {
+              const next = new Map(current);
+              next.delete(environmentId);
+              return next;
+            });
+          }
+          return settled.promoted;
+        }),
+      );
+    },
+  );
 
   const replaceRoutesLocked = Effect.fn("EnvironmentRegistry.replaceRoutesLocked")(function* (
     previous: ConnectionCatalogEntry,
@@ -977,9 +1108,22 @@ export const make = Effect.gen(function* () {
         }
         const entry = (yield* SubscriptionRef.get(entries)).get(input.environmentId);
         if (entry === undefined) return Option.none<ConnectionCatalogEntry>();
-        const next = entryWithServerLabel(entry, input.environmentId, input.descriptor);
-        if (next === null) return Option.none<ConnectionCatalogEntry>();
-        yield* registrations.setRoutes(input.environmentId, persistedRoutes(next));
+        const named = entryWithServerLabel(entry, input.environmentId, input.descriptor);
+        if (named === null) return Option.none<ConnectionCatalogEntry>();
+        const saved = yield* registrations.learnLabel(
+          input.environmentId,
+          persistedRoutes(entry),
+          named.target.label,
+        );
+        if (saved.length === 0) return Option.none<ConnectionCatalogEntry>();
+        const savedById = new Map(saved.map((target) => [connectionRouteId(target), target]));
+        const next = entryWithRoutes(
+          entry,
+          connectionRoutes(entry).map((route) => ({
+            ...route,
+            target: savedById.get(connectionRouteId(route.target)) ?? route.target,
+          })),
+        );
         const lease = (yield* SubscriptionRef.get(serviceScopes)).get(input.environmentId);
         if (lease !== undefined) {
           yield* SubscriptionRef.update(serviceScopes, (current) =>
@@ -1319,6 +1463,7 @@ export const make = Effect.gen(function* () {
     networkStatus,
     start,
     register,
+    settleProvisionalPairing,
     assertKnownAddress,
     reconcilePlatform,
     remove,

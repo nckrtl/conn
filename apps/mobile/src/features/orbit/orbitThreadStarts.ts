@@ -13,6 +13,8 @@ import {
   type OrbitCompletionPorts,
   type OrbitGatewayProject,
   type OrbitThreadStart,
+  type OrbitThreadStartPorts,
+  type TakenOrbitReservation,
 } from "@t3tools/client-runtime/orbit-gateway";
 
 import { isDraftThreadRoute } from "../threads/thread-route-state";
@@ -28,7 +30,11 @@ export interface MobileOrbitThreadStartPorts {
   /** Resolves false when the saved environments did not load in time. */
   readonly catalogReady: () => Promise<boolean>;
   readonly isSaved: (environmentId: string) => boolean;
-  readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
+  readonly reservationPairing?: OrbitThreadStartPorts["reservationPairing"];
+  readonly waitForReservationPairing?: OrbitThreadStartPorts["waitForReservationPairing"];
+  /** The name checks run while the user typed the first message. */
+  readonly nameFits?: OrbitThreadStartPorts["nameFits"];
+  readonly connect: OrbitThreadStartPorts["connect"];
   readonly firstMessage: Omit<OrbitFirstMessagePorts, "stopped">;
   /** Adds the clone's project ref to the workspace selected at Start; never throws. */
   readonly keepInWorkspace: (workspaceId: string | null, projectRef: string) => Promise<void>;
@@ -67,6 +73,10 @@ export function beginOrbitThreadStart(
     readonly workspaceId: string | null;
     readonly uuid: () => string;
     readonly now: number;
+    /** The clone reserved while the screen was open; the start finalizes it. */
+    readonly reservation?: TakenOrbitReservation | null;
+    /** The name suffix the screen checked names with while the user typed; else a new one. */
+    readonly suffix?: string;
   },
 ): OrbitThreadStart {
   const start = {
@@ -74,12 +84,13 @@ export function beginOrbitThreadStart(
       id: input.uuid(),
       project: input.project,
       message: input.message,
-      suffix: input.uuid().slice(0, 6),
+      suffix: input.suffix ?? input.uuid().slice(0, 6),
       threadId: input.uuid(),
       messageId: input.uuid(),
       commandId: input.uuid(),
       now: input.now,
       instanceDomainSuffix: input.project.instanceDomainSuffix ?? null,
+      reservation: input.reservation ?? null,
     }),
     workspaceId: input.workspaceId,
   };
@@ -104,6 +115,8 @@ function afterSave(store: OrbitThreadStartStore, gateway: OrbitGatewayClient): O
   return {
     ...gateway,
     createThreadInstance: saved(gateway.createThreadInstance),
+    reservation: saved(gateway.reservation),
+    finalizeReservation: saved(gateway.finalizeReservation),
     operation: saved(gateway.operation),
     environments: saved(gateway.environments),
     startPairing: saved(gateway.startPairing),
@@ -126,7 +139,8 @@ export async function runSavedOrbitThreadStart(
   const start = store.starts().find((entry) => entry.id === id);
   if (start === undefined || start.error !== null || running.has(id)) return null;
   running.add(id);
-  const stopped = () => !store.starts().some((entry) => entry.id === id) || !ports.orbitMode();
+  const dismissed = () => !store.starts().some((entry) => entry.id === id);
+  const stopped = () => dismissed() || !ports.orbitMode();
   try {
     if (!(await ports.catalogReady())) {
       store.save({
@@ -143,10 +157,14 @@ export async function runSavedOrbitThreadStart(
       sleep: ports.sleep,
       now: ports.now,
       stopped,
+      dismissed,
       isSaved: ports.isSaved,
-      connect: async (environmentId, pairingUrl) => {
+      reservationPairing: ports.reservationPairing,
+      waitForReservationPairing: ports.waitForReservationPairing,
+      nameFits: ports.nameFits,
+      connect: async (environmentId, pairingUrl, installId) => {
         await store.flush();
-        await ports.connect(environmentId, pairingUrl);
+        await ports.connect(environmentId, pairingUrl, installId);
       },
       send: async (ready) => {
         await store.flush();

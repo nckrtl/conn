@@ -16,7 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 
 import { orbitGatewayTransport } from "../orbit/orbitGatewayClient";
-import { fixtureOrbitTasksTransport } from "./orbitTasksFixtures";
+import { fixtureInsightTrend, fixtureOrbitTasksTransport } from "./orbitTasksFixtures";
 import { listAllTasks } from "./taskList";
 import { pollWhileActive } from "./taskInsightsPolling";
 import { TASKS_FIXTURE_INSIGHTS, TASKS_FIXTURES } from "./tasksFixtureMode";
@@ -30,6 +30,9 @@ const transport: OrbitGatewayTransport = USE_FIXTURES
 
 /** One client for the app, so a realtime notice reaches every open Tasks screen. */
 export const orbitTasksClient: OrbitTasksClient = createOrbitTasksClient(transport);
+
+/** What the thread's task cards need to follow the same source as the Tasks tab. */
+export const orbitTasksSource = { transport, fixtures: USE_FIXTURES } as const;
 
 /** While a Tasks screen is focused: Orbit's realtime notices, plus a periodic authoritative read. */
 function useFollowOrbitTasks() {
@@ -132,6 +135,14 @@ export function useOrbitTask(taskId: number) {
     setRefreshing(false);
   };
   return { state, refreshing, refresh };
+}
+
+/**
+ * The lab's own series for a number. The fixture Gateway reports no per-day history for it, and
+ * insightTrend would draw a flat line of zeros there. Always null outside the lab.
+ */
+export function labInsightTrend(id: string) {
+  return USE_FIXTURES ? fixtureInsightTrend(id, Date.now()) : null;
 }
 
 /** Orbit's numbers move slowly; the strip re-reads every few minutes, like the desktop board. */

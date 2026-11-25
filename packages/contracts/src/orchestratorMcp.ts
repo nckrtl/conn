@@ -39,6 +39,7 @@ import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2DelegatedFrom,
+  OrbitProjectRef,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
@@ -243,7 +244,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   hasPendingQuestion: Schema.Boolean.annotate({
     description:
-      "A question blocks the child and ends a wait. Answer via `t3_pending_request` on `childThreadId`, or the user does.",
+      "A question blocks the child and ends a wait. Answer via `conn_pending_request` on `childThreadId`, or the user does.",
   }),
   pendingApproval: Schema.NullOr(
     Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
@@ -408,6 +409,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   model: Schema.String,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  orbitProject: Schema.optional(OrbitProjectRef),
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   /** Up to 5 open linked pull requests, watched first; list_thread_pull_requests pages all of them. */
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
@@ -473,6 +475,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   model: Schema.String,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  orbitProject: Schema.optional(OrbitProjectRef),
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   /** Up to 5 open linked pull requests, watched first, on the first page only; list_thread_pull_requests pages all of them. */
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
@@ -819,7 +822,7 @@ export const OrchestratorMcpRequestSecretInput = Schema.Struct({
   }),
   placeholder: Schema.optional(TrimmedNonEmptyString),
   delivery: Schema.optional(Schema.Literals(["secretRef", "file"])).annotate({
-    description: "secretRef (default) for a T3 tool; file for a command.",
+    description: "secretRef (default) for a Conn tool; file for a command.",
   }),
   value: Schema.optional(PastedSecretValue).annotate({
     description: "Pasted in this thread; no card.",
@@ -891,7 +894,7 @@ export const OrchestratorMcpEnvironmentLinkResult = Schema.Union([
   Schema.Struct({
     status: Schema.Literal("linked"),
     environmentId: EnvironmentId.annotate({
-      description: "Pass it as environmentId to act there; t3_environment_links lists it.",
+      description: "Pass it as environmentId to act there; conn_environment_links lists it.",
     }),
     label: Schema.String,
     access: AuthMcpClientAccess.annotate({ description: "The access the user chose." }),
@@ -913,7 +916,7 @@ export type OrchestratorMcpEnvironmentLinkResult = typeof OrchestratorMcpEnviron
 
 export const OrchestratorMcpEnvironmentUnlinkInput = Schema.Struct({
   environmentId: EnvironmentId.annotate({
-    description: "The linked environment to forget, from t3_environment_links.",
+    description: "The linked environment to forget, from conn_environment_links.",
   }),
 });
 export type OrchestratorMcpEnvironmentUnlinkInput =

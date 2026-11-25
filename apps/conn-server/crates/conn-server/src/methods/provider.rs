@@ -1,4 +1,4 @@
-//! `provider.*` methods (provider status, models, sign-in, install).
+//! `provider.*` methods (provider status, models, sign-in).
 //!
 //! No `provider.*` method gates a turn. The client reads providers and their models from
 //! `ServerConfig.providers`, which `subscribeServerConfig` delivers at connect, and refreshes
@@ -7,21 +7,18 @@
 //! no model to send with. [`server_providers`] builds those entries; each provider crate adds
 //! its own line there.
 //!
-//! Sign-in (`provider.auth.*`): the T3 server has no in-app sign-in for the providers this
-//! server offers. Claude, Codex (`setupMode` other than `managed`) and Grok are CLI-owned: their
-//! T3 instances carry no `ProviderAuthController`, their entries say
-//! `setup.canAuthenticate: false`, and the clients show no sign-in for them (users run
-//! `claude auth login` or `codex login` on the machine; the `auth.json` watch and the status
-//! probe pick the result up). So every `provider.auth.*` method, the stream included, answers
-//! T3's `ProviderSetupError` from `ProviderAuthService.getController`. No CLI starts.
+//! Sign-in (`provider.auth.*`): see `provider_auth`. Claude, Codex (`setupMode` other than
+//! `managed`) and Grok are CLI-owned in T3 too: their instances carry no
+//! `ProviderAuthController`, their entries say `setup.canAuthenticate: false`, and every
+//! `provider.auth.*` call for them answers T3's `ProviderSetupError`. No CLI starts.
 //! `crates/conn-server/tools/provider-auth-diff.mjs` compares both servers.
 //!
-//! In an Orbit container the provider CLIs come from Orbit's read-only agent folder and reach
-//! models through Orbit's AI router (`ANTHROPIC_BASE_URL`, `~/.codex/config.toml`), so nobody
-//! signs in or installs anything. `provider.install.subscribe` answers "idle". The install
-//! flows (`provider.install.start|cancel|remove`), ChatGPT profiles (T3's managed Codex
-//! sign-in, which stores tokens itself), `uploadFeedback` and `consumeResetCredit` stay
-//! unregistered and answer "not supported".
+//! Install and update (`provider.install.*`, `server.updateProvider`): not served, by
+//! decision (Nick, 2026-11-20). Orbit installs and updates every provider CLI and owns
+//! `PATH`; this server finds each CLI on `PATH` only. The methods stay unregistered, so a
+//! client gets "not supported", and every provider entry says `setup.canInstall: false`.
+//! ChatGPT profiles (`provider.chatgpt.*`), `uploadFeedback` and `consumeResetCredit` stay
+//! unregistered too.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,149 +26,36 @@ use std::time::Duration;
 use conn_support::time::Mark;
 
 use conn_contract::{
-    ProviderAuthCancelInput, ProviderAuthCompleteInput, ProviderAuthRespondInput,
-    ProviderAuthStartInput, ProviderSetupError, ProviderSetupInput, lit,
+    ProviderSetupError, ProviderUploadFeedbackError, ProviderUploadFeedbackInput,
+    ProviderUploadFeedbackResult, lit,
 };
-use serde::Deserialize;
-use serde_json::{Value, json};
-use tokio::sync::{mpsc, watch};
+use serde_json::Value;
+use tokio::sync::watch;
 
 use super::Deps;
 use crate::table::{Failure, MethodTable};
 
-/// `ProviderAuthRemoveMethodInput` (not exported by the contract, so not generated).
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoveMethodInput {
-    instance_id: String,
-    /// Required, as in T3; no controller reads it.
-    #[serde(rename = "methodId")]
-    _method_id: String,
-}
-
-/// `ProviderAuthService.getController` for an instance without a sign-in controller: T3's
-/// `ProviderSetupError`, with `operation` as T3 names it.
-fn no_sign_in(deps: &Deps, instance_id: String, operation: &str) -> Failure {
-    let detail = if deps.providers.get(&instance_id).is_some() {
-        "This provider does not support sign-in in T3 Code."
-    } else {
-        "This provider instance is no longer available."
-    };
-    Failure::fail(&ProviderSetupError {
-        tag: lit::ProviderSetupError,
-        instance_id,
-        operation: operation.to_owned(),
-        detail: detail.to_owned(),
-        cause: None,
-    })
-}
-
-/// Registers one `provider.auth.*` unary method that answers [`no_sign_in`].
-macro_rules! no_sign_in_method {
-    ($table:expr, $deps:expr, $tag:literal, $operation:literal, $input:ty) => {{
-        let deps = $deps.clone();
-        $table.unary($tag, move |_, input: $input| {
-            let failure = no_sign_in(&deps, input.instance_id, $operation);
-            async move { Err::<Value, _>(failure) }
-        });
-    }};
-}
-
 pub fn register(table: &mut MethodTable, deps: &Deps) {
-    no_sign_in_method!(
-        table,
-        deps,
-        "provider.auth.start",
-        "start",
-        ProviderAuthStartInput
-    );
-    no_sign_in_method!(
-        table,
-        deps,
-        "provider.auth.respond",
-        "respond",
-        ProviderAuthRespondInput
-    );
-    no_sign_in_method!(
-        table,
-        deps,
-        "provider.auth.complete",
-        "complete",
-        ProviderAuthCompleteInput
-    );
-    no_sign_in_method!(
-        table,
-        deps,
-        "provider.auth.cancel",
-        "cancel",
-        ProviderAuthCancelInput
-    );
-    no_sign_in_method!(
-        table,
-        deps,
-        "provider.auth.removeMethod",
-        "removeMethod",
-        RemoveMethodInput
-    );
-    no_sign_in_method!(
-        table,
-        deps,
-        "provider.auth.logout",
-        "logout",
-        ProviderSetupInput
-    );
-    {
-        let deps = deps.clone();
-        table.stream(
-            "provider.auth.subscribe",
-            move |_, input: ProviderSetupInput| {
-                let failure = no_sign_in(&deps, input.instance_id, "subscribe");
-                async move { Err(failure) }
-            },
-        );
+    // The engine finds the thread's running session; the provider uploads (Codex only).
+    if let Some(engine) = &deps.engine {
+        super::orchestration::engine_unary::<
+            ProviderUploadFeedbackInput,
+            ProviderUploadFeedbackResult,
+            ProviderUploadFeedbackError,
+        >(table, engine, "provider.uploadFeedback");
     }
-    let deps = deps.clone();
-    table.stream(
-        "provider.install.subscribe",
-        move |_, input: ProviderSetupInput| {
-            let driver = deps
-                .providers
-                .get(&input.instance_id)
-                .map(|p| p.driver().to_owned())
-                .unwrap_or_else(|| input.instance_id.clone());
-            async move {
-                Ok(open_with(json!({
-                    "driver": driver,
-                    "operationId": null,
-                    "phase": "idle",
-                    "downloadedBytes": 0,
-                    "totalBytes": null,
-                    "version": null,
-                    "installedVersion": null,
-                    "source": "local",
-                    "canRemove": false,
-                    "message": null,
-                })))
-            }
-        },
-    );
-}
-
-/// One state, then open until the client unsubscribes.
-fn open_with(state: Value) -> mpsc::Receiver<Result<Value, Failure>> {
-    let (tx, rx) = mpsc::channel(1);
-    tx.try_send(Ok(state)).expect("room for the first state");
-    tokio::spawn(async move { tx.closed().await });
-    rx
+    super::provider_auth::register(table, deps);
 }
 
 /// Tells config streams that a provider entry changed (T3's `ProviderRegistry.streamChanges`),
 /// and holds the clients' activity leases that let the periodic probe run
 /// (`BackgroundPolicy`: `reportClientActivity`, `shouldRunScopeWork`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProviderStatus {
-    revision: Arc<watch::Sender<u64>>,
+    revision: conn_provider::StatusNotifier,
     leases: Arc<std::sync::Mutex<Vec<Lease>>>,
+    /// The full probe pass in flight (T3's `refreshAllInFlightRef`): later callers wait for it.
+    pass: Arc<std::sync::Mutex<Option<watch::Receiver<bool>>>>,
 }
 
 /// One client's `ClientActivityLease`, as far as provider status needs it.
@@ -184,8 +68,12 @@ struct Lease {
     ttl: Duration,
     /// `isForegroundLease`: visible, and focused or recently used.
     foreground: bool,
+    /// The client reported `lowPowerMode: "true"` (`isClientConstrained`).
+    low_power: bool,
     /// `provider-status` scopes: `None` for every instance, else the instance id.
     scopes: Vec<Option<String>>,
+    /// The folders of its `vcs-status` scopes, as the client named them.
+    vcs_scopes: Vec<String>,
 }
 
 impl Lease {
@@ -201,23 +89,21 @@ const MAX_LEASE_TTL: Duration = Duration::from_secs(120);
 /// Clients with a lease at once; the oldest goes first.
 const MAX_LEASES: usize = 64;
 
-impl Default for ProviderStatus {
-    fn default() -> Self {
+impl ProviderStatus {
+    /// Listens on `notifier`, which the providers share (`conn_provider::StatusNotifier`).
+    pub fn with_notifier(notifier: conn_provider::StatusNotifier) -> Self {
         Self {
-            revision: Arc::new(watch::channel(0).0),
-            leases: Arc::default(),
+            revision: notifier,
+            ..Self::default()
         }
     }
-}
 
-impl ProviderStatus {
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
     }
 
-    fn bump(&self) {
-        self.revision
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    pub(crate) fn bump(&self) {
+        self.revision.notify();
     }
 
     fn leases(&self) -> std::sync::MutexGuard<'_, Vec<Lease>> {
@@ -253,13 +139,22 @@ impl ProviderStatus {
             .filter(|scope| scope["type"] == "provider-status")
             .map(|scope| scope["instanceId"].as_str().map(str::to_owned))
             .collect();
+        let vcs_scopes = input["scopes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|scope| scope["type"] == "vcs-status")
+            .filter_map(|scope| scope["cwd"].as_str().map(str::to_owned))
+            .collect();
         let lease = Lease {
             client_id: client_id.to_owned(),
             since: now,
             ttl,
             foreground: input["visible"] == true
                 && (input["focused"] == true || input["recentlyInteracted"] == true),
+            low_power: input["lowPowerMode"] == "true",
             scopes,
+            vcs_scopes,
         };
         let mut leases = self.leases();
         leases.retain(|l| l.active_at(&now) && l.client_id != lease.client_id);
@@ -267,6 +162,19 @@ impl ProviderStatus {
             leases.remove(0);
         }
         leases.push(lease);
+    }
+
+    /// `shouldRunOpportunisticWork`: an active foreground lease from a client that is not
+    /// held back by its low power mode. T3 also pauses for host power (locked, low power,
+    /// battery, heat); this server reads no host power state, as T3 with a stale snapshot.
+    pub fn opportunistic(&self, settings: &serde_json::Map<String, Value>) -> bool {
+        self.opportunistic_at(pause_when_client_low_power(settings), &Mark::now())
+    }
+
+    fn opportunistic_at(&self, pause_on_low_power: bool, now: &Mark) -> bool {
+        self.leases().iter().any(|lease| {
+            lease.active_at(now) && lease.foreground && !(pause_on_low_power && lease.low_power)
+        })
     }
 
     /// `shouldRunScopeWork` for `provider-status` (generic or this instance): an active lease
@@ -285,6 +193,69 @@ impl ProviderStatus {
                     .any(|s| s.as_deref().is_none_or(|id| id == instance_id))
         })
     }
+}
+
+impl ProviderStatus {
+    /// `shouldRunScopeWork` for `vcs-status` at `cwd`: an active lease with that scope, not
+    /// held back by its low power mode, in the foreground unless the profile is `performance`.
+    /// No host power state is read, as for the provider probe.
+    pub fn wants_vcs(&self, cwd: &str, settings: &serde_json::Map<String, Value>) -> bool {
+        self.wants_vcs_at(
+            cwd,
+            is_performance(settings),
+            pause_when_client_low_power(settings),
+            &Mark::now(),
+        )
+    }
+
+    fn wants_vcs_at(
+        &self,
+        cwd: &str,
+        performance: bool,
+        pause_on_low_power: bool,
+        now: &Mark,
+    ) -> bool {
+        self.leases().iter().any(|lease| {
+            lease.active_at(now)
+                && lease.vcs_scopes.iter().any(|scope| scope == cwd)
+                && !(pause_on_low_power && lease.low_power)
+                && (performance || lease.foreground)
+        })
+    }
+}
+
+/// `pauseWhenClientLowPower` of `resolveServerBackgroundActivitySettings`: off only in the
+/// `performance` preset or by a custom override. Without a set `backgroundActivity`, the older
+/// `backgroundActivityProfile` names the preset; the default is `balanced`.
+pub(crate) fn pause_when_client_low_power(settings: &serde_json::Map<String, Value>) -> bool {
+    let preset = |profile: Option<&str>| profile != Some("performance");
+    let activity = settings.get("backgroundActivity");
+    let profile = activity
+        .and_then(|a| a.get("profile"))
+        .and_then(Value::as_str)
+        .unwrap_or("balanced");
+    let base = activity
+        .and_then(|a| a.get("baseProfile"))
+        .and_then(Value::as_str);
+    let overrides = activity
+        .and_then(|a| a.get("overrides"))
+        .and_then(Value::as_object);
+    let is_default =
+        profile == "balanced" && base.is_none() && overrides.is_none_or(|o| o.is_empty());
+    if is_default {
+        return preset(
+            settings
+                .get("backgroundActivityProfile")
+                .and_then(Value::as_str),
+        );
+    }
+    if profile != "custom" {
+        return preset(Some(profile));
+    }
+    overrides
+        .and_then(|o| o.get("pauseWhenClientLowPower"))
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| preset(Some(base.unwrap_or("balanced"))))
 }
 
 /// `DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL`.
@@ -314,16 +285,130 @@ fn refresh_interval(deps: &Deps) -> Option<Duration> {
 }
 
 /// Probes the providers (all, or the one named) with their current settings, then tells the
-/// config streams.
+/// config streams. All of them: the shared pass of [`refresh_all`].
 pub async fn refresh(deps: &Deps, only: Option<&str>) {
+    let Some(only) = only else {
+        return refresh_all(deps).await;
+    };
+    for provider in deps.providers.snapshot() {
+        let id = provider.instance_id().as_str();
+        if id == only {
+            provider.refresh_status(instance_settings(deps, id)).await;
+        }
+    }
+    deps.provider_status.bump();
+}
+
+/// T3's `refreshAll`: one full pass at a time, which every caller joins. The pass runs on its
+/// own task, so a caller that goes away (a closed connection) does not stop it for the
+/// others. It probes the instances at once, and at the end records the manifest it started
+/// with as probed.
+pub async fn refresh_all(deps: &Deps) {
+    let mut done = {
+        let mut pass = deps
+            .provider_status
+            .pass
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match pass.as_ref() {
+            Some(running) => running.clone(),
+            None => {
+                let (finished, done) = watch::channel(false);
+                *pass = Some(done.clone());
+                let deps = deps.clone();
+                tokio::spawn(async move {
+                    let manifest = deps
+                        .model_manifest
+                        .as_ref()
+                        .map(|manifest| manifest.current_updated_at());
+                    let mut probes = tokio::task::JoinSet::new();
+                    for provider in deps.providers.snapshot() {
+                        let settings = instance_settings(&deps, provider.instance_id().as_str());
+                        probes.spawn(async move { provider.refresh_status(settings).await });
+                    }
+                    // A probe that ended abnormally leaves the manifest unprobed, so the next
+                    // opened picker runs the pass again.
+                    let mut complete = true;
+                    while let Some(joined) = probes.join_next().await {
+                        complete &= joined.is_ok();
+                    }
+                    deps.provider_status.bump();
+                    if complete
+                        && let (Some(model_manifest), Some(updated)) =
+                            (&deps.model_manifest, manifest)
+                    {
+                        model_manifest.set_probed(updated);
+                    }
+                    *deps
+                        .provider_status
+                        .pass
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    let _ = finished.send(true);
+                });
+                done
+            }
+        }
+    };
+    let _ = done.wait_for(|finished| *finished).await;
+}
+
+/// T3's `refreshModelCatalog`, for an opened model picker: refetch a manifest older than
+/// 5 minutes, and run full passes until the providers have been probed with the manifest now
+/// known. A pass that started before the fetch does not count, so a second one may follow.
+pub async fn refresh_model_catalog(deps: &Deps) {
+    let Some(manifest) = deps.model_manifest.clone() else {
+        return;
+    };
+    let updated = manifest.refresh_on_demand().await;
+    for _ in 0..2 {
+        if manifest.probed_updated_at() == updated {
+            return;
+        }
+        refresh_all(deps).await;
+    }
+}
+
+/// The model refresh of `server.refreshProviders` with `refreshModels`, after the probe: each
+/// provider (all, or the one named) that has one, and whose entry is enabled and installed,
+/// lists its models again and is probed once more. The first failure answers T3's
+/// `ProviderSetupError` with operation `refresh-models`.
+pub async fn refresh_models(deps: &Deps, only: Option<&str>) -> Result<(), Failure> {
+    let checked_at = conn_support::time::iso_from_ms(conn_support::time::now_ms());
     for provider in deps.providers.snapshot() {
         let id = provider.instance_id().as_str();
         if only.is_some_and(|only| only != id) {
             continue;
         }
+        let ready = server_providers(deps, &checked_at).iter().any(|entry| {
+            entry["instanceId"] == id && entry["enabled"] == true && entry["installed"] == true
+        });
+        if !ready {
+            continue;
+        }
+        let Some(refresh) = provider.refresh_models() else {
+            continue;
+        };
+        if let Err(error) = refresh.await {
+            // The failed refresh may have changed the entry (a sign-in that ended): clients
+            // already subscribed see it before the error.
+            deps.provider_status.bump();
+            let detail = match error {
+                conn_provider::ProviderError::Failed { detail, .. } => detail,
+                other => other.to_string(),
+            };
+            return Err(Failure::fail(&ProviderSetupError {
+                tag: lit::ProviderSetupError,
+                instance_id: id.to_owned(),
+                operation: "refresh-models".to_owned(),
+                detail,
+                cause: None,
+            }));
+        }
         provider.refresh_status(instance_settings(deps, id)).await;
+        deps.provider_status.bump();
     }
-    deps.provider_status.bump();
+    Ok(())
 }
 
 /// `FAILED_CHECK_RECHECK_DELAY`.
@@ -336,14 +421,34 @@ fn performance_profile(deps: &Deps) -> bool {
     };
     // `raw()` is a `Map`: indexing it with a missing key panics, so read with `get`. Orbit's
     // settings hold neither key, and the panic aborted the server at the first 5-minute tick.
-    let settings = environment.settings.raw();
-    let is_performance =
-        |value: Option<&Value>| value.and_then(Value::as_str) == Some("performance");
-    is_performance(
+    is_performance(&environment.settings.raw())
+}
+
+/// `resolveServerBackgroundActivitySettings(..).profile == "performance"`: a custom profile
+/// resolves to its `baseProfile`; the default `backgroundActivity` defers to the legacy
+/// `backgroundActivityProfile`.
+fn is_performance(settings: &serde_json::Map<String, Value>) -> bool {
+    let activity = settings.get("backgroundActivity");
+    let field = |key: &str| activity.and_then(|a| a.get(key));
+    let profile = field("profile")
+        .and_then(Value::as_str)
+        .unwrap_or("balanced");
+    let base = field("baseProfile").and_then(Value::as_str);
+    let is_default = profile == "balanced"
+        && base.is_none()
+        && field("overrides")
+            .and_then(Value::as_object)
+            .is_none_or(|o| o.is_empty());
+    let resolved = if is_default {
         settings
-            .get("backgroundActivity")
-            .and_then(|activity| activity.get("profile")),
-    ) || is_performance(settings.get("backgroundActivityProfile"))
+            .get("backgroundActivityProfile")
+            .and_then(Value::as_str)
+    } else if profile == "custom" {
+        base
+    } else {
+        Some(profile)
+    };
+    resolved == Some("performance")
 }
 
 /// The periodic probe (`refreshOnInterval`): only the providers a client wants
@@ -461,6 +566,7 @@ mod tests {
     use std::sync::Arc;
 
     use conn_provider_claude::{ClaudeConfig, ClaudeProvider};
+    use serde_json::json;
 
     use super::*;
 
@@ -506,7 +612,7 @@ mod tests {
         for (instance, detail) in [
             (
                 "claudeAgent",
-                "This provider does not support sign-in in T3 Code.",
+                "This provider does not support sign-in in Conn.",
             ),
             ("nope", "This provider instance is no longer available."),
         ] {
@@ -529,6 +635,23 @@ mod tests {
                     "{tag} {instance}"
                 );
             }
+        }
+    }
+
+    /// Orbit installs and updates provider CLIs (Nick, 2026-11-20): no install or update
+    /// method is registered, so the client gets "not supported".
+    #[tokio::test(flavor = "current_thread")]
+    async fn install_and_update_are_not_served() {
+        let mut table = MethodTable::new();
+        crate::methods::register_all(&mut table, &Deps::default());
+        for tag in [
+            "provider.install.start",
+            "provider.install.cancel",
+            "provider.install.remove",
+            "provider.install.subscribe",
+            "server.updateProvider",
+        ] {
+            assert!(table.get(tag).is_none(), "{tag} is registered");
         }
     }
 
@@ -667,6 +790,22 @@ mod tests {
                 json!({"backgroundActivity": {"profile": "balanced"}}),
                 false,
             ),
+            // What the Background activity dialog saves for its Performance choice.
+            (
+                json!({"backgroundActivity": {"profile": "custom", "baseProfile": "performance",
+                       "overrides": {"automaticGitFetchInterval": 15000}}}),
+                true,
+            ),
+            (
+                json!({"backgroundActivity": {"profile": "custom", "overrides": {}}}),
+                false,
+            ),
+            // A set `backgroundActivity` wins over the legacy field.
+            (
+                json!({"backgroundActivity": {"profile": "battery-saver"},
+                       "backgroundActivityProfile": "performance"}),
+                false,
+            ),
             (json!({"backgroundActivity": "performance"}), false),
             (json!({"backgroundActivity": {}}), false),
         ] {
@@ -726,6 +865,19 @@ mod tests {
             "recentlyInteracted": true, "scopes": [{"type": "thread", "threadId": "t"}]}),
         );
         assert!(!status.wants("grok", false));
+        // `vcs-status` names a folder exactly; a client in low power mode holds it back.
+        let now = Mark::now();
+        status.report_activity(
+            &json!({"clientId": "web-1", "visible": true, "focused": true,
+            "recentlyInteracted": false, "scopes": [{"type": "vcs-status", "cwd": "/repo"}]}),
+        );
+        assert!(status.wants_vcs_at("/repo", false, true, &now));
+        assert!(!status.wants_vcs_at("/repo/", false, true, &now));
+        status.report_activity(&json!({"clientId": "web-1", "visible": false,
+            "lowPowerMode": "true", "scopes": [{"type": "vcs-status", "cwd": "/repo"}]}));
+        assert!(!status.wants_vcs_at("/repo", true, true, &now));
+        assert!(status.wants_vcs_at("/repo", true, false, &now));
+        assert!(!status.wants_vcs_at("/repo", false, false, &now));
         for n in 0..100 {
             status.report_activity(&json!({"clientId": format!("c{n}"), "scopes": []}));
         }
@@ -755,7 +907,7 @@ mod tests {
         assert_eq!(entry["instanceId"], "grok");
         assert_eq!(entry["status"], "disabled");
         assert_eq!(entry["enabled"], false);
-        assert_eq!(entry["message"], "Grok is disabled in T3 Code settings.");
+        assert_eq!(entry["message"], "Grok is disabled in Conn settings.");
         let _: conn_contract::ServerProvidersItemItem =
             conn_contract::from_json(entry.clone()).unwrap();
     }

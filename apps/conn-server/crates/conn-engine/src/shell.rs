@@ -125,6 +125,33 @@ pub(crate) fn settled_background_target(
     Ok(provider_thread.map(|pt| (run, pt)))
 }
 
+/// `isIdleCompactionMessage` on a `messages` row aliased `m`: the server's own `/compact`
+/// (`ProjectionStore.ts:8067`). Servers before `idleCompaction` marked theirs agent-created.
+pub(crate) const IDLE_COMPACTION_MESSAGE_SQL: &str = "(json_extract(m.body, '$.role') = 'user'
+  AND lower(trim(json_extract(m.body, '$.text'), char(9, 10, 11, 12, 13, 32, 160, 5760, 8192,
+    8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288,
+    65279))) = '/compact'
+  AND coalesce(json_array_length(m.body, '$.attachments'), 0) = 0
+  AND (json_extract(m.body, '$.idleCompaction') IS NOT NULL
+       OR (json_extract(m.body, '$.createdBy') = 'agent'
+           AND json_extract(m.body, '$.creationSource') = 'server')))";
+
+/// `isSilentRunForShell` on a `runs` row aliased `r`: the server's own idle compaction stays
+/// out of the shell unless it failed, so lists and notifications keep the user's last turn.
+pub(crate) fn silent_run_sql() -> String {
+    format!(
+        "(json_extract(r.body, '$.status') <> 'failed'
+          AND EXISTS (SELECT 1 FROM entities AS m WHERE m.thread_id = r.thread_id
+                      AND m.kind = 'messages' AND m.id = json_extract(r.body, '$.userMessageId')
+                      AND {IDLE_COMPACTION_MESSAGE_SQL})
+          AND NOT EXISTS (SELECT 1 FROM entities AS c WHERE c.thread_id = r.thread_id
+                          AND c.kind = 'turnItems'
+                          AND json_extract(c.body, '$.runId') = json_extract(r.body, '$.id')
+                          AND json_extract(c.body, '$.type') = 'compaction'
+                          AND json_extract(c.body, '$.status') = 'failed'))"
+    )
+}
+
 pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
     let thread = tx
         .thread(thread_id)?
@@ -141,9 +168,11 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
     // `latestUnheldRun`: the newest run, a queued one too (the thread shows `queued` while a
     // message waits behind a running turn), but not a run held in the queue, nor a run
     // cancelled before it started that an earlier run outlived (a steered queued message).
+    let silent = silent_run_sql();
     let latest_run = one(
         tx,
-        "SELECT body FROM entities AS r WHERE thread_id = ?1 AND kind = 'runs'
+        &format!("SELECT body FROM entities AS r WHERE thread_id = ?1 AND kind = 'runs'
+         AND NOT {silent}
          AND NOT (json_extract(body, '$.status') = 'queued' AND json_extract(body, '$.queueHeld') IS 1)
          AND NOT (json_extract(body, '$.status') = 'cancelled' AND json_extract(body, '$.startedAt') IS NULL
                   AND json_extract(body, '$.completedAt') IS NOT NULL
@@ -153,7 +182,7 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
                               AND (json_extract(e.body, '$.completedAt') IS NULL
                                    OR json_extract(e.body, '$.completedAt')
                                       >= json_extract(r.body, '$.completedAt'))))
-         ORDER BY ordinal DESC LIMIT 1",
+         ORDER BY ordinal DESC LIMIT 1"),
         params![thread_id],
     )?;
     // `isInterruptibleRunForShell` and `isActivityRunForShell`: the newest run in those
@@ -162,8 +191,8 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         one(
             tx,
             &format!(
-                "SELECT body FROM entities WHERE thread_id = ?1 AND kind = 'runs'
-                 AND json_extract(body, '$.status') IN ({statuses})
+                "SELECT body FROM entities AS r WHERE thread_id = ?1 AND kind = 'runs'
+                 AND json_extract(body, '$.status') IN ({statuses}) AND NOT {silent}
                  ORDER BY ordinal DESC LIMIT 1"
             ),
             params![thread_id],
@@ -197,12 +226,22 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
             pending_summary = json!({"id":secret.get("id"),"kind":"user_input","createdAt":created,"blocking":true,"userOnly":true});
         }
     }
-    let latest_user = one(
-        tx,
-        "SELECT body FROM entities WHERE thread_id = ?1 AND kind = 'messages'
-         AND json_extract(body, '$.role') = 'user' ORDER BY first_seq DESC LIMIT 1",
-        params![thread_id],
-    )?;
+    // The server's own idle compactions are not the user's messages (`idleCompactionOf`).
+    let latest_user = |authored: &str| {
+        one(
+            tx,
+            &format!(
+                "SELECT body FROM entities AS m WHERE thread_id = ?1 AND kind = 'messages'
+                 AND json_extract(body, '$.role') = 'user' {authored}
+                 AND NOT {IDLE_COMPACTION_MESSAGE_SQL} ORDER BY first_seq DESC LIMIT 1"
+            ),
+            params![thread_id],
+        )
+    };
+    let (latest_user, latest_authored) = (
+        latest_user("")?,
+        latest_user("AND json_extract(body, '$.createdBy') = 'user'")?,
+    );
     // `latestRootProviderFailure`: the newest failed error item on a failed run's root node.
     let failure = match &latest_run {
         Some(run) if run["status"] == "failed" => one(
@@ -217,6 +256,8 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         _ => None,
     };
     let item_count = tx.count(thread_id, "turnItems")?;
+    // `subagent_count`: native and delegated alike, one `subagents` row per child.
+    let subagent_count = tx.count(thread_id, "subagents")?;
     let provider_threads = tx.entities(thread_id, "providerThreads")?;
     let mut history: Vec<Value> = Vec::new();
     for provider_thread in &provider_threads {
@@ -225,6 +266,13 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
             history.push(id);
         }
     }
+    // `activeProviderGoalForShell`.
+    let goal = thread
+        .get("activeProviderThreadId")
+        .and_then(|id| provider_threads.iter().find(|pt| pt.get("id") == Some(id)))
+        .and_then(|pt| pt.get("goal"))
+        .cloned()
+        .unwrap_or(Value::Null);
     let pending_background = pending_background_tasks(
         tx,
         thread_id,
@@ -248,7 +296,7 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         .as_ref()
         .map_or(json!("idle"), |run| run["status"].clone());
 
-    Ok(json!({
+    let mut row = json!({
         "createdBy": field("createdBy"),
         "creationSource": field("creationSource"),
         "id": thread_id,
@@ -285,14 +333,13 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "pendingGuestMessageCount": 0,
         "latestVisibleMessage": null,
         "latestUserMessageAt": latest_user.as_ref().map_or(Value::Null, |m| m["updatedAt"].clone()),
-        "latestUserAuthoredMessageAt": latest_user
+        "latestUserAuthoredMessageAt": latest_authored
             .as_ref()
-            .filter(|m| m["createdBy"] == "user")
             .map_or(Value::Null, |m| m["updatedAt"].clone()),
         "hasActionableProposedPlan": false,
         "pendingBackgroundTasks": pending_background,
         "providerInstanceHistory": history,
-        "goal": null,
+        "goal": goal,
         "itemCount": item_count,
         "visibleItemCount": item_count,
         "createdAt": field("createdAt"),
@@ -314,7 +361,30 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "lastTitleRegeneration": field("lastTitleRegeneration"),
         "limitRecovery": field("limitRecovery"),
         "deletedAt": field("deletedAt"),
-    }))
+    });
+    // As T3's shell: present only when the thread has them.
+    for key in [
+        "linkedPullRequest",
+        "branchPullRequest",
+        "issues",
+        "historyOrigin",
+        "orbitProject",
+    ] {
+        if let (Some(value), Some(map)) = (thread.get(key), row.as_object_mut()) {
+            map.insert(key.into(), value.clone());
+        }
+    }
+    if subagent_count > 0 {
+        row["subagentCount"] = json!(subagent_count);
+    }
+    // The link that started it, when one did (`linkOrigin`): the fence reads it.
+    if let Some(from) = thread.get("delegatedFrom").filter(|d| d.is_object()) {
+        row["delegatedFrom"] = from.clone();
+    }
+    if let Some(origin) = thread.get("linkOrigin").filter(|o| o.is_object()) {
+        row["linkOrigin"] = origin.clone();
+    }
+    Ok(row)
 }
 
 #[cfg(test)]

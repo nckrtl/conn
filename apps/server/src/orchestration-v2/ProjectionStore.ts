@@ -489,6 +489,7 @@ export interface ActiveShellIndexEntry extends Pick<
   OrchestrationV2ThreadShell,
   | "id"
   | "projectId"
+  | "orbitProject"
   | "lineage"
   | "settledOverride"
   | "settledAt"
@@ -517,6 +518,7 @@ export type ActiveThreadListEntry = Pick<
 >;
 
 export interface OlderSettledThreadsQuery {
+  readonly orbitProjectIds?: ReadonlyArray<number>;
   readonly before: OrchestrationV2OlderSettledCursor;
   readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
   readonly limit: number;
@@ -1242,6 +1244,7 @@ type ShellThreadRow = {
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
   readonly has_actionable_proposed_plan: number;
+  readonly subagent_count: number;
 };
 
 type ShellRunRow = {
@@ -1967,6 +1970,7 @@ export function threadShellFromProjection(
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
     pinOrderKey: projection.thread.pinOrderKey ?? null,
+    ...(projection.thread.orbitProject ? { orbitProject: projection.thread.orbitProject } : {}),
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
     opens: projection.thread.opens ?? null,
@@ -2074,6 +2078,7 @@ type ShellThreadState = {
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   readonly hasActionableProposedPlan: boolean;
+  readonly subagentCount: number;
   readonly pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
   readonly providerInstanceHistory: OrchestrationV2ThreadShell["providerInstanceHistory"];
   readonly goal: OrchestrationV2ThreadShell["goal"];
@@ -2244,6 +2249,7 @@ function shellFromState(input: {
     usageLimitResetAt: input.state.usageLimitResetAt,
     pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     pendingGuestMessageCount: pendingGuestMessageCount(input.state.thread.guestShare),
+    ...(input.state.subagentCount > 0 ? { subagentCount: input.state.subagentCount } : {}),
     latestVisibleMessage: null,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
@@ -2265,6 +2271,7 @@ function shellFromState(input: {
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
+    ...(input.state.thread.orbitProject ? { orbitProject: input.state.thread.orbitProject } : {}),
     ...(input.state.thread.tags?.length ? { tags: input.state.thread.tags } : {}),
     lastVisitedAt: input.state.thread.lastVisitedAt,
     opens: input.state.thread.opens ?? null,
@@ -2280,11 +2287,11 @@ function shellFromState(input: {
 // in migration 095, where a tool name counts anywhere after the first toolName. Searching from
 // that first one once avoids rescanning the payload for every nested toolName.
 const INLINE_WORK_OUTPUT = new RegExp(
-  `htmlRender|${MCP_APP_OUTPUT_KEY}|"viewedImagePath"|sentMessage`,
+  `htmlRender|${MCP_APP_OUTPUT_KEY}|"viewedImagePath"|sentMessage|"orbitTask"`,
   "i",
 );
 const TOOL_NAME_PREFIX = /"toolName":"/i;
-const INLINE_TOOL_NAME = /(?:delegate.task|send.to.user)"/is;
+const INLINE_TOOL_NAME = /(?:delegate.task|send.to.user|orbit(?:__|[./:\s]+)task[-_]create)"/is;
 
 const isInlineWorkOutput = (payloadJson: string) => {
   if (INLINE_WORK_OUTPUT.test(payloadJson)) return true;
@@ -8156,8 +8163,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         threadIds,
         listedOnly = false,
         includeDeleted = false,
+        omitSubagentCount = false,
       }: ShellSnapshotOptions & {
         readonly listedOnly?: boolean;
+        readonly omitSubagentCount?: boolean;
         // A retained fork still shows the history of a deleted source run.
         readonly includeDeleted?: boolean;
       } = {},
@@ -8311,7 +8320,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE plan.thread_id = t.thread_id
                   AND plan.kind = 'proposed_plan'
                   AND plan.status = 'active'
-              ) AS has_actionable_proposed_plan
+              ) AS has_actionable_proposed_plan,
+              -- Native and delegated alike: each has one row keyed by its parent, whether or not
+              -- a shell lists its child thread. Awareness reads skip it.
+              ${
+                omitSubagentCount
+                  ? sql`0`
+                  : sql`(
+                SELECT COUNT(*)
+                FROM orchestration_v2_projection_subagents subagent
+                WHERE subagent.thread_id = t.thread_id
+              )`
+              } AS subagent_count
             FROM orchestration_v2_projection_threads t
             LEFT JOIN orchestration_v2_projection_runs active ON active.run_id = (
               SELECT r.run_id
@@ -8962,6 +8982,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : DateTime.makeUnsafe(row.latest_user_message_at),
           latestUserAuthoredMessageAt,
           hasActionableProposedPlan: row.has_actionable_proposed_plan === 1,
+          subagentCount: row.subagent_count,
           pendingBackgroundTasks,
           providerInstanceHistory: providerInstanceHistoryForShell({
             threadId: thread.id,
@@ -9150,7 +9171,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             Effect.gen(function* () {
               const threadRows = yield* selectShellThreadRows(
                 threadId,
-                threadId === undefined ? { location: "active", listedOnly: true } : {},
+                threadId === undefined
+                  ? { location: "active", listedOnly: true, omitSubagentCount: true }
+                  : { omitSubagentCount: true },
               );
               const ids = threadRows.map((row) => ThreadId.make(row.thread_id));
               const providerThreadRows =
@@ -9242,7 +9265,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return rows[0]?.count ?? 0;
     }, Effect.mapError(shellSnapshotReadError));
 
-    // Migration 98 indexes these exact expressions, so the read takes them from the index instead
+    // Migration 101 indexes these exact expressions, so the read takes them from the index instead
     // of parsing every active thread's payload. Changing one here needs a matching index change.
     const indexedField = (path: string, read: "json_extract" | "json_type" = "json_extract") =>
       sql.literal(
@@ -9256,6 +9279,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       const rows = yield* sql<{
         readonly thread_id: string;
         readonly project_id: string;
+        readonly orbit_id: number | null;
+        readonly orbit_slug: string | null;
         readonly relationship_to_parent: string | null;
         readonly parent_thread_id: string | null;
         readonly root_thread_id: string;
@@ -9271,6 +9296,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         SELECT
           t.thread_id,
           t.project_id,
+          ${indexedField("$.orbitProject.id")} AS orbit_id,
+          ${indexedField("$.orbitProject.slug")} AS orbit_slug,
           ${indexedField("$.lineage.relationshipToParent")} AS relationship_to_parent,
           ${indexedField("$.lineage.parentThreadId")} AS parent_thread_id,
           ${indexedField("$.lineage.rootThreadId")} AS root_thread_id,
@@ -9335,6 +9362,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return rows.map((row): ActiveShellIndexEntry => ({
         id: ThreadId.make(row.thread_id),
         projectId: ProjectId.make(row.project_id),
+        ...(row.orbit_id != null && row.orbit_slug != null
+          ? { orbitProject: { id: row.orbit_id, slug: row.orbit_slug } }
+          : {}),
         lineage: shellIndexLineage(row),
         settledOverride:
           row.settled_override === "settled" || row.settled_override === "active"
@@ -9455,7 +9485,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const listOlderSettledThreads: ProjectionStoreV2Shape["listOlderSettledThreads"] = Effect.fn(
       "ProjectionStore.listOlderSettledThreads",
-    )(function* ({ before, projectIds, limit }) {
+    )(function* ({ before, projectIds, orbitProjectIds, limit }) {
       // ISO strings in one format, so string order is time order.
       const older = sql`
         SELECT t.thread_id, t.project_id,
@@ -9467,7 +9497,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
           AND json_extract(t.payload_json, '$.settledOverride') = 'settled'
           AND json_extract(t.payload_json, '$.settledAt') IS NOT NULL${
-            projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
+            orbitProjectIds === undefined
+              ? projectIds === undefined
+                ? sql``
+                : sql` AND t.project_id IN ${sql.in(projectIds)}`
+              : sql` AND ((json_extract(t.payload_json, '$.orbitProject.id') IS NULL ${projectIds === undefined ? sql`` : sql`AND t.project_id IN ${sql.in(projectIds)}`})
+                 OR json_extract(t.payload_json, '$.orbitProject.id') IN ${sql.in(orbitProjectIds)})`
           }
       `;
       const belowCursor =

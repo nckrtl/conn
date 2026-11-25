@@ -20,12 +20,15 @@ import {
   ORBIT_ROUTE_DOMAIN_INVALID,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   OrbitGatewayError,
+  ORBIT_RESERVATION_FINALIZED,
   operationPollDelayMs,
   type OrbitGatewayBranchSelection,
   type OrbitGatewayClient,
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
+import { waitForOperationRead, type OrbitOperationNotices } from "./operationNotices.ts";
+import type { OrbitReservationPairing, TakenOrbitReservation } from "./reservations.ts";
 import {
   observeOrbitCreateRows,
   readSavedOrbitCreateRows,
@@ -140,6 +143,13 @@ export interface OrbitThreadStart {
    * Its outcome is saved here, never in `error`, so `connected` and the composer stay as they are.
    */
   readonly completionOperationId?: number | null;
+  /**
+   * Conn: the pre-warmed clone (`OrbitReservations.take`) this start finalizes instead of creating
+   * one; null or missing creates as before. Cleared when the start falls back to a create.
+   */
+  readonly reservationId?: string | null;
+  /** The reserved clone's server, hidden in every list until the finalize succeeded. */
+  readonly reservedEnvironmentId?: string | null;
   /** The key of the last Retry of the completion, saved before the call. */
   readonly completionKey?: string | null;
   readonly completionStatus?: OrbitGatewayOperation["status"] | null;
@@ -252,6 +262,8 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         completionProcessUnit: optionalString(row.completionProcessUnit),
         completionRequires: optionalString(row.completionRequires),
         completionRetryable: row.completionRetryable === true,
+        reservationId: optionalString(row.reservationId),
+        reservedEnvironmentId: optionalString(row.reservedEnvironmentId),
       },
     ];
   });
@@ -350,8 +362,20 @@ export interface OrbitThreadStartPorts {
   readonly now: () => number;
   /** True once the user dismissed the start, or Orbit no longer provides the environments. */
   readonly stopped: () => boolean;
+  /** A dismissal abandons provisional pairing; a pause keeps it for the next run. */
+  readonly dismissed?: (() => boolean) | undefined;
+  readonly reservationPairing?: OrbitReservationPairing | undefined;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
+  /** Lets the draft finish its last reservation read and install before the start reads it. */
+  readonly waitForReservationPairing?:
+    | ((reservationId: string) => Promise<void> | undefined)
+    | undefined;
+  /**
+   * Names checked while the user typed (`createOrbitInstanceNameFits`). A start whose name was
+   * checked already skips the check; any other name is checked at send as before.
+   */
+  readonly nameFits?: OrbitInstanceNameFits | undefined;
   /** Whether the user pressed Cancel while the create was being admitted. */
   readonly cancelRequested?: () => boolean;
   /** The runner cancelled the create Orbit admitted for a Cancel; the start is to be dropped. */
@@ -364,7 +388,11 @@ export interface OrbitThreadStartPorts {
    */
   readonly wake?: (instanceId: number) => Promise<OrbitInstanceWakeOutcome>;
   /** Opens a one-time pairing link and saves the server. */
-  readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
+  readonly connect: (
+    environmentId: string,
+    pairingUrl: string,
+    installId?: string,
+  ) => Promise<void>;
   /**
    * Starts the thread with the first message in the clone's workspace project. It may resolve facts
    * to save with the sent start, such as a model fallback.
@@ -384,6 +412,17 @@ const READ_OUTAGE_MS = 60_000;
 /** A clone's create runs for minutes; a pairing follows #9's `pair` deadline. */
 const CREATE_TIMEOUT_MS = 30 * 60_000;
 const PAIRING_TIMEOUT_MS = OPERATION_TIMEOUT_MS;
+/**
+ * The user waits on the create and the pairing, which end in seconds: Orbit's 2 s hint would see
+ * each end up to 2 s late. Conn reads them this often for their first minute, then by the hint.
+ */
+const WAITED_POLL_MS = 500;
+const WAITED_POLL_WINDOW_MS = 60_000;
+/**
+ * A create seen running this recently ended moments ago, so its clone is awake. After a longer
+ * gap (a sleeping laptop) the clone may sleep too: Conn lists it and wakes it.
+ */
+const CREATED_SERVER_FRESH_MS = 60_000;
 /** How long a pairing admission may keep losing its answer; each try may take up to 60 s. */
 const PAIRING_ADMISSION_MS = 5 * 60_000;
 
@@ -418,6 +457,89 @@ function orbitThreadInstanceNameTries(message: string, suffix: string): string[]
   return [...new Set(names)];
 }
 
+/** A name that fits Orbit's address limits, or a refusal of every shorter try. */
+export type OrbitInstanceNameFit =
+  | { readonly kind: "fits"; readonly name: string }
+  | { readonly kind: "refused" };
+
+/**
+ * Checks the names a message makes, longest first, while Orbit answers `domain_invalid`. Null
+ * when a check failed before any such answer: the name is then left to the create.
+ */
+async function fitOrbitThreadInstanceName(
+  client: Pick<OrbitGatewayClient, "checkInstanceName">,
+  projectId: number,
+  message: string,
+  suffix: string,
+  beforeCheck: () => void = () => {},
+  /** A check that fails after a refusal is unknown (null) instead of refusing every name. */
+  explicitOnly = false,
+): Promise<OrbitInstanceNameFit | null> {
+  let refused = false;
+  for (const name of orbitThreadInstanceNameTries(message, suffix)) {
+    beforeCheck();
+    let answer;
+    try {
+      answer = await client.checkInstanceName(projectId, name);
+    } catch {
+      if (!refused || explicitOnly) return null;
+      break;
+    }
+    if (answer.reason !== "domain_invalid") return { kind: "fits", name };
+    refused = true;
+  }
+  return { kind: "refused" };
+}
+
+/** Conn: the name check of a derived name, run while the user types instead of at send. */
+export interface OrbitInstanceNameFits {
+  /** Checks the names the message makes; the same names are checked once. */
+  readonly prefetch: (projectId: number, message: string, suffix: string) => void;
+  /**
+   * The answer for exactly these names: undefined when never checked, a promise while the check
+   * runs. It resolves null when the check failed, so the send checks again.
+   */
+  readonly lookup: (
+    projectId: number,
+    message: string,
+    suffix: string,
+  ) => Promise<OrbitInstanceNameFit | null> | undefined;
+}
+
+/** Keeps the last few checks; a changed message that makes other names checks again. */
+const NAME_FIT_CACHE_SIZE = 8;
+
+export function createOrbitInstanceNameFits(
+  client: Pick<OrbitGatewayClient, "checkInstanceName">,
+): OrbitInstanceNameFits {
+  const checks = new Map<string, Promise<OrbitInstanceNameFit | null>>();
+  const key = (projectId: number, message: string, suffix: string) =>
+    `${projectId}\n${orbitThreadInstanceNameTries(message, suffix).join("\n")}`;
+  return {
+    prefetch: (projectId, message, suffix) => {
+      if (message.trim() === "") return;
+      const id = key(projectId, message, suffix);
+      if (checks.has(id)) return;
+      // Kept only when Orbit answered: a refusal is cached only if it refused every name.
+      const check = fitOrbitThreadInstanceName(
+        client,
+        projectId,
+        message,
+        suffix,
+        undefined,
+        true,
+      ).catch(() => null);
+      checks.set(id, check);
+      // A failed check is not kept: the send or the next keystroke checks again.
+      void check.then((fit) => {
+        if (fit === null && checks.get(id) === check) checks.delete(id);
+      });
+      while (checks.size > NAME_FIT_CACHE_SIZE) checks.delete(checks.keys().next().value!);
+    },
+    lookup: (projectId, message, suffix) => checks.get(key(projectId, message, suffix)),
+  };
+}
+
 export function newOrbitThreadStart(input: {
   readonly id: string;
   readonly project: Pick<OrbitGatewayProject, "id" | "slug" | "nodeName">;
@@ -440,6 +562,8 @@ export function newOrbitThreadStart(input: {
   /** A new Instance only; ignored for an existing one. */
   readonly branch?: OrbitGatewayBranchSelection | null;
   readonly defaultBranch?: string | null;
+  /** A new Instance only: the reservation the send took, finalized instead of a create. */
+  readonly reservation?: TakenOrbitReservation | null;
 }): OrbitThreadStart {
   const existing = input.existing;
   return {
@@ -490,7 +614,32 @@ export function newOrbitThreadStart(input: {
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
     createRows: null,
     completionOperationId: null,
+    reservationId: existing ? null : (input.reservation?.reservationId ?? null),
+    reservedEnvironmentId: existing ? null : (input.reservation?.environmentId ?? null),
   };
+}
+
+/**
+ * The reserved clone's server while the start finalizes it, or null. Lists hide it until then, as
+ * they hide every reserved clone.
+ */
+export function orbitThreadStartHiddenEnvironmentId(start: OrbitThreadStart): string | null {
+  return start.reservationId && start.environmentId === null
+    ? (start.reservedEnvironmentId ?? null)
+    : null;
+}
+
+/** Reservations whose pending start was removed. A finalized server belongs to the catalog. */
+export function dismissedOrbitReservationIds(
+  previous: readonly OrbitThreadStart[],
+  current: readonly OrbitThreadStart[],
+): string[] {
+  const remaining = new Set(current.map((start) => start.id));
+  return previous.flatMap((start) =>
+    start.reservationId && start.environmentId === null && !remaining.has(start.id)
+      ? [start.reservationId]
+      : [],
+  );
 }
 
 /** The step a start is at, for display. */
@@ -635,6 +784,34 @@ function isAdmissionRefusal(error: unknown): error is OrbitGatewayError {
   return isOrbitGatewayError(error) && ADMISSION_REFUSALS.has(error.code);
 }
 
+/** The reservation is gone for this caller: released, expired, or another's. */
+function isReservationGone(error: unknown): boolean {
+  return (
+    isOrbitGatewayError(error) &&
+    (error.status === 404 ||
+      error.status === 410 ||
+      (error.code.startsWith("reservation.") && error.code !== ORBIT_RESERVATION_FINALIZED))
+  );
+}
+
+/**
+ * A finalize ends about a second after its admission: the start reads it this often for its first
+ * 2 s, then as any waited Operation.
+ */
+const FINALIZE_POLL_MS = 200;
+const FAST_POLL_WINDOW_MS = 2_000;
+
+/** A finalize that succeeded, and when it was last seen admitted or running (null after a resume). */
+interface FinalizedReservation {
+  readonly operation: OrbitGatewayOperation;
+  readonly runningSeenAt: number | null;
+}
+
+/** How often a start waits on a reservation that is still preparing (a read is cheap). */
+const RESERVATION_POLL_MS = 500;
+/** How long a start waits for a reservation to become ready before it creates instead. */
+const RESERVATION_WAIT_MS = 2 * 60_000;
+
 /**
  * Runs a start from its last saved step to the sent message. Resolves `true` once the message is
  * sent; otherwise it saves the start with `error` set and resolves `false`.
@@ -673,34 +850,59 @@ export async function runOrbitThreadStart(
     ) => StepFailed,
     observe?: (operation: OrbitGatewayOperation) => void,
     beforeRead?: () => Promise<void>,
+    /** Reads this often for the first `FAST_POLL_WINDOW_MS`, for an Operation that ends in about a second. */
+    fastPollMs?: number,
   ): Promise<OrbitGatewayOperation> => {
     const deadline = ports.now() + timeoutMs;
+    const fastUntil = ports.now() + WAITED_POLL_WINDOW_MS;
+    const fastestUntil = ports.now() + FAST_POLL_WINDOW_MS;
     let outageSince: number | null = null;
-    for (;;) {
-      checkStopped();
-      await beforeRead?.();
-      let operation;
-      try {
-        operation = await ports.client.operation(operationId);
-        outageSince = null;
-        observe?.(operation);
-      } catch (error) {
-        // A create runs for minutes; a short Gateway outage must not stop it.
-        outageSince ??= ports.now();
-        if (!isTransient(error) || ports.now() - outageSince >= READ_OUTAGE_MS) throw error;
-        operation = null;
+    let lastHint: number | null = null;
+    let sequence: number | null = null;
+    const notices = ports.client.operationNotices?.(operationId) ?? null;
+    try {
+      for (;;) {
+        checkStopped();
+        await beforeRead?.();
+        let operation;
+        try {
+          operation = await ports.client.operation(operationId);
+          outageSince = null;
+          sequence = operation.sequence ?? sequence;
+          observe?.(operation);
+        } catch (error) {
+          // A create runs for minutes; a short Gateway outage must not stop it.
+          outageSince ??= ports.now();
+          if (!isTransient(error) || ports.now() - outageSince >= READ_OUTAGE_MS) throw error;
+          operation = null;
+        }
+        if (operation?.status === "succeeded") return operation;
+        if (operation && OPERATION_TERMINAL_STATUSES.has(operation.status)) {
+          throw failed(
+            operation.errorCode ?? `operation.${operation.status}`,
+            operation.error?.detail ?? null,
+            operation,
+          );
+        }
+        if (ports.now() >= deadline) throw failed("operation.timeout", null, null);
+        if (operation !== null) lastHint = operation.pollAfterSeconds ?? lastHint;
+        // A failed read keeps the last hint, so a failing Gateway is not read faster.
+        const hinted = operationPollDelayMs(lastHint);
+        const waited =
+          fastPollMs !== undefined && ports.now() < fastestUntil ? fastPollMs : WAITED_POLL_MS;
+        const wait =
+          operation !== null && ports.now() < fastUntil ? Math.min(hinted, waited) : hinted;
+        // A failed read retries on the poll wait; the next notice may never come.
+        await waitForOperationRead({
+          notices: operation === null ? null : notices,
+          sequence,
+          pollMs: wait,
+          maxMs: deadline - ports.now(),
+          sleep: ports.sleep,
+        });
       }
-      if (operation?.status === "succeeded") return operation;
-      if (operation && OPERATION_TERMINAL_STATUSES.has(operation.status)) {
-        throw failed(
-          operation.errorCode ?? `operation.${operation.status}`,
-          operation.error?.detail ?? null,
-          operation,
-        );
-      }
-      if (ports.now() >= deadline) throw failed("operation.timeout", null, null);
-      const wait = operationPollDelayMs(operation?.pollAfterSeconds ?? null);
-      await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
+    } finally {
+      notices?.stop();
     }
   };
 
@@ -747,30 +949,235 @@ export async function runOrbitThreadStart(
    * leaves the name to the create; after one, or when no name fits, the start stops.
    */
   const fitDerivedName = async (suffix: string) => {
-    let refused = false;
-    for (const name of orbitThreadInstanceNameTries(current.message, suffix)) {
-      checkStopped();
-      let answer;
-      try {
-        answer = await ports.client.checkInstanceName(current.projectId, name);
-      } catch {
-        if (!refused) return;
-        break;
-      }
-      if (answer.reason !== "domain_invalid") {
-        if (name !== current.instanceName) update({ instanceName: name });
-        return;
-      }
-      refused = true;
+    // The check that ran while the user typed, for these names; else it runs now.
+    const typed = await ports.nameFits?.lookup(current.projectId, current.message, suffix);
+    checkStopped();
+    const fit =
+      typed ??
+      (await fitOrbitThreadInstanceName(
+        ports.client,
+        current.projectId,
+        current.message,
+        suffix,
+        checkStopped,
+      ));
+    if (fit === null) return;
+    if (fit.kind === "refused") {
+      throw stepFailed(ORBIT_NAME_DOMAIN_INVALID_TEXT, {}, ORBIT_ROUTE_DOMAIN_INVALID);
     }
-    throw stepFailed(ORBIT_NAME_DOMAIN_INVALID_TEXT, {}, ORBIT_ROUTE_DOMAIN_INVALID);
+    if (fit.name !== current.instanceName) update({ instanceName: fit.name });
+  };
+
+  /**
+   * Conn: a start with a reservation, before the create. It no longer holds one: the create runs as
+   * before, with nothing on screen. Orbit removes the clone of a released reservation.
+   */
+  const abandonReservation = (reservationId: string) => {
+    if (ports.reservationPairing) return ports.reservationPairing.abandon(reservationId);
+    void ports.client.releaseReservation(reservationId).catch(() => null);
+  };
+
+  const fallBackToCreate = async () => {
+    const reservationId = current.reservationId;
+    if (reservationId) await abandonReservation(reservationId);
+    checkStopped();
+    update({
+      reservationId: null,
+      reservedEnvironmentId: null,
+      createOperationId: null,
+      createKey: null,
+      createStartedAt: null,
+      createRows: null,
+      instanceId: null,
+    });
+  };
+
+  /**
+   * Conn: finalizes the start's reservation with the typed name and branch. Returns the succeeded
+   * Operation, or null when the start must create instead (reservation expired, failed, gone, or
+   * its finalize failed). Refusals of the name or branch stop the start as a create's would.
+   */
+  const finalizeReservation = async (deadline: number): Promise<FinalizedReservation | null> => {
+    const reservationId = current.reservationId!;
+    let admittedAt: number | null = null;
+    if (current.createOperationId === null) {
+      await ports.waitForReservationPairing?.(reservationId);
+      const reserved = current.reservedEnvironmentId ?? null;
+      // The draft paired with the clone once it was ready: no read is needed before the finalize.
+      // A reservation that ended since is refused by the finalize, which falls back as below.
+      const pairedWhileTyping = reserved !== null && ports.isSaved(reserved);
+      // Wait until the clone is ready; a reservation that cannot become ready soon falls back.
+      const readyBy = Math.min(deadline, ports.now() + RESERVATION_WAIT_MS);
+      let instanceId: number | null = null;
+      // A preparing reservation is ready once its create Operation succeeds: wait on its notices.
+      let createNotices: OrbitOperationNotices | null = null;
+      try {
+        while (!pairedWhileTyping) {
+          checkStopped();
+          let reservation;
+          try {
+            reservation = await ports.client.reservation(reservationId);
+          } catch (error) {
+            if (isReservationGone(error) || !isTransient(error)) return null;
+            reservation = null;
+          }
+          if (reservation !== null) {
+            if (reservation.id !== reservationId || reservation.projectId !== current.projectId) {
+              return null;
+            }
+            const replay = reservation.state === "finalized" && current.createKey != null;
+            if (reservation.state === "ready" || reservation.state === "finalizing" || replay) {
+              instanceId = reservation.instanceId;
+              checkStopped();
+              const { environmentId, pairing } = reservation;
+              if (environmentId !== null) update({ reservedEnvironmentId: environmentId });
+              checkStopped();
+              if (
+                reservation.state === "ready" &&
+                pairing !== null &&
+                environmentId === pairing.environmentId &&
+                !ports.isSaved(environmentId)
+              ) {
+                // GET hands out the link once. Install it in memory before continuing the start.
+                try {
+                  const connect = (installId?: string) =>
+                    ports.connect(environmentId, pairing.pairingUrl, installId);
+                  if (ports.reservationPairing) {
+                    await ports.reservationPairing.installPairing(
+                      reservationId,
+                      environmentId,
+                      connect,
+                    );
+                  } else {
+                    await connect();
+                  }
+                } catch {
+                  // Pair explicitly after finalize if the server was not saved.
+                }
+              }
+              break;
+            }
+            if (reservation.state !== "preparing") return null;
+            if (createNotices === null && reservation.createOperationId !== null) {
+              createNotices =
+                ports.client.operationNotices?.(reservation.createOperationId) ?? null;
+            }
+          }
+          if (ports.now() >= readyBy) return null;
+          await waitForOperationRead({
+            notices: reservation === null ? null : createNotices,
+            sequence: null,
+            pollMs: RESERVATION_POLL_MS,
+            maxMs: readyBy - ports.now(),
+            sleep: ports.sleep,
+          });
+        }
+      } finally {
+        createNotices?.stop();
+      }
+      checkStopped();
+      // A name made from the message fits Orbit's address limits, as for a create.
+      if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
+      /** A key saved by an earlier run: the finalize below may replay its Operation. */
+      const replayKey = current.createKey != null;
+      const begin = current.createKey
+        ? stamp("createStartedAt")
+        : {
+            createKey: newKey("finalize"),
+            createStartedAt: ports.now(),
+            createFinishedAt: null,
+            createRows: null,
+          };
+      if (Object.keys(begin).length > 0) update(begin);
+      let operation;
+      try {
+        operation = await admit(deadline, () =>
+          ports.client.finalizeReservation(
+            reservationId,
+            current.instanceName,
+            current.createKey!,
+            current.branch ?? null,
+          ),
+        );
+      } catch (error) {
+        if (isAdmissionRefusal(error)) {
+          throw new StepFailed({
+            message:
+              error.code === ORBIT_ROUTE_DOMAIN_INVALID
+                ? ORBIT_NAME_DOMAIN_INVALID_TEXT
+                : error.message,
+            code: error.code,
+            reset: { createKey: null },
+            details: error.details,
+          });
+        }
+        if (isOrbitGatewayError(error) && !isLostAdmission(error)) return null;
+        throw error;
+      }
+      // Only a finalize this call admitted counts as seen just now: a replay under a saved key may
+      // return one that ended long ago, whose clone may sleep since.
+      admittedAt =
+        replayKey || OPERATION_TERMINAL_STATUSES.has(operation.status) ? null : ports.now();
+      update({ createOperationId: operation.id, instanceId: instanceId ?? operation.targetId });
+      await cancelIfRequested(operation.id);
+    }
+    try {
+      const followed = await followCreate(deadline, FINALIZE_POLL_MS);
+      return {
+        operation: followed.operation,
+        runningSeenAt: followed.runningSeenAt ?? admittedAt,
+      };
+    } catch (error) {
+      // A finalize that failed leaves the send to a create; a timeout stops as a create's would.
+      if (isStepFailed(error) && error.code !== "operation.timeout") return null;
+      throw error;
+    }
+  };
+
+  const followCreate = async (deadline: number, fastPollMs?: number) => {
+    let runningSeenAt: number | null = null;
+    const operation = await follow(
+      current.createOperationId!,
+      deadline - ports.now(),
+      (code, detail, operation) =>
+        stepFailed(
+          `Orbit could not create the clone (${code}).`,
+          {
+            ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
+            errorProcessUnit: operation?.processFailureUnit ?? null,
+            errorRecoveryRequires: operation?.recoveryRequires ?? null,
+          },
+          code,
+          detail,
+        ),
+      (operation) => {
+        if (!OPERATION_TERMINAL_STATUSES.has(operation.status)) runningSeenAt = ports.now();
+        const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
+        if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
+        ports.onCreateOperation?.(operation);
+      },
+      () => cancelIfRequested(current.createOperationId!),
+      fastPollMs,
+    );
+    return { operation, runningSeenAt: runningSeenAt as number | null };
   };
 
   try {
     checkStopped();
     if (current.environmentId === null) {
-      const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
-      if (current.createOperationId === null) {
+      let createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+      let finalized: FinalizedReservation | null = null;
+      if (current.reservationId && current.orbitInstanceKind !== "existing") {
+        finalized = await finalizeReservation(createDeadline);
+        if (finalized === null) {
+          await fallBackToCreate();
+          // The create gets its full time, whatever the reservation took.
+          createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+        } else {
+          await ports.reservationPairing?.commitPairing(current.reservationId);
+        }
+      }
+      if (finalized === null && current.createOperationId === null) {
         if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
         // A new key is a new attempt (first try, a new name, or after a failed create): its time
         // counts from now. A repeat under the saved key keeps the first time.
@@ -821,40 +1228,40 @@ export async function runOrbitThreadStart(
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
-      const created = await follow(
-        current.createOperationId!,
-        createDeadline - ports.now(),
-        (code, detail, operation) =>
-          stepFailed(
-            `Orbit could not create the clone (${code}).`,
-            {
-              ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
-              errorProcessUnit: operation?.processFailureUnit ?? null,
-              errorRecoveryRequires: operation?.recoveryRequires ?? null,
-            },
-            code,
-            detail,
-          ),
-        (operation) => {
-          const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
-          if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
-          ports.onCreateOperation?.(operation);
-        },
-        () => cancelIfRequested(current.createOperationId!),
-      );
-      const server = (await ports.client.environments()).find(
-        (environment) => environment.instanceId === current.instanceId,
-      );
-      if (!server) {
-        throw stepFailed("Orbit created the clone but lists no T3 server for it.", {});
-      }
-      if (server.status !== "registered") {
-        throw stepFailed("The clone's T3 server registration expired.", {});
-      }
-      if (server.powerState === "stopped") await wakeClone(ports, current.instanceId!);
+      const { operation: created, runningSeenAt } =
+        finalized ?? (await followCreate(createDeadline));
       const result = created.result ?? null;
+      const t3 = result?.t3;
+      // A finalize keeps the reserved clone's server, which the draft paired with.
+      const createdServer = finalized
+        ? (current.reservedEnvironmentId ?? null)
+        : typeof t3 === "object" && t3 !== null && "environment_id" in t3
+          ? t3.environment_id
+          : null;
+      let environmentId: string;
+      if (
+        runningSeenAt !== null &&
+        ports.now() - runningSeenAt < CREATED_SERVER_FRESH_MS &&
+        typeof createdServer === "string"
+      ) {
+        // The create ended moments ago: its server was registered and started just now.
+        environmentId = createdServer;
+      } else {
+        const server = (await ports.client.environments()).find(
+          (environment) => environment.instanceId === current.instanceId,
+        );
+        if (!server) {
+          throw stepFailed("Orbit created the clone but lists no Conn Server for it.", {});
+        }
+        if (server.status !== "registered") {
+          throw stepFailed("The clone's Conn Server registration expired.", {});
+        }
+        if (server.powerState === "stopped") await wakeClone(ports, current.instanceId!);
+        environmentId = server.environmentId;
+      }
       update({
-        environmentId: server.environmentId,
+        environmentId,
+        reservedEnvironmentId: null,
         resultBranch: typeof result?.branch === "string" ? result.branch : null,
         resultBaseBranch: typeof result?.base_branch === "string" ? result.base_branch : null,
         // The completion runs on; the thread opens without waiting for it.
@@ -938,7 +1345,12 @@ export async function runOrbitThreadStart(
     return true;
   } catch (error) {
     // A start stopped mid-step ends without an error, so it resumes if it comes back.
-    if (isStopped(error) || ports.stopped()) return false;
+    if (isStopped(error) || ports.stopped()) {
+      if (current.reservationId && current.environmentId === null && ports.dismissed?.()) {
+        await abandonReservation(current.reservationId);
+      }
+      return false;
+    }
     // A create that timed out, or lost the Gateway, stops the row that ran at this time.
     const stoppedRows =
       current.environmentId === null && (!isStepFailed(error) || error.code === "operation.timeout")

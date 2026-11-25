@@ -3,8 +3,8 @@
 //!
 //! Like the T3 CLI, a command finds the running server through `server-runtime.json`, issues
 //! itself a short MCP client session in the shared auth store, calls the server's own `/mcp`
-//! tools (`t3_project_list`, `t3_thread_launch`, `t3_thread_send`, `t3_thread_wait`,
-//! `t3_thread_read`, `t3_thread_list`) and revokes the session before it exits. Output, error
+//! tools (`conn_project_list`, `conn_thread_launch`, `conn_thread_send`, `conn_thread_wait`,
+//! `conn_thread_read`, `conn_thread_list`) and revokes the session before it exits. Output, error
 //! texts and exit codes follow the T3 CLI: 0 done, 1 failed, 2 the run waits for an answer.
 //!
 //! The CLI is its own short process with no async runtime, so it uses blocking I/O.
@@ -20,7 +20,7 @@ use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 
 use crate::{
-    auth::{AuthStore, SESSION_TTL_MS, SessionRequest},
+    auth::{AuthStore, ClientInfo},
     home,
 };
 
@@ -39,15 +39,8 @@ const TERMINAL_RUN_STATUSES: [&str; 5] = [
     "rolled_back",
 ];
 
-/// `issueMcpClientSession` with `access: "full-access"`: the scopes, subject and label the
-/// T3 CLI's own session carries. Revoked when the command ends.
-const SESSION_SCOPES: [&str; 4] = [
-    "orchestration:read",
-    "orchestration:operate",
-    "settings:write",
-    "source-control:write",
-];
-const SESSION_SUBJECT: &str = "mcp-client";
+/// `issueMcpClientSession` with `access: "full-access"`: the scopes, subject, runtime ceiling
+/// and label the T3 CLI's own session carries. Revoked when the command ends.
 const SESSION_LABEL: &str = "t3 thread cli";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const CLIENT_NAME: &str = "t3-thread-cli";
@@ -125,17 +118,17 @@ fn execute(state_dir: &Path, command: ThreadCommand) -> Outcome<()> {
             let mut cursor = Some(0u64);
             while let Some(at) = cursor {
                 let page = tools.call(
-                    "t3_thread_list",
+                    "conn_thread_list",
                     json!({"projectId": project.id, "includeSubagents": false, "limit": 100, "cursor": at}),
                 )?;
                 let Some(items) = page.get("threads").and_then(Value::as_array) else {
-                    return Err(unexpected("t3_thread_list"));
+                    return Err(unexpected("conn_thread_list"));
                 };
                 threads.extend(items.iter().cloned());
-                cursor = next_cursor(&page, "t3_thread_list")?;
+                cursor = next_cursor(&page, "conn_thread_list")?;
             }
             if json {
-                let schema = tool_output_schema("t3_thread_list");
+                let schema = tool_output_schema("conn_thread_list");
                 let item = schema
                     .as_ref()
                     .and_then(|s| s.path(&["properties", "threads"]));
@@ -197,17 +190,17 @@ fn execute(state_dir: &Path, command: ThreadCommand) -> Outcome<()> {
                 if let Some(selection) = &model_selection {
                     args["modelSelection"] = selection.clone();
                 }
-                let launched = tools.call("t3_thread_launch", args)?;
+                let launched = tools.call("conn_thread_launch", args)?;
                 let (Some(thread_id), Some(project_id)) = (
                     launched.get("threadId").and_then(Value::as_str),
                     launched.get("projectId").and_then(Value::as_str),
                 ) else {
-                    return Err(unexpected("t3_thread_launch"));
+                    return Err(unexpected("conn_thread_launch"));
                 };
                 let run_id = match launched.get("runId") {
                     Some(Value::String(id)) => Some(id.as_str()),
                     Some(Value::Null) => None,
-                    _ => return Err(unexpected("t3_thread_launch")),
+                    _ => return Err(unexpected("conn_thread_launch")),
                 };
                 if wait && let Some(run_id) = run_id {
                     if !json {
@@ -243,17 +236,17 @@ fn execute(state_dir: &Path, command: ThreadCommand) -> Outcome<()> {
                     false
                 };
                 let sent = tools.call(
-                    "t3_thread_send",
+                    "conn_thread_send",
                     json!({"threadId": thread_id, "message": message, "mode": "queue"}),
                 )?;
                 let Some(run_id) = sent.get("runId").and_then(Value::as_str) else {
-                    return Err(unexpected("t3_thread_send"));
+                    return Err(unexpected("conn_thread_send"));
                 };
                 if wait {
                     return finish_run(tools, &thread_id, run_id, json, follow_wakes);
                 }
                 if json {
-                    let schema = tool_output_schema("t3_thread_send");
+                    let schema = tool_output_schema("conn_thread_send");
                     print_line(&ordered(&sent, schema.as_ref()));
                 } else if sent.get("delivery").and_then(Value::as_str) == Some("queued") {
                     print_line("Queued.");
@@ -286,7 +279,7 @@ fn execute(state_dir: &Path, command: ThreadCommand) -> Outcome<()> {
                     ));
                 }
                 if json {
-                    let schema = tool_output_schema("t3_thread_read");
+                    let schema = tool_output_schema("conn_thread_read");
                     let detail = schema
                         .as_ref()
                         .and_then(|s| s.path(&["properties", "thread"]));
@@ -346,7 +339,7 @@ fn execute(state_dir: &Path, command: ThreadCommand) -> Outcome<()> {
 fn with_tools<T>(state_dir: &Path, work: impl FnOnce(&mut Tools) -> Outcome<T>) -> Outcome<T> {
     let Some(runtime) = home::read_runtime_state(state_dir) else {
         return Err(Exit::fail(format!(
-            "No running T3 Code server uses {}. Start T3 Code, then retry.",
+            "No running Conn Server uses {}. Start Conn, then retry.",
             base_dir(state_dir).display()
         )));
     };
@@ -354,12 +347,13 @@ fn with_tools<T>(state_dir: &Path, work: impl FnOnce(&mut Tools) -> Outcome<T>) 
     let auth = AuthStore::open(auth_path.clone())
         .map_err(|e| Exit::fail(format!("could not read {}: {e}", auth_path.display())))?;
     let issued = auth
-        .issue_session(SessionRequest {
-            scopes: SESSION_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
-            label: Some(SESSION_LABEL.into()),
-            subject: Some(SESSION_SUBJECT.into()),
-            ttl_ms: SESSION_TTL_MS,
-        })
+        .issue_mcp_client_session(
+            SESSION_LABEL,
+            "full-access",
+            false,
+            ClientInfo::default(),
+            crate::auth::MCP_CLIENT_SESSION_TTL_MS,
+        )
         .map_err(|e| Exit::fail(format!("could not issue a session: {e}")))?;
     let mut tools = Tools {
         client: McpClient::new(&runtime.origin, &issued.token),
@@ -392,7 +386,7 @@ struct Tools {
 impl Tools {
     fn unreachable(&self, cause: &str) -> Exit {
         Exit::fail(format!(
-            "Could not reach the T3 Code server at {}. {cause}",
+            "Could not reach the Conn Server at {}. {cause}",
             self.origin
         ))
     }
@@ -536,9 +530,9 @@ impl McpClient {
         match envelope {
             Some(envelope) => match envelope.get("error") {
                 None => Ok(envelope),
-                Some(error) => Err(format!("T3 Code MCP {method} failed: {error}")),
+                Some(error) => Err(format!("Conn MCP {method} failed: {error}")),
             },
-            None => Err(format!("T3 Code MCP {method} failed.")),
+            None => Err(format!("Conn MCP {method} failed.")),
         }
     }
 
@@ -550,7 +544,7 @@ impl McpClient {
         }
         if !(200..300).contains(&reply.status) {
             return Err(format!(
-                "T3 Code MCP endpoint responded with HTTP {}.",
+                "Conn MCP endpoint responded with HTTP {}.",
                 reply.status
             ));
         }
@@ -569,7 +563,7 @@ impl McpClient {
             }
         } else if !body.trim().is_empty() {
             let payload: Value = serde_json::from_str(body.trim())
-                .map_err(|_| "T3 Code MCP endpoint sent a body that is not JSON.".to_owned())?;
+                .map_err(|_| "Conn MCP endpoint sent a body that is not JSON.".to_owned())?;
             match payload {
                 Value::Array(batch) => payloads.extend(batch),
                 single => payloads.push(single),
@@ -743,9 +737,9 @@ fn list_all_projects(tools: &mut Tools) -> Outcome<Vec<Project>> {
     let mut projects = Vec::new();
     let mut cursor = Some(0u64);
     while let Some(at) = cursor {
-        let page = tools.call("t3_project_list", json!({"cursor": at, "limit": 100}))?;
+        let page = tools.call("conn_project_list", json!({"cursor": at, "limit": 100}))?;
         let Some(items) = page.get("projects").and_then(Value::as_array) else {
-            return Err(unexpected("t3_project_list"));
+            return Err(unexpected("conn_project_list"));
         };
         for item in items {
             let (Some(id), Some(title), Some(root)) = (
@@ -753,7 +747,7 @@ fn list_all_projects(tools: &mut Tools) -> Outcome<Vec<Project>> {
                 item.get("title").and_then(Value::as_str),
                 item.get("workspaceRoot").and_then(Value::as_str),
             ) else {
-                return Err(unexpected("t3_project_list"));
+                return Err(unexpected("conn_project_list"));
             };
             projects.push(Project {
                 id: id.to_owned(),
@@ -761,7 +755,7 @@ fn list_all_projects(tools: &mut Tools) -> Outcome<Vec<Project>> {
                 workspace_root: root.to_owned(),
             });
         }
-        cursor = next_cursor(&page, "t3_project_list")?;
+        cursor = next_cursor(&page, "conn_project_list")?;
     }
     Ok(projects)
 }
@@ -773,7 +767,7 @@ fn resolve_project(tools: &mut Tools, identifier: &str) -> Outcome<Project> {
     let projects = list_all_projects(tools)?;
     let not_found = || {
         Exit::fail(format!(
-            "No T3 Code project matches '{identifier}'. Pass a project id or a path inside a project."
+            "No Conn project matches '{identifier}'. Pass a project id or a path inside a project."
         ))
     };
     if let Some(index) = projects.iter().position(|p| p.id == identifier) {
@@ -946,7 +940,7 @@ fn parse_worktree_records(stdout: &str) -> Vec<String> {
 // Reading a thread
 
 fn read(tools: &mut Tools, arguments: Value) -> Outcome<Value> {
-    let page = tools.call("t3_thread_read", arguments)?;
+    let page = tools.call("conn_thread_read", arguments)?;
     let valid = page.get("thread").is_some_and(Value::is_object)
         && page.get("recentRuns").is_some_and(Value::is_array)
         && page.get("items").is_some_and(Value::is_array)
@@ -954,7 +948,7 @@ fn read(tools: &mut Tools, arguments: Value) -> Outcome<Value> {
     if valid {
         Ok(page)
     } else {
-        Err(unexpected("t3_thread_read"))
+        Err(unexpected("conn_thread_read"))
     }
 }
 
@@ -1132,17 +1126,17 @@ struct Waited {
 }
 
 fn wait_call(tools: &mut Tools, arguments: Value) -> Outcome<Waited> {
-    let waited = tools.call("t3_thread_wait", arguments)?;
+    let waited = tools.call("conn_thread_wait", arguments)?;
     let run_id = match waited.get("runId") {
         Some(Value::String(id)) => Some(id.clone()),
         Some(Value::Null) => None,
-        _ => return Err(unexpected("t3_thread_wait")),
+        _ => return Err(unexpected("conn_thread_wait")),
     };
     let (Some(status), Some(timed_out)) = (
         waited.get("status").and_then(Value::as_str),
         waited.get("timedOut").and_then(Value::as_bool),
     ) else {
-        return Err(unexpected("t3_thread_wait"));
+        return Err(unexpected("conn_thread_wait"));
     };
     let result_run = waited.get("resultRun").and_then(|r| {
         Some((
@@ -1382,7 +1376,7 @@ fn finish_run(
         return Err(Exit {
             code: 2,
             message: format!(
-                "Thread {thread_id} is waiting for an answer. Open it in T3 Code to respond."
+                "Thread {thread_id} is waiting for an answer. Open it in Conn to respond."
             ),
         });
     }
@@ -1634,14 +1628,14 @@ mod tests {
     fn the_catalog_has_the_schemas_the_cli_prints() {
         for (tool, path) in [
             (
-                "t3_thread_list",
+                "conn_thread_list",
                 vec!["properties", "threads", "items", "properties", "threadId"],
             ),
             (
-                "t3_thread_read",
+                "conn_thread_read",
                 vec!["properties", "thread", "properties", "pendingRequestCount"],
             ),
-            ("t3_thread_send", vec!["properties", "delivery"]),
+            ("conn_thread_send", vec!["properties", "delivery"]),
         ] {
             let schema = tool_output_schema(tool).unwrap();
             assert!(schema.path(&path).is_some(), "{tool}");

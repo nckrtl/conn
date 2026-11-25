@@ -515,8 +515,10 @@ function PullRequestBadge({
 export function ThreadPullRequestsMiniList({
   pullRequests,
   onOpenPullRequest,
+  className,
 }: {
   pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  className?: string;
   onOpenPullRequest?: (event: MouseEvent<HTMLAnchorElement>, url: string) => void;
 }) {
   const lines = pipe(
@@ -526,7 +528,7 @@ export function ThreadPullRequestsMiniList({
   );
   if (lines.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-1">
+    <ul className={cn("flex flex-col gap-1", className)}>
       {lines.map((line) => {
         const snapshot = line.link.snapshot;
         const presentation =
@@ -582,7 +584,7 @@ function ThreadPullRequestMiniListItem({
     <>
       <Icon
         aria-hidden
-        className={cn("size-3 shrink-0", presentation?.toneClassName ?? "stroke-muted-foreground")}
+        className={cn("size-3 shrink-0", presentation?.toneClassName ?? "text-muted-foreground")}
       />
       <span className="shrink-0 font-mono tabular-nums">#{number}</span>
       <span className="min-w-0 truncate text-foreground/75">{title}</span>

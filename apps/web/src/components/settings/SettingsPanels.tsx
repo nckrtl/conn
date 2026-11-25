@@ -39,7 +39,6 @@ import * as Schema from "effect/Schema";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import { AboutVersionTitle } from "./AboutVersionTitle";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
-import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -125,7 +124,6 @@ import { StorageCleanupSections } from "./StorageSettings";
 import { UpdateTrackSwitchDialog } from "./UpdateTrackSwitchDialog";
 import { environmentIdsKey } from "~/state/environmentAtomList";
 import { environmentSessionStatesAtom } from "~/state/session";
-import { useCheckProviderUpdates } from "../ProviderUpdatesAction";
 import { canUpdateServer } from "../ServerUpdateAction";
 import { downloadLocalUpdate } from "../sidebar/SidebarUpdatePill";
 import { useUpdateEverythingRun } from "../sidebar/updateEverythingRun";
@@ -183,7 +181,6 @@ function AboutVersionSection() {
   );
   // A second run would replace the first run's progress and local download.
   const updateRun = useUpdateEverythingRun();
-  const checkProviderUpdates = useCheckProviderUpdates();
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
@@ -275,7 +272,6 @@ function AboutVersionSection() {
     }
 
     if (typeof bridge.checkForUpdate !== "function") return;
-    void checkProviderUpdates();
     void bridge
       .checkForUpdate()
       .then((result) => {
@@ -592,9 +588,6 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.responseStreamingMode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode
       ? [gt("Response streaming")]
       : []),
-    ...(settings.enableProviderUpdateChecks !== DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
-      ? [gt("Provider update checks")]
-      : []),
     ...(settings.continueThreadsAfterServerUpdate !==
     DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
       ? [gt("Continue threads after restarts")]
@@ -730,7 +723,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       snoozePresets: DEFAULT_UNIFIED_SETTINGS.snoozePresets,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
-      enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       keepAwakeWhileAgentsWork: DEFAULT_UNIFIED_SETTINGS.keepAwakeWhileAgentsWork,
@@ -2352,37 +2344,6 @@ export function MaintenanceSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="updates" title={gt("Updates")}>
         <SettingsRow
-          serverScoped
-          settingKeys={["enableProviderUpdateChecks"]}
-          {...setting("provider-update-checks")}
-          description={gt(
-            "Check installed provider CLIs for newer available versions and fetch model catalog updates. When off, new models may not appear.",
-          )}
-          resetAction={
-            settings.enableProviderUpdateChecks !==
-            DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
-              <SettingResetButton
-                ariaLabel={gt("Reset provider update checks to default")}
-                onClick={() =>
-                  updateSettings({
-                    enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["enableProviderUpdateChecks"]}
-              checked={settings.enableProviderUpdateChecks}
-              onCheckedChange={(checked) =>
-                updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
-              }
-              aria-label={gt("Check provider versions")}
-            />
-          }
-        />
-        <SettingsRow
           {...setting("continue-threads-after-server-update")}
           serverScoped
           settingKeys={["continueThreadsAfterServerUpdate"]}
@@ -2529,7 +2490,6 @@ export function AboutSettingsPanel() {
             />
           </>
         )}
-        <MobileAppSettingsRow />
         {primaryEnvironmentId === null ? null : (
           <SettingsRow
             {...setting("welcome-page")}

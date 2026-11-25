@@ -49,6 +49,22 @@ NodeFS.writeFileSync(
   JSON.stringify({ providerInstances: { codex: { driver: "codex", enabled: false } } }),
 );
 const serverEnv = { ...sealedEnv(stateDir), CONN_CODEX_STATUS_PROBE: "on" };
+// A stand-in `ssh` that refuses every connection: `device.testHost` gets its typed error and
+// no check reaches a network host.
+const sshStub = NodePath.join(stateDir, "ssh-stub");
+NodeFS.mkdirSync(sshStub, { recursive: true });
+NodeFS.writeFileSync(
+  NodePath.join(sshStub, "ssh"),
+  [
+    "#!/bin/sh",
+    'for arg in "$@"; do [ "$arg" = -G ] && { printf "hostname 192.0.2.10\\nport 22\\n"; exit 0; }; done',
+    'echo "ssh: connect to host 192.0.2.10 port 22: Connection refused" >&2',
+    "exit 255",
+    "",
+  ].join("\n"),
+  { mode: 0o755 },
+);
+serverEnv.PATH = `${sshStub}:${serverEnv.PATH}`;
 const workflowScript = NodePath.join(serverEnv.HOME, ".claude", "projects", "effect-client.js");
 NodeFS.mkdirSync(NodePath.dirname(workflowScript), { recursive: true });
 NodeFS.writeFileSync(workflowScript, "// workflow script fixture\n");
@@ -174,6 +190,10 @@ const program = Effect.gen(function* () {
   } else {
     yield* decodeCall(client, "secrets.answerRequest", { threadId: "missing", turnItemId: "missing", answer: { type: "decline" } });
     yield* decodeCall(client, "panels.respond", { requestId: "unknown", ok: true });
+    yield* decodeCall(client, "peerLinks.list", {});
+    yield* decodeCall(client, "peerLinks.unlink", { environmentId: "environment:none" });
+    yield* decodeCall(client, "peerLinks.link", { url: "http://127.0.0.1:1", pairingCode: "ABCDEFGHJKLM", access: "auto" });
+    yield* decodeCall(client, "peerLinks.answerRequest", { threadId: "missing", turnItemId: "missing", answer: { type: "decline" } });
     const login = yield* client["testLogins.save"]({ url: " http://localhost/login ", username: "tester", password: "fixture-only", otpSecret: " TEST " });
     decodedTags.add("testLogins.save");
     check("test login summary excludes secrets", login.createdBy === "user" && login.hasOtp && !("password" in login) && !("otpSecret" in login));
@@ -191,6 +211,22 @@ const program = Effect.gen(function* () {
       config.type === "snapshot" &&
         config.config.environment.environmentId === descriptor.environmentId,
       `${Object.keys(config.config.settings).length} settings keys`,
+    );
+    // A theme file dropped into the folder reaches a subscriber that asks, after the snapshot.
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "themes", "fixture.json"),
+      JSON.stringify({ name: " Fixture ", appearance: "dark", canvas: "#101010", accent: "#ff8800" }),
+    );
+    const themed = yield* take(client.subscribeServerConfig({ environmentThemes: true }), 2);
+    check(
+      "subscribeServerConfig environmentThemesUpdated decodes",
+      themed[0].type === "snapshot" &&
+        themed[0].config.environment.capabilities.environmentThemes === true &&
+        themed[1].type === "environmentThemesUpdated" &&
+        themed[1].payload.themes.length === 1 &&
+        themed[1].payload.themes[0].id === "fixture" &&
+        themed[1].payload.themes[0].name === "Fixture",
+      JSON.stringify(themed[1]),
     );
     const lifecycle = yield* take(client.subscribeServerLifecycle({}), 2);
     check("subscribeServerLifecycle", lifecycle.map((e) => e.type).join(",") === "welcome,ready");
@@ -320,7 +356,26 @@ const decodeEach = (client) =>
     yield* call("preview.clearProfile", {profileId:"never-opened"});
     yield* call("preview.reportStatus", {threadId:none,tabId:"missing",navStatus:{_tag:"Idle"},canGoBack:false,canGoForward:false});
     yield* call("preview.open", {threadId:none,runtime:"server",url:"file:///refused"});
+    // No listener is ours at pid 1: the typed `not-found` refusal.
+    yield* call("preview.stopLocalServer", {pid:1,port:1});
     yield* call("subscribePreviewEvents", {});
+    // The desktop tab relay over the real socket: a desktop tab record, its registration
+    // (a typed refusal for another environment), its request stream and an answer.
+    const { environmentId } = yield* Effect.promise(() =>
+      fetch(new URL("/.well-known/t3/environment", httpBaseUrl)).then((response) => response.json()),
+    );
+    const opened = yield* call("preview.open", { threadId: none, url: "http://localhost:3000" });
+    const snapshot = Exit.isSuccess(opened) ? opened.value : undefined;
+    check("preview.open: desktop tab record", snapshot?.runtime === "desktop", snapshot?.runtime);
+    const binding = { environmentId, threadId: none, tabId: snapshot.tabId, deviceName: "effect-client", snapshot };
+    const refused = yield* call("preview.desktopRegister", { ...binding, environmentId: "elsewhere" });
+    check("desktopRegister: another environment", Exit.isFailure(refused) && String(refused.cause).includes("binding"));
+    const registered = yield* call("preview.desktopRegister", binding);
+    const connectionId = Exit.isSuccess(registered) ? registered.value.connectionId : "missing";
+    const first = yield* call("preview.desktopRequests", { connectionId });
+    check("desktopRequests: connected first", Exit.isSuccess(first) && Option.getOrUndefined(Option.getOrUndefined(first.value) ?? Option.none())?.type === "connected");
+    yield* call("preview.desktopRespond", { clientId: "desktop", connectionId, requestId: "preview-none", ok: true });
+    yield* call("preview.close", { threadId: none, tabId: snapshot.tabId });
     yield* call("git.resolvePullRequest", { cwd: repo, reference: "42" });
     yield* call("git.preparePullRequestThread", { cwd: repo, reference: "42", mode: "worktree" });
     git(repo, "config", "user.name", "test");
@@ -439,6 +494,18 @@ const decodeEach = (client) =>
       annotation: { id: "effect-client-a1", comment: "Make the button bigger", source: "browser" },
     });
     yield* call("annotations.remove", { projectId: "effect-client-p1", ids: ["effect-client-a1"] });
+    // Devices, with device support off and no host but this machine: states and typed errors.
+    yield* call("device.list", {});
+    yield* call("device.list", { inspectOnly: true });
+    yield* call("device.configure", { onboardingCompleted: true });
+    yield* call("device.testHost", { kind: "ssh", id: "mac", label: "Mac", target: "192.0.2.10" });
+    yield* call("device.open", { threadId: none, hostId: "missing", deviceId: "d", platform: "ios" });
+    yield* call("device.close", { threadId: none });
+    yield* call("device.shutdown", { hostId: "missing", deviceId: "d", platform: "ios" });
+    yield* call("device.detail", { hostId: "missing", deviceId: "d" });
+    yield* call("device.action", { hostId: "missing", deviceId: "d", type: "setAppearance", value: "dark" });
+    yield* call("device.easAccount", {});
+    yield* call("device.simlockIdentity", {});
     yield* call("projects.writeFile", { cwd: repo, relativePath: "b.txt", contents: "b\n" });
     yield* call("projects.listIgnoredFiles", { cwd: repo });
     yield* call("review.getDiffFileContents", {
@@ -509,7 +576,42 @@ const decodeEach = (client) =>
     yield* call("provider.auth.cancel", { instanceId: "codex", flowId: "f" });
     yield* call("provider.auth.removeMethod", { instanceId: "codex", methodId: "chatgpt" });
     yield* call("provider.auth.logout", { instanceId: "codex" });
-    yield* call("provider.install.subscribe", { instanceId: "codex" });
+    // Install and update: not served, by decision (Nick, 2026-11-20). Orbit installs and
+    // updates every provider CLI; the server finds each on PATH only. Each call fails as an
+    // unsupported method, for an existing instance and for one in managed setup.
+    yield* call("server.updateSettings", {
+      patch: {},
+      providerInstanceMutation: {
+        operation: "create",
+        instanceId: "codexManaged",
+        instance: { driver: "codex", enabled: false, config: { setupMode: "managed" } },
+      },
+    });
+    for (const instanceId of ["codex", "codexManaged"]) {
+      for (const [tag, payload] of [
+        ["provider.install.start", { instanceId }],
+        ["provider.install.cancel", { instanceId, operationId: "op" }],
+        ["provider.install.remove", { instanceId }],
+        ["server.updateProvider", { provider: "codex", instanceId }],
+      ]) {
+        const exit = yield* Effect.exit(client[tag](payload).pipe(Effect.timeout("10 seconds")));
+        check(`${tag} is not served (${instanceId})`, Exit.isFailure(exit) && !String(exit.cause).includes("TimeoutError"), String(Exit.isFailure(exit) ? exit.cause : "succeeded").split("\n")[0]);
+      }
+      const watched = yield* Effect.exit(
+        Stream.runHead(client["provider.install.subscribe"]({ instanceId })).pipe(Effect.timeout("10 seconds")),
+      );
+      check(`provider.install.subscribe is not served (${instanceId})`, Exit.isFailure(watched) && !String(watched.cause).includes("TimeoutError"), String(Exit.isFailure(watched) ? watched.cause : "succeeded").split("\n")[0]);
+    }
+    const managed = yield* call("server.getConfig", {});
+    check(
+      "no provider entry offers an install",
+      Exit.isSuccess(managed) && managed.value.providers.every((p) => p.setup?.canInstall !== true),
+      Exit.isSuccess(managed) ? managed.value.providers.map((p) => `${p.instanceId}:${p.setup?.canInstall}`).join(",") : "",
+    );
+    yield* call("server.updateSettings", {
+      patch: {},
+      providerInstanceMutation: { operation: "remove", instanceId: "codexManaged" },
+    });
     yield* call("server.getConfig", {});
     // Grok, switched on with a stub CLI (crates/conn-provider-acp/tools/grok-cli-stub.mjs; no
     // real CLI runs): the server probes it as T3 does, and the entry decodes as "ready".
@@ -601,6 +703,25 @@ const decodeEach = (client) =>
     );
     yield* call("server.getHostResources", {});
     yield* call("server.getProcessDiagnostics", {});
+    // T3's answers for a server without trace files and without an offline repair command.
+    yield* call("server.getSettings", {});
+    const traces = yield* call("server.getTraceDiagnostics", {});
+    check(
+      "server.getTraceDiagnostics answers trace-file-not-found",
+      Exit.isSuccess(traces) && Option.getOrUndefined(traces.value.error)?.kind === "trace-file-not-found",
+      String(Exit.isSuccess(traces) ? JSON.stringify(traces.value.error) : traces.cause),
+    );
+    const storage = yield* call("server.getDatabaseStorage", {});
+    check(
+      "server.getDatabaseStorage sends null",
+      // The first item, inside the stream wait's own Option.
+      Exit.isSuccess(storage) && Option.getOrUndefined(Option.flatten(storage.value)) === null &&
+        Option.isSome(Option.flatten(storage.value)),
+      String(storage),
+    );
+    yield* call("server.reclaimDatabaseSpace", {});
+    // An unknown thread: T3's typed refusal.
+    yield* call("provider.uploadFeedback", { threadId: "effect-client-none" });
     yield* call("server.upsertKeybinding", { key: "mod+shift+f12", command: "sidebar.toggle" });
     yield* call("server.removeKeybinding", { key: "mod+shift+f12", command: "sidebar.toggle" });
     // The server refuses to signal itself; nothing is signalled.
@@ -634,6 +755,20 @@ const decodeEach = (client) =>
     yield* call("pullRequests.runAction", { ...prRef, action: "close" });
     yield* call("pullRequests.generateReviewGuide", prRef);
     yield* call("pullRequests.stack", prRef);
+    // Issues: no project is a GitHub checkout here, so each read and write answers with the
+    // contract's own error, which the client decodes.
+    const issueRef = { projectId: none, tracker: "github", host: "github.com", scope: "a/b", key: "7" };
+    yield* call("issues.list", { state: "open" });
+    yield* call("issues.detail", issueRef);
+    yield* call("issues.linkedThreads", { tracker: "github", host: "github.com", scope: "a/b", key: "7" });
+    yield* call("issues.comments", { ...issueRef, cursor: "older" });
+    yield* call("issues.templates", { projectId: none, tracker: "github", scope: "a/b" });
+    yield* call("issues.candidates", { projectId: none, tracker: "github", scope: "a/b" });
+    yield* call("issues.create", { projectId: none, tracker: "github", scope: "a/b", title: "T", body: "", labels: [], assignees: [] });
+    yield* call("issues.comment", { ...issueRef, body: "Comment" });
+    yield* call("issues.update", { ...issueRef, title: "T" });
+    yield* call("issues.setState", { ...issueRef, state: "Completed" });
+    yield* call("issues.react", { ...issueRef, content: "heart", reacted: true });
     yield* call("pullRequests.reviewGuide", prRef);
     yield* call("pullRequests.reportState", { reference: prRef, state: "open" });
     yield* call("pullRequests.invalidate", { reference: prRef });

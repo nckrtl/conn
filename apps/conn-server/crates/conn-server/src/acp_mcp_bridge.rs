@@ -1,4 +1,4 @@
-//! `conn-server acp-mcp-bridge`: the stdio MCP server an ACP agent starts for the `t3-code`
+//! `conn-server acp-mcp-bridge`: the stdio MCP server an ACP agent starts for the `conn`
 //! tools, relaying each JSON-RPC line to this server's `/mcp` over HTTP, as the T3 server's
 //! `runAcpMcpStdioBridge` (`apps/server/src/mcp/AcpMcpStdioBridge.ts`) does.
 //!
@@ -227,7 +227,7 @@ impl Bridge {
                     if let Some(id) = id {
                         self.error(
                             id,
-                            format!("T3 Code MCP endpoint responded with HTTP {}.", reply.status),
+                            format!("Conn MCP endpoint responded with HTTP {}.", reply.status),
                             -32603,
                         )
                         .await;
@@ -253,7 +253,7 @@ impl Bridge {
                 if let Some(id) = id {
                     self.error(
                         id,
-                        format!("T3 Code MCP bridge request failed: {error}"),
+                        format!("Conn MCP bridge request failed: {error}"),
                         -32603,
                     )
                     .await;

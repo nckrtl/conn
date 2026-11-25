@@ -771,7 +771,7 @@ function delegatedTasksStopEffect(command: {
 
 const WORKSPACE_PREPARATION_INPUT = "Preparing workspace";
 const RUNTIME_REQUEST_DELIVERY_FAILED_MESSAGE =
-  "T3 Code could not confirm that your answer reached the agent. If the run stays stuck, stop it and try again.";
+  "Conn could not confirm that your answer reached the agent. If the run stays stuck, stop it and try again.";
 
 function withoutPreparationResult(
   item: Extract<OrchestrationV2TurnItem, { readonly type: "command_execution" }>,
@@ -3483,7 +3483,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       return plan.parentRun?.id;
     }
-    // task_status and t3_thread_read use distinct command IDs, so two
+    // task_status and conn_thread_read use distinct command IDs, so two
     // valid observations can race after their read preflight. Re-emit the
     // existing task row so the second dispatch is a successful idempotent
     // no-op rather than "already acknowledged/disposed" or empty-events.
@@ -4854,6 +4854,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             ...(command.title === undefined ? {} : { title: command.title, titleRenamed: true }),
+            ...(command.orbitProject === undefined ? {} : { orbitProject: command.orbitProject }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&

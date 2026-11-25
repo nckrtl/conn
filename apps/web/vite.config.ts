@@ -285,7 +285,7 @@ function bootstrapTitlePlugin(): Plugin {
         hostedAppChannel: configuredHostedAppChannel,
         development,
       });
-      const title = formatAppDisplayName({ baseName: "T3 Code", stageLabel });
+      const title = formatAppDisplayName({ baseName: "Conn", stageLabel });
       return html.replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
     },
   };
@@ -385,10 +385,6 @@ export default defineConfig(({ command }) => {
           replacement: NodeURL.fileURLToPath(
             new URL("./src/icons/lucide-react.ts", import.meta.url),
           ),
-        },
-        {
-          find: /^lucide$/,
-          replacement: NodeURL.fileURLToPath(new URL("./src/icons/lucide.ts", import.meta.url)),
         },
       ],
       tsconfigPaths: true,

@@ -116,10 +116,33 @@ fn t3_characterizations_match_the_current_upstream_functions() {
             "stackError" => json!(stack::decode(input).is_err()),
             "provider-failure" | "access-hint" => continue,
             "github-host" => json!(github::is_github_host(input.as_str().expect("host"))),
+            "resolveRepository" => {
+                let (host, locator) = crate::hosts::repositories::resolve_github_repository(
+                    text(input, "remotes"),
+                    text(input, "resolved"),
+                    input["hostHint"].as_str(),
+                    text(input, "defaultHost"),
+                );
+                json!({"host": host, "locator": locator.map(|l| json!({"host": l.host, "owner": l.owner, "name": l.name}))})
+            }
             "summary" => normalize::summary(input, "github.com"),
             "checks" => json!(normalize::checks(input.as_array().expect("contexts"))),
             "breakdown" => normalize::breakdown(input),
             "patch" => diff::files_patch(input.as_array().expect("files")),
+            "mergeMessage" => json!(super::merge_message::remove_agent_credits(
+                input.as_str().expect("message")
+            )),
+            "jobId" => json!(super::checks::actions_job_id(input.as_str())),
+            "logTail" => {
+                let (log, truncated) = super::checks::tail_log_lines(
+                    text(input, "text"),
+                    input["lines"].as_u64().expect("lines") as usize,
+                );
+                json!({"log": log, "truncated": truncated})
+            }
+            "lightPermissions" => {
+                super::run_action::light_viewer_permissions(input).unwrap_or(Value::Null)
+            }
             "unavailable" => if input == "cli-missing" {
                 Error::Missing
             } else {
@@ -1177,5 +1200,433 @@ async fn requests_keep_github_messages_and_secondary_rate_limit_classification()
             .expect_err("refused");
         assert_eq!(error.to_string(), detail);
         assert_eq!(error.to_contract("summary")["cause"]["reason"], reason);
+    }
+}
+
+/// 26 heads take two documents. When the second fails, the first document's 25 answers still
+/// count; only the 26th head is unanswered.
+#[tokio::test]
+async fn head_lookups_keep_each_documents_answers_when_a_later_one_fails() {
+    use crate::http::fake;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let documents = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = documents.clone();
+    let server = fake::serve(move |request| {
+        if request.path != "/graphql" {
+            return (404, String::new());
+        }
+        if seen.fetch_add(1, Ordering::SeqCst) > 0 {
+            return (502, "bad gateway".into());
+        }
+        let body: Value = serde_json::from_str(&request.body).expect("request");
+        let mut data = serde_json::Map::new();
+        for index in 0..25 {
+            let head = body["variables"][format!("_{index}_head")].clone();
+            data.insert(
+                format!("_{index}_repository"),
+                json!({"pullRequests": {"nodes": [{"number": index + 1, "headRefName": head}]}}),
+            );
+        }
+        (200, json!({"data": data}).to_string())
+    })
+    .await;
+    let stubs = StubDir::new("pr-heads");
+    stubs.executable("gh", &[], "printf '%s\\n' fake-pr-token");
+    let client = connect(&stubs, &server.base).await;
+    let heads: Vec<(String, String, String)> = (0..26)
+        .map(|n| ("o".into(), "r".into(), format!("b{n}")))
+        .collect();
+    let answers = client.pull_requests_by_heads(&heads).await;
+    assert_eq!(documents.load(Ordering::SeqCst), 2, "two documents");
+    assert_eq!(answers.len(), 26);
+    for (index, answer) in answers.iter().take(25).enumerate() {
+        let nodes = answer.as_ref().expect("the first document's answer");
+        assert_eq!(nodes[0]["headRefName"], format!("b{index}"));
+    }
+    assert_eq!(answers[25], None, "the failed document's head");
+}
+
+/// T3's `runPullRequestAction`, `readCheckLogs` and `rerunChecks` traces
+/// (`tools/pr-action-recordings.mjs`), replayed on the same answers. Check reads and re-runs run
+/// concurrently in T3, so their requests compare as a set.
+#[tokio::test]
+async fn run_actions_and_ci_match_t3s_recorded_http_requests() {
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("run-action-cases.json")).expect("T3 recordings");
+    for case in cases {
+        let responses = case["responses"].clone();
+        let server = crate::http::fake::serve(move |request| {
+            let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+            let operation = text(&body, "query")
+                .split_once(' ')
+                .and_then(|(_, rest)| rest.split(['(', '{']).next())
+                .map(str::to_owned);
+            let key = match (request.path.ends_with("/graphql"), &operation) {
+                (true, Some(name)) => format!("graphql {name}"),
+                _ => format!("{} {}", request.method, request.path),
+            };
+            let answer =
+                responses
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| match operation.as_deref() {
+                        Some("PullRequestNodeId") => {
+                            json!({"data": {"repository": {"pullRequest": {"id": "PR7"}}}})
+                        }
+                        Some(_) => json!({"data": {}}),
+                        None => json!({"status": 200, "body": {}}),
+                    });
+            let status = answer["status"].as_u64().unwrap_or(200) as u16;
+            let body = match (answer.get("text"), answer.get("body")) {
+                (Some(text), _) => text.as_str().unwrap_or_default().to_owned(),
+                (None, Some(body)) => body.to_string(),
+                (None, None) => answer.to_string(),
+            };
+            (status, body)
+        })
+        .await;
+        let stubs = StubDir::new("pr-run-action");
+        stubs.executable("gh", &[], "printf '%s\\n' fake-pr-token");
+        let client = connect(&stubs, &server.base).await;
+        let lookup = Lookup::new("a/b", 7).expect("lookup");
+        let input = &case["input"];
+        let empty = Vec::new();
+        let checks = input["checks"].as_array().unwrap_or(&empty);
+        let method = text(&case, "method");
+        let result: Result<Value, Error> = match method {
+            "runPullRequestAction" => client
+                .run_action(
+                    &lookup,
+                    input,
+                    input["removeAgentCreditsOnMerge"] == Value::Bool(true),
+                )
+                .await
+                .map(|()| Value::Null),
+            "readCheckLogs" => client
+                .check_logs(
+                    &lookup,
+                    checks,
+                    input["tailLines"].as_u64().expect("lines") as usize,
+                )
+                .await
+                .map(Value::from),
+            "rerunChecks" => client.rerun_checks(&lookup, checks).await.map(Value::from),
+            other => panic!("unknown recorded method {other}"),
+        };
+        match case.get("error") {
+            Some(expected) => {
+                let error = result.expect_err("T3 failed this case");
+                assert_eq!(
+                    json!(error.to_string()),
+                    expected["detail"],
+                    "T3 error for {method} {input}"
+                );
+            }
+            None => assert_eq!(
+                result.expect("T3 succeeded"),
+                case["result"],
+                "T3 result for {method} {input}"
+            ),
+        }
+        let mut actual: Vec<Value> = server
+            .requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .map(|r| {
+                json!({"method": r.method, "path": r.path, "body": if r.body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str::<Value>(&r.body).expect("JSON")
+                }})
+            })
+            .collect();
+        let mut expected = case["requests"].as_array().cloned().unwrap_or_default();
+        if method != "runPullRequestAction" {
+            let order = |v: &Value| format!("{} {}", v["method"], v["path"]);
+            actual.sort_by_key(order);
+            expected.sort_by_key(order);
+        }
+        assert_eq!(actual, expected, "T3 API trace for {method} {input}");
+    }
+}
+
+/// T3's `GitHubIssueTracker` traces (`tools/pr-action-recordings.mjs`), replayed on the same
+/// answers: results, failures and every request in order.
+#[tokio::test]
+async fn issue_tracker_matches_t3s_recorded_http_requests() {
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("issue-cases.json")).expect("T3 recordings");
+    for case in cases {
+        let responses = case["responses"].clone();
+        let server = crate::http::fake::serve(move |request| {
+            let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+            let operation = text(&body, "query")
+                .split_once(' ')
+                .and_then(|(_, rest)| rest.split(['(', '{']).next())
+                .map(str::to_owned);
+            let key = match (request.path.ends_with("/graphql"), &operation) {
+                (true, Some(name)) => format!("graphql {name}"),
+                _ => format!("{} {}", request.method, request.path),
+            };
+            let answer = responses.get(&key).cloned().unwrap_or_else(|| {
+                if operation.is_some() {
+                    json!({"data": {}})
+                } else {
+                    json!({"status": 200, "body": {}})
+                }
+            });
+            let status = answer["status"].as_u64().unwrap_or(200) as u16;
+            let body = answer
+                .get("body")
+                .map_or_else(|| answer.to_string(), Value::to_string);
+            (status, body)
+        })
+        .await;
+        let stubs = StubDir::new("issue-tracker");
+        stubs.executable("gh", &[], "printf '%s\\n' fake-pr-token");
+        let client = connect(&stubs, &server.base).await;
+        let input = &case["input"];
+        let scope = text(input, "scope");
+        let key = text(input, "key");
+        let method = text(&case, "method");
+        let result: Result<Value, super::issues::TrackerError> = match method {
+            "listIssues" => client.list_issues(input, input["viewer"].as_str()).await,
+            "getIssue" => client.get_issue(scope, key).await,
+            "getComments" => {
+                client
+                    .issue_comments_page(scope, key, &input["cursor"])
+                    .await
+            }
+            "create" => client.create_issue(scope, input).await,
+            "comment" => client
+                .comment_on_issue(scope, key, &input["body"])
+                .await
+                .map(|()| Value::Null),
+            "update" => client
+                .update_issue(scope, key, input)
+                .await
+                .map(|()| Value::Null),
+            "setState" => client
+                .set_issue_state(scope, key, text(input, "state"))
+                .await
+                .map(|()| Value::Null),
+            "setReaction" => client
+                .react_to_issue(scope, key, input)
+                .await
+                .map(|()| Value::Null),
+            "listCandidates" => client.issue_candidate_list(scope).await,
+            "listTemplates" => client.issue_template_list(scope).await,
+            "getViewer" => client.issue_viewer().await.map(Value::from),
+            other => panic!("unknown recorded method {other}"),
+        };
+        match case.get("error") {
+            Some(expected) => {
+                let error = result.expect_err("T3 failed this case");
+                assert_eq!(
+                    json!({"reason": error.reason, "detail": error.detail}),
+                    *expected,
+                    "T3 error for {method} {input}"
+                );
+            }
+            None => assert_eq!(
+                result.expect("T3 succeeded"),
+                case["result"],
+                "T3 result for {method} {input}"
+            ),
+        }
+        let actual: Vec<Value> = server
+            .requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .map(|r| {
+                json!({"method": r.method, "path": r.path, "body": if r.body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str::<Value>(&r.body).expect("JSON")
+                }})
+            })
+            .collect();
+        assert_eq!(
+            json!(actual),
+            case["requests"],
+            "T3 API trace for {method} {input}"
+        );
+    }
+}
+
+/// `PullRequestService` for the draft step, recording each call as T3's recorder does.
+struct RecordedDrafts {
+    is_draft: bool,
+    fails: Option<String>,
+    calls: std::sync::Mutex<Vec<Value>>,
+}
+
+impl create::Drafts for RecordedDrafts {
+    async fn is_draft(&self, target: &create::DraftTarget) -> Result<bool, String> {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(json!({"call": "summary", "host": target.host, "repository": target.repository, "number": target.number, "url": target.url}));
+        Ok(self.is_draft)
+    }
+    async fn make_draft(&self, target: &create::DraftTarget) -> Result<(), String> {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(json!({"call": "runAction", "host": target.host, "repository": target.repository, "number": target.number, "url": target.url}));
+        self.fails.clone().map_or(Ok(()), Err)
+    }
+}
+
+#[tokio::test]
+async fn create_pull_request_matches_t3s_recorded_runs() {
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("create-cases.json")).expect("T3 recordings");
+    assert!(cases.len() >= 19, "every recorded case is replayed");
+    for case in cases {
+        let name = text(&case, "name").to_owned();
+        let stubs = StubDir::new("pr-create");
+        stubs.executable("gh", &[], "printf '%s\\n' fake-pr-token");
+        let checkout = stubs.dir.join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout");
+        for step in case["setup"].as_array().expect("setup") {
+            if let Some([path, contents]) = step["write"].as_array().map(Vec::as_slice) {
+                std::fs::write(
+                    checkout.join(path.as_str().expect("path")),
+                    contents.as_str().expect("text"),
+                )
+                .expect("write");
+                continue;
+            }
+            let args: Vec<&str> = step
+                .as_array()
+                .expect("git argv")
+                .iter()
+                .map(|a| a.as_str().expect("arg"))
+                .collect();
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&checkout)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_DATE", "2026-11-20T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2026-11-20T00:00:00Z")
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "{name}: git {args:?}");
+        }
+        let responses = case["responses"].clone();
+        let served = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            usize,
+        >::new()));
+        let server = crate::http::fake::serve(move |request| {
+            let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+            let operation = text(&body, "query")
+                .split_once(' ')
+                .and_then(|(_, rest)| rest.split(['(', '{']).next())
+                .map(str::to_owned);
+            let key = match (request.path.ends_with("/graphql"), &operation) {
+                (true, Some(name)) => format!("graphql {name}"),
+                _ => format!("{} {}", request.method, request.path),
+            };
+            let turn = {
+                let mut served = served.lock().expect("served");
+                let turn = served.entry(key.clone()).or_default();
+                *turn += 1;
+                *turn - 1
+            };
+            let answers = responses[&key].as_array().cloned().unwrap_or_default();
+            let answer = answers
+                .get(turn.min(answers.len().saturating_sub(1)))
+                .cloned();
+            if operation.as_deref() == Some("PullRequestsByHead") {
+                let nodes = answer.unwrap_or(json!([]));
+                return (
+                    200,
+                    json!({"data": {"_0_repository": {"pullRequests": {"nodes": nodes}}}})
+                        .to_string(),
+                );
+            }
+            match answer {
+                Some(answer) => (
+                    answer["status"].as_u64().unwrap_or(200) as u16,
+                    answer["body"].to_string(),
+                ),
+                None => (404, json!({"message": "Not Found"}).to_string()),
+            }
+        })
+        .await;
+        let child_env = stubs.path_env();
+        let settings = Settings::default();
+        let env = Environment::fixed([]);
+        let endpoints = Endpoints {
+            github_rest: Some(server.base.clone()),
+        };
+        let ctx = DiscoveryContext {
+            cwd: &checkout,
+            home: Some(&stubs.dir),
+            settings: &settings,
+            env: &env,
+            endpoints: &endpoints,
+            child_env: &child_env,
+        };
+        let input = &case["input"];
+        let request = create::CreateRequest {
+            title: text(input, "title"),
+            body: text(input, "body"),
+            base: input["base"].as_str(),
+            draft: input["draft"] == Value::Bool(true),
+        };
+        let drafts = RecordedDrafts {
+            is_draft: case["summary"]["isDraft"] == Value::Bool(true),
+            fails: case["draftFails"].as_str().map(str::to_owned),
+            calls: std::sync::Mutex::default(),
+        };
+        let result = create::create_pull_request(ctx, &request, &drafts).await;
+        match case.get("error") {
+            Some(expected) => assert_eq!(
+                json!(result.expect_err(&name).message()),
+                expected["message"],
+                "{name}"
+            ),
+            None => assert_eq!(result.expect(&name), case["result"], "{name}"),
+        }
+        let actual: Vec<Value> = server
+            .requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .map(|r| {
+                json!({"method": r.method, "path": r.path, "body": if r.body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str::<Value>(&r.body).expect("JSON")
+                }})
+            })
+            .collect();
+        assert_eq!(json!(actual), case["requests"], "{name}: requests");
+        let expected_drafts: Vec<Value> = case["draftCalls"]
+            .as_array()
+            .expect("draft calls")
+            .iter()
+            .map(|call| {
+                let target = if call["call"] == "summary" {
+                    &call["ref"]
+                } else {
+                    &call["action"]
+                };
+                json!({"call": call["call"], "host": target["host"], "repository": target["repository"], "number": target["number"], "url": target["url"]})
+            })
+            .collect();
+        assert_eq!(
+            json!(*drafts.calls.lock().expect("calls")),
+            json!(expected_drafts),
+            "{name}: draft calls"
+        );
+        let _ = std::fs::remove_dir_all(&stubs.dir);
     }
 }

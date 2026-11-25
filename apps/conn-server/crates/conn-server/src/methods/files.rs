@@ -51,12 +51,12 @@ fn check_length(value: &str, trimmed: bool, max: usize, field: &str) -> Result<(
 
 /// Where the engine says projects and threads live. Empty without an engine.
 #[derive(Default)]
-struct Layout {
+pub(crate) struct Layout {
     shell: Value,
 }
 
 impl Layout {
-    async fn load(engine: Option<&Arc<dyn Engine>>) -> Self {
+    pub(crate) async fn load(engine: Option<&Arc<dyn Engine>>) -> Self {
         let shell = match engine {
             Some(engine) => engine.shell_snapshot().await.unwrap_or(Value::Null),
             None => Value::Null,
@@ -80,7 +80,7 @@ impl Layout {
     }
 
     /// The thread's worktree, else its project's root.
-    fn thread_root(&self, thread_id: &str) -> Option<String> {
+    pub(crate) fn thread_root(&self, thread_id: &str) -> Option<String> {
         let thread = self.shell["threads"]
             .as_array()?
             .iter()
@@ -181,17 +181,21 @@ pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
         },
     );
 
-    let e = engine.clone();
+    let (e, environment) = (engine.clone(), deps.environment.clone());
     table.unary(
         "projects.writeFile",
         move |_, input: ProjectWriteFileInput| {
-            let e = e.clone();
+            let (e, environment) = (e.clone(), environment.clone());
             async move {
                 check_length(&input.relative_path, false, PATH_MAX_LENGTH, "relativePath")?;
                 let layout = Layout::load(e.as_ref()).await;
                 let (projects, worktrees) = layout.known_workspaces();
+                let managed = environment
+                    .as_deref()
+                    .map(crate::host::managed_worktree_dirs)
+                    .unwrap_or_default();
                 blocking(move || {
-                    let known = KnownWorkspaces::new(&projects, &worktrees);
+                    let known = KnownWorkspaces::new(&projects, &worktrees).with_managed(&managed);
                     workspace::write_file(&input, &|real| known.contains(real))
                         .map_err(|e| fail(e.into_write_error(&input.cwd, &input.relative_path)))
                 })

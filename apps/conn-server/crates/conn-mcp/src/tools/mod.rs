@@ -14,24 +14,30 @@ use conn_engine::EngineError;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{Caller, McpConfig, McpService};
+use crate::{Caller, ClientCaller, McpConfig, McpService};
 
 mod annotations;
 pub(crate) mod attachments;
 mod background;
 mod create_threads;
+mod devices;
 mod html;
+mod issues;
 mod manage;
 mod message;
 mod panels;
 mod preview;
 mod projects;
+mod pull_request_forge;
 mod pull_requests;
 mod scheduled;
+mod script_completion;
 mod secrets;
-mod tasks;
+pub(crate) mod tasks;
 mod test_logins;
+mod themes;
 mod threads;
+pub(crate) use threads::{resolve_interaction_mode, resolve_runtime_mode};
 mod workflows;
 pub(crate) mod worktree;
 
@@ -53,6 +59,13 @@ pub(crate) enum ToolError {
     Message(String),
     #[error("{message}")]
     Preview { tag: &'static str, message: String },
+    /// A failed image tool (`imageToolFailure`): the text, and the tag in `structuredContent`.
+    #[error("{message}")]
+    Image {
+        tag: &'static str,
+        operation: &'static str,
+        message: String,
+    },
 }
 
 pub(crate) type ToolResult = Result<Value, ToolError>;
@@ -82,9 +95,13 @@ pub(crate) fn fail(code: &'static str, message: impl Into<String>) -> ToolError 
 #[cfg(test)]
 pub(crate) const HANDLED: &[&str] = &[
     "tool_search",
-    "t3_workflow_stop",
+    "conn_workflow_stop",
     "html_render",
     "html_preview",
+    "device_list",
+    "device_open",
+    "device_screenshot",
+    "device_close",
     "preview_snapshot",
     "preview_act",
     "preview_wait_for",
@@ -98,23 +115,29 @@ pub(crate) const HANDLED: &[&str] = &[
     "preview_evaluate",
     "preview_dialog",
     "preview_cdp_endpoint",
-    "t3_preview_close",
-    "t3_preview_list",
+    "conn_preview_close",
+    "conn_preview_list",
     "mcp_call",
     "mcp_connect",
     "create_threads",
-    "t3_attachment_prepare_upload",
-    "t3_attachment_discard",
-    "t3_thread_send_attachments",
-    "t3_worktree_handoff",
-    "t3_worktree_list",
-    "t3_worktree_status",
+    "conn_attachment_prepare_upload",
+    "conn_attachment_discard",
+    "conn_thread_send_attachments",
+    "conn_worktree_handoff",
+    "conn_worktree_list",
+    "conn_worktree_status",
+    "files_definition",
+    "files_selection",
+    "files_reveal",
     "panel_open",
     "request_secret",
     "save_test_login",
     "request_credentials",
+    "fill_credential",
+    "conn_theme_read",
+    "conn_theme_set",
     "database_query",
-    "t3_background_wait",
+    "conn_background_wait",
     "link_pull_request",
     "link_pull_requests",
     "unlink_pull_request",
@@ -123,6 +146,24 @@ pub(crate) const HANDLED: &[&str] = &[
     "watch_pull_request",
     "unwatch_pull_request",
     "read_pull_request_guide",
+    "write_pull_request_guides",
+    "pull_request_read",
+    "pull_request_list",
+    "pull_request_create",
+    "pull_request_update",
+    "pull_request_respond",
+    "pull_request_review",
+    "pull_request_merge",
+    "ci_logs",
+    "ci_rerun",
+    "list_issues",
+    "read_issue",
+    "create_issue",
+    "comment_on_issue",
+    "set_issue_state",
+    "link_issue",
+    "unlink_issue",
+    "list_thread_issues",
     "annotations_list",
     "annotations_claim",
     "annotations_complete",
@@ -131,26 +172,35 @@ pub(crate) const HANDLED: &[&str] = &[
     "list_scheduled_tasks",
     "delete_scheduled_task",
     "run_scheduled_task_now",
-    "t3_queue",
-    "t3_thread_configure",
-    "t3_thread_organize",
+    "conn_queue",
+    "conn_thread_configure",
+    "conn_thread_organize",
+    "conn_thread_transfer",
     "send_to_user",
     "orchestrator_capabilities",
     "delegate_task",
     "task_status",
     "task_cancel",
-    "t3_thread_list",
-    "t3_thread_read",
-    "t3_thread_update",
-    "t3_thread_send",
-    "t3_thread_wait",
-    "t3_thread_interrupt",
-    "t3_thread_search",
-    "t3_pending_request",
-    "t3_thread_launch",
-    "t3_project_list",
-    "t3_project_read",
-    "t3_environment_read",
+    "conn_thread_list",
+    "conn_thread_read",
+    "conn_thread_update",
+    "conn_thread_send",
+    "conn_thread_wait",
+    "conn_thread_interrupt",
+    "conn_thread_search",
+    "conn_pending_request",
+    "conn_thread_launch",
+    "conn_project_list",
+    "conn_project_read",
+    "conn_project_create",
+    "conn_project_update",
+    "conn_project_delete",
+    "conn_project_clone",
+    "conn_environment_read",
+    "conn_environment_links",
+    "conn_environment_link",
+    "conn_environment_unlink",
+    "conn_environment_preferences_update",
 ];
 
 pub(crate) async fn call(
@@ -160,30 +210,85 @@ pub(crate) async fn call(
     mut args: Args,
     origin: Option<&str>,
 ) -> ToolResult {
-    // Linked environments are not served: only this environment's own id is accepted.
-    if let Some(environment) = args.remove("environmentId")
-        && environment != service.config.environment_id.as_str()
-    {
-        return Err(fail(
-            "capability_denied",
-            "Linked environments is off on this machine, so no tool can act on another machine. Leave out environmentId to work here; the user can turn it on in Settings → Labs.",
-        ));
-    }
     let cx = Cx {
         service,
         caller,
         origin,
     };
+    // A native bearer session's scopes hold here and there alike: checked before the call
+    // goes local or to a linked environment.
+    if let Some(scope) = crate::peers::native_scope(name) {
+        cx.require_scope(scope)?;
+    }
+    // A tool that takes a linked environment runs there when `environmentId` names another
+    // one; its handler here never sees the field. Other tools name an environment for their
+    // own reasons (the one to link or forget).
+    if crate::peers::takes_linked_environment(name) {
+        let target = match args.remove("environmentId") {
+            Some(Value::String(id)) if id != service.config.environment_id => Some(id),
+            _ => None,
+        };
+        if let Some(target) = target {
+            // There the thread's parent is here, so only this side can make a follow-up a task.
+            if name == "conn_thread_send" {
+                let request = args.clone();
+                let sent = cx.forward(name, args, target.clone()).await?;
+                return crate::remote_tasks::follow_up(&cx, &target, &request, sent).await;
+            }
+            return cx.forward(name, args, target).await;
+        }
+    }
+    // The peer's own answer goes back as it is; only a call here gets the hint below.
+    match call_in(&cx, name, args).await {
+        // `threadNotFound`: with links on, a thread id may belong to a linked environment. A
+        // peer link's caller, or a fenced one, may not use this environment's links.
+        Err(ToolError::Failure {
+            code: "thread_not_found",
+            message,
+        }) if !message.starts_with("The calling")
+            && service.links_enabled()
+            && !matches!(caller, Caller::Client(ClientCaller { linked: true, .. }))
+            && matches!(cx.fencing_link().await, Ok(None)) =>
+        {
+            Err(fail(
+                "thread_not_found",
+                format!("{message}{}", crate::peers::THREAD_IDS_HINT),
+            ))
+        }
+        other => other,
+    }
+}
+
+async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
+    let service = cx.service;
+    // Fenced work never changes this environment's scheduled tasks (`McpToolAccess.writes`,
+    // `startsThreads` refused).
+    let fenced = match name {
+        "schedule_task" if !args.contains_key("scheduledTaskId") => {
+            Some("schedule tasks in this environment")
+        }
+        "schedule_task" | "delete_scheduled_task" => {
+            Some("change this environment's scheduled tasks")
+        }
+        "run_scheduled_task_now" => Some("change projects or environment settings"),
+        _ => None,
+    };
+    if let Some(what) = fenced
+        && cx.fencing_link().await?.is_some()
+    {
+        cx.writing_caller().await?;
+        cx.assert_not_linked(what).await?;
+    }
     match name {
-        "t3_workflow_stop" => workflows::stop(&cx, &args).await,
+        "conn_workflow_stop" => workflows::stop(cx, &args).await,
         "tool_search" => {
             let caller = cx.require_thread("tool_search")?;
             Ok(
                 serde_json::json!({"tools":crate::lock(&service.exposure).search(&caller.provider_session_id, args.get("query").and_then(Value::as_str).unwrap_or_default())}),
             )
         }
-        "html_render" => html::render(&cx, &args).await,
-        "html_preview" => html::preview(&cx, &args).await,
+        "html_render" => html::render(cx, &args).await,
+        "html_preview" => html::preview(cx, &args).await,
         "preview_open"
         | "preview_status"
         | "preview_navigate"
@@ -192,63 +297,98 @@ pub(crate) async fn call(
         | "preview_evaluate"
         | "preview_dialog"
         | "preview_cdp_endpoint"
-        | "t3_preview_close"
-        | "t3_preview_list" => preview::call(&cx, name, &args).await,
+        | "conn_preview_close"
+        | "conn_preview_list" => preview::call(cx, name, &args).await,
         "preview_snapshot"
         | "preview_act"
         | "preview_wait_for"
         | "preview_recording_start"
-        | "preview_recording_stop" => preview::call(&cx, name, &args).await,
-        "create_threads" => create_threads::create(&cx, &args).await,
-        "t3_attachment_prepare_upload" => attachments::prepare(&cx, &args).await,
-        "t3_attachment_discard" => attachments::discard(&cx, &args).await,
-        "t3_thread_send_attachments" => attachments::send(&cx, &args).await,
-        "t3_worktree_handoff" => worktree::handoff(&cx, &args).await,
-        "t3_worktree_list" => worktree::list(&cx, &args).await,
-        "t3_worktree_status" => worktree::status(&cx).await,
-        "orchestrator_capabilities" => projects::capabilities(&cx, &args).await,
-        "t3_project_list" => projects::list(&cx, &args).await,
-        "t3_project_read" => projects::read(&cx, &args).await,
-        "t3_environment_read" => Ok(projects::environment(&cx)),
-        "t3_thread_list" => threads::list(&cx, &args).await,
-        "t3_thread_read" => threads::read(&cx, &args).await,
-        "t3_thread_search" => threads::search(&cx, &args).await,
-        "t3_thread_launch" => threads::launch(&cx, &args).await,
-        "t3_thread_send" => threads::send(&cx, &args).await,
-        "t3_thread_wait" => threads::wait(&cx, &args).await,
-        "t3_thread_interrupt" => threads::interrupt(&cx, &args).await,
-        "t3_thread_update" => threads::update(&cx, &args).await,
-        "t3_pending_request" => threads::pending_request(&cx, &args).await,
-        "t3_queue" => manage::queue(&cx, &args).await,
-        "t3_thread_configure" => manage::configure(&cx, &args).await,
-        "t3_thread_organize" => manage::organize(&cx, &args).await,
-        "mcp_call" | "mcp_connect" => panels::invoke(&cx, name, &args).await,
-        "panel_open" => panels::open(&cx, &args).await,
-        "request_secret" => secrets::request(&cx, &args).await,
-        "save_test_login" => test_logins::save(&cx, &args).await,
-        "request_credentials" => test_logins::request(&cx, &args).await,
-        "database_query" => panels::database_query(&cx, &args).await,
-        "send_to_user" => message::send_to_user(&cx, &args).await,
-        "t3_background_wait" => background::wait(&cx, &args).await,
-        "delegate_task" => tasks::delegate(&cx, &args).await,
-        "task_status" => tasks::status(&cx, &args).await,
-        "task_cancel" => tasks::cancel(&cx, &args).await,
-        "schedule_task" => scheduled::schedule(&cx, &args).await,
-        "annotations_list" => annotations::list(&cx, &args).await,
-        "annotations_claim" => annotations::claim(&cx, &args).await,
-        "annotations_complete" => annotations::complete(&cx, &args).await,
-        "annotations_release" => annotations::release(&cx, &args).await,
-        "list_scheduled_tasks" => scheduled::list(&cx, &args).await,
-        "delete_scheduled_task" => scheduled::delete(&cx, &args).await,
-        "run_scheduled_task_now" => scheduled::run_now(&cx, &args).await,
-        "link_pull_request" => pull_requests::link(&cx, &args).await,
-        "link_pull_requests" => pull_requests::link_many(&cx, &args).await,
-        "unlink_pull_request" => pull_requests::unlink(&cx, &args).await,
-        "unlink_pull_requests" => pull_requests::unlink_many(&cx, &args).await,
-        "list_thread_pull_requests" => pull_requests::list_thread(&cx, &args).await,
-        "watch_pull_request" => pull_requests::set_watching(&cx, &args, true).await,
-        "unwatch_pull_request" => pull_requests::set_watching(&cx, &args, false).await,
-        "read_pull_request_guide" => pull_requests::read_guide(&cx, &args).await,
+        | "preview_recording_stop" => preview::call(cx, name, &args).await,
+        "device_list" | "device_open" | "device_screenshot" | "device_close" => {
+            devices::call(cx, name, &args).await
+        }
+        "create_threads" => create_threads::create(cx, &args).await,
+        "conn_attachment_prepare_upload" => attachments::prepare(cx, &args).await,
+        "conn_attachment_discard" => attachments::discard(cx, &args).await,
+        "conn_thread_send_attachments" => attachments::send(cx, &args).await,
+        "conn_worktree_handoff" => worktree::handoff(cx, &args).await,
+        "conn_worktree_list" => worktree::list(cx, &args).await,
+        "conn_worktree_status" => worktree::status(cx).await,
+        "orchestrator_capabilities" => projects::capabilities(cx, &args).await,
+        "conn_project_list" => projects::list(cx, &args).await,
+        "conn_project_read" => projects::read(cx, &args).await,
+        "conn_project_create" => projects::create(cx, &args).await,
+        "conn_project_update" => projects::update(cx, &args).await,
+        "conn_project_delete" => projects::delete(cx, &args).await,
+        "conn_project_clone" => projects::clone(cx, &args).await,
+        "conn_environment_read" => Ok(projects::environment(cx)),
+        "conn_environment_links" => crate::peers::links(cx).await,
+        "conn_environment_link" => crate::peers::link(cx, &args).await,
+        "conn_environment_unlink" => crate::peers::unlink(cx, &args).await,
+        "conn_environment_preferences_update" => crate::peers::preferences_update(cx, &args).await,
+        "conn_thread_list" => threads::list(cx, &args).await,
+        "conn_thread_read" => threads::read(cx, &args).await,
+        "conn_thread_search" => threads::search(cx, &args).await,
+        "conn_thread_launch" => threads::launch(cx, &args).await,
+        "conn_thread_send" => threads::send(cx, &args).await,
+        "conn_thread_wait" => threads::wait(cx, &args).await,
+        "conn_thread_interrupt" => threads::interrupt(cx, &args).await,
+        "conn_thread_update" => threads::update(cx, &args).await,
+        "conn_pending_request" => threads::pending_request(cx, &args).await,
+        "conn_queue" => manage::queue(cx, &args).await,
+        "conn_thread_configure" => manage::configure(cx, &args).await,
+        "conn_thread_organize" => manage::organize(cx, &args).await,
+        "conn_thread_transfer" => manage::transfer(cx, &args).await,
+        "mcp_call" | "mcp_connect" => panels::invoke(cx, name, &args).await,
+        "files_definition" => panels::definition(cx, &args).await,
+        "files_selection" | "files_reveal" => panels::files(cx, name, &args).await,
+        "panel_open" => panels::open(cx, &args).await,
+        "request_secret" => secrets::request(cx, &args).await,
+        "save_test_login" => test_logins::save(cx, &args).await,
+        "request_credentials" => test_logins::request(cx, &args).await,
+        "fill_credential" => test_logins::fill(cx, &args).await,
+        "conn_theme_read" => themes::read(cx, &args).await,
+        "conn_theme_set" => themes::set(cx, &args).await,
+        "database_query" => panels::database_query(cx, &args).await,
+        "send_to_user" => message::send_to_user(cx, &args).await,
+        "conn_background_wait" => background::wait(cx, &args).await,
+        "delegate_task" => tasks::delegate(cx, &args).await,
+        "task_status" => tasks::status(cx, &args).await,
+        "task_cancel" => tasks::cancel(cx, &args).await,
+        "schedule_task" => scheduled::schedule(cx, &args).await,
+        "annotations_list" => annotations::list(cx, &args).await,
+        "annotations_claim" => annotations::claim(cx, &args).await,
+        "annotations_complete" => annotations::complete(cx, &args).await,
+        "annotations_release" => annotations::release(cx, &args).await,
+        "list_scheduled_tasks" => scheduled::list(cx, &args).await,
+        "delete_scheduled_task" => scheduled::delete(cx, &args).await,
+        "run_scheduled_task_now" => scheduled::run_now(cx, &args).await,
+        "list_issues" => issues::list(cx, &args).await,
+        "read_issue" => issues::read(cx, &args).await,
+        "create_issue" => issues::create(cx, &args).await,
+        "comment_on_issue" => issues::comment(cx, &args).await,
+        "set_issue_state" => issues::set_state(cx, &args).await,
+        "link_issue" => issues::link(cx, &args).await,
+        "unlink_issue" => issues::unlink(cx, &args).await,
+        "list_thread_issues" => issues::list_thread(cx, &args).await,
+        "link_pull_request" => pull_requests::link(cx, &args).await,
+        "link_pull_requests" => pull_requests::link_many(cx, &args).await,
+        "unlink_pull_request" => pull_requests::unlink(cx, &args).await,
+        "unlink_pull_requests" => pull_requests::unlink_many(cx, &args).await,
+        "list_thread_pull_requests" => pull_requests::list_thread(cx, &args).await,
+        "watch_pull_request" => pull_requests::set_watching(cx, &args, true).await,
+        "unwatch_pull_request" => pull_requests::set_watching(cx, &args, false).await,
+        "read_pull_request_guide" => pull_requests::read_guide(cx, &args).await,
+        "write_pull_request_guides" => pull_requests::write_guides(cx, &args).await,
+        "pull_request_read" => pull_request_forge::read(cx, &args).await,
+        "pull_request_list" => pull_request_forge::list(cx, &args).await,
+        "pull_request_create" => pull_request_forge::create(cx, &args).await,
+        "pull_request_update" => pull_request_forge::update(cx, &args).await,
+        "pull_request_respond" => pull_request_forge::respond(cx, &args).await,
+        "pull_request_review" => pull_request_forge::review(cx, &args).await,
+        "pull_request_merge" => pull_request_forge::merge(cx, &args).await,
+        "ci_logs" => pull_request_forge::ci_logs(cx, &args).await,
+        "ci_rerun" => pull_request_forge::ci_rerun(cx, &args).await,
         other => Err(fail(
             "capability_denied",
             format!("conn-server does not serve `{other}` yet."),
@@ -258,9 +398,9 @@ pub(crate) async fn call(
 
 /// One call's context.
 pub(crate) struct Cx<'a> {
-    service: &'a Arc<McpService>,
-    caller: &'a Caller,
-    origin: Option<&'a str>,
+    pub(crate) service: &'a Arc<McpService>,
+    pub(crate) caller: &'a Caller,
+    pub(crate) origin: Option<&'a str>,
 }
 
 /// The broadest modes the caller may start or drive threads in.
@@ -270,7 +410,7 @@ pub(crate) struct Limits {
 }
 
 impl Cx<'_> {
-    fn config(&self) -> &McpConfig {
+    pub(crate) fn config(&self) -> &McpConfig {
         &self.service.config
     }
 
@@ -301,13 +441,16 @@ impl Cx<'_> {
     }
 
     /// Tools that act as the calling thread.
-    fn require_thread(&self, operation: &str) -> Result<&crate::ThreadCaller, ToolError> {
+    pub(crate) fn require_thread(
+        &self,
+        operation: &str,
+    ) -> Result<&crate::ThreadCaller, ToolError> {
         match self.caller {
             Caller::Thread(thread) => Ok(thread),
             Caller::Client(_) => Err(fail(
                 "thread_credential_required",
                 format!(
-                    "{operation} acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread."
+                    "{operation} acts as the calling Conn thread, so it needs an agent running inside Conn. This MCP client signed in from outside a thread."
                 ),
             )),
         }
@@ -346,7 +489,7 @@ impl Cx<'_> {
         }
     }
 
-    async fn shell(&self) -> ToolResult {
+    pub(crate) async fn shell(&self) -> ToolResult {
         self.engine()
             .shell_snapshot()
             .await
@@ -356,7 +499,7 @@ impl Cx<'_> {
             })
     }
 
-    async fn limits(&self) -> Result<Limits, ToolError> {
+    pub(crate) async fn limits(&self) -> Result<Limits, ToolError> {
         match self.caller {
             Caller::Thread(_) => {
                 let own = self.caller_projection().await?.unwrap_or(Value::Null);
@@ -372,19 +515,35 @@ impl Cx<'_> {
                         .to_owned(),
                 })
             }
-            Caller::Client(client) => Ok(Limits {
-                runtime_mode: client
-                    .max_runtime_mode
-                    .unwrap_or("approval-required")
-                    .to_owned(),
-                interaction_mode: "default".to_owned(),
-            }),
+            // `clientModeCeiling`: what it was approved with, narrowed by `T3-Mode-Limit`.
+            Caller::Client(client) => {
+                let approved = client.max_runtime_mode.unwrap_or("approval-required");
+                let (runtime, interaction) = match client.narrowed {
+                    Some((runtime, interaction)) => (
+                        if runtime_rank(runtime) < runtime_rank(approved) {
+                            runtime
+                        } else {
+                            approved
+                        },
+                        if interaction_rank(interaction) < interaction_rank("default") {
+                            interaction
+                        } else {
+                            "default"
+                        },
+                    ),
+                    None => (approved, "default"),
+                };
+                Ok(Limits {
+                    runtime_mode: runtime.to_owned(),
+                    interaction_mode: interaction.to_owned(),
+                })
+            }
         }
     }
 
     /// TS `writingCaller`: refuses a read-only client, then a thread caller that no longer
     /// owns a live run (`loadCaller`, `assertLiveCaller`). Returns the caller's limits.
-    async fn writing_caller(&self) -> Result<Limits, ToolError> {
+    pub(crate) async fn writing_caller(&self) -> Result<Limits, ToolError> {
         self.require_write()?;
         let Caller::Thread(caller) = self.caller else {
             return self.limits().await;
@@ -444,7 +603,10 @@ impl Cx<'_> {
                 continue;
             }
             match self.projection(target).await {
-                Ok(projection) => self.within_limits(&limits, &projection["thread"])?,
+                Ok(projection) => {
+                    self.within_limits(&limits, &projection["thread"])?;
+                    self.assert_same_link(&projection["thread"]).await?;
+                }
                 Err(ToolError::Failure {
                     code: "thread_not_found",
                     ..
@@ -483,24 +645,9 @@ impl Cx<'_> {
     }
 
     /// Dispatches one contract command; returns the sequence of its last event.
-    async fn dispatch(&self, command: Value) -> Result<u64, ToolError> {
-        let command: Command =
-            from_json(command).map_err(|e| internal(format!("bad command: {e}")))?;
-        match self.engine().dispatch(command).await {
-            Ok(result) => Ok(conn_contract::to_json(&result)["sequence"]
-                .as_u64()
-                .unwrap_or(0)),
-            Err(EngineError::Rejected(error)) => Err(fail(
-                "orchestration_error",
-                conn_contract::to_json(&error)["message"]
-                    .as_str()
-                    .unwrap_or("The command was refused.")
-                    .to_owned(),
-            )),
-            Err(EngineError::Internal(message)) => Err(internal(message)),
-        }
+    pub(crate) async fn dispatch(&self, command: Value) -> Result<u64, ToolError> {
+        dispatch_to(self.engine(), command).await
     }
-
     /// `clientRequestId`, or a fresh key: retries with the same id replay the first call.
     fn request_key(args: &Args) -> String {
         args.get("clientRequestId")
@@ -509,7 +656,7 @@ impl Cx<'_> {
     }
 
     /// TS `stableCommandId`: `command:mcp:<namespace>:<operation>:<key>`, each part encoded.
-    fn stable_id(&self, prefix: &str, operation: &str, key: &str) -> String {
+    pub(crate) fn stable_id(&self, prefix: &str, operation: &str, key: &str) -> String {
         format!(
             "{prefix}:mcp:{}:{}:{}",
             encode(&self.caller.namespace()),
@@ -524,6 +671,36 @@ impl Cx<'_> {
         let digest = Sha256::digest(pair.as_bytes());
         let hex = conn_support::hex::hex(&digest);
         format!("{prefix}{hex}")
+    }
+}
+
+/// [`Cx::dispatch`] on an engine handle, for work that outlives the call (a delegate's dispatch).
+pub(crate) async fn dispatch_to(
+    engine: &dyn conn_engine::Engine,
+    command: Value,
+) -> Result<u64, ToolError> {
+    let command: Command = from_json(command).map_err(|e| internal(format!("bad command: {e}")))?;
+    match engine.dispatch(command).await {
+        Ok(result) => Ok(conn_contract::to_json(&result)["sequence"]
+            .as_u64()
+            .unwrap_or(0)),
+        Err(EngineError::Rejected(error)) => {
+            let error = conn_contract::to_json(&error);
+            // TS `OrchestratorMcpService` maps `ThreadManagementThreadArchivedError` so.
+            let code = if error["cause"]["_tag"] == conn_engine::THREAD_ARCHIVED_ERROR {
+                "thread_not_sendable"
+            } else {
+                "orchestration_error"
+            };
+            Err(fail(
+                code,
+                error["message"]
+                    .as_str()
+                    .unwrap_or("The command was refused.")
+                    .to_owned(),
+            ))
+        }
+        Err(EngineError::Internal(message)) => Err(internal(message)),
     }
 }
 
@@ -573,7 +750,7 @@ fn internal(message: impl std::fmt::Display) -> ToolError {
     eprintln!("mcp: {message}");
     fail(
         "orchestration_error",
-        "T3 Code could not complete this request.",
+        "Conn could not complete this request.",
     )
 }
 

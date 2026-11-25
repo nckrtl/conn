@@ -910,8 +910,8 @@ fn change_lines(change: &Change, base_branch: &str, commit: &str) -> Vec<String>
     }
 }
 
-const WATCHING_CLOSING: &str = "Look into each item and act on it as your task requires. This PR stays linked and watched, so do not link, watch, or list it again. End your turn when you are done, and T3 Code wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.";
-const WATCHING_CLOSING_PLURAL: &str = "Look into each item and act on it as your task requires. Each PR T3 Code still watches stays linked and watched, so do not link, watch, or list them again. End your turn when you are done, and T3 Code wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request for each first so the thread returns to their inbox.";
+const WATCHING_CLOSING: &str = "Look into each item and act on it as your task requires. This PR stays linked and watched, so do not link, watch, or list it again. End your turn when you are done, and Conn wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.";
+const WATCHING_CLOSING_PLURAL: &str = "Look into each item and act on it as your task requires. Each PR Conn still watches stays linked and watched, so do not link, watch, or list them again. End your turn when you are done, and Conn wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request for each first so the thread returns to their inbox.";
 
 /// `PullRequestWatchWake`: the text and the notification (`{source, outcome, summary}`).
 #[derive(Clone, Debug, PartialEq)]
@@ -927,6 +927,41 @@ impl Wake {
     }
 }
 
+/// `pullRequestWatchEndMessage`: the wake for a watched pull request that merged or closed.
+/// `detail` is its detail, or its link's snapshot when the host could not be read.
+pub fn end_message(number: u64, url: &str, detail: &Value) -> Wake {
+    let merged = detail["state"] == "merged";
+    let how = if merged {
+        let by = detail
+            .pointer("/mergedBy/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(|login| format!(" by {login}"))
+            .unwrap_or_default();
+        let sha = detail["mergeCommitSha"]
+            .as_str()
+            .filter(|sha| !sha.is_empty())
+            .map(|sha| format!(" as {}", sha.chars().take(7).collect::<String>()))
+            .unwrap_or_default();
+        let base = detail["baseBranch"].as_str().unwrap_or_default();
+        format!("was merged into {base}{by}{sha}")
+    } else {
+        "was closed without merging".to_owned()
+    };
+    let mut text = format!("Pull request #{number} ({url}) {how}, so Conn stopped watching it.");
+    if !merged {
+        text.push_str(" If it is reopened, call watch_pull_request to watch it again.");
+    }
+    Wake {
+        text,
+        outcome: if merged { "completed" } else { "updated" },
+        summary: format!(
+            "#{number}: {}, stopped watching",
+            if merged { "merged" } else { "closed" }
+        ),
+    }
+}
+
 /// `pullRequestWatchMessage`.
 pub fn message(
     number: u64,
@@ -939,7 +974,7 @@ pub fn message(
         .map(|sha| format!(" on {}", sha.chars().take(7).collect::<String>()))
         .unwrap_or_default();
     let mut lines = vec![format!(
-        "Update on pull request #{number} ({url}), which T3 Code is watching for you:"
+        "Update on pull request #{number} ({url}), which Conn is watching for you:"
     )];
     for change in &report.changes {
         lines.extend(change_lines(change, base_branch, &commit));
@@ -947,7 +982,7 @@ pub fn message(
     lines.push(String::new());
     lines.push(if report.exhausted {
         format!(
-            "T3 Code stopped watching after {WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again."
+            "Conn stopped watching after {WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again."
         )
     } else {
         WATCHING_CLOSING.to_owned()

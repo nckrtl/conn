@@ -108,7 +108,8 @@ export function PullRequestReviewDecisionGlyph({
   return (
     <Tooltip>
       <TooltipTrigger render={<span className="inline-flex shrink-0" />}>
-        <presentation.Icon aria-hidden className={cn("size-3.5", presentation.toneClassName)} />
+        {/* The person glyphs are drawn short; one step up balances them with the checks circle. */}
+        <presentation.Icon aria-hidden className={cn("size-4", presentation.toneClassName)} />
         <span className="sr-only">{m(presentation.label)}</span>
       </TooltipTrigger>
       <TooltipPopup>{m(presentation.label)}</TooltipPopup>
@@ -427,9 +428,8 @@ export function PullRequestReviewOutcomeAvatarBadge({
   return (
     <presentation.Icon
       aria-hidden
-      strokeWidth={3}
       className={cn(
-        "absolute -right-1 -bottom-1 size-3 text-background",
+        "absolute -right-1 -bottom-1 size-3 rounded-full bg-background",
         presentation.fillClassName,
         stale && "opacity-50",
       )}

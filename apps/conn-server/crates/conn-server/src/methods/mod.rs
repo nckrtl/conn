@@ -9,20 +9,24 @@ use conn_engine::Engine;
 use crate::table::MethodTable;
 
 mod annotations;
-mod files;
+pub(crate) mod devices;
+pub(crate) mod files;
 mod git;
 mod git_message;
+mod local_servers;
 mod mcp_apps;
 pub(crate) mod orchestration;
 mod panels;
+mod peer_links;
 mod preview;
 mod projects;
 pub mod provider;
+pub mod provider_auth;
 pub(crate) mod pull_requests;
 mod scheduled;
 mod secrets;
 pub mod server;
-mod source_control;
+pub(crate) mod source_control;
 pub mod terminal;
 mod test_logins;
 mod text_generation;
@@ -46,6 +50,9 @@ pub struct Deps {
     pub pull_requests: pull_requests::Shared,
     /// Shared with the engine host, so a thread's terminals close with it.
     pub terminals: Option<conn_terminal::TerminalManager>,
+    /// The engine's per-checkout lease ([`conn_engine::SqliteEngine::workspace_locks`]): a
+    /// terminal starts under it, so worktree cleanup never removes a folder a shell opens in.
+    pub workspace_locks: Option<Arc<conn_vcs::locks::WorkspaceLocks>>,
     /// Files, assets and attachments; without it those methods and routes are not served.
     pub files: Option<Arc<conn_files::Files>>,
     /// Scheduled tasks (`conn_features::scheduled`); without it `scheduledTasks.*` is not served.
@@ -60,8 +67,18 @@ pub struct Deps {
     /// Text generators (`crate::text_generation`); without it `listTextGeneratorModels` is not
     /// served.
     pub text_generators: Option<Arc<crate::text_generation::TextGenerators>>,
+    /// Device hosts (`conn_devices`); without it `device.*` is not served.
+    pub devices: Option<conn_devices::Devices>,
     /// Bumped when a provider's `ServerProvider` entry changes (`provider::ProviderStatus`).
     pub provider_status: provider::ProviderStatus,
+    /// MCP OAuth for outside agents and peer links (`crate::oauth`).
+    pub oauth: Option<Arc<crate::oauth::McpOAuth>>,
+    /// Links to other environments (`crate::peers`); without it `peerLinks.*` is not served.
+    pub peers: Option<Arc<crate::peers::PeerLinks>>,
+    /// `model-manifest.json` (`crate::model_manifest`); `server.refreshProviders` refreshes it.
+    pub model_manifest: Option<Arc<crate::model_manifest::ModelManifest>>,
+    /// `provider.auth.*` flows (`provider_auth`).
+    pub provider_auth: provider_auth::AuthFlows,
 }
 
 impl std::fmt::Debug for Deps {
@@ -78,6 +95,7 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     orchestration::register(table, deps);
     projects::register(table, deps);
     preview::register(table, deps);
+    local_servers::register(table, deps);
     provider::register(table, deps);
     vcs::register(table, deps);
     git::register(table, deps);
@@ -89,7 +107,9 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     test_logins::register(table, deps);
     panels::register(table, deps);
     annotations::register(table, deps);
+    devices::register(table, deps);
     source_control::register(table, deps);
     pull_requests::register(table, deps);
+    peer_links::register(table, deps);
     text_generation::register(table, deps);
 }

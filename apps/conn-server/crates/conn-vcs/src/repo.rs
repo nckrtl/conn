@@ -42,9 +42,43 @@ pub(crate) async fn optional_text(command: GitCommand) -> VcsResult<Option<Strin
     }
 }
 
+/// `Path::is_dir` off the runtime thread: a stat can block on a slow or hung mount.
+pub(crate) async fn is_dir(path: &Path) -> bool {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || path.is_dir())
+        .await
+        .unwrap_or(false)
+}
+
+/// `isNonGitProject` for a folder: Git finds no work tree there, and no `.git` entry sits in
+/// it or a folder above it. A repository Git cannot read (a bad config, unreadable metadata)
+/// is not "no repository": Git calls an unreadable `.git` "not a git repository" too.
+///
+/// The walk follows the physical path, as Git's discovery does, up to and including the
+/// filesystem root. Only `NotFound` shows that a folder holds no `.git`.
+pub async fn is_plain_folder(cwd: &Path) -> bool {
+    if !matches!(crate::checkpoint::is_repository(cwd).await, Ok(false)) {
+        return false;
+    }
+    let cwd = cwd.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let Ok(physical) = std::fs::canonicalize(&cwd) else {
+            return false;
+        };
+        physical.ancestors().all(|dir| {
+            matches!(
+                std::fs::symlink_metadata(dir.join(".git")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            )
+        })
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// The work tree root, or `None` for a folder outside a repository (or a missing folder).
 pub async fn toplevel(cwd: &Path) -> VcsResult<Option<PathBuf>> {
-    if !cwd.is_dir() {
+    if !is_dir(cwd).await {
         return Ok(None);
     }
     let root = optional_text(
@@ -61,7 +95,7 @@ pub async fn toplevel(cwd: &Path) -> VcsResult<Option<PathBuf>> {
 
 /// The checked-out branch name, `None` when HEAD is detached or the folder is no checkout.
 pub async fn current_branch(cwd: &Path) -> VcsResult<Option<String>> {
-    if !cwd.is_dir() {
+    if !is_dir(cwd).await {
         return Ok(None);
     }
     let head = optional_text(
@@ -78,7 +112,7 @@ pub async fn current_branch(cwd: &Path) -> VcsResult<Option<String>> {
 
 /// The `HEAD` file of the checkout (for a linked worktree, inside its own git folder).
 pub async fn head_path(cwd: &Path) -> VcsResult<Option<PathBuf>> {
-    if !cwd.is_dir() {
+    if !is_dir(cwd).await {
         return Ok(None);
     }
     let path = optional_text(
@@ -114,6 +148,29 @@ pub async fn has_head_commit(cwd: &Path) -> VcsResult<bool> {
     .await
 }
 
+/// `GitVcsDriver.resolveCommit`: the commit `revision` names in `cwd`, or `None` when it names
+/// none or `cwd` is no checkout.
+pub async fn resolve_commit(cwd: &Path, revision: &str) -> VcsResult<Option<String>> {
+    if !is_dir(cwd).await {
+        return Ok(None);
+    }
+    Ok(optional_text(
+        git(
+            "GitVcsDriver.resolveCommit",
+            cwd,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{revision}^{{commit}}"),
+            ],
+        )
+        .timeout(PROBE_TIMEOUT),
+    )
+    .await?
+    .filter(|sha| !sha.is_empty()))
+}
+
 pub async fn config_get(cwd: &Path, key: &str) -> VcsResult<Option<String>> {
     Ok(optional_text(git(
         "GitVcsDriver.readConfigValue",
@@ -139,6 +196,121 @@ pub async fn remote_names(cwd: &Path) -> VcsResult<Vec<String>> {
     )
 }
 
+/// `findRemoteTrackingRemote`: the remote that has `refs/remotes/<remote>/<branch>`; the
+/// preferred remote first, then `origin`, then the first in `git remote` order.
+pub async fn remote_tracking_remote(
+    cwd: &Path,
+    branch: &str,
+    preferred: Option<&str>,
+) -> VcsResult<Option<String>> {
+    if branch.is_empty() {
+        return Ok(None);
+    }
+    let names = remote_names(cwd).await?;
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let mut args = vec!["for-each-ref".to_owned(), "--format=%(refname)".to_owned()];
+    args.extend(names.iter().map(|n| format!("refs/remotes/{n}/{branch}")));
+    let refs = optional_text(
+        git("GitManager.findRemoteTrackingRemote.refs", cwd, args).timeout(PROBE_TIMEOUT),
+    )
+    .await?
+    .unwrap_or_default();
+    let refs: Vec<&str> = refs.lines().map(str::trim).collect();
+    let matching: Vec<&String> = names
+        .iter()
+        .filter(|n| refs.contains(&format!("refs/remotes/{n}/{branch}").as_str()))
+        .collect();
+    if let Some(preferred) = preferred
+        && matching.iter().any(|n| *n == preferred)
+    {
+        return Ok(Some(preferred.to_owned()));
+    }
+    if matching.iter().any(|n| *n == "origin") {
+        return Ok(Some("origin".to_owned()));
+    }
+    Ok(matching.first().map(|n| (*n).clone()))
+}
+
+/// `findPublishedBranchRemote`: the one remote a branch without an upstream was pushed to.
+/// A remote whose `refs/remotes/<remote>/<branch>` is the local commit wins; else the one
+/// whose ref is an ancestor of it. Without a local branch, the one remote that tracks
+/// `branch`. Two candidates, or none, answer `None`.
+pub async fn published_branch_remote(cwd: &Path, branch: &str) -> VcsResult<Option<String>> {
+    let names = remote_names(cwd).await?;
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let local_ref = format!("refs/heads/{branch}");
+    let mut args = vec![
+        "for-each-ref".to_owned(),
+        "--format=%(refname)%00%(objectname)".to_owned(),
+        local_ref.clone(),
+    ];
+    args.extend(names.iter().map(|n| format!("refs/remotes/{n}/{branch}")));
+    let listing = optional_text(
+        git("GitManager.findPublishedBranchRemote", cwd, args).timeout(PROBE_TIMEOUT),
+    )
+    .await?
+    .unwrap_or_default();
+    let oids: Vec<(&str, &str)> = listing
+        .lines()
+        .filter_map(|line| line.trim().split_once('\0'))
+        .collect();
+    let oid_of = |reference: &str| oids.iter().find(|(r, _)| *r == reference).map(|(_, o)| *o);
+    let remote_refs: Vec<(&String, &str)> = names
+        .iter()
+        .filter_map(|n| oid_of(&format!("refs/remotes/{n}/{branch}")).map(|o| (n, o)))
+        .collect();
+    let Some(local) = oid_of(&local_ref) else {
+        // No local branch (deleted after the push): the one remote that tracks it, as T3's
+        // `branchPullRequest.remoteTrackingRefs`. Several are ambiguous.
+        let [(name, _)] = remote_refs.as_slice() else {
+            return Ok(None);
+        };
+        return Ok(config_get(cwd, &format!("remote.{name}.url"))
+            .await?
+            .map(|_| (*name).clone()));
+    };
+    let exact: Vec<&String> = remote_refs
+        .iter()
+        .filter(|(_, o)| *o == local)
+        .map(|(n, _)| *n)
+        .collect();
+    if exact.len() > 1 {
+        return Ok(None);
+    }
+    let remote = match exact.first() {
+        Some(name) => (*name).clone(),
+        None => {
+            let mut ancestors = Vec::new();
+            for (name, oid) in &remote_refs {
+                let output = git(
+                    "GitManager.findPublishedBranchRemote.ancestor",
+                    cwd,
+                    ["merge-base", "--is-ancestor", oid, local],
+                )
+                .allow_exit(&[0, 1])
+                .timeout(PROBE_TIMEOUT)
+                .run()
+                .await
+                .map_err(crate::error::VcsError::from)?;
+                if output.code == 0 {
+                    ancestors.push((*name).clone());
+                }
+            }
+            if ancestors.len() != 1 {
+                return Ok(None);
+            }
+            ancestors.remove(0)
+        }
+    };
+    Ok(config_get(cwd, &format!("remote.{remote}.url"))
+        .await?
+        .map(|_| remote))
+}
+
 /// `origin` when it exists, else the first remote.
 pub async fn primary_remote(cwd: &Path) -> VcsResult<Option<String>> {
     let names = remote_names(cwd).await?;
@@ -149,18 +321,27 @@ pub async fn primary_remote(cwd: &Path) -> VcsResult<Option<String>> {
 }
 
 /// The default branch of `remote` from `refs/remotes/<remote>/HEAD`, without the prefix.
+/// `None` when that HEAD names a tracking ref this clone does not have: unlike `symbolic-ref`,
+/// `rev-parse` refuses a dangling HEAD (`resolveDefaultBranchName`).
 pub async fn remote_default_branch(cwd: &Path, remote: &str) -> VcsResult<Option<String>> {
     let head = optional_text(git(
-        "GitVcsDriver.remoteDefaultBranch",
+        "GitVcsDriver.resolveDefaultBranchName",
         cwd,
         [
-            "symbolic-ref".to_owned(),
+            "rev-parse".to_owned(),
+            "--verify".to_owned(),
+            "--quiet".to_owned(),
+            "--symbolic-full-name".to_owned(),
             format!("refs/remotes/{remote}/HEAD"),
         ],
     ))
     .await?;
     let prefix = format!("refs/remotes/{remote}/");
-    Ok(head.and_then(|h| h.strip_prefix(&prefix).map(str::to_owned)))
+    Ok(head.and_then(|h| {
+        h.strip_prefix(&prefix)
+            .filter(|branch| !branch.is_empty() && *branch != "HEAD")
+            .map(str::to_owned)
+    }))
 }
 
 /// The remote names, the primary remote and its default branch: what the default-branch and
@@ -175,7 +356,7 @@ pub struct Remotes {
 }
 
 impl Remotes {
-    /// `git remote`, then `symbolic-ref` for the primary remote's HEAD when there is one: the
+    /// `git remote`, then `rev-parse` for the primary remote's HEAD when there is one: the
     /// same calls [`primary_remote`] and [`remote_default_branch`] make.
     pub async fn load(cwd: &Path) -> VcsResult<Self> {
         let names = remote_names(cwd).await?;
@@ -201,23 +382,17 @@ impl Remotes {
 pub async fn default_branch(cwd: &Path) -> VcsResult<Option<String>> {
     // Boxed: the nested git calls make a large future.
     Box::pin(async {
-        let remotes = Remotes::load(cwd).await?;
-        default_branch_with(cwd, &remotes).await
+        if let Some(branch) = Remotes::load(cwd).await?.primary_default {
+            return Ok(Some(branch));
+        }
+        for name in ["main", "master"] {
+            if ref_exists(cwd, &format!("refs/heads/{name}")).await? {
+                return Ok(Some(name.into()));
+            }
+        }
+        Ok(None)
     })
     .await
-}
-
-/// [`default_branch`] with the remotes already read.
-pub async fn default_branch_with(cwd: &Path, remotes: &Remotes) -> VcsResult<Option<String>> {
-    if let Some(branch) = &remotes.primary_default {
-        return Ok(Some(branch.clone()));
-    }
-    for name in ["main", "master"] {
-        if ref_exists(cwd, &format!("refs/heads/{name}")).await? {
-            return Ok(Some(name.into()));
-        }
-    }
-    Ok(None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,6 +510,16 @@ async fn resolve_base_inner(
         }));
     }
 
+    // A plain recorded base such as `main` compares with the remote that local branch tracks,
+    // which need not be the primary remote.
+    if let Some(configured) = configured.as_deref()
+        && !configured.is_empty()
+        && configured != branch
+        && let Some(tracked) = tracked_remote_base(cwd, configured).await?
+    {
+        return Ok(Some(tracked));
+    }
+
     let loaded;
     let remotes = match remotes {
         Some(remotes) => remotes,
@@ -367,22 +552,8 @@ async fn resolve_base_inner(
             .map(str::to_owned)
             .unwrap_or(name);
         if name == branch {
-            if let Some(upstream) = optional_text(git(
-                "GitVcsDriver.upstreamRef",
-                cwd,
-                [
-                    "rev-parse".to_owned(),
-                    "--symbolic-full-name".into(),
-                    format!("{branch}@{{upstream}}"),
-                ],
-            ))
-            .await?
-                && let Some(short) = upstream.strip_prefix("refs/remotes/")
-            {
-                return Ok(Some(BaseRef {
-                    base_ref: short.to_owned(),
-                    comparison_ref: upstream.clone(),
-                }));
+            if let Some(tracked) = tracked_remote_base(cwd, branch).await? {
+                return Ok(Some(tracked));
             }
             if let Some(remote) = primary.as_deref() {
                 let full = format!("refs/remotes/{remote}/{name}");
@@ -412,6 +583,28 @@ async fn resolve_base_inner(
         }
     }
     Ok(None)
+}
+
+/// The remote-tracking ref `branch` tracks, as a full ref so a local branch or tag of the same
+/// short name cannot shadow it.
+async fn tracked_remote_base(cwd: &Path, branch: &str) -> VcsResult<Option<BaseRef>> {
+    let upstream = optional_text(git(
+        "GitVcsDriver.resolveTrackedRemoteBaseRef",
+        cwd,
+        [
+            "rev-parse".to_owned(),
+            "--symbolic-full-name".into(),
+            format!("{branch}@{{upstream}}"),
+        ],
+    ))
+    .await?;
+    Ok(upstream.and_then(|full| {
+        let short = full.strip_prefix("refs/remotes/")?.to_owned();
+        Some(BaseRef {
+            base_ref: short,
+            comparison_ref: full,
+        })
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 import * as Electron from "electron";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { DEFAULT_ORBIT_GATEWAY_URL } from "@t3tools/client-runtime/orbit-gateway";
+import { DEFAULT_ORBIT_GATEWAY_URL, INSIGHT_PERIODS } from "@t3tools/client-runtime/orbit-gateway";
 
 import * as DesktopIpc from "../DesktopIpc.ts";
 import { ORBIT_GATEWAY_SEND_CHANNEL } from "../channels.ts";
@@ -14,7 +14,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const CONN_PREFIX = "/api/v1/conn";
 
 const OrbitGatewayRequest = Schema.Struct({
-  method: Schema.Literals(["GET", "POST", "PUT", "PATCH"]),
+  method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   path: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.%-]{0,512}$/)),
   body: Schema.NullOr(Schema.String.check(Schema.isMaxLength(2_000_000))),
   /** Checked against `CONN_QUERIES`; a path without an entry takes no query. */
@@ -81,12 +81,18 @@ const ROOT_CALLS: ReadonlyArray<{ readonly method: "GET" | "POST"; readonly patt
   { method: "POST", pattern: /^\/broadcasting\/auth$/ },
 ];
 
-/** The Tasks board's insights: a period, and optionally one Project. */
+/** The Tasks board's insights: one of the board's periods, and optionally one Project. */
 function isTaskInsightsQuery(query: Readonly<Record<string, string>>): boolean {
   return Object.entries(query).every(([key, value]) =>
-    key === "period" ? value === "7d" || value === "30d" : key === "project_id" && isOrbitId(value),
+    key === "period"
+      ? INSIGHT_PERIODS.some((period) => period === value)
+      : key === "project_id" && isOrbitId(value),
   );
 }
+
+/** The Gateway channels the renderer may subscribe to: `orbit`, and one Operation's progress. */
+const isRealtimeChannel = (channel: string) =>
+  channel === "private-orbit" || /^private-operation\.[1-9][0-9]{0,15}$/.test(channel);
 
 /** The Gateway URL of an allowed call below `/api/v1`, or null for anything else. */
 export function resolveRootUrl(
@@ -107,7 +113,8 @@ export function resolveRootUrl(
       const data = body as Record<string, unknown>;
       if (
         Object.keys(data).length !== 2 ||
-        data.channel_name !== "private-orbit" ||
+        typeof data.channel_name !== "string" ||
+        !isRealtimeChannel(data.channel_name) ||
         typeof data.socket_id !== "string" ||
         !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(data.socket_id)
       )
@@ -190,10 +197,23 @@ export function isAllowedConnQuery(
   return keys.every((key) => spec.query[key]!(request.query![key]!));
 }
 
+/** Conn: the only DELETE the renderer may send releases a reservation of a pre-warmed clone. */
+const CONN_DELETE = /^\/reservations\/[A-Za-z0-9-]{1,64}$/;
+
+export function isAllowedConnMethod(
+  request: Pick<typeof OrbitGatewayRequest.Type, "method" | "path" | "root">,
+): boolean {
+  return request.method !== "DELETE" || (request.root !== true && CONN_DELETE.test(request.path));
+}
+
 async function send(
   request: typeof OrbitGatewayRequest.Type,
 ): Promise<typeof OrbitGatewayResponse.Type> {
-  const url = request.root === true ? resolveRootUrl(request) : resolveConnUrl(request.path);
+  const url = !isAllowedConnMethod(request)
+    ? null
+    : request.root === true
+      ? resolveRootUrl(request)
+      : resolveConnUrl(request.path);
   if (url === null) {
     return { error: "That Gateway path is not allowed.", status: 0, body: "" };
   }

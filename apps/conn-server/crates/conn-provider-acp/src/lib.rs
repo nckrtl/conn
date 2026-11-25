@@ -1,15 +1,18 @@
 //! The ACP provider for Conn Server: agents that speak the Agent Client Protocol on stdio
-//! (Grok first; Kiro, fx, Antigravity and the ACP registry follow the same runtime).
+//! (Grok and Antigravity; Kiro, fx and the ACP registry would follow the same runtime).
 //!
 //! - [`protocol`], [`ordered`]: JSON-RPC frames, written with T3's key order.
 //! - [`connection`]: request ids and replies on one agent's stdio.
 //! - [`mapper`], [`tools`], [`diff`]: agent frames → `ProviderEvent`s (pure, replay-tested).
 //! - [`session`]: the `Session`: process, handshake, prompts, Stop, close.
 //! - [`flavor`]: what differs per agent.
+//! - [`antigravity`], [`antigravity_provider`]: Google Antigravity (`agy acp`).
 //!
 //! Reference behaviour: `packages/provider-acp` and `packages/provider-grok` in the Conn
 //! monorepo. See `README.md` for what is ported, what is not, and the proofs.
 
+mod antigravity;
+mod antigravity_provider;
 mod connection;
 mod diff;
 pub mod flavor;
@@ -21,7 +24,6 @@ mod instructions;
 mod mapper;
 mod ordered;
 mod policy;
-mod probe;
 mod prompt;
 mod protocol;
 mod session;
@@ -45,6 +47,10 @@ use conn_provider_support::process::{LaunchSpec, Process};
 use serde_json::json;
 use tokio::sync::mpsc;
 
+pub use antigravity::{
+    ANTIGRAVITY, AUTH_BROWSER_MARKER, AntigravitySettings, BROWSER_SUBCOMMAND, browser_main,
+};
+pub use antigravity_provider::{AntigravityConfig, AntigravityProvider};
 pub use flavor::{Flavor, GROK, Launch};
 pub use session::AcpSession;
 
@@ -61,46 +67,53 @@ const END_INPUT_WAIT: Duration = Duration::from_millis(200);
 /// `processGroupTerminationGrace`: SIGTERM to SIGKILL on Stop.
 const TERMINATE_GRACE: Duration = Duration::from_secs(1);
 
-/// Ends an agent as T3 ends one it owns in a detached process group.
+/// Ends an agent as T3 ends one it owns in a detached process group. Every signal goes through
+/// the process supervisor while the agent is unreaped: once it is reaped, its PID and the group
+/// named after it may belong to another process, and nothing is sent. After `Exited` no signal
+/// is tried at all.
 async fn stop_process(mut process: Process, kind: session::StopKind) {
+    // The scope's close: the end of input first (T3's ACP writer completes and ends stdin).
+    if kind == session::StopKind::Kill {
+        process.end_input(END_INPUT_WAIT).await;
+    }
     // On Linux T3's runtime owns the agent's descendants (`ownDescendantProcessGroups`): it
-    // ends the process tree from `/proc`, descendants first, not the agent's group.
+    // ends the process tree from `/proc`, descendants first, not the agent's group. The scope's
+    // close is `terminatePosixProcessTree(0)`: SIGTERM down the tree and SIGKILL at once.
     #[cfg(target_os = "linux")]
     {
-        use conn_provider_support::process_tree::terminate_tree;
-        match kind {
-            // The scope's close (`terminatePosixProcessTree(0)`): the end of input, then
-            // SIGTERM down the tree and SIGKILL at once.
-            session::StopKind::Kill => {
-                process.end_input(END_INPUT_WAIT).await;
-                terminate_tree(process.pid, Duration::ZERO).await;
-            }
-            session::StopKind::Terminate => terminate_tree(process.pid, TERMINATE_GRACE).await,
+        let grace = match kind {
+            session::StopKind::Kill => Some(Duration::ZERO),
+            session::StopKind::Terminate => Some(TERMINATE_GRACE),
+            session::StopKind::Exited => None,
+        };
+        if let Some(grace) = grace {
+            process
+                .while_unreaped(move |pid| {
+                    conn_provider_support::process_tree::terminate_tree(pid, grace)
+                })
+                .await;
         }
     }
+    // Elsewhere the group: SIGKILL at once, or SIGTERM and SIGKILL after the grace.
     #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        use conn_provider_support::process::signal_group;
-        use rustix::process::Signal;
-        match kind {
-            // The scope's close: the end of input first (T3's ACP writer completes and ends
-            // stdin), then SIGKILL to the group at once.
-            session::StopKind::Kill => {
-                process.end_input(END_INPUT_WAIT).await;
-                signal_group(process.pid, Signal::KILL);
-            }
-            session::StopKind::Terminate => {
-                signal_group(process.pid, Signal::TERM);
-                let pid = process.pid;
-                if !conn_provider_support::process::wait_gone(pid, TERMINATE_GRACE).await {
-                    signal_group(pid, Signal::KILL);
-                }
+    match kind {
+        session::StopKind::Terminate => {
+            use conn_provider_support::process::signal_group;
+            let signalled = process
+                .while_unreaped(|pid| async move {
+                    signal_group(pid, rustix::process::Signal::TERM);
+                })
+                .await;
+            if signalled && !process.wait_exit(TERMINATE_GRACE).await {
+                process.kill();
             }
         }
+        session::StopKind::Kill => process.kill(),
+        session::StopKind::Exited => {}
     }
     #[cfg(not(unix))]
     let _ = kind;
-    // The child is gone or going; reap it.
+    // The child is gone or going; reap it. After `Exited` the supervisor already has.
     process.shutdown().await;
 }
 
@@ -344,7 +357,7 @@ fn process_spawner(launch: Launch, cwd: String) -> session::Spawner {
             program: PathBuf::from(&launch.program),
             args: launch.args.clone(),
             cwd: Some(cwd.clone()),
-            env_remove: Vec::new(),
+            env_remove: launch.env_remove.clone(),
             env_set: launch.env.clone(),
         };
         let (events_tx, events) = mpsc::channel(session::EVENT_CAPACITY);
@@ -444,6 +457,10 @@ impl Provider for AcpProvider {
                 mcp_servers: input.mcp_servers.clone(),
                 client_version: "0.0.0".into(),
                 attachments_dir: self.config.attachments_dir.clone(),
+                auth_method: None,
+                runtime_version: None,
+                default_model: None,
+                observer: None,
                 self_command: self.config.self_command.clone().unwrap_or_else(|| {
                     std::env::current_exe()
                         .map(|p| p.display().to_string())

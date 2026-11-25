@@ -196,7 +196,7 @@ export function makeTargetedProviderUpdateAction(
 // pnpm 11 resolves `@latest` to the newest release older than `minimumReleaseAge`
 // and exits 0, so a release advertised from the npm dist-tag would never install.
 // An exact spec installs it and pnpm records it in `minimumReleaseAgeExclude`.
-export function resolveLatestProviderUpdateAction(
+function resolveLatestProviderUpdateAction(
   capabilities: ProviderMaintenanceCapabilities,
   latestVersion: string | null,
 ): ProviderMaintenanceCommandAction | null {
@@ -1312,7 +1312,7 @@ export const makeCachedProviderMaintenanceResolution = Effect.fn(
 
 function manualUpdateMessage(latestVersion: string, installPath: string | undefined): string {
   return installPath
-    ? `Version ${latestVersion} is out. T3 Code runs ${installPath}; update it with the app or tool that installed it.`
+    ? `Version ${latestVersion} is out. Conn runs ${installPath}; update it with the app or tool that installed it.`
     : `Version ${latestVersion} is out. Update it with the app or tool that installed it.`;
 }
 

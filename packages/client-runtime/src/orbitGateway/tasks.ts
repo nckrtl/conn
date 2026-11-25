@@ -178,7 +178,7 @@ export interface OrbitTasksPage {
   readonly nextCursor: string | null;
 }
 
-export type OrbitTaskInsightsPeriod = "7d" | "30d";
+export type OrbitTaskInsightsPeriod = "24h" | "7d" | "30d";
 
 /**
  * One period of Orbit's task insights (`GET /api/v1/task-insights`), over the tasks that ended in
@@ -220,8 +220,20 @@ export interface OrbitTaskInsights {
     readonly weekStart: string;
     readonly tokensPerMergedPr: number | null;
   }>;
-  /** Each day of the period, oldest first. */
-  readonly daily: ReadonlyArray<{ readonly date: string; readonly merged: number }>;
+  /** Each day of the period, oldest first; empty for the 24-hour period. */
+  readonly daily: ReadonlyArray<{
+    readonly date: string;
+    readonly merged: number;
+    /** The day's own numbers, by the same rules as `current`; null where Orbit reports none. */
+    readonly values: OrbitTaskInsightsSummary;
+  }>;
+  /** Each hour of the 24-hour period, oldest first (ISO start of the hour); empty otherwise. */
+  readonly hourly: ReadonlyArray<{
+    readonly hour: string;
+    readonly merged: number;
+    /** The hour's own numbers, by the same rules as `current`; null where Orbit reports none. */
+    readonly values: OrbitTaskInsightsSummary;
+  }>;
   readonly byModel: ReadonlyArray<OrbitTaskInsightsBreakdownRow>;
 }
 

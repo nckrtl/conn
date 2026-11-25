@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use conn_engine::{Engine, EngineError, ThreadTranscript};
+use conn_engine::{Engine, EngineError, ThreadHistory, ThreadTranscript};
 
 use conn_support::time::iso_from_ms;
 
@@ -38,8 +38,8 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub struct AppState {
     pub table: Arc<MethodTable>,
     pub auth: Arc<AuthStore>,
-    /// `ExecutionEnvironmentDescriptor`.
-    pub descriptor: Arc<Value>,
+    /// `ExecutionEnvironmentDescriptor`, current after each reload (`crate::reload`).
+    pub descriptor: tokio::sync::watch::Receiver<Value>,
     /// Backs the orchestration snapshot routes; without it they answer 404.
     pub engine: Option<Arc<dyn Engine>>,
     /// The services the method table was built from, for the routes in `routes/`.
@@ -59,6 +59,7 @@ impl std::fmt::Debug for AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(root))
         .route("/health", get(health))
         .route("/.well-known/t3/environment", get(descriptor))
         .route("/api/auth/session", get(session_state))
@@ -69,6 +70,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/pairing-links/revoke", post(revoke_pairing_link))
         .route("/api/auth/clients", get(clients))
         .route("/api/auth/clients/revoke", post(revoke_client))
+        .route("/api/auth/clients/extend", post(extend_client))
+        .route("/api/auth/logout", post(logout))
         .route(
             "/api/auth/clients/revoke-others",
             post(revoke_other_clients),
@@ -82,6 +85,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/orchestration/threads/{thread_id}/transcript",
             get(thread_transcript),
+        )
+        .route(
+            "/api/orchestration/threads/{thread_id}/history",
+            get(thread_history),
+        )
+        .route(
+            "/api/orchestration/threads/{thread_id}/outline",
+            get(thread_outline),
+        )
+        .route(
+            "/api/orchestration/threads/{thread_id}/window",
+            get(thread_window),
         )
         .route("/ws", get(ws))
         .merge(crate::routes::router())
@@ -118,6 +133,19 @@ async fn cors(request: Request, next: Next) -> Response {
     response
 }
 
+/// The T3 server serves its web client here. This server has none (clients are the Conn apps),
+/// but the root must still answer 2xx: Conn desktop's SSH setup (`__ssh-helper wait-ready`,
+/// `packages/ssh`) probes `GET /` on the host's loopback server before it reuses it, and
+/// without a 2xx it would neither attach nor start a second server.
+async fn root() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        "<!doctype html><meta charset=\"utf-8\"><title>Conn Server</title>\
+         <p>This is a Conn Server. Connect to it from a Conn app.</p>\n",
+    )
+        .into_response()
+}
+
 async fn health(State(state): State<AppState>) -> Json<Value> {
     let coverage = state.table.coverage();
     // The T3 server has no `/health`; this route is how a caller tells the Conn Server apart.
@@ -131,7 +159,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn descriptor(State(state): State<AppState>) -> Json<Value> {
-    Json(state.descriptor.as_ref().clone())
+    Json(state.descriptor.borrow().clone())
 }
 
 async fn session_state(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
@@ -177,7 +205,10 @@ async fn token(
     headers: HeaderMap,
     Form(request): Form<TokenRequest>,
 ) -> Response {
-    no_store(exchange_token(&state, peer, &headers, request))
+    // The exchange writes `auth.json` and may read T3's pairing table: blocking work.
+    let exchanged =
+        tokio::task::spawn_blocking(move || exchange_token(&state, peer, &headers, request)).await;
+    no_store(exchanged.unwrap_or_else(|_| internal_reason("access_token_issuance_failed")))
 }
 
 fn exchange_token(
@@ -278,12 +309,37 @@ fn issue_ticket(state: &AppState, headers: &HeaderMap, route: Option<&str>) -> R
     }
 }
 
-/// `AuthCreatePairingCredentialInput`.
+/// `AuthCreatePairingCredentialInput`, plus Conn's `sessionTtl` for the session the code grants.
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct PairingTokenRequest {
     label: Option<String>,
     scopes: Option<Vec<String>>,
     access: Option<String>,
+    purpose: Option<String>,
+    /// Any JSON value, so `null` and numbers reach [`session_ttl`] and get its 400.
+    #[serde(default, deserialize_with = "present")]
+    session_ttl: Option<Value>,
+}
+
+/// A field that is present, `null` included; a missing one stays `None` (`serde(default)`).
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// A request's `sessionTtl`: only the string `until-revoked` is taken.
+fn session_ttl(value: &Value) -> Option<u64> {
+    value.as_str().and_then(auth::parse_session_ttl)
+}
+
+/// A `sessionTtl` other than `until-revoked`: 400.
+fn invalid_session_ttl() -> Response {
+    error(
+        StatusCode::BAD_REQUEST,
+        "EnvironmentRequestInvalidError",
+        "invalid_session_ttl",
+        "session_ttl_must_be_until_revoked",
+    )
 }
 
 /// The bearer session behind a request, or the 401 refusing it.
@@ -311,7 +367,7 @@ pub(crate) fn require_scope(
 }
 
 /// `EnvironmentScopeRequiredError`, 403.
-fn scope_required(scope: &str) -> Response {
+pub(crate) fn scope_required(scope: &str) -> Response {
     Json(json!({
         "_tag": "EnvironmentScopeRequiredError",
         "code": "insufficient_scope",
@@ -340,13 +396,65 @@ async fn pairing_token(
     headers: HeaderMap,
     body: Option<Json<PairingTokenRequest>>,
 ) -> Response {
-    let principal = match require_scope(&state, &headers, "access:write") {
+    // The auth store rereads and writes `auth.json` under a file lock: blocking work, off the
+    // runtime thread.
+    let request = body.map(|Json(b)| b).unwrap_or_default();
+    tokio::task::spawn_blocking(move || pairing_token_blocking(&state, &headers, request))
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn pairing_token_blocking(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: PairingTokenRequest,
+) -> Response {
+    let principal = match require_scope(state, headers, "access:write") {
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    let request = body.map(|Json(b)| b).unwrap_or_default();
-    // MCP approval codes (`access`) need the MCP OAuth flow, which this server lacks.
-    if request.access.is_some() {
+    let session_ttl_ms = match &request.session_ttl {
+        None => None,
+        Some(ttl) => match session_ttl(ttl) {
+            Some(ms) => Some(ms),
+            None => return invalid_session_ttl(),
+        },
+    };
+    // A peer-link code (`peerLinkPairingCodes`): the scopes its access needs, spent only by a link.
+    if let (Some(access), Some("peer-link")) =
+        (request.access.as_deref(), request.purpose.as_deref())
+        && auth::is_mcp_access(access)
+    {
+        if let Some(missing) = auth::mcp_client_scopes(access)
+            .iter()
+            .find(|s| !principal.has_scope(s))
+        {
+            return scope_required(missing);
+        }
+        let label = request.label.filter(|l| !l.trim().is_empty());
+        let issued = match state
+            .auth
+            .issue_peer_link_pairing(access, label, session_ttl_ms)
+        {
+            Ok(issued) => issued,
+            Err(e) => return internal("pairing_credential_issuance_failed", e),
+        };
+        let mut body = json!({
+            "id": issued.id,
+            "credential": issued.code,
+            "expiresAt": iso_from_ms(issued.expires_at_ms),
+            "access": access,
+            "purpose": "peer-link",
+        });
+        if let Some(label) = issued.label {
+            body["label"] = json!(label);
+        }
+        return no_store(Json(body).into_response());
+    }
+    // MCP approval codes (`access` alone) are not served: only peer-link codes are. A
+    // `purpose` without its `access` matches no branch of `AuthCreatePairingCredentialInput`,
+    // so it is refused too, never issued as an ordinary pairing code.
+    if request.access.is_some() || request.purpose.is_some() {
         return error(
             StatusCode::BAD_REQUEST,
             "EnvironmentRequestInvalidError",
@@ -382,6 +490,7 @@ async fn pairing_token(
         scopes,
         label,
         ttl_ms: auth::PAIRING_CODE_TTL_MS,
+        session_ttl_ms,
     }) {
         Ok(issued) => issued,
         Err(e) => return internal("pairing_credential_issuance_failed", e),
@@ -458,6 +567,90 @@ async fn revoke_client(
     }
 }
 
+/// `POST /api/auth/logout` (Conn only): ends the caller's own session, which
+/// `/api/auth/clients/revoke` refuses. Any session may call it, native or MCP. A repeat gets
+/// the usual 401, which a caller counts as done. Sessions here are bearer tokens, so no
+/// cookie to clear.
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    tokio::task::spawn_blocking(move || {
+        let Some(token) = bearer(&headers) else {
+            return auth_invalid("missing_credential");
+        };
+        match state.auth.logout(token) {
+            Ok(Some(id)) => {
+                no_store(Json(json!({ "sessionId": id, "revoked": true })).into_response())
+            }
+            Ok(None) => auth_invalid("invalid_credential"),
+            Err(e) => internal("client_session_revoke_failed", e),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtendRequest {
+    session_id: Option<String>,
+    /// Any JSON value, missing as `null`, so every value but `until-revoked` gets the 400.
+    #[serde(default)]
+    session_ttl: Value,
+}
+
+/// `POST /api/auth/clients/extend` (Conn only): moves a session's end out, the caller's own
+/// without `sessionId`. Orbit upgrades held sessions here instead of pairing again, and a
+/// peer link's holder upgrades its own MCP session.
+async fn extend_client(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ExtendRequest>,
+) -> Response {
+    tokio::task::spawn_blocking(move || extend_client_blocking(&state, &headers, request))
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn extend_client_blocking(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: ExtendRequest,
+) -> Response {
+    // A peer link's MCP session may extend itself, so links upgrade without a re-pair.
+    // Any other MCP session, and any `sessionId`, needs a native session with access:write.
+    let mcp = bearer(headers).and_then(|token| state.auth.authenticate_mcp_client(token));
+    let id = match (mcp, request.session_id) {
+        (Some(mcp), None) if mcp.peer_link => mcp.session_id,
+        (Some(_), _) => return scope_required("access:write"),
+        (None, session_id) => match require_scope(state, headers, "access:write") {
+            Ok(principal) => session_id.unwrap_or(principal.session_id),
+            Err(response) => return *response,
+        },
+    };
+    let Some(ttl_ms) = session_ttl(&request.session_ttl) else {
+        return invalid_session_ttl();
+    };
+    match state.auth.extend_session(&id, ttl_ms) {
+        Ok(Ok(expires_at_ms)) => Json(json!({
+            "sessionId": id,
+            "expiresAt": iso_from_ms(expires_at_ms),
+        }))
+        .into_response(),
+        Ok(Err(auth::ExtendError::NotFound)) => error(
+            StatusCode::NOT_FOUND,
+            "EnvironmentRequestInvalidError",
+            "invalid_request",
+            "client_session_not_found",
+        ),
+        Ok(Err(auth::ExtendError::CarriedFromT3)) => error(
+            StatusCode::CONFLICT,
+            "EnvironmentOperationForbiddenError",
+            "operation_forbidden",
+            "t3_session_extend_not_allowed",
+        ),
+        Err(e) => internal("client_session_extend_failed", e),
+    }
+}
+
 async fn revoke_other_clients(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let principal = match require_scope(&state, &headers, "access:write") {
         Ok(principal) => principal,
@@ -507,14 +700,31 @@ fn snapshot_failed<E>(reason: &str, error: EngineError<E>) -> Response {
     .with_status(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// `GET /api/orchestration/shell`: always the full snapshot, which is valid for any query.
-async fn shell_snapshot(State(state): State<AppState>, headers: HeaderMap) -> Response {
+/// `GET /api/orchestration/shell` (`answerShellSnapshot`): `{"resumable":true}` when the
+/// shell stream can resume from `resumeFrom`, else the snapshot with the query's omissions,
+/// as `subscribeShell` trims it.
+async fn shell_snapshot(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
     let engine = match orchestration_access(&state, &headers) {
         Ok(engine) => engine,
         Err(response) => return *response,
     };
-    match engine.shell_snapshot().await {
-        Ok(snapshot) => Json(snapshot).into_response(),
+    let flag = |name: &str| query.get(name).is_some_and(|v| v == "1");
+    let options = conn_engine::HttpShellQuery {
+        omit_idle_subagents: flag("omitIdleSubagents"),
+        omit_older_settled: flag("omitOlderSettled"),
+        // `Number.isSafeInteger(resumeFrom) && resumeFrom >= 0`.
+        resume_from: query
+            .get("resumeFrom")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v < (1 << 53)),
+    };
+    match engine.http_shell_snapshot(options).await {
+        Ok(Some(snapshot)) => Json(snapshot).into_response(),
+        Ok(None) => Json(json!({"resumable": true})).into_response(),
         Err(error) => snapshot_failed("orchestration_snapshot_failed", error),
     }
 }
@@ -534,6 +744,45 @@ async fn thread_snapshot(
         Ok(Some(snapshot)) => Json(snapshot).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => snapshot_failed("orchestration_thread_snapshot_failed", error),
+    }
+}
+
+async fn thread_outline(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let engine = match orchestration_access(&state, &headers) {
+        Ok(engine) => engine,
+        Err(response) => return *response,
+    };
+    history_result(engine.thread_outline(thread_id.into()).await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowQuery {
+    entry_id: String,
+}
+
+async fn thread_window(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<WindowQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let engine = match orchestration_access(&state, &headers) {
+        Ok(engine) => engine,
+        Err(response) => return *response,
+    };
+    history_result(engine.thread_window(thread_id.into(), query.entry_id).await)
+}
+
+fn history_result<T: serde::Serialize, E>(result: Result<Option<T>, EngineError<E>>) -> Response {
+    match result {
+        Ok(Some(value)) => Json(value).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => snapshot_failed("orchestration_thread_history_failed", error),
     }
 }
 
@@ -561,7 +810,7 @@ async fn thread_transcript(
     let Ok(_permit) = TRANSCRIPT_EXPORTS.acquire().await else {
         return internal_reason("orchestration_thread_snapshot_failed");
     };
-    let environment_id = state.descriptor["environmentId"]
+    let environment_id = state.descriptor.borrow()["environmentId"]
         .as_str()
         .unwrap_or("")
         .to_owned();
@@ -592,6 +841,57 @@ async fn thread_transcript(
             "thread_transcript_too_large",
         ),
         Err(error) => snapshot_failed("orchestration_thread_snapshot_failed", error),
+    }
+}
+
+/// `GET /api/orchestration/threads/:threadId/history?cursor=` (`OrchestrationV2ThreadHistoryPage`):
+/// the page before a bounded snapshot's or an earlier page's cursor (T3's `threadHistoryPage`).
+/// `view=conversation` leaves work rows out. Work folding (`deferWork`, `view=work`) is not
+/// served: this server's snapshots fold no work.
+async fn thread_history(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let engine = match orchestration_access(&state, &headers) {
+        Ok(engine) => engine,
+        Err(response) => return *response,
+    };
+    let invalid = || {
+        error(
+            StatusCode::BAD_REQUEST,
+            "EnvironmentRequestInvalidError",
+            "invalid_request",
+            "invalid_history_cursor",
+        )
+    };
+    let Some(cursor) = query.get("cursor").cloned() else {
+        return invalid();
+    };
+    let view = match query.get("view").map(String::as_str) {
+        Some("messages") => conn_engine::HistoryView::Messages,
+        Some("conversation") => conn_engine::HistoryView::Conversation,
+        _ => conn_engine::HistoryView::Timeline,
+    };
+    match engine
+        .thread_history_page(
+            thread_id.into(),
+            cursor,
+            query.get("throughEntryId").cloned(),
+            view,
+        )
+        .await
+    {
+        Ok(ThreadHistory::Page(page)) => Json(page).into_response(),
+        Ok(ThreadHistory::NotFound) => error(
+            StatusCode::NOT_FOUND,
+            "EnvironmentResourceNotFoundError",
+            "not_found",
+            "thread_not_found",
+        ),
+        Ok(ThreadHistory::InvalidCursor) => invalid(),
+        Err(error) => snapshot_failed("orchestration_thread_history_failed", error),
     }
 }
 
@@ -701,7 +1001,6 @@ async fn ws(
     let options = SessionOptions {
         frame_parts: query.contains_key(conn_wire::frame_parts::QUERY_PARAM),
         max_message_bytes: MAX_MESSAGE_BYTES,
-        idle_timeout: Duration::from_secs(60),
         context: CallContext {
             headers: Vec::new(),
             principal: Some(Arc::new(principal)),
@@ -733,7 +1032,7 @@ pub(crate) fn check_every(period: Duration) -> tokio::time::Interval {
 }
 
 /// Resolves once `session_id` is revoked or expires, here or by another process (the CLI).
-async fn revoked(auth: &AuthStore, session_id: &str) {
+pub(crate) async fn revoked(auth: &AuthStore, session_id: &str) {
     let mut changes = auth.subscribe();
     let mut check = check_every(Duration::from_secs(30));
     loop {
@@ -784,7 +1083,7 @@ fn trace_id() -> String {
     auth::random_hex(16)
 }
 
-fn auth_invalid(reason: &str) -> Response {
+pub(crate) fn auth_invalid(reason: &str) -> Response {
     error(
         StatusCode::UNAUTHORIZED,
         "EnvironmentAuthInvalidError",
@@ -832,25 +1131,231 @@ mod tests {
 
     use super::*;
 
+    /// Conn desktop's SSH setup reuses a host's server only when `GET /` answers 2xx.
+    #[tokio::test]
+    async fn the_root_answers_for_the_ssh_readiness_probe() {
+        let (addr, _) = serve().await;
+        let (status, _) = call(addr, "GET / HTTP/1.1", "").await;
+        assert_eq!(status, 200);
+    }
+
     async fn serve() -> (std::net::SocketAddr, Arc<AuthStore>) {
         serve_with(None).await
     }
 
     async fn serve_with(engine: Option<Arc<dyn Engine>>) -> (std::net::SocketAddr, Arc<AuthStore>) {
+        serve_with_deps(engine, Default::default()).await
+    }
+
+    async fn serve_with_deps(
+        engine: Option<Arc<dyn Engine>>,
+        deps: crate::methods::Deps,
+    ) -> (std::net::SocketAddr, Arc<AuthStore>) {
         let auth = AuthStore::in_memory();
         let state = AppState {
             table: Arc::new(MethodTable::new()),
             auth: auth.clone(),
-            descriptor: Arc::new(crate::environment::descriptor(
+            descriptor: crate::environment::fixed_descriptor(crate::environment::descriptor(
                 "env-test", "Test", false, None,
             )),
             engine,
-            deps: Default::default(),
+            deps,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router(state)).await });
         (addr, auth)
+    }
+
+    /// A server whose auth store keeps `auth.json` in a temp folder, with `/mcp` served.
+    async fn serve_on_disk(dir: &std::path::Path) -> (std::net::SocketAddr, Arc<AuthStore>) {
+        let auth = AuthStore::open(dir.join("auth.json")).unwrap();
+        let environment = Arc::new(
+            crate::environment::Environment::load(dir, None, dir.to_owned(), Default::default())
+                .unwrap(),
+        );
+        let engine: Arc<dyn Engine> = Arc::new(
+            conn_engine::SqliteEngine::open(conn_engine::EngineConfig::new(
+                dir.join("engine.sqlite"),
+            ))
+            .unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut deps = crate::methods::Deps {
+            environment: Some(environment),
+            engine: Some(engine),
+            ..Default::default()
+        };
+        deps.mcp = crate::routes::mcp::service(&deps, addr);
+        let state = AppState {
+            table: Arc::new(MethodTable::new()),
+            auth: auth.clone(),
+            descriptor: crate::environment::fixed_descriptor(crate::environment::descriptor(
+                "env-test", "Test", false, None,
+            )),
+            engine: None,
+            deps,
+        };
+        tokio::spawn(async move { axum::serve(listener, router(state)).await });
+        (addr, auth)
+    }
+
+    /// How long a 100 ms sleep on this (single) runtime thread takes while `request` runs: a
+    /// handler that blocks the thread delays it by as long as it blocks.
+    async fn sleep_while(
+        addr: std::net::SocketAddr,
+        head: &'static str,
+        body: &'static str,
+    ) -> Duration {
+        let request = tokio::spawn(async move { call(addr, head, body).await });
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let slept = started.elapsed();
+        request.await.unwrap();
+        slept
+    }
+
+    /// Minting a pairing code writes `auth.json` under its file lock. While another process
+    /// holds the lock, the runtime thread must stay free.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pairing_code_write_waits_off_the_runtime_thread() {
+        let dir = std::env::temp_dir().join(format!("conn-http-lock-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, auth) = serve_on_disk(&dir).await;
+        let token = auth
+            .issue_session(auth::SessionRequest {
+                scopes: auth::STANDARD_SCOPES
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                label: None,
+                subject: None,
+                ttl_ms: auth::SESSION_TTL_MS,
+            })
+            .unwrap()
+            .token;
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let lock = dir.join("auth.lock");
+        let holder = std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(lock)
+                .unwrap();
+            file.lock().unwrap();
+            held.0.send(()).unwrap();
+            let _ = release.1.recv_timeout(Duration::from_millis(800));
+        });
+        held.1.recv().unwrap();
+        let head: &'static str = Box::leak(
+            format!("POST /api/auth/pairing-token HTTP/1.1\r\nauthorization: Bearer {token}\r\ncontent-type: application/json").into_boxed_str(),
+        );
+        let request = tokio::spawn(async move {
+            call(addr, head, r#"{"access":"auto","purpose":"peer-link"}"#).await
+        });
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let slept = started.elapsed();
+        release.0.send(()).unwrap();
+        let (status, _) = request.await.unwrap();
+        holder.join().unwrap();
+        assert_eq!(status, 200);
+        assert!(
+            slept < Duration::from_millis(400),
+            "the runtime thread was blocked for {slept:?}"
+        );
+    }
+
+    /// `/mcp` authenticates through the auth store, which rereads `auth.json` when another
+    /// process changed it. A slow read (here a FIFO with no writer yet) must not block the
+    /// runtime thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_reads_the_auth_store_off_the_runtime_thread() {
+        let dir = std::env::temp_dir().join(format!("conn-http-fifo-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, _auth) = serve_on_disk(&dir).await;
+        let file = dir.join("auth.json");
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success(),
+            "mkfifo"
+        );
+        // After 800 ms, feed every reader the FIFO gets (each reread sees a new stamp).
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = std::thread::spawn({
+            let done = done.clone();
+            move || {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::thread::sleep(Duration::from_millis(800));
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok(mut fifo) = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                        .open(&file)
+                    {
+                        let _ = fifo.write_all(br#"{"version":1,"sessions":[],"pairingLinks":[]}"#);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+        let slept = sleep_while(
+            addr,
+            "POST /mcp HTTP/1.1\r\nauthorization: Bearer unknown\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream",
+            "{}",
+        )
+        .await;
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        writer.join().unwrap();
+        assert!(
+            slept < Duration::from_millis(400),
+            "the runtime thread was blocked for {slept:?}"
+        );
+    }
+
+    /// `logout` takes an MCP-audience bearer too: it ends that session, and `/mcp` then
+    /// refuses the token.
+    #[tokio::test(flavor = "current_thread")]
+    async fn logout_ends_an_mcp_session() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-http-mcp-logout-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, auth) = serve_on_disk(&dir).await;
+        let issued = auth
+            .issue_mcp_client_session(
+                "Agent",
+                "auto",
+                false,
+                ClientInfo::default(),
+                auth::MAX_TTL_MS,
+            )
+            .unwrap();
+        let bearer = format!("authorization: Bearer {}", issued.token);
+        let init = format!(
+            "POST /mcp HTTP/1.1\r\n{bearer}\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream"
+        );
+        let body = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#;
+        assert_eq!(call(addr, &init, body).await.0, 200);
+        let (status, reply) = call(
+            addr,
+            &format!("POST /api/auth/logout HTTP/1.1\r\n{bearer}"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap(),
+            json!({"sessionId": issued.principal.session_id, "revoked": true})
+        );
+        assert_eq!(call(addr, &init, body).await.0, 401);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// One HTTP/1.1 request; returns the status and the body.
@@ -1115,6 +1620,31 @@ mod tests {
         assert_eq!(status, 200, "{body}");
         let snapshot: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(snapshot["projects"][0]["title"], "P");
+        // `answerShellSnapshot`: a current cursor gets the small confirmation; a cursor past
+        // the head or one that is not a safe integer gets the snapshot again.
+        let sequence = snapshot["snapshotSequence"].as_u64().unwrap();
+        let (status, body) = get(
+            &format!("{shell}?resumeFrom={sequence}"),
+            &[header, &bearer],
+        )
+        .await;
+        assert_eq!((status, body.as_str()), (200, r#"{"resumable":true}"#));
+        for cursor in [
+            format!("{}", sequence + 1),
+            "-1".into(),
+            "abc".into(),
+            "9007199254740992".into(),
+        ] {
+            let (status, body) =
+                get(&format!("{shell}?resumeFrom={cursor}"), &[header, &bearer]).await;
+            assert_eq!(status, 200, "{body}");
+            let replaced: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(replaced["snapshotSequence"], sequence, "{cursor}");
+        }
+        // The opt-in gives the trimmed snapshot a fresh `subscribeShell` sends.
+        let (_, body) = get(&format!("{shell}?omitOlderSettled=1"), &[header, &bearer]).await;
+        let trimmed: Value = serde_json::from_str(&body).unwrap();
+        assert!(trimmed["olderSettled"].is_object(), "{trimmed}");
         // An unknown thread is a plain 404, never the structured not-found error.
         let (status, body) = get("/api/orchestration/threads/nope", &[header, &bearer]).await;
         assert_eq!((status, body.as_str()), (404, ""));
@@ -1284,6 +1814,55 @@ mod tests {
         )
         .await;
         assert_eq!(status, 400);
+        // `purpose: "peer-link"` needs its `access`; alone, or with any other purpose, it is
+        // refused and no code is issued (`AuthCreatePairingCredentialInput`).
+        let links_before = auth.pairing_links().len();
+        for body in [
+            r#"{"purpose":"peer-link"}"#,
+            r#"{"purpose":"peer-link","scopes":["access:read"]}"#,
+            r#"{"purpose":"startup"}"#,
+        ] {
+            let (status, reply) = post("/api/auth/pairing-token", body).await;
+            assert_eq!(status, 400, "{body}: {reply}");
+            assert!(!reply.contains(r#""credential""#), "{body}: {reply}");
+        }
+        assert_eq!(auth.pairing_links().len(), links_before);
+        // `sessionTtl` takes only `until-revoked`, on plain and peer-link codes. Any other
+        // explicit value, `null` and numbers too, is 400; only an omitted field keeps the default.
+        for body in [
+            r#"{"sessionTtl":"30d"}"#,
+            r#"{"sessionTtl":null}"#,
+            r#"{"sessionTtl":3600}"#,
+            r#"{"sessionTtl":0}"#,
+            r#"{"access":"auto","purpose":"peer-link","sessionTtl":"forever"}"#,
+            r#"{"access":"auto","purpose":"peer-link","sessionTtl":null}"#,
+            r#"{"access":"auto","purpose":"peer-link","sessionTtl":3600}"#,
+        ] {
+            let (status, reply) = post("/api/auth/pairing-token", body).await;
+            assert_eq!(status, 400, "{body}: {reply}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap()["code"],
+                "invalid_session_ttl",
+                "{body}: {reply}"
+            );
+        }
+        let (status, body) = post(
+            "/api/auth/pairing-token",
+            r#"{"scopes":["access:read"],"sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let long: Value = serde_json::from_str(&body).unwrap();
+        let held = auth
+            .exchange(
+                long["credential"].as_str().unwrap(),
+                None,
+                ClientInfo::default(),
+            )
+            .unwrap();
+        assert!(
+            held.principal.expires_at_ms > admin.principal.expires_at_ms + auth::SESSION_TTL_MS
+        );
 
         let device = auth
             .exchange(
@@ -1300,12 +1879,129 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         let clients: Vec<Value> = serde_json::from_str(&body).unwrap();
-        assert_eq!(clients.len(), 2);
+        assert_eq!(clients.len(), 3);
         assert!(
             clients
                 .iter()
                 .any(|c| c["current"] == true && c["client"]["label"] == "Orbit Gateway")
         );
+
+        // `extend`: the caller's own session without `sessionId`, another's with it.
+        let (status, body) = post(
+            "/api/auth/clients/extend",
+            r#"{"sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let extended: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(extended["sessionId"], admin.principal.session_id.as_str());
+        // The 30-day device session lacks access:write: it may not extend, not even itself.
+        let before = auth
+            .authenticate_bearer(&device.token)
+            .unwrap()
+            .expires_at_ms;
+        let device_head = format!(
+            "POST /api/auth/clients/extend HTTP/1.1\r\nauthorization: Bearer {}\r\ncontent-type: application/json",
+            device.token
+        );
+        for body in [
+            r#"{"sessionTtl":"until-revoked"}"#.to_owned(),
+            format!(
+                r#"{{"sessionId":"{}","sessionTtl":"until-revoked"}}"#,
+                device.principal.session_id
+            ),
+        ] {
+            let (status, reply) = call(addr, &device_head, &body).await;
+            assert_eq!(status, 403, "{body}: {reply}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap()["requiredPermission"],
+                "access:write"
+            );
+        }
+        assert_eq!(
+            auth.authenticate_bearer(&device.token)
+                .unwrap()
+                .expires_at_ms,
+            before
+        );
+        // A peer link's MCP session extends itself, and only itself. Other MCP sessions may not.
+        let mcp_session = |peer_link| {
+            auth.issue_mcp_client_session(
+                "Conn · holder",
+                "auto-accept-edits",
+                peer_link,
+                ClientInfo::default(),
+                auth::MCP_CLIENT_SESSION_TTL_MS,
+            )
+            .unwrap()
+        };
+        let (peer, agent) = (mcp_session(true), mcp_session(false));
+        let mcp_head = |token: &str| {
+            format!(
+                "POST /api/auth/clients/extend HTTP/1.1\r\nauthorization: Bearer {token}\r\ncontent-type: application/json"
+            )
+        };
+        for (token, body) in [
+            (
+                &peer.token,
+                format!(
+                    r#"{{"sessionId":"{}","sessionTtl":"until-revoked"}}"#,
+                    peer.principal.session_id
+                ),
+            ),
+            (&agent.token, r#"{"sessionTtl":"until-revoked"}"#.to_owned()),
+        ] {
+            let (status, reply) = call(addr, &mcp_head(token), &body).await;
+            assert_eq!(status, 403, "{body}: {reply}");
+        }
+        let (status, body) = call(
+            addr,
+            &mcp_head(&peer.token),
+            r#"{"sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let extended: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(extended["sessionId"], peer.principal.session_id.as_str());
+        let a_year_on = iso_from_ms(peer.principal.expires_at_ms + 365 * 24 * 3_600_000);
+        assert!(extended["expiresAt"].as_str().unwrap() > a_year_on.as_str());
+        for token in [&peer.token, &agent.token] {
+            auth.logout(token).unwrap().unwrap();
+        }
+        let device_ttl =
+            |ttl: &str| format!(r#"{{"sessionId":"{}"{ttl}}}"#, device.principal.session_id);
+        for ttl in [
+            r#","sessionTtl":"1h""#,
+            r#","sessionTtl":null"#,
+            r#","sessionTtl":3600"#,
+            "",
+        ] {
+            let (status, reply) = post("/api/auth/clients/extend", &device_ttl(ttl)).await;
+            assert_eq!(status, 400, "{ttl}: {reply}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply).unwrap()["code"],
+                "invalid_session_ttl",
+                "{ttl}: {reply}"
+            );
+        }
+        let (status, body) = post(
+            "/api/auth/clients/extend",
+            &device_ttl(r#","sessionTtl":"until-revoked""#),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            auth.authenticate_bearer(&device.token)
+                .unwrap()
+                .expires_at_ms
+                > admin.principal.expires_at_ms + auth::SESSION_TTL_MS
+        );
+        let (status, _) = post(
+            "/api/auth/clients/extend",
+            r#"{"sessionId":"no-such-session","sessionTtl":"until-revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, 404);
 
         let mine = format!(r#"{{"sessionId":"{}"}}"#, admin.principal.session_id);
         let (status, body) = post("/api/auth/clients/revoke", &mine).await;
@@ -1328,6 +2024,31 @@ mod tests {
         )
         .await;
         assert_eq!(body, r#"{"revoked":true}"#);
+        // `logout` ends the caller's own until-revoked session at once, with no access:write,
+        // and announces it so its sockets close. A repeat is the normal 401.
+        let mut changes = auth.subscribe();
+        let held_bearer = format!("authorization: Bearer {}", held.token);
+        let logout = format!("POST /api/auth/logout HTTP/1.1\r\n{held_bearer}");
+        let (status, body) = call(addr, &logout, "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"sessionId": held.principal.session_id, "revoked": true})
+        );
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            AccessChange::ClientRemoved(held.principal.session_id.clone())
+        );
+        assert!(auth.authenticate_bearer(&held.token).is_none());
+        let (status, _) = call(addr, &logout, "").await;
+        assert_eq!(status, 401);
+        let (status, _) = call(
+            addr,
+            &format!("GET /api/auth/clients HTTP/1.1\r\n{held_bearer}"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 401);
         let (_, body) = post("/api/auth/clients/revoke-others", "").await;
         assert_eq!(body, r#"{"revokedCount":0}"#);
         // Without access:read the list is refused.
@@ -1381,6 +2102,184 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the socket stayed open after revocation");
+    }
+
+    /// The preview viewer socket ends with its session too, on revoke and on logout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_revoked_session_loses_its_preview_socket() {
+        let root = std::env::temp_dir().join(format!("conn-http-preview-{}", auth::random_hex(6)));
+        let preview = conn_preview::tabs::Preview::with_fixture(
+            root.clone(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../conn-preview/tests/fake-chrome.py"),
+        );
+        let opened = preview
+            .invoke("thread", "agent", "open", json!({}))
+            .await
+            .unwrap();
+        let tab = opened["tabId"].as_str().unwrap().to_owned();
+        let (addr, auth) = serve_with_deps(
+            None,
+            crate::methods::Deps {
+                preview: Some(preview.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        for end in ["revoke", "logout"] {
+            let session = auth
+                .issue_session(auth::SessionRequest {
+                    scopes: vec!["orchestration:read".into()],
+                    label: None,
+                    subject: None,
+                    ttl_ms: auth::MAX_TTL_MS,
+                })
+                .unwrap();
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "GET /api/preview-stream/ws?threadId=thread&tabId={tab} HTTP/1.1\r\nhost: {addr}\r\nauthorization: Bearer {}\r\n{UPGRADE}\r\n\r\n",
+                session.token
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(
+                buf[..n].starts_with(b"HTTP/1.1 101"),
+                "{end}: {}",
+                String::from_utf8_lossy(&buf[..n])
+            );
+            match end {
+                "revoke" => {
+                    auth.revoke_session(None, &session.principal.session_id)
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {
+                    let logout = format!(
+                        "POST /api/auth/logout HTTP/1.1\r\nauthorization: Bearer {}",
+                        session.token
+                    );
+                    assert_eq!(call(addr, &logout, "").await.0, 200);
+                }
+            }
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
+                }
+            })
+            .await;
+            assert!(closed.is_ok(), "the preview socket stayed open after {end}");
+        }
+        preview.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    /// Revocation ends the preview socket while a viewer command waits on the browser: the
+    /// fake browser never answers `Input.insertText`, and the socket still closes at once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_preview_socket_closes_mid_command_on_revoke_and_logout() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+        let root = std::env::temp_dir().join(format!("conn-http-hang-{}", auth::random_hex(6)));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("hang-Input.insertText"), "").unwrap();
+        let pending = root.join("pending-Input.insertText");
+        let preview = conn_preview::tabs::Preview::with_fixture(
+            root.clone(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../conn-preview/tests/fake-chrome.py"),
+        );
+        let opened = preview
+            .invoke("thread", "agent", "open", json!({}))
+            .await
+            .unwrap();
+        let tab = opened["tabId"].as_str().unwrap().to_owned();
+        let (addr, auth) = serve_with_deps(
+            None,
+            crate::methods::Deps {
+                preview: Some(preview.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        for end in ["revoke", "logout"] {
+            let _ = std::fs::remove_file(&pending);
+            let session = auth
+                .issue_session(auth::SessionRequest {
+                    scopes: vec!["orchestration:read".into(), "preview:operate".into()],
+                    label: None,
+                    subject: None,
+                    ttl_ms: auth::MAX_TTL_MS,
+                })
+                .unwrap();
+            let mut request =
+                format!("ws://{addr}/api/preview-stream/ws?threadId=thread&tabId={tab}")
+                    .into_client_request()
+                    .unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {}", session.token).parse().unwrap(),
+            );
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (mut socket, _) = tokio_tungstenite::client_async(request, tcp).await.unwrap();
+            // The control message first; take control, then send a command the browser holds.
+            let control = socket.next().await.unwrap().unwrap();
+            assert!(matches!(control, Message::Text(_)), "{end}: {control:?}");
+            socket
+                .send(Message::Text(
+                    json!({"type": "takeControl"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type": "text", "text": "x"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let arrived = tokio::time::timeout(Duration::from_secs(5), async {
+                while !pending.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            assert!(
+                arrived.is_ok(),
+                "{end}: the command never reached the browser"
+            );
+            match end {
+                "revoke" => {
+                    auth.revoke_session(None, &session.principal.session_id)
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {
+                    let logout = format!(
+                        "POST /api/auth/logout HTTP/1.1\r\nauthorization: Bearer {}",
+                        session.token
+                    );
+                    assert_eq!(call(addr, &logout, "").await.0, 200);
+                }
+            }
+            // The browser's reply never comes, so only revocation can close the socket.
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(Ok(message)) = socket.next().await {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(
+                closed.is_ok(),
+                "the preview socket stayed open mid-command after {end}"
+            );
+        }
+        preview.shutdown().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     /// `CREDENTIAL_RESPONSE_HEADERS`: no cache may keep a token or a ticket.
@@ -1438,7 +2337,7 @@ mod tests {
         let state = AppState {
             table: Arc::new(MethodTable::new()),
             auth: auth.clone(),
-            descriptor: Arc::new(crate::environment::descriptor(
+            descriptor: crate::environment::fixed_descriptor(crate::environment::descriptor(
                 "env-test", "Test", false, None,
             )),
             engine: None,

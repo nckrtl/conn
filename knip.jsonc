@@ -32,6 +32,8 @@
         "fixtures/*/*.js",
         // Conn fork tools run by hand (symbols, vendored tarballs, local signing).
         "build-conn-symbols.ts",
+        "generate-conn-icons.ts",
+        "export-conn-android-icons.ts",
         "build-conn-vendored-tarball.ts",
         "sign-macos-local.ts",
         "check-desktop-typecheck.ts",
@@ -80,6 +82,8 @@
         "scripts/fetch-expo-schema.ts",
         "scripts/probe-claude-fork-local-rollback-replay.ts",
         "scripts/update-test-shard-weights.ts",
+        // Seeds the mobile UI lab's server by hand.
+        "scripts/mobile-lab-seed.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
         // graphqlgen reads its config.
@@ -120,6 +124,8 @@
         "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
         "src/annotations/**": ["exports"],
         "src/orbit/**": ["exports"],
+        // Generated: one export per glyph so single-glyph users tree-shake the set.
+        "src/icons/glyphs.generated.ts": ["exports"],
         "src/browser/ServerBrowserSurface.tsx": ["exports"],
         "src/components/AppRouteModal.tsx": ["exports"],
         "src/lib/sidebarTree.ts": ["exports"],
@@ -150,6 +156,15 @@
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.
+    },
+    "apps/lab-gpui": {
+      "entry": ["src/**/*.{ts,tsx,mjs}", "scripts/*.ts", "vite.reference.config.ts"],
+      // The web-reference Vite config resolves pre-bundled dependencies through @t3tools/web.
+      "ignoreDependencies": ["@t3tools/web"],
+    },
+    "apps/lab-ios": {
+      // index.html loads src/main.tsx; the generators run by hand.
+      "entry": ["src/main.tsx", "scripts/*.mts"],
     },
     "apps/marketing": {
       // `astro check` runs from the typecheck task in vite.config.ts, which knip does not read.
@@ -183,6 +198,9 @@
         "scripts/generate-device-stream.mts",
         "src/features/devices/device-stream.browser.ts!",
         "src/features/browser/preview-stream.browser.ts!",
+        // The mobile UI lab (scripts/lab/lab.mts) turns on metro.config.js's icon aliases, which
+        // load these by path; its generators run by hand.
+        "src/lab/icons/**/*.{ts,tsx,mts}",
       ],
       // Fonts are configured as asset paths; Expo autolinks the native packages.
       "ignoreDependencies": [

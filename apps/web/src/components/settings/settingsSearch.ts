@@ -544,11 +544,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "boring-sidebar-multiline",
-    title: msg("Two-line folder rows"),
+    title: msg("Two-line thread rows"),
     to: "/settings/labs",
-    // Shown inside the boring sidebar row only while it is on, so search lands on the parent.
-    targetId: "boring-sidebar",
-    searchTerms: [msg("beta boring sidebar folder rows multiline branch pull request details")],
+    searchTerms: [msg("beta sidebar thread folder rows multiline branch pull request details")],
   },
   {
     id: "tool-call-visibility",
@@ -855,15 +853,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("queue steer running turn send default behavior composer")],
   },
   {
-    id: "provider-update-checks",
-    title: msg("Provider update checks"),
-    to: "/settings/maintenance",
-    searchTerms: [
-      msg("installed cli versions newer available codex claude cursor grok fx kiro opencode"),
-    ],
-    scope: "environment-defaults",
-  },
-  {
     id: "continue-threads-after-server-update",
     title: msg("Continue threads after restarts"),
     to: "/settings/maintenance",
@@ -998,12 +987,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/about",
     searchTerms: [msg("cli terminal shell path install command line")],
     desktopOnly: true,
-  },
-  {
-    id: "mobile-app",
-    title: msg("Mobile app"),
-    to: "/settings/about",
-    searchTerms: [msg("phone tablet iPhone iPad iOS Android App Store Google Play QR")],
   },
   {
     id: "welcome-page",

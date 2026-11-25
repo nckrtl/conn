@@ -197,13 +197,16 @@ const CARGO_RUN_VARIABLE =
  */
 export const RUN_KNOBS = [
   "CONN_NETWORK_LOG", "ACP_FIXTURE", "ACP_DUMP", "CONN_CONTRACT_REAL_PAYLOADS",
+  "CONN_LARAVEL_FIXTURE",
   "REPLAY_MCP_CAPTURE", "RSS_TURNS", "RSS_SETTINGS", "STREAM", "REOPEN", "IDLE_MS", "CHECKPOINTS",
+  // T3's `handoffTokenCapConfig`: the history a context handoff may carry.
+  "T3CODE_CONTEXT_HANDOFF_TOKEN_CAP",
 ];
 
 /** What the cargo runner sets itself, whatever the shell has. */
 export const RUN_SET = [
   "HOME", "PATH", "SHELL", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
-  "CONN_CLAUDE_STATUS_PROBE", "CONN_CODEX_STATUS_PROBE", "CONN_MODEL_MANIFEST_URL",
+  "GIT_CEILING_DIRECTORIES", "CONN_CLAUDE_STATUS_PROBE", "CONN_CODEX_STATUS_PROBE", "CONN_MODEL_MANIFEST_URL",
 ];
 
 /**
@@ -214,6 +217,12 @@ export const RUN_SET = [
 export const RUN_DROPPED = [
   "CONN_SERVER_BROWSER_PATH", "T3CODE_SERVER_BROWSER_SANDBOX", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_BIN", "CAFE_TOKEN", "T3_ACP_MCP_ENDPOINT",
   "T3_ACP_MCP_AUTHORIZATION", "PROGRAMDATA", "HOSTNAME", "GIT_CONFIG_COUNT",
+  // The Android SDK and emulator options of this machine (conn-devices, the local host).
+  "ANDROID_HOME", "ANDROID_SDK_ROOT", "LOCALAPPDATA", "EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS",
+  // The machine's switch for the local server scan (`T3CODE_PORT_DISCOVERY=0`).
+  "T3CODE_PORT_DISCOVERY",
+  // A rehearsal copy's switch (`serve.rs`): a test server must run its providers.
+  "CONN_SERVER_INERT",
 ];
 
 /** The prefix of the cargo runner's temp folders: `conn-run-<runner pid>-XXXXXX`. */
@@ -223,8 +232,10 @@ export const RUN_DIR_PREFIX = "conn-run-";
  * The environment for a binary that cargo runs (tests, examples, benches, `cargo run`), built
  * by `tools/cargo-runner.mjs`: `RUNTIME_VARIABLES` and the canary's variables, what cargo and
  * libtest set (`CARGO_RUN_VARIABLE`), `RUN_KNOBS`; then a fresh HOME, a stand-in shell, a
- * `PATH` without provider or host CLIs, no global or system git configuration, the status
- * probes and the model manifest fetch off. `dir` must be a fresh temp folder.
+ * `PATH` without provider or host CLIs, no global or system git configuration, git's
+ * repository search stopped at the temp folder (a test's folder there never finds a checkout
+ * that holds it), the status probes and the model manifest fetch off. `dir` must be a fresh
+ * temp folder.
  */
 export function sealedRunEnv(dir, env = process.env) {
   const passed = Object.fromEntries(
@@ -246,6 +257,7 @@ export function sealedRunEnv(dir, env = process.env) {
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CEILING_DIRECTORIES: env.TMPDIR || NodeOS.tmpdir(),
     CONN_CLAUDE_STATUS_PROBE: "off",
     CONN_CODEX_STATUS_PROBE: "off",
     CONN_MODEL_MANIFEST_URL: "off",

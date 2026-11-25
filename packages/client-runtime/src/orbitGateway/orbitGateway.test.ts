@@ -421,6 +421,7 @@ describe("createOrbitGatewayClient", () => {
       ]);
       const waits: number[] = [];
       const client = createOrbitGatewayClient(transport, {
+        realtime: false,
         sleep: async (ms) => {
           waits.push(ms);
         },
@@ -494,6 +495,7 @@ describe("createOrbitGatewayClient", () => {
       ]);
       const waits: number[] = [];
       const client = createOrbitGatewayClient(transport, {
+        realtime: false,
         sleep: async (ms) => {
           waits.push(ms);
         },
@@ -522,6 +524,7 @@ describe("createOrbitGatewayClient", () => {
       const client = createOrbitGatewayClient(
         async () => ({ status: 200, body: JSON.stringify({ data: operation("running") }) }),
         {
+          realtime: false,
           now: () => clock,
           sleep: async (ms) => {
             clock += ms;
@@ -960,6 +963,61 @@ describe("createOrbitGatewayClient", () => {
         },
       ],
     });
+  });
+
+  it("reads an Operation the Conn read does not serve, such as instance.finalize, through Orbit's read", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    const client = createOrbitGatewayClient(async (request) => {
+      requests.push(request);
+      if (request.root !== true) {
+        return {
+          status: 404,
+          body: JSON.stringify({ error: { code: "http.404", message: "Resource not found." } }),
+        };
+      }
+      return {
+        status: 200,
+        body: JSON.stringify({
+          data: { id: 31898, kind: "instance.finalize", status: "succeeded", target_id: 3929 },
+        }),
+      };
+    });
+    await expect(client.operation(31898)).resolves.toMatchObject({
+      id: 31898,
+      kind: "instance.finalize",
+      status: "succeeded",
+      targetId: 3929,
+    });
+    expect(requests.map((request) => [request.path, request.root ?? false])).toEqual([
+      ["/operations/31898", false],
+      ["/operations/31898", true],
+    ]);
+    // The next poll of that Operation skips the Conn read that answers 404.
+    await client.operation(31898);
+    expect(requests.slice(2).map((request) => [request.path, request.root ?? false])).toEqual([
+      ["/operations/31898", true],
+    ]);
+  });
+
+  it("polls a finalize it admitted through the Conn read (Gateway release 2203)", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    const client = createOrbitGatewayClient(async (request) => {
+      requests.push(request);
+      return {
+        status: request.method === "POST" ? 202 : 200,
+        body: JSON.stringify({
+          data: { id: 32060, kind: "instance.finalize", status: "queued", target_id: 3947 },
+        }),
+      };
+    });
+    await client.finalizeReservation("r1", "fix-login", "key-1");
+    await client.operation(32060);
+    await client.operation(32060);
+    expect(requests.map((request) => [request.path, request.root ?? false])).toEqual([
+      ["/reservations/r1/finalize", false],
+      ["/operations/32060", false],
+      ["/operations/32060", false],
+    ]);
   });
 });
 

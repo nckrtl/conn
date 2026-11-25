@@ -627,20 +627,21 @@ function toCheckEntries(raw: ReadonlyArray<CheckFields> | null | undefined): Rea
     const name = trimmed(check.name) ?? trimmed(check.context);
     if (name === null) return [];
     const status = toCheckStatus(check);
+    const startedAt = realTimestamp(check.startedAt);
+    const completedAt = realTimestamp(check.completedAt);
     return [
       {
         check: {
           name,
           status,
+          ...(startedAt === null ? {} : { startedAt }),
+          ...(completedAt === null ? {} : { completedAt }),
           description: trimmed(check.description),
           url: trimmed(check.detailsUrl) ?? trimmed(check.targetUrl),
           ...(typeof check.isRequired === "boolean" ? { required: check.isRequired } : {}),
         },
         workflowName: trimmed(check.workflowName),
-        at:
-          status === "pending"
-            ? STILL_RUNNING
-            : (realTimestamp(check.completedAt) ?? realTimestamp(check.startedAt)),
+        at: status === "pending" ? STILL_RUNNING : (completedAt ?? startedAt),
       },
     ];
   });

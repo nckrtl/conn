@@ -1,0 +1,103 @@
+.m-changes-card {
+  margin-block-start: 12px;
+  min-width: 0;
+  padding: var(--thread-card-inset, 3px);
+  border-radius: var(--thread-card-radius, 14px);
+  background: var(--thread-card-surface);
+  color: var(--color-foreground);
+  font: 400 14px/1.4 var(--m-font);
+}
+[data-ios-theme="light"] .m-changes-card {
+  background: color-mix(in srgb, var(--thread-page) 94%, var(--color-foreground));
+}
+.m-changes-header {
+  align-content: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 16px;
+}
+.m-changes-header strong {
+  font-weight: 550;
+}
+.m-changes-header .m-card-actions {
+  margin-inline-start: auto;
+  color: var(--color-foreground-muted);
+}
+.m-changes-header .m-card-action:hover {
+  color: var(--color-foreground);
+}
+.m-change-all::before,
+.m-change-diff-icon {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  mask: var(--change-icon) center / contain no-repeat;
+}
+.m-change-all {
+  --change-icon: url("../../../../assets/conn/superheroicons/16/solid/chevrons-up-down.svg");
+}
+.m-change-all[data-collapse="true"] {
+  --change-icon: url("../../../../assets/conn/superheroicons/16/solid/chevrons-down-up.svg");
+}
+.m-change-diff-icon {
+  --change-icon: url("../../../../assets/conn/superheroicons/16/solid/file-diff.svg");
+}
+.m-change-stats {
+  display: inline-flex;
+  gap: 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.m-change-stats > :first-child {
+  color: var(--thread-success);
+}
+.m-change-stats > :last-child {
+  color: var(--thread-destructive);
+}
+.m-changes-card ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.m-changes-card .m-change-tree {
+  border-radius: calc(var(--thread-card-radius, 14px) - var(--thread-card-inset, 3px));
+  background: color-mix(in srgb, var(--thread-card-surface) 94%, white);
+  padding: var(--thread-card-inset, 3px);
+}
+[data-ios-theme="light"] .m-changes-card .m-change-tree {
+  background: white;
+}
+.m-changes-card .m-change-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 6px;
+  min-height: 28px;
+  padding: 2px 11px;
+  appearance: none;
+  border: 0;
+  border-radius: calc(var(--thread-card-radius, 14px) - 2 * var(--thread-card-inset, 3px));
+  background: transparent;
+  color: var(--color-foreground-muted);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.m-change-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.m-change-row .m-change-stats {
+  display: grid;
+  grid-template-columns: 5ch 4ch;
+  font-size: 13px;
+  text-align: end;
+}
+.m-change-row:hover {
+  color: var(--color-foreground);
+  background: var(--m-hl6);
+}

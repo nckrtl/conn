@@ -1,0 +1,105 @@
+.m-list {
+  position: absolute;
+  inset: 0;
+  background: var(--color-screen);
+}
+.ios-filter-options + .ios-filter-options {
+  border-top: 1px solid var(--color-border);
+}
+.ios-filter-heading {
+  padding: 10px 14px 2px;
+  font-size: var(--m-text-xs);
+  color: var(--color-foreground-muted);
+}
+
+/* Rows match the Tasks rows: inset 8, padding 12/8/12/4; favicon + title on line 1, the details
+   under the title (favicon 20 + gap 12). */
+.m-row {
+  margin: 0 8px 4px;
+  padding: 12px 8px 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 12px;
+}
+.m-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-height: 23px;
+}
+.m-row-head > :first-child {
+  align-self: flex-start;
+  margin-top: 1.5px;
+}
+.m-row-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  line-height: 23px;
+  font-weight: 500;
+  color: var(--color-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-row-meta {
+  padding-left: 32px;
+  font-size: var(--m-text-xs);
+  line-height: 17px;
+  color: var(--color-foreground-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-row-agent {
+  display: inline-flex;
+  vertical-align: -2px;
+}
+/* PR state colours and diff colours as on desktop's sidebar. */
+.m-row-pr {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -1px;
+  gap: 3px;
+  color: var(--color-adaptive-emerald-700-300);
+}
+.m-row-pr[data-state="merged"] {
+  color: var(--color-adaptive-violet-600-400);
+}
+.m-row-pr[data-state="draft"] {
+  color: var(--color-foreground-muted);
+}
+.m-row-diff [data-kind="add"] {
+  color: var(--color-adaptive-emerald-700-300);
+}
+.m-row-diff [data-kind="del"] {
+  color: var(--color-adaptive-rose-600-400, #e5484d);
+}
+.m-row[data-recede="true"] .m-row-title {
+  font-weight: 400;
+  color: var(--color-foreground-muted);
+}
+.m-row[data-recede="true"] .m-favicon,
+.m-row[data-recede="true"] .m-row-meta {
+  opacity: 0.6;
+}
+
+.m-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* Label starts on the favicons' 12pt edge. */
+  margin: 16px 12px 6px;
+  color: var(--color-foreground-tertiary);
+}
+.m-section-label {
+  font-size: 14px;
+  line-height: 19px;
+  font-weight: 500;
+}
+.m-section-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}

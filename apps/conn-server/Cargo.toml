@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.5.2"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -28,6 +28,7 @@ conn-files = { path = "crates/conn-files" }
 conn-terminal = { path = "crates/conn-terminal" }
 conn-support = { path = "crates/conn-support" }
 conn-features = { path = "crates/conn-features" }
+conn-devices = { path = "crates/conn-devices" }
 # Fixed-time scheduled tasks run on the server's local calendar, across daylight saving, as
 # the T3 server's `DateTime.withCurrentZoneLocal`. The system's tz database only: no bundled
 # copy. Cost measured in crates/conn-features/README.md.
@@ -55,9 +56,16 @@ getrandom = "0.3"
 rustix = { version = "1", default-features = false, features = ["std"] }
 # Bundled SQLite with JSON1 (built in since 3.38). No statement cache, no extra features.
 rusqlite = { version = "0.37", default-features = false, features = ["bundled"] }
+# conn-engine search: case and accent folding and NFC queries, as T3 folds.
+unicode-normalization = "0.1.26"
 # Display and std::error::Error for the error types at crate boundaries. Already in the tree
 # through tungstenite; a proc macro, so no run-time code beyond the impls it writes.
 thiserror = "2"
+# conn-engine in-thread Find: the text a message's Markdown shows (CommonMark with GFM tables,
+# strikethrough, footnotes and task lists). No default features (no HTML writer or CLI); adds
+# only unicase, as bitflags and memchr are in the tree. Chosen over `markdown` (the parser
+# conn-gpui uses) because it parsed the same messages with about 1/24 of the CPU time.
+pulldown-cmark = { version = "0.13.6", default-features = false }
 # v4 ids: the version and variant bits and the text form, in place of four hand-written copies.
 # Without its `v4` feature, which would bring getrandom 0.4 next to the 0.3 already in the
 # tree; conn-support fills the bytes from getrandom 0.3.
@@ -67,6 +75,9 @@ uuid = { version = "1.29", default-features = false, features = ["std"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # Already used by conn-server and grep-regex; shared for HTML pattern scans, no new features.
 regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf", "unicode"] }
+# The Unicode general categories search reads words by (`conn-engine/src/fold.rs`). Already in
+# the binary with these tables: regex-automata's `unicode` feature turns them on.
+regex-syntax = { version = "0.8", default-features = false, features = ["std", "unicode-gencat"] }
 axum = { version = "0.8", default-features = false, features = [
   "http1",
   "json",

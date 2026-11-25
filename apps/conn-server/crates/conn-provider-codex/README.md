@@ -18,7 +18,7 @@ mapping.
 | `mapper::subagents` | Subagents: `collabAgentToolCall`, `subAgentActivity`, child threads and turns |
 | `session`  | `Session`: one native thread per session, a driver task, the 50/400 ms text flushes |
 | `text_generation` | `Provider::generate_text`: `codex mcp list`, then `codex exec` (`CodexTextGeneration.ts`) |
-| `status`   | The status probe and the `ServerProvider` entry (`checkCodexProviderStatus`), with the model catalog from T3's manifest (`model_catalog.json`, generated) |
+| `status`   | The status probe and the `ServerProvider` entry (`checkCodexProviderStatus`), with the model catalog from T3's manifest: the one the server accepted last (`conn_provider::LiveManifest`), else the bundled one (`model_catalog.json`, generated) |
 
 Ids, line framing and the process supervisor come from `conn-provider-support`.
 
@@ -71,7 +71,7 @@ dies, open turns end as failed, and the next call starts a new process and resum
 - **Turn policy:** per turn, from the runtime mode (table in `PROTOCOL.md`), or the policy's
   `approval_policy` / `sandbox_policy` override (sandbox decoded as TS does), so model, effort
   and mode changes apply on the next turn.
-- **Turn context:** with the `t3-code` MCP server, `additionalContext` carries T3's
+- **Turn context:** with the `conn` MCP server, `additionalContext` carries T3's
   orchestration, runtime and tool text, byte for byte (`tools/gen-instructions.mjs`).
 - **Attachments:** a path line per attachment in the text (`attachmentPrompt.ts`), and GIF,
   JPEG, PNG and WebP images inline as data URLs, from `CodexConfig::attachments_dir`.
@@ -130,12 +130,19 @@ after. Errors carry T3's texts ("Codex CLI request timed out.", "Codex CLI comma
 - **Text generation:** T3's managed runtime (`resolveRuntime`), custom models
   (`customModels`) and the catalog's `isDefault`/`isLegacy` flags in the model fallback; the
   fallback to another provider when Codex is unusable (in the server's title code).
-- **Thread operations:** snapshots, compaction requests, history injection, goals, archive,
+- **Thread operations:** snapshots, compaction requests, history injection, archive,
   feedback upload; the `additionalContext` restore after compaction (`thread/inject_items`).
+- **Goals** (`/goal`, `src/mapper/goals.rs`): built as T3's `runGoalCommand`, including the run
+  held across Codex's own goal turns and the pause after the 5 s grace. The engine never
+  steers a `/goal` into a running turn, sent or promoted from the queue, and stops the run a
+  goal replaces (`goal_stops_run` in `conn-engine`). Not built: the pause at once when a
+  delegated task will wake the thread (`goalsPausedForWake`). Two differences: an answer to
+  `thread/goal/set` does not replace a goal notification for the same thread that came after
+  the request went out, and the goal row shows before the run's terminal.
 - **Retries:** `error` with `willRetry: true` makes no retry row; the turn keeps running.
 - **Rate limits:** `account/rateLimits/*` is ignored, so usage-limit failures have no `resetAt`.
-- **T3 context details:** browser tools are assumed on and device tools off (TS reads both
-  from the MCP session). App context entries go in `additionalContext` as `untrusted`.
+- **T3 context details:** browser tools are assumed on (TS reads them from the MCP session);
+  device tools follow the session's `device` capability (`McpServer.device_tools`). App context entries go in `additionalContext` as `untrusted`.
   Snapshot window context of image attachments is not added.
 - **Tool rows:** MCP presentation (titles, icons, surfaces).
 - **Elicitations:** URL elicitations and forms an approval cannot fill are declined, as in T3.

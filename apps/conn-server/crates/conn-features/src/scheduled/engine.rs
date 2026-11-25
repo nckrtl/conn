@@ -5,9 +5,12 @@ use std::sync::Arc;
 
 use conn_contract::{Command, ThreadId, from_json, to_json};
 use conn_engine::{BoxFuture, Engine, EngineError};
+use conn_vcs::setup::MissingBase;
 use serde_json::{Value, json};
 
-use super::{LaunchRequest, RUN_OUTCOME_WAIT, SendError, SendRequest, TaskRunner, ThreadShell};
+use super::{
+    LaunchRequest, RUN_OUTCOME_WAIT, RunEnd, SendError, SendRequest, TaskRunner, ThreadShell,
+};
 
 /// Run statuses after which a run never changes (`isTerminalRunStatus`).
 const TERMINAL: [&str; 5] = [
@@ -137,7 +140,12 @@ impl TaskRunner for EngineRunner {
                 "createdBy": request.created_by,
                 "creationSource": request.creation_source,
             });
-            match self.engine.launch_thread(input).await {
+            // A saved strategy can outlive its base (T3's `worktreeFallbackBase`).
+            match self
+                .engine
+                .launch_thread_with(input, MissingBase::FallBack)
+                .await
+            {
                 Ok(result) => result["threadId"]
                     .as_str()
                     .map(str::to_owned)
@@ -167,6 +175,9 @@ impl TaskRunner for EngineRunner {
             if !thread["deletedAt"].is_null() || thread["projectId"] != request.project_id.as_str()
             {
                 return Err(not_found());
+            }
+            if let Some(refusal) = conn_engine::send_refusal(thread) {
+                return Err(SendError::Other(refusal));
             }
             let command = json!({
                 "type": "message.dispatch",
@@ -237,16 +248,57 @@ impl TaskRunner for EngineRunner {
         })
     }
 
-    fn run_outcome(&self, thread_id: String, message_id: String) -> BoxFuture<'_, Option<String>> {
+    fn run_outcome(&self, thread_id: String, message_id: String) -> BoxFuture<'_, RunEnd> {
         Box::pin(async move {
+            self.follow_run(&thread_id, &message_id)
+                .await
+                .unwrap_or(RunEnd::Unknown)
+        })
+    }
+
+    fn is_non_git_project(&self, project_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            let Ok(projects) = self.engine.projects_snapshot().await else {
+                return false;
+            };
+            let Some(root) = projects
+                .iter()
+                .find(|p| p["id"] == project_id.as_str() && p["deletedAt"].is_null())
+                .and_then(|p| p["workspaceRoot"].as_str())
+                .map(str::to_owned)
+            else {
+                return false;
+            };
+            let scratch = self
+                .engine
+                .call("projects.isScratchRoot", json!({"workspaceRoot": root}))
+                .await;
+            if matches!(scratch, Ok(Value::Bool(true))) {
+                return true;
+            }
+            // A repository Git cannot read keeps its worktree and its own error at launch.
+            conn_vcs::repo::is_plain_folder(std::path::Path::new(&root)).await
+        })
+    }
+}
+
+impl EngineRunner {
+    async fn follow_run(&self, thread_id: &str, message_id: &str) -> Option<RunEnd> {
+        {
             let deadline = tokio::time::Instant::now() + RUN_OUTCOME_WAIT;
             let input = from_json(json!({"threadId": thread_id})).ok()?;
             let mut stream = self.engine.subscribe_thread(input).await.ok()?;
             loop {
-                let projection = self.projection(&thread_id).await.ok()??;
-                let run = run_of(&projection, &message_id)?;
-                if TERMINAL.contains(&run["status"].as_str().unwrap_or_default()) {
-                    return judge(&projection, run, &message_id);
+                let projection = self.projection(thread_id).await.ok()??;
+                let run = run_of(&projection, message_id)?;
+                let status = run["status"].as_str().unwrap_or_default();
+                if status == "completed" {
+                    return Some(RunEnd::Completed);
+                }
+                if TERMINAL.contains(&status) {
+                    return Some(
+                        judge(&projection, run, message_id).map_or(RunEnd::Unknown, RunEnd::Failed),
+                    );
                 }
                 // Wait for the next run event; the projection is read again after it.
                 loop {
@@ -262,7 +314,7 @@ impl TaskRunner for EngineRunner {
                     }
                 }
             }
-        })
+        }
     }
 }
 

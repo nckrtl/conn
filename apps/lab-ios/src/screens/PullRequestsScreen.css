@@ -1,0 +1,122 @@
+.ios-pr-age,
+.ios-pr-byline {
+  color: var(--color-foreground-muted);
+  font-weight: 400;
+}
+.ios-pr-check-count,
+.ios-pr-number {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.ios-pr-stats,
+.ios-pr-age {
+  flex: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ios-pr-stats {
+  align-items: center;
+  font-size: 14px;
+  display: flex;
+  gap: 4px;
+  font-weight: 400;
+  color: var(--color-adaptive-emerald-700-300);
+}
+.ios-pr-stats span:last-child {
+  color: var(--thread-destructive);
+}
+.ios-pr-byline,
+.ios-pr-age {
+  font-size: var(--m-text-xs);
+  line-height: 17px;
+}
+.ios-pr-byline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ios-pr-byline span {
+  min-width: 0;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ios-pr-byline i {
+  font-style: normal;
+  color: var(--color-foreground-tertiary);
+}
+.ios-pr-age {
+  margin-left: auto;
+}
+.ios-file-row {
+  appearance: none;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 8px;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: 500 var(--m-text-base)/21px var(--m-font);
+  text-align: left;
+  cursor: pointer;
+}
+.ios-file-row:active {
+  background: var(--m-hl6);
+}
+.ios-file-row:first-child {
+  padding-top: 0;
+  align-content: start;
+}
+.ios-file-type {
+  display: flex;
+  align-self: center;
+  color: var(--color-adaptive-violet-600-400);
+}
+.ios-file-type svg {
+  width: 18px;
+  height: 18px;
+}
+.ios-file-name,
+.ios-file-directory {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ios-file-directory {
+  grid-column: 2 / -1;
+  font-size: var(--m-text-xs);
+  line-height: 17px;
+  font-weight: 400;
+  color: var(--color-foreground-muted);
+}
+.ios-file-stats {
+  font: 400 var(--m-text-sm)/20px var(--m-font);
+  font-variant-numeric: tabular-nums;
+}
+.ios-file-detail .ios-file-stats {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.ios-file-patch {
+  margin: 0 -20px;
+  min-width: 0;
+  --code-background: var(--ios-code);
+  --code-foreground: var(--color-md-code-text);
+  --font-sans: var(--m-font);
+  --font-mono: var(--m-mono);
+  --diff-addition: var(--thread-success);
+  --diff-deletion: var(--thread-destructive);
+  --diffs-font-size: 12px;
+  --diffs-line-height: 20px;
+}
+.ios-file-status {
+  position: absolute;
+  bottom: 30px;
+  width: 100%;
+  text-align: center;
+  pointer-events: none;
+}

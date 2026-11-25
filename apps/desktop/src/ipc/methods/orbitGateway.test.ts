@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
+import { INSIGHT_PERIODS } from "@t3tools/client-runtime/orbit-gateway";
 
-import { isAllowedConnQuery, resolveConnUrl, resolveRootUrl } from "./orbitGateway.ts";
+import {
+  isAllowedConnMethod,
+  isAllowedConnQuery,
+  resolveConnUrl,
+  resolveRootUrl,
+} from "./orbitGateway.ts";
 
 describe("resolveConnUrl", () => {
   it("keeps ordinary Conn paths below the prefix", () => {
@@ -120,6 +126,13 @@ describe("resolveRootUrl", () => {
         body: JSON.stringify({ socket_id: "123.456", channel_name: "private-orbit" }),
       })?.pathname,
     ).toBe("/api/v1/broadcasting/auth");
+    expect(
+      resolveRootUrl({
+        method: "POST",
+        path: "/broadcasting/auth",
+        body: JSON.stringify({ socket_id: "123.456", channel_name: "private-operation.16044" }),
+      })?.pathname,
+    ).toBe("/api/v1/broadcasting/auth");
   });
 
   it.each([
@@ -132,6 +145,16 @@ describe("resolveRootUrl", () => {
       path: "/broadcasting/auth",
       body: JSON.stringify({ socket_id: "1.2", channel_name: "private-admin" }),
     },
+    ...[
+      "private-operation.",
+      "private-operation.0",
+      "private-operation.1x",
+      "private-operation.*",
+    ].map((channel_name) => ({
+      method: "POST" as const,
+      path: "/broadcasting/auth",
+      body: JSON.stringify({ socket_id: "1.2", channel_name }),
+    })),
     {
       method: "POST",
       path: "/broadcasting/auth",
@@ -164,9 +187,32 @@ describe("resolveRootUrl", () => {
       resolveRootUrl({ method, path: "/task-insights", query })?.pathname ?? null;
     expect(insights({})).toBe("/api/v1/task-insights");
     expect(insights({ period: "7d", project_id: "78" })).toBe("/api/v1/task-insights");
+    // Every period the board offers must pass; 24h was refused and showed dashes.
+    for (const period of INSIGHT_PERIODS) {
+      expect(insights({ period })).toBe("/api/v1/task-insights");
+      expect(insights({ period, project_id: "78" })).toBe("/api/v1/task-insights");
+    }
+    expect(insights({ period: "24h" })).toBe("/api/v1/task-insights");
     expect(insights({ period: "90d" })).toBeNull();
     expect(insights({ project_id: "0" })).toBeNull();
     expect(insights({ period: "30d", search: "x" })).toBeNull();
     expect(insights({ period: "30d" }, "POST")).toBeNull();
+  });
+});
+
+describe("isAllowedConnMethod", () => {
+  it("allows a DELETE only to release a reservation", () => {
+    expect(
+      isAllowedConnMethod({
+        method: "DELETE",
+        path: "/reservations/0b6c1c2e-5d7a-4a8e-9a39-1f1c0f6f6e01",
+      }),
+    ).toBe(true);
+    expect(isAllowedConnMethod({ method: "DELETE", path: "/instances/5" })).toBe(false);
+    expect(isAllowedConnMethod({ method: "DELETE", path: "/reservations/a/finalize" })).toBe(false);
+    expect(isAllowedConnMethod({ method: "DELETE", path: "/reservations/a", root: true })).toBe(
+      false,
+    );
+    expect(isAllowedConnMethod({ method: "POST", path: "/reservations/a/finalize" })).toBe(true);
   });
 });

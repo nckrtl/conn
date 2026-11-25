@@ -288,7 +288,8 @@ async fn run_scenario(
                         // TS side gets the same endpoint and token from its McpProviderSessions.
                         mcp_servers: if scenario["mcp"] == true {
                             vec![McpServer {
-                                name: "t3-code".into(),
+                                device_tools: scenario["device"] == true,
+                                name: "conn".into(),
                                 url: "http://127.0.0.1:3773/mcp".into(),
                                 headers: vec![(
                                     "Authorization".into(),
@@ -414,6 +415,15 @@ async fn run_scenario(
                     provider_turn_id: turn.as_str().into(),
                     message: message(input)?,
                     model_selection: json(&input["modelSelection"]).ok(),
+                    app_context: input["appContext"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|e| conn_provider::AppContextEntry {
+                            key: e["key"].as_str().unwrap_or_default().to_owned(),
+                            text: e["text"].as_str().unwrap_or_default().to_owned(),
+                        })
+                        .collect(),
                 })
                 .await
                 .map_err(|e| e.to_string())?;
@@ -610,6 +620,7 @@ async fn run_title(
         model_selection: json(&title["modelSelection"])?,
         image_paths: Vec::new(),
         timeout: None,
+        investigate: false,
     };
     let output = provider
         .generate_text(request)

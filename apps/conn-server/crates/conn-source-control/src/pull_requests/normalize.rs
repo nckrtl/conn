@@ -190,6 +190,11 @@ pub fn checks(raw: &[Value]) -> Vec<Value> {
                 .unwrap_or("")
         };
         let mut value = json!({"name":name,"status":status,"description":trimmed(check.get("description")),"url":if trimmed(check.get("detailsUrl")).is_null(){trimmed(check.get("targetUrl"))}else{trimmed(check.get("detailsUrl"))}});
+        for key in ["startedAt", "completedAt"] {
+            if let Some(timestamp) = real_at(key) {
+                value[key] = json!(timestamp);
+            }
+        }
         if let Some(required) = check.get("isRequired").filter(|v| v.is_boolean()) {
             value["required"] = required.clone();
         }

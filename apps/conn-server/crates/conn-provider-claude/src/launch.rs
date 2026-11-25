@@ -10,7 +10,10 @@
 //! No auth is set here. In an Orbit container the inherited environment points the CLI at the
 //! AI router.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde_json::{Map, Value, json};
 
@@ -68,10 +71,13 @@ pub struct ClaudeConfig {
     /// How long background work (a running subagent, a pending continuation) may keep an idle
     /// query alive. T3: 4 hours.
     pub idle_max_hold: Duration,
-    /// Text appended to the system prompt when the session has a `t3-code` MCP server
+    /// Text appended to the system prompt when the session has a `conn` MCP server
     /// (`T3_CODE_ORCHESTRATION_INSTRUCTIONS` and the adapter's own texts in TS;
     /// `conn_mcp::CLAUDE_INSTRUCTIONS`).
     pub mcp_instructions: Option<String>,
+    /// `T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH` (`conn_mcp::DEVICE_INSTRUCTIONS`), for
+    /// a session with the device tools.
+    pub device_instructions: Option<String>,
     /// The SDK helper. Default: [`HelperCommand::discover`].
     pub helper: HelperCommand,
     /// Where the status probe runs the CLI (T3: its state folder). `None`: the server's cwd.
@@ -79,6 +85,8 @@ pub struct ClaudeConfig {
     /// Runs the status probe. Off, the entry stays T3's pending one: checks that start a
     /// server set `CONN_CLAUDE_STATUS_PROBE=off`, so they never run this machine's `claude`.
     pub status_probe: bool,
+    /// The model manifest the server accepted last; the entry lists its Claude models.
+    pub model_manifest: conn_provider::LiveManifest,
 }
 
 /// T3's `DEFAULT_IDLE_TIMEOUT_MS`.
@@ -86,30 +94,30 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// T3's `DEFAULT_MAX_IDLE_PIN_MS`.
 pub const DEFAULT_IDLE_MAX_HOLD: Duration = Duration::from_secs(4 * 60 * 60);
 /// The MCP server name whose tools T3 allows without asking.
-pub const T3_MCP_SERVER: &str = "t3-code";
+pub const T3_MCP_SERVER: &str = "conn";
 /// `CLAUDE_T3_MCP_TOOL_WILDCARD`.
-pub const T3_MCP_WILDCARD: &str = "mcp__t3-code__*";
+pub const T3_MCP_WILDCARD: &str = "mcp__conn__*";
 /// `CLAUDE_READ_ONLY_ALLOWED_TOOLS`.
 pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep"];
-/// `CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS`: the `t3-code` tools annotated read-only.
+/// `CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS`: the `conn` tools annotated read-only.
 pub const READ_ONLY_T3_MCP_TOOLS: &[&str] = &[
-    "mcp__t3-code__orchestrator_capabilities",
-    "mcp__t3-code__list_scheduled_tasks",
-    "mcp__t3-code__t3_background_wait",
-    "mcp__t3-code__t3_thread_list",
-    "mcp__t3-code__t3_thread_wait",
-    "mcp__t3-code__t3_worktree_status",
-    "mcp__t3-code__t3_worktree_list",
-    "mcp__t3-code__t3_project_list",
-    "mcp__t3-code__t3_project_read",
-    "mcp__t3-code__t3_thread_search",
-    "mcp__t3-code__t3_preview_list",
-    "mcp__t3-code__t3_environment_read",
-    "mcp__t3-code__t3_environment_links",
-    "mcp__t3-code__t3_theme_read",
-    "mcp__t3-code__html_preview",
-    "mcp__t3-code__html_render",
-    "mcp__t3-code__send_to_user",
+    "mcp__conn__orchestrator_capabilities",
+    "mcp__conn__list_scheduled_tasks",
+    "mcp__conn__conn_background_wait",
+    "mcp__conn__conn_thread_list",
+    "mcp__conn__conn_thread_wait",
+    "mcp__conn__conn_worktree_status",
+    "mcp__conn__conn_worktree_list",
+    "mcp__conn__conn_project_list",
+    "mcp__conn__conn_project_read",
+    "mcp__conn__conn_thread_search",
+    "mcp__conn__conn_preview_list",
+    "mcp__conn__conn_environment_read",
+    "mcp__conn__conn_environment_links",
+    "mcp__conn__conn_theme_read",
+    "mcp__conn__html_preview",
+    "mcp__conn__html_render",
+    "mcp__conn__send_to_user",
 ];
 
 impl ClaudeConfig {
@@ -172,15 +180,17 @@ impl Default for ClaudeConfig {
             idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
             idle_max_hold: DEFAULT_IDLE_MAX_HOLD,
             mcp_instructions: None,
+            device_instructions: None,
             helper: HelperCommand::discover(),
             status_cwd: None,
             status_probe: true,
+            model_manifest: conn_provider::LiveManifest::default(),
         }
     }
 }
 
 /// The `<runtime_info>` block of `buildRuntimeInstructions` at the pinned commit.
-pub const RUNTIME_INFO: &str = "<runtime_info>In case you're asked: you are running in T3 Code through the Claude Code harness. No need to mention this otherwise. You can embed images, video, and audio using Markdown image syntax with absolute file paths. Link every other file you cite or produce by its absolute path, as in [http.ts:42](/abs/path/http.ts:42), so the user can open it in T3 Code's files viewer.</runtime_info>";
+pub const RUNTIME_INFO: &str = "<runtime_info>In case you're asked: you are running in Conn through the Claude Code harness. No need to mention this otherwise. You can embed images, video, and audio using Markdown image syntax with absolute file paths. Link every other file you cite or produce by its absolute path, as in [http.ts:42](/abs/path/http.ts:42), so the user can open it in Conn's files viewer.</runtime_info>";
 
 /// `PULL_REQUEST_LINKING_INSTRUCTIONS`. `buildRuntimeInstructions` adds it unless the caller
 /// passes `pullRequestLinking: false`; the Claude adapter never does.
@@ -369,12 +379,22 @@ pub struct QueryInput {
     /// `resumeSessionAt`: continue from this message (rollback, fork).
     pub resume_at: Option<String>,
     pub title: Option<String>,
-    /// The session has the `t3-code` MCP server (its servers go in by `setMcpServers`).
+    /// The session has the `conn` MCP server (its servers go in by `setMcpServers`).
     pub t3_mcp: bool,
+    /// That server offers the device tools: T3's device text follows the MCP text, and
+    /// subagents get it at their start.
+    pub device_tools: bool,
     /// `allowedTools` after the MCP pre-approvals.
     pub allowed_tools: Option<Vec<String>>,
     /// `promptSuggestions`. T3: off for delegated threads, else the user's setting.
     pub prompt_suggestions: bool,
+}
+
+/// The device text when the session has the device tools (`deviceInstructions`).
+pub fn device_text<'a>(config: &'a ClaudeConfig, input: &QueryInput) -> Option<&'a str> {
+    (input.t3_mcp && input.device_tools)
+        .then_some(config.device_instructions.as_deref())
+        .flatten()
 }
 
 /// The option object for `query()`, as `makeClaudeQueryOptions` builds it, without the
@@ -487,6 +507,11 @@ pub fn query_options(
     let mut append = config.append_system_prompt.clone().unwrap_or_default();
     if input.t3_mcp {
         append.push_str(config.mcp_instructions.as_deref().unwrap_or_default());
+        if let Some(device) = device_text(config, input) {
+            append.push('\n');
+            append.push_str(device);
+            append.push('\n');
+        }
     }
     for text in &launch.append {
         append.push_str("\n\n");
@@ -542,7 +567,7 @@ pub fn query_options(
 
 /// The CLI's environment (`options.env`), from the host's: T3's changes in order, then
 /// `T3CODE_THREAD_ID`. `settings_entrypoint` is `env.CLAUDE_CODE_ENTRYPOINT` from Claude's user
-/// or managed settings, which wins over `t3-code` (`mergeClaudeProcessEnvironment`).
+/// or managed settings, which wins over `conn` (`mergeClaudeProcessEnvironment`).
 pub fn query_env(
     config: &ClaudeConfig,
     thread_id: &str,
@@ -604,6 +629,20 @@ pub fn config_dir(config: &ClaudeConfig, env: &Map<String, Value>) -> PathBuf {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => expand_home("~/.claude"),
     }
+}
+
+/// `workflowFilesRoot`: `<CLAUDE_CONFIG_DIR>/projects` from the query's environment, a relative
+/// value resolved from the session cwd, else `~/.claude/projects`.
+pub fn workflow_files_root(env: &Map<String, Value>, cwd: Option<&Path>) -> PathBuf {
+    let config = match env
+        .get("CLAUDE_CONFIG_DIR")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some(dir) if !dir.is_empty() => cwd.map_or_else(|| PathBuf::from(dir), |cwd| cwd.join(dir)),
+        _ => expand_home("~/.claude"),
+    };
+    config.join("projects")
 }
 
 /// Claude's managed settings file (`claudeManagedSettingsPath`).
@@ -720,6 +759,7 @@ mod tests {
             resume_at: None,
             title: Some("A thread".into()),
             t3_mcp: false,
+            device_tools: false,
             allowed_tools: None,
             prompt_suggestions: false,
         }

@@ -20,7 +20,7 @@ this checkout.
 | Sessions                 | `t3 auth session issue --label "Orbit Gateway"                                                                                                                                                                                                                                              | "Orbit Swamp" --token-only`(stdout = token), checked with`GET /api/auth/session`(needs`authenticated: true`, `scopes`, `expiresAt`; Gateway needs `access:read`, `access:write`) | `instance-container-phase.yml:915-931`                                                                                                                                                                                                                     | Done, while the server runs (shared `auth.json`) |
 | Device pairing           | Swamp calls `POST <url>/api/auth/pairing-token` with the Gateway session and `{"label": "<node> via Orbit <rand>", "scopes": ["relay:read","access:read","access:write","relay:write"]}`; parses `id`, `credential`, `expiresAt`, echoed `label`; builds `<origin>/pair#token=<credential>` | `IssueConnPairingAction.php:26,44`, `workflow-operation-conn-pairing-create.yaml:76-93`, `conn-pairing/mod.ts`                                                                   | Scoped links with the label echoed: done                                                                                                                                                                                                                   |
 | Revocation               | `POST /api/auth/clients/revoke`, `POST /api/auth/pairing-links/revoke`; `GET /api/auth/clients` for owner checks; `t3 auth session list --json` in fixtures                                                                                                                                 | `workflow-operation-conn-pairing-revoke.yaml:149,198`, `environmentHttp.ts`                                                                                                      | Done                                                                                                                                                                                                                                                       |
-| Swamp driver             | `POST /mcp` (bearer); `POST /api/auth/websocket-ticket`, `/ws?orchestrationProtocol=2&wsTicket=…`; `orchestration.getThreadProjection`, `orchestration.forceStopThread`; MCP tools `t3_project_list`, `t3_thread_launch                                                                     | send                                                                                                                                                                             | wait                                                                                                                                                                                                                                                       | read`, `t3_pending_request`                      | `development-containers.md:892-909` | Tickets and `/ws`: done. `/mcp` is the MCP track; `forceStopThread` the engine track |
+| Swamp driver             | `POST /mcp` (bearer); `POST /api/auth/websocket-ticket`, `/ws?orchestrationProtocol=2&wsTicket=…`; `orchestration.getThreadProjection`, `orchestration.forceStopThread`; MCP tools `conn_project_list`, `conn_thread_launch                                                                     | send                                                                                                                                                                             | wait                                                                                                                                                                                                                                                       | read`, `conn_pending_request`                      | `development-containers.md:892-909` | Tickets and `/ws`: done. `/mcp` is the MCP track; `forceStopThread` the engine track |
 | Network                  | Binds `0.0.0.0:3773`; an Incus proxy device publishes `<wg ip>:<3800-3999>`; no reverse proxy, no path routing; clients reach the origin directly; nft admits only uid 0 and 2750                                                                                                           | `instance-container-phase.yml:139-146`, `InstanceContainer.php:51-53,210,332-342`, `InstanceImage.php:152`                                                                       | Nothing to change                                                                                                                                                                                                                                          |
 | Logs                     | journald; T3 prints a pairing token at each start (journal readable by root and `agent`)                                                                                                                                                                                                    | `development-containers.md:834`                                                                                                                                                  | Prints `pairingUrl:` at each start: same exposure                                                                                                                                                                                                          |
 
@@ -136,6 +136,51 @@ Not proven: a live turn through the tarball, Codex from the tarball (it needs no
 the release workflow itself (it has not run), and the server under Orbit's real
 `t3.service` with this layout (the earlier proof ran an older binary as `bin/t3`).
 
+### macOS app bundle (2026-11-23)
+
+On a Mac the server runs as `Conn Server.app` (`com.nckrtl.conn-server`, `LSUIElement`), not
+as a bare executable. `tools/macos-app.sh --from <folder with conn-server and sdk-host/> --out
+<dir>` builds it: the binary in `Contents/MacOS`, `sdk-host/` and Conn's icon in
+`Contents/Resources`, signed with Developer ID and the hardened runtime.
+
+**Where it comes from.** Each `conn-server-v*` release ships it as
+`conn-server-<version>-macos-arm64.zip` (with a `.sha256`), beside the Linux tarball. The
+`macos` job of `.github/workflows/conn-server-release.yml` builds it on the self-hosted runner on
+mini (label `conn-mac-release`, whose login keychain holds the identity):
+`tools/release-tarball.mjs --platform macos-arm64` makes the folder, `macos-app.sh` signs it,
+and the job checks the team id before it zips the bundle with `ditto`. To build one by hand on
+an arm64 Mac, run the same two commands.
+
+**Why.** For a bare executable TCC keys a grant by its path (`client_type` 1 in `TCC.db`), so
+each new install path asked again and listed one more nameless entry without an icon. Screen
+capture comes from the server's children, not from the server: agents run `screencapture`, and
+the Device panel's serve-sim stream loads LiveKit's WebRTC framework, which links ScreenCaptureKit
+and `CGDisplayStream`. The prompts named "conn-server", which suggests, but does not prove, that
+macOS charged those children to the launchd process.
+
+**Not yet proven.** Two things are open until a test with real prompts passes:
+
+- *Attribution:* that a child's Screen Recording or Accessibility request is charged to the
+  bundle (`com.nckrtl.conn-server`, its name and icon) when launchd runs the bundle's Mach-O
+  directly, not through LaunchServices.
+- *Persistence:* that TCC keys that grant by bundle id and team, and keeps it when the bundle is
+  replaced by a rebuild with the same designated requirement.
+
+The test is a disposable GUI LaunchAgent whose children ask for Screen Recording and
+Accessibility, then a rebuilt bundle at the same and at another path. A pass covers only those
+two services and those requests. It says nothing yet about Files and Folders, Automation or the
+serve-sim stream; claim those only after a test of each.
+
+**Install.** Keep the bundle at one path (`~/Applications/Conn Server.app`) and replace it in
+place on updates. The launchd job runs `Contents/MacOS/conn-server` and sets
+`AssociatedBundleIdentifiers` to `com.nckrtl.conn-server`, which Apple documents for Login Items
+attribution; whether it changes TCC attribution is part of the test above. On macOS only, the
+server finds the SDK host in `Contents/Resources` inside a `.app`, after the folder beside the
+binary. `CFBundleVersion` must be a build number that `CFBundleGetVersionNumber` can parse; the
+packager checks that before signing. The git commit goes in `ConnServerCommit`. The bundle is
+not notarized, so `spctl` rejects it ("Unnotarized Developer ID"); that does not matter for a
+launchd job, because Gatekeeper checks only quarantined files.
+
 ## 2. Conn desktop's local backend
 
 | What       | Desktop does                                                                                                                                                                                                                                                                 | Reference                                                                                                               | Conn Server                                                                                                                                                                |
@@ -168,7 +213,7 @@ What the desktop still needs before it can run the Conn Server (not done, not tr
 | `t3 auth pairing create                                                                                                               | list                                                                                                                                     | revoke`, `t3 auth session issue | list    | revoke`                                                                           | Done with the same flags and output (`--json`, `--token-only`, `--base-url`, a repeated `--scope`; also `--scopes <list>`) |
 | `t3 thread list [--project] [--json]`, `t3 thread start <project> <message or -> [--title --provider --model --worktree --branch --wait --json]`, `t3 thread send <thread> <message or -> [--wait --json]`, `t3 thread show <thread> [--messages --json]` | Done (section 1, "Task turns"); output, error texts and exit codes as the T3 CLI |
 | `t3 project add <path> [--title]`                                                                                                     | Done (see section 1); `remove` and `rename` not built                                                                                    |
-| `t3 environment link                                                                                                                  | link-orbit                                                                                                                               | list                            | unlink` | Not built: peer links need the engine's peer-link store. Orbit does not call them |
+| `t3 environment link-orbit <gateway-environment-id> [--access --gateway-url]` | Done (`src/orbit_link.rs`): pairs through the Orbit Gateway with the system curl, as T3; same output, codes and messages (`tools/orbit-link-diff.mjs`). `link`, `list` and `unlink` not built: the server serves peer links (`peerLinks.*`, the link tools on `/mcp`). Orbit does not call them |
 | `up`, `status`, `connect`, `service`, `update`, `install`, `doctor`, `policy`, `theme`, `trace`, `triage`, `browser`, `app` | Not built; none is used by Orbit or the desktop                                                                                          |
 
 Environment read: `T3CODE_HOME`, `T3CODE_PORT`, `T3CODE_HOST`, `T3CODE_MODE`,
@@ -210,26 +255,25 @@ either server, never both at once.
 | `keybindings.json`, `keybindings-migrations`                                                                                                                       | Rules, seeded with defaults                                                                                 | **Reads and writes both** (same format and backfill)                                                                                                                                    |
 | `server-owner.sqlite`                                                                                                                                              | Ownership lock                                                                                              | **Takes the same lock**                                                                                                                                                                 |
 | `server-runtime.json`                                                                                                                                              | Running server's origin                                                                                     | **Writes the same format**; T3's `t3 pair`/`project` CLI finds a running Conn Server                                                                                                    |
-| `statev2.sqlite` (+ `-wal`/`-shm`), `state.sqlite`                                                                                                                 | Threads, projects, auth sessions and pairing links (`auth_sessions`, `auth_pairing_links`), everything else | **Ignored.** Threads need the migration below; T3 sessions are not carried over, so every device pairs again and Orbit issues new Gateway and Swamp sessions                            |
-| `secrets/` (`server-signing-key.bin`, …)                                                                                                                           | Secret store, signing keys                                                                                  | Ignored                                                                                                                                                                                 |
+| `statev2.sqlite` (+ `-wal`/`-shm`), `state.sqlite`                                                                                                                 | Threads, projects, auth sessions and pairing links (`auth_sessions`, `auth_pairing_links`), everything else | **Read once, never written.** At the first start (no `engine.sqlite` yet) its projects and threads become `engine.sqlite` (`conn-engine/src/t3_import.rs`, below), and its live bearer sessions, unspent pairing codes, peer links and scheduled tasks go to `auth.json`, `peer-links.json` and `scheduled-tasks.json` (`src/t3_carry.rs`): paired devices and Orbit keep their tokens |
+| `secrets/` (`server-signing-key.bin`, …)                                                                                                                           | Secret store, signing keys                                                                                  | Reads T3's `server-signing-key` to accept the session tokens T3 issued (carried-over sessions only) and the `peer-link-*` tokens of peer links; writes `peer-link-*` and the MCP OAuth key in the same format |
 | `model-manifest.json` | The model catalog fetched from T3 Code's GitHub (`ModelManifest.ts`), `{"fetchedAtMs","manifest"}` | **Writes it the same way**: when (start, then at most hourly, 5 minutes after a failed try, only with `enableProviderUpdateChecks`), what (a manifest that decodes and is not older than the bundled or cached one) and the bytes (`model-manifest-diff.mjs`). Reads no model from it. Test seam: `CONN_MODEL_MANIFEST_URL` (`off` never fetches; an `http(s)` URL fetches from there); every check sets `off` |
 | `attachments/`, `logs/`, `anonymous-id`, `themes/`, `browser-artifacts/`, `annotations/`, `speech/`, `providers/`, `usage-model-rates.json` | Feature data and caches                                                                                     | Ignored (other tracks may take attachments and logs)                                                                                                                                    |
 | `<home>/worktrees`, `caches`, `runtime`, `tools`, `projects`, `scratch`                                                                                            | Worktrees, caches, managed tools                                                                            | Ignored                                                                                                                                                                                 |
 | `engine.sqlite`, `auth.json`, `auth.lock`, `projects.json`                                                                                                         | —                                                                                                           | **Conn Server only**: event store, sessions and links, projects added with `project add`                                                                                                |
 
 Switching back to the T3 server: settings, keybindings and the environment id carry over;
-threads and pairings made on the Conn Server do not.
+threads, sessions, pairings, peer links and scheduled-task changes made on the Conn Server do
+not. A session revoked on the Conn Server is live again under the T3 server.
 
-**Thread-history migration (design only).** A one-shot `conn-server migrate-t3` with both
-servers stopped: open `statev2.sqlite` read-only, read the projection rows (projects, threads,
-turns, messages, turn items, runs) rather than replaying T3's event log, and append one
-`thread.imported`-style event per thread into `engine.sqlite` carrying the projection as the
-client contract encodes it, so the Conn Server's own projections rebuild from its own log.
-Keep T3 ids, so clients' cached links survive. Skip live state: running turns become stopped,
-provider sessions are not resumed (the provider resumes by its own session id on the next
-turn). Checkpoint refs live in git and need nothing. Record the source commit and row counts
-in a marker table so the import never runs twice, and prove it with a recording of a migrated
-home in the real client.
+**Thread-history import (built, 2026-11-21).** `serve` imports it itself, before it listens,
+when the state folder holds `statev2.sqlite` and no `engine.sqlite`: T3's file is attached
+read-only, every projection row is copied with its id and its JSON body in one transaction,
+the shell rows are computed, and the new store is renamed into place when it is complete. T3's
+file is not changed, so the T3 server can take over again with every thread it had. Live state
+is not resumed by the import: the engine's restart recovery ends runs that were live, as after
+any restart, and the provider resumes by its own session id on the next turn. Proof and limits:
+`docs/status.md`, "T3 state import".
 
 ## 6. Making the Conn Server the default
 
@@ -242,8 +286,8 @@ works through the AI router; a container has run a week of real use with the cli
 no "not supported" error on the paths users take; memory is measured in the container.
 **Selection:** the agent bundle's `bin/t3` points at `conn-server` instead of the T3 tarball
 (the recipe's `instances.agent.t3` entry). Orbit needs no other change; rolling back is the
-recipe entry again. Moving an existing container keeps its settings and identity but not its
-threads or pairings (section 5) until the migration exists.
+recipe entry again. Moving an existing container keeps its settings, identity, threads,
+sessions, peer links and scheduled tasks (section 5).
 
 **(b) Conn desktop's local backend.** Ready when: everything a desktop user reaches from the
 chat view and Settings works (terminals, files, VCS, diffs, previews, attachments); the

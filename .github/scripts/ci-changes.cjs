@@ -13,6 +13,16 @@ const INERT = [
   // The Conn Server (Rust) has its own workflows (conn-server-*.yml); no Conn job reads it.
   /^apps\/conn-server\//,
   /^\.github\/workflows\/conn-server-/,
+  /^\.github\/scripts\/conn-server-checks-paths\.(cjs|d\.cts)$/,
+  // The GPUI desktop client (Rust) has its own workflow (conn-gpui-checks.yml).
+  /^apps\/conn-gpui\//,
+  /^\.github\/workflows\/conn-gpui-/,
+  // The native SwiftUI iPhone app builds in Xcode, outside the pnpm workspace.
+  /^apps\/ios\//,
+  // The shared Rust core (crates/) and its root Cargo files; apps/conn-gpui/scripts/check.sh
+  // checks them.
+  /^crates\//,
+  /^(Cargo\.toml|Cargo\.lock|clippy\.toml|rustfmt\.toml|rust-toolchain\.toml)$/,
 ];
 
 // Shared test setup and vendored mobile dependencies affect every package.
@@ -27,7 +37,7 @@ const RUNS_EVERYTHING = [
 const FORK_FILE_DEPS = {
   t3: {
     "@t3tools/client-runtime":
-      /^packages\/client-runtime\/src\/(orbitGateway\/client|state\/orchestrationV2Projection|threadPullRequests|sourceControlClients)\.ts$/,
+      /^packages\/client-runtime\/src\/(orbitGateway\/(?:client|operationNotices|realtimeSubscription)|state\/orchestrationV2Projection|threadPullRequests|sourceControlClients)\.ts$/,
   },
 };
 
@@ -61,6 +71,14 @@ const TEST_ONLY_DEPS = {
     "@t3tools/provider-cursor",
   ],
 };
+// Tests that read files outside every package; they do not change what the packages ship.
+const TEST_ONLY_FILES = [
+  // scripts/conn-server-checks-paths.test.ts reads the checks' tools and their path list.
+  [
+    /^apps\/conn-server\/.*\.(mjs|cjs|js|ts|sh|py)$|^\.github\/(workflows\/conn-server-checks\.yml|scripts\/conn-server-checks-paths\.(cjs|d\.cts))$/,
+    "@t3tools/scripts",
+  ],
+];
 // The server bundles the web build without importing it.
 const BUILD_ONLY_DEPS = { t3: ["@t3tools/web"] };
 
@@ -176,6 +194,9 @@ function decide(files, packages, full) {
     scriptsChanged = affected.has("@t3tools/scripts");
     for (const [name, deps] of Object.entries(TEST_ONLY_DEPS)) {
       if (deps.some((dep) => affected.has(dep))) affected.add(name);
+    }
+    for (const [pattern, name] of TEST_ONLY_FILES) {
+      if (files.some((file) => pattern.test(file))) affected.add(name);
     }
   }
 

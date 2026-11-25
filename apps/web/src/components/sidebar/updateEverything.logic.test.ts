@@ -124,7 +124,7 @@ describe("collectServerUpdateTargets", () => {
         entry.label,
         entry.reason,
       ]),
-    ).toEqual([["off", "Example Corp manages T3 Code updates."]]);
+    ).toEqual([["off", "Example Corp manages Conn updates."]]);
     expect(
       collectServerUpdateTargets(
         machines.map((entry) => ({
@@ -255,10 +255,7 @@ describe("collectChannelSwitchTargets", () => {
         `its database has changes ${NIGHTLY} does not support yet; stay on Stable until Nightly has them`,
       ],
       ["old-desktop", "needs a newer desktop app"],
-      [
-        "no-nightly",
-        "Example Corp manages T3 Code updates. Only stable releases can be installed.",
-      ],
+      ["no-nightly", "Example Corp manages Conn updates. Only stable releases can be installed."],
     ]);
   });
 });
@@ -349,65 +346,18 @@ describe("runUpdateEverything", () => {
     const calls: string[] = [];
     const result = await runUpdateEverything({
       downloadLocal: async () => false,
-      updateProviders: async () => {
-        calls.push("providers");
-      },
       updateServers: async () => {
         calls.push("servers");
       },
     });
 
-    expect(calls).toEqual(["providers", "servers"]);
+    expect(calls).toEqual(["servers"]);
     expect(result.localReady).toBe(false);
-  });
-
-  it("stages servers while providers install and updates each once its own stage settles", async () => {
-    const calls: string[] = [];
-    const [slow, fast] = [EnvironmentId.make("slow"), EnvironmentId.make("fast")];
-    let finishProviders = () => {};
-    let failSlowStage = () => {};
-    const providers = new Promise<void>((resolve) => (finishProviders = resolve));
-    const run = runUpdateEverything({
-      updateProviders: () => {
-        calls.push("providers");
-        return providers.then(() => {
-          calls.push("providers done");
-        });
-      },
-      stageServers: () => {
-        calls.push("stage");
-        return new Map([
-          [slow, new Promise((_, reject) => (failSlowStage = () => reject(new Error("failed"))))],
-          [fast, Promise.resolve()],
-        ]);
-      },
-      updateServers: (staged) => {
-        calls.push("servers");
-        return Promise.all(
-          [slow, fast].map(async (id) => {
-            await staged.get(id);
-            calls.push(`server ${id}`);
-            if (id === fast) failSlowStage();
-          }),
-        );
-      },
-    });
-    finishProviders();
-    await run;
-
-    expect(calls).toEqual([
-      "stage",
-      "providers",
-      "providers done",
-      "servers",
-      "server fast",
-      "server slow",
-    ]);
   });
 });
 
 describe("describeUpdateEverything", () => {
-  it("gives each machine one row with its T3 Code and provider updates", () => {
+  it("gives each machine one row with its T3 Code update", () => {
     const id = EnvironmentId.make;
     const { rows } = describeUpdateEverything({
       localVersion: "1.1.0",
@@ -423,25 +373,18 @@ describe("describeUpdateEverything", () => {
           targetVersion: "1.1.0",
         },
       ],
-      providerMachines: [
-        { environmentId: id("npm"), label: "bb-1", providers: ["Codex", "Claude"] },
-        { environmentId: id("local"), label: "Mainbook", providers: ["Codex"] },
-        { environmentId: id("manual"), label: "alvin", providers: ["Claude"] },
-      ],
       skipped: [
         { environmentId: id("manual"), label: "alvin", reason: "needs a manual update" },
         { environmentId: id("offline"), label: "TheoRoom", reason: "not connected" },
       ],
     });
 
-    expect(
-      rows.map(({ label, app, skipped, providers }) => [label, app, skipped, providers]),
-    ).toEqual([
-      ["Mainbook", "this-app", null, ["Codex"]],
-      ["Mainbook WSL", "this-app", null, []],
-      ["bb-1", "server", null, ["Codex", "Claude"]],
-      ["alvin", null, "needs a manual update", ["Claude"]],
-      ["TheoRoom", null, "not connected", []],
+    expect(rows.map(({ label, app, skipped }) => [label, app, skipped])).toEqual([
+      ["Mainbook", "this-app", null],
+      ["Mainbook WSL", "this-app", null],
+      ["bb-1", "server", null],
+      ["alvin", null, "needs a manual update"],
+      ["TheoRoom", null, "not connected"],
     ]);
   });
 });
@@ -452,7 +395,6 @@ describe("describeUpdateCapsule", () => {
       machine: {
         environmentId: EnvironmentId.make("remote"),
         label: "remote",
-        updatesProviders: false,
         server: {
           environmentId: EnvironmentId.make("remote"),
           serverLabel: "remote",
@@ -463,7 +405,6 @@ describe("describeUpdateCapsule", () => {
         startedAt: 0,
         result: "failed" as const,
         failure: "offline",
-        providerFailure: null,
       },
       status: "failed" as const,
     };

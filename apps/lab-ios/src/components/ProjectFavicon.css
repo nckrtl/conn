@@ -1,0 +1,24 @@
+.m-favicon-host {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.m-favicon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: color-mix(in srgb, #f5b800 22%, var(--color-screen));
+  color: #f5c518;
+  font: 700 10.3px/20px var(--m-mono);
+}
+.m-phone[data-mobile-theme="light"] .m-favicon {
+  background: #fff1c2;
+  color: #8a6400;
+}
+.m-favicon-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+}

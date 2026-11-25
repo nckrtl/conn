@@ -9,6 +9,7 @@ use std::{
 use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
 use tokio::time::Instant;
 
+mod desktop;
 mod profiles;
 mod viewer;
 pub use crate::screencast::Frame as ViewerFrame;
@@ -46,6 +47,10 @@ struct Tab {
     console_entries: std::collections::VecDeque<Value>,
     network_entries: std::collections::VecDeque<Value>,
     timeline: std::collections::VecDeque<Value>,
+    /// Test-login secrets filled into this tab, newest last (T3's `filledSecrets`, at most 32).
+    /// The page decides what it keeps, and console and network entries outlive the document,
+    /// so they are redacted until the tab closes.
+    filled: std::collections::VecDeque<String>,
     snapshot: Value,
     used: Instant,
     action: Arc<AsyncMutex<()>>,
@@ -71,6 +76,8 @@ struct State {
     default_profile: Option<String>,
     recording_rate: u64,
     pending_popups: Vec<(String, String, Option<String>)>,
+    /// Tabs a Conn desktop shows itself (`runtime: "desktop"`): records only, no page here.
+    desktop: Vec<desktop::DesktopSession>,
 }
 #[derive(Debug)]
 struct Inner {
@@ -85,6 +92,7 @@ struct Inner {
     events: broadcast::Sender<Value>,
     fixture: Option<PathBuf>,
     recording_slots: Arc<tokio::sync::Semaphore>,
+    relay: crate::relay::Relay,
 }
 /// A server's browser state. Constructing it does not create files or launch a process.
 #[derive(Clone, Debug)]
@@ -121,6 +129,7 @@ impl Preview {
                 recording_rate: 30,
                 profile_reports: vec![],
                 pending_popups: vec![],
+                desktop: vec![],
             }),
             open: AsyncMutex::new(()),
             profiles_loaded: tokio::sync::OnceCell::new(),
@@ -132,6 +141,7 @@ impl Preview {
             events,
             fixture,
             recording_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            relay: crate::relay::Relay::default(),
         }));
         let weak = Arc::downgrade(&result.0);
         tokio::spawn(async move {
@@ -153,7 +163,25 @@ impl Preview {
     }
     pub fn list(&self, thread: &str) -> Value {
         let state = lock(&self.0.state);
-        json!({"sessions":state.tabs.iter().filter(|t|t.thread==thread).map(|t|t.snapshot.clone()).collect::<Vec<_>>(),"serverEpoch":self.0.epoch,"revision":state.revision})
+        let mut sessions = state
+            .tabs
+            .iter()
+            .filter(|t| t.thread == thread)
+            .map(|t| &t.snapshot)
+            .chain(desktop::sessions(&state, thread))
+            .cloned()
+            .collect::<Vec<_>>();
+        // T3 lists a thread's tabs by `updatedAt`, server and desktop tabs together.
+        sessions.sort_by(|a, b| {
+            let at = |v: &Value| {
+                v.get("updatedAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            at(a).cmp(&at(b))
+        });
+        json!({"sessions":sessions,"serverEpoch":self.0.epoch,"revision":state.revision})
     }
     pub async fn close(&self, thread: &str, tab: Option<&str>) -> Result<(), Error> {
         let removed = {
@@ -171,6 +199,7 @@ impl Preview {
             for tab in &removed {
                 publish(&self.0, &mut state, "closed", &tab.snapshot);
             }
+            desktop::close(&self.0, &mut state, thread, tab);
             removed
         };
         for mut tab in removed {
@@ -378,6 +407,11 @@ impl Preview {
                     self.close(thread, Some(&id)).await?;
                     Ok(json!({}))
                 }
+                // The value goes only to CDP (`fillCredential`); no trace, no timeline.
+                "credentialFill" => {
+                    let remember = |value: &str| self.remember_filled(&id, value);
+                    crate::page::fill_credential(&browser, &session, &input, remember).await
+                }
                 "cdpEndpoint" => Err(Error(
                     "Not supported on server tabs: temporary CDP endpoints. Use a desktop tab."
                         .into(),
@@ -487,7 +521,8 @@ impl Preview {
                             snapshot["actionTimeline"] = json!(tab.timeline);
                         }
                     }
-                    let hidden = crate::page::secrets(&browser, &session).await?;
+                    let mut hidden = crate::page::secrets(&browser, &session).await?;
+                    hidden.extend(self.filled_secrets(&id));
                     let full_image = snapshot
                         .as_object_mut()
                         .and_then(|o| o.remove("fullScreenshot"));
@@ -620,7 +655,8 @@ impl Preview {
                             .into(),
                     ));
                     }
-                    let hidden = crate::page::secrets(&browser, &session).await?;
+                    let mut hidden = crate::page::secrets(&browser, &session).await?;
+                    hidden.extend(self.filled_secrets(&id));
                     crate::page::redact(&mut value, &hidden);
                     Ok(value)
                 }
@@ -695,6 +731,26 @@ impl Preview {
             trace.complete(&result);
         }
         result
+    }
+    /// `rememberFilledSecret`: keeps the 32 newest values filled into tab `id`.
+    fn remember_filled(&self, id: &str, value: &str) {
+        const MAX_REMEMBERED_SECRETS: usize = 32;
+        let mut state = lock(&self.0.state);
+        if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == id) {
+            tab.filled.retain(|held| held != value);
+            tab.filled.push_back(value.to_owned());
+            while tab.filled.len() > MAX_REMEMBERED_SECRETS {
+                tab.filled.pop_front();
+            }
+        }
+    }
+    fn filled_secrets(&self, id: &str) -> Vec<String> {
+        lock(&self.0.state)
+            .tabs
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.filled.iter().cloned().collect())
+            .unwrap_or_default()
     }
     pub fn status(&self, thread: &str, agent: &str, explicit: Option<&str>) -> Value {
         let mut state = lock(&self.0.state);
@@ -789,7 +845,7 @@ impl Preview {
                     .count()
                     >= spec()?.agent_tab_limit
             {
-                return Err(Error("Too many server browser tabs are open. Close one with t3_preview_close, or reuse a tabId from preview_status tabs.".into()));
+                return Err(Error("Too many server browser tabs are open. Close one with conn_preview_close, or reuse a tabId from preview_status tabs.".into()));
             }
         }
         // Explicit persistent profiles need separate Chrome processes to preserve their on-disk partition.
@@ -927,7 +983,7 @@ impl Preview {
                 appearance: "system".into(),
                 console_entries:std::collections::VecDeque::new(),
                 network_entries:std::collections::VecDeque::new(),
-                timeline:std::collections::VecDeque::new(),
+                timeline:std::collections::VecDeque::new(),filled:std::collections::VecDeque::new(),
                 snapshot: snapshot.clone(),
                 used: Instant::now(),
                 action:Arc::new(AsyncMutex::new(())),
@@ -1109,6 +1165,9 @@ impl Preview {
         }
     }
     pub async fn resize(&self, thread: &str, id: &str, setting: Value) -> Result<Value, Error> {
+        if let Some(snapshot) = self.resize_desktop(thread, id, &setting) {
+            return snapshot;
+        }
         let (browser, session, width, height) = {
             let state = lock(&self.0.state);
             let tab = state
@@ -1653,13 +1712,19 @@ impl Preview {
         }
     }
     pub fn snapshot_for(&self, thread: &str, id: &str) -> Option<Value> {
-        lock(&self.0.state)
+        let state = lock(&self.0.state);
+        state
             .tabs
             .iter()
             .find(|t| t.thread == thread && t.id == id)
-            .map(|t| t.snapshot.clone())
+            .map(|t| &t.snapshot)
+            .or_else(|| desktop::find(&state, thread, id))
+            .cloned()
     }
     pub async fn adjust(&self, thread: &str, id: &str, input: &Value) -> Result<Value, Error> {
+        if let Some(snapshot) = self.adjust_desktop(thread, id, input) {
+            return Ok(snapshot);
+        }
         if let Some(color) = input.get("colorScheme").and_then(Value::as_str) {
             self.appearance(thread, id, color).await?;
         }
@@ -1900,7 +1965,7 @@ impl Preview {
                 appearance:"system".into(),
                 console_entries:std::collections::VecDeque::new(),
                 network_entries:std::collections::VecDeque::new(),
-                timeline:std::collections::VecDeque::new(),
+                timeline:std::collections::VecDeque::new(),filled:std::collections::VecDeque::new(),
                 snapshot,
                 used:Instant::now(),
                 action:Arc::new(AsyncMutex::new(())),

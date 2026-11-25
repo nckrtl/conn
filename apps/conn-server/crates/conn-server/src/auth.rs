@@ -7,6 +7,10 @@
 //! `auth` and `pair` subcommands change while the server runs: every write takes a lock file,
 //! and the server reloads the file whenever its stamp changes. Tickets and live connection
 //! counts stay in memory.
+//!
+//! Sessions carried over from a T3 server (`t3_carry.rs`) keep the token the client already
+//! holds: T3 signs its session claims with the `server-signing-key` secret in the shared secret
+//! store, and those sessions are checked the same way (`T3SignedSession`).
 
 use std::{
     collections::HashMap,
@@ -93,11 +97,22 @@ pub const SESSION_TTL_MS: u64 = 30 * 24 * 60 * MINUTE_MS;
 pub const TICKET_TTL_MS: u64 = 5 * MINUTE_MS;
 /// The longest life a session or pairing link can get: ten years.
 pub const MAX_TTL_MS: u64 = 10 * 366 * 24 * 60 * MINUTE_MS;
+/// The session lifetime that ends only on revoke. Stored as [`MAX_TTL_MS`], so every reader
+/// still gets a real `expiresAt`.
+pub const UNTIL_REVOKED: &str = "until-revoked";
 
 /// Subjects as `EnvironmentAuth.ts` names them.
 pub const SUBJECT_ONE_TIME_TOKEN: &str = "one-time-token";
 pub const SUBJECT_CLI_SESSION: &str = "cli-issued-session";
 pub const SUBJECT_DESKTOP_BOOTSTRAP: &str = "desktop-bootstrap";
+/// Sessions MCP OAuth issues to outside agents and peer links (`MCP_CLIENT_SUBJECT`).
+pub const SUBJECT_MCP_CLIENT: &str = "mcp-client";
+/// Pairing links bound to one purpose (`AuthPairingLinks.ts`): only the MCP sign-in they were
+/// made for may spend them, never a plain pairing.
+pub const MCP_APPROVAL_SUBJECT_PREFIX: &str = "mcp-approval:";
+pub const PEER_LINK_PAIRING_SUBJECT_PREFIX: &str = "mcp-approval:peer-link:";
+/// `MCP_CLIENT_SESSION_TTL`: 30 days.
+pub const MCP_CLIENT_SESSION_TTL_MS: u64 = 30 * 24 * 60 * MINUTE_MS;
 const METHOD_BEARER: &str = "bearer-access-token";
 
 type Hash = [u8; 32];
@@ -388,6 +403,81 @@ pub enum ExchangeError {
     Storage,
 }
 
+/// Why a pairing code could not approve an MCP sign-in (`ServerAuthMcpApprovalCodeError`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpCodeError {
+    UnknownOrUsed,
+    InsufficientScope,
+    Storage,
+}
+
+impl McpCodeError {
+    /// The T3 server's words for each reason.
+    pub fn message(&self) -> &'static str {
+        match self {
+            McpCodeError::InsufficientScope => {
+                "That pairing code cannot grant this access. It has not been used, so choose an access level it grants, or create a code with the standard scopes."
+            }
+            McpCodeError::UnknownOrUsed => {
+                "That pairing code is unknown, expired, or already used."
+            }
+            McpCodeError::Storage => "The code could not be checked. Try again.",
+        }
+    }
+}
+
+/// An MCP OAuth client, as `/mcp` sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpClientSession {
+    pub session_id: String,
+    pub label: String,
+    /// `AuthMcpClientAccess`.
+    pub access: String,
+    pub peer_link: bool,
+}
+
+/// `AuthMcpClientAccess` levels.
+pub const MCP_ACCESS_LEVELS: &[&str] = &[
+    "read-only",
+    "approval-required",
+    "auto-accept-edits",
+    "auto",
+    "full-access",
+];
+
+pub fn is_mcp_access(level: &str) -> bool {
+    MCP_ACCESS_LEVELS.contains(&level)
+}
+
+/// `mcpClientScopes`: the scopes an agent session gets for an access level.
+pub fn mcp_client_scopes(access: &str) -> Vec<String> {
+    let scopes: &[&str] = match access {
+        "read-only" => &["orchestration:read"],
+        "full-access" => &[
+            "orchestration:read",
+            "orchestration:operate",
+            "settings:write",
+            "source-control:write",
+        ],
+        _ => &["orchestration:read", "orchestration:operate"],
+    };
+    scopes.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// Why [`AuthStore::extend_session`] refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExtendError {
+    NotFound,
+    CarriedFromT3,
+}
+
+/// What a spent MCP sign-in code grants.
+#[derive(Debug, PartialEq, Eq)]
+pub struct McpGrant {
+    pub access: String,
+    pub session_ttl_ms: u64,
+}
+
 /// A client may not revoke its own session (`current_session_revoke_not_allowed`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct RevokeCurrentSession;
@@ -398,6 +488,8 @@ pub struct PairingRequest {
     pub scopes: Vec<String>,
     pub label: Option<String>,
     pub ttl_ms: u64,
+    /// The life of the session the code grants; `None` keeps [`SESSION_TTL_MS`].
+    pub session_ttl_ms: Option<u64>,
 }
 
 impl PairingRequest {
@@ -406,6 +498,7 @@ impl PairingRequest {
             scopes: STANDARD_SCOPES.iter().map(|s| s.to_string()).collect(),
             label,
             ttl_ms,
+            session_ttl_ms: None,
         }
     }
 }
@@ -439,6 +532,19 @@ struct StoredPairing {
     label: Option<String>,
     created_at_ms: u64,
     expires_at_ms: u64,
+    /// Carried over from a T3 server (`t3_carry.rs`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    t3: bool,
+    /// The life of the session this code grants (`sessionTtl`); none keeps the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_ttl_ms: Option<u64>,
+}
+
+impl StoredPairing {
+    /// A code made for one MCP sign-in (`mcp-approval:…`), not a pairing link a client shows.
+    fn purpose_bound(&self) -> bool {
+        self.subject.starts_with(MCP_APPROVAL_SUBJECT_PREFIX)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +562,17 @@ struct StoredSession {
     expires_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_connected_at_ms: Option<u64>,
+    /// An MCP client's approved runtime mode (`runtimeModeCeiling`); none for read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_mode_ceiling: Option<String>,
+    /// An MCP client session another environment holds as its peer link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    peer_link: bool,
+    /// A session carried over from a T3 server: its client holds a token T3 signed, not a
+    /// random one. `token_hash` is then only the map key ([`t3_session_key`]); no bearer
+    /// token is looked up by it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    t3_signed: bool,
 }
 
 fn bearer_method() -> String {
@@ -468,6 +585,28 @@ struct AuthFile {
     version: u32,
     sessions: Vec<StoredSession>,
     pairing_links: Vec<StoredPairing>,
+    /// T3 pairing codes spent or revoked here. T3's table still lists them as unspent, so
+    /// neither a later carry-over nor [`AuthStore::exchange`]'s look into T3's table may take
+    /// them again. Each goes when its code would have expired.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    spent_t3_pairing: Vec<SpentT3Pairing>,
+    /// When T3's state was last carried over into this file. A code T3's CLI wrote after it
+    /// may be exchanged from T3's table; one from before was carried (or deliberately left
+    /// out) and is decided by this file alone. A file without it (carried by an older
+    /// version, whose spent codes left no record) takes no code from T3's table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    t3_carried_at_ms: Option<u64>,
+}
+
+/// See `exchange_t3_code`: how long before the carry a T3 code may have been stamped and
+/// still missed it.
+const T3_CARRY_MARGIN_MS: u64 = 5 * 60 * 1000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpentT3Pairing {
+    id: String,
+    expires_at_ms: u64,
 }
 
 #[derive(Clone)]
@@ -490,6 +629,10 @@ struct State {
     /// When each session last opened a socket, kept in memory so a socket open writes no
     /// file. Holds only ids of live sessions.
     last_connected: HashMap<String, u64>,
+    /// `AuthFile::spent_t3_pairing`: id to the code's expiry.
+    spent_t3: HashMap<String, u64>,
+    /// `AuthFile::t3_carried_at_ms`.
+    t3_carried_at: Option<u64>,
     stamp: Option<Stamp>,
 }
 
@@ -499,7 +642,8 @@ impl State {
         let mut changes = Vec::new();
         self.pairing.retain(|_, grant| {
             let keep = grant.expires_at_ms > now;
-            if !keep {
+            // Approval and peer-link codes are never listed, so their end is not announced.
+            if !keep && !grant.purpose_bound() {
                 changes.push(AccessChange::PairingLinkRemoved(grant.id.clone()));
             }
             keep
@@ -512,6 +656,8 @@ impl State {
             keep
         });
         self.tickets.retain(|_, ticket| ticket.expires_at_ms > now);
+        self.spent_t3
+            .retain(|_, expires_at_ms| *expires_at_ms > now);
         let sessions = &self.sessions;
         self.last_connected
             .retain(|id, _| sessions.values().any(|s| &s.id == id));
@@ -526,6 +672,8 @@ impl State {
 pub struct AuthStore {
     state: Mutex<State>,
     desktop: Mutex<Option<DesktopBootstrap>>,
+    /// T3's `server-signing-key`, read once when a T3-signed token first arrives.
+    t3_key: Mutex<Option<Option<Vec<u8>>>>,
     /// Where sessions and pairing links persist; `None` keeps them in memory (tests).
     file: Option<PathBuf>,
     changes: broadcast::Sender<AccessChange>,
@@ -549,6 +697,7 @@ impl AuthStore {
         Self {
             state: Mutex::default(),
             desktop: Mutex::default(),
+            t3_key: Mutex::default(),
             file,
             changes: broadcast::channel(64).0,
         }
@@ -612,6 +761,8 @@ impl AuthStore {
             label: request.label,
             created_at_ms: now,
             expires_at_ms: expires_at(now, request.ttl_ms),
+            t3: false,
+            session_ttl_ms: request.session_ttl_ms,
         };
         let issued = IssuedPairingCode {
             id: link.id.clone(),
@@ -689,7 +840,12 @@ impl AuthStore {
         let key = hash(&code.trim().to_ascii_uppercase());
         let mut outcome = Err(ExchangeError::InvalidCredential);
         let written = self.write(|state| {
-            let Some(grant) = state.pairing.get(&key) else {
+            // A purpose-bound code (`mcp-approval:…`) is only for the MCP sign-in it was made for.
+            let Some(grant) = state
+                .pairing
+                .get(&key)
+                .filter(|g| !g.subject.starts_with(MCP_APPROVAL_SUBJECT_PREFIX))
+            else {
                 return Vec::new();
             };
             let scopes = narrow(grant.scopes.clone(), requested);
@@ -700,12 +856,15 @@ impl AuthStore {
             let Some(grant) = state.pairing.remove(&key) else {
                 return Vec::new();
             };
+            if grant.t3 {
+                state.spent_t3.insert(grant.id.clone(), grant.expires_at_ms);
+            }
             let mut client = client.clone();
             if client.label.is_none() {
                 client.label = grant.label.clone();
             }
-            let (token, session) =
-                new_session(grant.subject.clone(), scopes, client, SESSION_TTL_MS);
+            let ttl_ms = grant.session_ttl_ms.unwrap_or(SESSION_TTL_MS);
+            let (token, session) = new_session(grant.subject.clone(), scopes, client, ttl_ms);
             let issued = IssuedSession {
                 token: token.clone(),
                 principal: principal_of(&session),
@@ -718,6 +877,75 @@ impl AuthStore {
                 AccessChange::PairingLinkRemoved(grant.id),
                 AccessChange::ClientUpserted(id),
             ]
+        });
+        if let Err(error) = written {
+            eprintln!("conn-server: could not save auth state: {error}");
+            return Err(ExchangeError::Storage);
+        }
+        if matches!(outcome, Err(ExchangeError::InvalidCredential)) {
+            return self.exchange_t3_code(code, requested, client);
+        }
+        outcome
+    }
+
+    /// A code T3's CLI made in this state folder after the carry-over (Conn desktop's SSH
+    /// setup runs `t3 auth pairing create`): spent here once, as a code of this server.
+    fn exchange_t3_code(
+        &self,
+        code: &str,
+        requested: Option<&[String]>,
+        client: ClientInfo,
+    ) -> Result<IssuedSession, ExchangeError> {
+        let Some(dir) = self.file.as_ref().and_then(|f| f.parent()) else {
+            return Err(ExchangeError::InvalidCredential);
+        };
+        let link = match crate::t3_carry::read_t3_pairing_code(dir, code, now_ms()) {
+            Ok(Some(link)) => link,
+            Ok(None) => return Err(ExchangeError::InvalidCredential),
+            Err(error) => {
+                eprintln!("conn-server: cannot read the T3 server's pairing codes: {error}");
+                return Err(ExchangeError::InvalidCredential);
+            }
+        };
+        let mut outcome = Err(ExchangeError::InvalidCredential);
+        let written = self.write(|state| {
+            // Spent, revoked or carried over here: this server's record decides. Only a code
+            // made after the carry-over is T3's table's to give, and only while it is valid
+            // (checked again under the lock: the spent record goes at the code's expiry).
+            // T3 stamps `createdAt` before it inserts the row, so a code stamped shortly
+            // before the read may still miss the carry: a margin takes it here. A carried
+            // code inside the margin is in `state.pairing` or `spent_t3`, checked below.
+            let made_after_carry = state
+                .t3_carried_at
+                .is_some_and(|at| link.created_at_ms >= at.saturating_sub(T3_CARRY_MARGIN_MS));
+            if !made_after_carry
+                || link.expires_at_ms <= now_ms()
+                || state.spent_t3.contains_key(&link.id)
+                || state.pairing.values().any(|l| l.id == link.id)
+            {
+                return Vec::new();
+            }
+            let scopes = narrow(link.scopes.clone(), requested);
+            if scopes.is_empty() {
+                outcome = Err(ExchangeError::ScopeNotGranted);
+                return Vec::new();
+            }
+            let mut client = client.clone();
+            if client.label.is_none() {
+                client.label = link.label.clone();
+            }
+            let (token, session) =
+                new_session(link.subject.clone(), scopes, client, SESSION_TTL_MS);
+            let issued = IssuedSession {
+                token: token.clone(),
+                principal: principal_of(&session),
+                client: session.client.clone(),
+            };
+            let id = session.id.clone();
+            state.sessions.insert(hash(&token), session);
+            state.spent_t3.insert(link.id.clone(), link.expires_at_ms);
+            outcome = Ok(issued);
+            vec![AccessChange::ClientUpserted(id)]
         });
         if let Err(error) = written {
             eprintln!("conn-server: could not save auth state: {error}");
@@ -750,15 +978,177 @@ impl AuthStore {
         Ok(issued)
     }
 
+    /// A one-time code that links another environment at `access` (`purpose: "peer-link"`):
+    /// it carries exactly the scopes that access needs, and only a peer link may spend it.
+    pub fn issue_peer_link_pairing(
+        &self,
+        access: &str,
+        label: Option<String>,
+        session_ttl_ms: Option<u64>,
+    ) -> io::Result<IssuedPairingCode> {
+        let code = pairing_code();
+        let now = now_ms();
+        let link = StoredPairing {
+            id: uuid_v4(),
+            code_hash: hex(&hash(&code)),
+            scopes: mcp_client_scopes(access),
+            subject: format!("{PEER_LINK_PAIRING_SUBJECT_PREFIX}{access}"),
+            label,
+            created_at_ms: now,
+            expires_at_ms: expires_at(now, PAIRING_CODE_TTL_MS),
+            t3: false,
+            session_ttl_ms,
+        };
+        let issued = IssuedPairingCode {
+            id: link.id.clone(),
+            code: code.clone(),
+            label: link.label.clone(),
+            scopes: link.scopes.clone(),
+            created_at_ms: now,
+            expires_at_ms: link.expires_at_ms,
+        };
+        // Purpose-bound codes stay out of the pairing links clients show
+        // (`PairingGrantStore.issue`): no upsert event.
+        self.write(|state| {
+            state.pairing.insert(hash(&code), link.clone());
+            Vec::new()
+        })?;
+        Ok(issued)
+    }
+
+    /// Spends a pairing code for an MCP sign-in at `access` (`consumeMcpApprovalCode`). A plain
+    /// one-time code works when it carries the access's scopes; a purpose-bound one only for
+    /// its own purpose (`peer_link`) and level. Returns what the session gets.
+    pub fn consume_mcp_code(
+        &self,
+        code: &str,
+        access: &str,
+        peer_link: bool,
+    ) -> Result<McpGrant, McpCodeError> {
+        let key = hash(&code.trim().to_ascii_uppercase());
+        let allowed = format!(
+            "{}{access}",
+            if peer_link {
+                PEER_LINK_PAIRING_SUBJECT_PREFIX
+            } else {
+                MCP_APPROVAL_SUBJECT_PREFIX
+            }
+        );
+        let required = mcp_client_scopes(access);
+        let mut outcome = Err(McpCodeError::UnknownOrUsed);
+        let written = self.write(|state| {
+            let Some(grant) = state.pairing.get(&key) else {
+                return Vec::new();
+            };
+            // T3 names a missing scope before a purpose that does not match.
+            if !required.iter().all(|s| grant.scopes.contains(s)) {
+                outcome = Err(McpCodeError::InsufficientScope);
+                return Vec::new();
+            }
+            if grant.subject.starts_with(MCP_APPROVAL_SUBJECT_PREFIX) && grant.subject != allowed {
+                return Vec::new();
+            }
+            let Some(grant) = state.pairing.remove(&key) else {
+                return Vec::new();
+            };
+            if grant.t3 {
+                state.spent_t3.insert(grant.id.clone(), grant.expires_at_ms);
+            }
+            let level = grant
+                .subject
+                .strip_prefix(MCP_APPROVAL_SUBJECT_PREFIX)
+                .filter(|level| is_mcp_access(level))
+                .unwrap_or(access);
+            outcome = Ok(McpGrant {
+                access: level.to_owned(),
+                session_ttl_ms: grant.session_ttl_ms.unwrap_or(MCP_CLIENT_SESSION_TTL_MS),
+            });
+            // `consumeAvailable`: a spent approval or peer-link code is not announced.
+            if grant.purpose_bound() {
+                Vec::new()
+            } else {
+                vec![AccessChange::PairingLinkRemoved(grant.id)]
+            }
+        });
+        if let Err(error) = written {
+            eprintln!("conn-server: could not save auth state: {error}");
+            return Err(McpCodeError::Storage);
+        }
+        outcome
+    }
+
+    /// A session for an MCP client signed in through OAuth (`issueMcpClientSession`).
+    pub fn issue_mcp_client_session(
+        &self,
+        label: &str,
+        access: &str,
+        peer_link: bool,
+        client: ClientInfo,
+        ttl_ms: u64,
+    ) -> io::Result<IssuedSession> {
+        let mut client = client;
+        client.label = Some(label.to_owned());
+        client.device_type = "bot".into();
+        let (token, mut session) = new_session(
+            SUBJECT_MCP_CLIENT.into(),
+            mcp_client_scopes(access),
+            client,
+            ttl_ms,
+        );
+        session.runtime_mode_ceiling = (access != "read-only").then(|| access.to_owned());
+        session.peer_link = peer_link;
+        let issued = IssuedSession {
+            token: token.clone(),
+            principal: principal_of(&session),
+            client: session.client.clone(),
+        };
+        self.write(|state| {
+            let id = session.id.clone();
+            state.sessions.insert(hash(&token), session.clone());
+            vec![AccessChange::ClientUpserted(id)]
+        })?;
+        Ok(issued)
+    }
+
+    /// The MCP client behind a bearer token (`authenticateMcpClient`), or `None` for any other
+    /// session.
+    pub fn authenticate_mcp_client(&self, token: &str) -> Option<McpClientSession> {
+        let now = now_ms();
+        let mut state = self.lock();
+        self.refresh(&mut state);
+        let (_, session) = self.resolve(&state, token, now)?;
+        if session.subject != SUBJECT_MCP_CLIENT {
+            return None;
+        }
+        let access = if session.scopes.iter().any(|s| s == "orchestration:operate") {
+            session
+                .runtime_mode_ceiling
+                .clone()
+                .unwrap_or_else(|| "approval-required".to_owned())
+        } else {
+            "read-only".to_owned()
+        };
+        Some(McpClientSession {
+            session_id: session.id.clone(),
+            label: session
+                .client
+                .label
+                .clone()
+                .unwrap_or_else(|| "MCP client".to_owned()),
+            access,
+            peer_link: session.peer_link,
+        })
+    }
+
+    /// The session behind a bearer token on the native HTTP and WebSocket paths. An MCP client
+    /// session is refused here: it is only accepted by `/mcp` (`rejectMcpClientAudience`).
     pub fn authenticate_bearer(&self, token: &str) -> Option<Principal> {
         let now = now_ms();
         let mut state = self.lock();
         self.refresh(&mut state);
-        state
-            .sessions
-            .get(&hash(token))
-            .filter(|s| s.expires_at_ms > now)
-            .map(principal_of)
+        self.resolve(&state, token, now)
+            .filter(|(_, s)| native_audience(s))
+            .map(|(_, s)| principal_of(&s))
     }
 
     /// A short-lived ticket for a WebSocket upgrade, which cannot carry headers.
@@ -771,11 +1161,9 @@ impl AuthStore {
         let mut state = self.lock();
         self.refresh(&mut state);
         state.tickets.retain(|_, t| t.expires_at_ms > now);
-        let session = hash(bearer_token);
-        state
-            .sessions
-            .get(&session)
-            .filter(|s| s.expires_at_ms > now)?;
+        let (session, _) = self
+            .resolve(&state, bearer_token, now)
+            .filter(|(_, s)| native_audience(s))?;
         let ticket = random_hex(32);
         let expires_at_ms = expires_at(now, TICKET_TTL_MS);
         state.tickets.insert(
@@ -805,7 +1193,7 @@ impl AuthStore {
         state
             .sessions
             .get(&ticket.session)
-            .filter(|s| s.expires_at_ms > now)
+            .filter(|s| s.expires_at_ms > now && native_audience(s))
             .map(principal_of)
     }
 
@@ -819,11 +1207,16 @@ impl AuthStore {
             .is_some_and(|(_, s)| s.expires_at_ms > now)
     }
 
-    /// Unspent, unexpired pairing links, oldest first.
+    /// Unspent, unexpired pairing links, oldest first. Purpose-bound codes are not listed
+    /// (`EnvironmentAuth.listPairingLinks`).
     pub fn pairing_links(&self) -> Vec<AuthPairingLink> {
         let mut state = self.lock();
         self.refresh(&mut state);
-        let mut links: Vec<&StoredPairing> = state.pairing.values().collect();
+        let mut links: Vec<&StoredPairing> = state
+            .pairing
+            .values()
+            .filter(|l| !l.purpose_bound())
+            .collect();
         links.sort_by_key(|l| (l.created_at_ms, l.id.clone()));
         links.into_iter().map(pairing_to_contract).collect()
     }
@@ -834,7 +1227,7 @@ impl AuthStore {
         state
             .pairing
             .values()
-            .find(|l| l.id == id)
+            .find(|l| l.id == id && !l.purpose_bound())
             .map(pairing_to_contract)
     }
 
@@ -858,11 +1251,31 @@ impl AuthStore {
             .map(|(_, s)| session_to_contract(s, &state, current))
     }
 
+    /// Drops every session carried over from T3. An inert rehearsal copy calls it, so the
+    /// original's clients cannot drive the copy; sessions issued here stay.
+    pub fn drop_t3_sessions(&self) -> io::Result<usize> {
+        let mut dropped = 0;
+        self.write(|state| {
+            let before = state.sessions.len();
+            state.sessions.retain(|_, s| !s.t3_signed);
+            dropped = before - state.sessions.len();
+            Vec::new()
+        })?;
+        Ok(dropped)
+    }
+
     pub fn revoke_pairing_link(&self, id: &str) -> io::Result<bool> {
         let mut revoked = false;
         self.write(|state| {
             let before = state.pairing.len();
-            state.pairing.retain(|_, l| l.id != id);
+            let spent = &mut state.spent_t3;
+            state.pairing.retain(|_, l| {
+                let keep = l.id != id;
+                if !keep && l.t3 {
+                    spent.insert(l.id.clone(), l.expires_at_ms);
+                }
+                keep
+            });
             revoked = state.pairing.len() != before;
             if revoked {
                 vec![AccessChange::PairingLinkRemoved(id.to_owned())]
@@ -882,6 +1295,25 @@ impl AuthStore {
         if current == Some(id) {
             return Ok(Err(RevokeCurrentSession));
         }
+        self.end_session(id).map(Ok)
+    }
+
+    /// Ends the session behind `token`, native or MCP (`/api/auth/logout`). Returns its id, or
+    /// `None` when the token names no live session.
+    pub fn logout(&self, token: &str) -> io::Result<Option<String>> {
+        let mut ended = None;
+        self.write(|state| {
+            let Some((key, session)) = self.resolve(state, token, now_ms()) else {
+                return Vec::new();
+            };
+            state.sessions.remove(&key);
+            ended = Some(session.id.clone());
+            vec![AccessChange::ClientRemoved(session.id)]
+        })?;
+        Ok(ended)
+    }
+
+    fn end_session(&self, id: &str) -> io::Result<bool> {
         let mut revoked = false;
         self.write(|state| {
             let before = state.sessions.len();
@@ -893,7 +1325,26 @@ impl AuthStore {
                 Vec::new()
             }
         })?;
-        Ok(Ok(revoked))
+        Ok(revoked)
+    }
+
+    /// Moves session `id`'s end out to `ttl_ms` from now. Never shortens it. A session carried
+    /// over from T3 is refused: the `exp` in its signed token bounds it. Returns the new end.
+    pub fn extend_session(&self, id: &str, ttl_ms: u64) -> io::Result<Result<u64, ExtendError>> {
+        let mut outcome = Err(ExtendError::NotFound);
+        self.write(|state| {
+            let Some(session) = state.sessions.values_mut().find(|s| s.id == id) else {
+                return Vec::new();
+            };
+            if session.t3_signed {
+                outcome = Err(ExtendError::CarriedFromT3);
+                return Vec::new();
+            }
+            session.expires_at_ms = session.expires_at_ms.max(expires_at(now_ms(), ttl_ms));
+            outcome = Ok(session.expires_at_ms);
+            vec![AccessChange::ClientUpserted(id.to_owned())]
+        })?;
+        Ok(outcome)
     }
 
     /// Revokes every session but `current`. Returns how many.
@@ -950,23 +1401,98 @@ impl AuthStore {
         crate::lock(&self.state)
     }
 
+    /// The live session a bearer token names, with its map key. A token this server issued
+    /// is found by its hash. A token a T3 server issued before the switch is checked as T3's
+    /// `SessionStore.verify` checks it: signature, claims, expiry, and a session that was
+    /// carried over and not revoked since; the claims' expiry, runtime mode ceiling and peer
+    /// link mark then apply.
+    fn resolve(&self, state: &State, token: &str, now: u64) -> Option<(Hash, StoredSession)> {
+        let key = hash(token);
+        if let Some(session) = state.sessions.get(&key) {
+            return (!session.t3_signed && session.expires_at_ms > now)
+                .then(|| (key, session.clone()));
+        }
+        if !token.contains('.') || !state.sessions.values().any(|s| s.t3_signed) {
+            return None;
+        }
+        let claims = self.t3_claims(token, now)?;
+        let key = t3_session_key(&claims.sid);
+        let session = state
+            .sessions
+            .get(&key)
+            .filter(|s| s.t3_signed && s.id == claims.sid && s.expires_at_ms > now)?;
+        // T3 picks the audience (native or MCP) by the signed subject; the row's must match.
+        if session.subject != claims.sub {
+            return None;
+        }
+        let mut session = session.clone();
+        session.expires_at_ms = session.expires_at_ms.min(claims.exp);
+        session.runtime_mode_ceiling = claims.rtc;
+        session.peer_link = claims.plk == Some(1);
+        Some((key, session))
+    }
+
+    /// The claims of a session token T3 signed with its `server-signing-key`, when the
+    /// signature holds and it has not expired. DPoP-bound tokens (`jkt`) are refused: this
+    /// server checks no proofs.
+    fn t3_claims(&self, token: &str, now: u64) -> Option<T3SessionClaims> {
+        let (payload, signature) = token.split_once('.')?;
+        let key = self.t3_signing_key()?;
+        let expected = hmac_sha256(&key, payload.as_bytes());
+        let given = conn_support::base64::url_decode(signature)?;
+        if !constant_time_eq(&expected, &given) {
+            return None;
+        }
+        let claims: T3SessionClaims =
+            serde_json::from_slice(&conn_support::base64::url_decode(payload)?).ok()?;
+        (matches!(claims.v, 1 | 2)
+            && claims.kind == "session"
+            && claims.jkt.is_none()
+            && claims.method == METHOD_BEARER
+            && claims.exp > now)
+            .then_some(claims)
+    }
+
+    fn t3_signing_key(&self) -> Option<Vec<u8>> {
+        let mut cached = crate::lock(&self.t3_key);
+        if cached.is_none() {
+            let dir = self.file.as_ref().and_then(|f| f.parent())?.join("secrets");
+            let key = conn_support::secret_store::read(&dir, T3_SIGNING_SECRET_NAME)
+                .unwrap_or_else(|error| {
+                    eprintln!("conn-server: cannot read the T3 signing key: {error}");
+                    None
+                })
+                .filter(|k| !k.is_empty());
+            *cached = Some(key);
+        }
+        cached.clone().flatten()
+    }
+
     /// Reloads the file when another process changed it, and announces what moved.
-    fn refresh(&self, state: &mut State) {
+    /// Reads the file again when another process changed it. `false` when it could not: the
+    /// state in memory may then be stale.
+    fn refresh(&self, state: &mut State) -> bool {
         let Some(path) = &self.file else {
             let changes = state.purge(now_ms());
             self.announce(changes);
-            return;
+            return true;
         };
         if stamp(path) == state.stamp {
             let changes = state.purge(now_ms());
             self.announce(changes);
-            return;
+            return true;
         }
         let before_links: Vec<String> = state.pairing.values().map(|l| l.id.clone()).collect();
+        let hidden_before: Vec<String> = state
+            .pairing
+            .values()
+            .filter(|l| l.purpose_bound())
+            .map(|l| l.id.clone())
+            .collect();
         let before_sessions: Vec<StoredSession> = state.sessions.values().cloned().collect();
         if let Err(error) = self.reload(state) {
             eprintln!("conn-server: could not read {}: {error}", path.display());
-            return;
+            return false;
         }
         let mut changes = Vec::new();
         for id in &before_links {
@@ -974,8 +1500,13 @@ impl AuthStore {
                 changes.push(AccessChange::PairingLinkRemoved(id.clone()));
             }
         }
+        // Approval and peer-link codes were never announced, so their end is not either.
+        changes.retain(|change| match change {
+            AccessChange::PairingLinkRemoved(id) => !hidden_before.contains(id),
+            _ => true,
+        });
         for link in state.pairing.values() {
-            if !before_links.contains(&link.id) {
+            if !before_links.contains(&link.id) && !link.purpose_bound() {
                 changes.push(AccessChange::PairingLinkUpserted(link.id.clone()));
             }
         }
@@ -990,6 +1521,7 @@ impl AuthStore {
             }
         }
         self.announce(changes);
+        true
     }
 
     /// Replaces the persistent part of `state` with the file's content.
@@ -1006,6 +1538,12 @@ impl AuthStore {
         };
         state.sessions.clear();
         state.pairing.clear();
+        state.spent_t3 = file
+            .spent_t3_pairing
+            .into_iter()
+            .map(|s| (s.id, s.expires_at_ms))
+            .collect();
+        state.t3_carried_at = file.t3_carried_at_ms;
         for session in file.sessions {
             if let Some(hash) = decode_hex(&session.token_hash) {
                 state.sessions.insert(hash, session);
@@ -1029,16 +1567,39 @@ impl AuthStore {
             None => None,
         };
         let mut state = self.lock();
-        self.refresh(&mut state);
+        // A write from a stale snapshot could bring back what another process removed.
+        if !self.refresh(&mut state) {
+            return Err(io::Error::other(
+                "could not read the auth file before writing it",
+            ));
+        }
         let mut next = state.clone();
         let changes = change(&mut next);
-        if !changes.is_empty()
-            && let Some(path) = &self.file
-        {
+        // Saved whenever the stored records changed, announced or not: a spent approval or
+        // peer-link code announces nothing but must not come back in another process.
+        let changed = !changes.is_empty()
+            || next.pairing.len() != state.pairing.len()
+            || next.pairing.keys().any(|k| !state.pairing.contains_key(k))
+            || next.sessions.len() != state.sessions.len()
+            || next
+                .sessions
+                .keys()
+                .any(|k| !state.sessions.contains_key(k))
+            || next.spent_t3 != state.spent_t3;
+        if changed && let Some(path) = &self.file {
             let file = AuthFile {
                 version: 1,
                 sessions: next.sessions.values().cloned().collect(),
                 pairing_links: next.pairing.values().cloned().collect(),
+                spent_t3_pairing: next
+                    .spent_t3
+                    .iter()
+                    .map(|(id, expires_at_ms)| SpentT3Pairing {
+                        id: id.clone(),
+                        expires_at_ms: *expires_at_ms,
+                    })
+                    .collect(),
+                t3_carried_at_ms: next.t3_carried_at,
             };
             let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
             write_private(path, &bytes)?;
@@ -1093,6 +1654,9 @@ fn new_session(
         issued_at_ms: now,
         expires_at_ms: expires_at(now, ttl_ms),
         last_connected_at_ms: None,
+        runtime_mode_ceiling: None,
+        peer_link: false,
+        t3_signed: false,
     };
     (token, session)
 }
@@ -1124,6 +1688,156 @@ fn now_ms() -> u64 {
 /// [`MAX_TTL_MS`], so no TTL overflows.
 fn expires_at(now: u64, ttl_ms: u64) -> u64 {
     now.saturating_add(ttl_ms.min(MAX_TTL_MS))
+}
+
+/// Whether a session may use the native HTTP and WebSocket paths: every session but an MCP
+/// client's (`rejectMcpClientAudience` in `EnvironmentAuth.ts`).
+fn native_audience(session: &StoredSession) -> bool {
+    session.subject != SUBJECT_MCP_CLIENT
+}
+
+/// T3's session signing secret (`SessionStore.ts`, `SIGNING_SECRET_NAME`).
+const T3_SIGNING_SECRET_NAME: &str = "server-signing-key";
+
+/// `SessionClaims` in T3's `SessionStore.ts`, the fields this server reads.
+#[derive(Deserialize)]
+struct T3SessionClaims {
+    v: u8,
+    kind: String,
+    sid: String,
+    sub: String,
+    method: String,
+    #[serde(default)]
+    jkt: Option<String>,
+    #[serde(default)]
+    rtc: Option<String>,
+    #[serde(default)]
+    plk: Option<u8>,
+    exp: u64,
+}
+
+/// The map key of a session carried over from T3. No bearer token reaches it: tokens are
+/// hashed alone, and a session with `t3_signed` is never found by a token's hash.
+fn t3_session_key(session_id: &str) -> Hash {
+    hash(&format!("t3-signed-session:{session_id}"))
+}
+
+/// A T3 session as `t3_carry.rs` reads it from `auth_sessions`.
+pub(crate) struct T3Session {
+    pub id: String,
+    pub subject: String,
+    pub scopes: Vec<String>,
+    pub client: ClientInfo,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub last_connected_at_ms: Option<u64>,
+}
+
+/// A T3 pairing link as `t3_carry.rs` reads it from `auth_pairing_links`.
+pub(crate) struct T3PairingLink {
+    pub id: String,
+    pub credential: String,
+    pub scopes: Vec<String>,
+    pub subject: String,
+    pub label: Option<String>,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+/// Writes `auth.json` from a T3 server's live sessions and pairing links. Pairing codes are
+/// kept as their hash, as every code here is; the T3 sessions keep their tokens valid
+/// ([`AuthStore::resolve`]).
+/// Under the auth file's lock, so a CLI write cannot be lost. An `auth.json` that appeared
+/// meanwhile is kept (`false`). With `replace` (an earlier carry-over's file, read again from
+/// T3), sessions and pairing links issued here since are kept; T3's are read afresh.
+///
+/// `read_at` is when T3's table was read: a code T3 makes after it is the fallback's
+/// (`t3CarriedAtMs`). On `replace` over an existing file, T3's sessions and codes come back
+/// only when this file still holds them or T3 made them after the file's carry: one revoked
+/// or spent here never returns, even from a file an older version wrote.
+pub(crate) fn write_t3_import(
+    path: &Path,
+    mut sessions: Vec<T3Session>,
+    mut links: Vec<T3PairingLink>,
+    replace: bool,
+    read_at: u64,
+) -> io::Result<bool> {
+    let _lock = lock_file(path)?;
+    if !replace && path.exists() {
+        return Ok(false);
+    }
+    // A file that cannot be read stops the start: it may hold sessions issued here.
+    let (earlier, existed): (AuthFile, bool) = match fs::read(path) {
+        Ok(bytes) => (
+            serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            true,
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (AuthFile::default(), false),
+        Err(error) => return Err(error),
+    };
+    if existed {
+        let after = |at: u64| earlier.t3_carried_at_ms.is_some_and(|cut| at >= cut);
+        sessions.retain(|s| {
+            after(s.issued_at_ms) || earlier.sessions.iter().any(|e| e.t3_signed && e.id == s.id)
+        });
+        links.retain(|l| {
+            after(l.created_at_ms) || earlier.pairing_links.iter().any(|e| e.t3 && e.id == l.id)
+        });
+    }
+    let own_sessions: Vec<StoredSession> = earlier
+        .sessions
+        .into_iter()
+        .filter(|s| !s.t3_signed)
+        .collect();
+    let own_links: Vec<StoredPairing> = earlier
+        .pairing_links
+        .into_iter()
+        .filter(|l| !l.t3)
+        .collect();
+    let spent = earlier.spent_t3_pairing;
+    let mut file = AuthFile {
+        version: 1,
+        sessions: sessions
+            .into_iter()
+            .map(|s| StoredSession {
+                token_hash: hex(&t3_session_key(&s.id)),
+                id: s.id,
+                subject: s.subject,
+                scopes: s.scopes,
+                method: METHOD_BEARER.into(),
+                client: s.client,
+                issued_at_ms: s.issued_at_ms,
+                expires_at_ms: s.expires_at_ms,
+                last_connected_at_ms: s.last_connected_at_ms,
+                runtime_mode_ceiling: None,
+                peer_link: false,
+                t3_signed: true,
+            })
+            .collect(),
+        pairing_links: links
+            .into_iter()
+            .filter(|l| !spent.iter().any(|s| s.id == l.id))
+            .map(|l| StoredPairing {
+                id: l.id,
+                code_hash: hex(&hash(&l.credential.trim().to_ascii_uppercase())),
+                scopes: l.scopes,
+                subject: l.subject,
+                label: l.label,
+                created_at_ms: l.created_at_ms,
+                expires_at_ms: l.expires_at_ms,
+                t3: true,
+                session_ttl_ms: None,
+            })
+            .collect(),
+        spent_t3_pairing: spent,
+        t3_carried_at_ms: Some(read_at),
+    };
+    file.sessions.extend(own_sessions);
+    file.pairing_links.extend(own_links);
+    let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
+    write_private(path, &bytes)?;
+    Ok(true)
 }
 
 fn principal_of(session: &StoredSession) -> Principal {
@@ -1268,6 +1982,9 @@ fn decode_hex(text: &str) -> Option<Hash> {
 /// Parses a TTL as the TypeScript CLI takes it: `90s`, `5m`, `1h`, `30d`, `15 minutes`.
 pub fn parse_ttl_ms(text: &str) -> Option<u64> {
     let text = text.trim();
+    if text == UNTIL_REVOKED {
+        return Some(MAX_TTL_MS);
+    }
     let split = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
@@ -1282,6 +1999,11 @@ pub fn parse_ttl_ms(text: &str) -> Option<u64> {
         _ => return None,
     };
     number.checked_mul(unit_ms).filter(|ms| *ms > 0)
+}
+
+/// A request's `sessionTtl`: only [`UNTIL_REVOKED`] is taken.
+pub fn parse_session_ttl(text: &str) -> Option<u64> {
+    (text == UNTIL_REVOKED).then_some(MAX_TTL_MS)
 }
 
 /// Splits `a,b c` into scopes and checks each is a grant scope.
@@ -1312,6 +2034,48 @@ mod tests {
 
     pub(super) fn jump_wall(by_ms: u64) {
         WALL_OFFSET_MS.with(|offset| offset.set(offset.get() + by_ms));
+    }
+
+    /// `rejectMcpClientAudience`: an MCP OAuth token works on `/mcp` only, never as a native
+    /// bearer, for a WebSocket ticket, or behind a ticket minted before.
+    #[test]
+    fn mcp_client_sessions_are_refused_outside_mcp() {
+        let store = AuthStore::in_memory();
+        let issued = store
+            .issue_mcp_client_session(
+                "Conn · peer",
+                "full-access",
+                true,
+                ClientInfo::default(),
+                MCP_CLIENT_SESSION_TTL_MS,
+            )
+            .unwrap();
+        assert!(
+            store.authenticate_mcp_client(&issued.token).is_some(),
+            "/mcp takes it"
+        );
+        assert!(
+            store.authenticate_bearer(&issued.token).is_none(),
+            "a native bearer path refuses it"
+        );
+        assert!(
+            store.issue_ticket(&issued.token, Some("rpc")).is_none(),
+            "no WebSocket ticket for it"
+        );
+        // A ticket that names the session (as one minted before this check) is refused too.
+        let ticket = "fixture-ticket";
+        {
+            let mut state = store.lock();
+            state.tickets.insert(
+                hash(ticket),
+                Ticket {
+                    session: hash(&issued.token),
+                    audience: None,
+                    expires_at_ms: now_ms() + 60_000,
+                },
+            );
+        }
+        assert!(store.authenticate_ticket(ticket, "rpc").is_none());
     }
 
     /// Orbit freezes a container and its wall clock jumps on wake. Every expiry here reads
@@ -1381,12 +2145,73 @@ mod tests {
         assert_eq!(parse_ttl_ms("90s"), Some(90_000));
         assert_eq!(parse_ttl_ms("soon"), None);
         assert_eq!(parse_ttl_ms("0m"), None);
+        assert_eq!(parse_ttl_ms("until-revoked"), Some(MAX_TTL_MS));
+        assert_eq!(parse_session_ttl("until-revoked"), Some(MAX_TTL_MS));
+        assert_eq!(parse_session_ttl("30d"), None);
         assert_eq!(
             parse_scopes("access:read,access:write access:read").unwrap(),
             vec!["access:read", "access:write"]
         );
         assert!(parse_scopes("review:write").is_err());
         assert!(parse_scopes("").is_err());
+    }
+
+    /// A peer-link code is purpose-bound: it is never announced as a pairing link nor listed,
+    /// here or in another process that reads the file (`PairingGrantStore.issue`,
+    /// `EnvironmentAuth.listPairingLinks`).
+    #[test]
+    fn peer_link_codes_stay_out_of_pairing_links_and_events() {
+        let dir = temp_dir("auth-peer-link-hidden");
+        let file = dir.join("auth.json");
+        let store = AuthStore::open(file.clone()).unwrap();
+        let other = AuthStore::open(file).unwrap();
+        let mut events = store.subscribe();
+        let mut other_events = other.subscribe();
+        let issued = store.issue_peer_link_pairing("auto", None, None).unwrap();
+        assert!(events.try_recv().is_err(), "an upsert was announced");
+        assert!(store.pairing_links().is_empty());
+        assert!(store.pairing_link(&issued.id).is_none());
+        assert!(other.pairing_links().is_empty());
+        assert!(other.pairing_link(&issued.id).is_none());
+        assert!(
+            other_events.try_recv().is_err(),
+            "a reload announced the code"
+        );
+        // A plain code is still listed and announced.
+        let plain = store.issue_pairing_code(None, PAIRING_CODE_TTL_MS).unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AccessChange::PairingLinkUpserted(id)) if id == plain.id
+        ));
+        assert_eq!(store.pairing_links().len(), 1);
+        // Spending the peer-link code announces nothing either, here or on a reload
+        // (`consumeAvailable` skips approval subjects; Codex finding 4 of #151).
+        let _ = other_events.try_recv();
+        assert_eq!(
+            store
+                .consume_mcp_code(&issued.code, "auto", true)
+                .ok()
+                .map(|grant| grant.access)
+                .as_deref(),
+            Some("auto")
+        );
+        assert!(events.try_recv().is_err(), "the spent code was announced");
+        // Spent means spent in a process that opens the file afresh too.
+        let reopened = AuthStore::open(dir.join("auth.json")).unwrap();
+        assert!(
+            reopened
+                .consume_mcp_code(&issued.code, "auto", true)
+                .is_err(),
+            "a spent peer-link code came back from the file"
+        );
+        assert_eq!(other.pairing_links().len(), 1);
+        while let Ok(change) = other_events.try_recv() {
+            assert!(
+                !matches!(&change, AccessChange::PairingLinkRemoved(id) if *id == issued.id),
+                "a reload announced the spent code"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1471,6 +2296,7 @@ mod tests {
                 scopes: scopes.clone(),
                 label: Some("node via Orbit".into()),
                 ttl_ms: PAIRING_CODE_TTL_MS,
+                session_ttl_ms: None,
             })
             .unwrap();
         let link = &store.pairing_links()[0];
@@ -1514,6 +2340,108 @@ mod tests {
         assert!(store.authenticate_ticket(&any, "media").is_some());
         // The bearer token itself is not a ticket.
         assert_eq!(store.authenticate_ticket(&session.token, "rpc"), None);
+    }
+
+    /// `sessionTtl: "until-revoked"` on a code: the session it grants lasts until revoked,
+    /// through a restart. Codes without it keep the 30-day default.
+    #[test]
+    fn a_code_with_a_session_ttl_grants_a_long_session() {
+        let dir = temp_dir("auth-session-ttl");
+        let file = dir.join("auth.json");
+        let store = AuthStore::open(file.clone()).unwrap();
+        let long = store
+            .issue_pairing(PairingRequest {
+                session_ttl_ms: Some(MAX_TTL_MS),
+                ..PairingRequest::standard(None, PAIRING_CODE_TTL_MS)
+            })
+            .unwrap();
+        assert!(long.expires_at_ms <= now_ms() + PAIRING_CODE_TTL_MS);
+        let peer = store
+            .issue_peer_link_pairing("auto", None, Some(MAX_TTL_MS))
+            .unwrap();
+        let plain = store.issue_peer_link_pairing("auto", None, None).unwrap();
+        let store = AuthStore::open(file).unwrap();
+        let before = now_ms();
+        let issued = store
+            .exchange(&long.code, None, ClientInfo::default())
+            .unwrap();
+        assert!(issued.principal.expires_at_ms >= before + MAX_TTL_MS);
+        assert_eq!(
+            store.consume_mcp_code(&peer.code, "auto", true).unwrap(),
+            McpGrant {
+                access: "auto".into(),
+                session_ttl_ms: MAX_TTL_MS
+            }
+        );
+        assert_eq!(
+            store
+                .consume_mcp_code(&plain.code, "auto", true)
+                .unwrap()
+                .session_ttl_ms,
+            MCP_CLIENT_SESSION_TTL_MS
+        );
+        let default = store
+            .exchange(
+                &store
+                    .issue_pairing_code(None, PAIRING_CODE_TTL_MS)
+                    .unwrap()
+                    .code,
+                None,
+                ClientInfo::default(),
+            )
+            .unwrap();
+        assert!(default.principal.expires_at_ms <= now_ms() + SESSION_TTL_MS);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `extend` moves a session's end out but never in, announces it, and a revoke still ends
+    /// an until-revoked session at once.
+    #[test]
+    fn extend_never_shortens_and_revoke_still_ends_the_session() {
+        let store = AuthStore::in_memory();
+        let me = store
+            .issue_session(SessionRequest {
+                scopes: vec!["access:write".into()],
+                label: None,
+                subject: None,
+                ttl_ms: SESSION_TTL_MS,
+            })
+            .unwrap();
+        let held = store
+            .issue_session(SessionRequest {
+                scopes: vec!["orchestration:read".into()],
+                label: None,
+                subject: None,
+                ttl_ms: SESSION_TTL_MS,
+            })
+            .unwrap();
+        let id = held.principal.session_id.clone();
+        let mut changes = store.subscribe();
+        let long = store.extend_session(&id, MAX_TTL_MS).unwrap().unwrap();
+        assert!(long >= held.principal.expires_at_ms + MAX_TTL_MS - SESSION_TTL_MS);
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            AccessChange::ClientUpserted(id.clone())
+        );
+        assert_eq!(
+            store
+                .authenticate_bearer(&held.token)
+                .unwrap()
+                .expires_at_ms,
+            long
+        );
+        assert_eq!(store.extend_session(&id, MINUTE_MS).unwrap(), Ok(long));
+        assert_eq!(
+            store.extend_session("no-such-session", MAX_TTL_MS).unwrap(),
+            Err(ExtendError::NotFound)
+        );
+        assert_eq!(
+            store
+                .revoke_session(Some(&me.principal.session_id), &id)
+                .unwrap(),
+            Ok(true)
+        );
+        assert_eq!(store.authenticate_bearer(&held.token), None);
     }
 
     #[test]
@@ -1877,5 +2805,231 @@ mod tests {
         assert_eq!(info.browser.as_deref(), Some("Safari"));
         let contract = info.to_contract();
         assert_eq!(contract.ip_address.as_deref(), Some("10.0.0.2"));
+    }
+
+    /// A session token as T3's `SessionStore.signClaims` makes it.
+    fn t3_token(key: &[u8], claims: serde_json::Value) -> String {
+        let payload = conn_support::base64::url_encode(claims.to_string().as_bytes());
+        let signature = conn_support::base64::url_encode(&hmac_sha256(key, payload.as_bytes()));
+        format!("{payload}.{signature}")
+    }
+
+    fn t3_session(id: &str, subject: &str, expires_at_ms: u64) -> T3Session {
+        T3Session {
+            id: id.into(),
+            subject: subject.into(),
+            scopes: vec!["orchestration:read".into(), "orchestration:operate".into()],
+            client: ClientInfo {
+                label: Some("phone".into()),
+                device_type: "mobile".into(),
+                ..ClientInfo::default()
+            },
+            issued_at_ms: now_ms() - 1_000,
+            expires_at_ms,
+            last_connected_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_repeated_carry_keeps_what_was_issued_here() {
+        let dir = temp_dir("auth-t3-recarry");
+        let file = dir.join("auth.json");
+        let later = now_ms() + 60 * MINUTE_MS;
+        let link = |id: &str, code: &str| T3PairingLink {
+            id: id.into(),
+            credential: code.into(),
+            scopes: vec![],
+            subject: "one-time-token".into(),
+            label: None,
+            created_at_ms: now_ms(),
+            expires_at_ms: later,
+        };
+        let session = |id: &str| T3Session {
+            id: id.into(),
+            subject: "one-time-token".into(),
+            scopes: vec![],
+            client: ClientInfo::default(),
+            issued_at_ms: now_ms(),
+            expires_at_ms: later,
+            last_connected_at_ms: None,
+        };
+        assert!(
+            write_t3_import(
+                &file,
+                vec![session("a"), session("b")],
+                vec![link("p1", "AAAA")],
+                false,
+                now_ms(),
+            )
+            .unwrap()
+        );
+        // Without `replace`, an existing file is kept.
+        assert!(!write_t3_import(&file, vec![], vec![], false, now_ms()).unwrap());
+        let store = AuthStore::open(file.clone()).unwrap();
+        let own = store
+            .issue_session(SessionRequest {
+                scopes: vec!["orchestration:read".into()],
+                label: Some("cli".into()),
+                subject: None,
+                ttl_ms: 60 * MINUTE_MS,
+            })
+            .unwrap();
+        drop(store);
+        // T3 revoked "b" and spent "p1" in between: the re-read drops them, keeps the CLI one.
+        assert!(write_t3_import(&file, vec![session("a")], vec![], true, now_ms()).unwrap());
+        let store = AuthStore::open(file.clone()).unwrap();
+        let ids: Vec<String> = store
+            .client_sessions(None)
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert!(ids.contains(&"a".to_owned()) && !ids.contains(&"b".to_owned()));
+        assert!(store.authenticate_bearer(&own.token).is_some());
+        assert!(store.pairing_links().is_empty());
+        drop(store);
+        // A re-read never brings back what this file dropped (revoked or spent here), even
+        // from a file without a carry time; what T3 made after the carry comes in.
+        let mut bare: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        bare.as_object_mut().unwrap().remove("t3CarriedAtMs");
+        fs::write(&file, serde_json::to_vec(&bare).unwrap()).unwrap();
+        assert!(
+            write_t3_import(&file, vec![session("b")], vec![link("p1", "AAAA")], true, 0).unwrap()
+        );
+        let store = AuthStore::open(file.clone()).unwrap();
+        assert!(
+            store
+                .client_sessions(None)
+                .iter()
+                .all(|s| s.session_id != "b")
+        );
+        assert!(store.pairing_links().is_empty());
+        drop(store);
+        let mut late = link("p2", "BBBB");
+        late.created_at_ms = u64::MAX / 2;
+        assert!(write_t3_import(&file, vec![], vec![late], true, 0).unwrap());
+        assert_eq!(AuthStore::open(file).unwrap().pairing_links().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accepts_tokens_of_sessions_carried_over_from_t3() {
+        let dir = temp_dir("auth-t3-carry");
+        let key = [7u8; 32];
+        conn_support::secret_store::write(&dir.join("secrets"), "server-signing-key", &key)
+            .unwrap();
+        let later = now_ms() + 60 * MINUTE_MS;
+        write_t3_import(
+            &dir.join("auth.json"),
+            vec![
+                t3_session("s-native", "one-time-token", later),
+                t3_session("s-peer", SUBJECT_MCP_CLIENT, later),
+            ],
+            vec![T3PairingLink {
+                id: "p1".into(),
+                credential: "abcdefghjkmn".into(),
+                scopes: vec!["orchestration:read".into()],
+                subject: "one-time-token".into(),
+                label: Some("laptop".into()),
+                created_at_ms: now_ms(),
+                expires_at_ms: later,
+            }],
+            false,
+            now_ms(),
+        )
+        .unwrap();
+        let store = AuthStore::open(dir.join("auth.json")).unwrap();
+        let claims = |sid: &str, exp: u64| {
+            serde_json::json!({"v": 1, "kind": "session", "sid": sid, "sub": "one-time-token",
+                "scopes": ["orchestration:read"], "method": "bearer-access-token",
+                "iat": now_ms(), "exp": exp})
+        };
+        let token = t3_token(&key, claims("s-native", later));
+        let principal = store
+            .authenticate_bearer(&token)
+            .expect("T3 token accepted");
+        assert_eq!(principal.session_id, "s-native");
+        assert!(
+            principal.has_scope("orchestration:operate"),
+            "the row's scopes apply"
+        );
+        assert!(store.issue_ticket(&token, Some("rpc")).is_some());
+        assert!(store.authenticate_mcp_client(&token).is_none());
+
+        // Another key, an expired token, a DPoP-bound one, an unknown session: refused.
+        assert!(
+            store
+                .authenticate_bearer(&t3_token(&[8u8; 32], claims("s-native", later)))
+                .is_none()
+        );
+        assert!(
+            store
+                .authenticate_bearer(&t3_token(&key, claims("s-native", now_ms() - 1)))
+                .is_none()
+        );
+        let mut bound = claims("s-native", later);
+        bound["jkt"] = "thumb".into();
+        assert!(store.authenticate_bearer(&t3_token(&key, bound)).is_none());
+        assert!(
+            store
+                .authenticate_bearer(&t3_token(&key, claims("s-other", later)))
+                .is_none()
+        );
+        // A version T3 does not know, or a subject other than the session's: refused.
+        let mut unknown = claims("s-native", later);
+        unknown["v"] = 9.into();
+        assert!(
+            store
+                .authenticate_bearer(&t3_token(&key, unknown))
+                .is_none()
+        );
+        let mut other_sub = claims("s-native", later);
+        other_sub["sub"] = SUBJECT_MCP_CLIENT.into();
+        assert!(
+            store
+                .authenticate_mcp_client(&t3_token(&key, other_sub))
+                .is_none()
+        );
+        // The map key is no token.
+        assert!(
+            store
+                .authenticate_bearer("t3-signed-session:s-native")
+                .is_none()
+        );
+
+        // A peer link's MCP session keeps its signed ceiling and mark.
+        let mut peer = claims("s-peer", later);
+        peer["sub"] = SUBJECT_MCP_CLIENT.into();
+        peer["rtc"] = "full-access".into();
+        peer["plk"] = 1.into();
+        let peer = t3_token(&key, peer);
+        let mcp = store
+            .authenticate_mcp_client(&peer)
+            .expect("peer token accepted on /mcp");
+        assert_eq!(mcp.access, "full-access");
+        assert!(mcp.peer_link);
+        assert!(
+            store.authenticate_bearer(&peer).is_none(),
+            "MCP sessions stay off native paths"
+        );
+
+        // The pairing code is spent as any code here, case-insensitively.
+        assert_eq!(store.pairing_links().len(), 1);
+        assert!(
+            store
+                .exchange("ABCDEFGHJKMN", None, ClientInfo::default())
+                .is_ok()
+        );
+
+        // Its signed `exp` bounds it, so it cannot be extended.
+        assert_eq!(
+            store.extend_session("s-native", MAX_TTL_MS).unwrap(),
+            Err(ExtendError::CarriedFromT3)
+        );
+
+        // Revoking ends the carried session.
+        assert!(store.revoke_session(None, "s-native").unwrap().unwrap());
+        assert!(store.authenticate_bearer(&token).is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

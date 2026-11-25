@@ -57,7 +57,7 @@ shutdown. Follow it byte for byte where a provider can see it.
 | Claude | Anthropic's Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`), at the T3 server's version | `crates/conn-provider-claude` and the SDK host (`helpers/sdk-host`), a small Node program that the Rust server starts with the first session and stops after the last |
 | Codex | `codex app-server`, JSON-RPC over stdio | `crates/conn-provider-codex` |
 | Cursor, OpenCode, Muse | The vendor's SDK | Not built. They go in the same Node helper. |
-| Grok, Kiro, fx, Antigravity, ACP registry | ACP (Agent Client Protocol) over stdio | `crates/conn-provider-acp`: Grok built and offered by the server (off until settings enable it, as in T3), with `/compact`, background work and subagents; subagents carried over to a later turn, and the other flavors, not built. Proofs: its `tools/conformance.mjs`, `tools/probe-conformance.mjs`, the replay in `cargo test`, and the engine's fixture replay |
+| Grok, Kiro, fx, Antigravity, ACP registry | ACP (Agent Client Protocol) over stdio | `crates/conn-provider-acp`: Grok built and offered by the server (off until settings enable it, as in T3), with `/compact`, background work and subagents; Antigravity (the `agy` CLI) built and offered, off until settings enable it (gaps in the crate README); subagents carried over to a later turn, Kiro, fx and the registry not built. Proofs: its `tools/conformance.mjs`, `tools/antigravity-conformance.mjs`, `tools/probe-conformance.mjs`, the replay in `cargo test`, and the engine's fixture replay |
 | Pi | | Out of scope. |
 
 - Never write a vendor SDK's private protocol by hand, and never set an SDK's identity markers
@@ -135,7 +135,7 @@ follows the Conn commit it is part of. There is no pin.
 - Run every tool from `apps/conn-server`. The Node tools read the monorepo two levels up
   (`tools/monorepo.mjs`) and resolve packages from its `node_modules`: run `vp i` at the
   monorepo root first.
-- Generated files: `crates/conn-contract/src/generated.rs` and `methods.json`, the `/mcp` tool
+- Generated files: `crates/conn-contract/src/generated.rs` and `methods.json`, `crates/conn-gateway-api/src/{types,ops}.rs` (from its pinned `openapi.json`), the `/mcp` tool
   catalog and instruction texts in `crates/conn-mcp/src`, the keybinding defaults, and the
   upstream tables from `tools/gen-upstream.mjs` (`crates/conn-server/src/scopes/generated.rs`,
   `crates/conn-server/src/settings/generated.rs`, `crates/conn-contract/src/upstream.rs` with

@@ -19,7 +19,7 @@ workspace README describes the trait's first methods and the wire.
 | `SqliteEngine::stored_events`                 | The whole event log, paged (`OrchestrationV2StoredEvent` rows); never pruned |
 | `EngineConfig::runtime_policy_override`       | Laid over every turn's policy (`RuntimePolicy.layerWithOverride`); the replay sets the fixture's |
 | `EngineConfig::command_output_tap`            | Sees every live command output chunk (T3's `CommandOutputRecorder`) |
-| `Engine::await_background_tasks`, `BackgroundWait`, `BackgroundWaitError` | `awaitBackgroundTasks` (`src/background_wait.rs`): the live session of the thread's active provider thread marks or clears background task ids (15 s limit); `/mcp`'s `t3_background_wait` |
+| `Engine::await_background_tasks`, `BackgroundWait`, `BackgroundWaitError` | `awaitBackgroundTasks` (`src/background_wait.rs`): the live session of the thread's active provider thread marks or clears background task ids (15 s limit); `/mcp`'s `conn_background_wait` |
 | `Engine::thread_transcript`, `ThreadTranscript` | `GET /api/orchestration/threads/:id/transcript` (`src/transcript.rs`): reads visible turn items one at a time on the store thread (indexes `turn_items_in_order`, `turn_item_interrupts`), writes the JSON body as it goes, and stops at the first row past the file limit; a run fork starts with its inherited rows and the fork marker; the thread projection's `visibleTurnItems` uses the same reader (`RowSink`) |
 | `EngineHost::response_streaming_mode`, `ResponseStreamingMode` | The project's `responseStreamingMode` (`paragraph` by default, or `turn`), read at each turn start |
 
@@ -34,16 +34,16 @@ decode is a defect, not a broken client.
 
 ## dispatchCommand
 
-45 of the 58 command types are handled. The other 13 answer `OrchestrationV2DispatchCommandError`
+50 of the 58 command types are handled. The other 8 answer `OrchestrationV2DispatchCommandError`
 with a reason the client shows (`commands::refusal`).
 
 | Handled                                                                                                                                                             | Refused, and why                                                                             |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `thread.create`, `message.dispatch` (all five dispatch modes), `run.interrupt` (`holdQueue`), `thread.stop`, `runtime-request.respond`, `thread.user-input.dismiss` | `thread.merge_back`: no portable context handoff (needs Codex `thread/inject_items` and Claude `inlineContextLength` in the providers) |
+| `thread.create`, `message.dispatch` (all five dispatch modes), `run.interrupt` (`holdQueue`), `thread.stop`, `runtime-request.respond`, `thread.user-input.dismiss` | (none) |
 | `queued-run.start`, `.cancel`, `.reorder`, `.edit`, `queue.resume`, `queued-message.promote-to-steer`                                                               | (none)                                                                                       |
 | `thread.archive`, `unarchive`, `delete`, `visit`, `mark-unread`, `metadata.update` (`regenerateTitle`), `title.regeneration.complete`                               | `prepared-run.release`, `.progress`, `.fail`, `.retry`: no worktree preparation              |
-| `thread.settle`, `auto-settle`, `unsettle`, `snooze`, `unsnooze`, `auto-settle.set`, `pin`, `unpin`, `pin.reorder`, `active.reorder`, `tag.set`                     | `thread.pull-request-link.sync`, `.pull-request.sync`: no link sync from the host            |
-| `thread.pull-request.link`, `.unlink`, `.watch` (and the server-only `thread.pull-request-watch.sync` and `.checks-reopen`)                                                               | `thread.guest-share.close`, `thread.guest-message.dismiss`: no guest sharing                 |
+| `thread.settle`, `auto-settle`, `unsettle`, `snooze`, `unsnooze`, `auto-settle.set`, `pin`, `unpin`, `pin.reorder`, `active.reorder`, `tag.set`                     | (none)                                                                                       |
+| `thread.pull-request.link`, `.unlink`, `.watch`, `thread.pull-request-link.sync`, `thread.pull-request.sync` (and the server-only `thread.pull-request-watch.sync` and `.checks-reopen`)                                                               | `thread.guest-share.close`, `thread.guest-message.dismiss`: no guest sharing                 |
 | `thread.runtime-mode.set`, `interaction-mode.set`, `model-selection.set`, `provider.switch`, `provider-session.detach`                                              | `notification.delivery.accept`, `subagent.stop`                     |
 | `delegated_task.request`, `.wake-policy`, `.completion-delivery.acknowledge`, `.dispose`, `checkpoint.rollback`, `thread.fork`, `thread.created.record` |                                                                                              |
 
@@ -56,9 +56,8 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
 | --- | --- | --- | --- | --- |
 | `checkpoint.rollback` | `Orchestrator.ts` `dispatchCheckpointRollback`, `CheckpointRollbackService.ts`, `CheckpointRestoreSafety.ts` | Puts the workspace back to a checkpoint, marks later runs `rolled_back`, rolls the provider's native thread back | checkpoints, `Session::rollback_thread`, `conn-vcs` restore | yes |
 | `thread.fork` | `ThreadForkService.ts`, `Orchestrator.ts` `dispatchThreadFork` | A new thread from a run of another, with a `fork` context transfer and the provider's native fork | `Session::fork_thread`, `ContextHandoffService.ts` | yes |
-| `thread.merge_back` | `Orchestrator.ts` `dispatchThreadMergeBack`, `ContextHandoffService.ts` | Records a pending `merge_back` context transfer from a fork to its parent; the parent's next message carries the fork's delta | fork, context transfers (no checkpoint) | yes |
+| `thread.merge_back` | `Orchestrator.ts` `dispatchThreadMergeBack`, `ContextHandoffService.ts`, `ContextHandoffDelivery.ts` | Records a pending `merge_back` context transfer from a fork to its parent; the parent's next message carries the fork's delta as a `fork_delta_summary` handoff (`merge_back.rs`, `handoff.rs`), injected (Codex) or inline | fork, context transfers, `Session::inject_history` | yes |
 | `prepared-run.release`, `.progress`, `.fail`, `.retry` | `ThreadLaunchService.ts`, `Orchestrator.ts` `dispatchPreparedRun*`, `ProjectSetupScriptRunner.ts` | A worktree launch's `preparing` run: progress, failure, retry, release to the provider; setup scripts typed into a `setup-<id>` terminal | `conn-terminal` prompt and marker watch, `conn-vcs` worktree | yes |
-| `thread.pull-request-link.sync`, `thread.pull-request.sync` | `ThreadPullRequestService.ts`, `PullRequestSyncReactor.ts` | Link snapshots and the branch PR from the host | the link sweep | other |
 | `thread.guest-share.close`, `thread.guest-message.dismiss` | `GuestShareDecider.ts` | Guest sharing | guest share | other |
 | `notification.delivery.accept` | `Orchestrator.ts` `dispatchNotificationAccepted`, `NotificationMailbox.ts` | Marks a background notification delivered to a run | a notification mailbox (not built) | later |
 | `subagent.stop` | `Orchestrator.ts` `dispatchSubagentStop` | Stops one subagent of a run | `Session::stop_task` in the providers (in the trait, not built) | later |
@@ -90,9 +89,9 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   repeats the provider rollback on every retry, which cuts a Codex thread again each time
   (`docs/status.md`, "Faults found in the T3 server"). Test:
   `a_failing_restore_rolls_the_provider_back_once`.
-  An admitted rollback stays in `pending_rollbacks` until it commits or fails. A restart runs
-  it again if the provider rollback was not sent, goes on from the file restore if its answer
-  was kept, and records a failure (`ROLLBACK_INTERRUPTED_MESSAGE`) if the server stopped in
+  An admitted rollback's outbox row keeps its phase in `progress` until it commits or fails. A
+  restart runs it again if the provider rollback was not sent, goes on from the file restore if
+  its answer was kept, and records a failure (`ROLLBACK_INTERRUPTED_MESSAGE`) if the server stopped in
   between, where T3 would send the provider rollback again. Test:
   `a_restart_finishes_or_fails_a_rollback_left_pending`.
 - **Fork** (`src/fork.rs`). `thread.fork` makes the fork thread and a pending `fork` transfer
@@ -101,6 +100,13 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   path (a `full_thread_summary` handoff when the fork cannot be native, or after a failed
   native fork) is not built: such a message is refused, and a failed native fork fails the
   turn.
+- **T3 state import** (`src/t3_import.rs`). `import_t3_state` builds `engine.sqlite` once
+  from a T3 server's `statev2.sqlite` in the same folder: projects, threads and every
+  projection row with its id and body, read-only from T3's file, renamed into place when
+  complete. The server calls it before it opens the engine (`docs/status.md`, "T3 state
+  import"); `import_t3_state_with_progress` reports each step for the log. Sessions, peer
+  links and scheduled tasks are the server's (`conn-server/src/t3_carry.rs`), which reads
+  T3's file through `open_t3_read_only`. Tests: `t3_import::tests`.
 
 - **Buffered delivery** (`src/streaming.rs`, T3's `assistantStreaming.ts` and
   `RunExecutionService`). A running `assistant_message` node is never stored. A streaming
@@ -137,12 +143,20 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   (a rollback's own resume does not count). An `error` thread update forgets the key.
 - **Session release.** A closed session (idle, provider switch, fresh start) writes its row as
   `stopped` and expires the requests only it could answer (`writeReleasedSessionEvents`).
-- **Effect order.** A thread's effects (turn start, Stop, steer, answer, rollback, capture,
-  close) run one at a time, in the order they were made, as T3's effect outbox claims them
-  (`EffectOutbox.ts`); title generation runs outside, as T3 gives it its own lane. A lane
-  entry exists only while its thread has an effect waiting or running. `dispatch` and the
-  run's end take the lane slot under the store lock (`reserve_effect`), so lane order is
-  commit order; the end-of-run capture is such an effect, as T3's `checkpoint.capture`.
+- **Effect outbox.** A command's effects are rows in `effect_outbox`, written in the
+  transaction that commits the command, as T3's `EventSink` and `EffectOutbox.ts` do; the
+  run's end, the checkpoint capture, project writes and the restart write theirs the same
+  way. A caller that goes away after the commit (a closed socket aborts its handler) cannot
+  lose them. One worker (`effect_worker.rs`, T3's `EffectWorker.ts`) claims and runs them. A
+  thread's effects run one at a time in commit order; titles have their own lane, as in T3;
+  `AbandonStart` and `RemoteTaskChanged` run at once. What a stopped process left unsettled
+  is reconciled at the next start, as T3's `reconcileAfterProcessLoss`: process-bound effects
+  (turn start, steer, Stop, answers, model changes) are cancelled and the restart decides again
+  from the stored runs; replay-safe ones (capture, session close, cleanups, titles, host
+  notices, rollback by its phase) run again. A `running` run with no provider turn for its
+  attempt never got its prompt, so the restart sends it again (`rewindUnacceptedRuns`).
+  Settled rows are pruned after 7 days. Deviations from T3: one claim loop instead of 4 slots
+  (one runtime thread), and no worker retries (a planned follow-up).
 - **Busy thread.** While a run is active, a message queues (`queue_after_active`, or any start)
   or steers (`steer_active`, or the client's `deliveryIntent` steer). A steer before the
   provider turn runs waits as a queued run with `steerWhenReadyRunId`; a steer the provider
@@ -169,9 +183,24 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   question's answer as `questionAnswer`, as T3's `Orchestrator` does.
 - **Search.** `searchThreads` reads a trigram FTS5 index of final message texts
   (`message_search`) with `MATCH` and quoted words, as `ThreadSearch.ts`; SQLite's bundled
-  build already has FTS5. Every word of three characters or more must match; shorter words
-  only narrow, and a query without a long word searches no messages (two CJK characters count
-  as long). Hidden threads drop out in SQL before the limit. Titles are the client's to match.
+  build already has FTS5. The index holds text folded as T3's `trigram remove_diacritics 1`
+  tokenizer folds it (`src/fold.rs`), from a table generated from the bundled SQLite
+  (`src/sqlite-fold.txt`; a test fails when SQLite folds differently): case, and a single
+  diacritic of a Latin letter, so "ecole" finds "École" but "aard" does not find "ǡard" and
+  "かかく" does not find "かがく". Queries are NFC and lowercased, then fold the same way. A `meta` mark
+  (`message_search_folded`, now 3) folds an older index again from the message texts, once,
+  inside the engine's open, a byte-bounded batch at a time; it prints T3's migration lines
+  (`databaseMigrationLog.ts`), so a desktop waiting for readiness keeps waiting.
+  Every word of three characters or more must match; shorter words only narrow, and a query
+  without a long word searches no messages (two CJK characters count as long). Word lengths
+  count before the index folds a word. As `messageMatcher`, each word is looked for lowercased,
+  then with accents folded when that finds no whole word. A word shorter than four characters
+  must start a word in the message (a symbol starts one only where a letter would), and a hit
+  inside a hex id does not count. The snippet shows the original text from where the words sit
+  side by side as typed, else from the shortest stretch that holds every word, in UTF-16 units,
+  and is cut as `buildSearchSnippet` cuts it: from a word start up to 24 units before, emphasis
+  and code marks dropped, whitespace collapsed, with ellipses.
+  Hidden threads drop out in SQL before the limit. Titles are the client's to match.
 - **Background work.** A run that completes leaves its open command, dynamic tool and
   subagent rows running, as T3 does. The shell row's `pendingBackgroundTasks` is
   `derivePendingBackgroundWork` (`src/background.rs`): provider thread rosters, then those
@@ -179,6 +208,12 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   rule. `background_work.updated` (not persisted) holds an idle session like the provider's
   own probe, at most 64 provider turns tracked. `client-check.mjs` compares the roster with
   T3's own function.
+- **Find in a thread.** `searchThread` and `searchThreadStream` read the visible timeline
+  that `visible_rows` also writes into the transcript, so a run fork searches the parent
+  history it shows, through the fork run. Each message counts matches in the text its
+  Markdown shows (`src/thread_find.rs`, pulldown-cmark): emphasis and link labels join, link
+  destinations stay out, and each block is its own segment. T3's file-link labels, citations,
+  skill labels and assistant HTML are not rendered. No parse is cached.
 - **Stop.** `thread.stop` and `run.interrupt` record a `run_interrupt_request` item on the
   active run (`markStoppedRun`, message "Stopped by user" or the command's reason); a run that
   ends interrupted gets a `run_interrupt_result` (`makeInterruptResultTurnItem`). When the
@@ -200,14 +235,39 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
 - **Selection plan.** A model change on the thread's instance asks that provider's
   `plan_selection_transition` with the live session's capabilities (`ProviderSwitchService`):
   `reject` refuses the command; `restart_session` releases the session between turns and is
-  refused during a run; `create_with_handoff` is refused (no handoff here). Without a session
-  row the change applies at the next turn. Claude and Codex answer `apply_on_next_turn`.
+  refused during a run; `create_with_handoff` is refused. No provider here or in T3 answers it
+  for a change on the same instance (T3 accepts it and continues the native thread), so the
+  refusal is never reached. Without a session row the change applies at the next turn.
+  Claude and Codex answer `apply_on_next_turn`.
 - **Session row.** `open_session` returns the provider session; the engine stores it before
   any event. A session whose background tasks end with its process (Claude) clears its
   provider threads' rosters when it is released.
 - **Provider switch.** A `thread.model-selection.set` to another instance is a provider switch
   (refused while a run is active). A run on another instance than the live session closes it
   and opens one on its own instance; a provider thread of another instance is never resumed.
+- **Provider handoff** (`src/provider_handoff.rs`, T3's `dispatchMessage` and
+  `startNextQueuedRun`). A message whose run goes to another instance than the conversation's
+  carries the history: a `provider_handoff` transfer (`consumed`), a context handoff
+  (`handoff::prepare_provider_handoff`), the run's `contextHandoffId` and a "Provider handoff"
+  item before the message. The covered runs are those that reached a provider
+  (`isHandoffSourceRun`) after the context boundary and after the last run the target's own
+  provider thread took part in. Without such a thread, or with a native ref missing, or with
+  a merge-back pending, the strategy is `full_thread_summary` (with inherited fork history and
+  v1 imported rows) and the transfer resolves `portable_context`; else
+  `delta_since_target_last_seen` and `delta_context`. A queued run decides when it starts,
+  against the newest such run's instance. The target's capabilities must take the handoff
+  (`ensureContextHandoff`, checked for a message from the provider's `capabilities`, before the
+  command reaches its handler), else T3's refusal text. The turn start delivers it as a
+  merge-back: injected (Codex) or inline (Claude, Grok, Antigravity). Every provider now says
+  `supportsProviderSwitchingViaHandoff: true`, as in T3, so clients open the model picker to
+  other providers. Tests: `a_provider_switch_hands_the_history_to_the_new_provider`,
+  `a_queued_run_on_another_provider_carries_the_history`,
+  `a_switch_to_a_provider_without_handoff_is_refused`,
+  `a_steer_to_another_provider_restarts_there`.
+  Not built (T3 has them): the `prepareLegacyImport` recovery handoff of a v1 import with no
+  completed run, the turn start's resume-fallback and missed-run retry handoffs, cross-instance resume for instances that share native
+  history (`restart_and_resume`; here every instance change hands off), the capability check
+  for a queued run (all four providers pass it), and the provider thread's `handoffIds`.
 - **Live command output.** `command_output.delta` (Codex) feeds a bounded hub in `output.rs`:
   at most 8 running commands, a 64 KiB tail each, dropped when the command settles.
 
@@ -237,11 +297,12 @@ A thread snapshot is built in memory whole: about 13 heap bytes per byte of its 
 peak, so a 4.6 MB thread (1,000 turns) peaks near 60 MiB, and the macOS allocator keeps those
 pages in RSS afterwards. Clients that opt in to compact snapshots get each turn item once.
 
-Next step: bounded thread snapshots (`acceptBoundedSnapshot`). The engine would send the newest
-window of rows with a `historyCursor`, and serve older pages through
-`GET /api/orchestration/threads/:id/history` (`OrchestrationV2ThreadHistoryPage`), as
-`threadHistoryPaging.ts` does (75 items or 10 user turns per page). That needs the route in the
-server crate and an `Engine` method for a page.
+Bounded thread snapshots (`acceptBoundedSnapshot`, `history.rs`): the engine sends the newest
+window of rows (10 user turns, or 75 rows without a user turn, within T3's byte budget) with a
+`historyCursor`, and serves older pages through `GET /api/orchestration/threads/:id/history`
+(`OrchestrationV2ThreadHistoryPage`), as `threadHistoryPaging.ts` does. The store reads a light row
+index first (selection fields and sizes, one body at a time) and loads only the chosen bodies.
+Work folding (`deferWork`, `view=work`) is not served.
 
 ## Checks
 

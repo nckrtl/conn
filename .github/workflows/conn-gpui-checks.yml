@@ -1,0 +1,144 @@
+name: Conn GPUI checks
+
+# Desktop and the Swift bridge exercise Apple APIs on macOS. The full shared core runs on Linux.
+
+on:
+  pull_request:
+    paths: &paths
+      - apps/conn-gpui/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - clippy.toml
+      - rustfmt.toml
+      - apps/conn-server/Cargo.toml
+      - apps/conn-server/crates/conn-wire/**
+      - apps/conn-server/crates/conn-contract/**
+      - .github/workflows/conn-gpui-checks.yml
+  push:
+    branches:
+      - main
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conn-gpui-checks-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same as `channel` in rust-toolchain.toml and apps/conn-gpui/rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.99.1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  workspace:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GPUI desktop
+            workspace: apps/conn-gpui
+            runner: &mac-runner ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-6vcpu-macos-27' || 'macos-15' }}
+          - name: Shared Rust core
+            workspace: .
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ${{ matrix.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with: &checkout-options
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Configure Cargo for CI
+        # The interactive desktop build optimizes dependencies for rendering.
+        run: |
+          cat > "$RUNNER_TEMP/ci-cargo.toml" <<'TOML'
+          [profile.dev.package."*"]
+          opt-level = 0
+          debug = false
+          TOML
+
+      - name: Restore Cargo
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cargo-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ matrix.workspace }}/target
+          key: conn-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.workspace)) }}
+          restore-keys: conn-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo --config "$RUNNER_TEMP/ci-cargo.toml" clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Compile tests
+        run: cargo --config "$RUNNER_TEMP/ci-cargo.toml" test --locked --workspace --no-run
+
+      - name: Save Cargo on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cargo-paths
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      - name: Test
+        run: cargo --config "$RUNNER_TEMP/ci-cargo.toml" test --locked --workspace
+
+  apple-core:
+    name: Apple Swift bridge and TLS
+    runs-on: *mac-runner
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with: *checkout-options
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Build the host library used by Swift binding generation
+        run: |
+          cargo build --locked -p conn-ffi --lib
+          test -s target/debug/libconn_ffi.dylib
+
+      - name: Test the Swift bridge and Apple TLS
+        run: cargo test --locked -p conn-ffi -p conn-orbit --lib
+
+  checks:
+    name: Conn GPUI checks
+    if: always()
+    needs: [workspace, apple-core]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every native check
+        env:
+          WORKSPACES: ${{ needs.workspace.result }}
+          APPLE_CORE: ${{ needs.apple-core.result }}
+        run: test "$WORKSPACES" = success && test "$APPLE_CORE" = success

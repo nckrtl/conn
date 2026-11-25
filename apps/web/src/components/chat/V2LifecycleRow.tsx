@@ -1,15 +1,11 @@
 import { T, Var, msg, useGT, useMessages } from "gt-react";
-import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { AgentElapsed } from "./AgentElapsed";
-import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ReactNode } from "react";
-import { useThreadShell, useProject } from "../../state/entities";
 import { useEnvironment } from "../../state/environments";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useNavigate } from "@tanstack/react-router";
-import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { environmentThreadDetails } from "../../state/threads";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { MiddleTruncate } from "../ui/middle-truncate";
@@ -23,9 +19,12 @@ import {
 } from "@t3tools/client-runtime/handoff";
 import {
   formatSubagentDisplayTitle,
+  resolveSubagentMetadata,
   subagentCardDetail,
 } from "@t3tools/client-runtime/state/subagent-display";
+import { formatSubagentEffort } from "@t3tools/client-runtime/state/thread-execution";
 import {
+  isOrchestrationV2WorkActive,
   ProviderDriverKind,
   type ModelSelection,
   type OrchestrationV2ModelSwitch,
@@ -43,7 +42,6 @@ import {
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   BotIcon,
-  ChevronRightIcon,
   CircleStopIcon,
   ArrowRightLeftIcon,
   ArrowRightIcon,
@@ -61,14 +59,20 @@ import {
   shouldShowInstanceBadge,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
-import { formatShortTimestamp } from "../../timestampFormat";
+import { formatRelativeTimeLabel, formatShortTimestamp } from "../../timestampFormat";
+import { StatusDotBadge, type StatusDotState } from "../StatusDotBadge";
+import {
+  TASK_CARD_FACE_CLASS,
+  TASK_CARD_FACE_INTERACTIVE_CLASS,
+  TASK_CARD_FILL,
+} from "~/orbit/tasks/TaskCardButton";
 import { getTriggerDisplayModelName } from "./providerIconUtils";
 import { ProviderInstanceIcon, providerTextColor } from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { subagentResumedSince } from "./V2LifecycleRow.logic";
 import { Button, InlineButton } from "../ui/button";
-import { T3Wordmark } from "../T3Wordmark";
+import { ConnMark } from "../ConnMark";
 
 export type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 
@@ -144,7 +148,7 @@ export function V2LifecycleRow(props: {
     return (
       <WorkLogRow
         data-v2-item-type={item.type}
-        icon={<T3Wordmark className="size-4 text-icon-muted" aria-hidden />}
+        icon={<ConnMark className="size-4 text-icon-muted" aria-hidden />}
         label={
           item.title ? (
             <T>
@@ -242,6 +246,8 @@ function SubagentAvatar({
   showBadge,
   anyInstanceBadge,
   status,
+  plain = false,
+  small = false,
   className,
 }: {
   driver?: ProviderDriverKind | undefined;
@@ -251,8 +257,32 @@ function SubagentAvatar({
   showBadge: boolean;
   anyInstanceBadge: boolean;
   status?: OrchestrationV2TurnItem["status"] | undefined;
+  /** The bare provider icon, with no disc or status dot. */
+  plain?: boolean;
+  /** 12px, for a properties line. */
+  small?: boolean;
   className?: string;
 }) {
+  if (plain) {
+    return (
+      <span aria-hidden className={cn("inline-flex shrink-0 items-center", className)}>
+        {driver ? (
+          <ProviderInstanceIcon
+            driverKind={driver}
+            displayName={displayName ?? driver}
+            accentColor={accentColor}
+            acpRegistryIconUrl={iconUrl}
+            showBadge={showBadge}
+            size="compact"
+            className="z-auto"
+            iconClassName={small ? "size-3" : "size-3.5"}
+          />
+        ) : (
+          <BotIcon className={cn(small ? "size-3" : "size-3.5", "text-muted-foreground")} />
+        )}
+      </span>
+    );
+  }
   return (
     <span
       aria-hidden
@@ -302,6 +332,8 @@ export function EnvironmentSubagentAvatar({
   /** A task in a linked environment runs a provider instance there; its driver here is only a label. */
   remote?: OrchestrationV2RemoteTaskChild | undefined;
   status?: OrchestrationV2TurnItem["status"] | undefined;
+  plain?: boolean;
+  small?: boolean;
 }) {
   const providerEnvironmentId = remote?.environmentId ?? environmentId;
   const providersAtom = serverEnvironment.providersValueAtom(providerEnvironmentId);
@@ -349,6 +381,76 @@ export function EnvironmentSubagentAvatar({
       anyInstanceBadge={anyInstanceBadge}
     />
   );
+}
+
+/** "Claude · Opus 5.5 · high". Selects one string, so status pushes do not re-render it. */
+function SubagentModelText(props: {
+  environmentId: EnvironmentId;
+  providerInstanceId: ProviderInstanceId;
+  remote: OrchestrationV2RemoteTaskChild | undefined;
+  model: string | null;
+  modelSelection: OrchestrationV2Subagent["modelSelection"];
+}) {
+  const m = useMessages();
+  const providerEnvironmentId = props.remote?.environmentId ?? props.environmentId;
+  const settings = useAtomValue(serverEnvironment.settingsValueAtom(providerEnvironmentId));
+  const text = useAtomValue(
+    serverEnvironment.providersValueAtom(providerEnvironmentId),
+    (providers) => {
+      const provider = providers?.find((entry) => entry.instanceId === props.providerInstanceId);
+      const derived = deriveProviderInstanceEntries(providers ?? []);
+      const entries = settings ? brandProviderInstanceEntries(derived, settings) : derived;
+      const providerName = entries.find(
+        (entry) => entry.instanceId === props.providerInstanceId,
+      )?.displayName;
+      const hasModel = props.model !== null || props.modelSelection !== undefined;
+      const { modelLabel, modelSlug } = resolveSubagentMetadata(
+        { model: props.model, modelSelection: props.modelSelection, provider },
+        m,
+      );
+      const effort = formatSubagentEffort({
+        modelSlug,
+        modelSelection: props.modelSelection,
+        provider,
+      });
+      return [providerName, hasModel ? modelLabel : undefined, effort]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ");
+    },
+  );
+  return <span className="min-w-0 truncate">{text}</span>;
+}
+
+/** The dot on the card's provider icon. A stopped or idle task has none. */
+function subagentStatusDot(status: OrchestrationV2TurnItem["status"]): StatusDotState | null {
+  switch (status) {
+    case "pending":
+    case "running":
+      return "working";
+    case "waiting":
+      return "waiting";
+    case "completed":
+      return "done";
+    case "failed":
+      return "failed";
+    default:
+      return null;
+  }
+}
+
+/** The time at the card's top right: how long it has run, or when it finished. */
+function SubagentCardTime(props: {
+  status: OrchestrationV2TurnItem["status"];
+  label: string;
+  timing: Parameters<typeof AgentElapsed>[0]["agent"];
+  eventTimestamp: string | undefined;
+}) {
+  const { status, timing } = props;
+  if (isOrchestrationV2WorkActive(status)) return <AgentElapsed agent={timing} working />;
+  const finished =
+    props.eventTimestamp ??
+    (timing.completedAt !== null ? formatRelativeTimeLabel(timing.completedAt) : props.label);
+  return <span className="text-muted-foreground/80 tabular-nums">{finished}</span>;
 }
 
 const NOTIFICATION_OUTCOME_STATUS: Record<
@@ -481,140 +583,88 @@ function SubagentTimelineLink(props: {
     startedAt: isoOrNull(agent?.startedAt ?? props.startedAt),
     completedAt: isoOrNull(agent?.completedAt ?? props.completedAt),
   };
+  const shown = status ?? liveStatus;
+  const working = isOrchestrationV2WorkActive(shown);
+  // Laid out like a thread row: the agent and its title, then its properties and duration.
   const content = (
     <>
-      <EnvironmentSubagentAvatar
-        environmentId={props.parentRef.environmentId}
-        providerInstanceId={props.providerInstanceId}
-        driver={props.driver}
-        remote={remote}
-        status={status ?? undefined}
-      />
-      <span className="min-w-0 flex-1">
-        <span className="flex items-baseline gap-2">
-          <span className="min-w-0 truncate text-ui font-medium text-foreground">
-            {props.title}
-          </span>
-          {remote !== undefined ? (
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {gt("on {environment}", { environment: remote.label })}
-            </span>
-          ) : null}
-        </span>
+      <span className="flex w-full min-w-0 items-center gap-1.5 text-ui leading-5">
+        <StatusDotBadge state={subagentStatusDot(shown)} ring={TASK_CARD_FILL}>
+          <BotIcon aria-hidden className="size-4 text-muted-foreground" />
+        </StatusDotBadge>
         <span
           className={cn(
-            "block text-xs leading-relaxed",
+            "min-w-0 flex-1 text-foreground [overflow-wrap:anywhere]",
+            // Background work recedes to regular weight, like a working thread.
+            working ? "font-normal" : "font-medium",
+          )}
+        >
+          {props.title}
+        </span>
+      </span>
+      <span className="flex min-w-0 items-center gap-1.5 ps-5.5 text-ui leading-4 text-muted-foreground tabular-nums">
+        <EnvironmentSubagentAvatar
+          environmentId={props.parentRef.environmentId}
+          providerInstanceId={props.providerInstanceId}
+          driver={props.driver}
+          remote={remote}
+          plain
+          small
+        />
+        {remote !== undefined ? (
+          <span className="shrink-0">{gt("on {environment}", { environment: remote.label })}</span>
+        ) : null}
+        <span className="min-w-0 truncate">
+          <SubagentModelText
+            environmentId={props.parentRef.environmentId}
+            providerInstanceId={props.providerInstanceId}
+            remote={remote}
+            model={agent?.model ?? null}
+            modelSelection={agent?.modelSelection}
+          />
+          {" · "}
+          <SubagentCardTime
+            status={shown}
+            label={statusLabel}
+            timing={timing}
+            eventTimestamp={props.event?.timestamp}
+          />
+        </span>
+      </span>
+      {detail !== null ? (
+        <span
+          className={cn(
+            "block ps-5.5 text-ui leading-4",
             failed ? "text-destructive" : "text-muted-foreground",
           )}
         >
-          {detail === null ? (
-            statusLabel
-          ) : detail.includes("/") && !detail.includes(" ") ? (
+          {detail.includes("/") && !detail.includes(" ") ? (
             <MiddleTruncate value={detail} showTitle={false} className="flex" />
           ) : (
-            <span className="block truncate">{detail}</span>
+            <span className="line-clamp-3">{detail}</span>
           )}
         </span>
-      </span>
-      {detail !== null && (props.event !== undefined || status !== "completed") ? (
-        <span
-          className={cn("shrink-0 text-xs", failed ? "text-destructive" : "text-muted-foreground")}
-        >
-          {statusLabel}
-        </span>
-      ) : null}
-      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-        {props.event ? props.event.timestamp : <SubagentElapsed agent={timing} />}
-      </span>
-      {open !== null ? (
-        <ChevronRightIcon
-          aria-hidden
-          className="size-3.5 shrink-0 text-muted-foreground/60 transition-colors group-hover/subagent:text-foreground"
-        />
       ) : null}
     </>
   );
-  const className =
-    "group/subagent flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left";
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        delay={200}
-        render={
-          open === null ? (
-            <div data-v2-item-type="subagent" aria-description={statusLabel} className={className}>
-              {content}
-            </div>
-          ) : (
-            <button
-              type="button"
-              data-v2-item-type="subagent"
-              aria-label={gt("Open {title}", { title: props.title })}
-              aria-description={statusLabel}
-              onClick={open}
-              className={cn(
-                className,
-                "cursor-pointer transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-              )}
-            >
-              {content}
-            </button>
-          )
-        }
-      />
-      <ThreadHoverCardPopup>
-        <SubagentTimelineTooltip
-          {...props}
-          elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
-          model={agent?.model ?? null}
-          modelSelection={agent?.modelSelection}
-          status={liveStatus}
-          result={agent?.result ?? props.result}
-          progress={agent?.progress ?? props.progress}
-        />
-      </ThreadHoverCardPopup>
-    </Tooltip>
-  );
-}
-
-function SubagentTimelineTooltip(
-  props: Parameters<typeof SubagentTimelineLink>[0] & {
-    model: string | null;
-    modelSelection: OrchestrationV2Subagent["modelSelection"];
-    elapsed: ReactNode;
-  },
-) {
-  const environmentId = props.parentRef.environmentId;
-  // Read providers only in the open popup to avoid per-row subscriptions.
-  const providers =
-    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
-  const parent = useThreadShell(props.parentRef)?.source;
-  const child = useThreadShell(
-    props.threadId ? scopeThreadRef(environmentId, props.threadId) : null,
-  )?.source;
-  const parentProject = useProject(
-    parent ? scopeProjectRef(environmentId, parent.projectId) : null,
-  );
-  const childProject = useProject(child ? scopeProjectRef(environmentId, child.projectId) : null);
-  return (
-    <SubagentTooltipContent
-      title={formatSubagentDisplayTitle(child?.title ?? props.title)}
-      model={props.model}
-      providerInstanceId={props.providerInstanceId}
-      origin={props.origin}
-      modelSelection={props.modelSelection}
-      provider={providers.find((provider) => provider.instanceId === props.providerInstanceId)}
-      providers={providers}
-      driver={props.driver}
-      elapsed={props.elapsed}
-      status={props.status}
-      result={props.result}
-      progress={props.progress}
-      parentThread={parent}
-      childThread={child}
-      parentProject={parentProject ?? undefined}
-      childProject={childProject ?? undefined}
-    />
+  // Insets and line gap of a sidebar thread row, like the board's task cards.
+  const className = cn("group/subagent min-w-0", TASK_CARD_FACE_CLASS, "gap-1 px-2.25 pt-2.5 pb-3");
+  // No hover card: the card already shows everything it would.
+  return open === null ? (
+    <div data-v2-item-type="subagent" aria-description={statusLabel} className={className}>
+      {content}
+    </div>
+  ) : (
+    <button
+      type="button"
+      data-v2-item-type="subagent"
+      aria-label={gt("Open {title}", { title: props.title })}
+      aria-description={statusLabel}
+      onClick={open}
+      className={cn(className, TASK_CARD_FACE_INTERACTIVE_CLASS)}
+    >
+      {content}
+    </button>
   );
 }
 

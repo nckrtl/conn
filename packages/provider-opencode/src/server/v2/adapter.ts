@@ -420,13 +420,13 @@ const rule = (action: string, effect: Rule["effect"]): Rule => ({ action, resour
 
 /** OpenCode hides tools for names over 64 chars and rejects names over 100; hash long thread IDs. */
 export const t3McpServerName = Effect.fn("t3McpServerName")(function* (threadId: string) {
-  const name = `t3-code-${threadId.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const name = `conn-${threadId.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}`;
   if (name.length <= 64) return name;
   const crypto = yield* Digest.Digest;
   const digest = yield* crypto
     .digest(Digest.sha256, new TextEncoder().encode(threadId))
     .pipe(Effect.orDie);
-  return `t3-code-${Hex.encode(digest).slice(0, 16)}`;
+  return `conn-${Hex.encode(digest).slice(0, 16)}`;
 });
 
 // Last match wins: deny all threads' T3 servers, then allow only this thread's.
@@ -434,7 +434,7 @@ const mcpRules = (mcpServerName: string | null): ReadonlyArray<Rule> =>
   mcpServerName === null
     ? []
     : [
-        { action: "t3-code-*", resource: "*", effect: "deny" },
+        { action: "conn-*", resource: "*", effect: "deny" },
         { action: `${mcpServerName}_*`, resource: "*", effect: "allow" },
       ];
 
@@ -613,7 +613,7 @@ const isUsageLimit = (error: {
   claudeUsageLimit(error.message) !== undefined;
 
 const INTERRUPT_TIMEOUT = 10_000;
-const INSTRUCTIONS_KEY = "t3-code";
+const INSTRUCTIONS_KEY = "conn";
 const RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = "2 seconds";
 const RECONCILE_TIMEOUT = "15 seconds";
@@ -657,7 +657,7 @@ class OpenCode2ServerExitedError extends Schema.TaggedError<OpenCode2ServerExite
   {},
 ) {}
 const LOST_BACKGROUND =
-  "T3 Code lost its connection to OpenCode while this subagent ran, so its result is not shown.";
+  "Conn lost its connection to OpenCode while this subagent ran, so its result is not shown.";
 const INVENTORY_TIMEOUT = "5 seconds";
 const MCP_TOOL_RELOAD_SETTLE = "250 millis";
 const ACTIVE_CHECK_TIMEOUT = "5 seconds";
@@ -715,7 +715,7 @@ const boundaryAfter = (
       new ProviderAdapter.ProviderAdapterProtocolError({
         driver: OPENCODE_PROVIDER,
         detail:
-          "This OpenCode conversation has turns from an earlier T3 Code version, so it can't be cut there.",
+          "This OpenCode conversation has turns from an earlier Conn version, so it can't be cut there.",
       }),
     );
   }
@@ -1454,7 +1454,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           turnItem: {
             ...itemBase(state, turn, pageId, "completed", startedAt, updatedAt, updatedAt),
             type: "dynamic_tool",
-            toolName: `t3-code.${HTML_RENDER_TOOL_NAME}`,
+            toolName: `conn.${HTML_RENDER_TOOL_NAME}`,
             input: { title: page.title, height: page.height },
             output: { htmlRender: page },
           },
@@ -2416,7 +2416,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* finishTurn(state, {
         status: "failed",
         failure: makeProviderFailure({
-          message: "OpenCode is waiting on a request T3 Code couldn't answer.",
+          message: "OpenCode is waiting on a request Conn couldn't answer.",
           class: "provider_error",
         }),
       });
@@ -2661,7 +2661,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         );
       }
       // Cancel reports user Stop; record failure here and skip that execution end.
-      yield* Effect.logWarning("Declined an OpenCode form T3 Code cannot show.", {
+      yield* Effect.logWarning("Declined an OpenCode form Conn cannot show.", {
         reason: mapped.unsupported,
       });
       const cancelled = yield* deliver(
@@ -2674,7 +2674,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* finishTurn(asker, {
         status: "failed",
         failure: makeProviderFailure({
-          message: `OpenCode asked for ${mapped.unsupported}, which T3 Code can't show. The question was declined.`,
+          message: `OpenCode asked for ${mapped.unsupported}, which Conn can't show. The question was declined.`,
           class: "provider_error",
         }),
       });
@@ -3687,7 +3687,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                       status: "failed",
                       failure: makeProviderFailure({
                         message:
-                          "OpenCode ended the turn with an error while T3 Code was reconnecting.",
+                          "OpenCode ended the turn with an error while Conn was reconnecting.",
                         class: "provider_error",
                       }),
                     }
@@ -4321,7 +4321,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             Effect.timeout(INVENTORY_TIMEOUT),
             Effect.as(true),
             Effect.catchCause((cause) =>
-              Effect.logWarning("Could not add T3 Code's MCP server to OpenCode.", cause).pipe(
+              Effect.logWarning("Could not add Conn's MCP server to OpenCode.", cause).pipe(
                 Effect.as(false),
               ),
             ),
@@ -4336,7 +4336,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         buildRuntimeInstructions({ harness: "OpenCode", model: turnInput.modelSelection.model }),
         t3OrchestrationSystemPrompt(mcpAvailable, mcpSession?.capabilities?.has("device") === true),
         mcpAvailable
-          ? "To wait for a background shell you started (tests, a build), call `t3_background_wait` with its shell ID before you end your turn. Do not mark work you leave running, or PRs."
+          ? "To wait for a background shell you started (tests, a build), call `conn_background_wait` with its shell ID before you end your turn. Do not mark work you leave running, or PRs."
           : undefined,
       ]
         .filter((part) => part !== undefined && part.length > 0)

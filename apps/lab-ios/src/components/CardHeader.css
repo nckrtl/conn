@@ -1,0 +1,29 @@
+[data-code-cards="true"] .m-card-header,
+.m-card-header:is(.m-changes-header, .m-gallery-card-header) {
+  display: flex;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: var(--thread-card-header-height, 26px);
+  padding: 0 5px 0 11px;
+  margin-bottom: var(--thread-card-inset, 3px);
+}
+.m-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.m-card-action {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.m-card-action:hover {
+  background: var(--m-hl6);
+}

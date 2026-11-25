@@ -14,7 +14,10 @@ use std::{
     time::Duration,
 };
 
-use rustix::process::{Pid, Signal};
+use rustix::{
+    event::{PollFd, PollFlags},
+    process::{Pid, Signal},
+};
 use tokio::{io::AsyncReadExt, process::Child, sync::oneshot};
 
 /// Variables a terminal must not inherit from the server (as `createTerminalSpawnEnv`).
@@ -42,10 +45,13 @@ pub(crate) struct Spawned {
     pub control: OwnedFd,
     pub child: Child,
     pub pid: i32,
+    /// The shell executable that started (`session.shell` in T3's manager).
+    pub shell: String,
 }
 
 /// The environment a shell gets: the server's, minus server-only variables, plus terminal
-/// settings, plus the client's `env` (with `~` and `$HOME` expanded).
+/// settings, plus the client's `env` as given, but for `~` in the home-folder variables
+/// (`createTerminalSpawnEnv`, `expandHomeVariable`).
 pub(crate) fn shell_env(
     runtime: &BTreeMap<String, String>,
     version: &str,
@@ -66,9 +72,13 @@ pub(crate) fn shell_env(
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("TERM_PROGRAM".into(), "t3code".into());
     env.insert("TERM_PROGRAM_VERSION".into(), version.into());
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = std::env::var("HOME").ok();
     for (key, value) in runtime {
-        env.insert(key.into(), expand_home(value, &home).into());
+        let value = match &home {
+            Some(home) => conn_support::home::expand_home_variable(key, value, home),
+            None => value.clone(),
+        };
+        env.insert(key.into(), value.into());
     }
     if !had_colorterm && !runtime.contains_key("COLORTERM") {
         env.insert("COLORTERM".into(), "truecolor".into());
@@ -87,20 +97,6 @@ pub(crate) fn shell_env(
         }
     }
     env.into_iter().collect()
-}
-
-fn expand_home(value: &str, home: &str) -> String {
-    if home.is_empty() {
-        return value.to_owned();
-    }
-    let value = if value == "~" {
-        home.to_owned()
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        format!("{home}/{rest}")
-    } else {
-        value.to_owned()
-    };
-    value.replace("${HOME}", home).replace("$HOME", home)
 }
 
 /// Shells to try, in order: `$SHELL`, then the usual ones.
@@ -232,6 +228,7 @@ fn spawn_one(
         control,
         child,
         pid,
+        shell: shell.to_owned(),
     })
 }
 
@@ -253,13 +250,38 @@ pub(crate) fn resize(control: &OwnedFd, cols: u16, rows: u16) -> io::Result<()> 
     Ok(rustix::termios::tcsetwinsize(control, size)?)
 }
 
+/// The PTY's foreground process group, `None` when it cannot be read.
+pub(crate) fn foreground_group(control: &OwnedFd) -> Option<i32> {
+    Some(
+        rustix::termios::tcgetpgrp(control)
+            .ok()?
+            .as_raw_nonzero()
+            .get(),
+    )
+}
+
 /// The PTY's foreground process group, when it is not the shell's own: a command runs.
 pub(crate) fn foreground_job(control: &OwnedFd, shell_pid: i32) -> Option<i32> {
-    let group = rustix::termios::tcgetpgrp(control)
-        .ok()?
-        .as_raw_nonzero()
-        .get();
-    (group != shell_pid).then_some(group)
+    foreground_group(control).filter(|group| *group != shell_pid)
+}
+
+/// Whether the shell itself holds the PTY's foreground. An unreadable group counts as not:
+/// an idle close must never guess.
+pub(crate) fn shell_in_foreground(control: &OwnedFd, shell_pid: i32) -> bool {
+    foreground_group(control) == Some(shell_pid)
+}
+
+/// Whether the PTY holds output the reader has not taken yet. `poll` on the master checks the
+/// queue the reader drains on Linux and macOS; `FIONREAD` reads the other queue on macOS. A
+/// failed poll counts as pending.
+pub(crate) fn output_pending(control: &OwnedFd) -> bool {
+    let mut fds = [PollFd::new(control, PollFlags::IN)];
+    let now = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut fds, Some(&now))
+        .map_or(true, |_| fds[0].revents().contains(PollFlags::IN))
 }
 
 /// What a finished shell reports.
@@ -402,6 +424,7 @@ mod tests {
     fn builds_the_shell_environment() {
         let runtime = BTreeMap::from([
             ("CONN_TEST".to_owned(), "~/x:$HOME/y".to_owned()),
+            ("CODEX_HOME".to_owned(), "~/codex".to_owned()),
             ("COLORTERM".to_owned(), String::new()),
         ]);
         let env: BTreeMap<_, _> = shell_env(&runtime, "1.2.3")
@@ -409,7 +432,9 @@ mod tests {
             .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
             .collect();
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(env["CONN_TEST"], format!("{home}/x:{home}/y"));
+        // Values stay as given: only the home-folder variables expand `~` (T3).
+        assert_eq!(env["CONN_TEST"], "~/x:$HOME/y");
+        assert_eq!(env["CODEX_HOME"], format!("{home}/codex"));
         assert_eq!(env["COLORTERM"], "");
         assert_eq!(env["TERM"], "xterm-256color");
         assert_eq!(env["TERM_PROGRAM_VERSION"], "1.2.3");

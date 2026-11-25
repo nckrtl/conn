@@ -8,8 +8,10 @@ stdio). One shared runtime, one small flavor per agent. Reference behaviour: T3'
 **State (2026-11-14): Grok, offered by the server.** The server lists T3's default `grok`
 instance, off until `providerInstances.grok` enables it, and probes the CLI as T3 does (see
 "Server entry"). `/compact` is served as T3 serves it (see "Compaction"), and so are Grok's
-background work and subagents (see "Background work and subagents"). Kiro, fx, Antigravity
-and the ACP registry are not built (see "Not built").
+background work and subagents (see "Background work and subagents").
+
+**State (2026-11-20): Antigravity, offered by the server** (see "Antigravity"). Kiro, fx and
+the ACP registry are not built (see "Not built").
 
 ## Trial: the official crates or our own JSON-RPC?
 
@@ -57,7 +59,7 @@ write is built from `ordered::J`, which keeps T3's key order.
   `mcpServers`, then `session/set_model` when the selection names another model than the
   session's, or (protocol 1) a reasoning effort the model offers, as `_meta.reasoningEffort`;
   a rejected effort is dropped and the switch sent again without it.
-- **`/mcp` (`acpMcpContext`, `sessionMcpServers`):** the `t3-code` server goes as the stdio
+- **`/mcp` (`acpMcpContext`, `sessionMcpServers`):** the `conn` server goes as the stdio
   bridge `{name, command, args: ["acp-mcp-bridge"], env: [ELECTRON_RUN_AS_NODE=1,
   T3_ACP_MCP_ENDPOINT, T3_ACP_MCP_AUTHORIZATION]}`; as `{type: http, …}` only when the
   agent offers HTTP and the flavor sets `mcpOverHttp` (T3: Grok, Kiro and fx no;
@@ -99,7 +101,7 @@ debounced 200 ms, as T3's `ws.ts`). The periodic probe follows T3's managed prov
 
 - **Enabled:** `resolveProviderInstanceEnabled`: an explicit `false` on the envelope or in the
   config wins, then the envelope, then the config, then Grok's default: off. Off: no probe,
-  `status: "disabled"`, "Grok is disabled in T3 Code settings."; a session on it is refused.
+  `status: "disabled"`, "Grok is disabled in Conn settings."; a session on it is refused.
 - **Probes**, in order, each in its own process group with the server's environment, the
   instance's entries, `MISE_OFFLINE=1` and `GROK_DISABLE_AUTOUPDATER=1`, stdin an open pipe:
   `grok --version` (10 s), `grok models` (10 s; once more after "not authenticated" when no
@@ -203,13 +205,13 @@ prompts; our replay and the stub conformance check compare against those.
   protocol 1), MCP tool
   presentation (`extractMcpToolCallIdentity`), web search and fetch projections, structured
   file changes, notices, retries.
-- **Shared runtime:** ACP protocol 2 responses (Kiro answers with v2), `session/load` and
-  resume at open, fork, `session/set_config_option`, steering, elicitation, MCP over ACP,
-  client file and terminal callbacks (`ProviderHost`; only Antigravity's files and the
-  registry's terminals use them in T3, Grok never does), authentication on `auth_required`.
+- **Shared runtime:** ACP protocol 2 responses (Kiro answers with v2; only `auth/login`
+  follows the reply's shape), `session/load` and resume at open, fork, config options other
+  than Antigravity's model, steering, elicitation, MCP over ACP, client terminal callbacks
+  (the registry's), file writes, authentication on `auth_required`.
 - **Linux launch:** T3 puts Grok's process tree in a cgroup wrapper on Linux
   (`ownDescendantProcessGroups`); we spawn it directly. macOS matches.
-- **Flavors:** Kiro, fx, Antigravity (its own adapter and stdout filter), the ACP registry.
+- **Flavors:** Kiro, fx, the ACP registry. Antigravity's gaps are listed under "Antigravity".
 - **The ACP registry's download and install: not to be built (Nick, 2026-11-14).** This
   server installs nothing: no index download, no binary, npm or uv install. Of the registry's
   11 `server.*` methods only `uninstallAcpRegistryManagedBinary` and `acceptAcpRegistryUrlAuth`
@@ -245,11 +247,89 @@ This server must not download or install; the choice is Nick's.
   `acceptAcpRegistryUrlAuth` need no network and no install; the other nine fetch the index,
   install, or start the agent.
 
+## Antigravity (`antigravity.rs`, `antigravity_provider.rs`)
+
+T3's Antigravity driver for the `agy` CLI found on `PATH` or set as `binaryPath`
+(`AntigravityDriver.ts`, `antigravityAuthSupport.ts`, `AntigravityAcpSupport.ts`,
+`AntigravityAdapterV2.ts`). The server lists the default `antigravity` instance (off) and one
+more per `providerInstances` entry with that driver (`supportsMultipleInstances`).
+
+- **Credential:** the instance's `apiKey` setting, a settings secret as in T3 (moved out of
+  `settings.json` into `<state>/secrets`), passed to the agent as `GEMINI_API_KEY`
+  (`gemini-api-key`) or `GOOGLE_API_KEY` (`agent-platform`). Never logged. Other variables of
+  the server's environment reach the agent, so a model endpoint the host sets (Orbit:
+  `GOOGLE_GEMINI_BASE_URL`) applies.
+- **Launch:** `agy acp --gemini-dir <profile> --app-data-dir antigravity-acp`, profile
+  `<state>/providers/antigravity/<sha256 of the instance id>` (0700) with
+  `antigravity-acp/settings.json` naming the sign-in method; the driver's own keys removed
+  from the inherited environment, then `GEMINI_HOME`, `AGY_ACP_FORCE_FILE_STORAGE`,
+  `BROWSER`, `PYTHONUNBUFFERED`, `ELECTRON_RUN_AS_NODE`, and `TMPDIR` = a fresh
+  `run-<random>` folder per process, removed after it ends.
+- **Wire:** `initialize` as client `zed` 0.0.0 (the CLI's version is unknown before it
+  answers; T3 the same) with `fs.readTextFile`; `authenticate` with the configured method
+  before `session/new`; `session/new` with `additionalDirectories: [attachments]` and the pull
+  request linking text as `_meta.antigravity.systemPrompt.append` when the agent offers it
+  (then the runtime notes leave it out); the model through `session/set_config_option` on the
+  `model` option (unknown models refused with T3's text, 1.3 ids of a listed family passed
+  through); Stop as `session/cancel`, waiting for the prompt's reply; a restarted agent gets
+  `session/resume`. `fs/read_text_file` is served inside the turn's workspace and the
+  attachments folder (`conn-provider-support` `RootedFiles`).
+- **Status:** the executable resolves and the sign-in is configured. While the account is
+  unknown, the check opens a throwaway session in a scratch folder (as T3's `loadModels`);
+  that session, like every session, sets `ready` and the models (T3's `onSessionStarted`).
+  Once the account is known, the check starts no agent. The version is read fresh in every check with
+  `<agy> --version` (5 s), so it follows the binary Orbit puts on `PATH`; T3 runs no
+  `--version` and keeps the last version it saw. `setup.canInstall` is `false`: Orbit
+  installs and updates the CLI (Nick, 2026-11-20); T3 says `true` for its managed runtime.
+- **Model refresh** (`server.refreshProviders` with `refreshModels`, T3's `refreshModels`
+  and `publishCatalog`): the throwaway session selects each model, then the original again,
+  and drains the agent's events before it closes; it starts from the agent's own model, not
+  the catalog's default. Each model lists the thinking levels it reported, kept until sign-out
+  as in T3. A selection's reply is
+  dropped when the agent pushed `config_option_update` while it was in flight (T3's
+  `configOptionUpdates` rule). Only the root session's updates reach the entry; metadata
+  sent before `session/new` answered is kept per session and applied for the root (T3's
+  `startupMetadata`); the entry hears it after the session is published, so a retry after a
+  sign-in failure keeps its commands. The 90 s limit stops the agent before the refresh
+  answers, also during `initialize`. An agent that exited is cleaned up without a signal.
+- **Catalog:** the entry applies the accepted model manifest's legacy marks and default
+  (`applyModelCatalog`; bundled: `src/antigravity_catalog.json`, generated), and a selection
+  that asks for the default takes the catalog's default when the agent lists it.
+- **Commands:** `available_commands_update` sets the machine's slash commands and, for a
+  thread's session, its workspace snapshot (at most 32).
+- **Sign-in required:** an error reply that asks for a sign-in (`-32000`, or the native
+  CLI's "No browser is available here"), or a valid Google sign-in URL on stdout (T3's
+  prefix) or stderr (prefix or our browser helper's marker), ends the session. The entry
+  turns `unauthenticated` without models, commands or workspaces, and the config streams
+  hear it, before the error returns; a refresh then fails with T3's sign-in instruction.
+  Health checks start no agent until a session proves the sign-in. A `python-socks` failure
+  keeps T3's diagnostic; other error details never reach the user.
+- **One accepted difference:** `BROWSER` runs this server (`<self> antigravity-browser -- %s`,
+  which reports the URL on stderr with T3's marker) where T3 runs its Node with an inline
+  script.
+- **Sign-in:** only the credential check (`credential_check`, for `gemini-api-key` and
+  `agent-platform` with a configured key; never Application Default Credentials): a
+  throwaway session that reports T3's steps, stops its agent and removes both temp folders on
+  cancel or failure, and maps known ACP errors to T3's fixed texts. An agent's exit and an
+  explicit stop share one cleanup (`Stopper` in `session.rs`), run once, awaited by both;
+  after a confirmed exit it signals nothing. A finished throwaway session's files (the
+  conversation database, `.meta` and `brain/`) go once the agent has closed, only when the
+  `.meta` names the session's own scratch folder.
+- **Not built:** Google sign-in in the browser (Orbit's AI router signs providers in);
+  T3's managed runtime (`localharness_external`) and its install; links to `~/.gemini`
+  skills; `AntigravityProtocol` (tool call normalization, read repair, `interaction_*`
+  questions, the `allow_always` security warning); audio, text, PDF and video attachments as
+  ACP resources (images go as image blocks, every path in the text); background commands,
+  child work and subagents (`deferFinalizeForBackgroundWork`, `toolOutlivesPrompt`,
+  `watchPromptOutcome`); the stderr harness-failure filter; the prompt inactivity timeout;
+  per-turn usage; text generation; usage limits; a per-workspace scan (`snapshotForCwd`).
+
 ## Proofs
 
 ```sh
 cargo test -p conn-provider-acp                                                 # offline
 node crates/conn-provider-acp/tools/conformance.mjs   # the wire check
+node crates/conn-provider-acp/tools/antigravity-conformance.mjs   # Antigravity's launch and wire
 node crates/conn-provider-acp/tools/probe-conformance.mjs   # the status probe
 node crates/conn-provider-acp/tools/gen-instructions.mjs --check
 node crates/conn-provider-acp/tools/make-scenarios.mjs   # the hand-made scenarios

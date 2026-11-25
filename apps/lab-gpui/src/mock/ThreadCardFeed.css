@@ -1,0 +1,94 @@
+/* The desktop timeline owns width and scrolling. The shared entries own their card styles. */
+.desktop-card-feed {
+  --m-font: -apple-system, "SF Pro Text", "SF Pro", system-ui, sans-serif;
+  --m-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --m-text-2xs: 12px;
+  --m-text-sm: 14px;
+  font-family: var(--m-font);
+}
+.desktop-card-feed .m-thread {
+  --m-hl6: color-mix(in srgb, var(--color-foreground) 6%, transparent);
+  --m-hl10: color-mix(in srgb, var(--color-foreground) 10%, transparent);
+  position: static;
+  background: transparent;
+}
+.desktop-card-feed .m-feed,
+.desktop-card-feed .m-feed-inner,
+.desktop-card-feed .m-feed-text {
+  padding: 0;
+}
+.desktop-card-feed .m-feed-inner {
+  gap: 12px;
+}
+.desktop-card-feed .m-user-bubble:is([data-images], .m-gallery-attachment-bubble) {
+  width: fit-content;
+  max-width: 54%;
+}
+.desktop-card-feed .m-user-bubble:is([data-images], .m-gallery-attachment-bubble):has(> span) {
+  max-width: 80%;
+}
+.desktop-card-feed .m-user-bubble[data-images] {
+  min-width: 32%;
+}
+.desktop-card-feed .m-user-gallery {
+  contain: inline-size;
+}
+.desktop-card-feed .m-user-bubble.m-gallery-video-bubble {
+  width: 100%;
+}
+.desktop-card-feed .m-gallery-attachment strong {
+  margin-inline-end: var(--thread-card-icon-gap);
+}
+.desktop-card-feed .m-feed .m-md p {
+  white-space: normal;
+}
+.desktop-card-feed .ios-message-meta {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+  color: var(--color-foreground-muted);
+}
+.desktop-request-dock:has(.m-composer-deck) {
+  margin-block-end: 8px;
+}
+.desktop-request-dock .m-composer-deck {
+  --composer-deck-radius: var(--composer-radius);
+}
+.desktop-request-dock .m-composer-panel {
+  max-block-size: 65dvh;
+}
+.desktop-request-dock .m-composer-approval .m-composer-decision-actions button {
+  min-height: 32px;
+}
+.desktop-request-dock .m-composer-decision-actions button:not([data-decision="cancel"]) {
+  font-size: 13px;
+  line-height: 18px;
+}
+.desktop-request-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.desktop-secret-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--composer-panel-content-padding);
+  color: var(--color-foreground);
+  font: 14px/1.5 var(--m-font);
+}
+.desktop-secret-content > span {
+  color: var(--color-foreground-muted);
+}
+.desktop-secret-content input {
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--composer-panel-inner) 82%, var(--color-foreground));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--composer-panel-inner) 93%, var(--color-foreground));
+  color: inherit;
+  font: inherit;
+}

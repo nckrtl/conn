@@ -7,6 +7,7 @@ import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
 const TEST_EXCLUDE = [
   "**/.repos/**",
   "**/.t3/**",
+  "**/.conn/**",
   "**/node_modules/**",
   "**/dist/**",
   "**/dist-electron/**",
@@ -184,6 +185,11 @@ export default defineConfig({
       ".repos/**",
       // The Conn Server (Rust) formats and checks itself (apps/conn-server/tools/check.sh).
       "apps/conn-server/**",
+      // So does the GPUI desktop client (apps/conn-gpui/scripts/check.sh).
+      "apps/conn-gpui/**",
+      // The native SwiftUI iPhone app (Xcode project, asset catalogs, generated bindings).
+      "apps/ios/**",
+      "crates/**",
       "infra/task-cache/vendor/**",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
       ".macroscope/ignore.md",
@@ -221,6 +227,9 @@ export default defineConfig({
       ".repos",
       ".repos/**",
       "apps/conn-server/**",
+      "apps/conn-gpui/**",
+      "apps/ios/**",
+      "crates/**",
       "infra/task-cache/vendor/**",
       "dist",
       "dist-electron",
@@ -505,6 +514,8 @@ export default defineConfig({
         excludeFiles: [
           "apps/mobile/src/components/ui/AppSymbol.tsx",
           "apps/mobile/src/components/ui/AppSymbol.android.tsx",
+          "apps/mobile/src/components/ui/connGlyphs.generated.ts",
+          "apps/mobile/src/native/connHeaderIcons.generated.ts",
           "apps/mobile/src/features/pull-requests/pullRequestGlyphs.ts",
         ],
         rules: { "t3code/no-mobile-pull-request-glyph-literals": "error" },
@@ -803,7 +814,13 @@ export default defineConfig({
         rules: { "t3code/no-manual-memo": ["error", { allowMemoHooks: true }] },
       },
       {
-        files: ["apps/web/src/**", "apps/mobile/src/**", "packages/*/src/**"],
+        files: [
+          "apps/web/src/**",
+          "apps/lab-gpui/src/**",
+          "apps/lab-ios/src/**",
+          "apps/mobile/src/**",
+          "packages/*/src/**",
+        ],
         rules: { "t3code/no-unreasoned-state-sync": "error" },
       },
       {
@@ -831,6 +848,7 @@ export default defineConfig({
           "apps/mobile/src/features/threads/ThreadQueueControl.tsx",
           "apps/mobile/src/features/review/ReviewCommentCard.tsx",
           "apps/mobile/src/features/threads/thread-list-v2-items.tsx",
+          "apps/mobile/src/features/tasks/TaskInsightsStrip.tsx",
           "apps/mobile/src/components/ui/SecretTextInput.android.tsx",
           "apps/mobile/src/lib/useMobileNavigationTheme.ts",
           "apps/mobile/src/native/T3ComposerEditor.ios.tsx",
@@ -840,6 +858,27 @@ export default defineConfig({
         ],
         rules: {
           "t3code/no-mobile-uniwind-theme-escape-hatches": ["error", { allowUniwindTheme: true }],
+        },
+      },
+      {
+        // The UI labs are design tools, not product code: fixture copy is English sample text,
+        // the mobile lab styles with plain CSS classes, its scripts are node tools, the generated
+        // icon maps list every glyph name, the stand-ins keep the hook names of the modules they
+        // replace, and the lab driver talks to the fake environment's RPC.
+        files: [
+          "apps/lab-gpui/**",
+          "apps/lab-ios/**",
+          "apps/mobile/scripts/lab/**",
+          "apps/mobile/src/lab/**",
+        ],
+        rules: {
+          "shadcn/no-unknown-classes": "off",
+          "t3code/namespace-node-imports": "off",
+          "t3code/no-hookless-use-function": "off",
+          "t3code/no-mobile-pull-request-glyph-literals": "off",
+          "t3code/no-rpc-permission-bypass": "off",
+          "t3code/no-sparkles-icon": "off",
+          "t3code/no-untranslated-copy": "off",
         },
       },
     ],

@@ -20,6 +20,7 @@ use conn_contract::{
 };
 use conn_support::text::js_trim;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use crate::{
     auth::AuthStore, http::ORCHESTRATION_PROTOCOL_VERSION, keybindings::KeybindingsStore,
@@ -31,16 +32,25 @@ use crate::{
 /// Codex provider sends the same value in `initialize`, as the T3 server does.
 pub const CONTRACT_SERVER_VERSION: &str = conn_contract::T3_SERVER_VERSION;
 
-/// Orbit writes this root-owned file before an Instance's first boot.
-const ORBIT_INSTANCE_FILE: &str = "/etc/orbit/instance";
+/// Orbit writes this root-owned file before an Instance's first boot, and rewrites it when it
+/// renames an Instance (`crate::reload` re-reads it).
+pub const ORBIT_INSTANCE_FILE: &str = "/etc/orbit/instance";
 const ORBIT_INSTANCE_FILE_MAX_BYTES: u64 = 64 * 1024;
 const MAX_SAFE_JS_INTEGER: i64 = 9_007_199_254_740_991;
 
 pub struct Environment {
     pub restart: Arc<crate::restart::Restart>,
+    environment_id: String,
+    /// `--label`; without it the label follows the machine's name.
+    label: Option<String>,
+    orbit_instance_file: PathBuf,
+    /// Stands in for the machine's name in tests.
+    #[cfg(test)]
+    hostname_file: Option<PathBuf>,
     /// `ExecutionEnvironmentDescriptor`, served at `/.well-known/t3/environment` and inside
-    /// the server config.
-    pub descriptor: Value,
+    /// the server config. [`Environment::reload`] replaces it when the label or the Orbit
+    /// Instance file changes.
+    descriptor: watch::Sender<Value>,
     pub cwd: PathBuf,
     pub state_dir: PathBuf,
     pub settings: SettingsStore,
@@ -52,7 +62,7 @@ pub struct Environment {
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Environment")
-            .field("descriptor", &self.descriptor)
+            .field("descriptor", &*self.descriptor.borrow())
             .field("cwd", &self.cwd)
             .field("state_dir", &self.state_dir)
             .field("settings", &self.settings)
@@ -73,18 +83,20 @@ impl Environment {
     ) -> io::Result<Self> {
         fs::create_dir_all(state_dir)?;
         let environment_id = load_or_create_id(&state_dir.join("environment-id"))?;
-        let label = label
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .or_else(hostname)
-            .filter(|l| !l.trim().is_empty())
-            .unwrap_or_else(|| "conn-server".into());
+        let label = label.filter(|l| !l.trim().is_empty());
+        let orbit_instance_file = PathBuf::from(ORBIT_INSTANCE_FILE);
         Ok(Self {
-            descriptor: descriptor(
+            descriptor: watch::Sender::new(descriptor(
                 &environment_id,
-                label.trim(),
+                &resolve_label(label.as_deref()),
                 restart.available(),
-                read_orbit_instance(Path::new(ORBIT_INSTANCE_FILE)),
-            ),
+                read_orbit_instance(&orbit_instance_file),
+            )),
+            environment_id,
+            label,
+            orbit_instance_file,
+            #[cfg(test)]
+            hostname_file: None,
             restart: Arc::new(restart),
             cwd,
             state_dir: state_dir.to_owned(),
@@ -95,10 +107,84 @@ impl Environment {
     }
 
     pub fn environment_id(&self) -> &str {
-        self.descriptor["environmentId"]
+        &self.environment_id
+    }
+
+    /// The current descriptor.
+    pub fn descriptor(&self) -> Value {
+        self.descriptor.borrow().clone()
+    }
+
+    /// The current label (`ExecutionEnvironmentDescriptor.label`).
+    pub fn label(&self) -> String {
+        self.descriptor.borrow()["label"]
             .as_str()
             .unwrap_or_default()
+            .to_owned()
     }
+
+    /// Sees every descriptor [`Environment::reload`] publishes.
+    pub fn subscribe_descriptor(&self) -> watch::Receiver<Value> {
+        self.descriptor.subscribe()
+    }
+
+    /// Reads the label and the Orbit Instance file again and publishes a changed descriptor.
+    /// Returns whether it changed. File and process work: call it off the runtime thread.
+    pub fn reload(&self) -> bool {
+        #[cfg(test)]
+        let label = match &self.hostname_file {
+            Some(file) => fs::read_to_string(file)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            None => resolve_label(self.label.as_deref()),
+        };
+        #[cfg(not(test))]
+        let label = resolve_label(self.label.as_deref());
+        let orbit_instance = read_orbit_instance(&self.orbit_instance_file);
+        self.descriptor.send_if_modified(|current| {
+            let server_restart = current["capabilities"]["serverRestart"] == true;
+            let next = descriptor(&self.environment_id, &label, server_restart, orbit_instance);
+            let changed = *current != next;
+            if changed {
+                *current = next;
+            }
+            changed
+        })
+    }
+
+    /// Where [`Environment::reload`] reads the Orbit Instance file.
+    pub fn orbit_instance_file(&self) -> &Path {
+        &self.orbit_instance_file
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_orbit_instance_file(&mut self, path: PathBuf) {
+        self.orbit_instance_file = path;
+        self.reload();
+    }
+
+    /// Reads the label from `file` instead of `--label` and the machine's name.
+    #[cfg(test)]
+    pub(crate) fn set_hostname_file(&mut self, file: PathBuf) {
+        self.hostname_file = Some(file);
+        self.reload();
+    }
+}
+
+/// A descriptor that never changes, for states built without an [`Environment`].
+pub fn fixed_descriptor(descriptor: Value) -> watch::Receiver<Value> {
+    watch::Sender::new(descriptor).subscribe()
+}
+
+/// `--label`, else `HOSTNAME`, else the machine's name, as the T3 server's `os.hostname()`.
+fn resolve_label(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(hostname)
+        .filter(|l| !l.trim().is_empty())
+        .map_or_else(|| "conn-server".into(), |l| l.trim().to_owned())
 }
 
 /// `ServerEnvironment.ts`: a UUID and a newline. The TypeScript server's file is read as is,
@@ -132,18 +218,15 @@ fn load_or_create_id(file: &Path) -> io::Result<String> {
     }
 }
 
-/// The machine's name, as `os.hostname()` gives the T3 server its label.
+/// The machine's name, as `os.hostname()` gives the T3 server its label: `/etc/hostname`,
+/// else the kernel's name up to the first dot (`hostname -s`, without a process).
 fn hostname() -> Option<String> {
     fs::read_to_string("/etc/hostname")
         .ok()
         .or_else(|| {
-            let out = std::process::Command::new("hostname")
-                .arg("-s")
-                .output()
-                .ok()?;
-            out.status
-                .success()
-                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+            let uname = rustix::system::uname();
+            let name = uname.nodename().to_string_lossy();
+            name.split('.').next().map(str::to_owned)
         })
         .map(|h| h.trim().to_owned())
 }
@@ -274,15 +357,39 @@ pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
         max_upload_bytes: i64::try_from(conn_files::attachments::MAX_FILE_BYTES)
             .unwrap_or(i64::MAX),
     });
+    // `environmentThemesUpdated` on `subscribeServerConfig`, theme background assets and the
+    // theme tools (`conn_files::themes`).
+    capabilities.environment_themes = Some(true);
     capabilities.pull_requests = Some(true);
     capabilities.pull_request_checks = Some(true);
     capabilities.linked_thread_refreshes = Some(true);
     capabilities.thread_force_stop = Some(true);
+    // `server.refreshProviders` honours `modelCatalogOnly` (`crate::model_manifest`).
+    capabilities.model_catalog_refresh = Some(true);
     capabilities.shell_thread_families = Some(true);
     capabilities.shell_older_settled = Some(true);
     // projects.listIgnoredFiles, with `query` (conn-files entries::list_ignored).
     capabilities.ignored_file_listing = Some(true);
     capabilities.ignored_file_search = Some(true);
+    // Links to other environments (`crate::peers`), `/mcp` narrowing an OAuth client by
+    // `T3-Mode-Limit`, the link fence (`linkOrigin`), and peer-link pairing codes.
+    capabilities.peer_links = Some(true);
+    capabilities.mcp_mode_limit_header = Some(true);
+    capabilities.link_fence = Some(true);
+    capabilities.peer_link_pairing_codes = Some(true);
+    // Served features mobile gates on: `/clear` dispatch (`freshContext` in conn-engine),
+    // one-time and fresh-session schedules (conn-features), PR watches, issue links and the
+    // per-command output stream.
+    capabilities.fresh_context = Some(true);
+    capabilities.one_time_schedules = Some(true);
+    capabilities.scheduled_task_thread_modes = Some(true);
+    capabilities.thread_pull_request_watch = Some(true);
+    capabilities.issue_linked_threads = Some(true);
+    capabilities.command_output_streaming = Some(true);
+    // `preview.stopLocalServer` (`crate::local_servers`), off on Windows as in T3.
+    if !cfg!(windows) {
+        capabilities.local_server_stop = Some(true);
+    }
     capabilities
 }
 
@@ -356,16 +463,29 @@ mod tests {
             advertised,
             [
                 "attachmentUploads",
+                "commandOutputStreaming",
+                "environmentThemes",
                 "fileAttachments",
+                "freshContext",
                 "ignoredFileListing",
                 "ignoredFileSearch",
+                "issueLinkedThreads",
+                "linkFence",
                 "linkedThreadRefreshes",
+                "localServerStop",
+                "mcpModeLimitHeader",
+                "modelCatalogRefresh",
+                "oneTimeSchedules",
+                "peerLinkPairingCodes",
+                "peerLinks",
                 "pullRequestChecks",
                 "pullRequests",
+                "scheduledTaskThreadModes",
                 "serverBrowser",
                 "shellOlderSettled",
                 "shellThreadFamilies",
-                "threadForceStop"
+                "threadForceStop",
+                "threadPullRequestWatch"
             ]
         );
     }

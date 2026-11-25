@@ -82,6 +82,7 @@ CI path filters and sync triggers are listed in [`docs/upkeep.md`](docs/upkeep.m
 | Release build       | `cargo build --release --workspace --bins --examples`                                                                           | The binaries below build                                                                             |
 | Recordings decode   | `cargo test --manifest-path fixtures/decode-check/Cargo.toml`                                                                   | Every recorded frame decodes with `conn_wire`                                                        |
 | Contract current    | `node crates/conn-contract/tools/gen-contract.mjs --check`                                                                      | Generated types match `packages/contracts`                                                           |
+| Gateway API current | `cargo run -p conn-gateway-api --features gen -- --check` | `conn-gateway-api` types and ops match its pinned `openapi.json` |
 | MCP tools current   | `node crates/conn-mcp/tools/gen-tools.mjs --check`                                                                              | Served tool definitions match `apps/server`                                                          |
 | GitHub GraphQL current | `node crates/conn-source-control/tools/gen-graphql.mjs --check` | GitHub's GraphQL operation texts match T3's generated modules, printed by `effect/graphql` |
 | Keybinding defaults | `node crates/conn-server/tools/gen-keybindings.mjs --check`                                                                     | The compiled-in defaults match `packages/shared`                                                     |
@@ -92,6 +93,9 @@ CI path filters and sync triggers are listed in [`docs/upkeep.md`](docs/upkeep.m
 | Text generation     | `node crates/conn-server/tools/textgen-diff.mjs target/release/examples/text_generation` | Text generator requests and answers, title prompts, contexts and titles equal T3's own code, on a loopback stub |
 | Registry            | `node crates/conn-source-control/tools/registry-diff.mjs target/release/examples/registry_cases` | GitHub and unknown-host fallback match T3's core registry with its GitHub definition, on every GitHub test literal and a fixed grid (8,901 cases) |
 | MCP parity          | `node crates/conn-mcp/tools/parity.mjs target/release/examples/replay_server`                                                   | `/mcp` answers as the T3 server's does, on the same calls                                            |
+| Peer links          | `node crates/conn-server/tools/peer-links-diff.mjs target/release/examples/replay_server` | Linking, forwarded tools, the link fence and link cards give T3 → T3's answers for Conn → Conn, Conn → T3 and T3 → Conn |
+| Devices current     | `node crates/conn-devices/tools/gen-devices.mjs --check` | The SSH bootstrap, the agent-device launcher, the tool pins and the hub proxy lists equal `apps/server`'s |
+| Device conformance  | `node crates/conn-devices/tools/conformance.mjs target/release/examples/replay_server` | `device.*`, the hub proxy and the four device tools answer as the T3 server's, and run the same ssh, npm and agent-device commands, on stand-ins |
 | Orbit idle check    | `node crates/conn-server/tools/idle-diff.mjs target/release/conn-server` | `/api/orchestration/shell` as Orbit's idle sleep and thread index read it equals the T3 server's in 14 states (no thread to a restart mid-turn) and 5 refusals; `/transcript` matches in status, refusals and decode, and is each server's own thread snapshot cut down, in 6 states and 4 refusals, and a run fork's transcript, thread snapshot and `subscribeThread` snapshot match T3's outline and fork marker; Codex on the conformance stub; differences listed in its `KNOWN` must stay exactly those |
 | Provider sign-in    | `node crates/conn-server/tools/provider-auth-diff.mjs target/release/conn-server` | every `provider.auth.*` reply for `claudeAgent`, `codex`, `grok` and an unknown id equals the T3 server's, and neither server runs a CLI for them (recording stubs) |
 | Codex instructions  | `node crates/conn-provider-codex/tools/gen-instructions.mjs --check`                                                             | T3's Codex `additionalContext` text is current, byte for byte                                         |
@@ -167,6 +171,7 @@ Release, which Orbit downloads.
 | ----------------------- | --------------------------------------------------------------------- |
 | `conn-wire`             | Effect RPC frame types and JSON codec                                 |
 | `conn-contract`         | Generated contract types (`tools/gen-contract.mjs`), method list, ids |
+| `conn-gateway-api`      | Typed Orbit Gateway operations generated from the Gateway's OpenAPI document; no HTTP client (see its README) |
 | `conn-engine`           | `Engine` trait; SQLite event store, projections, streams, turn runner |
 | `conn-provider`         | `Provider` and `Session` traits, `ProviderEvent`, `ProviderSet` (the instances, changed as the settings change) |
 | `conn-provider-claude`  | The Claude provider, through the official Agent SDK in the SDK host (see [Claude](#claude)) |
@@ -181,6 +186,7 @@ Release, which Orbit downloads.
 | `conn-server`           | Binary: HTTP, `/ws` session, pairing, method table, handlers          |
 | `conn-support`          | Helpers several crates share: time, hex, base64, SHA-256 and HMAC, atomic writes, v4 ids, the T3 secret store, URL text |
 | `conn-features`         | Scheduled tasks (webhook tasks too) and the Conn-only areas beside the engine; see its README |
+| `conn-devices`          | Device hosts (this machine, a Mac over SSH): `device.*`, the hub proxy rules, the device tools |
 
 Dependencies point one way: `conn-server` → `conn-engine` → `conn-provider` → `conn-contract`;
 `conn-provider-claude` → `conn-provider`; `conn-server` → `conn-wire`. `conn-wire` and
@@ -414,8 +420,9 @@ client send `omit*` shell flags and call methods we would then need.
   `event {sequence, event}` with a per-thread sequence. Clients always send
   `requestCompletionMarker` and `acceptDedupedBodies`, and send `acceptBoundedSnapshot`,
   `acceptDeferredWork`, `acceptCompactTurnItems`, `acceptCompactIds` whenever they have an HTTP
-  client, whatever the server advertises. All of these may be ignored: full bodies, plain ids,
-  no `idTable`, no history cursor. Without a history cursor the client never calls `/history`.
+  client, whatever the server advertises. `acceptBoundedSnapshot` is served: the newest window
+  and a `historyCursor`, which the client pages back through `/history`. The others may be
+  ignored: full bodies, plain ids, no `idTable`.
 - **Also emit `thread.updated` on the shell** as a turn runs, so the sidebar status moves.
 
 ### HTTP orchestration routes
@@ -426,15 +433,18 @@ client send `omit*` shell flags and call methods we would then need.
 is a plain 404, never `EnvironmentResourceNotFoundError`, which would make the client mark the
 thread deleted. `/transcript` is served as T3 serves it: the whole visible turn items, the
 same header and bearer, `thread_transcript_too_large` past `PROVIDER_SEND_TURN_MAX_FILE_BYTES`,
-and T3's structured `thread_not_found`. `/bounded` and `/history` are not routed; the client
-falls back to the socket.
+and T3's structured `thread_not_found`. `/history` is served for a bounded snapshot's cursor
+(T3's `invalid_history_cursor` and `thread_not_found`; no work folding). `/bounded` is not
+routed; the client falls back to the socket.
 
 ### Opt-in flags
 
 - **Thread stream:** the client sends `acceptBoundedSnapshot`, `acceptDeferredWork`,
   `acceptCompactTurnItems` and `acceptCompactIds` whenever it has an HTTP client and a history
   controller (`state/threads.ts`), whatever the server advertises. So it sends them to this
-  server too. The engine ignores them: full bodies, plain ids, never an `idTable`.
+  server too. The engine serves `acceptBoundedSnapshot`, `acceptDedupedBodies` and, outside a
+  bounded snapshot, `acceptCompactTurnItems`. It ignores the rest: no deferred work, plain ids,
+  never an `idTable`.
 - **Shell stream:** `omitIdleSubagents` and `omitOlderSettled` are sent only when the descriptor
   advertises `shellThreadFamilies` / `shellOlderSettled` (`state/shell.ts`). This server
   advertises both (`environment::capabilities`, the one place for capabilities), and the
@@ -533,8 +543,9 @@ What a real Conn session hits that this server does not do:
   the title model the thread keeps the client's seed title until the Claude provider
   implements `Provider::generate_text` (`docs/server-area.md`, "Text generators").
 - **`/mcp` serves 28 of 87 T3 tools** (`crates/conn-mcp/README.md`).
-- **Worktree launch:** the worktree is made before the thread exists; `prepared-run.*` stays
-  refused and no project setup script runs.
+- **Worktree launch and worktree delegates:** the worktree is made before the thread exists;
+  `prepared-run.*` stays refused. A launch runs no project setup script; a `delegate_task`
+  child with `isolation: worktree` starts it in its terminal without waiting for it.
 - **Providers:** Claude, Codex and Grok (Grok with `/compact`, background work and subagents; not subagents carried over to a later turn). Their gaps are in each crate's README. Claude and Codex instance settings apply (binary, home, launch arguments, environment, enabled, identity); Codex is probed as T3 probes it (its `app-server`, account, models, skills, config, usage) and reads `customModels`; not yet: Claude's `customModels` and `autoCompactWindow`, Codex's `shadowHomePath` and managed setup.
 - **Auth:** bearer and ticket only. No cookie sessions, DPoP or relay (`DROP-IN.md` §4).
 - **Desktop-local backend:** the `--bootstrap-fd` start works; the desktop itself still

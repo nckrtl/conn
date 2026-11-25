@@ -1,1 +1,7 @@
-t3_queue beforeRunId
+conn_project_create defaultModelSelection
+conn_project_update defaultModelSelection
+conn_project_update projectIcon
+conn_project_update faviconPath
+conn_project_update defaultThreadEnvMode
+conn_queue beforeRunId
+conn_environment_preferences_update defaultThreadEnvMode

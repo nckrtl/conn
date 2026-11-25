@@ -23,19 +23,19 @@ pinned pair.
 | Target | Methods to build | `/mcp` tools to build | HTTP routes to build | Rough size [estimate] |
 | --- | --- | --- | --- | --- |
 | (a) Orbit container only | **0** of 67 needed (all served); 1 useful method remains | **0** needed or useful | **0** needed; 3 useful routes remain | Profile remainder not re-estimated; Orbit additions about 2 to 4 k (section 4) |
-| (b) Container and host, what the client really uses | **15** needed (51 with the useful ones the rip-out list keeps) | **9** needed (17 with the useful ones) | **0** needed (11 with the useful ones) | Remaining work not re-estimated |
-| (c) Full parity with the T3 server | **68**, including 1 unclassified method | **17** | **38** | Remaining work not re-estimated |
+| (b) Container and host, what the client really uses | **1** needed (37 with the useful ones the rip-out list keeps) | **1** needed (9 with the useful ones) | **0** needed (8 with the useful ones) | Remaining work not re-estimated |
+| (c) Full parity with the T3 server | **54**, including 1 unclassified method | **9** | **35** | Remaining work not re-estimated |
 
 The dated size basis is about 140 k lines of Rust [measured on 2026-11-14, `wc -l` over
-`crates/*/src`]. Current coverage is 169 of 237 methods, 70 of 87 tools and 19 of 57 HTTP
-contract routes, plus seven endpoints outside that HTTP contract. The original size
+`crates/*/src`]. Current coverage is 185 of 237 methods, 79 of 87 tools and 22 of 57 HTTP
+contract routes, plus eight endpoints outside that HTTP contract. The original size
 estimates are not estimates of the remaining work. Section 2 gives the current gaps;
 section 3 keeps the dated binary measurements.
 
 Five points carry the rest of the document:
 
 1. **A container is already served.** Every method a container needs is served, and since
-   2026-11-14 every `/mcp` tool too: `t3_background_wait`, which our Claude instructions tell
+   2026-11-14 every `/mcp` tool too: `conn_background_wait`, which our Claude instructions tell
    the agent to call, is served as T3 serves it. A Stop during a Claude cold start now ends the
    run at once, as in T3 (it waited for the boot, up to about 6.5 minutes).
    Orbit's task-turn path also uses four CLI items; they are built (section 1b).
@@ -55,7 +55,7 @@ Five points carry the rest of the document:
    Gateway signs, which ends pairing, hourly renewal and vault round trips; start-up from
    files Orbit writes, which ends the `t3` CLI calls in `clone-t3`; and Swamp on `/mcp`
    with a service credential, which ends the CLI and WebSocket workaround for task turns.
-4. **Maintenance.** The host target (b) still needs 15 methods and 9 tools, and no HTTP
+4. **Maintenance.** The host target (b) still needs 11 methods and 5 tools, and no HTTP
    route; their size has not been re-estimated. After that there is one server kind, and
    the contract is ours to change for Orbit. Orbit's workarounds go away. The upkeep becomes merges by
    choice plus a watch on the provider layer: 783 upstream commits and 58 k changed lines in
@@ -199,9 +199,9 @@ periodic checks (the socket revocation check, the desktop parent watch) caught u
 thousands of ticks at once; client activity leases and `/mcp` credential liveness counted only
 monotonic time. A turn that was running stays running at the thaw; whether it ends is the
 CLI's choice, as in T3. In a container on Beast a held turn stayed `running` through 10
-minutes and completed, a scheduled task due during a pause ran at the thaw, and a client
-socket open across a pause longer than 60 s was closed at the thaw (the client reconnects)
-[measured, `docs/status.md` "Proof on Beast"].
+minutes and completed, a scheduled task due during a pause ran at the thaw
+[measured, `docs/status.md` "Proof on Beast"]. A client socket open across a pause stays open:
+the server has no idle timer, as in T3 [test, `a_suspended_client_stays_connected`].
 
 **The checks touch nothing of the host** [check, `R/tools/canary.mjs`, the last check of
 `tools/check.sh`]: no read of a provider, `gh` or `git` setting or credential, no real provider
@@ -249,7 +249,7 @@ and size measurements retain the dated research framing. The current contract al
 `server.getSettings`, which is unserved and unclassified here; only the full-parity total
 includes it. Section 11 proposes what to hide or remove, independently of what is served.
 
-### Methods (237; 169 served) [measured counts]
+### Methods (237; 173 served) [measured counts]
 
 | Area | Methods | Served | C: N / U / X / O | H: N / U / X / O |
 | --- | --- | --- | --- | --- |
@@ -259,14 +259,14 @@ includes it. Section 11 proposes what to hide or remove, independently of what i
 | attachments | 2 | 2 | 2 / 0 / 0 / 0 | 2 / 0 / 0 / 0 |
 | cloud | 2 | 0 | 0 / 0 / 2 / 0 | 0 / 0 / 2 / 0 |
 | credentials | 2 | 0 | 0 / 0 / 2 / 0 | 0 / 2 / 0 / 0 |
-| device | 10 | 0 | 0 / 0 / 10 / 0 | 10 / 0 / 0 / 0 |
+| device | 10 | 10 | 0 / 0 / 10 / 0 | 10 / 0 / 0 / 0 |
 | filesystem | 2 | 2 | 2 / 0 / 0 / 0 | 2 / 0 / 0 / 0 |
 | git | 3 | 3 | 0 / 1 / 0 / 2 | 3 / 0 / 0 / 0 |
 | guestShare | 1 | 0 | 0 / 0 / 1 / 0 | 0 / 0 / 1 / 0 |
 | mcpApps | 4 | 4 | 0 / 4 / 0 / 0 | 0 / 4 / 0 / 0 |
 | orchestration | 23 | 23 | 18 / 5 / 0 / 0 | 21 / 2 / 0 / 0 |
 | panels | 2 | 2 | 0 / 2 / 0 / 0 | 0 / 2 / 0 / 0 |
-| peerLinks | 4 | 0 | 0 / 0 / 4 / 0 | 4 / 0 / 0 / 0 |
+| peerLinks | 4 | 4 | 0 / 0 / 4 / 0 | 4 / 0 / 0 / 0 |
 | preview | 12 | 8 | 0 / 0 / 12 / 0 | 8 / 1 / 3 / 0 |
 | projectClone | 3 | 0 | 0 / 0 / 3 / 0 | 0 / 3 / 0 / 0 |
 | projects | 10 | 10 | 10 / 0 / 0 / 0 | 10 / 0 / 0 / 0 |
@@ -283,43 +283,39 @@ includes it. Section 11 proposes what to hide or remove, independently of what i
 | testLogins | 5 | 5 | 0 / 0 / 5 / 0 | 0 / 5 / 0 / 0 |
 | vcs | 9 | 9 | 9 / 0 / 0 / 0 | 9 / 0 / 0 / 0 |
 | worktreeSetup | 1 | 1 | 1 / 0 / 0 / 0 | 1 / 0 / 0 / 0 |
-| **Total** | **237** | **169** | **67 / 43 / 96 / 30** | **152 / 68 / 16 / 0** |
+| **Total** | **237** | **183** | **67 / 43 / 96 / 30** | **152 / 68 / 16 / 0** |
 
 The C/H columns classify 236 methods; `server.getSettings` adds one unclassified method
 in the `server` area.
 
 - **Container:** all 67 needed methods are served. One useful method is not:
   `provider.consumeResetCredit`.
-- **Host:** 152 are needed, and 15 of them are not served: `device.*` (10),
-  `peerLinks.*` (4), and `preview.stopLocalServer`. The last stops only a server that
-  the port scan (`subscribeDiscoveredLocalServers`, useful, not served) listed; it comes with
-  that scan.
+- **Host:** all 152 needed methods are served; `preview.stopLocalServer` and its port scan
+  (`subscribeDiscoveredLocalServers`) since 2026-11-19. `device.*` and `peerLinks.*` are served since 2026-11-19.
 - **Not needed anywhere: 16 methods.** These are T3 Connect (`cloud.*`, `guestShare`), the
   ACP registry's download and install (9; Nick ruled out installs), the Electron tab relay
   (`preview.desktop*`, 3) and `server.commitDesktopUpdate`.
 
-### `/mcp` tools (87; 70 served) [measured counts]
+### `/mcp` tools (87; 79 served) [measured counts]
 
 | | N | U | X | O |
 | --- | --- | --- | --- | --- |
-| Container | 21 (all served) | 44 (all served) | 14 (2 served) | 8 (3 served) |
-| Host | 67 (58 served) | 20 (12 served) | 0 | 0 |
+| Container | 21 (all served) | 44 (all served) | 14 (6 served) | 8 (3 served) |
+| Host | 67 (all served) | 20 (12 served) | 0 | 0 |
 
 - Every needed or useful container tool is served.
-- On a host, 9 needed tools are missing: `device_*` (4), linked machines
-  (`t3_environment_link/links/unlink/preferences_update`, 4) and `write_pull_request_guides`
-  (no review guide generator yet). PR watching and guide reads are served since 2026-11-19.
+- On a host, every needed tool is served since `write_pull_request_guides` (2026-11-19). Device tools, linked machines and PR watching are served since 2026-11-19.
 
-### HTTP routes (57 contract routes; 19 served) [measured counts]
+### HTTP routes (57 contract routes; 22 served) [measured counts]
 
 | | N | U | X |
 | --- | --- | --- | --- |
-| Container | 11 (all served) | 10 (7 served) | 36 (1 served) |
-| Host | 14 (all served) | 16 (5 served) | 27 (none served) |
+| Container | 11 (all served) | 10 (7 served) | 36 (4 served) |
+| Host | 14 (all served) | 16 (8 served) | 27 (none served) |
 
 - Every needed route is served. `threads/:id/transcript` (context import in the composer),
   `POST /api/pull-requests/diff` and all four webhook routes are served.
-- Appendix C also lists seven served endpoints outside `EnvironmentHttpApi`; these do not
+- Appendix C also lists eight served endpoints outside `EnvironmentHttpApi`; these do not
   add gaps or C/H verdicts to the profile.
 - Not needed on either: the 16 voice routes, the 10 T3 Connect routes (with
   `connect-devices`) and `browser-session`.
@@ -345,19 +341,16 @@ in the `server` area.
 | --- | --- | --- | --- |
 | (a) container: needed, not served | 0 | 0 | 0 |
 | (a) container: needed or useful, not served | 1 | 0 | 3 |
-| (b) container or host: needed, not served | 15 | 9 | 0 |
-| (b) container or host: needed or useful, minus what section 11 hides or removes | 51 | 17 | 11 |
-| (c) full parity: not served | 68 | 17 | 38 |
+| (b) container or host: needed, not served | 11 | 5 | 0 |
+| (b) container or host: needed or useful, minus what section 11 hides or removes | 47 | 13 | 8 |
+| (c) full parity: not served | 64 | 13 | 35 |
 
 Remaining work by area. Estimates for unchanged gaps retain the original research basis;
 implemented areas have no remaining-size estimate.
 
 | Area | Remaining items in (b) | Estimate |
 | --- | --- | --- |
-| Review guide writing | `write_pull_request_guides` (and `pullRequests.generateReviewGuide` for real) | Not estimated: T3's guide generator, a temporary checkout and the guide normalization |
-| Agent browser and previews | `preview.stopLocalServer` | Not re-estimated; browser tools and eight preview methods are registered |
-| Devices | 10 methods, 4 tools | 5 to 7 k (T3's `device/` was about 8,400 lines) |
-| Peer links, linked environments, MCP OAuth | 4 methods, 4 tools, 8 useful routes | 3 to 5 k |
+| MCP OAuth for outside agents | 5 useful routes (the browser approval page and the `.well-known` metadata); peer links and linked environments are served (`docs/status.md`) | Not re-estimated |
 | Provider sign-in | 6 methods | 1.5 to 2.5 k |
 | The rest | useful features in appendices A to C | Not re-estimated |
 
@@ -490,12 +483,12 @@ fork makes them possible: the contract outside the provider protocols becomes ou
 
 | Need | Today | Proposal |
 | --- | --- | --- |
-| Answer a pending question | Interrupt the run, then send the answer as a new turn (`development-containers.md:1605`) | `t3_pending_request` with `action: respond`, served now on `/mcp` |
-| Interrupt | `t3_copy_rpc.mjs`: a one-minute session, a ticket, `/ws`, `run.interrupt` | `t3_thread_interrupt`, served now |
-| Send and wait | `t3 thread send --wait --json` | `t3_thread_send` plus `t3_thread_wait`, served now |
+| Answer a pending question | Interrupt the run, then send the answer as a new turn (`development-containers.md:1605`) | `conn_pending_request` with `action: respond`, served now on `/mcp` |
+| Interrupt | `t3_copy_rpc.mjs`: a one-minute session, a ticket, `/ws`, `run.interrupt` | `conn_thread_interrupt`, served now |
+| Send and wait | `t3 thread send --wait --json` | `conn_thread_send` plus `conn_thread_wait`, served now |
 | List providers and models | `cat settings.json` and `model-manifest.json` | `orchestrator_capabilities`, served now |
-| Effort per turn | Five provider instances with `CLAUDE_CODE_EFFORT_LEVEL`, because "Claude Code takes `CLAUDE_CODE_EFFORT_LEVEL` over the `--effort` that T3 passes" (`:1623`) | Effort as a model option on the turn. The client already sends options with `thread.model-selection.set`. Whether `t3_thread_send` or `t3_thread_configure` takes the effort is **to check**. The router env file must not set the variable. |
-| Token use per turn | "T3's CLI reports no token use" (`TaskCopyTurnProjection.php:20`) | Usage is in the thread projection; expose it in `t3_thread_read` |
+| Effort per turn | Five provider instances with `CLAUDE_CODE_EFFORT_LEVEL`, because "Claude Code takes `CLAUDE_CODE_EFFORT_LEVEL` over the `--effort` that T3 passes" (`:1623`) | Effort as a model option on the turn. The client already sends options with `thread.model-selection.set`. Whether `conn_thread_send` or `conn_thread_configure` takes the effort is **to check**. The router env file must not set the variable. |
+| Token use per turn | "T3's CLI reports no token use" (`TaskCopyTurnProjection.php:20`) | Usage is in the thread projection; expose it in `conn_thread_read` |
 | A service credential | Sessions from the CLI | A 4b token with `sub: swamp` and `orchestration:operate` |
 
 The Conn Server already accepts an environment session on `/mcp`. So the only server work
@@ -515,7 +508,9 @@ is effort per turn, token use, and the 4b verifier. **Orbit must change:** repla
 
 ### 4e. The instance descriptor, live (the "Orbit row")
 
-- **Today:** the label comes from `/etc/machine-info`, read once at start [brief]. The
+- **Today:** the label (`--label`, `HOSTNAME`, `/etc/hostname`, the host name) and
+  `orbitInstance` are re-read live: `SIGHUP`, an inotify watch on `/etc/orbit/` and a 2 s
+  poll (`docs/orbit-instance-reload.md`). The
   fields of `/etc/orbit/instance` are `ORBIT_INSTANCE_ID`, `ORBIT_INSTANCE`, `ORBIT_PROJECT`,
   `ORBIT_PROJECT_ID`, `ORBIT_PROJECT_NAME`, `ORBIT_NODE`, `ORBIT_URL`, and optionally
   `ORBIT_DEV_PORTS` and `ORBIT_DEV_PORTS_TAKEN` [code, `InstanceContainer.php:452-457`].
@@ -539,7 +534,9 @@ is effort per turn, token use, and the 4b verifier. **Orbit must change:** repla
     not call GitHub from a container.
 - **Client change:** the thread PR panel takes its data from the Gateway when the
   environment is an Orbit container.
-- **Server change:** none beyond the link tools.
+- **Server change:** none beyond the link tools. The link sweep (since 2026-11-19) reads
+  GitHub only with a credential (`GH_TOKEN` or a `gh` login). Without one, a link has no
+  snapshot and is tried again every 15 minutes, as in T3.
 
 ---
 
@@ -650,8 +647,8 @@ remain separate from registration):
 | --- | --- | --- |
 | Git actions control (commit, push, PR) | `git.runStackedAction` | Registered; commit is served, push and PR creation return a typed error |
 | Thread PR panel, when a PR is linked | `pullRequests.*` | All 35 methods are registered; disabled guide generation and unavailable actions return typed errors |
-| Provider sign-in and install in Settings | `provider.auth.*`, `provider.install.*` | Sign-in is served as in T3: Claude, Codex and Grok are CLI-owned (`setup.canAuthenticate: false`), so the UI shows no sign-in and every `provider.auth.*` call answers T3's `ProviderSetupError`. Install actions fail; the UI follows `providers[].auth.status` |
-| Device panel | `device.*` | The stream is served; the actions fail |
+| Provider sign-in and install in Settings | `provider.auth.*`, `provider.install.*` | Sign-in is served as in T3: Claude, Codex and Grok are CLI-owned (`setup.canAuthenticate: false`), so the UI shows no sign-in and every `provider.auth.*` call answers T3's `ProviderSetupError`. Install and update are not served, by decision (Nick, 2026-11-20): Orbit installs and updates every provider CLI, every entry says `setup.canInstall: false`, and `provider.install.*` and `server.updateProvider` answer "not supported" (status.md) |
+| Device panel | `device.*` | Served on this machine and on SSH hosts; Expo and Simlock hosts are not offered |
 | Test logins and credentials | `testLogins.*`, `credentials.*` | Test-login methods are served; the two site-credential methods remain unserved |
 | Secret request card | `secrets.answerRequest` | Served |
 | MCP App frames, agent panels | `mcpApps.*`, `panels.*` | Registered; panel browser URL/tab automation returns `capability_denied` |
@@ -714,12 +711,14 @@ Every stage is built and proven in isolation first:
 | Stage | Proven before it (checkable) | State that moves | How it ships and starts | In isolation, in practice | First live step | Way back |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0. The isolated client copy | The copy builds with its own identity. The 22 recorder scenarios pass against the Conn Server in the copy. No file in `nckrtl/conn` changes. | None | A separate repository or fork branch of the client, never merged into Conn | Its own bundle id, URL scheme and data folder, so it never reads Conn's saved environments | Nick installs the copy beside Conn | Delete the copy |
-| 1. Orbit containers | (a) is complete: `t3_background_wait` (done 2026-11-14); the four CLI items (built 2026-11-14) or Swamp on `/mcp`. Orbit's container flow passes in a scratch container on Linux. The 4b verifier, if chosen. The section 7 flags hide what a container does not serve. A week of real use shows no "not supported" on the paths people take. | New containers start fresh. An existing container keeps settings, keybindings, its environment id, attachments and annotations (same files). Threads, pairings and scheduled tasks need the converter (below). | The musl binary in the agent bundle; `bin/t3` points at it (`DROP-IN.md` §6a) | A scratch Instance only, opened from the isolated client copy | One new scratch Instance with the Conn Server, with Nick's word | Point `bin/t3` back at the T3 tarball, then `try-restart` |
+| 1. Orbit containers | (a) is complete: `conn_background_wait` (done 2026-11-14); the four CLI items (built 2026-11-14) or Swamp on `/mcp`. Orbit's container flow passes in a scratch container on Linux. The 4b verifier, if chosen. The section 7 flags hide what a container does not serve. A week of real use shows no "not supported" on the paths people take. | New containers start fresh. An existing container keeps settings, keybindings, its environment id, attachments and annotations (same files). Threads, pairings and scheduled tasks need the converter (below). | The musl binary in the agent bundle; `bin/t3` points at it (`DROP-IN.md` §6a) | A scratch Instance only, opened from the isolated client copy | One new scratch Instance with the Conn Server, with Nick's word | Point `bin/t3` back at the T3 tarball, then `try-restart` |
 | 2. The Mac mini | (b) for what Nick uses there: `peerLinks`, linked environments, scheduled tasks, PR panels. A supervisor for `server.restart`. The converter, proven on a **copy** of a T3 home that Nick makes. | Threads and projects: one import event per thread from T3's projection rows, keeping ids. Scheduled tasks: from the `scheduled_tasks` table into JSON. Settings secrets: from `secrets/*.bin` back into `settings.json`. Sessions **cannot** move (T3 signs tokens; we store hashes), so devices pair again. | A launchd service running `conn-server serve`, with its own `--base-dir` and port | A second server with its own state folder and port, beside the T3 server; the T3 service is untouched | The isolated client connects to it; Nick runs one orchestrator thread there | Stop the Conn Server service; the T3 server never stopped |
 | 3. The Mac with the desktop app | (b) for the desktop: previews and the agent browser, devices, PR panels, provider sign-in. A native spawn path (no `ELECTRON_RUN_AS_NODE`, `--bootstrap-fd 3`). A replacement for fds 4 to 7 (updates, telemetry, the in-app browser), or an explicit drop. Signed binaries. | As stage 2, from a copy of the Mac's T3 home | The binary in the isolated desktop copy's bundle. The desktop updates the server by updating itself. The SDK host could run on Electron's own Node (`ELECTRON_RUN_AS_NODE`) instead of a 152 MB single executable [estimate]. | The isolated desktop copy, with its own data folder and home; Conn's desktop keeps its T3 server | Nick uses the isolated desktop for one project | Use the normal Conn app |
 | 4. The T3 server leaves Conn | Stages 1 to 3 have run for an agreed time. The loose fork's merge gate (section 10) works. | None new | Conn's desktop and mobile take the client copy's changes | Only now does `nckrtl/conn` change | A Conn release with the Conn Server | The previous Conn release, which still bundles the T3 server |
 
-**The converter.** None exists [code: a search for `statev2` in `R/crates` finds nothing].
+**The converter.** Built for threads and projects (2026-11-21): `conn-engine/src/t3_import.rs`,
+run by `serve` at the first start in a T3 state folder (`docs/status.md`, "T3 state import").
+Scheduled tasks, peer links and sessions are not converted.
 
 - T3 keeps `userdata/statev2.sqlite`: events, about 20 projection tables, auth, scheduled
   tasks, peer links, PR review data [code, `M/apps/server/src/persistence/Migrations`].
@@ -938,7 +937,7 @@ Surfaces Nick's container and host use need (the start list for a later client p
 - **Conn's own edits inside upstream files.** The checkout has no `upstream` remote, so I
   could not measure how far Conn has already moved from T3 Code.
 - **The client's churn per area.** The measurement did not finish in time.
-- **Whether `t3_thread_send` or `t3_thread_configure` carries effort.**
+- **Whether `conn_thread_send` or `conn_thread_configure` carries effort.**
 - **The brief's timing facts** (6.9 s, 1 s per call, 6 s for 48 servers): not in Orbit's
   code or docs.
 
@@ -968,16 +967,16 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `cloud.installRelayClient` | no | X | X | L | T3 Connect relay (Clerk); Orbit gives WireGuard |
 | `credentials.fillForSite` | no | X | U | M | autofill test logins into preview tabs |
 | `credentials.listForSite` | no | X | U | M | autofill test logins into preview tabs |
-| `device.action` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.close` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.configure` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.detail` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.easAccount` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.list` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.open` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.shutdown` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.simlockIdentity` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
-| `device.testHost` | no | X | N | L | iOS simulators on the Mac (device/ is about 8,400 lines in T3) |
+| `device.action` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.close` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.configure` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.detail` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.easAccount` | yes | X | N |  | typed error: no Expo or Simlock hosts |
+| `device.list` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.open` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.shutdown` | yes | X | N |  | simulators on this machine or an SSH host |
+| `device.simlockIdentity` | yes | X | N |  | typed error: no Expo or Simlock hosts |
+| `device.testHost` | yes | X | N |  | simulators on this machine or an SSH host |
 | `filesystem.browse` | yes | N | N |  | project and file pickers |
 | `filesystem.getMetadata` | yes | N | N |  | project and file pickers |
 | `git.preparePullRequestThread` | yes | O | N |  | pull request checkout into a thread |
@@ -1013,10 +1012,10 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `orchestration.subscribeThread` | yes | N | N |  | thread view, composer, diffs |
 | `panels.requests` | yes | U | U |  | agent opens a panel in the client |
 | `panels.respond` | yes | U | U |  | agent opens a panel in the client |
-| `peerLinks.answerRequest` | no | X | N | L | threads on other machines (mini reaches every machine) |
-| `peerLinks.link` | no | X | N | L | threads on other machines (mini reaches every machine) |
-| `peerLinks.list` | no | X | N | L | threads on other machines (mini reaches every machine) |
-| `peerLinks.unlink` | no | X | N | L | threads on other machines (mini reaches every machine) |
+| `peerLinks.answerRequest` | yes | X | N |  | threads on other machines (mini reaches every machine) |
+| `peerLinks.link` | yes | X | N |  | threads on other machines (mini reaches every machine) |
+| `peerLinks.list` | yes | X | N |  | threads on other machines (mini reaches every machine) |
+| `peerLinks.unlink` | yes | X | N |  | threads on other machines (mini reaches every machine) |
 | `preview.adjust` | yes | X | N |  | agent browser and preview tabs; container previews go through the app Route |
 | `preview.clearProfile` | yes | X | N |  | agent browser and preview tabs; container previews go through the app Route |
 | `preview.close` | yes | X | N |  | agent browser and preview tabs; container previews go through the app Route |
@@ -1028,7 +1027,7 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `preview.reportProfiles` | yes | X | U |  |  |
 | `preview.reportStatus` | yes | X | N |  | agent browser and preview tabs; container previews go through the app Route |
 | `preview.resize` | yes | X | N |  | agent browser and preview tabs; container previews go through the app Route |
-| `preview.stopLocalServer` | no | X | N | L | stops a server that `subscribeDiscoveredLocalServers` found; unreachable without that port scan, which stays unregistered |
+| `preview.stopLocalServer` | yes | X | N | L | stops a listed, owned server (`local_servers`) |
 | `projectClone.cancel` | no | X | U | M | clone from the client; Orbit clones containers |
 | `projectClone.retry` | no | X | U | M | clone from the client; Orbit clones containers |
 | `projectClone.start` | no | X | U | M | clone from the client; Orbit clones containers |
@@ -1053,10 +1052,10 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `provider.chatgpt.import-profile` | no | X | U | M | ChatGPT profile handoff for Codex |
 | `provider.chatgpt.reconnect-profile` | no | X | U | M | ChatGPT profile handoff for Codex |
 | `provider.consumeResetCredit` | no | X | U | S |  |
-| `provider.install.cancel` | no | X | U | M | install a provider CLI; Orbit bundles agents |
-| `provider.install.remove` | no | X | U | M | install a provider CLI; Orbit bundles agents |
-| `provider.install.start` | no | X | U | M | install a provider CLI; Orbit bundles agents |
-| `provider.install.subscribe` | yes | U | U |  |  |
+| `provider.install.cancel` | no | X | X | — | not served, by decision: Orbit installs and updates provider CLIs (Nick, 2026-11-20) |
+| `provider.install.remove` | no | X | X | — | not served, by decision: Orbit installs and updates provider CLIs (Nick, 2026-11-20) |
+| `provider.install.start` | no | X | X | — | not served, by decision: Orbit installs and updates provider CLIs (Nick, 2026-11-20) |
+| `provider.install.subscribe` | no | X | X | — | not served, by decision: Orbit installs and updates provider CLIs (Nick, 2026-11-20) |
 | `provider.uploadFeedback` | no | U | U | S |  |
 | `pullRequests.activity` | yes | O | N |  | PR panel: list, review, comment, merge |
 | `pullRequests.changeBreakdown` | yes | O | N |  | PR panel: list, review, comment, merge |
@@ -1066,7 +1065,7 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `pullRequests.diffFileContents` | yes | O | N |  | PR panel: list, review, comment, merge |
 | `pullRequests.filesViewed` | yes | O | N |  | PR panel: list, review, comment, merge |
 | `pullRequests.filterOptions` | yes | O | N |  | PR panel: list, review, comment, merge |
-| `pullRequests.generateReviewGuide` | yes | X | U |  | registered; returns a typed error when guides are off |
+| `pullRequests.generateReviewGuide` | yes | X | U |  | writes a guide in a temporary checkout (`guide_writer.rs`) |
 | `pullRequests.invalidate` | yes | U | N |  | read-only PR view; in a container the data would come from the Gateway |
 | `pullRequests.labelCandidates` | yes | O | N |  | PR panel: list, review, comment, merge |
 | `pullRequests.linkedThreads` | yes | U | N |  | read-only PR view; in a container the data would come from the Gateway |
@@ -1143,7 +1142,7 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `server.setAcpRegistryProvider` | no | X | X | L | ACP registry download and install: Nick ruled it out |
 | `server.signalProcess` | yes | U | U |  | diagnostics |
 | `server.uninstallAcpRegistryManagedBinary` | no | X | U | S | ACP registry, offline part |
-| `server.updateProvider` | no | X | U | M | update a provider CLI |
+| `server.updateProvider` | no | X | X | — | not served, by decision: Orbit installs and updates provider CLIs (Nick, 2026-11-20) |
 | `server.updateServer` | no | X | U | M | self-update; a native app ships the binary |
 | `server.updateServerWithProgress` | no | X | U | M | self-update; a native app ships the binary |
 | `server.updateSettings` | yes | N | N |  | connection and settings |
@@ -1159,8 +1158,8 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `sourceControl.star` | yes | X | U |  | stars |
 | `sourceControl.starred` | yes | X | U |  | stars |
 | `subscribeAuthAccess` | yes | N | N |  | connection streams |
-| `subscribeDeviceState` | yes | U | N |  | device panel opens setup when this fails |
-| `subscribeDiscoveredLocalServers` | no | X | U | M | port scan for previews |
+| `subscribeDeviceState` | yes | U | N |  | device panel state; real state since 2026-11-19 |
+| `subscribeDiscoveredLocalServers` | yes | X | U | M | port scan for previews (`local_servers`) |
 | `subscribePreviewEvents` | yes | X | N |  | preview tabs |
 | `subscribeProjectClones` | yes | X | U |  |  |
 | `subscribeResourceTelemetry` | no | X | U | M |  |
@@ -1206,10 +1205,10 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `database_query` | yes | U | U |  | Conn database panel |
 | `delegate_task` | yes | N | N |  | core orchestration |
 | `delete_scheduled_task` | yes | U | N |  | scheduled tasks |
-| `device_close` | no | X | N | L | simulators |
-| `device_list` | no | X | N | L | simulators |
-| `device_open` | no | X | N | L | simulators |
-| `device_screenshot` | no | X | N | L | simulators |
+| `device_close` | yes | X | N |  | simulators |
+| `device_list` | yes | X | N |  | simulators |
+| `device_open` | yes | X | N |  | simulators |
+| `device_screenshot` | yes | X | N |  | simulators |
 | `fill_credential` | no | X | U | M | test logins |
 | `html_preview` | yes | U | N |  | charts; needs headless Chromium on the server |
 | `html_render` | yes | U | N |  | charts; needs headless Chromium on the server |
@@ -1241,42 +1240,42 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `save_test_login` | yes | X | U |  | test logins |
 | `schedule_task` | yes | U | N |  | scheduled tasks |
 | `send_to_user` | yes | N | N |  | core orchestration |
-| `t3_attachment_discard` | yes | U | N |  | attachments between threads |
-| `t3_attachment_prepare_upload` | yes | U | N |  | attachments between threads |
-| `t3_background_wait` | yes | N | N |  | agents wait on background commands; named in T3's instructions |
-| `t3_environment_link` | no | X | N | L | linked machines |
-| `t3_environment_links` | no | X | N | L | linked machines |
-| `t3_environment_preferences_update` | no | X | N | L | linked machines |
-| `t3_environment_read` | yes | N | N |  | core orchestration |
-| `t3_environment_unlink` | no | X | N | L | linked machines |
-| `t3_pending_request` | yes | N | N |  | core orchestration |
-| `t3_preview_close` | yes | U | N |  | agent browser; needs headless Chromium on the server |
-| `t3_preview_list` | yes | U | N |  | agent browser; needs headless Chromium on the server |
-| `t3_project_clone` | no | O | U | M | Orbit owns projects in a container |
-| `t3_project_create` | no | O | U | M | Orbit owns projects in a container |
-| `t3_project_delete` | no | O | U | M | Orbit owns projects in a container |
-| `t3_project_list` | yes | N | N |  | core orchestration |
-| `t3_project_read` | yes | N | N |  | core orchestration |
-| `t3_project_update` | no | O | U | M | Orbit owns projects in a container |
-| `t3_queue` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_theme_read` | no | X | U | S | client theme |
-| `t3_theme_set` | no | X | U | S | client theme |
-| `t3_thread_configure` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_interrupt` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_launch` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_list` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_organize` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_read` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_search` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_send` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_send_attachments` | yes | U | N |  | attachments between threads |
-| `t3_thread_transfer` | no | X | U | L | move a thread between machines |
-| `t3_thread_update` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_thread_wait` | yes | N | N |  | core orchestration; Swamp's service calls |
-| `t3_workflow_stop` | yes | U | U |  |  |
-| `t3_worktree_handoff` | yes | U | N |  | worktree hand-off |
-| `t3_worktree_list` | yes | U | N |  | worktree hand-off |
-| `t3_worktree_status` | yes | U | N |  | worktree hand-off |
+| `conn_attachment_discard` | yes | U | N |  | attachments between threads |
+| `conn_attachment_prepare_upload` | yes | U | N |  | attachments between threads |
+| `conn_background_wait` | yes | N | N |  | agents wait on background commands; named in T3's instructions |
+| `conn_environment_link` | yes | X | N |  | linked machines |
+| `conn_environment_links` | yes | X | N |  | linked machines |
+| `conn_environment_preferences_update` | yes | X | N |  | linked machines |
+| `conn_environment_read` | yes | N | N |  | core orchestration |
+| `conn_environment_unlink` | yes | X | N |  | linked machines |
+| `conn_pending_request` | yes | N | N |  | core orchestration |
+| `conn_preview_close` | yes | U | N |  | agent browser; needs headless Chromium on the server |
+| `conn_preview_list` | yes | U | N |  | agent browser; needs headless Chromium on the server |
+| `conn_project_clone` | no | O | U | M | Orbit owns projects in a container |
+| `conn_project_create` | no | O | U | M | Orbit owns projects in a container |
+| `conn_project_delete` | no | O | U | M | Orbit owns projects in a container |
+| `conn_project_list` | yes | N | N |  | core orchestration |
+| `conn_project_read` | yes | N | N |  | core orchestration |
+| `conn_project_update` | no | O | U | M | Orbit owns projects in a container |
+| `conn_queue` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_theme_read` | no | X | U | S | client theme |
+| `conn_theme_set` | no | X | U | S | client theme |
+| `conn_thread_configure` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_interrupt` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_launch` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_list` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_organize` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_read` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_search` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_send` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_send_attachments` | yes | U | N |  | attachments between threads |
+| `conn_thread_transfer` | no | X | U | L | move a thread between machines |
+| `conn_thread_update` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_thread_wait` | yes | N | N |  | core orchestration; Swamp's service calls |
+| `conn_workflow_stop` | yes | U | U |  |  |
+| `conn_worktree_handoff` | yes | U | N |  | worktree hand-off |
+| `conn_worktree_list` | yes | U | N |  | worktree hand-off |
+| `conn_worktree_status` | yes | U | N |  | worktree hand-off |
 | `task_cancel` | yes | N | N |  | core orchestration |
 | `task_status` | yes | N | N |  | core orchestration |
 | `tool_search` | yes | U | U |  |  |
@@ -1284,12 +1283,12 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `unlink_pull_requests` | yes | U | N |  | PR links on a thread; Swamp could link the PR it opens |
 | `unwatch_pull_request` | yes | O | N |  | PR watching; hidden from delegated children |
 | `watch_pull_request` | yes | O | N |  | PR watching: a 2-minute sweep wakes the thread; hidden from delegated children |
-| `write_pull_request_guides` | no | O | N | M | needs T3's review guide generator (a temporary checkout and a model run); unregistered until then |
+| `write_pull_request_guides` | yes | O | N | M | served since 2026-11-19 |
 
 
 ## Appendix C. Every HTTP route
 
-The first table covers all 57 `EnvironmentHttpApi` routes. The seven additional served
+The first table covers all 57 `EnvironmentHttpApi` routes. The eight additional served
 endpoints below it are outside that contract and the dated C/H classification. GET routes
 also accept HEAD (explicitly for webhooks); the router handles OPTIONS for CORS. Neither is
 counted as a separate profile row.
@@ -1349,9 +1348,9 @@ counted as a separate profile row.
 | `POST /api/voice/transcribe` | no | X | X | L | server-side speech models; iOS transcribes on the device |
 | `POST /oauth/mcp/approval` | no | X | U | M | MCP OAuth for outside MCP clients and peer links |
 | `GET /oauth/mcp/authorize` | no | X | U | M | MCP OAuth for outside MCP clients and peer links |
-| `POST /oauth/mcp/decision` | no | X | U | M | MCP OAuth for outside MCP clients and peer links |
-| `POST /oauth/mcp/register` | no | X | U | M | MCP OAuth for outside MCP clients and peer links |
-| `POST /oauth/mcp/token` | no | X | U | M | MCP OAuth for outside MCP clients and peer links |
+| `POST /oauth/mcp/decision` | yes | X | U |  | MCP OAuth for peer links (pairing-code decision only) |
+| `POST /oauth/mcp/register` | yes | X | U |  | MCP OAuth for peer links (pairing-code decision only) |
+| `POST /oauth/mcp/token` | yes | X | U |  | MCP OAuth for peer links (pairing-code decision only) |
 | `POST /oauth/token` | yes | N | N |  | connect and sign in; Orbit reads session and revokes clients |
 
 ### Additional served endpoints
@@ -1363,5 +1362,6 @@ counted as a separate profile row.
 | `GET /api/assets/:token/*name` | yes | signed assets, including HTML renders |
 | `POST /api/attachments/upload/:token` | yes | attachment upload |
 | `GET /api/preview-stream/ws` | yes | authenticated browser stream |
+| `* /api/device-hub/*` | yes | Device panel streams, input and screenshots, proxied to the host's hub |
 | `POST /mcp` | yes | MCP requests |
 | `DELETE /mcp` | yes | MCP session close |

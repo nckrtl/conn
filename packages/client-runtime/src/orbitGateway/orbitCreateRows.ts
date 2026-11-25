@@ -17,7 +17,7 @@ export type OrbitCreateRowStatus = "pending" | "running" | "done" | "failed";
 export const ORBIT_CREATE_ROW_LABELS: Readonly<Record<OrbitCreateRowId, string>> = {
   container: "Copy the container",
   address: "Publish the address",
-  t3: "Start the T3 server",
+  t3: "Start the Conn Server",
   register: "Register with Orbit",
 };
 
@@ -44,6 +44,16 @@ const STEP_ROWS: Readonly<Record<string, OrbitCreateRowId>> = {
   "clone-input": "container",
   "clone-container": "container",
   "clone-club-key": "container",
+  // The Gateway engine's create.
+  clone: "container",
+  fetch: "container",
+  copy_volume: "container",
+  prepare: "container",
+  start: "container",
+  club_key: "container",
+  spare: "container",
+  checkout: "t3",
+  t3: "t3",
   csr: "address",
   sign: "address",
   // Orbit task group 5063 moves the Route publication into the create under these names.

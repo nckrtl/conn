@@ -29,6 +29,12 @@ pub const CLIENT_VERSION: &str = conn_contract::T3_SERVER_VERSION;
 
 /// T3's `CODEX_STOP_CONFIRM_TIMEOUT_MS`.
 pub const STOP_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// T3's `CODEX_GOAL_CONTINUATION_GRACE`: Codex starts the next goal turn milliseconds after
+/// the last one completes.
+pub const GOAL_CONTINUATION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a closed session's silent subagent is checked with Codex.
+pub const CHILD_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The Codex instance's settings that shape a launch (`CodexSettings` in contracts).
 #[derive(Clone, Debug)]
@@ -51,12 +57,20 @@ pub struct CodexConfig {
     /// How long the session waits for the answer to a `turn/start` that Stop abandoned after
     /// it was written (the request's own limit, 60 s). Tests shorten it.
     pub abandoned_start_timeout: std::time::Duration,
+    /// After a close on a shared app-server, how often a subagent that sends nothing is
+    /// checked with Codex (`thread/read`). Tests shorten it.
+    pub child_check_interval: std::time::Duration,
+    /// How long a completed goal turn's run waits for Codex to continue the goal before it
+    /// pauses the goal and settles (T3's `CODEX_GOAL_CONTINUATION_GRACE`, 5 s). Tests shorten it.
+    pub goal_continuation_grace: std::time::Duration,
     /// Whether the status probe runs (`checkCodexProviderStatus`). Checks turn it off, so no
     /// check runs this machine's `codex`; the entry then stays T3's pending one.
     pub status_probe: bool,
     /// The folder the probe runs in: the server's working folder (T3's `process.cwd()`).
     /// `None`: this process's working folder.
     pub status_cwd: Option<PathBuf>,
+    /// The model manifest the server accepted last; the probe classifies models with it.
+    pub model_manifest: conn_provider::LiveManifest,
 }
 
 impl Default for CodexConfig {
@@ -69,8 +83,11 @@ impl Default for CodexConfig {
             attachments_dir: None,
             stop_confirm_timeout: STOP_CONFIRM_TIMEOUT,
             abandoned_start_timeout: crate::client::REQUEST_TIMEOUT,
+            child_check_interval: CHILD_CHECK_INTERVAL,
+            goal_continuation_grace: GOAL_CONTINUATION_GRACE,
             status_probe: true,
             status_cwd: None,
+            model_manifest: conn_provider::LiveManifest::default(),
         }
     }
 }
@@ -309,10 +326,10 @@ fn thread_config(app_thread_id: Option<&str>, mcp: &[McpServer]) -> Value {
 
 /// `CODEX_DIRECT_ONLY_T3_TOOLS`: Code Mode runs a blocking wait or delegate wait as a nested
 /// call, and the model keeps polling it; the direct-only server makes it a plain tool call.
-const DIRECT_ONLY_TOOLS: [&str; 2] = ["t3_thread_wait", "delegate_task"];
+const DIRECT_ONLY_TOOLS: [&str; 2] = ["conn_thread_wait", "delegate_task"];
 
 /// `mcp_servers.<name>` overrides for one server, as `codexThreadRuntimeParams` builds them.
-/// T3's own server (`t3-code`) splits in two: [`DIRECT_ONLY_TOOLS`] go on a direct-only
+/// T3's own server (`conn`) splits in two: [`DIRECT_ONLY_TOOLS`] go on a direct-only
 /// server, out of code mode, so a wait never runs inside a script.
 fn mcp_server_config(server: &McpServer) -> Vec<(String, Value)> {
     let entry = |extra: Value| {
@@ -331,7 +348,7 @@ fn mcp_server_config(server: &McpServer) -> Vec<(String, Value)> {
         entry
     };
     let name = &server.name;
-    if name != "t3-code" {
+    if name != "conn" {
         return vec![(format!("mcp_servers.{name}"), entry(json!({})))];
     }
     vec![
@@ -723,20 +740,21 @@ mod tests {
     #[test]
     fn t3_code_splits_its_wait_tool_onto_a_direct_server() {
         let server = McpServer {
-            name: "t3-code".into(),
+            device_tools: false,
+            name: "conn".into(),
             url: "http://127.0.0.1:3773/mcp".into(),
             headers: vec![("Authorization".into(), "Bearer abc".into())],
         };
         let config = &thread_params(Some("t1"), None, None, &[server])["config"];
-        let main = &config["mcp_servers.t3-code"];
-        let direct = &config["mcp_servers.t3-code-direct"];
+        let main = &config["mcp_servers.conn"];
+        let direct = &config["mcp_servers.conn-direct"];
         assert_eq!(
             main["disabled_tools"],
-            json!(["t3_thread_wait", "delegate_task"])
+            json!(["conn_thread_wait", "delegate_task"])
         );
         assert_eq!(
             direct["enabled_tools"],
-            json!(["t3_thread_wait", "delegate_task"])
+            json!(["conn_thread_wait", "delegate_task"])
         );
         assert_eq!(direct["http_headers"]["Authorization"], "Bearer abc");
         assert_eq!(main["tool_timeout_sec"], MCP_TOOL_TIMEOUT_SECS);

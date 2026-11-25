@@ -16,7 +16,7 @@ async fn read_thread(cx: &Cx<'_>, args: &Args) -> Result<(String, Value), ToolEr
         .ok_or_else(|| {
             fail(
                 "target_required",
-                "Pass threadId: this MCP client is not running inside a T3 thread.",
+                "Pass threadId: this MCP client is not running inside a Conn thread.",
             )
         })?
         .to_owned();
@@ -41,7 +41,7 @@ fn required<'a>(args: &'a Args, name: &str) -> Result<&'a Value, ToolError> {
         .ok_or_else(|| fail("invalid_request", format!("This action needs `{name}`.")))
 }
 
-/// `t3_thread_organize`: `writesThreads([threadId])`, then one engine command. A thread's own
+/// `conn_thread_organize`: `writesThreads([threadId])`, then one engine command. A thread's own
 /// agent that settles its thread mid-turn gets `settlesWhenTurnEnds` and the thread settles
 /// after the run completes (`ThreadManagementService.settleThread`).
 pub(super) async fn organize(cx: &Cx<'_>, args: &Args) -> ToolResult {
@@ -50,6 +50,15 @@ pub(super) async fn organize(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let action = str_arg(args, "action").unwrap_or_default();
     let command_id = new_command_id();
     let command = match action {
+        "file_project" | "unfile_project" => {
+            let project = if action == "file_project" {
+                required(args, "orbitProject")?.clone()
+            } else {
+                Value::Null
+            };
+            json!({"type": "thread.metadata.update", "commandId": command_id, "threadId": id,
+                   "orbitProject": project})
+        }
         "settle" => {
             let by_own_agent = cx.caller_thread_id() == Some(id.as_str());
             if by_own_agent
@@ -295,7 +304,7 @@ fn queue_entry(projection: &Value, run_id: &str, limit: usize) -> Option<Value> 
     }))
 }
 
-/// `t3_queue`: `list` and `read` read; the other actions are `writesThreads([threadId])` and
+/// `conn_queue`: `list` and `read` read; the other actions are `writesThreads([threadId])` and
 /// one queued-run command each.
 pub(super) async fn queue(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let action = str_arg(args, "action").unwrap_or_default();
@@ -347,7 +356,7 @@ pub(super) async fn queue(cx: &Cx<'_>, args: &Args) -> ToolResult {
     Ok(json!({ "sequence": sequence }))
 }
 
-/// `t3_thread_configure`: without `modelSelection` it reads the thread's selection and
+/// `conn_thread_configure`: without `modelSelection` it reads the thread's selection and
 /// modes; with it, `writesThreads([threadId])` and `thread.model-selection.set` (same
 /// provider instance) or `provider.switch` (`modelSelectionCommandType`).
 pub(super) async fn configure(cx: &Cx<'_>, args: &Args) -> ToolResult {
@@ -376,4 +385,60 @@ pub(super) async fn configure(cx: &Cx<'_>, args: &Args) -> ToolResult {
         }))
         .await?;
     Ok(json!({ "sequence": sequence }))
+}
+
+/// `conn_thread_transfer` (`toolkits/thread/handlers.ts`): `status` reads the thread's context
+/// transfers; `fork` and `merge_back` are `writesThreads([threadId, targetThreadId])` and one
+/// engine command each.
+pub(super) async fn transfer(cx: &Cx<'_>, args: &Args) -> ToolResult {
+    let action = str_arg(args, "action").unwrap_or_default();
+    if action == "status" {
+        let (_, projection) = read_thread(cx, args).await?;
+        let transfers: Vec<Value> = projection["contextTransfers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| {
+                json!({"id": t["id"], "sourceThreadId": t["sourceThreadId"],
+                    "targetThreadId": t["targetThreadId"], "status": t["status"]})
+            })
+            .collect();
+        return Ok(json!({ "transfers": transfers }));
+    }
+    let limits = cx
+        .writes_threads(&[str_arg(args, "threadId"), str_arg(args, "targetThreadId")])
+        .await?;
+    let source_point = args
+        .get("sourcePoint")
+        .cloned()
+        .unwrap_or_else(|| json!({"type": "latest_stable"}));
+    let (id, source) = read_thread(cx, args).await?;
+    // T3 checks the modes of the snapshot it copies; this is the latest read before dispatch.
+    cx.within_limits(&limits, &source["thread"])?;
+    let command_id = new_command_id();
+    if action == "merge_back" {
+        let target = required(args, "targetThreadId")?.clone();
+        let mut target_args = Args::new();
+        target_args.insert("threadId".into(), target.clone());
+        read_thread(cx, &target_args).await?;
+        let sequence = cx
+            .dispatch(json!({
+                "type": "thread.merge_back", "commandId": command_id, "sourceThreadId": id,
+                "targetThreadId": target, "sourcePoint": source_point,
+                "createdBy": "agent", "creationSource": "mcp",
+            }))
+            .await?;
+        return Ok(json!({ "sequence": sequence, "targetThreadId": target }));
+    }
+    let target = format!("{command_id}:fork");
+    let mut command = json!({
+        "type": "thread.fork", "commandId": command_id, "sourceThreadId": id,
+        "targetThreadId": target, "sourcePoint": source_point,
+        "createdBy": "agent", "creationSource": "mcp",
+    });
+    if let Some(title) = args.get("title") {
+        command["title"] = title.clone();
+    }
+    let sequence = cx.dispatch(command).await?;
+    Ok(json!({ "sequence": sequence, "targetThreadId": target }))
 }

@@ -99,6 +99,40 @@ from this tree.
   `conn-server-release.yml`. It makes a GitHub Release on `nckrtl/conn` with
   `conn-server-<version>-linux-x64.tar.gz` and its `.sha256`, not marked Latest; Orbit
   downloads it. Conn's `release.yml` takes only `v*.*.*` tags, so neither starts the other.
+- **Not served, by decision** (Nick, 2026-11-20). The Conn Server does not serve these
+  client areas. They stay unregistered, and parity work skips them:
+  - Resource telemetry: `subscribeResourceTelemetry`, the resource and process history and
+    its retry (the Settings › Diagnostics CPU and memory panel). Orbit tracks resources.
+  - The Usage page: `server.getUsageSummary` and `server.refreshUsageRates`.
+  - Session import: `agentSessions.scan` and `agentSessions.import` (provider transcripts
+    turned into threads). This is not the T3 state import: a Conn Server that starts in a
+    T3 server's state folder carries that server's threads over once
+    (`apps/conn-server/docs/status.md`, "T3 state import").
+  - Clone from the client: `projectClone.*`. The `/mcp` clone tool stays.
+  - The test-login group of the browser's key menu: `credentials.listForSite` and
+    `credentials.fillForSite`. Vault logins in that menu stay; the desktop fills them itself.
+  - Linear and other standalone trackers: `issueTrackers.*`. GitHub issues stay.
+  - Provider install and update: `provider.install.*` and `server.updateProvider`. Orbit
+    installs and updates provider CLIs; see [Provider CLIs](#provider-clis). The T3 server
+    does not mount them either.
+  - Server self-update (Nick, 2026-11-21): `server.getNpmRelease`, `server.updateServer`,
+    `server.updateServerWithProgress` and `server.commitDesktopUpdate`. They fetch T3's own
+    releases. Orbit releases the Conn Server in containers; on Macs the Conn desktop build
+    carries it.
+  - The ACP registry: its 11 `server.*AcpRegistry*` methods. Orbit tools install agent CLIs,
+    and the Conn Server runs ACP agents such as Antigravity without the registry.
+  - ChatGPT profile and handoff (`provider.chatgpt.*`) and `provider.consumeResetCredit`.
+    They need provider account tokens, which the server never holds.
+  - T3 cloud: `cloud.getRelayClientStatus`, `cloud.installRelayClient` and
+    `guestShare.create`. Conn links through the Orbit Gateway.
+  - `server.prepareTriage` (a bug report about T3 itself), `server.checkOtlpEndpoint` (the
+    server sends no telemetry), `server.checkSecretSource` (the server never reads secret
+    references), and storage cleanup (`server.getStorageCleanupReport`,
+    `server.runStorageCleanup`).
+
+  The Diagnostics panel, the Usage page and the key menu's test-login group may later be
+  removed from Conn itself.
+
 - **Exclusions.** Root Vite+ format, lint and test configs ignore `apps/conn-server/**`,
   `.github/scripts/ci-changes.cjs` treats it and the `conn-server-*` workflows as inert for
   Conn's CI, and `.gitignore` re-includes `apps/conn-server/helpers/sdk-host/build/`. On a
@@ -179,52 +213,59 @@ Sources:
 
 ### Icons
 
-Web thread timeline icons are Phosphor: solid by default, bold for carets and
-line glyphs whose solid form adds a box. Icons elsewhere stay Lucide.
-`ConnIconScope` around `MessagesTimeline` in `ChatView.tsx` selects Phosphor.
+Every web and desktop icon is a Superheroicons 16px solid glyph. The set is
+vendored in `assets/conn/superheroicons/` (`16/solid/*.svg`, `manifest.json`,
+README there); fix glyphs in github.com/nckrtl/superheroicons and copy them in.
+`manifest.json` maps each Lucide name Conn uses to a glyph.
 
-The web tsconfig and Vite's `resolve.alias` map `lucide-react` and `lucide` to
-Conn modules that pair each Lucide icon with a Phosphor icon. Upstream imports
-stay unchanged. A new upstream icon fails typecheck until it gets an entry. Both
-mappings are needed: the dev server ignores tsconfig paths for pre-bundled
-packages.
+`node scripts/generate-conn-icons.ts` writes `apps/web/src/icons/lucide-react.ts`:
+one component per Lucide name, with Lucide's props (`size`, `color`, `className`;
+stroke props are ignored) and the `lucide lucide-<name>` classes. The web
+tsconfig and Vite's `resolve.alias` map `lucide-react` to it, so upstream imports
+stay unchanged. A Lucide name missing from the manifest fails the typecheck until
+the set maps it. Both mappings are needed: the dev server ignores tsconfig paths
+for pre-bundled packages. Colour icons with `text-*`, not `stroke-*`; for a halo
+use `stroke-background [paint-order:stroke]`.
 
-Upstream removed icon morphing and `MorphIcon` (#33985); the 2026-11-12 sync took
-that removal, so toggles swap icons instantly through `lucide-react`. The `lucide`
-alias and `lucideNodes` (from `lucide-original`) remain for any `lucide` import. Project and workspace icons use
-`lucide-react/dynamic` and `lucide-react-original`.
-
-Sources:
-
-- Web (`apps/web/`): `src/icons/` (`lucide-react.ts`, `lucide.ts`,
-  `connIcon.tsx`), `tsconfig.json` (`paths`), `vite.config.ts`.
-- Components (`apps/web/src/components/`): `ChatView.tsx`,
-  `sidebar/workspaceVisuals.tsx`.
-
-### iOS icons
-
-On iOS, thread feed icons in messages and the work log are Phosphor. The rest of
-the app, including native toolbars, tab bars and menus, keeps SF Symbols.
-Android keeps Tabler. `AppSymbol.tsx` (upstream's iOS implementation since its platform-primitive
-refactor, #33173; Conn's version replaces it) also uses SF Symbols for git icons
-that upstream drew with Tabler.
-
-`symbols.json` maps SF names to Phosphor icons and weights: solid by default,
-bold for carets and line glyphs that solid would box. Inside `ConnSymbolScope`
-around `ThreadFeed` in `ThreadDetailScreen.tsx`, `AppSymbol.tsx` requests
-mapped names with a `conn.` prefix. `ConnSymbols.swift` swaps `UIImage`'s
-`systemImageNamed` methods only for those names.
-
-After changing `symbols.json`, run `node scripts/build-conn-symbols.ts`. It
-builds custom symbols and `ConnSymbolNames.swift`. Commit the output and rebuild
-the app.
+Icons with no Lucide name use a glyph by concept id: `connIcon("<concept>",
+<concept>Glyph)` from `src/icons/glyphs.generated.ts` (Mini PC and Workstation
+machines, SnapShots, screen rotation). Glyphs drawn at 24px or more use
+the set's 24px files, vendored one by one in `24/solid/` (the foldable postures
+in `DeviceDuoGlyph`, size-7); everything else is 16px. Project and workspace icons (any Lucide
+name a user picks) stay on `lucide-react/dynamic` and `lucide-react-original`.
 
 Sources:
 
-- `apps/mobile/modules/conn-symbols/` (`symbols.json`, `ios/`).
-- `scripts/build-conn-symbols.ts`.
-- Mobile (`apps/mobile/src/`): `components/ui/AppSymbol.tsx`,
-  `components/ConnSymbolScope.tsx`, `features/threads/ThreadDetailScreen.tsx`.
+- `assets/conn/superheroicons/`, `scripts/generate-conn-icons.ts`.
+- Web (`apps/web/`): `src/icons/` (`lucide-react.ts`, `connIcon.tsx`),
+  `tsconfig.json` (`paths`), `vite.config.ts`, `components/sidebar/workspaceVisuals.tsx`.
+
+### Mobile icons
+
+Mobile draws the Superheroicons **24px** solid set (`assets/conn/superheroicons/24/solid/`;
+web and desktop stay on 16px). The manifest's `sf` map names a glyph for each SF Symbol name
+the app uses.
+
+- iOS: `node scripts/build-conn-symbols.ts` builds a custom symbol per mapped name
+  (`ConnSymbols.xcassets`, `ConnSymbolNames.swift`). `ConnSymbols.swift` swaps
+  `UIImage`'s `systemImageNamed` methods so every caller gets them: `AppSymbol.tsx`
+  (expo-symbols), tab bars and menus. Unmapped names stay SF Symbols.
+- Native header buttons take template images instead (`assets/header-icons/`,
+  `src/native/connHeaderIcons.generated.ts`), so they draw the glyph at 24pt; build header
+  icons with `connHeaderIcon(name)` (react-navigation items) or `connScreensHeaderIcon(name)`
+  (react-native-screens items). `V5StackHeader` converts SF names itself.
+- Android: the same script writes `src/components/ui/connGlyphs.generated.ts`;
+  `AppSymbol.android.tsx` draws it with react-native-svg (`ConnGlyph.tsx`).
+- Composer chips: `apps/mobile/scripts/sync-context-chip-icons.mjs` renders the
+  manifest's `chips` from the 24px set.
+
+Run the scripts after changing the set and commit their output.
+
+Sources:
+
+- `assets/conn/superheroicons/`, `scripts/build-conn-symbols.ts`.
+- `apps/mobile/modules/conn-symbols/ios/`, `apps/mobile/src/components/ui/`
+  (`AppSymbol.tsx`, `AppSymbol.android.tsx`, `ConnGlyph.tsx`), `apps/mobile/src/native/connHeaderIcon.ts`.
 
 ### Workspaces
 
@@ -396,6 +437,26 @@ target lock, so it cannot be busy. Any other Gateway error stops the start. The 
 skips a clone a start is pairing with (`heldOrbitInstanceIds`), and an asleep one. Away from the
 pending thread, a toast reports the result. Starts saved by the removed sidebar dialog load as
 pending threads, so they resume or can be dismissed; one whose send finished is dropped.
+
+**Pre-warm (reservations).** While the prompt box of a new Instance shows (the desktop draft in
+the main window, the phone's Orbit project screen), Conn reserves a clone of the Project
+(`POST /conn/projects/{id}/reservations`, `reservations.ts`), polls it every 2 s while it
+prepares, and installs a one-time link as soon as a ready GET delivers it. With no link it
+uses the existing pairing endpoints. The link is used in memory before any further read. Conn reads
+the reservation every 60 s once ready to keep it held. A send during that read or install lets
+it finish before reading the reservation again. The runner finalizes it
+(`POST /conn/reservations/{id}/finalize` with the name and branch), follows that Operation with
+the same create rows, and skips pairing if the device already saved the server. Conn waits up
+to two minutes for readiness. If the wait expires, the reservation is gone or failed, or the
+finalize fails, Conn releases it and starts an ordinary create with a fresh deadline. An
+abandoned reservation stays hidden until its pairing install settles and Conn removes the
+connection and credential it installed. The catalog stores the install identity with each
+record. Cleanup matches that identity, resumes after a restart, and leaves independently
+saved routes visible. Finalize clears the provisional identity and keeps the connection.
+Closing the prompt releases it (`DELETE`, the desktop's only allowed DELETE). A restart
+releases what the last run held. At most 3 are held: a fourth Project releases the oldest. Reserved clones (Gateway rows with `reservation_id`, and the ones a start finalizes)
+stay out of every list: the lists read `visibleCatalogValueAtom`, and the Gateway-fed lists drop
+reserved rows. Nothing about it shows on screen.
 
 **Workspaces.** A start saves the workspace selected at Start (null for all). Once the first
 message is sent, that workspace gets the clone's `<environmentId>:<projectId>` ref unless it
@@ -792,7 +853,7 @@ This also holds when the server runs on another machine (Beast, mini, nick-vm).
 Only `preview_cdp_endpoint` stays on the tab's host, because it listens on
 loopback. Upstream does not have the relay, and its agent copy says desktop
 tabs cannot be reached from another machine. On 2026-10-28, a sync brought in
-such a `t3_preview_list` description (upstream #24850), and agents on Beast
+such a `conn_preview_list` description (upstream #24850), and agents on Beast
 refused to drive Nick's tabs. In every sync, read upstream's changes to the
 preview tool descriptions and agent instructions, and keep or rewrite any line
 that limits agents to server tabs. The guard
@@ -935,15 +996,22 @@ These also keep their T3 names:
   `~/.t3/...`.
 - The staged package name `t3code`, which fixes the keychain item name "t3code
   Safe Storage".
-- Server branding in `apps/server`. The dev backend allows
-  `T3CODE_DEV_ALLOWED_ORIGINS=conn-dev://app`. Fork features still change server
-  code.
+- Identifiers other software matches: MCP tool names and titles (`t3_*`,
+  "Create T3 threads"; the Conn Server's catalog mirrors the titles), the `t3`
+  CLI name, launchd and systemd unit text, Codex and ACP client names, checkpoint
+  commit authors and trailers, and model-facing instructions. The dev backend
+  allows `T3CODE_DEV_ALLOWED_ORIGINS=conn-dev://app`.
+
+User-visible text names the product Conn in every client and both servers
+(Nick, 2026-11-22): "Conn thread", "Conn Server", "Conn's home folder". "T3
+Connect", "T3 Chat" and "T3 account" stay: they name T3's hosted services.
 
 The Conn logo replaces the T3 mark on blueprint dev icons and black production
 icons. Fork-owned Icon Composer projects are in
 `assets/conn/{dev,prod}/app-icon.icon`, copied from upstream with only
 `text.svg` swapped. `assets/conn/export-icons.sh` uses `ictool` to render iOS,
-universal, favicon and `.ico` assets into `assets/conn/*/conn-*`. It uses
+universal, favicon and `.ico` assets into `assets/conn/*/conn-*`; the 192 and
+512 web icons are the iOS render scaled down. It uses
 `assets/conn/safe-area.swift` to place the macOS render in the pre-Tahoe safe
 area (824px body, soft shadow), because the GUI-only preset cannot be scripted.
 
@@ -953,14 +1021,16 @@ upstream paths in `appBrand.ts`. Source-tree icons, the dev runtime bundle's
 upstream's. Desktop packaging applies the Conn name on Linux and Windows as
 well; platform integration files retain some T3 names.
 
-`apps/web/public` holds Conn dev favicons and the splash logo.
-`vp run icons:check` reports those four assets as stale; `vp run icons:export`
-would overwrite them. Packaged stable builds also use the Conn splash logo.
+`apps/web/public` holds Conn dev favicons, manifest icons and the splash logo.
+`vp run icons:check` reports those six assets as stale; `vp run icons:export`
+would overwrite them. Packaged stable builds copy the Conn production web icons
+over upstream's (`resolveDesktopWebIconOverrides`).
 
-With `T3CODE_IOS_BUNDLE_ID` set, the iPhone's development and production
-variants use the Conn iOS icon, `.icon` project and splash. Widgets and Live
-Activities use `assets/conn/widget/ConnMark.svg`. Preview and Android artwork
-stay T3. Upstream's `assets/{dev,prod,nightly}` are untouched.
+Every mobile variant is named Conn and uses the Conn iOS icon, `.icon` project
+and splash (preview uses production's). Widgets and Live Activities use
+`assets/conn/widget/ConnMark.svg`. Android artwork comes from
+`assets/conn/android`, rendered by `node scripts/export-conn-android-icons.ts`.
+Upstream's `assets/{dev,prod,nightly}` are untouched.
 
 Sources:
 
@@ -987,7 +1057,7 @@ Conn renames the app, so **copy never names it literally**:
 - `appName()` reads the desktop bridge's branding in the renderer, so module-level
   `msg()` constants get Conn's name. Mobile sets it from the Expo config in
   `apps/mobile/src/lib/installAppName.ts`, imported by `index.ts` before `App`. Default:
-  `T3 Code`.
+  `Conn`.
 - Every locale keeps `{appName}` where upstream's translation said "T3 Code" (German
   compounds: `{appName}-Server`).
 - Strings that must stay literal (legacy directory and keychain names, file markers,
@@ -1145,8 +1215,7 @@ when launchd does not know the job does it read `ProgramArguments` of
 `env VAR=value` wrapper. The label differs per host:
 
 - mini: `com.t3tools.t3code.service`.
-- nick-vm: `com.nckrtl.conn-server`.
-- nick headless: `com.nckrtl.t3-headless`.
+- nick and nick-vm: `com.nckrtl.conn-server`.
 
 Install the script in `~/.local/bin`. Fill in the placeholders of
 `scripts/orbit/com.nckrtl.t3-orbit-register.plist` and put it in
@@ -1215,7 +1284,7 @@ Sources:
 
 Typing `@` in the composer offers other T3 Code environments alongside threads
 and files. Picking one inserts a machine chip. Messages carry only the
-environment ID and label. The agent is told to use `t3_environment_link` before
+environment ID and label. The agent is told to use `conn_environment_link` before
 delegating there.
 
 Web persists `environmentContexts` on the composer draft and restores them on
@@ -1278,6 +1347,31 @@ Sources:
 - `packages/contracts/src/rpc.ts` (`OfficialWsRpcGroup`, `ForkWsRpcGroup`).
 - `apps/server/src/wsFork.ts`, `ws.ts`.
 
+### Provider CLIs
+
+Orbit installs and updates every provider CLI (vp, brew and brew-cask) and owns PATH: the brew
+and vp bins on Nodes, the agent folder in containers. Conn and the Conn Server never install,
+update or remove one (Nick, 2026-11-20).
+
+- **Finding a CLI.** Each CLI is resolved on PATH, or the instance's `binaryPath`; the version
+  comes from the binary on every health check. Antigravity runs `agy` (`agy --version`, sessions
+  `agy acp`); the managed `localharness` runtime is gone. Managed Codex (the ChatGPT account
+  mode) runs `codex` from PATH. `binaryPath` stays: removing it touches every driver schema, the
+  settings form and saved settings, and its default already resolves on PATH.
+- **Server.** `ws.ts` does not mount `provider.install.*` or `server.updateProvider`; the
+  contracts keep them, so the sync and the Conn Server's generated contract do not move.
+  `provider/orbitManagedProviders.ts` supplies a `ProviderLatestVersions` layer that never looks
+  up a release, and strips `versionAdvisory` and `setup.canInstall` from published snapshots. A
+  compatibility advisory never blocks a Codex session.
+- **Clients.** Each provider shows its version and "Managed by Orbit". No install, update or
+  remove control, no update pill or launch notification, no update-check toggle. A
+  compatibility advisory is one quiet line; it never replaces the status, raises an alert, or
+  hides models.
+- **Conn Server.** Serves neither group; `apps/conn-server/docs/status.md` lists them.
+
+Sources: `apps/server/src/provider/orbitManagedProviders.ts`, `providerCliOnPath.ts`,
+`Drivers/AntigravityDriver.ts`, `CodexManagedRuntime.ts`, `ws.ts`.
+
 ### Codex MCP network wait
 
 Codex starts a thread's MCP servers once and never retries one that failed.
@@ -1332,6 +1426,13 @@ Sources:
      it past any new upstream ID and extend the reconcile).
    - `apps/web/src/components/chat/ChatComposer.tsx`: take upstream's draft
      changes, but keep `composerEnvironmentContexts` from `composerDraft`.
+   - Provider CLIs: upstream files deleted for [Provider CLIs](#provider-clis)
+     (`provider/AntigravityInstallation.ts`, `CodexInstallation.ts`,
+     `providerInstallation.ts`, `providerMaintenanceRunner.ts`, their tests, and the web
+     provider-update components) stay deleted on a modify/delete conflict. Port an upstream fix
+     only when it touches PATH lookup or version reading. Keep the five-tag filter in `ws.ts`, the
+     `layerNoLatestVersions` line in `server.ts` and the `withoutProviderMaintenance` call in
+     `ProviderRegistry.ts`.
    - Composer: upstream's composer redesign (#25869) is adopted as of
      2026-10-30 (Nick); Conn's own composer animation is retired. On conflicts
      in composer files take upstream's composer and re-apply only the listed
@@ -1355,16 +1456,14 @@ Sources:
      forward buttons out of `SidebarChromeHeader`. Take upstream's
      sidebar content changes inside that wrapper. The November 7 sync dropped
      all three; see [Shell design](#shell-design).
-   - `apps/web/src/components/ChatView.tsx`: keep `<ConnIconScope>` around
-     `<MessagesTimeline>`;
-     `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: keep
-     `<ConnSymbolScope>` around `<ThreadFeed>`.
+   - `apps/web/src/icons/lucide-react.ts`: generated; take upstream's new
+     Lucide names into `assets/conn/superheroicons/manifest.json` (ask the icon
+     set for a glyph) and regenerate.
    - `apps/mobile/src/components/ui/AppSymbol.tsx` (was `AppSymbol.ios.tsx` until 2026-11-10): keep Conn's version (no
-     Tabler; `conn.` names inside `ConnSymbolScope`).
+     Tabler; every name through expo-symbols and `ConnSymbols.swift`).
    - Work-log icon unions (`thread-work-log.tsx`): keep both sides' icons.
    - `apps/web/vite.config.ts` (`resolve.alias`), `apps/web/tsconfig.json`
-     (`paths`), `apps/web/package.json` (`lucide-react-original`,
-     `lucide-original`, `@phosphor-icons/react`), `apps/mobile/package.json`
+     (`paths`), `apps/web/package.json` (`lucide-react-original`), `apps/mobile/package.json`
      (the `-conn.tgz` tarballs) and `pnpm-workspace.yaml` (the Conn tarball's
      build allowance): keep the Conn entries next to upstream's.
    - Desktop relay routing: keep
@@ -1465,11 +1564,10 @@ Sources:
    `apps/desktop/src/window/DesktopWindow.test.ts`. Run `vp run i18n:check` and
    `vp run brand:check` ([i18n and the app name](#i18n-and-the-app-name)). Run `vp i`
    first: merges change dependencies. When the web typecheck reports a Lucide name missing from
-   `apps/web/src/icons/lucide-react.ts`, add a line for it (the Lucide icon and
-   the closest Phosphor icon). New SF Symbol names in the mobile thread feed
-   stay SF Symbols until they get an entry in
-   `apps/mobile/modules/conn-symbols/symbols.json` and
-   `node scripts/build-conn-symbols.ts` runs. If upstream bumps a vendored
+   `apps/web/src/icons/lucide-react.ts`, or the mobile typecheck an SF name missing
+   from `AppSymbolName`, ask the icon set to map it in
+   `assets/conn/superheroicons/manifest.json`, copy the set in, and run
+   `node scripts/generate-conn-icons.ts` and `node scripts/build-conn-symbols.ts`. If upstream bumps a vendored
    tarball in `apps/mobile/deps`, rebuild Conn's as described below.
 4. Publish the exact build commit to an origin `sync/` branch
    (`node scripts/publish-sync-branch.ts`; a dated `sync/<yyyy-mm-dd>` tip

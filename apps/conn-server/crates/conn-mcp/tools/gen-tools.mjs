@@ -122,6 +122,7 @@ const listed = (tool) => {
 // What each EnabledWhen filter says for a caller: run it with that caller in the fiber.
 // `outside` is a client with no calling thread (a paired device, `t3 auth session issue`);
 // the others are agents in a thread.
+// `no-forge` is an agent whose thread's project is on no forge T3 reads (`forge: false`).
 const scopeFor = (caller) => ({
   environmentId: "environment:gen",
   capabilities: new Set(),
@@ -138,8 +139,25 @@ const scopeFor = (caller) => ({
         },
   client: undefined,
   linkedEnvironments: caller !== "links-off",
+  ...(caller === "no-forge" ? { forge: false } : {}),
 });
 
+/** `$ref: "#/$defs/…"` replaced by its definition; an unknown or too deep reference fails. */
+function inlineRefs(schema) {
+  const defs = schema.$defs ?? {};
+  const walk = (node, depth) => {
+    if (Array.isArray(node)) return node.map((n) => walk(n, depth));
+    if (!isObject(node)) return node;
+    if (typeof node.$ref === "string") {
+      const name = node.$ref.replace(/^#\/\$defs\//, "");
+      if (depth > 32 || defs[name] === undefined) throw new Error(`result schema: cannot inline ${node.$ref}`);
+      return walk(defs[name], depth + 1);
+    }
+    return Object.fromEntries(Object.entries(node).filter(([k]) => k !== "$defs").map(([k, v]) => [k, walk(v, depth)]));
+  };
+  return walk(schema, 0);
+}
+const resultSchemas = [];
 const tools = await Effect.runPromise(
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
@@ -148,15 +166,21 @@ const tools = await Effect.runPromise(
       const enabledWhen = Context.getOption(annotations, McpSchema.EnabledWhen);
       const hiddenFor = [];
       if (enabledWhen._tag === "Some") {
-        for (const caller of ["outside", "subagent", "links-off"]) {
+        for (const caller of ["outside", "subagent", "links-off", "no-forge"]) {
           const shown = yield* Effect.sync(() => enabledWhen.value({})).pipe(
             Effect.provideService(McpInvocationContext.McpInvocationContext, scopeFor(caller)),
           );
           if (shown === false) hiddenFor.push(caller);
         }
       }
+      const plain = JSON.parse(JSON.stringify(tool));
+      // A union output schema is left out of `tools/list`; a linked environment's answer is
+      // still decoded with it (`result-schemas.jsonl`).
+      if (plain.outputSchema !== undefined && listed(plain).outputSchema === undefined) {
+        resultSchemas.push({ name: plain.name, schema: inlineRefs(plain.outputSchema) });
+      }
       result.push({
-        ...listed(JSON.parse(JSON.stringify(tool))),
+        ...listed(plain),
         ...(hiddenFor.length === 0 ? {} : { "x-conn-hiddenFor": hiddenFor }),
       });
     }
@@ -176,27 +200,31 @@ if (missing.length > 0) {
   console.error(`apps/server no longer registers: ${missing.join(", ")}`);
   process.exit(1);
 }
-// conn-mcp knows two filters: tools that act as the calling thread are hidden from outside
-// clients (`hiddenFromOutsideClients`, src/outside-hidden.txt), and tools a delegated child may
-// not call are hidden from it (`hiddenFromSubagents`, src/subagent-hidden.txt). Any other
-// filter on one of ours would need a Rust check too.
+// conn-mcp knows four filters: tools that act as the calling thread are hidden from outside
+// clients (`hiddenFromOutsideClients`, src/outside-hidden.txt), tools a delegated child may
+// not call are hidden from it (`hiddenFromSubagents`, src/subagent-hidden.txt), tools that
+// only serve links are hidden while Linked environments is off (`hiddenWhileLinksOff`,
+// src/links-hidden.txt), and forge tools are hidden from an agent whose project is on no forge
+// (`hiddenWithoutForge`, src/forge-hidden.txt). Any other filter needs a Rust check too.
 const outsideHidden = [];
 const subagentHidden = [];
+const linksHidden = [];
+const forgeHidden = [];
 const catalog = implemented.map((name) => {
   const { "x-conn-hiddenFor": hiddenFor, ...tool } = byName.get(name);
   if (hiddenFor !== undefined) {
     const [only] = hiddenFor;
-    if (hiddenFor.length !== 1 || (only !== "outside" && only !== "subagent")) {
+    if (hiddenFor.length !== 1 || !["outside", "subagent", "links-off", "no-forge"].includes(only)) {
       console.error(`${name} is hidden for ${hiddenFor.join(", ")}; teach conn-mcp that filter.`);
       process.exit(1);
     }
-    (only === "outside" ? outsideHidden : subagentHidden).push(`${name}\n`);
+    ({ outside: outsideHidden, subagent: subagentHidden, "links-off": linksHidden, "no-forge": forgeHidden })[only].push(`${name}\n`);
   }
   return tool;
 });
 // One compact tool per line: conn-mcp splices these bytes into `tools/list` unparsed.
 const text = catalog.map((tool) => `${JSON.stringify(tool)}\n`).join("");
-// The orchestration text T3 appends to an agent's system prompt when it has `t3-code`.
+// The orchestration text T3 appends to an agent's system prompt when it has `conn`.
 const { T3_CODE_ORCHESTRATION_INSTRUCTIONS } = await import(
   NodeURL.pathToFileURL(
     NodePath.join(repo, "packages/provider-core/src/server/orchestrationInstructions.ts"),
@@ -206,8 +234,8 @@ const instructionsOut = NodePath.join(here, "..", "src", "instructions.txt");
 // Claude also gets the adapter's own texts after T3_CODE_ORCHESTRATION_INSTRUCTIONS, which it
 // does not export: `T3_CODE_ORCHESTRATION_INSTRUCTIONS + CLAUDE_A + CLAUDE_B + (deviceInstructions
 // ? … : "")` in makeClaudeQueryOptions. Read the constant names from that expression, in order,
-// so a new or moved text fails `--check` instead of drifting. The device text is left out: this
-// server has no device tools, and T3 adds it only with them.
+// so a new or moved text fails `--check` instead of drifting. The device text follows only when
+// the session has the device tools (`src/device-instructions.txt`, also the SubagentStart text).
 const adapter = NodeFS.readFileSync(
   NodePath.join(server, "src/orchestration-v2/Adapters/ClaudeAdapterV2.ts"),
   "utf8",
@@ -232,6 +260,17 @@ const claudeTexts = claudeTextNames.map((name) => {
   return found[1].replace(/\\(.)/g, "$1");
 });
 const claudeOut = NodePath.join(here, "..", "src", "claude-instructions.txt");
+// `(deviceInstructions ? `\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH}\n` : "")`, and the
+// SubagentStart hook's `additionalContext`: the same text.
+if (!adapter.includes("(deviceInstructions\n                ? `\\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH}\\n`") ||
+    !adapter.includes("additionalContext: T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,")) {
+  console.error("ClaudeAdapterV2.ts adds the device text in a new shape: teach gen-tools.mjs and launch.rs.");
+  process.exit(1);
+}
+const { T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH } = await import(
+  NodeURL.pathToFileURL(NodePath.join(repo, "packages/provider-core/src/server/orchestrationInstructions.ts")).href
+);
+const deviceOut = NodePath.join(here, "..", "src", "device-instructions.txt");
 // The `next` text of a running task: the schema takes any string, so the catalog no longer holds it.
 const { ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } = await import(
   NodeURL.pathToFileURL(NodePath.join(repo, "packages/contracts/src/orchestratorMcp.ts")).href
@@ -239,7 +278,7 @@ const { ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } = await import(
 const runningTaskNextOut = NodePath.join(here, "..", "src", "running-task-next.txt");
 // Arguments that keep an explicit `null`. T3 decodes with the JSON codec of each tool's
 // schema (`decodeAsAdvertised`), which reads `null` as omitted unless the field itself takes
-// `null` (`Schema.NullOr`, as `t3_queue`'s `beforeRunId`). The advertised JSON schema drops
+// `null` (`Schema.NullOr`, as `conn_queue`'s `beforeRunId`). The advertised JSON schema drops
 // that `null` branch, so ask each implemented tool's Effect schema directly.
 const Schema = await pkg("effect/Schema");
 const Exit = await pkg("effect/Exit");
@@ -264,9 +303,31 @@ for (const name of implemented) {
     if (Exit.isSuccess(Schema.decodeUnknownExit(field)(null))) nullArguments.push(`${name} ${key}\n`);
   }
 }
+// Tools that run in a linked environment when `environmentId` names one: their parameters
+// take `OrchestratorMcpEnvironmentTarget` as `environmentId` (`takesLinkedEnvironment` in
+// McpToolAccess.ts). Other tools may name an environment for their own reasons.
+const { OrchestratorMcpEnvironmentTarget } = await import(
+  NodeURL.pathToFileURL(NodePath.join(repo, "packages/contracts/src/index.ts")).href
+);
+if (OrchestratorMcpEnvironmentTarget === undefined) throw new Error("OrchestratorMcpEnvironmentTarget moved");
+const linkedTargets = implemented
+  .filter((name) => effectTools.get(name)?.parametersSchema.fields?.environmentId === OrchestratorMcpEnvironmentTarget)
+  .map((name) => `${name}\n`);
+if (linkedTargets.length === 0) throw new Error("No tool takes a linked environment: the target check moved");
+const linkedTargetsOut = NodePath.join(here, "..", "src", "linked-targets.txt");
+// What `conn_environment_read` and `conn_environment_preferences_update` report for settings that
+// were never changed: T3's own `preferences` of `ServerSettings` decoded from `{}`.
+const { ServerSettings } = await import(
+  NodeURL.pathToFileURL(NodePath.join(repo, "packages/contracts/src/index.ts")).href
+);
+const { preferences: preferencesOf } = await src("mcp/toolkits/environment/handlers.ts");
+const preferenceDefaults = `${JSON.stringify(preferencesOf(Schema.decodeUnknownSync(ServerSettings)({})))}\n`;
+const preferenceDefaultsOut = NodePath.join(here, "..", "src", "preference-defaults.json");
+const linksHiddenOut = NodePath.join(here, "..", "src", "links-hidden.txt");
 const nullArgumentsOut = NodePath.join(here, "..", "src", "null-arguments.txt");
 const outsideHiddenOut = NodePath.join(here, "..", "src", "outside-hidden.txt");
 const subagentHiddenOut = NodePath.join(here, "..", "src", "subagent-hidden.txt");
+const forgeHiddenOut = NodePath.join(here, "..", "src", "forge-hidden.txt");
 // Every tool apps/server registers, whoever may see it: the tests check the agent texts by it.
 const allNamesOut = NodePath.join(here, "..", "fixtures", "t3-tool-names.txt");
 const allNames = tools.map((tool) => `${tool.name}\n`).join("");
@@ -282,11 +343,11 @@ const initiallyListed = searchTools
   .map((tool) => tool.name);
 const searchCases = [];
 for (const query of [
-  "T3_WORKFLOW_STOP",
+  "CONN_WORKFLOW_STOP",
   "thread",
   "project",
   "thread thread",
-  "t3_thread_read",
+  "conn_thread_read",
   "@!!",
   "tool_search",
   "environment, schedule",
@@ -296,10 +357,10 @@ for (const query of [
 }
 const searchOut = NodePath.join(here, "..", "fixtures", "tool-search.json");
 for (let index = 0; index < 300; index++) {
-  await Effect.runPromise(exposure.search(`session-${index}`, "t3_workflow_stop"));
+  await Effect.runPromise(exposure.search(`session-${index}`, "conn_workflow_stop"));
 }
 const retainedSessions = Array.from({ length: 300 }, (_, index) => index).filter((index) =>
-  exposure.isListed(`session-${index}`, "t3_workflow_stop"),
+  exposure.isListed(`session-${index}`, "conn_workflow_stop"),
 ).length;
 const searchText = JSON.stringify({ initiallyListed, retainedSessions, cases: searchCases }, null, 2) + "\n";
 const exposureSource = NodeFS.readFileSync(NodePath.join(repo, "apps/server/src/mcp/McpToolExposure.ts"), "utf8");
@@ -332,7 +393,7 @@ const httpLimitsOut = NodePath.join(here, "../src/http-limits.rs");
 const httpLimitsText = `// Generated by tools/gen-tools.mjs from T3's html_render schema. Do not edit.\npub const MAX_MCP_BODY_BYTES: usize = 6 * (${inlineHtmlLimit} + ${HTML_RENDER_MAX_TITLE_LENGTH}) + 64 * 1024;\n`;
 const { T3_MCP_TOOL_NAMES } = await import(NodeURL.pathToFileURL(NodePath.join(repo, "packages/shared/src/t3McpToolPresentation.ts")).href);
 const { MCP_APP_OUTPUT_KEY } = await import(NodeURL.pathToFileURL(NodePath.join(repo, "packages/shared/src/mcpApp.ts")).href);
-const toolOutputConstantsOut = NodePath.join(here, "../../conn-provider/src/tool-output-constants.rs");
+const toolOutputConstantsOut = NodePath.join(here, "../../conn-contract/src/tool-output-constants.rs");
 const toolOutputSource = NodeFS.readFileSync(NodePath.join(repo,"packages/shared/src/toolOutput.ts"),"utf8");
 const htmlSource = NodeFS.readFileSync(NodePath.join(repo,"packages/shared/src/htmlRender.ts"),"utf8");
 const privateLimit = (source,name) => {
@@ -340,15 +401,17 @@ const privateLimit = (source,name) => {
   if (!value) throw new Error(`${name} moved`);
   return value;
 };
-const toolOutputConstants = `// Generated by conn-mcp/tools/gen-tools.mjs. Do not edit.\nconst TOOL_NAMES: &[&str] = &[${[...T3_MCP_TOOL_NAMES].map((name) => JSON.stringify(name)).join(",")}];\nconst HTML_RENDER_MIN_HEIGHT: i64 = ${HTML_RENDER_MIN_HEIGHT};\nconst HTML_RENDER_MAX_HEIGHT: i64 = ${HTML_RENDER_MAX_HEIGHT};\nconst HTML_RENDER_MAX_TITLE_LENGTH: usize = ${HTML_RENDER_MAX_TITLE_LENGTH};\nconst MAX_MEASURED_HEIGHTS: usize = ${privateLimit(htmlSource,"MAX_MEASURED_HEIGHTS")};\nconst SEND_TO_USER_MAX_LENGTH: usize = ${privateLimit(toolOutputSource,"SEND_TO_USER_MAX_LENGTH")};\npub(crate) const MCP_APP_OUTPUT_KEY: &str = ${JSON.stringify(MCP_APP_OUTPUT_KEY)};\n`;
+const terminalOutputMarker = /const TERMINAL_OUTPUT_MARKER = ("(?:[^"\\]|\\.)*");/.exec(toolOutputSource)?.[1];
+if (!terminalOutputMarker) throw new Error("TERMINAL_OUTPUT_MARKER moved");
+const toolOutputConstants = `// Generated by conn-mcp/tools/gen-tools.mjs. Do not edit.\nconst TOOL_NAMES: &[&str] = &[${[...T3_MCP_TOOL_NAMES].map((name) => JSON.stringify(name)).join(",")}];\nconst HTML_RENDER_MIN_HEIGHT: i64 = ${HTML_RENDER_MIN_HEIGHT};\nconst HTML_RENDER_MAX_HEIGHT: i64 = ${HTML_RENDER_MAX_HEIGHT};\nconst HTML_RENDER_MAX_TITLE_LENGTH: usize = ${HTML_RENDER_MAX_TITLE_LENGTH};\nconst MAX_MEASURED_HEIGHTS: usize = ${privateLimit(htmlSource,"MAX_MEASURED_HEIGHTS")};\nconst SEND_TO_USER_MAX_LENGTH: usize = ${privateLimit(toolOutputSource,"SEND_TO_USER_MAX_LENGTH")};\npub(crate) const MCP_APP_OUTPUT_KEY: &str = ${JSON.stringify(MCP_APP_OUTPUT_KEY)};\nconst TERMINAL_OUTPUT_MARKER: &str = ${JSON.stringify(JSON.parse(terminalOutputMarker))};\n`;
 const htmlOut = NodePath.join(here, "../../conn-files/src/html-bootstrap.json");
 const htmlText = JSON.stringify({markup, minHeight: HTML_RENDER_MIN_HEIGHT, maxHeight: HTML_RENDER_MAX_HEIGHT, maxTitleLength: HTML_RENDER_MAX_TITLE_LENGTH}) + "\n";
 // MCP's advertised schemas omit decode-time checks and string normalization.
 const threadInputs = {};
-for (const [module,name] of [["attachment","AttachmentToolkit"],["worktree","WorktreeToolkit"],["orchestrator","OrchestratorToolkit"],["toolSearch","ToolSearchToolkit"],["credentials","CredentialsToolkit"],["panels","PanelsToolkit"]]) {
+for (const [module,name] of [["attachment","AttachmentToolkit"],["worktree","WorktreeToolkit"],["orchestrator","OrchestratorToolkit"],["toolSearch","ToolSearchToolkit"],["credentials","CredentialsToolkit"],["panels","PanelsToolkit"],["theme","ThemeToolkit"],["pullRequests","PullRequestsToolkit"]]) {
   const toolkit = (await src(`mcp/toolkits/${module}/tools.ts`))[name];
   for (const [name,tool] of Object.entries(toolkit.tools)) {
-    if (!["create_threads","t3_attachment_prepare_upload","t3_attachment_discard","t3_thread_send_attachments","t3_worktree_handoff","t3_worktree_list","t3_workflow_stop","tool_search","save_test_login","request_credentials","database_query","mcp_call","mcp_connect"].includes(name)) continue;
+    if (!["create_threads","conn_attachment_prepare_upload","conn_attachment_discard","conn_thread_send_attachments","conn_worktree_handoff","conn_worktree_list","conn_workflow_stop","tool_search","save_test_login","request_credentials","database_query","mcp_call","mcp_connect","conn_theme_read","conn_theme_set","pull_request_create"].includes(name)) continue;
     threadInputs[name] = schemaRule(tool.parametersSchema.ast, "decode");
   }
 }
@@ -372,13 +435,19 @@ const outputs = [
   [threadInputsOut,`${JSON.stringify(threadInputs)}\n`,"thread tool input checks"],
   [NodePath.join(here, "..", "..", "conn-features", "src", "secret-texts.json"), secretTexts, "secret request texts"],
   [out, text, `${catalog.length} tools`],
+  [NodePath.join(here, "..", "src", "result-schemas.jsonl"), resultSchemas.filter(({ name }) => implemented.includes(name)).map((entry) => `${JSON.stringify(entry)}\n`).join(""), "union result schemas"],
   [outsideHiddenOut, outsideHidden.join(""), `${outsideHidden.length} tools hidden from outside clients`],
+  [linksHiddenOut, linksHidden.join(""), `${linksHidden.length} tools hidden while links are off`],
+  [linkedTargetsOut, linkedTargets.join(""), `${linkedTargets.length} tools that run in a linked environment`],
+  [preferenceDefaultsOut, preferenceDefaults, "environment preference defaults"],
   [subagentHiddenOut, subagentHidden.join(""), `${subagentHidden.length} tools hidden from delegated children`],
+  [forgeHiddenOut, forgeHidden.join(""), `${forgeHidden.length} tools hidden without a forge`],
   [allNamesOut, allNames, `${tools.length} tool names`],
   [runningTaskNextOut, ORCHESTRATOR_MCP_RUNNING_TASK_NEXT, "running task next text"],
   [nullArgumentsOut, nullArguments.join(""), `${nullArguments.length} arguments that keep null`],
   [instructionsOut, T3_CODE_ORCHESTRATION_INSTRUCTIONS, "agent instructions"],
   [claudeOut, claudeTexts.join(""), `Claude texts (${claudeTextNames.join(" + ")})`],
+  [deviceOut, T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH, "Claude device text"],
 ];
 if (process.argv.includes("--check")) {
   for (const [file, content, what] of outputs) {

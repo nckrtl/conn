@@ -40,6 +40,7 @@ usage:
   conn-server auth session list [--json]
   conn-server auth session revoke <session-id>
   conn-server project add <path> [--title <title>]
+  conn-server environment link-orbit <gateway-environment-id> [--access <access>] [--gateway-url <url>]
   conn-server thread list [--project <id or path>] [--json]
   conn-server thread start <project> <message or -> [--title <t>] [--provider <id> --model <slug>]
               [--worktree <base-ref> [--branch <name>]] [--wait] [--json]
@@ -55,7 +56,10 @@ session and its process close; 0 keeps them open. Default 30, as the T3 server.
 an .mjs script run with node. Default: conn-sdk-host beside this binary, else
 sdk-host/index.mjs beside it (the release tarball), else the checkout's
 helpers/sdk-host/index.mjs.
-Environment: T3CODE_HOME, T3CODE_PORT, T3CODE_HOST, T3CODE_MODE, T3CODE_BOOTSTRAP_FD, CONN_SERVER_BROWSER_PATH.";
+CONN_SERVER_INERT=1 serves a rehearsal copy of a state folder: it imports and answers, but runs
+no agent (no providers, no run recovery, no scheduled tasks, no task followers or PR sweeps).
+Environment: T3CODE_HOME, T3CODE_PORT, T3CODE_HOST, T3CODE_MODE, T3CODE_BOOTSTRAP_FD, CONN_SERVER_BROWSER_PATH,
+CONN_SERVER_INERT.";
 
 pub const DEFAULT_PORT: u16 = 3773;
 
@@ -114,6 +118,13 @@ pub enum Command {
     SessionList {
         state_dir: PathBuf,
         json: bool,
+    },
+    /// `environment link-orbit`: links a server Orbit lists, pairing through the Gateway.
+    EnvironmentLinkOrbit {
+        state_dir: PathBuf,
+        environment_id: String,
+        access: String,
+        gateway_url: String,
     },
     SessionRevoke {
         state_dir: PathBuf,
@@ -345,10 +356,29 @@ pub fn parse(raw: Vec<String>) -> Result<Command, String> {
                 title: args.value("--title"),
             })
         }
+        ["environment", "link-orbit", environment_id] => {
+            args.only(&["--access", "--gateway-url"])?;
+            let access = args
+                .value("--access")
+                .unwrap_or_else(|| "approval-required".into());
+            if !auth::is_mcp_access(&access) {
+                return Err(format!(
+                    "--access must be one of read-only, approval-required, auto-accept-edits, auto, full-access, not `{access}`"
+                ));
+            }
+            Ok(Command::EnvironmentLinkOrbit {
+                state_dir,
+                environment_id: (*environment_id).to_owned(),
+                access,
+                gateway_url: args
+                    .value("--gateway-url")
+                    .unwrap_or_else(|| crate::orbit_link::DEFAULT_GATEWAY_URL.into()),
+            })
+        }
         ["thread", ..] => thread_args(&args, &words, state_dir),
         [] | ["serve" | "start"] | ["serve" | "start", _] => serve_args(&args, state_dir),
         [cwd]
-            if !matches!(*cwd, "pair" | "auth" | "project" | "thread")
+            if !matches!(*cwd, "pair" | "auth" | "project" | "thread" | "environment")
                 && Path::new(cwd).is_dir() =>
         {
             serve_args(&args, state_dir)
@@ -732,6 +762,15 @@ pub fn run(command: Command) -> i32 {
     if matches!(command, Command::AcpMcpBridge) {
         return crate::acp_mcp_bridge::main();
     }
+    if let Command::EnvironmentLinkOrbit {
+        state_dir,
+        environment_id,
+        access,
+        gateway_url,
+    } = &command
+    {
+        return crate::orbit_link::run_cli(state_dir, environment_id, access, gateway_url);
+    }
     match run_inner(command) {
         Ok(()) => 0,
         Err(message) => {
@@ -801,8 +840,8 @@ fn run_inner(command: Command) -> Result<(), String> {
                 .unwrap_or_default()
         )),
         Command::Serve(_) => return Err("serve runs from main".into()),
-        Command::Thread { .. } | Command::AcpMcpBridge => {
-            return Err("thread and acp-mcp-bridge run from run".into());
+        Command::Thread { .. } | Command::AcpMcpBridge | Command::EnvironmentLinkOrbit { .. } => {
+            return Err("thread, environment and acp-mcp-bridge run from run".into());
         }
         Command::Pair {
             state_dir,
@@ -811,13 +850,14 @@ fn run_inner(command: Command) -> Result<(), String> {
             label,
         } => {
             let runtime = home::read_runtime_state(&state_dir).ok_or_else(|| {
-                format!("No running T3 server found for {}.", state_dir.display())
+                format!("No running Conn Server found for {}.", state_dir.display())
             })?;
             let issued = open_auth(&state_dir)?
                 .issue_pairing(PairingRequest {
                     scopes,
                     label: Some(label.clone()),
                     ttl_ms,
+                    session_ttl_ms: None,
                 })
                 .map_err(|e| e.to_string())?;
             let url = format!("{}/pair#token={}", runtime.origin, issued.code);
@@ -841,6 +881,7 @@ fn run_inner(command: Command) -> Result<(), String> {
                     scopes,
                     label,
                     ttl_ms,
+                    session_ttl_ms: None,
                 })
                 .map_err(|e| e.to_string())?;
             let pair_url = base_url

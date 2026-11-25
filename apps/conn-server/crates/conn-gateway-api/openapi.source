@@ -1,0 +1,3 @@
+# Where openapi.json came from. Written by `--fetch`; checked by `--check`.
+source = "https://gateway.orbit/api/v1/openapi.json"
+sha256 = "1419c0a8a7e365100bb48d1d6c02469cced0803df79a7dd30518671cc3e33b6f"

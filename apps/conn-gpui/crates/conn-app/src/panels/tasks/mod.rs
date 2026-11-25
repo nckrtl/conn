@@ -322,7 +322,7 @@ impl TasksPanel {
         self.project_key.as_deref().unwrap_or("default")
     }
 
-    fn navigation(&self) -> TasksNavigation {
+    pub(super) fn navigation(&self) -> TasksNavigation {
         self.panel_state.navigation(self.nav_key())
     }
 

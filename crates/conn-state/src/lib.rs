@@ -91,7 +91,7 @@ pub use crate::layout::{
     SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, right_panel_max_width,
     sidebar_max_width,
 };
-pub use crate::orbit_task::{is_orbit_task_create_tool, orbit_task_create_row};
+pub use crate::orbit_task::{ThreadTaskLinks, is_orbit_task_create_tool, orbit_task_create_row};
 pub use crate::order_keys::{
     OrderAssignment, order_key_between, plan_reorder, sort_active, sort_pinned, spread_order_keys,
     top_of_pinned_run_key,

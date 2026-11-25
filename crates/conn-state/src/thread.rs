@@ -526,6 +526,7 @@ fn model_option_strings(options: &serde_json::Value) -> HashMap<String, String> 
 pub struct ThreadState {
     pub thread_id: String,
     pub entries: Vec<TimelineEntry>,
+    pub task_links: crate::ThreadTaskLinks,
     /// True while a turn runs (show the working row and the Stop button).
     pub working: bool,
     pub sequence: Option<i64>,
@@ -890,6 +891,16 @@ impl ThreadState {
         projection: conn_contract::OrchestrationV2ThreadProjection,
         sequence: Option<i64>,
     ) {
+        self.apply_snapshot_projection(projection, sequence, None);
+    }
+
+    fn apply_snapshot_projection(
+        &mut self,
+        projection: conn_contract::OrchestrationV2ThreadProjection,
+        sequence: Option<i64>,
+        cursor: Option<String>,
+    ) {
+        self.task_links.begin_snapshot(cursor.as_deref());
         self.revision = next_revision();
         self.thread = Some(Box::new(projection.thread.clone()));
         self.thread_id = projection.thread.id;
@@ -1012,9 +1023,12 @@ impl ThreadState {
                 ingest(turn_item, None);
             }
         }
+        for entry in &entries {
+            self.task_links.observe_entry(entry);
+        }
         self.entries = entries;
         self.history_prefix_len = 0;
-        self.history_cursor = None;
+        self.history_cursor = cursor;
         self.has_more_history = false;
         self.loading_earlier = false;
         self.reconcile_queued_runs(true);
@@ -1026,8 +1040,11 @@ impl ThreadState {
         &mut self,
         snapshot: conn_contract::OrchestrationV2ThreadDetailSnapshot,
     ) {
-        self.apply_projection(snapshot.projection, Some(snapshot.snapshot_sequence));
-        self.history_cursor = snapshot.history_cursor.flatten();
+        self.apply_snapshot_projection(
+            snapshot.projection,
+            Some(snapshot.snapshot_sequence),
+            snapshot.history_cursor.flatten(),
+        );
         self.has_more_history = snapshot.has_more_history.unwrap_or(false);
         self.loading_earlier = false;
     }
@@ -1072,6 +1089,7 @@ impl ThreadState {
             else {
                 continue;
             };
+            self.task_links.observe_entry(&entry);
             if existing_ids.contains(entry.id()) {
                 continue;
             }
@@ -1158,8 +1176,11 @@ impl ThreadState {
             ThreadStreamItem::Snapshot(snapshot) => {
                 // The stream's snapshot is the server's thread now, as when it was created again.
                 self.deleted = false;
-                self.apply_projection(snapshot.projection, Some(snapshot.snapshot_sequence));
-                self.history_cursor = snapshot.history_cursor.flatten();
+                self.apply_snapshot_projection(
+                    snapshot.projection,
+                    Some(snapshot.snapshot_sequence),
+                    snapshot.history_cursor.flatten(),
+                );
                 self.has_more_history = snapshot.has_more_history.unwrap_or(false);
                 self.loading_earlier = false;
                 true
@@ -1448,6 +1469,7 @@ impl ThreadState {
                     self.places.insert(id, place);
                 }
                 if let Some(entry) = map_turn_item(ev.payload) {
+                    self.task_links.observe_entry(&entry);
                     let mut changed = compaction_changed || detail_changed;
                     if matches!(entry, TimelineEntry::User { .. }) {
                         let before = self.entries.len();
@@ -2055,13 +2077,7 @@ fn map_dynamic_tool(
         });
     // The task card is gated on the tool's own name and a completed call, read before the title
     // takes the name's place.
-    let orbit_task = if let (TurnItemStatus::Completed, Some(name), Some(Some(output))) =
-        (item.status, item.tool_name.as_deref(), item.output.as_ref())
-    {
-        crate::orbit_task::orbit_task_create_row(name, output)
-    } else {
-        None
-    };
+    let orbit_task = crate::orbit_task::completed_task_row(&item);
     let title = non_empty(item.title)
         .or_else(|| non_empty(item.tool_name))
         .unwrap_or_else(|| "Tool call".to_owned());

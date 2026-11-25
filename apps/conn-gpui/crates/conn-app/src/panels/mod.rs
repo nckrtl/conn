@@ -887,6 +887,11 @@ impl RightPanel {
             .update(cx, |panel, cx| panel.open_task(task_id, cx));
     }
 
+    #[cfg(test)]
+    pub(crate) fn selected_task_for_test(&self, cx: &gpui_kit::App) -> Option<i64> {
+        self.tasks.read(cx).navigation().task_id
+    }
+
     /// Whether live surfaces (native CEF browser view, device video/input streams) may run:
     /// the shell passes `true` only when the right panel is open and no GPUI overlay covers it.
     pub fn set_surface_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {

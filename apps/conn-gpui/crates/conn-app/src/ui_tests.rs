@@ -30,6 +30,8 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+pub(crate) mod details_tasks;
+
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;
 
@@ -175,7 +177,7 @@ fn make_thread_shell(spec: ThreadSeedSpec<'_>) -> ThreadShell {
     }
 }
 
-fn kitchen_sink_shell() -> ShellState {
+pub(crate) fn kitchen_sink_shell() -> ShellState {
     let project_val = json!({
         "id": "proj-parity",
         "title": "conn-gpui",
@@ -2765,7 +2767,7 @@ fn labelled(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) -> bo
         .unwrap_or(false)
 }
 
-fn click_row(cx: &mut TestAppContext, window: AnyWindowHandle, title: &str, button: MouseButton) {
+pub(crate) fn click_row(cx: &mut TestAppContext, window: AnyWindowHandle, title: &str, button: MouseButton) {
     let at = match cx.update_window(window, |_, window, cx| center_by_label(window, cx, title)) {
         Ok(at) => at,
         Err(err) => panic!("failed to locate the row `{title}`: {err}"),

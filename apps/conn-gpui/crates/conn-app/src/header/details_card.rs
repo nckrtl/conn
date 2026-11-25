@@ -143,6 +143,7 @@ pub(crate) struct ThreadDetailsState {
     pub(crate) vcs_loading: bool,
     pub(crate) tasks: Vec<ScheduledTask>,
     pub(crate) tasks_error: Option<String>,
+    pub(crate) task_history: Option<crate::app::details_tasks::TaskHistoryRead>,
     pub(crate) busy_task_id: Option<String>,
     pub(crate) git_init_pending: bool,
     pub(crate) prs_expanded: bool,
@@ -294,7 +295,7 @@ pub(crate) fn pull_request_lines(thread: &ThreadShell) -> Vec<String> {
 pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
     pub(crate) thread: &'a ThreadShell,
-    pub(crate) timeline: &'a [conn_state::TimelineEntry],
+    pub(crate) task_links: Option<&'a conn_state::ThreadTaskLinks>,
     pub(crate) state: &'a ThreadDetailsState,
     pub(crate) environment_label: &'a str,
     pub(crate) max_height: f32,
@@ -467,17 +468,8 @@ pub(crate) fn render_thread_details_card(
         body = body.child(vc);
     }
 
-    let mut seen_tasks = std::collections::HashSet::new();
-    let linked_tasks = props.timeline.iter().filter_map(|entry| {
-        let conn_state::TimelineEntry::OrbitTask { task, .. } = entry else {
-            return None;
-        };
-        let id = task.get("id")?.as_i64()?;
-        let title = task.get("title")?.as_str()?;
-        seen_tasks.insert(id).then_some((id, title))
-    });
     let mut tasks_section = None;
-    for (id, title) in linked_tasks {
+    for (&id, title) in props.task_links.into_iter().flat_map(|tasks| &tasks.links) {
         let rows = tasks_section.take().unwrap_or_else(|| {
             section(
                 "thread-details.linked-tasks",

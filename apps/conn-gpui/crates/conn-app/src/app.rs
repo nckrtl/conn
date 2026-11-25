@@ -36,6 +36,7 @@ use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
+pub(crate) mod details_tasks;
 mod linked;
 mod offline;
 mod rail_workspaces;
@@ -1779,6 +1780,10 @@ impl ConnApp {
                         match result {
                             Ok(page) => {
                                 thread.prepend_history_page(page);
+                                if let Some(env) = &env {
+                                    app.offline.task_links_changed(env, &thread_id);
+                                    app.schedule_offline_save(cx);
+                                }
                             }
                             Err(err) => {
                                 eprintln!(
@@ -5795,9 +5800,7 @@ impl ConnApp {
                     shell: &self.shell,
                     thread,
                     state: &self.thread_details,
-                    timeline: self
-                        .selected_timeline()
-                        .map_or(&[], |t| t.entries.as_slice()),
+                    task_links: self.selected_timeline().map(|t| &t.task_links),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px
@@ -7495,6 +7498,7 @@ fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
 
 impl Render for ConnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.sync_details_task_history(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.sync_thread_menu_focus(window, cx);

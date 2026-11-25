@@ -4,27 +4,41 @@ Compare the completed delegated report in **Conn iOS WireGuard Launch Experience
 
 ## Reproduce
 
-Run on the test Mac with Chrome, Python 3.12 and the running iOS lab reachable. The input is the JSON produced by the delegated-report seed, with string fields `title`, `body` and `reply`. Use the same file on both sides. The physical case uses the title “Use native Liquid Glass for iPhone floating controls”. The QA evidence bundle keeps a copy named `report.json`. On native the report must arrive via the server-created delegated completion on the parent thread, followed by the assistant reply. Sending the text as a new chat message exercises a different path.
+Use two checkouts on the test Mac. Run the harness from the QA commit under review. Serve the lab from commit `30d117b3651cd8122ca89bfdeec0c30826cf952b`. That merge includes the 16 px / 24 px typography change from `6b26242f547b67fb8e73dc11d572803c87bfef61` and the attachment composer from #368. Integration PR [#371](https://github.com/nckrtl/conn/pull/371) carries the combined lab to `main`. This check uses the immutable merge even after the target branch moves.
+
+From the root of the clean QA checkout, start the pinned lab in one terminal (Node 24 and Corepack):
+
+```sh
+LAB_SHA=30d117b3651cd8122ca89bfdeec0c30826cf952b
+git fetch origin "$LAB_SHA"
+git worktree add --detach ../conn-thread-qa-lab "$LAB_SHA"
+cd ../conn-thread-qa-lab
+corepack pnpm --filter @t3tools/lab-ios... --filter @t3tools/web... install --frozen-lockfile --ignore-scripts
+cd apps/lab-ios
+PORT=19873 node ../../node_modules/vite-plus/bin/vp dev
+```
+
+In a second terminal, from the QA checkout, use Chrome and Python 3.12. Choose an evidence directory outside build products. The tracked [report.json](report.json) contains the exact title, full Markdown body and assistant reply. The harness loads that file by default. Supply the same strings to the native seed. The report must arrive via the server-created delegated completion on the parent thread, followed by the assistant reply.
 
 ```sh
 cd apps/ios/scripts/thread-qa
+export EVIDENCE="$(mktemp -d)"
 python3.12 -m venv /tmp/conn-thread-check
 . /tmp/conn-thread-check/bin/activate
-pip install pillow==13.0.0 tesserocr==2.13.0 playwright
+pip install pillow==13.0.0 tesserocr==2.13.0 playwright==1.58.0
 mkdir -p /tmp/conn-thread-data
 curl -fsSL https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/eng.traineddata \
   -o /tmp/conn-thread-data/eng.traineddata
 echo '7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2  /tmp/conn-thread-data/eng.traineddata' | shasum -a 256 -c -
-python lab.py "$EVIDENCE/lab" "$EVIDENCE/report.json" \
-  --origin "$LAB_ORIGIN" --tessdata /tmp/conn-thread-data
+python lab.py "$EVIDENCE/lab" --origin http://127.0.0.1:19873 --tessdata /tmp/conn-thread-data
 ```
 
-Set `EVIDENCE` to an evidence directory outside build products and `LAB_ORIGIN` to the running lab. The browser uses a disposable profile. The command requires the unmodified report view to pass and each visual mutation to fail on its named assertion. It saves each image. The mutations cover an outgoing bubble, the wrong inner fill, a hidden attachment action, smaller card text, the former message font size in both roles, and a missing final timestamp.
+The runner prints computed font size and line height on the painted reply and bubble, then evaluates the screenshots with OCR and pixel checks. Both references must pass at 16 px / 24 px. The old-size mutations must reach 13 px / 21.125 px and fail the wrap check. The other seven mutations must fail their named checks for an outgoing bubble, extra status row, wrong inner fill, hidden attachment, smaller card preview, tight composer inset and covered timestamp.
 
 1. On native, open the seeded thread, dismiss the keyboard and go to the newest message. Save `native-closed.png` after scrolling stops.
 2. Focus the empty composer, show the English QWERTY software keyboard with predictive text, and go to the newest message. Save `native-focused.png` after the keyboard stops. Record the keyboard's actual top in screen points from the accessibility frame. With only a screenshot, multiply the top edge's pixel Y by 402 and divide by the full image width. Round to the nearest point.
 3. To reproduce the focused lab geometry, pass the same `--keyboard-top "$KEYBOARD_TOP_PT"` to `lab.py`. Its extra reference reserves the measured keyboard space and the native 2 pt gutter. The iOS keyboard itself appears only in the native capture.
-4. Run both checks. Each exits nonzero for a mismatch. Retain both images and the output alongside the build SHA, device bounds and text settings. The focused check uses the measured keyboard top and requires visible keyboard keys, the attachment plus, the final three-line reply and its timestamp above the composer.
+4. Run both checks. Each exits nonzero for a mismatch. Retain both images and the output alongside the build SHA, device bounds and text settings. The focused check uses the measured keyboard top and requires visible keyboard keys, the attachment plus, the final four-line reply and its timestamp above the composer.
 
 ```sh
 python check.py "$EVIDENCE/native-closed.png" --tessdata /tmp/conn-thread-data

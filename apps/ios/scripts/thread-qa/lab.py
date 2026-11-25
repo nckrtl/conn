@@ -8,9 +8,20 @@ from playwright.sync_api import sync_playwright
 
 from check import HEIGHT, check
 
+def require_type(element, name, expected):
+    actual = element.evaluate("""el => {
+        const style = getComputedStyle(el);
+        return [style.fontSize, style.lineHeight];
+    }""")
+    print(f"{name}: computed font-size / line-height = {' / '.join(actual)}", flush=True)
+    if actual != expected:
+        raise SystemExit(f"{name}: expected {expected}, got {actual}. Check the lab revision in README.md.")
+
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("out", type=Path)
-parser.add_argument("report", type=Path, help="JSON with title, body and reply from the native seed")
+parser.add_argument("report", nargs="?", type=Path, default=Path(__file__).with_name("report.json"),
+                    help="report fixture (defaults to the tracked report.json)")
 parser.add_argument("--origin", default="http://127.0.0.1:5801")
 parser.add_argument("--tessdata", type=Path, required=True)
 parser.add_argument("--keyboard-top", type=int, help="also capture lab layout at the native keyboard top")
@@ -60,6 +71,9 @@ with sync_playwright() as playwright:
     ]
     for name, css, expected in cases:
         style = page.add_style_tag(content=css)
+        if name in ("reference", "old-body-size"):
+            require_type(phone.locator(".m-feed-text .m-md p").first, name,
+                         ["16px", "24px"] if name == "reference" else ["13px", "21.125px"])
         feed.evaluate("n => n.scrollTop = n.scrollHeight")
         image = args.out / f"{name}.png"
         phone.screenshot(path=image, animations="disabled")
@@ -87,6 +101,8 @@ with sync_playwright() as playwright:
     for name, css in (("bubble", None), ("old-bubble-size", "font-size: 13px; line-height: 21.125px")):
         if css:
             bubble_phone.locator(".m-user-bubble").evaluate("(el, css) => el.style.cssText += css", css)
+        require_type(bubble_phone.locator(".m-user-bubble span").first, name,
+                     ["13px", "21.125px"] if css else ["16px", "24px"])
         bubble_phone.locator(".m-feed").evaluate("n => n.scrollTop = n.scrollHeight")
         image = args.out / f"{name}.png"
         bubble_phone.screenshot(path=image, animations="disabled")

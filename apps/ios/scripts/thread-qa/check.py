@@ -150,6 +150,7 @@ def check(path, tessdata, keyboard_top, bubble=False):
                 "outer card fill or width")
     if title and preview and header:
         require(header[4] < title[2] < title[4] < preview[2], "Agent header and disclosure order")
+        require(abs(preview[2] - header[2] - 66) <= 5, "extra space or row in collapsed Agent card")
     if preview:
         _, x, y, right, base = preview
         print(f"  report preview: x={x:.1f} width={right - x:.1f} ink-height={base - y:.1f}")

@@ -44,6 +44,8 @@ with sync_playwright() as playwright:
             width: 80%; align-self: flex-end; background: #394048 !important;
         } .m-agent-message .m-feed-card-content {background: transparent !important}""",
          "generic outgoing fill"),
+        ("extra-status", ".m-agent-message .m-feed-card-title::after {content: '· Completed'; display: block}",
+         "extra space or row in collapsed Agent card"),
         ("wrong-inset", ".m-agent-message .m-feed-card-content {background: #394048 !important}",
          "inner card fill or width"),
         ("hidden-attachment", ".m-composer-plus {visibility: hidden}", "missing attachment plus"),

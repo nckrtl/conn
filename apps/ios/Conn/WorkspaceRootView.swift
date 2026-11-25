@@ -292,8 +292,13 @@ struct WorkspaceRootView: View {
 
 struct OfflinePill: View {
     var body: some View {
-        Label("Not connected", systemImage: "bolt.fill")
+        // Lab `OfflinePill`: a 14pt bolt 6 from 13pt medium text.
+        HStack(spacing: 6) {
+            ThreadGlyph(name: "bolt", size: 14)
+            Text("Not connected")
+        }
             .font(.system(size: 13, weight: .medium))
+            .frame(height: 16)
             .foregroundStyle(Color(red: 0.16, green: 0.14, blue: 0.055))
             .padding(.horizontal, 12)
             .padding(.vertical, 6)

@@ -10,6 +10,7 @@ struct InboxView: View {
     @Environment(\.connTheme) private var theme
     @State private var environmentFilter: String?
     @State private var settledExpanded = false
+    @State private var pagingOlder = false
     @State private var renameOwner: CoreStore?
     @State private var renamingThread: FfiThreadSummary?
     @State private var renameDraft = ""
@@ -136,11 +137,20 @@ struct InboxView: View {
                         ForEach(settled) { row in
                             threadRow(row.thread, owner: row.owner, project: row.project, settled: true)
                         }
-                        ForEach(paged, id: \.scope) { owner in
-                            Button("Load older threads · " + owner.displayName) {
-                                Task { await owner.loadOlder() }
-                            }.disabled(owner.loadingOlder || owner.status != .connected)
-                            if let message = owner.olderError { Text(message).foregroundStyle(.secondary) }
+                        if !paged.isEmpty {
+                            Button("Load older threads") {
+                                guard !pagingOlder else { return }
+                                pagingOlder = true
+                                Task {
+                                    defer { pagingOlder = false }
+                                    await withTaskGroup(of: Void.self) { group in
+                                        for owner in paged where owner.status == .connected {
+                                            group.addTask { await owner.loadOlder() }
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(pagingOlder || !paged.contains { $0.status == .connected })
                         }
                     }
                 }

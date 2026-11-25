@@ -143,15 +143,20 @@ final class CoreStore {
     /// Rust: grows when this scope connects to a different server than before.
     var identityEpoch: UInt64 { state?.identityEpoch ?? 0 }
 
-    /// The workspace, rather than the Orbit or pairing screen: connected before, or connecting to
-    /// this launch's first server (its offline history shows meanwhile). After a switch to
-    /// another server, the connecting screen shows until that one connects.
-    private(set) var showsWorkspace = false
+    private var hasPrimaryInventory = false
+
+    var showsWorkspace: Bool {
+        guard !restoringLaunchInventory else { return false }
+        if hasPrimaryInventory { return true }
+        // A saved primary can be unavailable while a linked machine already has its inventory.
+        return scope.isEmpty && (coldLaunchSession != nil || hasConnected)
+            && linked.values.contains { $0.shell != nil }
+    }
 
     private func updateWorkspaceVisibility() {
-        guard !showsWorkspace, !restoringLaunchInventory else { return }
+        guard !hasPrimaryInventory, !restoringLaunchInventory else { return }
         if shell != nil && (hasConnected || coldLaunchSession != nil || offlineReader != nil) {
-            showsWorkspace = true
+            hasPrimaryInventory = true
         }
     }
     var serverURL: String? { state?.serverUrl }
@@ -671,7 +676,7 @@ final class CoreStore {
             shell = nil
             offlineReader = nil
             discoveredPrimary = nil
-            showsWorkspace = false
+            hasPrimaryInventory = false
             openThread = nil
             openThreadId = nil
         }
@@ -686,7 +691,7 @@ final class CoreStore {
             else {
                 shell = nil
                 offlineReader = nil
-                showsWorkspace = false
+                hasPrimaryInventory = false
                 discoveredPrimary = nil
             }
         case let .live(status):

@@ -1703,6 +1703,11 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func pairManual(serverUrl: String, pairingCode: String) 
     
     /**
+     * Read at presentation time: a callback queued before a socket retry carries no stale rows.
+     */
+    func publishedShell(connectionId: UInt64)  -> FfiShellSnapshot?
+    
+    /**
      * A linked environment's session at launch: its saved Orbit environment or manual server.
      */
     func restore(saved: FfiSavedSession?) 
@@ -1959,6 +1964,19 @@ open func pairManual(serverUrl: String, pairingCode: String)  {try! rustCall() {
         FfiConverterString.lower(pairingCode),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Read at presentation time: a callback queued before a socket retry carries no stale rows.
+     */
+open func publishedShell(connectionId: UInt64) -> FfiShellSnapshot?  {
+    return try!  FfiConverterOptionTypeFfiShellSnapshot.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_published_shell(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(connectionId),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -4182,7 +4200,7 @@ public protocol SessionListener: AnyObject, Sendable {
      */
     func onSave(session: FfiSavedSession?) 
     
-    func onShell(connectionId: UInt64, snapshot: FfiShellSnapshot) 
+    func onShellChanged(connectionId: UInt64) 
     
     func onThread(connectionId: UInt64, snapshot: FfiThreadSnapshot) 
     
@@ -4273,12 +4291,11 @@ open func onSave(session: FfiSavedSession?)  {try! rustCall() {
 }
 }
     
-open func onShell(connectionId: UInt64, snapshot: FfiShellSnapshot)  {try! rustCall() {
+open func onShellChanged(connectionId: UInt64)  {try! rustCall() {
         uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_sessionlistener_on_shell(
+    uniffi_conn_ffi_fn_method_sessionlistener_on_shell_changed(
             self.uniffiCloneHandle(),
-        FfiConverterUInt64.lower(connectionId),
-        FfiConverterTypeFfiShellSnapshot_lower(snapshot),uniffiCallStatus
+        FfiConverterUInt64.lower(connectionId),uniffiCallStatus
     )
 }
 }
@@ -4399,10 +4416,9 @@ fileprivate struct UniffiCallbackInterfaceSessionListener {
                 writeReturn: writeReturn
             )
         },
-        onShell: { (
+        onShellChanged: { (
             uniffiHandle: UInt64,
             connectionId: UInt64,
-            snapshot: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -4411,9 +4427,8 @@ fileprivate struct UniffiCallbackInterfaceSessionListener {
                 guard let uniffiObj = try? FfiConverterTypeSessionListener.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return uniffiObj.onShell(
-                     connectionId: try FfiConverterUInt64.lift(connectionId),
-                     snapshot: try FfiConverterTypeFfiShellSnapshot_lift(snapshot)
+                return uniffiObj.onShellChanged(
+                     connectionId: try FfiConverterUInt64.lift(connectionId)
                 )
             }
 
@@ -18541,6 +18556,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_pair_manual() != 12047) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_published_shell() != 24802) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_restore() != 5191) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18562,7 +18580,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_save() != 47827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_sessionlistener_on_shell() != 11746) {
+    if (uniffi_conn_ffi_checksum_method_sessionlistener_on_shell_changed() != 4741) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_thread() != 42157) {

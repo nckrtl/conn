@@ -1375,6 +1375,10 @@ impl PumpState {
     fn handle_control(&mut self, ctrl: PumpControl) -> bool {
         match ctrl {
             PumpControl::BeginOlderPage(reply) => {
+                if !self.shell.synchronized {
+                    let _ = reply.send(None);
+                    return true;
+                }
                 self.shell.retry_older_page();
                 let request = self.shell.next_older_page(0, 1);
                 if let Some(ref request) = request {
@@ -1802,15 +1806,15 @@ async fn run_pump(
                         break;
                     }
                 }
-                () = tokio::time::sleep_until(sleep_until) => {
-                    state.flush_due();
-                }
                 maybe_event = events_rx.recv() => {
                     let Some(first) = maybe_event else { break };
                     state.handle_event(first);
                     while let Ok(more) = events_rx.try_recv() {
                         state.handle_event(more);
                     }
+                    state.flush_due();
+                }
+                () = tokio::time::sleep_until(sleep_until) => {
                     state.flush_due();
                 }
             }
@@ -2391,9 +2395,20 @@ mod tests {
 
         core.close_thread("thread-1".to_owned());
         core.close_thread(launched_id);
-        core.disconnect();
+        assert!(core.published_shell().is_some());
         let _ = stop_tx.send(());
         let _ = server_thread.join();
+        assert!(listener.wait_for(Duration::from_secs(5), |state| {
+            state
+                .statuses
+                .iter()
+                .any(|s| matches!(s, FfiConnectionStatus::Reconnecting { .. }))
+        }));
+        assert!(
+            core.published_shell().is_none(),
+            "a previously queued iOS callback must not read the lost socket's shell"
+        );
+        core.disconnect();
         Ok(())
     }
     fn provider_json(id: &str, extra: serde_json::Value) -> serde_json::Value {

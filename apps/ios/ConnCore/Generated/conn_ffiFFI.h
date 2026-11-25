@@ -343,7 +343,7 @@ typedef void (*UniffiCallbackInterfaceSessionListenerMethod1)(uint64_t, RustBuff
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SESSION_LISTENER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SESSION_LISTENER_METHOD2
-typedef void (*UniffiCallbackInterfaceSessionListenerMethod2)(uint64_t, uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceSessionListenerMethod2)(uint64_t, uint64_t, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -419,7 +419,7 @@ typedef struct UniffiVTableCallbackInterfaceSessionListener {
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceSessionListenerMethod0 _Nonnull onState;
     UniffiCallbackInterfaceSessionListenerMethod1 _Nonnull onSave;
-    UniffiCallbackInterfaceSessionListenerMethod2 _Nonnull onShell;
+    UniffiCallbackInterfaceSessionListenerMethod2 _Nonnull onShellChanged;
     UniffiCallbackInterfaceSessionListenerMethod3 _Nonnull onThread;
     UniffiCallbackInterfaceSessionListenerMethod4 _Nonnull onError;
     UniffiCallbackInterfaceSessionListenerMethod5 _Nonnull onProvidersChanged;
@@ -1012,6 +1012,11 @@ void uniffi_conn_ffi_fn_method_connsession_open_thread(uint64_t ptr, RustBuffer 
 void uniffi_conn_ffi_fn_method_connsession_pair_manual(uint64_t ptr, RustBuffer server_url, RustBuffer pairing_code, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_PUBLISHED_SHELL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_PUBLISHED_SHELL
+RustBuffer uniffi_conn_ffi_fn_method_connsession_published_shell(uint64_t ptr, uint64_t connection_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_RESTORE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_RESTORE
 void uniffi_conn_ffi_fn_method_connsession_restore(uint64_t ptr, RustBuffer saved, RustCallStatus *_Nonnull out_status
@@ -1062,9 +1067,9 @@ void uniffi_conn_ffi_fn_method_sessionlistener_on_state(uint64_t ptr, RustBuffer
 void uniffi_conn_ffi_fn_method_sessionlistener_on_save(uint64_t ptr, RustBuffer session, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_SESSIONLISTENER_ON_SHELL
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_SESSIONLISTENER_ON_SHELL
-void uniffi_conn_ffi_fn_method_sessionlistener_on_shell(uint64_t ptr, uint64_t connection_id, RustBuffer snapshot, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_SESSIONLISTENER_ON_SHELL_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_SESSIONLISTENER_ON_SHELL_CHANGED
+void uniffi_conn_ffi_fn_method_sessionlistener_on_shell_changed(uint64_t ptr, uint64_t connection_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_SESSIONLISTENER_ON_THREAD
@@ -2093,6 +2098,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_pair_manual(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_PUBLISHED_SHELL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_PUBLISHED_SHELL
+uint16_t uniffi_conn_ffi_checksum_method_connsession_published_shell(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_RESTORE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_RESTORE
 uint16_t uniffi_conn_ffi_checksum_method_connsession_restore(void
@@ -2135,9 +2146,9 @@ uint16_t uniffi_conn_ffi_checksum_method_sessionlistener_on_save(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_SESSIONLISTENER_ON_SHELL
-#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_SESSIONLISTENER_ON_SHELL
-uint16_t uniffi_conn_ffi_checksum_method_sessionlistener_on_shell(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_SESSIONLISTENER_ON_SHELL_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_SESSIONLISTENER_ON_SHELL_CHANGED
+uint16_t uniffi_conn_ffi_checksum_method_sessionlistener_on_shell_changed(void
     
 );
 #endif

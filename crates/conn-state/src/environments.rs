@@ -37,6 +37,8 @@ pub struct LinkedShellSnapshot {
     pub threads: Vec<ThreadShell>,
     pub archived_threads: Vec<ThreadShell>,
     pub sequence: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    older: Option<crate::shell::OlderSettled>,
 }
 
 impl LinkedShellSnapshot {
@@ -53,17 +55,30 @@ impl LinkedShellSnapshot {
             threads: shell.threads.clone(),
             archived_threads: shell.archived_threads.clone(),
             sequence: shell.sequence,
+            older: None,
         }
+    }
+
+    /// Includes the settled pages and their cutoff so the cached phone inventory matches the screen.
+    #[must_use]
+    pub fn capture_inventory(environment_id: &str, shell: &ShellState) -> Self {
+        let mut snapshot = Self::capture(environment_id, "", shell);
+        if shell.older_settled().cut.is_some() {
+            snapshot.older = Some(shell.older.clone());
+        }
+        snapshot
     }
 
     #[must_use]
     pub fn into_shell(self) -> ShellState {
-        ShellState::from_parts(
+        let mut shell = ShellState::from_parts(
             self.projects,
             self.threads,
             self.archived_threads,
             self.sequence,
-        )
+        );
+        shell.older = self.older.unwrap_or_default();
+        shell
     }
 
     /// # Errors
@@ -791,6 +806,20 @@ mod tests {
         }))
         .expect("page decodes");
         linked.apply_older_page("mini", &request, page);
+        let cached = LinkedShellSnapshot::capture_inventory("mini", linked.shell("mini").unwrap());
+        let restored = LinkedShellSnapshot::from_json(&cached.to_json().unwrap())
+            .unwrap()
+            .into_shell();
+        assert_eq!(restored.older_settled().loaded, 2);
+        assert!(restored.older_settled().frontier.is_none());
+        assert_eq!(
+            restored
+                .top_level_settled_threads()
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            ["t-mini-settled", "t-mini-old-1", "t-mini-old-2"]
+        );
         linked.merge_into("nick", "nick", &mut primary, &origins);
 
         assert_eq!(

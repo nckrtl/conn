@@ -58,6 +58,7 @@ private struct SettingsEnvironmentsDetailView: View {
                 LabeledContent("Status") {
                     ConnectionStatusPill(status: store.status)
                 }
+                if let error = store.olderError { Text(error).foregroundStyle(.secondary) }
                 if let error = store.lastError { Text(error).foregroundStyle(.secondary) }
                 Button {
                     store.reconnect()
@@ -82,6 +83,7 @@ private struct SettingsEnvironmentsDetailView: View {
                             .swipeActions {
                                 Button("Disconnect", role: .destructive) { store.removeLinked(id) }
                             }
+                        if let error = child.olderError { Text(error).font(.caption) }
                         if child.showsOffline || child.lastError != nil {
                             if case let .failed(message, detail, _) = child.state?.phase {
                                 Text([message, detail].compactMap { $0 }.joined(separator: " ")).font(.caption)

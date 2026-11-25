@@ -43,12 +43,13 @@ struct ThreadAttachments: View {
                 // One image takes the whole width at its own aspect ratio (lab `[data-count="1"]`).
                 AttachmentTile(file: only, store: store, thread: thread, single: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .id([thread, store.attachmentEnvironment, String(store.identityEpoch)])
+                    .id([only.id, thread, store.attachmentEnvironment, String(store.identityEpoch)])
             } else if !images.isEmpty {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: min(2, images.count)), spacing: 3) {
-                    ForEach(images, id: \.self) { file in
+                    ForEach(images, id: \.id) { file in
+                        // Each tile needs its own identity: a shared `.id` made the grid draw only one.
                         AttachmentTile(file: file, store: store, thread: thread)
-                            .id([thread, store.attachmentEnvironment, String(store.identityEpoch)])
+                            .id([file.id, thread, store.attachmentEnvironment, String(store.identityEpoch)])
                     }
                 }
             }

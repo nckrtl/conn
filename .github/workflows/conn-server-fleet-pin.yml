@@ -97,7 +97,7 @@ jobs:
             echo 'Orbit main already contains this pin.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Mint the orbit-nckrtl installation token
-        if: steps.plan.outputs.changed == 'true'
+        if: steps.plan.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         id: writer
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
@@ -107,6 +107,11 @@ jobs:
           repositories: orbit
           permission-contents: write
           permission-pull-requests: write
+      - name: Prove App access for an already pinned release
+        if: github.event_name == 'workflow_dispatch' && steps.plan.outputs.changed != 'true'
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+        run: bash "$RUNNER_TEMP/conn-server-fleet-pin.sh" verify-app
       - name: Open or recover the pin PR
         if: steps.plan.outputs.changed == 'true'
         env:

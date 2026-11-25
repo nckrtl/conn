@@ -12,11 +12,18 @@ pin_pr() {
     --jq 'map(select(.user.login == "orbit-nckrtl[bot]")) | first // {}'
 }
 
+verify_app() {
+  gh api /installation/repositories --jq '[.repositories[].full_name] | index("hardimpactdev/orbit") != null' | grep -qx true
+  echo 'The GitHub App installation token can read hardimpactdev/orbit.'
+}
+
 case ${1:?} in
+  verify-app)
+    verify_app
+    ;;
   propose)
     [[ ${SOURCE_SHA:?} =~ ^[a-f0-9]{40}$ ]]
-    gh api /installation/repositories --jq '[.repositories[].full_name] | index("hardimpactdev/orbit") != null' | grep -qx true
-    echo 'The GitHub App installation token can read hardimpactdev/orbit.'
+    verify_app
     pr=$(pin_pr)
     if [[ $(jq -r '.html_url // empty' <<<"$pr") != '' ]]; then
       jq -e --arg sha "$SOURCE_SHA" '.body | contains("Conn-Source: " + $sha)' <<<"$pr" > /dev/null

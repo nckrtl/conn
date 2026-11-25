@@ -83,7 +83,8 @@ branch. Merge the pin through the Orbit merge queue.
 
 Set the Conn Actions variable `ORBIT_PIN_APP_ID` and the secret
 `ORBIT_PIN_APP_PRIVATE_KEY`. The proposal job mints a short-lived installation
-token for Orbit alone, then verifies that token can read the repository. The
+token for Orbit alone, then verifies that token can read the repository. A manual
+run against the already pinned tag can prove access without opening a new PR. The
 Mac runner uses its existing Developer ID. It has no App credentials.
 
 A parallel job checks the PR at five minutes after publication. If the deadline

@@ -109,11 +109,11 @@ struct PullRequestsTabView: View {
                             }
                         }.padding(.vertical, 12).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityIdentifier("pr.row.\(row.repository).\(row.number)")
-                    .task(id: model.request) {
+                    .task(id: model.rowsGeneration) { [generation = model.rowsGeneration] in
                         guard model.checkCounts[row.id] == nil else { return }
                         struct Checks: Decodable { let checks: [PullRequestRecord.Detail.Check] }
                         guard let result = try? await store.pullRequest(.checks, input: row.ref, as: Checks?.self),
-                              !Task.isCancelled else { return }
+                              !Task.isCancelled, generation == model.rowsGeneration else { return }
                         let runs = result.checks.filter { $0.placeholder != true }
                         if !runs.isEmpty {
                             model.checkCounts[row.id] = "\(runs.filter { $0.status == "success" }.count) of \(runs.count) passed"
@@ -143,7 +143,8 @@ final class WorkspacePullRequests {
     var rows: [PullRequestRow] = []
     var checkCounts: [String: String] = [:]
     fileprivate var stats: [String: PullRequestStats.Stat] = [:]
-    var request = UUID()
+    private(set) var rowsGeneration = UUID()
+    private var request = UUID()
     var notice: String?
     var loading = true
     var filter = "All"
@@ -174,6 +175,7 @@ final class WorkspacePullRequests {
             }
             checkCounts = [:]
             rows = result
+            rowsGeneration = generation
             notice = messages.isEmpty ? nil : messages.sorted().joined(separator: "\n")
             loading = false
             stats = [:]

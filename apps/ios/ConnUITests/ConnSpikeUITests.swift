@@ -455,7 +455,9 @@ final class ConnSpikeUITests: XCTestCase {
 
     func testWorkspaceSystemTabs() throws {
         let env = ProcessInfo.processInfo.environment
-        let pairing = try XCTUnwrap(env["CONN_PAIRING_URL"], "Requires an isolated, seeded Conn server")
+        guard let pairing = env["CONN_PAIRING_URL"], !pairing.isEmpty else {
+            throw XCTSkip("Set CONN_PAIRING_URL to run against an isolated, seeded Conn server")
+        }
         let threadTitle = env["CONN_THREAD_TITLE"] ?? "Inspect main.rs and greeting"
         let app = XCUIApplication()
         app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = env["CONN_TEST_TASK_GATEWAY"]

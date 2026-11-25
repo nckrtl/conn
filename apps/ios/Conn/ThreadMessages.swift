@@ -140,7 +140,7 @@ struct ThreadMessage: View {
                 .padding(3)
                 // Lab: the corner toward the copy button is nearly square.
                 .background(theme.messageSurface, in: UnevenRoundedRectangle(
-                    topLeadingRadius: 14, bottomLeadingRadius: 14, bottomTrailingRadius: 4, topTrailingRadius: 14,
+                    topLeadingRadius: 14, bottomLeadingRadius: 14, bottomTrailingRadius: 8, topTrailingRadius: 14,
                     style: .continuous))
                 // The copy glyph's right edge sits on the bubble's right edge (its 24 pt target pads 5).
                 MessageFooter(text: text, timestamp: date, trailingCopy: true)

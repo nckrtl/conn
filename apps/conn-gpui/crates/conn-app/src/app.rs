@@ -5680,56 +5680,6 @@ impl ConnApp {
         }
     }
 
-    /// Opens a native folder picker and registers the selected directory via `projects.mutate`
-    /// (`project.create`).
-    pub(crate) fn add_project_via_picker(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(connection) = self.connection.clone() else {
-            return;
-        };
-        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add project".into()),
-        });
-        cx.spawn_in(window, async move |_this, _cx| {
-            let Ok(Ok(Some(mut chosen))) = paths.await else {
-                return;
-            };
-            let Some(path) = chosen.pop() else {
-                return;
-            };
-            let workspace_root = path.to_string_lossy().trim_end_matches('/').to_owned();
-            if workspace_root.is_empty() {
-                return;
-            }
-            let title = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Project")
-                .to_owned();
-            let Ok(mutation) = crate::commands::create_project_mutation(&workspace_root, &title)
-            else {
-                return;
-            };
-            if let Err(err) = connection
-                .call::<conn_contract::rpc::projects::mutate::Payload, conn_contract::rpc::projects::mutate::Success>(
-                    "projects.mutate",
-                    &mutation,
-                )
-                .await
-            {
-                eprintln!("add project: projects.mutate failed: {err}");
-            }
-        })
-        .detach();
-    }
-
     /// Current layout state.
     #[cfg_attr(
         all(not(feature = "automation"), not(test)),

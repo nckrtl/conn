@@ -848,19 +848,25 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
         != "subscribeServerConfig"
     {}
 
-    let start = cx
-        .update_window(window, |_, window, cx| {
-            app.update(cx, |app, cx| {
-                app.set_shell(two_project_shell(), cx);
-                app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
-                app.start_general_draft(Some(window), cx)
-            })
-        })
-        .expect("test window");
-    let draft_id = start.await.expect("opened General draft");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let filter = window.find_by_label("Filter by project").bounds();
+        let new_thread = window.find_by_label("New thread").bounds();
+        assert_eq!(filter.right(), new_thread.left());
+    })
+    .expect("sidebar actions");
+    click_row(cx, window, "New thread", MouseButton::Left);
+    cx.condition(&app, |app, _| app.open_draft_for_test().is_some())
+        .await;
     assert_eq!(
-        cx.read(|cx| app.read(cx).open_draft_for_test()),
-        Some((draft_id, "primary-scratch".to_owned()))
+        cx.read(|cx| app.read(cx).open_draft_for_test().expect("General draft").1),
+        "primary-scratch"
     );
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);

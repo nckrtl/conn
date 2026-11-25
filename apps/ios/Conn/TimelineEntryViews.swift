@@ -1,6 +1,11 @@
 import DesignKit
 import SwiftUI
 
+/// The thread feed's spacing between items (messages, cards, work groups).
+enum ThreadFeed {
+    static let spacing: CGFloat = 30
+}
+
 struct WorkGroupCard: View {
     let group: FfiWorkGroupTiming
     let entries: [FfiTimelineEntry]
@@ -81,12 +86,15 @@ struct WorkGroupCard: View {
                 }
             }
 
-            Rectangle()
-                .fill(threadDividerColor(theme, appearance))
-                .frame(height: 1)
+            // The rule closes an expanded log only; collapsed, "Worked for" sits on its message.
+            if expanded && !group.hasActive {
+                Rectangle()
+                    .fill(threadDividerColor(theme, appearance))
+                    .frame(height: 1)
+            }
         }
-        // The feed stacks items 22 apart; below the divider only the paragraph gap is wanted.
-        .padding(.bottom, gap - 22)
+        // The feed stacks items `ThreadFeed.spacing` apart; below this row only the paragraph gap.
+        .padding(.bottom, gap - ThreadFeed.spacing)
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
         .onAppear { anchor() }
         .onChange(of: group.durationMs) { anchor() }
@@ -108,11 +116,9 @@ struct WorkingFold: View {
 
     var body: some View {
         let gap = size * 0.85
-        VStack(alignment: .leading, spacing: gap) {
-            WorkingFoldLabel(since: since, size: size)
-            Rectangle().fill(threadDividerColor(theme, appearance)).frame(height: 1)
-        }
-        .padding(.bottom, gap)
+        // No rule under "Working for": the live row follows a paragraph gap below.
+        WorkingFoldLabel(since: since, size: size)
+            .padding(.bottom, gap)
     }
 }
 

@@ -919,6 +919,7 @@ fn map_checkpoint_entry(checkpoint: &TurnCheckpointSummary) -> FfiTimelineEntry 
 pub(crate) fn build_thread_snapshot(
     thread: &ThreadState,
     meta: Option<&ThreadSnapshotMeta>,
+    catalog: &conn_state::providers::ModelCatalog,
 ) -> FfiThreadSnapshot {
     let mut entries = Vec::with_capacity(thread.entries.len() + thread.turn_checkpoints.len());
     let mut emitted_checkpoints: HashSet<&str> = HashSet::new();
@@ -982,17 +983,13 @@ pub(crate) fn build_thread_snapshot(
                 .subagent_of_entry
                 .get(id)
                 .and_then(|k| thread.subagent_models.get(k));
+            let label = model.and_then(|m| m.label(catalog));
             feed_details.insert(
                 id.clone(),
                 crate::FfiFeedDetail::Subagent {
                     provider: model.and_then(|m| m.instance_id.clone()),
-                    model: model.and_then(|m| m.model.clone()),
-                    effort: model.and_then(|m| {
-                        m.options
-                            .get("reasoningEffort")
-                            .or_else(|| m.options.get("effort"))
-                            .cloned()
-                    }),
+                    model: label.as_ref().map(|l| l.model.clone()),
+                    effort: label.and_then(|l| l.effort),
                     environment: remote_child.as_ref().map(|r| r.environment_id.clone()),
                     thread: remote_child.as_ref().map(|r| r.thread_id.clone()),
                 },
@@ -1830,7 +1827,7 @@ mod tests {
             model_label: Some("claude-sonnet-4-5".to_owned()),
         };
 
-        let snap = build_thread_snapshot(&state, Some(&meta));
+        let snap = build_thread_snapshot(&state, Some(&meta), &Default::default());
         assert_eq!(snap.title.as_deref(), Some("Fix build"));
         assert_eq!(snap.branch.as_deref(), Some("feat/ios-spike"));
         assert_eq!(snap.model_label.as_deref(), Some("claude-sonnet-4-5"));
@@ -1900,7 +1897,7 @@ mod tests {
         let mut state = ThreadState::new("thread-1");
         assert!(state.apply(item), "snapshot must change thread state");
 
-        let ffi = build_thread_snapshot(&state, None);
+        let ffi = build_thread_snapshot(&state, None, &Default::default());
         assert_eq!(
             ffi.entries.len(),
             6,
@@ -1973,7 +1970,7 @@ mod tests {
         }).collect();
         projection["visibleTurnItems"] = json!(rows);
         let expected = |state: &ThreadState| {
-            let snap = build_thread_snapshot(state, None);
+            let snap = build_thread_snapshot(state, None, &Default::default());
             assert_eq!(snap.entries.len(), 3);
             assert!(
                 matches!(&snap.entries[0], FfiTimelineEntry::User{text,created_by_agent:true,..} if text == body)
@@ -2009,7 +2006,7 @@ mod tests {
         let mut recorded = ThreadState::new("thread");
         recorded.apply(serde_json::from_value(old).unwrap());
         assert!(
-            matches!(&build_thread_snapshot(&recorded,None).entries[..], [FfiTimelineEntry::User{text,created_by_agent:true,..}] if text == body)
+            matches!(&build_thread_snapshot(&recorded, None, &Default::default()).entries[..], [FfiTimelineEntry::User{text,created_by_agent:true,..}] if text == body)
         );
 
         // An offline row saved before attribution was cached still has the Rust server's command-derived id.
@@ -2045,7 +2042,7 @@ mod tests {
             "occurredAt":wake["updatedAt"],"payload":child
         }});
         assert!(live.apply(serde_json::from_value(frame).unwrap()));
-        let snap = build_thread_snapshot(&live, None);
+        let snap = build_thread_snapshot(&live, None, &Default::default());
         assert_eq!(snap.entries.len(), 3);
         assert!(snap.entries.iter().any(|entry| matches!(entry,FfiTimelineEntry::Subagent{summary:Some(text),..} if text == body)));
         assert!(!snap.entries.iter().any(|entry| matches!(

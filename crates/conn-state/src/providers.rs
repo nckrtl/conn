@@ -964,6 +964,85 @@ pub struct ModelCatalog {
     pub preferences: ModelPreferences,
 }
 
+/// A subagent card's header, as the lab's `SubagentCard`: the model's catalog name and its
+/// reasoning effort, lowercased (`GPT-6.2 Astra`, `high`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentModelLabel {
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+impl crate::SubagentModel {
+    /// The header label. A delegate started without options carries none, so the effort falls
+    /// back to the catalog's current choice; a model the catalog lacks shows its slug,
+    /// prettified, and the raw reasoning option.
+    #[must_use]
+    pub fn label(&self, catalog: &ModelCatalog) -> Option<SubagentModelLabel> {
+        let slug = self.model.as_deref()?;
+        let found = catalog.find_model(self.instance_id.as_deref(), slug);
+        let model = found.map_or_else(|| prettify_model_slug(slug), ModelOption::display_label);
+        let options: OptionMap = self
+            .options
+            .iter()
+            .map(|(id, value)| {
+                let value = match value.as_str() {
+                    "true" => serde_json::Value::Bool(true),
+                    "false" => serde_json::Value::Bool(false),
+                    other => serde_json::Value::String(other.to_owned()),
+                };
+                (id.clone(), value)
+            })
+            .collect();
+        let effort = found
+            .and_then(|found| {
+                found
+                    .effort_summary((!options.is_empty()).then_some(&options))
+                    .word
+            })
+            .or_else(|| {
+                ["reasoningEffort", "effort", "reasoning"]
+                    .iter()
+                    .find_map(|key| self.options.get(*key).cloned())
+            })
+            .map(|word| word.to_lowercase())
+            .filter(|word| !word.is_empty());
+        Some(SubagentModelLabel { model, effort })
+    }
+}
+
+/// A readable name for a model slug the catalog does not list: `gpt-6.2-astra` becomes
+/// `GPT-6.2 Astra`, `claude-opus-5-5` becomes `Claude Opus 5.5`.
+fn prettify_model_slug(slug: &str) -> String {
+    let short_number =
+        |part: &str| (1..=2).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
+    let mut out = String::new();
+    let mut previous: Option<&str> = None;
+    for part in slug.split(['-', '_']).filter(|part| !part.is_empty()) {
+        match previous {
+            None => {}
+            Some(prev) if short_number(prev) && short_number(part) => out.push('.'),
+            Some(prev)
+                if prev.eq_ignore_ascii_case("gpt")
+                    && part.starts_with(|c: char| c.is_ascii_digit()) =>
+            {
+                out.push('-');
+            }
+            Some(_) => out.push(' '),
+        }
+        if part.eq_ignore_ascii_case("gpt") {
+            out.push_str("GPT");
+        } else if part.bytes().all(|b| b.is_ascii_alphabetic()) {
+            let mut chars = part.chars();
+            out.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+            out.push_str(chars.as_str());
+        } else {
+            out.push_str(part);
+        }
+        previous = Some(part);
+    }
+    if out.is_empty() { slug.to_owned() } else { out }
+}
+
 /// The picker rail's Favorites tab, as a `selected_provider`. Instance ids start with a
 /// letter, so it never names an instance.
 pub const FAVORITES_TAB: &str = "@favorites";
@@ -2399,6 +2478,59 @@ mod live_tests {
             Some("antigravity"),
             "else the first instance with a setup path"
         );
+    }
+
+    /// A subagent card names the catalog model and its effort, as the lab's `GPT-6.2 Astra ·
+    /// high`. A delegate started without options carries none: the effort is the catalog's
+    /// current choice, not missing. A model the catalog lacks shows a readable slug.
+    #[test]
+    fn a_subagent_label_names_the_catalog_model_and_its_effort() {
+        let state = loaded();
+        let catalog = state.catalog();
+        let subagent =
+            |instance: &str, slug: &str, options: &[(&str, &str)]| crate::SubagentModel {
+                model: Some(slug.to_owned()),
+                instance_id: Some(instance.to_owned()),
+                options: options
+                    .iter()
+                    .map(|(id, value)| ((*id).to_owned(), (*value).to_owned()))
+                    .collect(),
+            };
+        let label =
+            |model: &crate::SubagentModel| model.label(catalog).map(|l| (l.model, l.effort));
+        let named =
+            |model: &str, effort: Option<&str>| Some((model.to_owned(), effort.map(str::to_owned)));
+        assert_eq!(
+            label(&subagent(
+                "codex",
+                "gpt-6-astra",
+                &[("reasoningEffort", "high")]
+            )),
+            named("GPT-6-Astra", Some("high"))
+        );
+        assert_eq!(
+            label(&subagent("codex", "gpt-6-astra", &[])),
+            named("GPT-6-Astra", Some("medium")),
+            "no options: the catalog's current effort"
+        );
+        assert_eq!(
+            label(&subagent("claudeAgent", "claude-opus-5-5", &[])).map(|(m, _)| m),
+            Some("Claude Opus 5.5".to_owned())
+        );
+        assert_eq!(
+            label(&subagent(
+                "codex",
+                "gpt-6.2-astra",
+                &[("reasoningEffort", "xhigh")]
+            )),
+            named("GPT-6.2 Astra", Some("xhigh")),
+            "an unlisted model: prettified slug, raw effort"
+        );
+        assert_eq!(
+            label(&subagent("claudeAgent", "claude-haiku-4-5-20251001", &[])),
+            named("Claude Haiku 4.5 20251001", None)
+        );
+        assert_eq!(label(&crate::SubagentModel::default()), None);
     }
 
     #[test]

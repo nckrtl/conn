@@ -1449,7 +1449,9 @@ impl PumpState {
                             .is_none_or(|sync| sync.may_read(&thread_id))
                     })
                     .filter(|state| state.synchronized || !state.entries.is_empty())
-                    .map(|state| build_thread_snapshot(state, meta.as_ref()));
+                    .map(|state| {
+                        build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
+                    });
                 self.threads
                     .entry(thread_id.clone())
                     .or_insert_with(|| ThreadState::new(thread_id.clone()));
@@ -1500,10 +1502,9 @@ impl PumpState {
                     self.update_thread_run_meta(&thread_id, &state);
                     self.threads.insert(thread_id.clone(), state);
                     let meta = self.resolve_thread_meta(&thread_id);
-                    let snapshot = self
-                        .threads
-                        .get(&thread_id)
-                        .map(|state| build_thread_snapshot(state, meta.as_ref()));
+                    let snapshot = self.threads.get(&thread_id).map(|state| {
+                        build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
+                    });
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
                     self.connection.subscribe_thread(&thread_id);
@@ -1634,7 +1635,11 @@ impl PumpState {
                         && (state.synchronized || !state.entries.is_empty())
                     {
                         let meta = self.resolve_thread_meta(&thread_id);
-                        let thread_snapshot = build_thread_snapshot(state, meta.as_ref());
+                        let thread_snapshot = build_thread_snapshot(
+                            state,
+                            meta.as_ref(),
+                            self.server_config.catalog(),
+                        );
                         self.emit_or_buffer_thread(thread_snapshot);
                     }
                 }
@@ -1666,9 +1671,9 @@ impl PumpState {
                 let meta = self.resolve_thread_meta(&thread_id);
                 let emit = changed || force_emit || meta != meta_before;
                 let snapshot = if self.open_threads.contains(&thread_id) && emit {
-                    self.threads
-                        .get(&thread_id)
-                        .map(|state| build_thread_snapshot(state, meta.as_ref()))
+                    self.threads.get(&thread_id).map(|state| {
+                        build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
+                    })
                 } else {
                     None
                 };

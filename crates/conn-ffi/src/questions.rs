@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(open.entry_id, "open", "the first request that still waits");
         assert!(open.answerable, "its provider waits");
 
-        let snapshot = crate::types::build_thread_snapshot(&thread, None);
+        let snapshot = crate::types::build_thread_snapshot(&thread, None, &Default::default());
         let ids: Vec<String> = snapshot
             .entries
             .iter()

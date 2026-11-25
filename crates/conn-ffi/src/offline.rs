@@ -391,7 +391,7 @@ impl OfflineReader {
             }
             state.entries.push(message.entry());
         }
-        Ok(build_thread_snapshot(&state, None))
+        Ok(build_thread_snapshot(&state, None, &Default::default()))
     }
 }
 
@@ -507,7 +507,7 @@ impl OfflineReader {
         let page = self.online()?.fetch_thread_window(&thread, &id).await?;
         let mut state = ThreadState::new(thread);
         state.prepend_history_page(page);
-        let mut snapshot = build_thread_snapshot(&state, None);
+        let mut snapshot = build_thread_snapshot(&state, None, &Default::default());
         snapshot.server_page = true;
         Ok(snapshot)
     }
@@ -538,14 +538,14 @@ impl OfflineReader {
                     .and_then(|saved| saved.stamp.cursor),
             };
             let Some(cursor) = cursor else {
-                return Ok(build_thread_snapshot(&state, None));
+                return Ok(build_thread_snapshot(&state, None, &Default::default()));
             };
             self.online()?
                 .fetch_history_before_message(&thread, &cursor, &anchor)
                 .await?
         };
         state.prepend_history_page(page);
-        Ok(build_thread_snapshot(&state, None))
+        Ok(build_thread_snapshot(&state, None, &Default::default()))
     }
 
     pub async fn outline(

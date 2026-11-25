@@ -144,19 +144,20 @@ struct TimelineEntryRow: View {
         case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, _, started, ended):
             let metadata = subagentMetadata
             ThreadCard {
-                ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
-                    Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
-                        .frame(width: 6, height: 6)
-                }
-                let elapsed = threadElapsed(started, ended)
-                Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
-                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)
-                Spacer(minLength: 0)
-                if let elapsed { Text(elapsed).monospacedDigit().fixedSize() }
-                if let destination = metadata.thread ?? child {
-                    Button { onOpenThread(destination, metadata.environment) } label: {
-                        Image(systemName: "arrow.up.right").padding(6)
-                    }.accessibilityLabel("Open " + title)
+                // Lab `SubagentCard`: `<model> · <effort>`, the run time at the right. As on desktop,
+                // the header opens the child thread.
+                ThreadCardHeaderLink(open: (metadata.thread ?? child).map { destination in
+                    { onOpenThread(destination, metadata.environment) }
+                }, label: "Open " + title) {
+                    ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
+                        Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
+                            .frame(width: 6, height: 6)
+                    }
+                    let elapsed = threadElapsed(started, ended)
+                    Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
+                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)
+                    Spacer(minLength: 0)
+                    if let elapsed { Text(elapsed).monospacedDigit().fixedSize() }
                 }
             } content: { AgentSummary(title: title, text: summary ?? "") }
         case let .turnCheckpoint(_, _, ordinal, fileCount, additions, deletions, files):
@@ -177,6 +178,27 @@ struct TimelineEntryRow: View {
         return (nil, nil, nil, nil, nil)
     }
 
+}
+
+/// A card header row that opens a thread when tapped, in place of a separate open button.
+struct ThreadCardHeaderLink<Content: View>: View {
+    let open: (() -> Void)?
+    let label: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        let row = HStack(spacing: 8) { content }
+            .padding(.trailing, 6)
+            .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+            .contentShape(Rectangle())
+        if let open {
+            Button(action: open) { row }
+                .buttonStyle(.plain)
+                .accessibilityLabel(label)
+        } else {
+            row
+        }
+    }
 }
 
 struct ThinkingRow: View {

@@ -2409,8 +2409,6 @@ pub(super) mod tests {
             |name: &str, status: PullRequestCheckStatus, url: Option<&str>| PullRequestCheck {
                 name: name.to_owned(),
                 status,
-                started_at: None,
-                completed_at: None,
                 description: None,
                 url: url.map(ToOwned::to_owned),
                 started_at: None,
@@ -2694,8 +2692,6 @@ pub(super) mod tests {
         let failing_check = PullRequestCheck {
             name: "cargo clippy".to_owned(),
             status: PullRequestCheckStatus::Failure,
-            started_at: None,
-            completed_at: None,
             description: Some("2 warnings".to_owned()),
             url: None,
             started_at: None,

@@ -21,7 +21,6 @@ final class CoreStore {
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
     private var readerConnection: UInt64?
-    private(set) var isSending = false
     var lastError: String?
     /// A thread to show, set by a `conn://thread/...` URL or a push tap; the workspace consumes it.
     private(set) var pendingLink: ThreadLink?
@@ -29,10 +28,19 @@ final class CoreStore {
     var isInboxVisible = false
     /// Bumped whenever the server's provider list changes; model pickers re-read on it.
     private(set) var providersRevision = 0
-    /// Each thread's unsent composer text, by thread id (mobile's composer drafts by thread key).
-    /// It lives here, not in the view, so a failed send restores into the thread's draft even
-    /// after the user left the thread.
-    var drafts: [String: String] = [:]
+    @ObservationIgnored private var drafts: [ComposerDraftKey: ComposerDraft] = [:]
+
+    func composerDraft(_ key: ComposerDraftKey, initialText: String = "") -> ComposerDraft {
+        if let existing = drafts[key] { return existing }
+        let draft = ComposerDraft(text: initialText)
+        drafts[key] = draft
+        return draft
+    }
+
+    var composerLimits: FfiComposerLimits {
+        _ = providersRevision
+        return core?.composerLimits() ?? FfiComposerLimits(images: false, maxFileBytes: nil)
+    }
 
     @ObservationIgnored private var session: ConnSession?
     private var core: ConnCore? { session?.core() }
@@ -315,19 +323,25 @@ final class CoreStore {
         session?.closeThread(threadId: threadId)
     }
 
-    func sendMessage(threadId: String, text: String, mode: FfiSendMode = .auto) async -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == .connected, !trimmed.isEmpty, let core else { return false }
-        isSending = true
-        lastError = nil
-        defer { isSending = false }
+    func submit(_ draft: ComposerDraft, for draftKey: ComposerDraftKey, to target: FfiComposerTarget) async -> String? {
+        guard status == .connected, let core, drafts[draftKey] === draft, draft.hasContent, !draft.locked else { return nil }
+        draft.sending = true
+        draft.error = nil
+        defer { draft.sending = false }
+        let epoch = identityEpoch
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let files = draft.files.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) }
         do {
-            try await core.sendMessage(threadId: threadId, text: trimmed, mode: mode)
+            let id = try await core.submitComposer(target: target, key: draft.key, text: text, files: files)
+            guard epoch == identityEpoch else { return nil }
+            draft.text = ""
+            draft.files = []
+            if case .new = draftKey { drafts[draftKey] = nil }
             PushRegistration.shared.noteThreadActivity()
-            return true
+            return id
         } catch {
-            lastError = error.localizedDescription
-            return false
+            draft.error = connectionMessage(error)
+            return nil
         }
     }
 
@@ -368,25 +382,12 @@ final class CoreStore {
         return (try? await core.scanThreadWorkspaceModels(threadId: threadId)) ?? nil
     }
 
-    /// Sends the thread's draft. Like mobile, the draft clears as the message goes out; a failed
-    /// send merges the sent text back into that thread's draft, wherever the user is by then.
     func followUpSteers(_ threadId: String) -> Bool {
         UserDefaults.standard.bool(forKey: "steer.\(environmentId ?? scope).\(threadId)")
     }
 
     func setFollowUpSteers(_ steer: Bool, threadId: String) {
         UserDefaults.standard.set(steer, forKey: "steer.\(environmentId ?? scope).\(threadId)")
-    }
-
-    func sendDraft(threadId: String) async -> Bool {
-        let message = drafts[threadId] ?? ""
-        drafts[threadId] = nil
-        let sent = await sendMessage(threadId: threadId, text: message, mode: followUpSteers(threadId) ? .steer : .queue)
-        if !sent {
-            let restored = composerRestoreDraft(current: drafts[threadId] ?? "", sent: message)
-            drafts[threadId] = restored.isEmpty ? nil : restored
-        }
-        return sent
     }
 
     func stopThread(threadId: String) async {
@@ -467,7 +468,7 @@ final class CoreStore {
         do {
             try await core.deleteThread(threadId: threadId)
             // `useThreadListActions`: a deleted thread's draft goes with it.
-            drafts[threadId] = nil
+            drafts[.thread(threadId)] = nil
         } catch {
             lastError = error.localizedDescription
         }
@@ -479,38 +480,6 @@ final class CoreStore {
             try await core.markThreadUnread(threadId: threadId)
         } catch {
             lastError = error.localizedDescription
-        }
-    }
-
-    func launchThread(projectId: String, text: String) async -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == .connected, !trimmed.isEmpty, let core else { return nil }
-        isSending = true
-        lastError = nil
-        defer { isSending = false }
-        do {
-            let threadId = try await core.launchThread(projectId: projectId, text: trimmed)
-            PushRegistration.shared.noteThreadActivity()
-            return threadId
-        } catch {
-            lastError = error.localizedDescription
-            return nil
-        }
-    }
-
-    func launchGeneralThread(text: String) async -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == .connected, !trimmed.isEmpty, let core else { return nil }
-        isSending = true
-        lastError = nil
-        defer { isSending = false }
-        do {
-            let threadId = try await core.launchGeneralThread(text: trimmed)
-            PushRegistration.shared.noteThreadActivity()
-            return threadId
-        } catch {
-            lastError = error.localizedDescription
-            return nil
         }
     }
 
@@ -643,6 +612,7 @@ final class CoreStore {
         let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
         let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
+            drafts.removeAll()
             coldLaunchSession = nil
             shell = nil
             offlineReader = nil
@@ -708,7 +678,7 @@ final class CoreStore {
     /// successful delete clear a draft.
     fileprivate func handleThreadDeleted(_ threadId: String, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
-        drafts[threadId] = nil
+        drafts[.thread(threadId)] = nil
     }
 
     fileprivate func handleError(_ message: String) {

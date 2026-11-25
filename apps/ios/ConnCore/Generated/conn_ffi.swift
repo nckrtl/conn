@@ -664,6 +664,8 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      */
     func closeThread(threadId: String) 
     
+    func composerLimits()  -> FfiComposerLimits
+    
     /**
      * Permanently deletes `thread_id` (`thread.delete`).
      *
@@ -864,6 +866,13 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      */
     func stopThread(threadId: String) async throws 
     
+    /**
+     * Uploads to this connection, then commits one idempotent launch or reply.
+     * # Errors
+     * Returns a file, upload, or dispatch error and leaves the caller's draft intact.
+     */
+    func submitComposer(target: FfiComposerTarget, key: String, text: String, files: [FfiComposerFile]) async throws  -> String
+    
     func turnPatch(threadId: String, turn: Int64) async throws  -> [FfiFilePatch]
     
     func worktreeSetup(threadId: String) throws  -> WorktreeSetupFeed
@@ -1002,6 +1011,15 @@ open func closeThread(threadId: String)  {try! rustCall() {
         FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
+}
+    
+open func composerLimits() -> FfiComposerLimits  {
+    return try!  FfiConverterTypeFfiComposerLimits_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_composer_limits(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1507,6 +1525,27 @@ open func stopThread(threadId: String)async throws   {
             completeFunc: ffi_conn_ffi_rust_future_complete_void,
             freeFunc: ffi_conn_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Uploads to this connection, then commits one idempotent launch or reply.
+     * # Errors
+     * Returns a file, upload, or dispatch error and leaves the caller's draft intact.
+     */
+open func submitComposer(target: FfiComposerTarget, key: String, text: String, files: [FfiComposerFile])async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_submit_composer(
+                        self.uniffiCloneHandle(),FfiConverterTypeFfiComposerTarget_lower(target),FfiConverterString.lower(key),FfiConverterString.lower(text),FfiConverterSequenceTypeFfiComposerFile.lower(files)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -5175,6 +5214,118 @@ public func FfiConverterTypeFfiColor_lift(_ buf: RustBuffer) throws -> FfiColor 
 #endif
 public func FfiConverterTypeFfiColor_lower(_ value: FfiColor) -> RustBuffer {
     return FfiConverterTypeFfiColor.lower(value)
+}
+
+
+public struct FfiComposerFile: Equatable, Hashable {
+    public var path: String
+    public var name: String
+    public var mimeType: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, name: String, mimeType: String) {
+        self.path = path
+        self.name = name
+        self.mimeType = mimeType
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiComposerFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiComposerFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerFile {
+        return
+            try FfiComposerFile(
+                path: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                mimeType: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiComposerFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.mimeType, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerFile_lift(_ buf: RustBuffer) throws -> FfiComposerFile {
+    return try FfiConverterTypeFfiComposerFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerFile_lower(_ value: FfiComposerFile) -> RustBuffer {
+    return FfiConverterTypeFfiComposerFile.lower(value)
+}
+
+
+public struct FfiComposerLimits: Equatable, Hashable {
+    public var images: Bool
+    public var maxFileBytes: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(images: Bool, maxFileBytes: UInt64?) {
+        self.images = images
+        self.maxFileBytes = maxFileBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiComposerLimits: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiComposerLimits: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerLimits {
+        return
+            try FfiComposerLimits(
+                images: FfiConverterBool.read(from: &buf), 
+                maxFileBytes: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiComposerLimits, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.images, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxFileBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerLimits_lift(_ buf: RustBuffer) throws -> FfiComposerLimits {
+    return try FfiConverterTypeFfiComposerLimits.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerLimits_lower(_ value: FfiComposerLimits) -> RustBuffer {
+    return FfiConverterTypeFfiComposerLimits.lower(value)
 }
 
 
@@ -11787,6 +11938,79 @@ public func FfiConverterTypeFfiChangeTone_lower(_ value: FfiChangeTone) -> RustB
 
 
 
+
+public enum FfiComposerTarget: Equatable, Hashable {
+    
+    case new(projectId: String?
+    )
+    case reply(threadId: String, mode: FfiSendMode
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiComposerTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiComposerTarget: FfiConverterRustBuffer {
+    typealias SwiftType = FfiComposerTarget
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerTarget {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .new(projectId: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 2: return .reply(threadId: try FfiConverterString.read(from: &buf), mode: try FfiConverterTypeFfiSendMode.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiComposerTarget, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .new(projectId):
+            writeInt(&buf, Int32(1))
+            FfiConverterOptionString.write(projectId, into: &buf)
+            
+        
+        case let .reply(threadId,mode):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(threadId, into: &buf)
+            FfiConverterTypeFfiSendMode.write(mode, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerTarget_lift(_ buf: RustBuffer) throws -> FfiComposerTarget {
+    return try FfiConverterTypeFfiComposerTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerTarget_lower(_ value: FfiComposerTarget) -> RustBuffer {
+    return FfiConverterTypeFfiComposerTarget.lower(value)
+}
+
+
+
 /**
  * Connection lifecycle reported to [`crate::CoreListener::on_status`].
  */
@@ -16568,6 +16792,31 @@ fileprivate struct FfiConverterSequenceTypeFfiCodeSpan: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiComposerFile: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiComposerFile]
+
+    public static func write(_ value: [FfiComposerFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiComposerFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiComposerFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiComposerFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiComposerFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiDeliverable: FfiConverterRustBuffer {
     typealias SwiftType = [FfiDeliverable]
 
@@ -17975,6 +18224,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 13465) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_composer_limits() != 43499) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_delete_thread() != 14454) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18045,6 +18297,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_stop_thread() != 56935) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_submit_composer() != 29646) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_turn_patch() != 19061) {

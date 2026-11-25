@@ -509,6 +509,11 @@ impl Connection {
             .await?;
 
         let upload_url = self.http_base_url.join(&prepared.relative_url)?;
+        if upload_url.origin() != self.http_base_url.origin() {
+            return Err(ClientError::Connection(
+                "Unexpected attachment upload origin".into(),
+            ));
+        }
         let http = self.http.clone();
         let bearer = self.bearer.read().ok().and_then(|g| g.clone());
         let upload_mime = mime_type.clone();

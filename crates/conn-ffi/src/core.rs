@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use crate::coalesce::SnapshotCoalescer;
+use crate::composer::{FfiComposerFile, FfiComposerLimits, FfiComposerTarget};
 use crate::model_picker::{
     FfiModelPicker, FfiModelSave, PickerInput, PickerThread, SaveDecision, build_model_picker,
     model_to_save,
@@ -159,6 +160,7 @@ pub struct ConnCore {
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Receiver<Option<FfiShellSnapshot>>,
     status_watch: watch::Receiver<FfiConnectionStatus>,
+    limits: watch::Receiver<FfiComposerLimits>,
     disconnected: AtomicBool,
     started_with_bearer: bool,
 }
@@ -187,6 +189,98 @@ impl Drop for ConnCore {
 }
 
 impl ConnCore {
+    async fn launch_with_files(
+        &self,
+        project_id: String,
+        text: String,
+        key: &str,
+        attachments: &[conn_contract::ChatAttachment],
+    ) -> Result<String, FfiError> {
+        self.ensure_connected()?;
+
+        let (defaults_tx, defaults_rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::ResolveLaunchDefaults {
+                project_id: project_id.clone(),
+                reply: defaults_tx,
+            })
+            .map_err(|_| FfiError::Closed)?;
+        let defaults = defaults_rx.await.map_err(|_| FfiError::Closed)?;
+
+        let thread_id = format!("thread-{key}");
+        let mut payload = conn_client::commands::launch_thread_payload(
+            &thread_id,
+            &project_id,
+            &text,
+            attachments,
+            defaults.model_selection,
+            &defaults.runtime_mode,
+            &defaults.interaction_mode,
+            WorkspaceStrategyChoice::Local,
+        );
+
+        payload["commandId"] = key.into();
+        payload["initialMessage"]["messageId"] = format!("message-{key}").into();
+        let value = self.call_json(TAG_LAUNCH_THREAD, payload).await?;
+        let parsed = conn_contract::from_json::<OrchestrationV2ThreadLaunchResult>(value.clone());
+        let (final_thread_id, projection, sequence) = match parsed {
+            Ok(res) => (res.thread_id, Some(res.projection), res.sequence),
+            Err(_) => {
+                let fallback_id = value
+                    .get("threadId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&thread_id)
+                    .to_owned();
+                (fallback_id, None, None)
+            }
+        };
+
+        let (apply_tx, apply_rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::ApplyLaunchedThread {
+                thread_id: final_thread_id.clone(),
+                projection: Box::new(projection),
+                sequence,
+                reply: apply_tx,
+            })
+            .map_err(|_| FfiError::Closed)?;
+        let _ = apply_rx.await;
+
+        Ok(final_thread_id)
+    }
+
+    async fn send_with_files(
+        &self,
+        thread_id: String,
+        text: String,
+        mode: FfiSendMode,
+        key: Option<&str>,
+        attachments: &[conn_contract::ChatAttachment],
+    ) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let meta = self.thread_run_meta(&thread_id);
+        let steer_target = if meta.working && mode == FfiSendMode::Steer {
+            meta.active_run_id.as_deref()
+        } else {
+            None
+        };
+        let mut command = conn_client::commands::send_message(
+            &thread_id,
+            &text,
+            attachments,
+            meta.working,
+            steer_target,
+        )
+        .map_err(|err| map_build_error("message.dispatch", err))?;
+        if let Some(key) = key
+            && let OrchestrationV2Command::MessageDispatch(ref mut dispatch) = command
+        {
+            dispatch.command_id = key.into();
+            dispatch.message_id = format!("message-{key}");
+        }
+        self.dispatch_command(command).await
+    }
+
     /// Starts a connection. `orbit_server_id` marks an Orbit session: its bearers are reported
     /// with that id, and a rejected bearer ends it so the session can re-pair through Orbit.
     pub(crate) fn start(
@@ -256,13 +350,14 @@ impl ConnCore {
         let (shell_watch_tx, shell_watch) = watch::channel(None);
         let (status_watch_tx, status_watch) = watch::channel(FfiConnectionStatus::Connecting);
 
+        let (limits_tx, limits) = watch::channel(FfiComposerLimits::default());
         runtime_handle.spawn(run_pump(
             connection.clone(),
             events_rx,
             ctrl_rx,
             listener,
             Arc::clone(&thread_runs),
-            (shell_watch_tx, status_watch_tx),
+            (shell_watch_tx, status_watch_tx, limits_tx),
             SessionIdentity {
                 server_url: normalized_url.clone(),
                 orbit_server_id,
@@ -279,6 +374,7 @@ impl ConnCore {
             thread_runs,
             shell_watch,
             status_watch,
+            limits,
             disconnected: AtomicBool::new(false),
             started_with_bearer,
         }))
@@ -635,17 +731,53 @@ impl ConnCore {
         text: String,
         mode: FfiSendMode,
     ) -> Result<(), FfiError> {
+        self.send_with_files(thread_id, text, mode, None, &[]).await
+    }
+
+    pub fn composer_limits(&self) -> FfiComposerLimits {
+        *self.limits.borrow()
+    }
+
+    /// Uploads to this connection, then commits one idempotent launch or reply.
+    /// # Errors
+    /// Returns a file, upload, or dispatch error and leaves the caller's draft intact.
+    pub async fn submit_composer(
+        &self,
+        target: FfiComposerTarget,
+        key: String,
+        text: String,
+        files: Vec<FfiComposerFile>,
+    ) -> Result<String, FfiError> {
         self.ensure_connected()?;
-        let meta = self.thread_run_meta(&thread_id);
-        let steer_target = if meta.working && mode == FfiSendMode::Steer {
-            meta.active_run_id.as_deref()
-        } else {
-            None
-        };
-        let command =
-            conn_client::commands::send_message(&thread_id, &text, &[], meta.working, steer_target)
-                .map_err(|err| map_build_error("message.dispatch", err))?;
-        self.dispatch_command(command).await
+        let mut attachments = Vec::new();
+        let result = async {
+            self.composer_limits()
+                .upload(&self.connection, files, &mut attachments)
+                .await?;
+            match target {
+                FfiComposerTarget::New { project_id } => {
+                    let project = match project_id {
+                        Some(id) => id,
+                        None => self.ensure_scratch_project().await?,
+                    };
+                    self.launch_with_files(project, text, &key, &attachments)
+                        .await
+                }
+                FfiComposerTarget::Reply { thread_id, mode } => {
+                    self.send_with_files(thread_id.clone(), text, mode, Some(&key), &attachments)
+                        .await?;
+                    Ok(thread_id)
+                }
+            }
+        }
+        .await;
+        for attachment in &attachments {
+            let id = crate::FfiAttachment::from(attachment).id;
+            let _ = self
+                .call_json("attachments.delete", json!({"attachmentId": id}))
+                .await;
+        }
+        result
     }
 
     /// Answers a pending approval request (`runtime-request.respond`).
@@ -959,55 +1091,13 @@ impl ConnCore {
         project_id: String,
         text: String,
     ) -> Result<String, FfiError> {
-        self.ensure_connected()?;
-
-        let (defaults_tx, defaults_rx) = oneshot::channel();
-        self.ctrl_tx
-            .send(PumpControl::ResolveLaunchDefaults {
-                project_id: project_id.clone(),
-                reply: defaults_tx,
-            })
-            .map_err(|_| FfiError::Closed)?;
-        let defaults = defaults_rx.await.map_err(|_| FfiError::Closed)?;
-
-        let thread_id = conn_client::commands::new_thread_id();
-        let payload = conn_client::commands::launch_thread_payload(
-            &thread_id,
-            &project_id,
-            &text,
+        self.launch_with_files(
+            project_id,
+            text,
+            &conn_client::commands::new_thread_id(),
             &[],
-            defaults.model_selection,
-            &defaults.runtime_mode,
-            &defaults.interaction_mode,
-            WorkspaceStrategyChoice::Local,
-        );
-
-        let value = self.call_json(TAG_LAUNCH_THREAD, payload).await?;
-        let parsed = conn_contract::from_json::<OrchestrationV2ThreadLaunchResult>(value.clone());
-        let (final_thread_id, projection, sequence) = match parsed {
-            Ok(res) => (res.thread_id, Some(res.projection), res.sequence),
-            Err(_) => {
-                let fallback_id = value
-                    .get("threadId")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(&thread_id)
-                    .to_owned();
-                (fallback_id, None, None)
-            }
-        };
-
-        let (apply_tx, apply_rx) = oneshot::channel();
-        self.ctrl_tx
-            .send(PumpControl::ApplyLaunchedThread {
-                thread_id: final_thread_id.clone(),
-                projection: Box::new(projection),
-                sequence,
-                reply: apply_tx,
-            })
-            .map_err(|_| FfiError::Closed)?;
-        let _ = apply_rx.await;
-
-        Ok(final_thread_id)
+        )
+        .await
     }
 
     /// Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
@@ -1095,6 +1185,7 @@ struct PumpState {
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
     status_watch: watch::Sender<FfiConnectionStatus>,
+    limits: watch::Sender<FfiComposerLimits>,
 }
 
 impl PumpState {
@@ -1571,9 +1662,21 @@ impl PumpState {
                 }
             }
             ClientEvent::ServerConfig(event) => {
+                let limits_changed =
+                    if let conn_contract::ServerConfigStreamEvent::Snapshot(s) = event.as_ref() {
+                        let caps = &s.config.environment.capabilities;
+                        let limits = FfiComposerLimits::new(caps);
+                        self.limits.send_if_modified(|current| {
+                            let changed = *current != limits;
+                            *current = limits;
+                            changed
+                        })
+                    } else {
+                        false
+                    };
                 let change = self.server_config.apply(*event);
                 // Project-only enablement arrives as `settingsUpdated`; the open picker reloads too.
-                if change.providers_changed || change.settings_changed {
+                if change.providers_changed || change.settings_changed || limits_changed {
                     self.listener.on_providers_changed();
                 }
             }
@@ -1627,9 +1730,10 @@ async fn run_pump(
     mut ctrl_rx: mpsc::UnboundedReceiver<PumpControl>,
     listener: Arc<dyn CoreListener>,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
-    (shell_watch, status_watch): (
+    (shell_watch, status_watch, limits): (
         watch::Sender<Option<FfiShellSnapshot>>,
         watch::Sender<FfiConnectionStatus>,
+        watch::Sender<FfiComposerLimits>,
     ),
     mut identity: SessionIdentity,
 ) {
@@ -1652,6 +1756,7 @@ async fn run_pump(
         thread_runs,
         shell_watch,
         status_watch,
+        limits,
     };
 
     loop {

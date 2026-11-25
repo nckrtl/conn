@@ -1,9 +1,12 @@
 import DesignKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ConnComposerPill<Trailing: View>: View {
     let placeholder: String
-    @Binding var text: String
+    @Bindable var draft: ComposerDraft
+    let limits: FfiComposerLimits
+    var allowsAttachments = true
     var maxLines = 4
     var isBusy = false
     var canSend = false
@@ -13,36 +16,122 @@ struct ConnComposerPill<Trailing: View>: View {
 
     @Environment(\.connTheme) private var theme
 
+    @State private var showingPhotos = false
+    @State private var showingFiles = false
+
     private static var radius: CGFloat { 27 }
     private static var control: CGFloat { 44 }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
-        // Mobile's `+` (`ComposerAttachmentButton`) stays out until the core sends attachments.
-        HStack(alignment: .bottom, spacing: 0) {
-            TextField(
-                placeholder, text: $text,
-                prompt: Text(placeholder).foregroundStyle(Color(ffi: theme.tokens.placeholder)),
-                axis: .vertical
-            )
-                .textFieldStyle(.plain)
-                .font(.system(size: 16))
-                .lineHeight(.exact(points: 24))
-                .tint(theme.foreground)
-                .foregroundStyle(theme.foreground)
-                .lineLimit(1...maxLines)
-                .padding(.vertical, 10)
-                .padding(.leading, 12)
-                .frame(maxWidth: .infinity, minHeight: Self.control, alignment: .leading)
+        VStack(alignment: .leading, spacing: 0) {
+            if let error = draft.error {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(theme.destructive)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    .accessibilityLabel("Attachment or send error, \(error)")
+            }
+            if allowsAttachments && !draft.files.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        ForEach(draft.files) { file in
+                            Button {
+                                draft.files.removeAll { $0.id == file.id }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: file.isImage ? "photo" : "doc")
+                                    Text(file.name).lineLimit(1).truncationMode(.middle)
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .font(.footnote)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(theme.foreground.opacity(0.08), in: Capsule())
+                                .frame(minHeight: 44)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(draft.locked)
+                            .accessibilityLabel("Remove \(file.name)")
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+                .scrollIndicators(.hidden)
+            }
+            HStack(alignment: .bottom, spacing: 0) {
+                if allowsAttachments && limits.images {
+                    Menu {
+                        Button("Photos", systemImage: "photo.on.rectangle") { showingPhotos = true }
+                        if limits.maxFileBytes != nil {
+                            Button("Files", systemImage: "folder") { showingFiles = true }
+                        }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 18, weight: .medium))
+                            .frame(width: Self.control, height: Self.control)
+                            .contentShape(Rectangle())
+                    }
+                    .disabled(draft.locked || draft.files.count >= 100)
+                    .accessibilityLabel("Add attachment")
+                }
+                TextField(
+                    placeholder, text: $draft.text,
+                    prompt: Text(placeholder).foregroundStyle(theme.mutedForeground),
+                    axis: .vertical
+                )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16))
+                    .lineHeight(.exact(points: 24))
+                    .tint(theme.foreground)
+                    .lineLimit(1...maxLines)
+                    .padding(.vertical, 10)
+                    .padding(.leading, allowsAttachments && limits.images ? 0 : 12)
+                    .frame(maxWidth: .infinity, minHeight: Self.control, alignment: .leading)
+                    .disabled(draft.sending)
 
-            trailing()
-                .frame(minHeight: Self.control)
-
-            actionButton
+                trailing().frame(minHeight: Self.control)
+                if draft.locked {
+                    ProgressView()
+                        .frame(width: Self.control, height: Self.control)
+                        .accessibilityLabel(draft.sending ? "Sending" : "Adding attachment")
+                } else {
+                    actionButton
+                }
+            }
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
+        .foregroundStyle(theme.foreground)
         .glassEffect(.regular, in: shape)
+        .background(theme.background, in: shape)
+        .sheet(isPresented: $showingPhotos) {
+            ComposerPhotosPicker(draft: draft, limits: limits) { showingPhotos = false }
+        }
+        .fileImporter(isPresented: $showingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            importFiles(result)
+        }
+    }
+
+    private func importFiles(_ result: Result<[URL], Error>) {
+        switch result {
+        case let .success(urls):
+            guard !urls.isEmpty, !draft.locked else { return }
+            draft.importing = true
+            draft.error = nil
+            Task {
+                defer { draft.importing = false }
+                do {
+                    for url in urls {
+                        try draft.append(await ComposerFile.document(url, limits: limits))
+                    }
+                } catch { draft.error = error.localizedDescription }
+            }
+        case let .failure(error):
+            if (error as NSError).code != NSUserCancelledError { draft.error = error.localizedDescription }
+        }
     }
 
     /// Mobile's send button: a 30pt primary circle with `arrow.up` 16 semibold in a 44pt target.

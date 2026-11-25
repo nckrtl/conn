@@ -457,6 +457,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_attachment_url(uint64_t ptr, RustBuf
 void uniffi_conn_ffi_fn_method_conncore_close_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_COMPOSER_LIMITS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_COMPOSER_LIMITS
+RustBuffer uniffi_conn_ffi_fn_method_conncore_composer_limits(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DELETE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DELETE_THREAD
 uint64_t uniffi_conn_ffi_fn_method_conncore_delete_thread(uint64_t ptr, RustBuffer thread_id
@@ -575,6 +580,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_settle_thread(uint64_t ptr, RustBuff
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_STOP_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_STOP_THREAD
 uint64_t uniffi_conn_ffi_fn_method_conncore_stop_thread(uint64_t ptr, RustBuffer thread_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SUBMIT_COMPOSER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SUBMIT_COMPOSER
+uint64_t uniffi_conn_ffi_fn_method_conncore_submit_composer(uint64_t ptr, RustBuffer target, RustBuffer key, RustBuffer text, RustBuffer files
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_TURN_PATCH
@@ -1538,6 +1548,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_close_thread(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_COMPOSER_LIMITS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_COMPOSER_LIMITS
+uint16_t uniffi_conn_ffi_checksum_method_conncore_composer_limits(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DELETE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DELETE_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_delete_thread(void
@@ -1679,6 +1695,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_settle_thread(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_STOP_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_STOP_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_stop_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SUBMIT_COMPOSER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SUBMIT_COMPOSER
+uint16_t uniffi_conn_ffi_checksum_method_conncore_submit_composer(void
     
 );
 #endif

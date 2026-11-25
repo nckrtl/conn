@@ -161,7 +161,7 @@ struct ConnComposerPill<Trailing: View>: View {
             // before the glass; the negative padding after it keeps the layout where it was.
             .padding(.horizontal, keyboardUp ? ComposerSheet.screenInset : 0)
             .padding(.bottom, keyboardUp ? ComposerSheet.bottomBleed : 0)
-            .glassEffect(.regular, in: shape)
+            .glassEffect(.conn(theme), in: shape)
             .overlay(alignment: .top) { ComposerSheetEdge(shape: shape, color: theme.border, visible: keyboardUp) }
             .padding(.horizontal, keyboardUp ? -ComposerSheet.screenInset : 0)
             .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)

@@ -108,7 +108,7 @@ struct WorkspaceRootView: View {
             ThreadGlyph(name: glyph, size: 26)
                 .foregroundStyle(theme.primary)
                 .frame(width: size, height: size).contentShape(Circle())
-        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle)
+        }.buttonStyle(.plain).glassEffect(.conn(theme).interactive(), in: .circle)
             .accessibilityLabel(label).accessibilityIdentifier(id)
     }
 
@@ -274,7 +274,7 @@ struct WorkspaceRootView: View {
                         }
                         .padding(.horizontal, 12).frame(height: 44)
                         .overlay(Capsule().strokeBorder(theme.border, lineWidth: 1))
-                        .glassEffect(.regular, in: .capsule)
+                        .glassEffect(.conn(theme), in: .capsule)
                         .onAppear {
                             guard focusOnSearchEntry else { return }
                             focusOnSearchEntry = false

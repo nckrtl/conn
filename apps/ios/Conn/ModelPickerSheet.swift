@@ -131,7 +131,7 @@ struct ModelPickerSheet: View {
                                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                                     .accessibilityIdentifier("modelPicker.search")
                             }.padding(.horizontal, 12).frame(height: 44)
-                                .glassEffect(.regular, in: .capsule).padding(.horizontal, 14)
+                                .glassEffect(.conn(theme), in: .capsule).padding(.horizontal, 14)
                         }
                     }
                     .navigationTitle(pageTitle(page))
@@ -240,7 +240,7 @@ struct SheetGlassButton: View {
             ThreadGlyph(name: glyph, size: 22)
                 .foregroundStyle(theme.foreground)
                 .frame(width: 44, height: 44)
-                .glassEffect(.regular.interactive(), in: .circle)
+                .glassEffect(.conn(theme).interactive(), in: .circle)
         }
         .accessibilityLabel(label)
     }

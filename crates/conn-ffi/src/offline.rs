@@ -161,8 +161,7 @@ impl OfflineReader {
         };
         let _ = flight
             .get_or_init(|| async {
-                let retained = self.may_read(thread);
-                if retained
+                if self.may_read(thread)
                     && let Some(bytes) = self
                         .db
                         .image(&self.env, thread, &version)
@@ -174,7 +173,7 @@ impl OfflineReader {
                     return Ok(bytes);
                 }
                 let _slot = self.image_slots.acquire().await.map_err(read_error)?;
-                if self.db.is_closed() || retained && !self.may_read(thread) {
+                if self.db.is_closed() {
                     return Err(FfiError::Closed);
                 }
                 let pending = self
@@ -191,7 +190,9 @@ impl OfflineReader {
                     })
                     .map(|pick| image_version(&pick.pending))
                     .transpose()?;
-                let local = if retained && let Some(pending) = &pending {
+                let local = if self.may_read(thread)
+                    && let Some(pending) = &pending
+                {
                     self.db
                         .image(&self.env, thread, pending)
                         .await
@@ -199,18 +200,25 @@ impl OfflineReader {
                 } else {
                     None
                 };
-                let bytes = match local {
-                    Some(bytes) if bytes.len() == file.size_bytes as usize => bytes,
-                    _ if online => fetch().await?,
+                let (bytes, downloaded) = match local {
+                    Some(bytes)
+                        if bytes.len() == file.size_bytes as usize && self.may_read(thread) =>
+                    {
+                        (bytes, false)
+                    }
+                    _ if online => (fetch().await?, true),
                     _ => return Err(FfiError::Closed),
                 };
                 if bytes.len() != file.size_bytes as usize || self.db.is_closed() {
                     return Err(read_error("Incomplete or expired image"));
                 }
-                if !retained {
-                    return Ok(bytes);
+                match self.store_image(thread, &version, &bytes).await {
+                    Ok(()) => {}
+                    Err(FfiError::Closed) if downloaded && !self.db.is_closed() => {
+                        return Ok(bytes);
+                    }
+                    Err(error) => return Err(error),
                 }
-                self.store_image(thread, &version, &bytes).await?;
                 if pending.is_some() {
                     self.picks.lock().map_err(read_error)?.retain(|pick| {
                         pick.thread != thread || pick.claimed.as_deref() != Some(file.id.as_str())
@@ -1110,6 +1118,39 @@ mod tests {
             created_at: None,
             run_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn image_thumbnail_and_original_stay_online_only_after_expiry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let reader = OfflineReader::open(dir.path().into(), "env".into(), None).await?;
+        let file = crate::FfiAttachment::from(&attachment("image"));
+        let version = image_version(&file)?;
+        let thumbnail = reader
+            .acquire_image("chat", &file, true, || async {
+                reader
+                    .expires
+                    .write()
+                    .map_err(read_error)?
+                    .insert("chat".into(), now_ms());
+                Ok(b"tile".to_vec())
+            })
+            .await?;
+        assert_eq!(thumbnail, b"tile");
+        assert!(reader.db.image("env", "chat", &version).await?.is_none());
+        let original = reader
+            .acquire_image("chat", &file, true, || async { Ok(b"full".to_vec()) })
+            .await?;
+        assert_eq!(original, b"full");
+        assert!(reader.db.image("env", "chat", &version).await?.is_none());
+        assert!(
+            reader
+                .image_bytes("chat".into(), file, false)
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     fn attachment(id: &str) -> conn_contract::ChatAttachment {

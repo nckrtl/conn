@@ -585,6 +585,13 @@ struct ThreadView: View {
                     .id("timeline-bottom")
             }
             .scrollTargetLayout()
+            // A tap on the feed puts the keyboard away; simultaneous, so links, cards and buttons still
+            // work. On the feed content, not the ScrollView: the composer is the ScrollView's
+            // safeAreaBar, and a tap on Send there resigned the keyboard and SwiftUI focus brought it back.
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            })
             // Card edges line up with the composer's 12-point inset.
             .padding(.horizontal, 12)
             .padding(.top, 12)
@@ -614,10 +621,6 @@ struct ThreadView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
-        // A tap on the feed puts the keyboard away; simultaneous, so links, cards and buttons still work.
-        .simultaneousGesture(TapGesture().onEnded {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        })
         .onChange(of: scrollFingerprint) { _, _ in
             if stickToBottom && readingWindow == nil {
                 withAnimation(Kit.Motion.fast) {

@@ -254,6 +254,13 @@ pub(crate) const ICON_BUTTON_GLYPH_PX: f32 = 14.0;
 pub(crate) const SECTION_TABS_HEIGHT_PX: f32 = 36.0;
 /// Row inset used by panel lists (`ps-4`, `px-4`).
 pub(crate) const ROW_PAD_START_PX: f32 = 16.0;
+/// Sidebar geometry shared by search controls and their selectable list rows.
+pub(crate) const LIST_INLINE_INSET_PX: f32 = 8.0;
+pub(crate) const SEARCH_LIST_GAP_PX: f32 = 6.0;
+pub(crate) const LIST_ROW_HEIGHT_PX: f32 = 32.0;
+pub(crate) const LIST_ROW_GAP_PX: f32 = 2.0;
+pub(crate) const LIST_ROW_INSET_PX: f32 = 14.0;
+pub(crate) const LIST_ROW_RADIUS_PX: f32 = 8.0;
 /// Conn `StatusDotBadge` (`apps/web/src/components/StatusDotBadge.tsx`) geometry:
 /// `6px` solid status dot (`size-1.5`) with a `2px` opaque cutout ring (`10px` outer disc)
 /// centered right on the icon's corner (`top: -5px, right: -5px`, half-width / half-height).

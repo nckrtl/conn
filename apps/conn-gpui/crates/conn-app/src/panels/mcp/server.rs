@@ -16,7 +16,7 @@ use super::McpPanel;
 use super::helpers::capitalize;
 use super::widgets::{McpBadgeVariant, badge, field_box};
 use crate::panels::chrome::{
-    self, ConnTooltipExt as _, ROW_PAD_START_PX, TOOLBAR_PAD_END_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
+    self, ConnTooltipExt as _, TOOLBAR_PAD_END_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
     XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use crate::panels::color::to_hsla;
@@ -143,7 +143,7 @@ impl McpPanel {
                 .gap(px(8.0))
                 .border_b_1()
                 .border_color(divider)
-                .px(px(ROW_PAD_START_PX))
+                .px(px(self.body_inset()))
                 .py(px(12.0))
                 .child(header)
                 .child(caps_row);
@@ -164,7 +164,7 @@ impl McpPanel {
         let mut form = v_flex()
             .w_full()
             .gap(px(12.0))
-            .px(px(ROW_PAD_START_PX))
+            .px(px(self.body_inset()))
             .py(px(12.0))
             .child(
                 v_flex()
@@ -219,7 +219,7 @@ impl McpPanel {
         };
         scroller = scroller.child(
             div()
-                .px(px(ROW_PAD_START_PX))
+                .px(px(self.body_inset()))
                 .pb(px(4.0))
                 .text_size(px(XS_TEXT_PX))
                 .line_height(px(XS_LINE_HEIGHT_PX))
@@ -267,7 +267,7 @@ impl McpPanel {
                     .w_full()
                     .items_center()
                     .gap(px(12.0))
-                    .pl(px(ROW_PAD_START_PX))
+                    .pl(px(self.body_inset()))
                     .pr(px(TOOLBAR_PAD_END_PX))
                     .border_b_1()
                     .border_color(divider)

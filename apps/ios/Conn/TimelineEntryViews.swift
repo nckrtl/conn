@@ -7,6 +7,8 @@ struct WorkGroupCard: View {
     @Environment(\.connTheme) private var theme
     @State private var expanded = false
 
+    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+
     private var title: String {
         if group.hasActive {
             return group.durationLabel.map { "Working (\($0))…" } ?? "Working…"
@@ -25,16 +27,18 @@ struct WorkGroupCard: View {
                     expanded.toggle()
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Text(title)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: size))
+                        .lineHeight(.exact(points: size * 1.625))
                         .foregroundStyle(theme.mutedForeground)
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(theme.mutedForeground)
                     Spacer()
                 }
-                .padding(.vertical, 4)
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -87,11 +91,11 @@ struct TimelineEntryRow: View {
 
     @ViewBuilder private var entryView: some View {
         switch entry {
-        case let .user(_, text, date, agent, steer, _, files):
-            ThreadMessage(text: text, date: date, agent: agent, badge: steer ? "Steer" : nil, files: files,
+        case let .user(_, text, date, agent, _, _, files):
+            ThreadMessage(text: text, date: date, agent: agent, files: files,
                           detail: detail, store: store, onOpenThread: onOpenThread)
         case let .queuedUser(_, _, _, text, date, agent, files):
-            ThreadMessage(text: text, date: date, agent: agent, badge: "Queued", files: files,
+            ThreadMessage(text: text, date: date, agent: agent, files: files,
                           detail: detail, store: store, onOpenThread: onOpenThread)
         case let .assistant(_, markdown, streaming, timestamp, _, status):
             VStack(alignment: .leading, spacing: 6) {

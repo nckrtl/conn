@@ -295,6 +295,40 @@ final class ConnSpikeUITests: XCTestCase {
         }
     }
 
+    func testDelegatedResultDisclosure() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairing = env["CONN_DELEGATE_PAIRING"] else { throw XCTSkip("Requires a delegated completion fixture") }
+        let app = XCUIApplication()
+        let theme = env["CONN_APPEARANCE"] ?? "light"
+        app.launchEnvironment["CONN_TEST_APPEARANCE"] = theme
+        app.launchArguments = ["--reset-session", "--manual-pairing", "-AppleLocale", "en_GB"]
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        field.tap()
+        field.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        let thread = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Conn iOS WireGuard Launch Experience")).firstMatch
+        XCTAssertTrue(thread.waitForExistence(timeout: 20))
+        thread.tap()
+        let reply = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Build 5 is already merged")).firstMatch
+        XCTAssertTrue(reply.wait(for: \.isHittable, toEqual: true, timeout: 15))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        func capture(_ name: String) {
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = theme + "-" + name
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        capture("thread")
+        let disclosure = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Use native Liquid Glass")).firstMatch
+        XCTAssertTrue(disclosure.exists)
+        disclosure.tap()
+        let screenshots = app.staticTexts["Screenshots"].firstMatch
+        XCTAssertTrue(screenshots.waitForExistence(timeout: 10))
+        capture("expanded")
+    }
+
     func testFeedVisualStates() throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_FEED_PAIRING"] else { throw XCTSkip("Requires the feed fixture") }

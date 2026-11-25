@@ -26,9 +26,22 @@ struct MarkdownView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: messageStyle == nil ? Kit.Space.m : 10.4) {
-            ForEach(Array(parseBlocks(source).enumerated()), id: \.offset) { _, block in
-                blockView(block)
+        if messageStyle == .user {
+            Text(verbatim: source)
+                .font(bodyFont)
+                .foregroundStyle(textColor)
+                .lineHeight(.exact(points: messageSize * 1.625))
+                .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
+                .textSelection(.enabled)
+        } else {
+            markdown
+        }
+    }
+
+    private var markdown: some View {
+        VStack(alignment: .leading, spacing: messageStyle == nil ? Kit.Space.m : messageSize * 0.8) {
+            ForEach(Array(parseBlocks(source).enumerated()), id: \.offset) { index, block in
+                blockView(block, first: index == 0)
             }
         }
         .lineHeight(messageStyle == nil ? nil : .exact(points: messageSize * 1.625))
@@ -37,14 +50,15 @@ struct MarkdownView: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: MarkdownBlock) -> some View {
+    private func blockView(_ block: MarkdownBlock, first: Bool) -> some View {
         switch block {
         case let .heading(level, text):
             inlineMarkdownText(text)
                 .font(headingFont(for: level))
+                .lineHeight(messageStyle == nil ? nil : .exact(points: messageSize * 1.3))
                 .foregroundStyle(textColor)
                 .textSelection(.enabled)
-                .padding(.top, recordStyle ? 15 : level <= 2 ? Kit.Space.xs : 0)
+                .padding(.top, messageStyle != nil ? (first ? 0 : messageSize * 9.6 / 13) : recordStyle ? 15 : level <= 2 ? Kit.Space.xs : 0)
 
         case let .paragraph(text):
             inlineMarkdownText(text)
@@ -58,7 +72,7 @@ struct MarkdownView: View {
         case let .quote(text):
             HStack(spacing: 10) {
                 Capsule().fill(theme.border).frame(width: 3)
-                inlineMarkdownText(text).foregroundStyle(theme.mutedForeground).textSelection(.enabled)
+                inlineMarkdownText(text).font(bodyFont).foregroundStyle(theme.mutedForeground).textSelection(.enabled)
             }
 
         case let .table(rows):
@@ -73,7 +87,7 @@ struct MarkdownView: View {
                         if i == 0 { Divider() }
                     }
                 }
-                .font(.system(size: 14)).textSelection(.enabled).padding(10)
+                .font(messageStyle == nil ? .system(size: 14) : bodyFont).textSelection(.enabled).padding(10)
             }
             .background(theme.card, in: .rect(cornerRadius: 10))
 

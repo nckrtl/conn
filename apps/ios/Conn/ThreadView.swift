@@ -297,7 +297,10 @@ struct ThreadView: View {
                     })?.entryId ?? current.entries.first?.entryId else { return }
                     var older: [FfiTimelineEntry] = []
                     if !current.serverPage {
-                        older = try await reader.before(thread: threadId, id: first).entries
+                        let page = try await reader.before(thread: threadId, id: first)
+                        older = page.entries
+                        current.feedDetails.merge(page.feedDetails) { current, _ in current }
+                        current.delegatedTaskIds.merge(page.delegatedTaskIds) { current, _ in current }
                     }
                     if older.isEmpty {
                         guard online else {
@@ -321,6 +324,7 @@ struct ThreadView: View {
                             current.serverPage = true
                             current.historyCursor = page.historyCursor
                             current.feedDetails.merge(page.feedDetails) { current, _ in current }
+                            current.delegatedTaskIds.merge(page.delegatedTaskIds) { current, _ in current }
                             current.workGroups.insert(contentsOf: page.workGroups, at: 0)
                         } while older.isEmpty
                     }
@@ -328,6 +332,7 @@ struct ThreadView: View {
                           store.openThreadId == threadId else { return }
                     var ids = Set(current.entries.map(\.entryId))
                     current.entries.insert(contentsOf: older.filter { ids.insert($0.entryId).inserted }, at: 0)
+                    current.removeRepeatedDelegatedResults()
                     pageExhausted = current.serverPage && current.historyCursor == nil
                     guard !older.isEmpty else {
                         historyNotice = nil

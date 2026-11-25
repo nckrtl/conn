@@ -4,24 +4,28 @@ import UniformTypeIdentifiers
 struct ThreadCard<Header: View, Content: View>: View {
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
+    @ScaledMetric(relativeTo: .footnote) private var headerSize: CGFloat = 13
+    var code = false
     @ViewBuilder let header: Header
     @ViewBuilder let content: Content
 
     var body: some View {
+        let outer = theme.background.mix(with: theme.foreground, by: appearance == .light ? 0.06 : 0.056, in: .device)
+        let inner = code ? theme.codeBackground : appearance == .light ? Color.white : outer.mix(with: .white, by: 0.06, in: .device)
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) { header }
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: headerSize))
                 .foregroundStyle(theme.mutedForeground)
                 .padding(.leading, 11)
                 .padding(.trailing, 5)
                 .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(appearance == .light ? Color.white : theme.card.mix(with: .white, by: 0.06))
+                .background(inner)
                 .clipShape(.rect(cornerRadius: 11))
         }
         .padding(3)
-        .background(theme.card, in: .rect(cornerRadius: 14))
+        .background(outer, in: .rect(cornerRadius: 14))
     }
 }
 
@@ -84,7 +88,7 @@ struct CodeCard: View {
     }
 
     var body: some View {
-        ThreadCard {
+        ThreadCard(code: true) {
             ConnIcon("doc.text").font(.system(size: 14))
             Text(title ?? label)
             Spacer()
@@ -117,13 +121,15 @@ struct HighlightedSource: View {
     let language: String
     @Environment(\.connTheme) private var theme
     @State private var formatted: AttributedString?
+    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
 
     private struct Input: Equatable { let code, language, theme: String }
 
     var body: some View {
         let input = Input(code: code, language: language, theme: theme.themeId)
         Text(formatted ?? AttributedString(code))
-            .font(.system(size: 13, design: .monospaced))
+            .font(.system(size: size, design: .monospaced))
+            .lineHeight(.exact(points: size * 1.625))
             .foregroundStyle(theme.codeForeground)
             .textSelection(.enabled)
             .task(id: input) {

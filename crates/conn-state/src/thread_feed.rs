@@ -2,8 +2,16 @@
 use conn_contract::{OrchestrationV2TurnItemDynamicTool, OrchestrationV2TurnItemUserMessage};
 use serde_json::Value;
 
+mod delegation;
+pub use delegation::{DelegatedResult, cached_completion_id, completion_results};
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum FeedDetail {
+    Delegated(Vec<DelegatedResult>),
+    DelegatedNotice {
+        run: Option<String>,
+        tasks: Vec<String>,
+    },
     Message {
         sender: Option<String>,
         thread: Option<String>,
@@ -34,6 +42,12 @@ pub struct ReviewExcerpt {
 }
 
 pub(crate) fn message_detail(item: &OrchestrationV2TurnItemUserMessage) -> Option<FeedDetail> {
+    if item.created_by == conn_contract::OrchestrationV2Actor::Agent
+        && item.creation_source == conn_contract::OrchestrationV2CreationSource::Server
+        && let Some(results) = completion_results(&item.text)
+    {
+        return Some(FeedDetail::Delegated(results));
+    }
     let reviews: Vec<_> = item
         .context
         .iter()
@@ -154,6 +168,49 @@ fn asset_id(value: &Value) -> Option<String> {
         .as_str()
         .filter(|id| !id.is_empty() && id.len() <= 256)
         .map(str::to_owned)
+}
+
+pub(crate) fn notification_detail(
+    item: &conn_contract::OrchestrationV2TurnItemNotification,
+) -> Option<FeedDetail> {
+    use conn_contract::{
+        OrchestrationV2NotificationSource as Source,
+        OrchestrationV2NotificationSourceMonitorPullRequestSectionOutcome as Outcome,
+    };
+    let Source::DelegatedTask(source) = &item.source else {
+        return None;
+    };
+    if item.outcome == Outcome::Updated {
+        return None;
+    }
+    if let Some(detail) = item.detail.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(results) = completion_results(detail) {
+            return Some(FeedDetail::Delegated(results));
+        }
+        let task = source
+            .task_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| item.id.clone());
+        let title =
+            crate::conn_tools::humanize_delegated_task_ids(&item.summary, &|_| None).into_owned();
+        let state = match item.outcome {
+            Outcome::Failed => "Failed",
+            Outcome::Cancelled => "Cancelled",
+            Outcome::Completed => "Completed",
+            _ => "Finished",
+        };
+        return Some(FeedDetail::Delegated(vec![DelegatedResult {
+            task,
+            title: Some(title),
+            state: state.to_owned(),
+            body: detail.to_owned(),
+        }]));
+    }
+    Some(FeedDetail::DelegatedNotice {
+        run: item.run_id.clone(),
+        tasks: source.task_ids.clone(),
+    })
 }
 
 #[cfg(test)]

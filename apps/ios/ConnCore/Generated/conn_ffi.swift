@@ -10497,6 +10497,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
     public var modelLabel: String?
     public var entries: [FfiTimelineEntry]
     public var feedDetails: [String: FfiFeedDetail]
+    public var delegatedTaskIds: [String: String]
     public var workGroups: [FfiWorkGroupTiming]
     public var working: Bool
     public var activeRunId: String?
@@ -10515,7 +10516,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
+    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool,
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -10532,6 +10533,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         self.modelLabel = modelLabel
         self.entries = entries
         self.feedDetails = feedDetails
+        self.delegatedTaskIds = delegatedTaskIds
         self.workGroups = workGroups
         self.working = working
         self.activeRunId = activeRunId
@@ -10565,6 +10567,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
                 entries: FfiConverterSequenceTypeFfiTimelineEntry.read(from: &buf), 
                 feedDetails: FfiConverterDictionaryStringTypeFfiFeedDetail.read(from: &buf), 
+                delegatedTaskIds: FfiConverterDictionaryStringString.read(from: &buf),
                 workGroups: FfiConverterSequenceTypeFfiWorkGroupTiming.read(from: &buf), 
                 working: FfiConverterBool.read(from: &buf), 
                 activeRunId: FfiConverterOptionString.read(from: &buf), 
@@ -10584,6 +10587,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.modelLabel, into: &buf)
         FfiConverterSequenceTypeFfiTimelineEntry.write(value.entries, into: &buf)
         FfiConverterDictionaryStringTypeFfiFeedDetail.write(value.feedDetails, into: &buf)
+        FfiConverterDictionaryStringString.write(value.delegatedTaskIds, into: &buf)
         FfiConverterSequenceTypeFfiWorkGroupTiming.write(value.workGroups, into: &buf)
         FfiConverterBool.write(value.working, into: &buf)
         FfiConverterOptionString.write(value.activeRunId, into: &buf)

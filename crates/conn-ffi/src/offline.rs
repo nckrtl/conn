@@ -164,11 +164,14 @@ impl OfflineReader {
     fn snapshot(&self, thread: &str, bodies: Vec<String>) -> Result<FfiThreadSnapshot, FfiError> {
         let mut state = ThreadState::new(thread);
         for body in bodies {
-            state.entries.push(
-                serde_json::from_str::<Message>(&body)
-                    .map_err(read_error)?
-                    .entry(),
-            );
+            let message = serde_json::from_str::<Message>(&body).map_err(read_error)?;
+            if let Some(results) = message.delegated_results() {
+                state.feed_details.insert(
+                    message.id().to_owned(),
+                    conn_state::thread_feed::FeedDetail::Delegated(results),
+                );
+            }
+            state.entries.push(message.entry());
         }
         Ok(build_thread_snapshot(&state, None))
     }
@@ -637,7 +640,7 @@ impl SyncState {
             .entries
             .iter()
             .rev()
-            .filter_map(Message::capture)
+            .filter_map(|entry| Message::capture_for_feed(state, entry))
             .take(conn_cache::MESSAGE_CAP)
             .collect::<Vec<_>>();
         messages.reverse();

@@ -19,6 +19,8 @@ struct ThreadView: View {
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
     @State private var showsOutline = false
+    /// The last feed shown, kept while another thread covers this one.
+    @State private var retainedSnapshot: FfiThreadSnapshot?
     private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
     @State private var historyNotice: String?
@@ -82,8 +84,9 @@ struct ThreadView: View {
 
     private var snapshot: FfiThreadSnapshot? {
         if let readingWindow, readingWindow.threadId == threadId { return readingWindow }
-        guard let current = store.openThread, current.threadId == threadId else { return nil }
-        return current
+        if let current = store.openThread, current.threadId == threadId { return current }
+        // Covered by a thread opened from a link: keep the feed, so Back returns to the same spot.
+        return retainedSnapshot?.threadId == threadId ? retainedSnapshot : nil
     }
 
     /// An approval gives up height to the feed: at most 560pt, at least 160pt, and never more
@@ -512,6 +515,7 @@ struct ThreadView: View {
                 .presentationDetents([.large])
         }
         .onDisappear {
+            retainedSnapshot = snapshot
             historyRequest = UUID()
             store.closeThread(threadId)
         }

@@ -33,6 +33,8 @@ struct WorkspaceRootView: View {
 
     @AppStorage("workspace.selectedTab") private var selectedTab: WorkspaceTab = .threads
     @State private var navigationPath: [WorkspaceRoute] = []
+    /// The next pending link was tapped inside a thread: push it instead of replacing the stack.
+    @State private var pushNextLink = false
     @State private var restoredEnvironment: String?
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
@@ -146,6 +148,8 @@ struct WorkspaceRootView: View {
                             initialSettled: summary?.settled ?? false,
                             onOpenThread: { childId, environment in
                                 if let environment, environment != owner.environmentId {
+                                    // Opened from a thread: push it, so Back returns to that thread.
+                                    pushNextLink = true
                                     store.open(ThreadLink(environmentId: environment, threadId: childId))
                                 } else {
                                     navigationPath.append(.thread(childId, scope: scope))
@@ -305,7 +309,13 @@ struct WorkspaceRootView: View {
         let scope = store.linked[link.environmentId] != nil
             ? link.environmentId
             : store.linked.first { $0.value.environmentId == link.environmentId }?.key ?? ""
-        navigationPath = [.thread(link.threadId, scope: scope)]
+        let route = WorkspaceRoute.thread(link.threadId, scope: scope)
+        if pushNextLink && !navigationPath.isEmpty {
+            navigationPath.append(route)
+        } else {
+            navigationPath = [route]
+        }
+        pushNextLink = false
     }
 }
 

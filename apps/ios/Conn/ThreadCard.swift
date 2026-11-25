@@ -34,6 +34,13 @@ func threadCardSurface(_ theme: ConnTheme, _ appearance: ColorScheme) -> Color {
     theme.background.mix(with: theme.foreground, by: appearance == .light ? 0.06 : 0.056, in: .device)
 }
 
+/// The lighter inner fill of a composer panel body (lab `--composer-panel-inner`).
+func composerPanelInner(_ theme: ConnTheme, _ appearance: ColorScheme) -> Color {
+    appearance == .light
+        ? Color.white.mix(with: theme.foreground, by: 0.03, in: .device)
+        : threadCardSurface(theme, appearance).mix(with: .white, by: 0.06, in: .device)
+}
+
 /// The work divider line (lab `--thread-divider`): the sidebar colour mixed 89% (dark) or 90% (light)
 /// with the text colour in OKLab, which is conn-theme's `shell_divider`.
 func threadDividerColor(_ theme: ConnTheme, _ appearance: ColorScheme) -> Color {
@@ -204,24 +211,29 @@ func attributedCodeLine(_ spans: [FfiCodeSpan]) -> AttributedString {
 /// out round the corners, as a CSS `border-top` does.
 struct ComposerPanelEdge: ViewModifier {
     let radius: CGFloat
+    let visible: Bool
     @Environment(\.colorScheme) private var appearance
     @Environment(\.connTheme) private var theme
 
     func body(content: Content) -> some View {
         content.overlay {
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .strokeBorder(appearance == .light ? Color.white.opacity(0.45) : theme.foreground.opacity(0.05), lineWidth: 1)
-                .mask(alignment: .top) {
-                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-                        .frame(height: radius)
-                }
-                .allowsHitTesting(false)
+            if visible {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(appearance == .light ? Color.white.opacity(0.45) : theme.foreground.opacity(0.05), lineWidth: 1)
+                    .mask(alignment: .top) {
+                        LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: radius)
+                    }
+                    .allowsHitTesting(false)
+            }
         }
     }
 }
 
 extension View {
-    func composerPanelEdge(radius: CGFloat) -> some View { modifier(ComposerPanelEdge(radius: radius)) }
+    func composerPanelEdge(radius: CGFloat, visible: Bool = true) -> some View {
+        modifier(ComposerPanelEdge(radius: radius, visible: visible))
+    }
 }
 
 struct ComposerDeck: ViewModifier {

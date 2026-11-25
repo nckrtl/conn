@@ -126,6 +126,10 @@ struct ConnButton: View {
     let label: String
     let tone: FfiButtonTone
     var size: Size = .regular
+    /// Overrides the label inset: compact is 12 (approval), the question pills use 20.
+    var horizontalPadding: CGFloat?
+    /// The fill while disabled; the tone's own fill by default.
+    var disabledFill: Color?
     var disabled = false
     var loading = false
     let action: () -> Void
@@ -137,6 +141,7 @@ struct ConnButton: View {
             ZStack {
                 Text(label)
                     .font(.system(size: 16, weight: .medium))
+                    .lineHeight(.exact(points: 23))
                     .foregroundStyle(disabled ? theme.mutedForeground : labelColor)
                     .lineLimit(1)
                     .opacity(loading ? 0 : 1)
@@ -145,9 +150,9 @@ struct ConnButton: View {
                 }
             }
             // `min-h-12 px-6` / compact `min-h-10 px-5`, at 3.5pt per unit.
-            .padding(.horizontal, size == .compact ? 12 : 21)
+            .padding(.horizontal, horizontalPadding ?? (size == .compact ? 12 : 21))
             .frame(maxWidth: size == .compact ? nil : .infinity, minHeight: size == .compact ? 40 : 48)
-            .background(Capsule().fill(fill))
+            .background(Capsule().fill(disabled ? (disabledFill ?? fill) : fill))
             .contentShape(Capsule())
         }
         .buttonStyle(PressedOpacityStyle())

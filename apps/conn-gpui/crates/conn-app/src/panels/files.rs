@@ -234,11 +234,9 @@ pub(crate) struct FilesPanel {
     pending_reveal: Option<usize>,
     revealed_line: Option<usize>,
     _reveal_flash: Option<Task<()>>,
-    /// `projects.searchEntries` for the query: the newest request wins, the list says whether more
-    /// matches exist than it holds, and a failure shows a retry banner.
+    /// Only the newest search request may replace the visible results.
     search_generation: u64,
     search_pending: bool,
-    search_truncated: bool,
     search_error: Option<String>,
     thread_id: Option<String>,
     /// The open file shows its rendered view (Markdown or table) instead of its source.
@@ -322,7 +320,6 @@ impl FilesPanel {
             _reveal_flash: None,
             search_generation: 0,
             search_pending: false,
-            search_truncated: false,
             search_error: None,
             thread_id: None,
             render_preview: false,
@@ -424,7 +421,6 @@ impl FilesPanel {
         let generation = self.search_generation;
         let query: String = self.tree.query().trim().chars().take(256).collect();
         self.search_error = None;
-        self.search_truncated = false;
         if query.is_empty() {
             self.tree.clear_search();
             self.search_pending = false;
@@ -466,7 +462,6 @@ impl FilesPanel {
                 match res {
                     Ok(result) => {
                         panel.tree.set_search_results(&result.entries);
-                        panel.search_truncated = result.truncated;
                     }
                     Err(err) => {
                         panel.tree.clear_search();
@@ -1521,14 +1516,6 @@ impl FilesPanel {
                 tree_status("No matching files.", 16.0, muted).into_any_element()
             });
         }
-        if self.search_truncated && !self.search_pending && !self.tree.query().trim().is_empty() {
-            col = col.child(tree_status(
-                "More matches available. Refine your search.",
-                4.0,
-                muted,
-            ));
-        }
-
         let selected = self.tree.selected();
         for row in rows {
             let is_dir = row.kind == ProjectEntryKind::Directory;

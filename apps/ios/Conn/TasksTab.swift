@@ -610,7 +610,7 @@ struct RecordChrome: ViewModifier {
                         }.buttonStyle(.plain).accessibilityLabel(name)
                             .accessibilityAddTraits(name == selection ? .isSelected : [])
                     }
-                }.padding(4).frame(maxWidth: 238).glassEffect(.regular, in: .capsule).padding(.horizontal, 24).offset(y: 4)
+                }.padding(4).frame(maxWidth: 238).phoneFooterSurface(Capsule()).padding(.horizontal, 24).offset(y: 4)
             }
     }
 }

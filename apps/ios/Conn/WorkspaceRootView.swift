@@ -41,7 +41,7 @@ struct WorkspaceRootView: View {
         Button(action: action) {
             connImage(icon).resizable().scaledToFit().frame(width: 20, height: 20)
                 .frame(width: 48, height: 48).contentShape(Circle())
-        }.buttonStyle(.plain).glassEffect(.regular, in: .circle)
+        }.buttonStyle(.plain).phoneFooterSurface(Circle())
             .accessibilityLabel(label).accessibilityIdentifier(id)
     }
 
@@ -92,7 +92,7 @@ struct WorkspaceRootView: View {
                             ConnIcon("magnifyingglass").foregroundStyle(.secondary)
                             TextField(selectedTab.searchPlaceholder, text: $searchQuery)
                                 .focused($searchFocused).submitLabel(.search)
-                        }.padding(.horizontal, 16).frame(height: 48).glassEffect(.regular, in: .capsule)
+                        }.padding(.horizontal, 16).frame(height: 48).phoneFooterSurface(Capsule())
                         footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
                             isSearching = false
                             searchQuery = ""
@@ -101,7 +101,7 @@ struct WorkspaceRootView: View {
                         footerAction("ellipsis", label: "Open settings", id: "workspace.settingsButton") { showingSettings = true }
                         Spacer(minLength: 0)
                         WorkspacePhoneSwitcher(selectedTab: $selectedTab, onSearch: { isSearching = true })
-                            .glassEffect(.regular, in: .capsule)
+                            .phoneFooterSurface(Capsule())
                         Spacer(minLength: 0)
                         footerAction("plus", label: "New chat", id: "inbox.newThreadButton") {
                             navigationPath.append(.newThreadDraft(projectId: nil, title: "General"))

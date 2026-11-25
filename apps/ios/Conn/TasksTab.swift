@@ -541,7 +541,8 @@ struct TaskRecordView: View {
 struct WorkspaceFilterIcon: View {
     @Environment(\.connTheme) private var theme
     var body: some View {
-        connImage("line.3.horizontal.decrease").resizable().scaledToFit().frame(width: 18, height: 18)
+        // Lab `FilterPopover`: a 44pt glass circle with the 19pt filter glyph.
+        ThreadGlyph(name: "filter", size: 19)
             .foregroundStyle(theme.foreground).frame(width: 44, height: 44)
             .glassEffect(.regular.interactive(), in: .circle)
     }

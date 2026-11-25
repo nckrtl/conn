@@ -12,8 +12,8 @@
 # the server's launchd job and this script reads the binary the server runs right now from that job's
 # first argument (t3-orbit-relink uses the same lookup through --print-cli):
 #   --service-label LABEL  the loaded job `launchctl print gui/<uid>/LABEL`, else
-#                          ~/Library/LaunchAgents/LABEL.plist, e.g. com.t3tools.t3code.service (mini),
-#                          com.nckrtl.conn-server (nick-vm) or com.nckrtl.t3-headless (nick headless).
+#                          ~/Library/LaunchAgents/LABEL.plist, e.g. com.t3tools.t3code.service (mini)
+#                          or com.nckrtl.conn-server (nick, nick-vm).
 #   --service-plist PATH   any launchd plist (XML, binary or JSON; read with plutil).
 #   T3_SERVER_LABEL / T3_SERVER_PLIST in the environment work the same way.
 # On Linux pass a stable launcher instead, e.g. ~/.local/bin/t3 (a symlink the updater repoints).

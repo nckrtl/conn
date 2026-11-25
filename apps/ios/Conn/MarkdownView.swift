@@ -10,7 +10,7 @@ struct MarkdownView: View {
     var recordStyle = false
     enum MessageStyle { case assistant, user }
     var messageStyle: MessageStyle?
-    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
     var onTemplate: ((String) -> Void)? = nil
     @Environment(\.connTheme) private var theme
 
@@ -20,7 +20,7 @@ struct MarkdownView: View {
     }
 
     private var messageLineHeight: AttributedString.LineHeight? {
-        messageStyle == nil ? nil : .exact(points: messageSize * 1.5)
+        messageStyle == nil ? nil : .exact(points: messageSize * 1.6)
     }
 
     private var textColor: Color {

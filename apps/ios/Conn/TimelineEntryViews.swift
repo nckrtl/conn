@@ -7,7 +7,7 @@ struct WorkGroupCard: View {
     @Environment(\.connTheme) private var theme
     @State private var expanded = false
 
-    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
     private var title: String {
         if group.hasActive {

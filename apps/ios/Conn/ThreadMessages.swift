@@ -7,7 +7,7 @@ struct AgentSummary: View {
     @State private var expanded = false
     @Environment(\.connTheme) private var theme
 
-    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
     private var preview: String {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -52,7 +52,7 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {
@@ -146,6 +146,7 @@ struct ThreadMessage: View {
 
 struct TaskReceiptCard: View {
     let task: FfiTaskSummary
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
     @Environment(\.colorScheme) private var appearance
     @Environment(\.connTheme) private var theme
 
@@ -164,7 +165,7 @@ struct TaskReceiptCard: View {
                     pr.state == .closed ? theme.destructive : AdaptiveColor.emerald700300.color(appearance))
             }
         } content: {
-            Text(row.title).font(.system(size: 14, weight: .medium)).padding(11)
+            Text(row.title).font(.system(size: size, weight: .medium)).padding(11)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(row.accessibilityLabel)

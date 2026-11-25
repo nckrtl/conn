@@ -574,7 +574,8 @@ struct ThreadView: View {
                     .id("timeline-bottom")
             }
             .scrollTargetLayout()
-            .padding(.horizontal, 16)
+            // Card edges line up with the composer's 12-point inset.
+            .padding(.horizontal, 12)
             .padding(.top, 12)
             // The stack gap and bottom anchor already contribute 13 of the 14 points.
             .padding(.bottom, 1)

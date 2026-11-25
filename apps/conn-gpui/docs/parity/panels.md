@@ -86,7 +86,7 @@
 - `[x]` **Toolbar action group: Refresh + Expand/Collapse all folders (skipping ignored dirs)** (`FileBrowserPanel.tsx:498-534` -> `panels/files.rs:349-382`).
 - `[x]` **Lazy directory loading via `projects.listEntries` RPC with sorted folders-first tree** (`FileBrowserPanel.tsx:125-167` -> `panels/files.rs:140-210`, `panels/tree.rs:45-165`).
 - `[x]` **28px tree rows with `@pierre/trees` file/folder icons and dimmed gitignored styling** (`FileBrowserPanel.tsx:270-360` -> `panels/files.rs:402-468`, `file_icons.rs`).
-- `[x]` **Opening a file launches a dedicated `RightPanelTab::File` tab using `projects.readFile`** (`FileBrowserPanel.tsx:310-335`, `FilePreviewPanel.tsx:310-390` -> `panels/files.rs:530-610`).
+- `[x]` **Opening a file launches a dedicated `RightPanelTab::File` tab using `projects.readFile`** (`FileBrowserPanel.tsx:310-335`, `FilePreviewPanel.tsx:310-390` -> `panels/files.rs:530-610`). The file tab opens the searchable explorer on the right. Drag its divider to resize it or use the file-tree button to hide it.
 - `[x]` **Syntax-highlighted source preview (`syntect` mapped to active theme) with line numbers** (`ReadOnlySourcePreview.tsx` -> `panels/files.rs:640-755`, `panels/highlight.rs`).
 - `[x]` **Word wrap toggle (`wrap-lines.svg`) in file preview subheader** (`FilePreviewPanel.tsx:1292-1305` -> `panels/files.rs:492-502`).
 - `[x]` **Copy file contents button (`copy.svg`) in file preview subheader** (`FilePreviewPanel.tsx:1306-1317` -> `panels/files.rs:503-513`).
@@ -103,7 +103,6 @@
 
 ### Missing (`[ ]`)
 - `[ ]` **Horizontal scrolling when word wrap is off** (`ReadOnlySourcePreview.tsx:45-90` vs `panels/files.rs:703-705`): `panels/files.rs` applies `.overflow_hidden().whitespace_nowrap()`, silently **clipping** lines wider than the viewport instead of allowing horizontal scroll.
-- `[ ]` **Toggleable split `FileExplorerPane` inside file preview tabs** (`FilePreviewPanel.tsx:1323-1331,1541-1567`, `FileExplorerPane.tsx:1-145`): Toolbar `FolderTreeIcon` button toggling a resizable (`160px–560px`, persisted width & open state) right-side file tree pane while viewing any file. Open: needs a second tree view in the file tab.
 - `[x]` **`OpenInPicker`** (`FilePreviewPanel.tsx:1273-1285` -> `panels/files.rs` `files-preview-open-in-btn` + chevron, `render_row_menu`): a split button on the preview toolbar opens the file in the editor picked last (Cursor to begin with; kept for the session, not across restarts), and its chevron lists Open, Reveal in Finder, Open with Cursor / VS Code / Zed and the copy rows. Only the Open actions need the file on this Mac.
 - `[x]` **Rendered Markdown preview toggle** (`FilePreviewPanel.tsx:919-968,1495-1506` -> `panels/files.rs`, `chat/markdown.rs` `render_markdown`): `.md`, `.mdx`, `.markdown`, `.mdown`, `.mkd` get an Eye / Code toggle; source is the default as in web (`renderMarkdownPreferred: false`). Open: interactive `- [ ]` checkboxes that write back to disk.
 - `[ ]` **Mermaid diagram preview toggle** (`FilePreviewPanel.tsx:1491-1494`): Open. Needs a diagram renderer; not cheap in GPUI.

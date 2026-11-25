@@ -6,6 +6,8 @@
 #[cfg(feature = "zed-files")]
 mod navigation;
 
+mod navigator;
+
 use crate::a11y::ConnA11yExt as _;
 use std::fmt;
 
@@ -1290,7 +1292,11 @@ impl FilesPanel {
             .child(explorer_actions)
     }
 
-    fn render_preview_subheader(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render_preview_subheader(
+        &self,
+        navigator: Entity<navigator::Navigator>,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let fg = to_hsla(self.tokens.foreground);
         let muted = to_hsla(self.tokens.muted_foreground);
         let control_border = to_hsla(self.tokens.shell_divider_header);
@@ -1327,6 +1333,36 @@ impl FilesPanel {
                 )
                 .children(self.render_crumb_menu(path, cx))
                 .children(self.render_preview_actions(cx));
+        }
+        if self.workspace_root.is_some() {
+            let open = navigator.read(cx).open;
+            let label = if open {
+                "Hide file explorer"
+            } else {
+                "Show file explorer"
+            };
+            row = row.child(
+                super::chrome::icon_button(
+                    "files-toggle-navigator",
+                    "superhero/file-tree.svg",
+                    &self.tokens,
+                    false,
+                    cx.listener(move |_, _, _, cx| {
+                        navigator.update(cx, |state, _| state.toggle());
+                        cx.notify();
+                    }),
+                )
+                .a11y_button("panel.files.toggle-navigator", label)
+                .test_support()
+                .aria_expanded(open)
+                .tab_index(0)
+                .conn_tooltip(label, &self.tokens)
+                .size(px(TOOLBAR_HEIGHT_PX))
+                .flex_shrink_0()
+                .border_1()
+                .border_color(control_border)
+                .bg(to_hsla(self.tokens.shell_control)),
+            );
         }
         row
     }
@@ -1477,6 +1513,7 @@ impl FilesPanel {
 
         let mut col = v_flex()
             .id("files-tree-scroll")
+            .test_support()
             .a11y_group("panel.files.tree", "File tree")
             .flex_1()
             .min_h_0()
@@ -1545,6 +1582,7 @@ impl FilesPanel {
 
             let item = h_flex()
                 .id(SharedString::from(format!("tree-row-{}", row.path)))
+                .test_support()
                 .a11y_button(format!("panel.files.row.{}", row.path), row.name.clone())
                 .h(px(TREE_ROW_HEIGHT_PX))
                 .flex_shrink_0()
@@ -2143,10 +2181,16 @@ impl FilesPanel {
 
 impl Render for FilesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let navigator = navigator::Navigator::state(window, cx);
         if self.showing_preview {
-            return v_flex()
-                .size_full()
-                .child(self.render_preview_subheader(cx))
+            let header = self
+                .render_preview_subheader(navigator.clone(), cx)
+                .into_any_element();
+            let editor = v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
                 .children(self.render_view_switch(cx))
                 .child(
                     v_flex()
@@ -2159,6 +2203,12 @@ impl Render for FilesPanel {
                         .overflow_hidden()
                         .child(self.render_preview_column(window, cx)),
                 )
+                .into_any_element();
+            return v_flex()
+                .size_full()
+                .min_w_0()
+                .child(header)
+                .child(self.render_file_split(editor, navigator, cx))
                 .children(self.render_row_menu(cx))
                 .into_any_element();
         }
@@ -2543,6 +2593,70 @@ mod tests {
             assert!(files.read(cx).zed.is_some());
             assert!(reply.try_recv().unwrap().is_ok());
             assert!(files.read(cx).selected_source(cx).is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn open_files_share_the_right_hand_explorer(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let (window, files) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+            let (window, files) = gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut files = FilesPanel::new(tokens, None, window, cx);
+                    files.workspace_root = Some("/project".into());
+                    files.tree.set_directory_entries(
+                        "",
+                        vec![conn_contract::ProjectEntry {
+                            path: "second.txt".into(),
+                            kind: ProjectEntryKind::File,
+                            ignored: None,
+                        }],
+                    );
+                    files.show_preview("first.txt".into(), cx);
+                    files
+                })
+            })
+            .unwrap();
+            cx.subscribe(&files, |files, event: &FilesEvent, cx| {
+                if let FilesEvent::OpenFile(path) = event {
+                    files.update(cx, |panel, cx| panel.show_preview(path.clone(), cx));
+                }
+            })
+            .detach();
+            (window, files)
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let editor = window.find("file-preview-viewport").bounds();
+            let tree = window.find("files-navigator").bounds();
+            assert_eq!(editor.right(), tree.left());
+            assert_eq!(editor.top(), tree.top());
+            window.click("tree-row-second.txt", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert_eq!(files.read(cx).preview.path(), Some("second.txt"));
+            let tree = window.find("files-navigator").bounds();
+            let handle = window.find("files-navigator-resize").bounds().center();
+            window.drag(handle, handle + gpui_kit::point(px(48.), px(0.)), cx);
+            let resized = window.find("files-navigator").bounds();
+            assert!(resized.size.width < tree.size.width);
+            window.click("files-toggle-navigator", cx);
+            assert!(window.try_find_by_label("Show file explorer").is_some());
+            assert_eq!(
+                window.find("file-preview-viewport").bounds().right(),
+                tree.right()
+            );
+            window.click("files-toggle-navigator", cx);
+            assert_eq!(window.find("files-navigator").bounds(), resized);
+            assert_eq!(files.read(cx).preview.path(), Some("second.txt"));
+            files.update(cx, |files, cx| files.show_tree(cx));
+            window.render_frame(cx);
+            assert_eq!(window.find("files-tree-scroll").bounds().left(), px(0.));
         })
         .unwrap();
     }

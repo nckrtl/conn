@@ -26,6 +26,12 @@ export const ADDITIONAL_THREAD_CARDS = [
 
 export type AdditionalThreadCard = (typeof ADDITIONAL_THREAD_CARDS)[number];
 
+export interface LabAttachment {
+  readonly id: string;
+  readonly name: string;
+  readonly size: string;
+}
+
 export type LabEntry =
   | { readonly kind: "galleryCard"; readonly card: AdditionalThreadCard }
   | { readonly kind: "work"; readonly label: string; readonly steps: readonly string[] }
@@ -34,6 +40,7 @@ export type LabEntry =
       readonly text: string;
       readonly minutesAgo: number;
       readonly images?: ReadonlyArray<{ readonly src: string; readonly alt: string }>;
+      readonly attachments?: readonly LabAttachment[];
     }
   | {
       readonly kind: "agentMessage";

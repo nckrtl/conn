@@ -1,4 +1,5 @@
 import { copyFeedText } from "./copyFeedText";
+import { FileAttachmentRow } from "./GalleryCard";
 import { useId, useState } from "react";
 import { Icon, ProviderIcon } from "./Icon";
 import { WithStatusDot } from "./StatusDot";
@@ -13,12 +14,19 @@ export function UserBubble({
   entry: Extract<LabEntry, { kind: "user" }>;
   time: string;
 }) {
-  const { text, images } = entry;
+  const { text, images, attachments } = entry;
   const hasImages = !!images?.length;
   return (
     <div className="m-user">
       <div className="m-user-bubble" data-images={hasImages || undefined}>
         {text && <span>{text}</span>}
+        {!!attachments?.length && (
+          <div className="m-gallery-file-list">
+            {attachments.map((file) => (
+              <FileAttachmentRow key={file.id} {...file} />
+            ))}
+          </div>
+        )}
         {hasImages && (
           <div
             className="m-user-gallery"

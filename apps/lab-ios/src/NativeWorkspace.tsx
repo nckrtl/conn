@@ -19,6 +19,7 @@ import {
   QUESTION_SCENARIOS,
   WORKING_THREADS,
   type LabThread,
+  type LabAttachment,
   type ListThread,
 } from "./data/fixtures";
 import { demoThread, listRow, demoFilingProject } from "./data/iosDemo";
@@ -143,14 +144,14 @@ export function NativeWorkspace({
     if (!existing) fixtures.remember(t);
     go("thread", t.key);
   }
-  function send(text: string) {
+  function send(text: string, attachments: readonly LabAttachment[] = []) {
     fixtures.remember({
       ...thread,
       project:
         thread.startedInGeneral && thread.project === "General"
           ? demoFilingProject(text)
           : thread.project,
-      entries: [...thread.entries, { kind: "user", text, minutesAgo: 0 }],
+      entries: [...thread.entries, { kind: "user", text, attachments, minutesAgo: 0 }],
     });
   }
   const rows = fixtures.threads.map(listRow);
@@ -287,18 +288,19 @@ export function NativeWorkspace({
             <Composer
               value={draft}
               onChange={setDraft}
-              onSend={() => {
+              onSend={(attachments) => {
                 const text = draft.trim();
-                if (!text) return;
+                const title = text || attachments[0]?.name;
+                if (!title) return;
                 const t: LabThread = {
                   key: "draft-" + (fixtures.threads.length + 1),
                   startedInGeneral: true,
                   project: demoFilingProject(text),
                   instanceId: demoThread.instanceId,
                   model: demoThread.model,
-                  title: text,
+                  title,
                   minutesAgo: 0,
-                  entries: [{ kind: "user", minutesAgo: 0, text }],
+                  entries: [{ kind: "user", minutesAgo: 0, text, attachments }],
                 };
                 fixtures.remember(t);
                 setDraft("");

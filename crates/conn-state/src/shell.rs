@@ -1133,17 +1133,18 @@ fn sort_threads(threads: &mut [ThreadShell]) {
 /// `sortSettledThreads`: settle time, else the thread's activity, newest first; ties by id in
 /// plain order, as the server pages them.
 fn compare_settled(left: &ThreadShell, right: &ThreadShell) -> Ordering {
-    let time = |thread: &ThreadShell| {
-        thread
-            .settled_at
-            .as_deref()
-            .and_then(parse_iso8601_epoch_ms)
-            .or_else(|| parse_iso8601_epoch_ms(activity_timestamp(thread)))
-            .unwrap_or(0)
-    };
-    time(right)
-        .cmp(&time(left))
+    settled_sort_time(right)
+        .cmp(&settled_sort_time(left))
         .then_with(|| left.id.cmp(&right.id))
+}
+
+pub(crate) fn settled_sort_time(thread: &ThreadShell) -> i64 {
+    thread
+        .settled_at
+        .as_deref()
+        .and_then(parse_iso8601_epoch_ms)
+        .or_else(|| parse_iso8601_epoch_ms(activity_timestamp(thread)))
+        .unwrap_or(0)
 }
 
 fn compare_threads(left: &ThreadShell, right: &ThreadShell) -> Ordering {

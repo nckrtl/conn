@@ -58,6 +58,7 @@ private struct SettingsEnvironmentsDetailView: View {
                 LabeledContent("Status") {
                     ConnectionStatusPill(status: store.status)
                 }
+                if let error = store.lastError { Text(error).foregroundStyle(.secondary) }
                 Button {
                     store.reconnect()
                 } label: {
@@ -71,12 +72,22 @@ private struct SettingsEnvironmentsDetailView: View {
             }
             .listRowBackground(theme.settingsGroup)
             Section("Linked environments") {
+                if let error = store.discoveryError {
+                    Text(error).foregroundStyle(.secondary)
+                    Button("Retry discovery") { Task { await store.discoverLinked() } }
+                }
                 ForEach(store.linked.keys.sorted(), id: \.self) { id in
                     if let child = store.linked[id] {
                         LabeledContent(child.displayName) { ConnectionStatusPill(status: child.status) }
                             .swipeActions {
                                 Button("Disconnect", role: .destructive) { store.removeLinked(id) }
                             }
+                        if child.showsOffline || child.lastError != nil {
+                            if case let .failed(message, detail, _) = child.state?.phase {
+                                Text([message, detail].compactMap { $0 }.joined(separator: " ")).font(.caption)
+                            } else if let message = child.lastError { Text(message).font(.caption) }
+                            Button("Retry " + child.displayName) { child.reconnect() }
+                        }
                     }
                 }
                 ForEach(store.disabledOrbitLinks, id: \.self) { id in

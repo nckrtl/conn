@@ -174,17 +174,24 @@ impl OfflineReader {
     }
 }
 
+pub(crate) async fn read_saved_shell(
+    dir: &std::path::Path,
+    identity: &str,
+) -> Option<FfiShellSnapshot> {
+    let bytes = tokio::fs::read(dir.join("shell.json")).await.ok()?;
+    let saved = LinkedShellSnapshot::from_json(&bytes)?;
+    if saved.environment_id != identity {
+        return None;
+    }
+    let mut snapshot = build_shell_snapshot(&saved.into_shell());
+    snapshot.synchronized = false;
+    Some(snapshot)
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl OfflineReader {
     pub async fn saved_shell(&self) -> Option<FfiShellSnapshot> {
-        let bytes = tokio::fs::read(self.dir.join("shell.json")).await.ok()?;
-        let saved = LinkedShellSnapshot::from_json(&bytes)?;
-        if saved.environment_id != self.env {
-            return None;
-        }
-        let mut snapshot = build_shell_snapshot(&saved.into_shell());
-        snapshot.synchronized = false;
-        Some(snapshot)
+        read_saved_shell(&self.dir, &self.env).await
     }
 
     pub async fn recent(&self, thread: String) -> Result<FfiThreadSnapshot, FfiError> {

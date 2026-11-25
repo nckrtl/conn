@@ -8,6 +8,24 @@ enum OrbitConnectState: Equatable {
     case failed(message: String, detail: String?)
 }
 
+/// All machines that finish in one display frame commit together. A slow machine joins a later frame.
+@MainActor
+final class InboxPublications {
+    private var pending: [String: () -> Void] = [:]
+
+    func submit(scope: String, publish: @escaping () -> Void) {
+        let schedule = pending.isEmpty
+        pending[scope] = publish
+        guard schedule else { return }
+        Task {
+            try? await Task.sleep(for: .milliseconds(16))
+            let batch = pending
+            pending.removeAll(keepingCapacity: true)
+            for commit in batch.values { commit() }
+        }
+    }
+}
+
 /// One environment's store: the main one (`scope` empty) or a linked one. It renders its
 /// `ConnSession`'s state. Rust owns the connection: which attempt counts, its status, what Retry
 /// repeats, when to re-pair, and the offline cache.
@@ -16,7 +34,8 @@ enum OrbitConnectState: Equatable {
 final class CoreStore {
     private(set) var state: FfiSessionState?
     private(set) var shell: FfiShellSnapshot?
-    private var shellConnection: UInt64?
+    private let publications: InboxPublications
+    private var restoringLaunchInventory = false
     private(set) var openThread: FfiThreadSnapshot?
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
@@ -92,6 +111,16 @@ final class CoreStore {
 
     let scope: String
     private(set) var linked: [String: CoreStore] = [:]
+    private var linkedOrder: [String] = []
+    var inboxOwners: [CoreStore] { [self] + linkedOrder.compactMap { linked[$0] } }
+
+    private func registerLinked(_ child: CoreStore) {
+        linked[child.scope] = child
+        if !linkedOrder.contains(child.scope) {
+            linkedOrder.append(child.scope)
+            UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
+        }
+    }
 
     /// The connection status the workspace shows inline. Once this scope has connected, a
     /// reconnect or re-pair shows here, so the workspace and its open thread stay up.
@@ -120,7 +149,10 @@ final class CoreStore {
     private(set) var showsWorkspace = false
 
     private func updateWorkspaceVisibility() {
-        if shell != nil && (hasConnected || offlineReader != nil) { showsWorkspace = true }
+        guard !showsWorkspace, !restoringLaunchInventory else { return }
+        if shell != nil && (hasConnected || coldLaunchSession != nil || offlineReader != nil) {
+            showsWorkspace = true
+        }
     }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
@@ -147,7 +179,8 @@ final class CoreStore {
         }
     }
 
-    init(scope: String = "", deferOrbit: Bool = false) {
+    init(scope: String = "", deferOrbit: Bool = false, publications: InboxPublications = InboxPublications()) {
+        self.publications = publications
         self.scope = scope
         let arguments = ProcessInfo.processInfo.arguments
         if scope.isEmpty && arguments.contains("--reset-session") {
@@ -182,27 +215,53 @@ final class CoreStore {
             )
         }
         fleetID = saved?.orbitServerId
-        guard scope.isEmpty else {
-            if !deferOrbit || fleetID == nil { session?.restore(saved: saved) }
-            return
+        if scope.isEmpty {
+            guard !arguments.contains("--manual-pairing") else { return }
+            session?.launch(saved: saved)
+            linkedOrder = UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []
+            for id in linkedOrder where KeychainStore.loadSession(scope: id) != nil {
+                linked[id] = CoreStore(scope: id, deferOrbit: true, publications: publications)
+            }
+        } else if !deferOrbit || fleetID == nil {
+            session?.restore(saved: saved)
         }
-        guard !arguments.contains("--manual-pairing") else { return }
         coldLaunchSession = saved
-        session?.launch(saved: saved)
-        if let saved, let session {
+        if scope.isEmpty { restoreLaunchInventory() }
+        if let identity = saved?.environmentId ?? saved?.orbitServerId, let session {
             Task {
-                guard let reader = await session.savedOfflineReader(), let snapshot = await reader.savedShell(),
-                      coldLaunchSession != nil, !hasConnected, offlineReader == nil,
-                      let identity = saved.environmentId ?? saved.orbitServerId,
+                guard let reader = await session.savedOfflineReader(identity: identity),
+                      coldLaunchSession != nil, offlineReader == nil,
                       state?.environmentId.map({ $0 == identity }) ?? true else { return }
                 offlineReader = reader
-                shell = snapshot
-                updateWorkspaceVisibility()
                 if let id = openThreadId { restoreThread(id) }
             }
         }
-        for id in UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? [] {
-            if KeychainStore.loadSession(scope: id) != nil { linked[id] = CoreStore(scope: id, deferOrbit: true) }
+    }
+
+    private func restoreLaunchInventory() {
+        let sources = inboxOwners.compactMap { owner -> (CoreStore, ConnSession, String)? in
+            guard let session = owner.session, let saved = owner.coldLaunchSession,
+                  let id = saved.environmentId ?? saved.orbitServerId else { return nil }
+            return (owner, session, id)
+        }
+        guard !sources.isEmpty else { return }
+        restoringLaunchInventory = true
+        Task {
+            await withTaskGroup(of: (Int, FfiShellSnapshot?).self) { group in
+                for (index, source) in sources.enumerated() {
+                    let (_, session, identity) = source
+                    group.addTask { (index, await session.cachedShell(identity: identity)) }
+                }
+                for await (index, snapshot) in group {
+                    let (owner, _, identity) = sources[index]
+                    if let snapshot, owner.shell == nil,
+                       owner.environmentId == identity || owner.coldLaunchSession?.orbitServerId == identity {
+                        owner.shell = snapshot
+                    }
+                }
+            }
+            restoringLaunchInventory = false
+            updateWorkspaceVisibility()
         }
     }
 
@@ -226,7 +285,7 @@ final class CoreStore {
             discoveredPrimary = primary
             let wanted = Set(targets.map(\.serverId))
             for (key, child) in linked {
-                if let id = child.fleetID, !wanted.contains(id) {
+                if let id = child.fleetID, !wanted.contains(id), discovery.unresolvedEndpoints.isEmpty {
                     child.session?.connectManually()
                     linked.removeValue(forKey: key)
                 }
@@ -236,10 +295,10 @@ final class CoreStore {
                 let existing = linked.values.first { $0.fleetID == id || $0.environmentId == id }
                 if let existing, existing.fleetID == nil { continue }
                 let key = existing?.scope ?? credentials.first { $0.value.orbitServerId == id }?.key ?? UUID().uuidString
-                let child = existing ?? CoreStore(scope: key, deferOrbit: true)
+                let child = existing ?? CoreStore(scope: key, deferOrbit: true, publications: publications)
                 child.fleetID = id
                 child.fleetLabel = target.displayTitle
-                linked[key] = child
+                registerLinked(child)
                 if let attempt = child.lastFleetAttempt {
                     guard child.showsOffline, Date().timeIntervalSince(attempt) >= 300 else { continue }
                 }
@@ -249,7 +308,6 @@ final class CoreStore {
                 }
                 child.session?.followEnvironment(environmentId: id, saved: credential)
             }
-            UserDefaults.standard.set(Array(Set(savedScopes).union(linked.keys)), forKey: "linkedSessions")
         } catch {
             if !Task.isCancelled && environmentId == primary { discoveryError = connectionMessage(error) }
         }
@@ -491,10 +549,9 @@ final class CoreStore {
                 return
             }
             let id = UUID().uuidString
-            let child = CoreStore(scope: id)
+            let child = CoreStore(scope: id, publications: publications)
             child.connectWithPairingURL(raw)
-            linked[id] = child
-            UserDefaults.standard.set(Array(Set(UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []).union(linked.keys)), forKey: "linkedSessions")
+            registerLinked(child)
         } catch { lastError = error.localizedDescription }
     }
 
@@ -513,8 +570,8 @@ final class CoreStore {
             UserDefaults.standard.set(Array(Set(disabled + [orbit])), forKey: "disabledOrbitLinks")
         }
         linked.removeValue(forKey: id)?.disconnect()
-        let saved = UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []
-        UserDefaults.standard.set(saved.filter { $0 != id }, forKey: "linkedSessions")
+        linkedOrder.removeAll { $0 == id }
+        UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
     }
 
     private func clearLinkedSessions() {
@@ -527,6 +584,7 @@ final class CoreStore {
             }
         }
         linked.removeAll()
+        linkedOrder.removeAll()
         UserDefaults.standard.removeObject(forKey: "linkedSessions")
     }
 
@@ -583,10 +641,9 @@ final class CoreStore {
         }
         if session?.openLink(environmentId: link.environmentId) == .here { return }
         guard scope.isEmpty else { return }
-        let child = CoreStore(scope: link.environmentId)
+        let child = CoreStore(scope: link.environmentId, publications: publications)
         child.fleetID = link.environmentId
-        linked[link.environmentId] = child
-        UserDefaults.standard.set(Array(Set(UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []).union(linked.keys)), forKey: "linkedSessions")
+        registerLinked(child)
         child.session?.connectEnvironment(environmentId: link.environmentId)
     }
 
@@ -606,9 +663,6 @@ final class CoreStore {
         if let state, newState.revision <= state.revision { return }
         // The open thread stays: the session resubscribes it on the new connection. Only a switch
         // to another server drops it, with that server's inbox.
-        if newState.connectionId != shellConnection {
-            shell?.synchronized = false
-        }
         let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
         let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
@@ -621,7 +675,10 @@ final class CoreStore {
             openThread = nil
             openThreadId = nil
         }
+        // The pump may publish its first inventory before the session attaches its core.
+        let wasAttached: Bool = if case .live = state?.phase { state?.connectionId == newState.connectionId } else { false }
         state = newState
+        if case .live = newState.phase, !wasAttached { handleShell(connectionId: newState.connectionId) }
         if newState.hasConnected { coldLaunchSession = nil }
         switch newState.phase {
         case let .idle(message):
@@ -633,7 +690,6 @@ final class CoreStore {
                 discoveredPrimary = nil
             }
         case let .live(status):
-            if status != .connected { shell?.synchronized = false }
             if status == .connected { lastError = nil }
         default:
             break
@@ -651,19 +707,19 @@ final class CoreStore {
         Task {
             let saved = await reader.savedShell()
             guard state?.connectionId == connection else { return }
-            if shell?.synchronized != true, let saved { shell = saved }
+            if shell == nil, let saved { shell = saved }
             updateWorkspaceVisibility()
             if let id = openThreadId { restoreThread(id) }
         }
     }
 
-    fileprivate func handleShell(_ snapshot: FfiShellSnapshot, connectionId: UInt64) {
+    fileprivate func handleShell(connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
-        if snapshot.synchronized || shell == nil {
-            shell = snapshot
-            shellConnection = connectionId
+        publications.submit(scope: scope) { [weak self] in
+            guard let self, let snapshot = session?.publishedShell(connectionId: connectionId) else { return }
+            if shell != snapshot { shell = snapshot }
+            updateWorkspaceVisibility()
         }
-        updateWorkspaceVisibility()
     }
 
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
@@ -719,8 +775,8 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
         }
     }
 
-    func onShell(connectionId: UInt64, snapshot: FfiShellSnapshot) {
-        Task { @MainActor [weak store] in store?.handleShell(snapshot, connectionId: connectionId) }
+    func onShellChanged(connectionId: UInt64) {
+        Task { @MainActor [weak store] in store?.handleShell(connectionId: connectionId) }
     }
 
     func onThread(connectionId: UInt64, snapshot: FfiThreadSnapshot) {

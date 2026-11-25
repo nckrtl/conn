@@ -1199,6 +1199,7 @@ impl<E: Env> Mapper<E> {
         }
         self.apply_late_background_mutation(&life.session_id, &life.task_id, status, &mut out);
         if status != TaskStatus::Running {
+            let first_command_row = out.len();
             match detached {
                 Some(seq) => {
                     self.with_detached(seq, |m| {
@@ -1208,6 +1209,23 @@ impl<E: Env> Mapper<E> {
                 None => {
                     self.finish_registered_background_tool(&life.task_id, status, output, &mut out)
                 }
+            }
+            if let Some(exit_code) = life.exit_code.filter(|code| *code != 0) {
+                return out
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, event)| match event {
+                        Out::Event(conn_provider::ProviderEvent::TurnItemUpdated {
+                            turn_item: conn_contract::TurnItem::CommandExecution(command),
+                        }) if index >= first_command_row && command.monitor != Some(true) => {
+                            Out::Event(conn_provider::ProviderEvent::GrokCommandFailed {
+                                turn_item: conn_contract::TurnItem::CommandExecution(command),
+                                exit_code,
+                            })
+                        }
+                        other => other,
+                    })
+                    .collect();
             }
         }
         out

@@ -12,7 +12,7 @@ pub(super) fn repo_root(cwd: &Path) -> Option<&Path> {
     cwd.ancestors().find(|d| d.join(".git").exists())
 }
 
-fn plugin_repo(cwd: &Path) -> Option<PathBuf> {
+pub(super) fn plugin_repo(cwd: &Path) -> Option<PathBuf> {
     let root = repo_root(cwd)?;
     let git = root.join(".git");
     let linked = || {

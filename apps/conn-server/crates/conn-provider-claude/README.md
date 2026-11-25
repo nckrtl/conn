@@ -48,7 +48,8 @@ T3 server's Claude driver and `createClaudeAdapterV2` build theirs; the server
 | `launchArgs` | per query (`launch_args`): `--add-dir` values after the cwd and attachments; `--permission-mode`, then `--dangerously-skip-permissions`, over the policy's mode; `--append-system-prompt-file` text (one trailing newline trimmed) and `--append-system-prompt` text after T3's append text; `--settings` (inline JSON or a file, comments and trailing commas allowed) beneath T3's settings keys, in its own key order; every other flag to `extraArgs` in T3's order, then `thinking-display`. A missing value or an unreadable file fails the start. Text generation uses the launch settings too. Review guides resolve settings in the original project, preserve deny rules, and pass a private settings file to the CLI |
 | `enabled` | T3's rule; a disabled instance gets T3's disabled entry, also with the probe off, and the engine refuses its turns |
 | `displayName`, `accentColor` | on the entry, pending and probed (`withInstanceIdentity`) |
-| `customModels`, `autoCompactWindow` | not read yet |
+| `customModels` | Adds and renames picker entries. Configured slugs shadow native aliases for chat and text generation. |
+| `autoCompactWindow` | Sets the native compaction window and the context-usage threshold. An empty value preserves Claude’s settings. |
 
 Proof: the conformance scenarios `instance_*` and the probe scenarios `instance-settings` and
 `title-instance` (below); `instances-flow.mjs` in `conn-server` for a turn through the server.
@@ -259,9 +260,8 @@ Normalized in the comparison:
   keeps an icon URL as sent, where T3 normalizes it with `new URL`.
 - **Attachments:** eligible PDFs with verifiable page counts are native document blocks.
   Claude restores its 28 MiB and 100-page budgets from the provider thread.
-- **Not passed:** `autoCompactWindow`, `customModels`,
-  `ENABLE_TOOL_SEARCH`, the delegated child's prompt cache TTL, prompt suggestions, the
-  device-tool text and hook (no device tools), custom models.
+- **Not passed:** `ENABLE_TOOL_SEARCH`, the delegated child's prompt cache TTL, prompt suggestions, the
+  device-tool text and hook (no device tools).
 - **Process:** no Linux `systemd-run` agent scope (T3's `AgentScope`; macOS and containers
   without systemd have none either). T3 records each CLI before it opens the fd 4 gate, so a
   restarted server can reap survivors (`ProviderProcesses`); the helper opens the gate at once

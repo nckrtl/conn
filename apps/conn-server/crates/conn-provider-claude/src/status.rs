@@ -45,6 +45,7 @@ pub struct StatusSettings {
     pub home_path: String,
     pub display_name: Option<String>,
     pub accent_color: Option<String>,
+    pub custom_models: crate::catalog::CustomModels,
     /// The instance's `environment` entries with a value, in order. `Debug` prints names only.
     pub environment: InstanceEnv,
 }
@@ -57,6 +58,7 @@ impl Default for StatusSettings {
             home_path: String::new(),
             display_name: None,
             accent_color: None,
+            custom_models: Default::default(),
             environment: InstanceEnv::default(),
         }
     }
@@ -79,6 +81,7 @@ impl StatusSettings {
             home_path: envelope.config_str("homePath").unwrap_or_default(),
             display_name: envelope.display_name,
             accent_color: envelope.accent_color,
+            custom_models: crate::catalog::CustomModels::parse(&envelope.config["customModels"]),
             environment: envelope.environment,
         }
     }
@@ -836,7 +839,11 @@ fn effort_label(id: &str) -> &str {
 }
 
 /// `claudeReportedModels`: models the CLI reports that the catalog does not know.
-fn reported_models(catalog: &[CatalogModel], reported: &[Value]) -> Vec<Value> {
+fn reported_models(
+    catalog: &[CatalogModel],
+    custom: &crate::catalog::CustomModels,
+    reported: &[Value],
+) -> Vec<Value> {
     // `stripClaudeContextWindowSuffix`: a trailing `[...]` goes.
     let strip = |id: &str| {
         let id = match (id.ends_with(']'), id.rfind('[')) {
@@ -861,6 +868,7 @@ fn reported_models(catalog: &[CatalogModel], reported: &[Value]) -> Vec<Value> {
         })
         .map(|id| strip(&id))
         .collect();
+    known.extend(custom.slugs().map(strip));
     let mut out = Vec::new();
     for info in reported {
         let slug = info["value"].as_str().unwrap_or("").trim();
@@ -935,7 +943,9 @@ where
     let group_key = format!("claude:home:{}", home.to_string_lossy());
     let now = conn_support::time::millis_from_iso(&input.checked_at).unwrap_or(0);
     let catalog = catalog_models(input.manifest, now);
-    let all_models: Vec<Value> = catalog.iter().map(|c| c.model.clone()).collect();
+    let all_models = settings
+        .custom_models
+        .display(catalog.iter().map(|c| c.model.clone()).collect());
     let entry = |models, update_required, slash_commands, probe| {
         build_entry(
             input.instance_id,
@@ -1086,8 +1096,13 @@ where
         .map(|m| m.model.clone())
         .collect();
     if let Some(caps) = &caps {
-        models.extend(reported_models(&catalog, &caps.models));
+        models.extend(reported_models(
+            &catalog,
+            &settings.custom_models,
+            &caps.models,
+        ));
     }
+    let models = settings.custom_models.display(models);
     let Some(caps) = caps else {
         let message = match &answer {
             Err(e) if e.contains("timeout") => format!(

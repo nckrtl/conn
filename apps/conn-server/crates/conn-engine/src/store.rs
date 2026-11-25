@@ -2375,6 +2375,31 @@ impl Tx<'_> {
             && row["appThreadId"] == thread_id
             && !is_queued_provider_thread_placeholder(row)
         {
+            if let Some(mut selected) = self.thread(&thread_id)?
+                && selected["activeProviderThreadId"] != row["id"]
+            {
+                let other_instance = row["providerInstanceId"].is_string()
+                    && selected["providerInstanceId"].is_string()
+                    && selected["providerInstanceId"] != row["providerInstanceId"];
+                let released = match row["providerSessionId"].as_str() {
+                    Some(session) if !other_instance => self
+                        .entity(&thread_id, "providerSessions", session)?
+                        .is_some_and(|owner| {
+                            matches!(owner["status"].as_str(), Some("stopped" | "error"))
+                        }),
+                    _ => false,
+                };
+                if other_instance || released {
+                    // Clients also project a provider-thread event as an activation. Keep the
+                    // historical row update and restore the current selection in the same batch.
+                    selected["updatedAt"] = json!(self.now);
+                    self.append(
+                        Draft::new(&thread_id, "thread.metadata-updated", selected)
+                            .payload_instance(),
+                    )?;
+                    return Ok(seq);
+                }
+            }
             // Native child threads do not start an app run. Their first provider row
             // activates their conversation just as it does on an ordinary app thread.
             self.tx
@@ -4135,6 +4160,47 @@ mod tests {
         assert_eq!(ordinal(&tx, "next"), 4);
         tx.commit(None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_released_session_cannot_replace_the_current_conversation_on_the_same_instance() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut tx = store.tx().unwrap();
+        tx.append(Draft::new("t", "thread.created", json!({
+            "id":"t", "projectId":"p", "providerInstanceId":"claude", "activeProviderThreadId":"current"
+        }))).unwrap();
+        tx.append(Draft::new(
+            "t",
+            "provider-session.updated",
+            json!({
+                "id":"closed-session", "providerInstanceId":"claude", "status":"stopped"
+            }),
+        ))
+        .unwrap();
+        tx.append(Draft::new(
+            "t",
+            "provider-thread.updated",
+            json!({
+                "id":"retired", "appThreadId":"t", "providerInstanceId":"claude",
+                "providerSessionId":"closed-session", "status":"idle", "pendingBackgroundTasks":[]
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            tx.thread("t").unwrap().unwrap()["activeProviderThreadId"],
+            "current"
+        );
+        assert_eq!(
+            tx.entity("t", "providerThreads", "retired")
+                .unwrap()
+                .unwrap()["pendingBackgroundTasks"],
+            json!([])
+        );
+        tx.commit(None).unwrap();
+        assert_eq!(
+            store.stored_shell("t").unwrap().unwrap()["activeProviderThreadId"],
+            "current"
+        );
     }
 
     #[test]

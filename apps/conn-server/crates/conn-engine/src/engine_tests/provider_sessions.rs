@@ -1,6 +1,63 @@
 use super::*;
 
 #[tokio::test]
+async fn clearing_a_released_roster_preserves_the_selected_provider() {
+    let db = TempDb::new("switch-with-background-roster");
+    let (engine, _, _) = open_two(&db);
+    dispatch(&engine, create("t1", "create")).await;
+    dispatch(&engine, message("t1", "start", "background-task")).await;
+    let first = run_to_end(&engine, "t1", "run:t1:1").await;
+    let old_thread = &first["thread"]["activeProviderThreadId"];
+    assert!(old_thread.is_string());
+    assert_eq!(
+        first["providerThreads"][0]["pendingBackgroundTasks"][0]["taskId"],
+        "bg-1"
+    );
+
+    let mut events = engine
+        .subscribe_thread(from_json(json!({"threadId":"t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut events).await;
+    dispatch(&engine, model_selection_set("switch", "codex")).await;
+    loop {
+        let message = next(&mut events).await;
+        let event = &message["event"];
+        if event["type"] == "provider-thread.updated"
+            && &event["payload"]["id"] == old_thread
+            && event["payload"]["pendingBackgroundTasks"] == json!([])
+        {
+            break;
+        }
+    }
+    let view = projection(&engine, "t1").await;
+    assert_eq!(view["thread"]["providerInstanceId"], "codex");
+    assert!(view["thread"]["activeProviderThreadId"].is_null());
+    assert_eq!(
+        view["providerThreads"][0]["pendingBackgroundTasks"],
+        json!([])
+    );
+    // A client resuming at the historical roster also gets the current selection.
+    let next_event = next(&mut events).await;
+    assert_eq!(next_event["event"]["type"], "thread.metadata-updated");
+    assert_eq!(next_event["event"]["payload"], view["thread"]);
+    let shell = engine
+        .inner()
+        .db(|store| store.stored_shell("t1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(shell["activeProviderThreadId"].is_null());
+
+    dispatch(&engine, message("t1", "next", "continue")).await;
+    let second = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(
+        second["runs"][1]["providerThreadId"],
+        "provider-thread:codex:t1"
+    );
+}
+
+#[tokio::test]
 async fn idle_release_uses_the_opened_provider_capability_and_the_operator_override() {
     use crate::IdleTimeout::{After, Disabled, ProviderDefault};
     for (case, native, policy, threshold, pinned) in [

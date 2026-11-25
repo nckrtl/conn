@@ -136,6 +136,9 @@ impl ClaudeProvider {
         {
             settings.home_path = home.to_string_lossy().into_owned();
         }
+        if config.and_then(|c| c.get("customModels")).is_none() {
+            settings.custom_models = self.config.custom_models.clone();
+        }
         if settings.environment.is_empty() {
             settings.environment = self.config.instance_env.clone();
         }
@@ -471,9 +474,8 @@ pub fn pending_entry_for(
 ) -> Value {
     let mut entry = pending_entry(instance_id, checked_at);
     let now = conn_support::time::millis_from_iso(checked_at).unwrap_or(0);
-    entry["models"] = Value::Array(catalog::current_provider_models(
-        &config.model_manifest,
-        now,
+    entry["models"] = Value::Array(settings.custom_models.display(
+        catalog::current_provider_models(&config.model_manifest, now),
     ));
     let env = launch::query_env(
         config,

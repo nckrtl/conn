@@ -44,6 +44,7 @@ pub(crate) struct Lifecycle {
     pub session_id: String,
     pub task_id: String,
     pub status: TaskStatus,
+    pub exit_code: Option<i64>,
     pub output: Option<String>,
     pub report: Option<Work>,
 }
@@ -852,6 +853,7 @@ pub(crate) fn lifecycle(params: &Value, completed: bool) -> Option<Lifecycle> {
         session_id,
         task_id,
         status,
+        exit_code: snapshot["exit_code"].as_i64(),
         output: snapshot["output"].as_str().map(str::to_owned),
         report: background_report(update, status),
     })

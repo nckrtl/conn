@@ -79,10 +79,36 @@ pub fn cli_args(
     managed_mcp_config: bool,
     investigate: bool,
 ) -> Vec<String> {
+    cli_args_scoped(
+        selection,
+        &crate::ClaudeConfig {
+            model_manifest: manifest.clone(),
+            ..Default::default()
+        },
+        output_schema,
+        no_session_persistence,
+        managed_mcp_config,
+        investigate,
+    )
+}
+
+fn cli_args_scoped(
+    selection: &Value,
+    config: &crate::ClaudeConfig,
+    output_schema: &str,
+    no_session_persistence: bool,
+    managed_mcp_config: bool,
+    investigate: bool,
+) -> Vec<String> {
     let model = selection["model"].as_str().unwrap_or_default();
-    let compiled = catalog::compile(selection, manifest);
+    let compiled = config
+        .custom_models
+        .compile(selection, &config.model_manifest);
     let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
-    let models = catalog::current_provider_models(manifest, now);
+    let models = config.custom_models.scope(catalog::current_provider_models(
+        &config.model_manifest,
+        now,
+    ));
     let capabilities = model_entry(&models, model).map(|m| &m["capabilities"]);
     let has_boolean = |id: &str| {
         capabilities
@@ -247,9 +273,9 @@ pub async fn generate(
     request: TextGenerationRequest,
 ) -> Result<Value, ProviderError> {
     let selection = conn_contract::to_json(&request.model_selection);
-    let mut args = cli_args(
+    let mut args = cli_args_scoped(
         &selection,
-        &config.model_manifest,
+        config,
         &request.output_schema,
         true,
         managed_mcp_config,

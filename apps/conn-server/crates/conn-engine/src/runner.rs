@@ -1785,6 +1785,12 @@ impl Inner {
             }
             let active = live.active();
             let run_id = active.as_ref().map(|a| a.run_id.clone());
+            let native_command_failure = match &event {
+                ProviderEvent::GrokCommandFailed { exit_code, .. } if *exit_code != 0 => {
+                    Some(*exit_code)
+                }
+                _ => None,
+            };
             let mut translated = translate(&thread_id, active.as_ref(), event);
             // T3's `ProviderEventIngestor` names the session's instance on every event it
             // stores.
@@ -1874,13 +1880,17 @@ impl Inner {
                             .is_some_and(|(active, owner)| active != owner) =>
                 {
                     // A wake may poll an earlier run's command again after its last output.
-                    // Only an item still open on this provider thread can be inherited.
+                    // A native exit can also correct that command's earlier sparse completion.
                     let provider_thread = lock(&live.state)
                         .provider_thread
                         .as_ref()
                         .map(|thread| thread.id.as_str().to_owned());
                     if !self
-                        .commit_inherited_background_item(draft, provider_thread)
+                        .commit_inherited_background_item(
+                            draft,
+                            provider_thread,
+                            native_command_failure,
+                        )
                         .await
                     {
                         continue;
@@ -2180,11 +2190,13 @@ impl Inner {
         }
     }
 
-    /// Accept a late item for its original run exactly until its first terminal update.
+    /// Route inherited work to its original run. A structured native command exit can
+    /// correct a sparse terminal update from that same turn and tool call.
     async fn commit_inherited_background_item(
         self: &Arc<Self>,
         mut draft: Draft,
         provider_thread: Option<String>,
+        native_command_failure: Option<i64>,
     ) -> bool {
         let Some(provider_thread) = provider_thread else {
             return false;
@@ -2205,11 +2217,14 @@ impl Inner {
                 if previous["runId"] != item["runId"]
                     || previous["type"] != item["type"]
                     || previous["providerThreadId"] != item["providerThreadId"]
-                    || !matches!(
-                        previous["status"].as_str(),
-                        Some("pending" | "running" | "waiting")
-                    )
                 {
+                    return Ok(false);
+                }
+                let open = matches!(
+                    previous["status"].as_str(),
+                    Some("pending" | "running" | "waiting")
+                );
+                if !open && !is_grok_command_correction(&previous, item, native_command_failure) {
                     return Ok(false);
                 }
                 if native_thread != provider_thread {
@@ -2228,6 +2243,14 @@ impl Inner {
                     }
                 }
                 draft.run_id = Some(run_id.to_owned());
+                if let Some(code) = native_command_failure {
+                    draft.payload["exitCode"] = json!(code);
+                    if draft.payload["output"].as_str().is_none_or(str::is_empty)
+                        && previous["output"].is_string()
+                    {
+                        draft.payload["output"] = previous["output"].clone();
+                    }
+                }
                 tx.append(draft)?;
                 Ok(true)
             })
@@ -3102,6 +3125,38 @@ fn thread_load_key(
     .to_string()
 }
 
+fn is_grok_command_correction(previous: &Value, item: &Value, native_exit: Option<i64>) -> bool {
+    if native_exit.is_none()
+        || item["type"] != "command_execution"
+        || item["status"] != "failed"
+        || previous["monitor"] == true
+        || item["monitor"] == true
+        || item["nativeItemRef"]["driver"] != "grok"
+        || item["nativeItemRef"]["nativeId"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        || previous["nativeItemRef"] != item["nativeItemRef"]
+        || item["providerTurnId"].as_str().is_none_or(str::is_empty)
+        || previous["providerTurnId"] != item["providerTurnId"]
+    {
+        return false;
+    }
+    match previous["status"].as_str() {
+        Some("completed") => previous["exitCode"].is_null(),
+        Some("failed") => {
+            let Some(recorded_code) = previous["exitCode"].as_i64() else {
+                return true;
+            };
+            let old = previous["output"].as_str().unwrap_or_default();
+            Some(recorded_code) == native_exit
+                && item["output"]
+                    .as_str()
+                    .is_some_and(|new| new.len() > old.len() && new.starts_with(old))
+        }
+        _ => false,
+    }
+}
+
 /// Maps one provider event to a domain event. Adding an event kind is one arm here.
 fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) -> Translated {
     let run_id = active.map(|a| a.run_id.as_str());
@@ -3171,17 +3226,25 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
                 Err(_) => Translated::Event(draft),
             }
         }
-        ProviderEvent::NodeUpdated { node } => {
-            Translated::Event(scoped("node.updated", to_json(&node)))
-        }
+        // A child's lifecycle can outlast its spawning turn. Its row identifies the
+        // owning run and node even while another run consumes the event stream.
+        ProviderEvent::NodeUpdated { node } => Translated::Event(
+            Draft::new(&node.thread_id, "node.updated", to_json(&node))
+                .run(node.run_id.as_deref().or(run_id))
+                .node(Some(&node.id)),
+        ),
         ProviderEvent::SubagentUpdated { subagent } => {
             let payload = to_json(&subagent);
-            Translated::Subagent(scoped("subagent.updated", payload.clone()), payload)
+            let draft = Draft::new(&subagent.thread_id, "subagent.updated", payload.clone())
+                .run(subagent.run_id.as_deref().or(run_id))
+                .node(Some(&subagent.id));
+            Translated::Subagent(draft, payload)
         }
         ProviderEvent::MessageUpdated { message } => {
             Translated::Event(scoped("message.updated", to_json(&message)))
         }
         ProviderEvent::TurnItemUpdated { turn_item }
+        | ProviderEvent::GrokCommandFailed { turn_item, .. }
         | ProviderEvent::McpAppCapture { turn_item, .. } => {
             Translated::Event(scoped("turn-item.updated", to_json(&turn_item)))
         }

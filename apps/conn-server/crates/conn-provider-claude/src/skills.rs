@@ -46,7 +46,7 @@ fn text_file(path: &Path, limit: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn json_file(path: &Path) -> Value {
+pub(super) fn json_file(path: &Path) -> Value {
     text_file(path, 16 * 1024 * 1024)
         .and_then(|text| conn_support::json::parse_lenient(&text))
         .unwrap_or_default()
@@ -63,17 +63,28 @@ fn files(path: &Path) -> Vec<PathBuf> {
     entries
 }
 
-fn settings(home: &Path, cwd: Option<&Path>, managed: Option<&Path>) -> Settings {
-    let mut settings = Settings::default();
+/// User, project, then local settings, in increasing precedence.
+pub(super) fn settings_paths(home: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = vec![home.join("settings.json")];
-    let shared = cwd.map(|p| p.join(".claude/settings.json"));
     if let Some(cwd) = cwd {
         paths.push(cwd.join(".claude/settings.json"));
         paths.push(cwd.join(".claude/settings.local.json"));
-        if let Some(root) = plugins::repo_root(cwd).filter(|root| *root != cwd) {
+        if let Some(root) = plugins::plugin_repo(cwd).filter(|root| {
+            !cfg!(windows)
+                && *root != cwd
+                && root.join(".git").exists()
+                && std::env::var_os("HOME").as_deref() != Some(root.as_os_str())
+        }) {
             paths.push(root.join(".claude/settings.local.json"));
         }
     }
+    paths
+}
+
+fn settings(home: &Path, cwd: Option<&Path>, managed: Option<&Path>) -> Settings {
+    let mut settings = Settings::default();
+    let shared = cwd.map(|p| p.join(".claude/settings.json"));
+    let mut paths = settings_paths(home, cwd);
     paths.extend(managed.map(Path::to_owned));
     for path in paths {
         let json = json_file(&path);

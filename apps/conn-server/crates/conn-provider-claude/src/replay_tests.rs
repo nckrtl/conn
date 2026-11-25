@@ -1464,3 +1464,41 @@ fn the_final_main_model_iteration_sets_the_context_window() {
         "input_tokens":1089209,"iterations":[{"type":"message","input_tokens":500000},{"type":"message","input_tokens":545100,"output_tokens":96},{"type":"advisor","input_tokens":543000}]}}}})));
     assert!(event.iter().any(|out|matches!(out,Out::Event(ProviderEvent::ProviderTurnUpdated{provider_turn,..}) if to_json(provider_turn)["tokenUsage"]["usedTokens"]==545196)));
 }
+
+#[test]
+fn explicit_compaction_window_reaches_normal_and_post_compaction_usage() {
+    for (window, threshold) in [
+        (None, None),
+        (Some(120_000), Some(87_000)),
+        (Some(1_000_000), None),
+    ] {
+        let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+        mapper.auto_compact_window = window;
+        mapper.begin_turn(
+            &turn_input(1, &provider_thread("compact"), "test", "full-access"),
+            "default",
+        );
+        for frame in [
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{
+                "id":"a","model":"claude-sonnet","usage":{"input_tokens":54}}}}),
+            json!({"type":"system","subtype":"compact_boundary","uuid":"b",
+                "compact_metadata":{"trigger":"auto","pre_tokens":54,"post_tokens":10}}),
+        ] {
+            let usage = mapper
+                .handle(Inbound::from_value(frame))
+                .into_iter()
+                .find_map(|out| {
+                    if let Out::Event(ProviderEvent::ProviderTurnUpdated {
+                        provider_turn, ..
+                    }) = out
+                    {
+                        to_json(&provider_turn).get("tokenUsage").cloned()
+                    } else {
+                        None
+                    }
+                })
+                .expect("root token usage");
+            assert_eq!(usage["autoCompactThreshold"].as_u64(), threshold);
+        }
+    }
+}

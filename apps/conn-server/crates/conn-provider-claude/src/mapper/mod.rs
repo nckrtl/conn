@@ -125,6 +125,7 @@ pub struct Mapper<E: Env> {
     closing: bool,
     /// The picker's models for the turn's catalog ([`Self::set_catalog`]).
     catalog: Vec<Value>,
+    pub(crate) auto_compact_window: Option<u64>,
 }
 
 /// `ClaudeLiveQueryContext.promptEchoMode`.
@@ -283,6 +284,7 @@ struct Turn {
     app_thread: Value,
     instance_id: String,
     root_model: String,
+    auto_compact_window: Option<u64>,
     /// Steers written but not yet taken: prompt uuid → message id.
     pending_steers: Vec<(String, String)>,
     steered: bool,
@@ -306,6 +308,15 @@ struct Turn {
 }
 
 impl Turn {
+    fn set_compact_threshold(&self, usage: &mut Value, max_tokens: u64) {
+        if let Some(window) = self
+            .auto_compact_window
+            .filter(|window| *window < max_tokens)
+        {
+            usage["autoCompactThreshold"] = json!(window - 33_000);
+        }
+    }
+
     fn parent_ctx(&self) -> ParentCtx {
         ParentCtx {
             thread_id: self.thread_id.clone(),
@@ -373,6 +384,7 @@ impl<E: Env> Mapper<E> {
             scheduled: wakes::Scheduled::default(),
             closing: false,
             catalog: Vec::new(),
+            auto_compact_window: None,
         }
     }
 
@@ -593,6 +605,7 @@ impl<E: Env> Mapper<E> {
                 .as_str()
                 .unwrap_or(DRIVER)
                 .to_string(),
+            auto_compact_window: self.auto_compact_window,
             root_model: selection["model"].as_str().unwrap_or("").to_string(),
             pending_steers: Vec::new(),
             steered: false,
@@ -1181,11 +1194,13 @@ impl<E: Env> Mapper<E> {
                     let after = post.round() as u64;
                     item["afterTokenCount"] = json!(after);
                     let mut provider_turn = provider_turn(turn, "running", None, false);
+                    let max_tokens = max_tokens(turn, &self.context_windows);
                     provider_turn["tokenUsage"] = json!({
                         "usedTokens": after,
-                        "maxTokens": max_tokens(turn, &self.context_windows),
+                        "maxTokens": max_tokens,
                         "updatedAt": now,
                     });
+                    turn.set_compact_threshold(&mut provider_turn["tokenUsage"], max_tokens);
                     emit(
                         out,
                         |v| ProviderEvent::ProviderTurnUpdated {
@@ -2450,6 +2465,7 @@ fn emit_usage(turn: &Turn, max_tokens: u64, now: &str, out: &mut Vec<Out>) {
         "outputTokens": sample.output_tokens,
         "reasoningOutputTokens": 0,
     });
+    turn.set_compact_threshold(&mut token_usage, max_tokens);
     let ttl = usage.cache_creation.as_ref().and_then(|c| {
         if c.ephemeral_1h_input_tokens > 0 {
             Some(3_600_000)

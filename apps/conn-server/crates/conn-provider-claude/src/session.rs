@@ -1329,9 +1329,20 @@ fn end_detail(end: &QueryEnd) -> String {
 /// `compileClaudeModelSelection`: API model id, effort, settings and the prompt effort.
 fn model_selection(
     selection: &conn_contract::ModelSelection,
-    manifest: &conn_provider::LiveManifest,
+    config: &ClaudeConfig,
 ) -> (String, Option<String>, Map<String, Value>) {
-    let compiled = catalog::compile(&to_json(selection), manifest);
+    let mut compiled = config
+        .custom_models
+        .compile(&to_json(selection), &config.model_manifest);
+    let model = compiled.api_model_id.as_str();
+    if ["opus", "sonnet", "haiku", "fable"].contains(&model)
+        && selection.model.as_str().is_some_and(|s| s.trim() == model)
+    {
+        compiled.settings.insert(
+            "env".into(),
+            json!({format!("ANTHROPIC_DEFAULT_{}_MODEL", model.to_ascii_uppercase()): model}),
+        );
+    }
     (compiled.api_model_id, compiled.effort, compiled.settings)
 }
 
@@ -1602,7 +1613,7 @@ impl ClaudeSession {
         let native = native_thread_id(&input.provider_thread)
             .ok_or_else(|| failed_err("start_turn", "provider thread has no native Claude id"))?;
         let (model, effort, selection_settings) =
-            model_selection(&input.model_selection, &inner.config.model_manifest);
+            model_selection(&input.model_selection, &inner.config);
         // `resolveSettings` may wait for the SDK host to launch; nothing is open yet.
         let run_id = input.run_id.as_str();
         let policy = self
@@ -1676,6 +1687,7 @@ impl ClaudeSession {
                         // opened in the policy's mode (T3's openedPermissionMode check).
                         || (l.selection_settings.get("alwaysThinkingEnabled")
                             == selection_settings.get("alwaysThinkingEnabled")
+                            && l.selection_settings.get("env") == selection_settings.get("env")
                             && (effort.is_some() || l.effort.is_none())
                             && (l.model == model
                                 || l.opened_permission_mode == policy.permission_mode)))
@@ -1846,8 +1858,7 @@ impl ClaudeSession {
         native: Option<&str>,
         model_change: ModelChange,
     ) -> ProviderResult<bool> {
-        let (model, effort, settings) =
-            model_selection(selection, &self.inner.config.model_manifest);
+        let (model, effort, settings) = model_selection(selection, &self.inner.config);
         let live_change = {
             let state = self.inner.lock();
             state.live.as_ref().is_some_and(|live| {
@@ -1856,6 +1867,7 @@ impl ClaudeSession {
                     && live.selection_settings == settings;
                 let can_apply = live.selection_settings.get("alwaysThinkingEnabled")
                     == settings.get("alwaysThinkingEnabled")
+                    && live.selection_settings.get("env") == settings.get("env")
                     && (effort.is_some() || live.effort.is_none());
                 let model_ok = live.model == model
                     || match model_change {
@@ -1904,7 +1916,22 @@ impl ClaudeSession {
         // With a live query the host is up, and frames of that query must not reach the new
         // turn before `prepare` decided to keep or close it, so the turn opens after it.
         let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
-        let models = catalog::current_provider_models(&self.inner.config.model_manifest, now);
+        let models = self
+            .inner
+            .config
+            .custom_models
+            .scope(catalog::current_provider_models(
+                &self.inner.config.model_manifest,
+                now,
+            ));
+        let config = self.inner.config.clone();
+        let cwd = input.runtime_policy.cwd.clone();
+        let selected = to_json(&input.model_selection);
+        let compact_window = tokio::task::spawn_blocking(move || {
+            launch::usage_compact_window(&config, cwd.as_deref(), &selected)
+        })
+        .await
+        .unwrap_or_default();
         let early = {
             let mut state = self.inner.lock();
             if state.mapper.turn_active() {
@@ -1923,6 +1950,7 @@ impl ClaudeSession {
                 state.attachment_thread = native;
             }
             state.mapper.set_catalog(models);
+            state.mapper.auto_compact_window = compact_window;
             if state.live.is_none() && !state.closed {
                 let mode = plain_policy(&input.runtime_policy).permission_mode;
                 Some(state.mapper.begin_turn(&input, &mode))
@@ -1936,11 +1964,15 @@ impl ClaudeSession {
         }
         let run_id = input.run_id.as_str();
         // T3 reads the attachments before it opens the query (`ClaudeAdapterV2` startTurn).
-        let effort = catalog::compile(
-            &to_json(&input.model_selection),
-            &self.inner.config.model_manifest,
-        )
-        .prompt_effort;
+        let effort = self
+            .inner
+            .config
+            .custom_models
+            .compile(
+                &to_json(&input.model_selection),
+                &self.inner.config.model_manifest,
+            )
+            .prompt_effort;
         let text = catalog::prompt_text(&input.message.text, effort.as_deref());
         let original_budget = self.inner.lock().attachment_budget;
         let prepared = match self
@@ -2624,7 +2656,10 @@ impl Session for ClaudeSession {
             };
             let effort = match live_selection {
                 Some(selection) => {
-                    catalog::compile(&to_json(selection), &self.inner.config.model_manifest)
+                    self.inner
+                        .config
+                        .custom_models
+                        .compile(&to_json(selection), &self.inner.config.model_manifest)
                         .prompt_effort
                 }
                 None => self.inner.lock().turn_prompt_effort.clone(),

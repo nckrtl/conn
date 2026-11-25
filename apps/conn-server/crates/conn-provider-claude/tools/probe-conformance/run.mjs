@@ -74,6 +74,23 @@ const SCENARIOS = [
   { name: "version-fails", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: { version: { code: 1, stdout: "2.1.300\n", stderr: "boom\n" } } },
   { name: "version-hangs", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: { version: { hang: true } } },
   { name: "old-cli", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: { ...signedIn(PRO), version: ok("2.1.200") } },
+  {
+    name: "custom-models",
+    instance: { driver: "claudeAgent", config: { customModels: [
+      "sonnet", " sonnet ", { slug: "claude-sonnet-4-6", name: "Team Sonnet" },
+      { slug: "gateway-model-x", name: "Orbit model", capabilities: { optionDescriptors: [
+        { id: "fastMode", type: "boolean", label: "Fast Mode", currentValue: true },
+      ] } },
+    ] } },
+    binary: "stub", behaviour: signedIn(PRO),
+  },
+  {
+    name: "title-custom-alias",
+    instance: { driver: "claudeAgent", config: { customModels: ["sonnet"] } },
+    binary: "stub",
+    title: { message: "Add dark mode", modelSelection: { instanceId: "claudeAgent", model: "sonnet" } },
+    behaviour: { title: [{ code: 0, stdout: JSON.stringify({ type: "result", structured_output: { title: "Dark mode", needsRefinement: false } }) }] },
+  },
   { name: "signed-in", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: signedIn(PRO) },
   {
     name: "signed-out",

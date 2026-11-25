@@ -26,6 +26,131 @@ pub struct Compiled {
     pub settings: Map<String, Value>,
 }
 
+/// The instance-specific models accepted by the Claude settings contract.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CustomModels(Vec<CustomModel>);
+
+#[derive(Clone, Debug, PartialEq)]
+struct CustomModel {
+    slug: String,
+    name: String,
+    capabilities: Option<Value>,
+}
+
+impl CustomModels {
+    pub(crate) fn parse(value: &Value) -> Self {
+        let mut entries = Vec::<CustomModel>::new();
+        for raw in value.as_array().into_iter().flatten() {
+            let Some(slug) = raw
+                .as_str()
+                .or_else(|| raw["slug"].as_str())
+                .map(str::trim)
+                .filter(|slug| !slug.is_empty())
+            else {
+                continue;
+            };
+            if entries.iter().any(|entry| entry.slug == slug) {
+                continue;
+            }
+            let name = raw["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(slug);
+            let capabilities = raw["capabilities"].as_object().and_then(|caps| {
+                let descriptors = match caps.get("optionDescriptors") {
+                    None => Vec::new(),
+                    Some(value) => value.as_array()?.clone(),
+                };
+                Some(with_ultracode_toggle(
+                    serde_json::json!({"optionDescriptors": descriptors}),
+                ))
+            });
+            entries.push(CustomModel {
+                slug: slug.to_owned(),
+                name: name.to_owned(),
+                capabilities,
+            });
+        }
+        Self(entries)
+    }
+
+    pub(crate) fn slugs(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|m| m.slug.as_str())
+    }
+
+    /// The snapshot overlays display names, then appends the instance's additional models.
+    pub(crate) fn display(&self, mut models: Vec<Value>) -> Vec<Value> {
+        for entry in &self.0 {
+            if let Some(builtin) = models.iter_mut().find(|m| m["slug"] == entry.slug) {
+                if entry.name != entry.slug {
+                    builtin["name"] = Value::from(entry.name.as_str());
+                    if let Some(object) = builtin.as_object_mut() {
+                        object.remove("shortName");
+                    }
+                }
+            } else {
+                models.push(serde_json::json!({"slug": entry.slug, "name": entry.name, "isCustom": true,
+                    "capabilities": entry.capabilities.clone().unwrap_or_else(|| serde_json::json!({"optionDescriptors": []}))}));
+            }
+        }
+        models
+    }
+
+    /// Selection and native subagent routing use the scoped T3 catalog. A configured slug
+    /// shadows a built-in alias even when it has no option descriptors.
+    pub(crate) fn scope(&self, mut models: Vec<Value>) -> Vec<Value> {
+        if self.0.is_empty() {
+            return models;
+        }
+        for model in &mut models {
+            if let Some(aliases) = model.get_mut("aliases").and_then(Value::as_array_mut) {
+                aliases.retain(|alias| {
+                    !alias.as_str().is_some_and(|alias| {
+                        self.slugs().any(|slug| slug.eq_ignore_ascii_case(alias))
+                    })
+                });
+            }
+        }
+        for entry in &self.0 {
+            if let Some(caps) = &entry.capabilities
+                && !models.iter().any(|m| m["slug"] == entry.slug)
+            {
+                models.push(serde_json::json!({"slug": entry.slug, "name": entry.name, "isCustom": true, "capabilities": caps}));
+            }
+        }
+        models
+    }
+
+    pub(crate) fn compile(
+        &self,
+        selection: &Value,
+        manifest: &conn_provider::LiveManifest,
+    ) -> Compiled {
+        let model = selection["model"].as_str().unwrap_or("default").trim();
+        if !self.slugs().any(|slug| slug.eq_ignore_ascii_case(model)) {
+            return compile(selection, manifest);
+        }
+        let builtins = current_provider_models(manifest, 0);
+        if builtins.iter().any(|m| m["slug"] == model) {
+            return compile(selection, manifest);
+        }
+        let custom = self
+            .0
+            .iter()
+            .find(|m| m.slug == model)
+            .and_then(|m| m.capabilities.as_ref());
+        let models = custom
+            .map(|caps| serde_json::json!({"slug": model, "capabilities": caps}))
+            .into_iter()
+            .collect::<Vec<_>>();
+        compile_resolved(
+            &serde_json::json!({"providerModels": models, "runtime": [{}]}),
+            selection,
+        )
+    }
+}
+
 /// The generated catalog as JSON.
 pub(crate) fn catalog_json() -> Value {
     serde_json::from_str(CATALOG).unwrap_or(Value::Null)

@@ -16,6 +16,12 @@ use crate::{Engine, EngineConfig, EngineError, ProjectConfig, SqliteEngine, Subs
 #[path = "engine_tests/claude_control.rs"]
 mod claude_control;
 
+#[path = "engine_tests/codex_wake.rs"]
+mod codex_wake;
+
+#[path = "engine_tests/grok_background_correction.rs"]
+mod grok_background_correction;
+
 #[path = "engine_tests/provider_sessions.rs"]
 mod provider_sessions;
 

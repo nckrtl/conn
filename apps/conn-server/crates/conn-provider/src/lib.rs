@@ -879,6 +879,14 @@ pub enum ProviderEvent {
     MessageUpdated { message: ConversationMessage },
     #[serde(rename = "turn_item.updated")]
     TurnItemUpdated { turn_item: TurnItem },
+    /// A Grok task snapshot reported a nonzero exit for its registered command.
+    /// Keep its native provenance inside the process; public replays use the normal item.
+    #[serde(rename = "turn_item.updated", skip_deserializing)]
+    GrokCommandFailed {
+        turn_item: TurnItem,
+        #[serde(skip)]
+        exit_code: i64,
+    },
     #[serde(rename = "mcp_app.capture")]
     McpAppCapture {
         turn_item: TurnItem,

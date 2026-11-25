@@ -21,23 +21,25 @@ struct WorkGroupCard: View {
         return count == 1 ? "1 step" : "\(count) steps"
     }
 
+    /// The paragraph gap (MarkdownView `blockSpacing`): the space above and below the divider.
+    private var gap: CGFloat { size * 0.85 }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: gap) {
             Button {
                 withAnimation(Kit.Motion.fast) {
                     expanded.toggle()
                 }
             } label: {
-                HStack(spacing: 4) {
+                // No fixed line box, so the chevron centres on the text's own glyphs.
+                HStack(alignment: .center, spacing: 4) {
                     Text(title)
                         .font(.system(size: size))
-                        .lineHeight(.exact(points: size * 1.625))
                         .foregroundStyle(theme.mutedForeground)
                     ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
                         .foregroundStyle(theme.mutedForeground)
                     Spacer()
                 }
-                .padding(.top, 4)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -62,6 +64,8 @@ struct WorkGroupCard: View {
                 .fill(threadDividerColor(theme, appearance))
                 .frame(height: 1)
         }
+        // The feed stacks items 22 apart; below the divider only the paragraph gap is wanted.
+        .padding(.bottom, gap - 22)
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
     }
 }

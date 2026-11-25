@@ -384,6 +384,60 @@ describe("fork-sync merge", () => {
     }
   });
 
+  it("keeps an interrupted checkout and its edits when another sync runs", () => {
+    const fixture = createMergeFixture();
+    try {
+      const manifest = parseForkSyncManifest(toyManifest());
+      const first = mergeUpstream({
+        repo: fixture.repo,
+        upstreamRef: fixture.upstreamSha,
+        baseRef: "main",
+        manifest,
+      });
+      expect(first.committed).toBe(false);
+      const firstWorktree = first.worktree;
+      if (firstWorktree === null) throw new Error("first run kept no worktree");
+      try {
+        // Conflict resolution in progress: an unstaged edit and an untracked note.
+        write(firstWorktree, "mixed.ts", "half resolved\n");
+        write(firstWorktree, "NOTES.md", "resolving mixed.ts\n");
+
+        // A second default run on the same upstream reuses the checkout.
+        const rerun = mergeUpstream({
+          repo: fixture.repo,
+          upstreamRef: fixture.upstreamSha,
+          baseRef: "main",
+          manifest,
+        });
+        expect(rerun.worktree).toBe(firstWorktree);
+
+        // An overlapping run on another branch leaves the first checkout alone.
+        const other = mergeUpstream({
+          repo: fixture.repo,
+          upstreamRef: fixture.upstreamSha,
+          baseRef: "main",
+          branch: "sync/other",
+          worktree: NodePath.join(fixture.root, "wt-other"),
+          manifest,
+        });
+        expect(other.notes).toContain(`left other fork-sync worktree in place: ${firstWorktree}`);
+
+        expect(NodeFS.readFileSync(NodePath.join(firstWorktree, "mixed.ts"), "utf8")).toBe(
+          "half resolved\n",
+        );
+        expect(NodeFS.readFileSync(NodePath.join(firstWorktree, "NOTES.md"), "utf8")).toBe(
+          "resolving mixed.ts\n",
+        );
+        expect(runGit(firstWorktree, ["rev-parse", "--verify", "MERGE_HEAD"]).status).toBe(0);
+      } finally {
+        runGit(fixture.repo, ["worktree", "remove", "--force", firstWorktree]);
+        NodeFS.rmSync(firstWorktree, { recursive: true, force: true });
+      }
+    } finally {
+      fixture.dispose();
+    }
+  });
+
   it("refuses to merge onto main", () => {
     const fixture = createMergeFixture();
     try {

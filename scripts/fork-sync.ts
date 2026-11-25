@@ -1281,22 +1281,22 @@ function removeWorktree(repo: string, worktree: string, deleteBranch?: string): 
   if (deleteBranch !== undefined) runGit(repo, ["branch", "-D", deleteBranch]);
 }
 
-function pruneStaleForkSyncWorktrees(repo: string, keep?: string): void {
+// Never removes another checkout: a fork-sync worktree left by an earlier or
+// concurrent run may hold conflict edits or a running install. Only drops
+// registrations whose directory is already gone, and reports the rest.
+function otherForkSyncWorktrees(repo: string, keep: ReadonlyArray<string>): ReadonlyArray<string> {
   runGit(repo, ["worktree", "prune"]);
   const listed = runGit(repo, ["worktree", "list", "--porcelain"]);
-  if (listed.status !== 0) return;
-  let current: string | undefined;
+  if (listed.status !== 0) return [];
+  const others: string[] = [];
   for (const line of listed.stdout.split("\n")) {
-    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
-    if (line === "" && current !== undefined) {
-      const path = current;
-      current = undefined;
-      if (keep !== undefined && samePath(path, keep)) continue;
-      if (!path.includes(WORKTREE_PREFIX)) continue;
-      if (samePath(path, repo)) continue;
-      runGit(repo, ["worktree", "remove", "--force", path]);
-    }
+    if (!line.startsWith("worktree ")) continue;
+    const path = line.slice("worktree ".length);
+    if (!path.includes(WORKTREE_PREFIX)) continue;
+    if (samePath(path, repo) || keep.some((kept) => samePath(path, kept))) continue;
+    others.push(path);
   }
+  return others;
 }
 
 function blocksInstall(path: string): boolean {
@@ -1424,12 +1424,14 @@ export function mergeUpstream(input: {
 
   const branch = input.branch ?? `sync/${upstreamSha}`;
   assertSyncBranch(branch);
-  pruneStaleForkSyncWorktrees(input.repo, input.worktree);
   const existingWorktree = worktreeForBranch(input.repo, branch);
   let worktree =
     existingWorktree ??
     input.worktree ??
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), WORKTREE_PREFIX));
+  for (const other of otherForkSyncWorktrees(input.repo, [worktree])) {
+    notes.push(`left other fork-sync worktree in place: ${other}`);
+  }
   if (samePath(worktree, input.repo)) {
     throw new ForkSyncError("merge worktree cannot be the main checkout");
   }
@@ -1455,6 +1457,8 @@ export function mergeUpstream(input: {
       createdWorktree = true;
       createdBranch = true;
     }
+    // git lists worktrees by real path; report the same path on every run.
+    worktree = NodeFS.realpathSync(worktree);
     const repo = worktree;
     if (
       !inMerge(repo) &&

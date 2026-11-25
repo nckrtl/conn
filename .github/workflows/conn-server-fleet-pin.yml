@@ -1,0 +1,139 @@
+name: Propose Conn Server fleet pin
+
+on:
+  workflow_run:
+    workflows: [Conn Server Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published conn-server-vX.Y.Z tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  published:
+    if: >-
+      github.repository == 'nckrtl/conn' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.id == github.event.repository.id &&
+        github.event.workflow_run.path == '.github/workflows/conn-server-release.yml' &&
+        startsWith(github.event.workflow_run.head_branch, 'conn-server-v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      published: ${{ steps.release.outputs.published }}
+    steps:
+      - name: Resolve the published tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          [[ "$TAG" =~ ^conn-server-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          release=$(gh api "repos/nckrtl/conn/releases/tags/$TAG")
+          published=$(jq -er 'select(.draft == false and .prerelease == false) | .published_at | fromdateiso8601' <<<"$release")
+          sha=$(gh api "repos/nckrtl/conn/commits/$TAG" --jq .sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ -z "$RUN_SHA" || "$RUN_SHA" == "$sha" ]]
+          printf 'tag=%s\nsha=%s\npublished=%s\n' "$TAG" "$sha" "$published" >> "$GITHUB_OUTPUT"
+
+  propose:
+    needs: published
+    concurrency:
+      group: conn-server-fleet-pin-writer
+      queue: max
+    permissions:
+      contents: read
+      checks: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TAG: ${{ needs.published.outputs.tag }}
+      SOURCE_SHA: ${{ needs.published.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: .github
+          path: .trusted
+      - uses: ./.trusted/.github/actions/drop-checkout-credentials
+      - name: Check exact commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(gh api "repos/nckrtl/conn/compare/$SOURCE_SHA...main" --jq .status)
+          [[ "$status" == identical || "$status" == ahead ]]
+          .trusted/.github/scripts/conn-server-release-checks.sh "$SOURCE_SHA" 1
+          cp .trusted/.github/scripts/conn-server-fleet-pin.sh "$RUNNER_TEMP/"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: hardimpactdev/orbit
+          ref: main
+          persist-credentials: false
+      - uses: ./.github/actions/php
+      - name: Install pin generator test dependencies
+        run: |
+          composer install --working-dir=apps/gateway --no-interaction --prefer-dist --no-scripts
+          composer install --working-dir=apps/docs --no-interaction --prefer-dist --no-scripts
+      - name: Generate the pin proposal
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN_BODY: ${{ runner.temp }}/orbit-pin-pr.md
+        run: |
+          bin/conn-release-pin "${TAG#conn-server-v}" --source-sha "$SOURCE_SHA" --pr-body "$PIN_BODY"
+          git diff --check
+          if ! git diff --quiet; then
+            bin/docs-impact --gate --base HEAD --pr-body-file "$PIN_BODY"
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Orbit main already contains this pin.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Mint the orbit-nckrtl installation token
+        if: steps.plan.outputs.changed == 'true'
+        id: writer
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.ORBIT_PIN_APP_ID }}
+          private-key: ${{ secrets.ORBIT_PIN_APP_PRIVATE_KEY }}
+          owner: hardimpactdev
+          repositories: orbit
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open or recover the pin PR
+        if: steps.plan.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          PIN_BODY: ${{ runner.temp }}/orbit-pin-pr.md
+        run: bash "$RUNNER_TEMP/conn-server-fleet-pin.sh" propose
+
+  deadline:
+    # This job runs alongside the writer and can alert even when the writer is queued or its App key is absent.
+    if: github.event_name == 'workflow_run'
+    needs: published
+    concurrency:
+      group: conn-server-pin-alert-${{ needs.published.outputs.tag }}
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      TAG: ${{ needs.published.outputs.tag }}
+      PUBLISHED: ${{ needs.published.outputs.published }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: .github
+      - uses: ./.github/actions/drop-checkout-credentials
+      - name: Escalate to Nick when the pin PR misses five minutes
+        run: .github/scripts/conn-server-fleet-pin.sh deadline

@@ -192,10 +192,29 @@ jobs:
           path: apps/conn-server/dist/release/
           retention-days: 14
 
+  checked-commit:
+    name: Verify the tagged commit
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: .github
+      - uses: ./.github/actions/drop-checkout-credentials
+      - name: Wait for Conn Server checks and the Linux release build
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/conn-server-release-checks.sh "$(git rev-parse HEAD)"
+
   # Its own job, so the write token never meets the checkout or the build.
   release:
     name: GitHub Release
-    needs: [tarball, macos]
+    needs: [tarball, macos, checked-commit]
     if: ${{ needs.tarball.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 3

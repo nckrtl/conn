@@ -10,33 +10,34 @@ struct SettingsRootSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
+                // Lab `.ios-settings-sheet`: 18 pt sides, a 14 pt title, 20 pt groups with 16 pt row insets.
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Connections").font(.system(size: 14, weight: .medium))
                         .foregroundStyle(theme.mutedForeground).padding(.horizontal, 16)
-                    PhoneSettingsGroup {
+                    PhoneSettingsGroup(radius: 20, inset: 16) {
                         NavigationLink {
                             SettingsEnvironmentsDetailView(store: store)
                         } label: {
-                            HStack(spacing: 12) {
-                                ConnIcon("desktopcomputer").frame(width: 22)
-                                PhoneOptionRow(title: "Environments", value: String(store.linked.count + (store.isPaired ? 1 : 0)))
+                            HStack(spacing: 10) {
+                                ThreadGlyph(name: "desktop", size: 22).frame(width: 32, alignment: .leading)
+                                Text("Environments").foregroundStyle(theme.foreground)
+                                Spacer()
+                                Text(String(store.linked.count + (store.isPaired ? 1 : 0))).foregroundStyle(theme.mutedForeground)
+                                ThreadGlyph(name: "chevron-right", size: 15).foregroundStyle(theme.mutedForeground)
                             }
+                            .font(.system(size: 16)).frame(minHeight: 48).contentShape(Rectangle())
                         }
                     }
-                }.padding(.horizontal, 14).padding(.top, 14)
+                }.padding(.horizontal, 18).padding(.top, 14)
             }.buttonStyle(.plain).background(theme.background)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .accessibilityLabel("Close")
-                    .accessibilityIdentifier("settings.closeButton")
+                    SheetGlassButton(glyph: "close", label: "Close settings") { dismiss() }
+                        .accessibilityIdentifier("settings.closeButton")
                 }
+                .sharedBackgroundVisibility(.hidden)
             }
         }.tint(theme.foreground).presentationBackground(theme.background)
     }
@@ -117,18 +118,20 @@ private struct SettingsEnvironmentsDetailView: View {
 
 struct PhoneSettingsGroup<Content: View>: View {
     @Environment(\.connTheme) private var theme
+    var radius: CGFloat = 16
+    var inset: CGFloat = 14
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(spacing: 0) {
             Group(subviews: content) { rows in
                 ForEach(rows.indices, id: \.self) { index in
-                    if index > 0 { PhoneSettingsDivider().padding(.horizontal, 14) }
+                    if index > 0 { PhoneSettingsDivider().padding(.horizontal, inset) }
                     rows[index].frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, inset)
                 }
             }
-        }.background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: 16))
+        }.background(theme.settingsGroup, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 }
 

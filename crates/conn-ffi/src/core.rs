@@ -775,11 +775,20 @@ impl ConnCore {
             }
         }
         .await;
-        for attachment in &attachments {
-            let id = crate::FfiAttachment::from(attachment).id;
-            let _ = self
-                .call_json("attachments.delete", json!({"attachmentId": id}))
+        if !attachments.is_empty() {
+            let connection = self.connection.clone();
+            self.runtime_handle.spawn(async move {
+                // The server expires pending uploads. A lost cleanup reply must never hold a draft.
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    for attachment in &attachments {
+                        let id = crate::FfiAttachment::from(attachment).id;
+                        let _ = connection
+                            .call_json("attachments.delete", json!({"attachmentId": id}))
+                            .await;
+                    }
+                })
                 .await;
+            });
         }
         result
     }
@@ -1968,6 +1977,30 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the fixture asserts on the received upload"
+    )]
+    async fn accept_test_upload(listener: &TcpListener) -> std::io::Result<()> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let (stream, _) = listener.accept().await?;
+        let mut http = BufReader::new(stream);
+        let mut header = String::new();
+        while !header.ends_with("\r\n\r\n") {
+            assert_ne!(
+                http.read_line(&mut header).await?,
+                0,
+                "incomplete upload headers"
+            );
+        }
+        let mut body = [0; b"test file".len()];
+        http.read_exact(&mut body).await?;
+        assert_eq!(&body, b"test file", "wrong staged bytes");
+        http.get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+    }
+
     struct MockRpcCall {
         tag: String,
         payload: serde_json::Value,
@@ -2010,6 +2043,10 @@ mod tests {
 
         let launch_projection = snapshot_val["projection"].clone();
 
+        let config: serde_json::Value = serde_json::from_str(include_str!(
+            "../../conn-state/tests/fixtures/server-config-snapshot.json"
+        ))?;
+        let (ack_dispatch, mut resume_dispatch) = oneshot::channel();
         let (addr, calls_rx) = server_rt.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
@@ -2030,6 +2067,29 @@ mod tests {
                             continue;
                         };
                         match req.tag.as_str() {
+                            "subscribeServerConfig" => {
+                                let chunk = FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![config.clone()],
+                                };
+                                ws.send(Message::Text(encode_server_frame(&chunk).into()))
+                                    .await
+                                    .unwrap();
+                            }
+                            "attachments.createUploadUrl" => {
+                                let slot = FromServer::Exit {
+                                    request_id: req.id,
+                                    exit: Exit::success(json!({
+                                        "attachmentId": "pending-test",
+                                        "relativeUrl": "/upload",
+                                        "expiresAt": 1000
+                                    })),
+                                };
+                                ws.send(Message::Text(encode_server_frame(&slot).into()))
+                                    .await
+                                    .unwrap();
+                                accept_test_upload(&listener).await.unwrap();
+                            }
                             "orchestration.subscribeShell" => {
                                 let chunk = FromServer::Chunk {
                                     request_id: req.id,
@@ -2108,6 +2168,11 @@ mod tests {
                                     tag: req.tag.clone(),
                                     payload: req.payload.clone(),
                                 });
+                                let disconnect =
+                                    req.payload["commandId"] == "disconnect-after-dispatch";
+                                if disconnect {
+                                    (&mut resume_dispatch).await.unwrap();
+                                }
                                 let reply = FromServer::Exit {
                                     request_id: req.id,
                                     exit: Exit::success(json!({ "ok": true })),
@@ -2115,6 +2180,10 @@ mod tests {
                                 let _ = ws
                                     .send(Message::Text(encode_server_frame(&reply).into()))
                                     .await;
+                                if disconnect {
+                                    ws.close(None).await.unwrap();
+                                    return;
+                                }
                             }
                             _ => {}
                         }
@@ -2392,6 +2461,41 @@ mod tests {
             }),
             "launch_thread must apply projection and emit thread snapshot"
         );
+
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"test file")?;
+        let mut submitted = Box::pin(core.submit_composer(
+            FfiComposerTarget::Reply {
+                thread_id: launched_id.clone(),
+                mode: FfiSendMode::Queue,
+            },
+            "disconnect-after-dispatch".into(),
+            String::new(),
+            vec![FfiComposerFile {
+                path: file.path().to_string_lossy().into_owned(),
+                name: "test.txt".into(),
+                mime_type: "text/plain".into(),
+            }],
+        ));
+        core.runtime_handle.block_on(async {
+            tokio::select! {
+                call = calls_rx.recv() => assert_eq!(call.unwrap().payload["commandId"], "disconnect-after-dispatch"),
+                result = &mut submitted => panic!("returned before dispatch: {result:?}"),
+            }
+        });
+        // Resume Swift's future only after the acknowledgement arrived and the socket closed.
+        ack_dispatch.send(()).unwrap();
+        assert!(
+            listener.wait_for(Duration::from_secs(5), |s| matches!(
+                s.statuses.last(),
+                Some(FfiConnectionStatus::Reconnecting { .. })
+            )),
+            "server must disconnect after acknowledging the message"
+        );
+        let sent = core
+            .runtime_handle
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), submitted).await })??;
+        assert_eq!(sent, launched_id);
 
         core.close_thread("thread-1".to_owned());
         core.close_thread(launched_id);

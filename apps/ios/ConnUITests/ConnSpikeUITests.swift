@@ -1534,6 +1534,57 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Primary b complete"].exists)
     }
 
+    func testGeneralDraftDoesNotCrossPrimarySignOut() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let first = env["CONN_PAIRING_URL"], let second = env["CONN_SECOND_PAIRING_URL"] else {
+            throw XCTSkip("Requires two disposable servers and a single seeded synthetic photo.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        func tap(_ element: XCUIElement) {
+            XCTAssertTrue(element.wait(for: \.isHittable, toEqual: true, timeout: 15))
+            element.tap()
+        }
+        let add = app.buttons["inbox.newThreadButton"]
+        func pair(_ url: String) {
+            let field = app.textFields["pairing.urlField"]
+            tap(field)
+            field.typeText(url)
+            tap(app.buttons["pairing.connectButton"])
+            tap(add)
+        }
+        pair(first)
+        let field = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
+        let privateText = "First environment draft"
+        tap(field)
+        field.typeText(privateText)
+        tap(app.buttons["Add attachment"].firstMatch)
+        tap(app.buttons["Photos"].firstMatch)
+        tap(app.collectionViews.cells.firstMatch)
+        tap(app.buttons["Add"].firstMatch)
+        let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 15))
+        let filename = String(chip.label.dropFirst("Remove ".count))
+        XCTAssertFalse(filename.isEmpty)
+        let back = app.navigationBars.buttons.firstMatch
+        tap(back)
+        tap(add)
+        XCTAssertEqual(field.value as? String, privateText)
+        XCTAssertEqual(chip.label, "Remove " + filename)
+        tap(back)
+        tap(app.buttons["workspace.settingsButton"])
+        tap(app.buttons.containing(.staticText, identifier: "Environments").firstMatch)
+        tap(app.buttons["Disconnect"].firstMatch)
+        pair(second)
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue([nil, "", "Ask anything"].contains(field.value as? String))
+        XCTAssertFalse(chip.exists)
+        let send = app.buttons["Send"].firstMatch
+        XCTAssertTrue(send.waitForExistence(timeout: 10))
+        XCTAssertFalse(send.isEnabled)
+    }
+
     func testOfflineLinkedChildKeepsItsPromptAcrossReconnect() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let primaryURL = env["CONN_PAIRING_URL"],

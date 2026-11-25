@@ -57,6 +57,11 @@ final class CoreStore {
         return draft
     }
 
+    private func discardComposerDrafts() {
+        for draft in drafts.values { draft.discard() }
+        drafts.removeAll()
+    }
+
     var composerLimits: FfiComposerLimits {
         _ = providersRevision
         return core?.composerLimits() ?? FfiComposerLimits(images: false, maxFileBytes: nil)
@@ -334,6 +339,7 @@ final class CoreStore {
     }
 
     func showManualPairing() {
+        discardComposerDrafts()
         session?.connectManually()
     }
 
@@ -341,6 +347,7 @@ final class CoreStore {
         lastError = nil
         do {
             let parsed = try PairingURLParser.parse(raw)
+            discardComposerDrafts()
             session?.pairManual(serverUrl: parsed.serverURL, pairingCode: parsed.pairingCode)
         } catch {
             lastError = error.localizedDescription
@@ -397,7 +404,7 @@ final class CoreStore {
         let files = draft.files.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) }
         do {
             let id = try await core.submitComposer(target: target, key: draft.key, text: text, files: files)
-            guard epoch == identityEpoch else { return nil }
+            guard epoch == identityEpoch, drafts[draftKey] === draft else { return nil }
             draft.text = ""
             draft.files = []
             if case .new = draftKey { drafts[draftKey] = nil }
@@ -611,6 +618,7 @@ final class CoreStore {
 
     func disconnect() {
         imageThumbnails.clear()
+        discardComposerDrafts()
         coldLaunchSession = nil
         if scope.isEmpty {
             clearLinkedSessions()
@@ -675,6 +683,7 @@ final class CoreStore {
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
             imageThumbnails.clear()
             drafts.removeAll()
+            discardComposerDrafts()
             coldLaunchSession = nil
             shell = nil
             offlineReader = nil

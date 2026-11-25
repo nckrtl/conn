@@ -174,6 +174,9 @@ pub struct FfiThreadSummary {
     /// The failure is a usage limit (`lastErrorClass: usage_limit`), which mobile shows as a
     /// warning ("limited") instead of an error.
     pub usage_limited: bool,
+    /// The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
+    /// the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
+    pub provider: Option<String>,
 }
 
 /// Point-in-time shell snapshot emitted to [`crate::CoreListener::on_shell`].
@@ -778,7 +781,41 @@ fn map_thread_summary(shell: &ShellState, thread: &ThreadShell, settled: bool) -
         unread: has_unseen_completion(thread),
         failure_message: failure_message(thread),
         usage_limited: is_usage_limited(thread),
+        provider: thread_provider(thread),
     }
+}
+
+/// The driver behind the thread's provider instance, matched like desktop's `provider_mark`
+/// (substring of the instance id, so a custom `codex_work` still reads as Codex). The shell
+/// carries no provider catalog, so the id is all there is to match.
+fn thread_provider(thread: &ThreadShell) -> Option<String> {
+    let selected = thread
+        .model_selection
+        .instance_id
+        .clone()
+        .flatten()
+        .and_then(|value| value.as_str().map(str::to_owned));
+    let id = selected
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| thread.provider_instance_id.clone());
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let lower = id.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    let driver = if has(&["antigravity", "gemini"]) {
+        "antigravity"
+    } else if has(&["claude", "anthropic", "haiku", "sonnet", "opus"]) {
+        "claudeAgent"
+    } else if has(&["codex", "openai", "gpt"]) {
+        "codex"
+    } else if has(&["grok"]) {
+        "grok"
+    } else {
+        id
+    };
+    Some(driver.to_owned())
 }
 
 /// `lastError` while the thread has failed, like Conn mobile's `showsError` in `ThreadListV2Row`.
@@ -2200,6 +2237,80 @@ mod tests {
             None,
             "a blank error shows nothing"
         );
+    }
+
+    #[test]
+    fn thread_summary_carries_the_current_provider_driver() {
+        let thread = |id: &str, selection: serde_json::Value, instance: &str| {
+            let mut json = thread_shell_json(
+                id,
+                "p-active",
+                id,
+                "2026-11-22T12:00:00Z",
+                "idle",
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            json["modelSelection"] = selection;
+            json["providerInstanceId"] = json!(instance);
+            json
+        };
+        let item: OrchestrationV2ShellStreamItem = serde_json::from_value(json!({
+            "kind": "snapshot",
+            "snapshot": {
+                "schemaVersion": 1,
+                "snapshotSequence": 1,
+                "projects": [{
+                    "id": "p-active",
+                    "title": "Conn",
+                    "workspaceRoot": "/tmp/conn",
+                    "defaultModelSelection": null,
+                    "scripts": [],
+                    "createdAt": "2026-11-20T00:00:00Z",
+                    "updatedAt": "2026-11-20T00:00:00Z",
+                    "archivedAt": null
+                }],
+                "threads": [
+                    thread("t-claude", json!({ "instanceId": "claudeAgent", "model": "haiku" }), "claudeAgent"),
+                    thread("t-codex", json!({ "instanceId": "codex", "model": "gpt-5" }), "codex"),
+                    thread("t-custom", json!({ "instanceId": "codex_work", "model": "gpt-5" }), "claudeAgent"),
+                    thread("t-fallback", json!({ "model": "haiku" }), "claudeAgent"),
+                    thread("t-unknown", json!({ "instanceId": "acme", "model": "x" }), "acme"),
+                    thread("t-none", json!({ "model": "x" }), ""),
+                ],
+                "archivedThreads": []
+            }
+        }))
+        .unwrap_or_else(|e| panic!("deserialize shell snapshot: {e}"));
+        let mut shell = ShellState::default();
+        shell.apply(item);
+
+        let snap = build_shell_snapshot(&shell);
+        let provider = |id: &str| {
+            snap.threads
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap_or_else(|| panic!("row {id} missing from shell snapshot"))
+                .provider
+                .as_deref()
+        };
+        assert_eq!(provider("t-claude"), Some("claudeAgent"));
+        assert_eq!(provider("t-codex"), Some("codex"));
+        assert_eq!(
+            provider("t-custom"),
+            Some("codex"),
+            "the model selection's instance beats the thread's first one, and a custom id reads as its driver"
+        );
+        assert_eq!(
+            provider("t-fallback"),
+            Some("claudeAgent"),
+            "without a selected instance the thread's provider instance applies"
+        );
+        assert_eq!(provider("t-unknown"), Some("acme"));
+        assert_eq!(provider("t-none"), None, "no instance, no provider");
     }
 
     #[test]

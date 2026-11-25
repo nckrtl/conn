@@ -74,6 +74,8 @@ pub(crate) enum ThreadMenuAction {
     CopyBranch,
     CopyThread,
     CopyThreadId,
+    /// `conn://thread/<environmentId>/<threadId>`.
+    CopyThreadLink,
     ProjectSettings,
     Delete,
     /// `Discard draft` on a new-thread draft row.
@@ -98,6 +100,7 @@ impl ThreadMenuAction {
             Self::CopyBranch => "thread-menu.copy.branch",
             Self::CopyThread => "thread-menu.copy.thread",
             Self::CopyThreadId => "thread-menu.copy.thread-id",
+            Self::CopyThreadLink => "thread-menu.copy.thread-link",
             Self::ProjectSettings => "thread-menu.project-settings",
             Self::Delete => "thread-menu.delete",
             Self::DiscardDraft => "thread-menu.discard-draft",
@@ -259,6 +262,11 @@ pub(crate) fn build_thread_action_menu_items(state: &ThreadMenuState) -> Vec<Thr
         A::CopyThreadId,
         "Thread ID",
         "superhero/hash.svg",
+    ));
+    copy.children.push(ThreadMenuItem::new(
+        A::CopyThreadLink,
+        "Thread link",
+        "superhero/link.svg",
     ));
     items.push(copy);
     items.push(ThreadMenuItem::new(
@@ -683,7 +691,7 @@ mod tests {
             .expect("copy submenu");
         assert_eq!(
             labels(&copy.children),
-            vec!["Path", "Branch", "Thread", "Thread ID"]
+            vec!["Path", "Branch", "Thread", "Thread ID", "Thread link"]
         );
         let separated: Vec<&str> = items
             .iter()
@@ -721,7 +729,10 @@ mod tests {
             .iter()
             .find(|i| i.action == ThreadMenuAction::Copy)
             .expect("copy submenu");
-        assert_eq!(labels(&copy.children), vec!["Path", "Thread", "Thread ID"]);
+        assert_eq!(
+            labels(&copy.children),
+            vec!["Path", "Thread", "Thread ID", "Thread link"]
+        );
     }
 
     #[test]

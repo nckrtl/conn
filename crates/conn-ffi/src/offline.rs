@@ -34,12 +34,84 @@ pub struct OfflineReader {
     dir: PathBuf,
     expires: RwLock<HashMap<String, u64>>,
     fetch_slots: tokio::sync::Semaphore,
+    image_slots: tokio::sync::Semaphore,
+    image_locks:
+        std::sync::Mutex<HashMap<(String, String), std::sync::Weak<tokio::sync::Mutex<()>>>>,
     connection: Option<Connection>,
 }
 
 fn read_error(e: impl std::fmt::Display) -> FfiError {
     FfiError::Connection {
         message: e.to_string(),
+    }
+}
+
+fn image_version(file: &crate::FfiAttachment) -> Result<String, FfiError> {
+    serde_json::to_string(&(&file.id, &file.name, &file.mime_type, file.size_bytes))
+        .map_err(read_error)
+}
+
+impl OfflineReader {
+    async fn acquire_image<F, Fut>(
+        &self,
+        thread: &str,
+        file: &crate::FfiAttachment,
+        fetch: F,
+    ) -> Result<Vec<u8>, FfiError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, FfiError>>,
+    {
+        if !file.is_image
+            || !(1..=10 * 1024 * 1024).contains(&file.size_bytes)
+            || !self.may_read(thread)
+        {
+            return Err(FfiError::Closed);
+        }
+        let version = image_version(file)?;
+        let lock = {
+            let mut locks = self.image_locks.lock().map_err(read_error)?;
+            locks.retain(|_, weak| weak.strong_count() > 0);
+            let weak = locks
+                .entry((thread.to_owned(), version.clone()))
+                .or_default();
+            weak.upgrade().unwrap_or_else(|| {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                *weak = Arc::downgrade(&lock);
+                lock
+            })
+        };
+        let _flight = lock.lock().await;
+        if let Some(bytes) = self
+            .db
+            .image(&self.env, thread, &version)
+            .await
+            .map_err(read_error)?
+            && bytes.len() == file.size_bytes as usize
+            && self.may_read(thread)
+        {
+            return Ok(bytes);
+        }
+        let _slot = self.image_slots.acquire().await.map_err(read_error)?;
+        if !self.may_read(thread) {
+            return Err(FfiError::Closed);
+        }
+        let bytes = fetch().await?;
+        if bytes.len() != file.size_bytes as usize || !self.may_read(thread) {
+            return Err(read_error("Incomplete or expired image"));
+        }
+        self.db
+            .save_image(&self.env, thread, &version, &bytes)
+            .await
+            .map_err(read_error)?;
+        if !self.may_read(thread) {
+            self.db
+                .forget_image(&self.env, thread, &version)
+                .await
+                .map_err(read_error)?;
+            return Err(FfiError::Closed);
+        }
+        Ok(bytes)
     }
 }
 
@@ -115,6 +187,8 @@ impl OfflineReader {
         Ok(Arc::new(Self {
             expires: RwLock::new(expires),
             fetch_slots: tokio::sync::Semaphore::new(2),
+            image_slots: tokio::sync::Semaphore::new(3),
+            image_locks: Default::default(),
             db,
             env,
             dir,
@@ -190,6 +264,53 @@ pub(crate) async fn read_saved_shell(
 
 #[uniffi::export(async_runtime = "tokio")]
 impl OfflineReader {
+    pub fn retains_thread(&self, thread: String) -> bool {
+        self.may_read(&thread)
+    }
+
+    pub async fn image_bytes(
+        self: Arc<Self>,
+        thread: String,
+        file: crate::FfiAttachment,
+        online: bool,
+    ) -> Result<Vec<u8>, FfiError> {
+        let reader = self.clone();
+        tokio::spawn(async move {
+            reader
+                .acquire_image(&thread, &file, || async {
+                    if !online {
+                        return Err(FfiError::Closed);
+                    }
+                    reader
+                        .online()?
+                        .fetch_attachment_bytes_limited(
+                            &file.id,
+                            conn_client::FetchDeadlines {
+                                rpc: Duration::from_secs(15),
+                                download: Duration::from_secs(30),
+                            },
+                            Some(file.size_bytes as usize),
+                        )
+                        .await
+                        .map_err(|_| read_error("Image unavailable"))
+                })
+                .await
+        })
+        .await
+        .map_err(|_| FfiError::Closed)?
+    }
+
+    pub async fn discard_image(
+        &self,
+        thread: String,
+        file: crate::FfiAttachment,
+    ) -> Result<(), FfiError> {
+        self.db
+            .forget_image(&self.env, &thread, &image_version(&file)?)
+            .await
+            .map_err(read_error)
+    }
+
     pub async fn saved_shell(&self) -> Option<FfiShellSnapshot> {
         read_saved_shell(&self.dir, &self.env).await
     }

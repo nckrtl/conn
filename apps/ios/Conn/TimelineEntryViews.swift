@@ -89,10 +89,10 @@ struct TimelineEntryRow: View {
         switch entry {
         case let .user(_, text, date, agent, steer, _, files):
             ThreadMessage(text: text, date: date, agent: agent, badge: steer ? "Steer" : nil, files: files,
-                          detail: detail, store: store, onOpenThread: onOpenThread)
+                          detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
         case let .queuedUser(_, _, _, text, date, agent, files):
             ThreadMessage(text: text, date: date, agent: agent, badge: "Queued", files: files,
-                          detail: detail, store: store, onOpenThread: onOpenThread)
+                          detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
         case let .assistant(_, markdown, streaming, timestamp, _, status):
             VStack(alignment: .leading, spacing: 6) {
                 MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)

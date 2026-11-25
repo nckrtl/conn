@@ -988,6 +988,7 @@ impl crate::SubagentModel {
             },
             ModelOption::trigger_label,
         );
+        let model = name_before_version(&model);
         let options: OptionMap = self
             .options
             .iter()
@@ -1014,6 +1015,17 @@ impl crate::SubagentModel {
             .map(|word| word.to_lowercase())
             .filter(|word| !word.is_empty());
         Some(SubagentModelLabel { model, effort })
+    }
+}
+
+/// Puts a leading version after the name, as subagent cards read it: `6.2 Astra` becomes
+/// `Astra 6.2`; `Opus 5.5` stays.
+fn name_before_version(label: &str) -> String {
+    match label.split_once(' ') {
+        Some((version, name)) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+            format!("{name} {version}")
+        }
+        _ => label.to_owned(),
     }
 }
 
@@ -2513,11 +2525,11 @@ mod live_tests {
                 "gpt-6-astra",
                 &[("reasoningEffort", "high")]
             )),
-            named("6 Astra", Some("high"))
+            named("Astra 6", Some("high"))
         );
         assert_eq!(
             label(&subagent("codex", "gpt-6-astra", &[])),
-            named("6 Astra", Some("medium")),
+            named("Astra 6", Some("medium")),
             "no options: the catalog's current effort"
         );
         assert_eq!(
@@ -2530,7 +2542,7 @@ mod live_tests {
                 "gpt-6.2-astra",
                 &[("reasoningEffort", "xhigh")]
             )),
-            named("6.2 Astra", Some("xhigh")),
+            named("Astra 6.2", Some("xhigh")),
             "an unlisted model: prettified short name, raw effort"
         );
         assert_eq!(

@@ -1,3 +1,4 @@
+import CoreText
 import DesignKit
 import SwiftUI
 
@@ -9,7 +10,7 @@ struct MarkdownView: View {
     var recordStyle = false
     enum MessageStyle { case assistant, user }
     var messageStyle: MessageStyle?
-    @ScaledMetric(relativeTo: .footnote) private var messageSize: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = 16
     var onTemplate: ((String) -> Void)? = nil
     @Environment(\.connTheme) private var theme
 
@@ -17,6 +18,11 @@ struct MarkdownView: View {
         if messageStyle != nil { return .system(size: messageSize) }
         return muted || recordStyle ? .system(size: 15) : .kitBody
     }
+
+    private var messageLineHeight: AttributedString.LineHeight? {
+        messageStyle == nil ? nil : .exact(points: messageSize * 1.5)
+    }
+
     private var textColor: Color {
         switch messageStyle {
         case .user: theme.messageForeground
@@ -30,7 +36,7 @@ struct MarkdownView: View {
             Text(verbatim: source)
                 .font(bodyFont)
                 .foregroundStyle(textColor)
-                .lineHeight(.exact(points: messageSize * 1.625))
+                .lineHeight(messageLineHeight)
                 .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
                 .textSelection(.enabled)
         } else {
@@ -39,12 +45,11 @@ struct MarkdownView: View {
     }
 
     private var markdown: some View {
-        VStack(alignment: .leading, spacing: messageStyle == nil ? Kit.Space.m : messageSize * 0.8) {
+        VStack(alignment: .leading, spacing: messageStyle == nil ? Kit.Space.m : messageSize * 10.4 / 16) {
             ForEach(Array(parseBlocks(source).enumerated()), id: \.offset) { index, block in
                 blockView(block, first: index == 0)
             }
         }
-        .lineHeight(messageStyle == nil ? nil : .exact(points: messageSize * 1.625))
         .lineSpacing(recordStyle ? 4 : 0)
         .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
     }
@@ -55,14 +60,15 @@ struct MarkdownView: View {
         case let .heading(level, text):
             inlineMarkdownText(text)
                 .font(headingFont(for: level))
-                .lineHeight(messageStyle == nil ? nil : .exact(points: messageSize * 1.3))
+                .lineHeight(messageLineHeight)
                 .foregroundStyle(textColor)
                 .textSelection(.enabled)
-                .padding(.top, messageStyle != nil ? (first ? 0 : messageSize * 9.6 / 13) : recordStyle ? 15 : level <= 2 ? Kit.Space.xs : 0)
+                .padding(.top, messageStyle != nil ? (first ? 0 : messageSize * 9.6 / 16) : recordStyle ? 15 : level <= 2 ? Kit.Space.xs : 0)
 
         case let .paragraph(text):
             inlineMarkdownText(text)
                 .font(bodyFont)
+                .lineHeight(messageLineHeight)
                 .foregroundStyle(textColor)
                 .textSelection(.enabled)
 
@@ -73,6 +79,7 @@ struct MarkdownView: View {
             HStack(spacing: 10) {
                 Capsule().fill(theme.border).frame(width: 3)
                 inlineMarkdownText(text).font(bodyFont).foregroundStyle(theme.mutedForeground).textSelection(.enabled)
+                    .lineHeight(messageLineHeight)
             }
 
         case let .table(rows):
@@ -87,6 +94,7 @@ struct MarkdownView: View {
                         if i == 0 { Divider() }
                     }
                 }
+                .lineHeight(messageLineHeight)
                 .font(messageStyle == nil ? .system(size: 14) : bodyFont).textSelection(.enabled).padding(10)
             }
             .background(theme.card, in: .rect(cornerRadius: 10))
@@ -121,6 +129,7 @@ struct MarkdownView: View {
                     .foregroundStyle(textColor)
                     .textSelection(.enabled)
             }
+            .lineHeight(messageLineHeight)
         }
     }
 

@@ -68,9 +68,12 @@ struct WorkGroupCard: View {
                                        status: streaming ? .running : .completed, duration: nil,
                                        detail: text.isEmpty ? nil : text, monospaced: false, size: size)
                         case let .tool(_, kind, title, detail, status, _, _, durationMs):
-                            WorkLogRow(title: title.isEmpty ? kind : title, status: status,
+                            // Conn's own MCP tools get desktop's label and icon (`conn_tools`).
+                            let conn = title.isEmpty ? nil : connToolLabel(title: title)
+                            WorkLogRow(title: conn?.displayName ?? (title.isEmpty ? kind : title), status: status,
                                        duration: workDurationLabel(durationMs),
-                                       detail: detail?.isEmpty == false ? detail : nil, monospaced: true, size: size)
+                                       detail: detail?.isEmpty == false ? detail : nil, monospaced: true, size: size,
+                                       glyph: conn.map { $0.icon.glyph })
                         default:
                             EmptyView()
                         }
@@ -627,6 +630,8 @@ private struct WorkLogRow: View {
     let detail: String?
     let monospaced: Bool
     let size: CGFloat
+    /// A finished Conn tool shows its own icon in place of the check.
+    var glyph: String? = nil
     @Environment(\.connTheme) private var theme
     @State private var open = false
 
@@ -640,7 +645,7 @@ private struct WorkLogRow: View {
                     Group {
                         switch status {
                         case .running: KitStatusIcon(.working, size: 16, label: "Running")
-                        case .completed: ThreadGlyph(name: "check-circle", size: 16).foregroundStyle(theme.mutedForeground)
+                        case .completed: ThreadGlyph(name: glyph ?? "check-circle", size: 16).foregroundStyle(theme.mutedForeground)
                         case .failed: ThreadGlyph(name: "error-circle", size: 16).foregroundStyle(theme.destructive)
                         }
                     }
@@ -716,6 +721,19 @@ enum PrettyJSON {
             return expand(inner, depth: depth + 1)
         default:
             return value
+        }
+    }
+}
+
+extension FfiConnToolIcon {
+    /// The thread glyph for each Conn tool icon (GPUI's `conn_icon_path`).
+    var glyph: String {
+        switch self {
+        case .connMark: "conn-mark"
+        case .browser: "globe"
+        case .device: "phone"
+        case .pullRequest: "pull-request"
+        case .credential: "key"
         }
     }
 }

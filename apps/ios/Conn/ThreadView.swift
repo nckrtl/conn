@@ -797,7 +797,7 @@ struct ThreadView: View {
         guard let snapshot else { return ("Thinking", "thinking") }
         let last = snapshot.entries.last { if case .queuedUser = $0 { false } else { true } }
         if case let .tool(_, kind, title, _, .running, _, _, _)? = last {
-            return (title.isEmpty ? kind : title, "thinking")
+            return (connToolLabel(title: title)?.displayName ?? (title.isEmpty ? kind : title), "thinking")
         }
         let waiting = turnSubagents.filter { !$0.settled }.count
         if waiting > 0 {

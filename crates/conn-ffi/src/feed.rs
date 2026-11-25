@@ -368,3 +368,38 @@ pub fn changed_file_rows(
     })
     .collect()
 }
+
+/// Which icon a Conn tool row draws (`conn_state::conn_tools::ConnToolIcon`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiConnToolIcon {
+    ConnMark,
+    Browser,
+    Device,
+    PullRequest,
+    Credential,
+}
+
+/// Conn's friendly label and icon for one of its own MCP tools.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiConnToolLabel {
+    pub display_name: String,
+    pub icon: FfiConnToolIcon,
+}
+
+/// The label desktop shows for a Conn MCP tool call (`mcp__conn__conn_thread_send`, any provider
+/// spelling), or `None` for other tools, which keep their own title.
+#[uniffi::export]
+pub fn conn_tool_label(title: String) -> Option<FfiConnToolLabel> {
+    use conn_state::conn_tools::{ConnToolIcon, conn_tool_presentation};
+    let found = conn_tool_presentation(&title)?;
+    Some(FfiConnToolLabel {
+        display_name: found.display_name.into_owned(),
+        icon: match found.icon {
+            ConnToolIcon::ConnMark => FfiConnToolIcon::ConnMark,
+            ConnToolIcon::Browser => FfiConnToolIcon::Browser,
+            ConnToolIcon::Device => FfiConnToolIcon::Device,
+            ConnToolIcon::PullRequest => FfiConnToolIcon::PullRequest,
+            ConnToolIcon::Credential => FfiConnToolIcon::Credential,
+        },
+    })
+}

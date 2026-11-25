@@ -236,7 +236,6 @@ struct ThreadView: View {
     /// With a question open, text answers it and an empty composer runs the answer action.
     private var overlayHasCards: Bool {
         !pendingApprovals.isEmpty || questionPanelModel != nil
-            || (snapshot?.queuedCount ?? 0) > 0
             || historyNotice != nil || (store.showsOffline && !store.showsSavedConnectionAlert)
     }
 
@@ -541,10 +540,6 @@ struct ThreadView: View {
                         .modifier(ComposerDeck(remaining: question.questions.count - Int(panel.step)))
                         .id(question.requestId)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-                    if let queued = snapshot?.queuedCount, queued > 0 {
-                        KitBadge("\(queued) queued")
-                            .accessibilityIdentifier("thread.queuedBadge")
                     }
                   }
                   // Cards: `px-[14px] pb-[7px] gap-2.5` (2pt more than the composer's 12).

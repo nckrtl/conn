@@ -130,10 +130,10 @@ pub use crate::sidebar_nav::{
     thread_traversal_key, traversal_order, tree_key, tree_step,
 };
 pub use crate::thread::{
-    ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, PendingApproval, PendingRequest,
-    RunStatus, RunTiming, SecretRequestStatus, SubagentModel, ThreadContextWindowSnapshot,
-    ThreadState, TimelineEntry, TurnCheckpointSummary, TurnItemStatus, child_approvals,
-    parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
+    AgentMessageSender, ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, PendingApproval,
+    PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
+    ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnCheckpointSummary, TurnItemStatus,
+    child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

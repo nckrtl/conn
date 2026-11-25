@@ -1350,7 +1350,21 @@ impl ConnApp {
             chat.set_draft(draft_view, cx);
             chat.set_project_id(project_id.clone(), cx);
             chat.set_workspace_root(root, cx);
-            chat.set_thread(thread, title, cx);
+            chat.set_thread(
+                thread,
+                title,
+                |sender_id| {
+                    if self.linked_environment_of_thread(sender_id)
+                        != selected.and_then(|id| self.linked_environment_of_thread(id))
+                    {
+                        return None;
+                    }
+                    self.shell
+                        .find_thread(sender_id)
+                        .map(|shell| shell.title.as_str())
+                },
+                cx,
+            );
             chat.set_linked_pull_requests(linked_pull_requests, cx);
             chat.set_preferred_editor(preferred_editor);
             chat.set_outline(outline, cx);
@@ -3630,6 +3644,7 @@ impl ConnApp {
                 id: format!("big-u-{turn}"),
                 text: format!("Turn #{turn}: {topic} and verify edge cases."),
                 created_by_agent: false,
+                sender: None,
                 created_at: None,
                 attachments: Vec::new(),
                 is_steer: false,

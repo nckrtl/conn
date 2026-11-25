@@ -65,8 +65,8 @@ const AUTO_ADVANCE_DELAY: Duration = Duration::from_millis(200);
 const COPY_CONFIRM_DURATION: Duration = Duration::from_millis(1_000);
 /// Conn's `SECRET_REQUEST_DEFAULT_PLACEHOLDER`.
 const SECRET_DEFAULT_PLACEHOLDER: &str = "Paste the secret";
-/// Conn's changed-files row indent per depth (`4 + depth * 14`).
-const TREE_INDENT_PX: f32 = 14.0;
+/// Indentation per directory level in the lab's changed-files tree.
+const TREE_INDENT_PX: f32 = 12.0;
 
 /// Local state of one pending question card.
 pub(super) struct UserInputCardState {
@@ -2221,7 +2221,25 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let run_id = cp.run_id.clone();
-        let all_expanded = self.changed_files_expanded.contains(&run_id);
+        use gpui_kit::TestSupportExt as _;
+
+        let tree = build_turn_diff_tree(&cp.files);
+        let empty = HashMap::new();
+        let overrides = self
+            .changed_files_dir_overrides
+            .get(&run_id)
+            .unwrap_or(&empty);
+        let rows = flatten_turn_diff_tree(
+            &tree,
+            overrides,
+            self.changed_files_expanded.contains(&run_id),
+        );
+        let has_dirs = tree.iter().any(|node| node.is_directory);
+        // A hidden directory always has a visible, collapsed ancestor.
+        let all_expanded = rows
+            .iter()
+            .filter(|row| row.is_directory)
+            .all(|row| row.expanded);
         let fg = hsla(self.tokens.foreground);
         let muted = hsla(self.tokens.muted_foreground);
         let hover_bg = hsla(self.tokens.shell_highlight);
@@ -2234,7 +2252,6 @@ impl ChatView {
         } else {
             format!("{} changed files", cp.file_count)
         };
-        let has_dirs = cp.files.iter().any(|f| f.path.contains(['/', '\\']));
         let first_path = cp.files.first().map(|f| f.path.clone());
         let ordinal = cp.app_run_ordinal;
 
@@ -2288,13 +2305,16 @@ impl ChatView {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |view, _, _, cx| {
-                        if !view.changed_files_expanded.remove(&toggle_run) {
+                        if all_expanded {
+                            view.changed_files_expanded.remove(&toggle_run);
+                        } else {
                             view.changed_files_expanded.insert(toggle_run.clone());
                         }
                         view.changed_files_dir_overrides.remove(&toggle_run);
                         view.remeasure_for_id(&format!("changed-files:{toggle_run}"));
                         cx.notify();
                     }))
+                    .tab_index(0)
                     .conn_tooltip(tip, &self.tokens)
                     .child(icons::icon(
                         if all_expanded {
@@ -2304,7 +2324,8 @@ impl ChatView {
                         },
                         14.0,
                         muted,
-                    )),
+                    ))
+                    .test_support(),
             );
         }
         let open_run = run_id.clone();
@@ -2330,6 +2351,7 @@ impl ChatView {
                         file_path: open_path.clone(),
                     });
                 }))
+                .tab_index(0)
                 .conn_tooltip("Open diff", &self.tokens)
                 .child(icons::icon(icons::FILE_DIFF, 14.0, muted)),
         );
@@ -2359,14 +2381,6 @@ impl ChatView {
                     .child(header_right),
             );
 
-        let tree = build_turn_diff_tree(&cp.files);
-        let empty = HashMap::new();
-        let overrides = self
-            .changed_files_dir_overrides
-            .get(&run_id)
-            .unwrap_or(&empty);
-        let rows = flatten_turn_diff_tree(&tree, overrides, all_expanded);
-        let has_dir_nodes = tree.iter().any(|n| n.is_directory);
         let mut list = div()
             .flex()
             .flex_col()
@@ -2374,9 +2388,10 @@ impl ChatView {
             .rounded(px(11.0))
             .bg(panel);
         for (row_idx, row) in rows.iter().enumerate() {
-            let left = 8.0 + row.depth as f32 * TREE_INDENT_PX;
+            let left = 9.0 + row.depth as f32 * TREE_INDENT_PX;
             let mut el = div()
-                .id((SharedString::from(format!("cf-row-{run_id}")), row_idx))
+                .id(SharedString::from(format!("cf-row-{run_id}-{}", row.path)))
+                .tab_index(0)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -2427,6 +2442,7 @@ impl ChatView {
                                 muted,
                             )),
                     )
+                    .child(icons::icon("superhero/folder.svg", 14.0, muted))
                     .child(
                         div()
                             .min_w_0()
@@ -2454,7 +2470,7 @@ impl ChatView {
                             file_path: Some(file_path.clone()),
                         });
                     }))
-                    .when(has_dir_nodes || row.depth > 0, |d| {
+                    .when(has_dirs || row.depth > 0, |d| {
                         d.child(div().size(px(16.0)).flex_none())
                     })
                     .child(icons::icon(file_icon.asset, 14.0, icon_color))
@@ -2469,7 +2485,7 @@ impl ChatView {
             if row.shows_stat() {
                 el = el.child(div().ml_auto().child(stat(row.additions, row.deletions)));
             }
-            list = list.child(el);
+            list = list.child(el.test_support());
         }
         card = card.child(list);
 

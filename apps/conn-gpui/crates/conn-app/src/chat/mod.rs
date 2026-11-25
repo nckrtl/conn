@@ -239,7 +239,8 @@ pub(crate) struct ChatView {
     turn_checkpoints: HashMap<String, TurnCheckpointSummary>,
     expanded_ids: HashSet<String>,
     wrapped_code_keys: HashSet<String>,
-    copied_code_key: Option<String>,
+    copied_code_blocks: HashMap<String, gpui_kit::Task<()>>,
+    local_sender_titles: HashMap<String, String>,
     model_label: String,
     /// Project root; tool row paths under it show relative, as in Conn.
     workspace_root: Option<String>,
@@ -498,7 +499,8 @@ impl ChatView {
             turn_checkpoints: HashMap::new(),
             expanded_ids: HashSet::new(),
             wrapped_code_keys: HashSet::new(),
-            copied_code_key: None,
+            copied_code_blocks: HashMap::new(),
+            local_sender_titles: HashMap::new(),
             model_label: "Default model".to_owned(),
             workspace_root: None,
             list_state,
@@ -773,10 +775,11 @@ impl ChatView {
     /// Fast even on huge threads: Markdown is parsed lazily when a row enters the
     /// virtualized viewport, and streaming updates splice only the changed tail of
     /// GPUI's `ListState` while preserving measured heights above.
-    pub(crate) fn set_thread(
+    pub(crate) fn set_thread<'a>(
         &mut self,
         thread: Option<&ThreadState>,
         title: Option<String>,
+        resolve_sender: impl Fn(&str) -> Option<&'a str>,
         cx: &mut Context<'_, Self>,
     ) {
         let title_changed = self.thread_title != title;
@@ -801,7 +804,8 @@ impl ChatView {
             self.turn_checkpoints.clear();
             self.expanded_ids.clear();
             self.wrapped_code_keys.clear();
-            self.copied_code_key = None;
+            self.copied_code_blocks.clear();
+            self.local_sender_titles.clear();
             self.toc_hovered_slot = None;
             self.toc_pinned_slot = None;
             self.editing_queued_run_id = None;
@@ -826,7 +830,8 @@ impl ChatView {
             self.thread_id = Some(thread.thread_id.clone());
             self.expanded_ids.clear();
             self.wrapped_code_keys.clear();
-            self.copied_code_key = None;
+            self.copied_code_blocks.clear();
+            self.local_sender_titles.clear();
             self.toc_hovered_slot = None;
             self.toc_pinned_slot = None;
             self.editing_queued_run_id = None;
@@ -837,10 +842,32 @@ impl ChatView {
             && self.has_more_history == thread.has_more_history
             && self.loading_earlier == thread.loading_earlier
         {
-            if title_changed {
+            // A sender can be renamed or loaded independently of this thread's timeline.
+            let mut sender_changed = false;
+            for (id, title) in &mut self.local_sender_titles {
+                let latest = resolve_sender(id).unwrap_or("");
+                if latest != title.as_str() {
+                    latest.clone_into(title);
+                    sender_changed = true;
+                }
+            }
+            if title_changed || sender_changed {
                 cx.notify();
             }
             return;
+        }
+        self.local_sender_titles.clear();
+        for entry in &thread.entries {
+            if let TimelineEntry::User {
+                created_by_agent: true,
+                sender: Some(conn_state::AgentMessageSender::LocalThread(id)),
+                ..
+            } = entry
+            {
+                self.local_sender_titles
+                    .entry(id.clone())
+                    .or_insert_with(|| resolve_sender(id).unwrap_or("").to_owned());
+            }
         }
         self.synced_revision = Some(thread.revision);
         let history =
@@ -1200,7 +1227,7 @@ impl ChatView {
         let entity_template = cx.entity().downgrade();
         markdown::MarkdownOptions {
             heading_style: markdown::HeadingStyle::Scale,
-            copied_code_key: self.copied_code_key.as_deref(),
+            copied_code_blocks: Some(&self.copied_code_blocks),
             on_copy_code: Some(Rc::new(move |key, _window, cx| {
                 let _ = entity_copy.update(cx, |view, cx| view.mark_code_copied(key, cx));
             })),
@@ -1243,8 +1270,18 @@ impl ChatView {
     }
 
     pub(super) fn mark_code_copied(&mut self, key: String, cx: &mut Context<'_, Self>) {
-        self.remeasure_for_id(&key);
-        self.copied_code_key = Some(key);
+        let copied_key = key.clone();
+        let reset = cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1200))
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                view.copied_code_blocks.remove(&copied_key);
+                cx.notify();
+            });
+        });
+        // Replacing a GPUI task cancels its timer, including when the same block is copied twice.
+        self.copied_code_blocks.insert(key, reset);
         cx.notify();
     }
 
@@ -1821,6 +1858,7 @@ impl ChatView {
                     id,
                     text,
                     created_by_agent,
+                    sender,
                     created_at,
                     attachments,
                     review_comments,
@@ -1829,7 +1867,7 @@ impl ChatView {
                 } = &rows[*row_idx].entry
                 {
                     if *created_by_agent {
-                        self.render_agent_message_card(id, text, cx)
+                        self.render_agent_message_card(id, text, sender.as_ref(), cx)
                     } else {
                         self.render_user_bubble(
                             UserBubble {
@@ -4110,6 +4148,40 @@ fn latest_actionable_plan_markdown(thread: &ThreadState, working: bool) -> Optio
 }
 
 #[cfg(test)]
+mod code_copy_tests {
+    use gpui_kit::TestAppContext;
+    use std::time::Duration;
+
+    #[gpui_kit::test]
+    fn copying_code_restarts_only_that_blocks_feedback(cx: &mut TestAppContext) {
+        let (_, app) = crate::ui_tests::mount_app(cx);
+        let chat = app.read_with(cx, |app, _| app.chat_for_test());
+        let copy = |cx: &mut TestAppContext, key: &str| {
+            chat.update(cx, |chat, cx| chat.mark_code_copied(key.to_owned(), cx));
+            cx.run_until_parked();
+        };
+        let copied = |cx: &mut TestAppContext, key: &str| {
+            chat.read_with(cx, |chat, _| chat.copied_code_blocks.contains_key(key))
+        };
+        let advance = |cx: &mut TestAppContext, ms| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        copy(cx, "a");
+        copy(cx, "b");
+        advance(cx, 900);
+        copy(cx, "a");
+        advance(cx, 300);
+        assert!(copied(cx, "a"));
+        assert!(!copied(cx, "b"));
+        advance(cx, 899);
+        assert!(copied(cx, "a"));
+        advance(cx, 1);
+        assert!(!copied(cx, "a"));
+    }
+}
+
+#[cfg(test)]
 mod worked_label_tests {
     use conn_state::{ItemStatus, ThreadState, TimelineEntry};
 
@@ -4251,6 +4323,7 @@ mod worked_label_tests {
             id: "user-2".to_owned(),
             text: "Go ahead".to_owned(),
             created_by_agent: false,
+            sender: None,
             created_at: None,
             attachments: Vec::new(),
             is_steer: false,

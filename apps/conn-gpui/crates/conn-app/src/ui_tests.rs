@@ -265,6 +265,7 @@ fn kitchen_sink_thread() -> ThreadState {
             id: "u-1".to_owned(),
             text: "Build a kitchen-sink parity view.".to_owned(),
             created_by_agent: false,
+            sender: None,
             created_at: Some("2026-11-22T15:00:00.000Z".to_owned()),
             attachments: Vec::new(),
             is_steer: false,
@@ -275,6 +276,7 @@ fn kitchen_sink_thread() -> ThreadState {
             id: "u-2".to_owned(),
             text: "Also verify consecutive user bubble grouping and steer markers.".to_owned(),
             created_by_agent: false,
+            sender: None,
             created_at: Some("2026-11-22T15:00:10.000Z".to_owned()),
             attachments: Vec::new(),
             is_steer: true,
@@ -408,6 +410,95 @@ fn kitchen_sink_thread() -> ThreadState {
         },
     );
     thread
+}
+
+#[gpui_kit::test]
+fn agent_cards_use_local_and_linked_sender_titles(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    for (sender, expected) in [
+        (
+            Some(conn_state::AgentMessageSender::LocalThread(
+                "thread-working-bg".into(),
+            )),
+            "Unselected background working thread",
+        ),
+        (
+            Some(conn_state::AgentMessageSender::LinkedTitle(
+                " Linked sender ".into(),
+            )),
+            "Linked sender",
+        ),
+        (
+            Some(conn_state::AgentMessageSender::LinkedTitle("Agent".into())),
+            "Message",
+        ),
+        (None, "Message"),
+    ] {
+        let mut thread = kitchen_sink_thread();
+        thread.entries.truncate(1);
+        let TimelineEntry::User {
+            created_by_agent,
+            sender: source,
+            ..
+        } = &mut thread.entries[0]
+        else {
+            panic!("user fixture")
+        };
+        *created_by_agent = true;
+        *source = sender;
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(kitchen_sink_shell(), cx);
+                app.set_thread_for_test("thread-selected".into(), thread, cx);
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find_by_label("Expand agent message").description(),
+                Some(expected)
+            );
+        })
+        .expect("agent message card");
+    }
+}
+
+#[gpui_kit::test]
+fn changed_files_bulk_action_tracks_individual_folders(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let mut thread = kitchen_sink_thread();
+    thread
+        .entries
+        .retain(|entry| matches!(entry, TimelineEntry::Assistant { .. }));
+    thread.entry_timings.insert(
+        "dup-id".to_owned(),
+        conn_state::EntryTiming {
+            run_id: Some("run-1".to_owned()),
+            ..Default::default()
+        },
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), thread, cx);
+        });
+    });
+    let click = |cx: &mut TestAppContext, name| click_row(cx, window, name, MouseButton::Left);
+    let file = "crates/conn-app/src/chat/mod.rs";
+    click(cx, "Expand all folders");
+    assert!(labelled(cx, window, file));
+    click(cx, "chat");
+    assert!(!labelled(cx, window, file));
+    click(cx, "Expand all folders");
+    assert!(labelled(cx, window, file));
+    click(cx, "Collapse all folders");
+    assert!(!labelled(cx, window, file));
+
+    click(cx, "crates/conn-app/src");
+    click(cx, "chat");
+    click(cx, "sidebar");
+    click(cx, "Collapse all folders");
+    assert!(!labelled(cx, window, file));
 }
 
 #[gpui_kit::test]

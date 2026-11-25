@@ -72,6 +72,14 @@ pub enum ItemStatus {
     Failed,
 }
 
+/// Attribution carried by a delivered agent message. A local sender's current title is in the
+/// owning environment's shell; a linked sender supplies its own title on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentMessageSender {
+    LocalThread(String),
+    LinkedTitle(String),
+}
+
 /// One row in the chat timeline. A flattened, render-ready model of the thread's turn items.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TimelineEntry {
@@ -81,6 +89,7 @@ pub enum TimelineEntry {
         /// True when the message was dispatched by an agent or system rather than the human user
         /// (Conn renders these as a collapsible `"Agent <preview>"` row).
         created_by_agent: bool,
+        sender: Option<AgentMessageSender>,
         /// ISO-8601 creation time (`startedAt`, else `updatedAt`) for the hover timestamp.
         created_at: Option<String>,
         attachments: Vec<ChatAttachment>,
@@ -1901,6 +1910,10 @@ fn map_user_message(item: UserMessageItem) -> Option<TimelineEntry> {
         id: item.id,
         text: item.text,
         created_by_agent: is_agent_origin(item.created_by, item.creation_source),
+        sender: match item.linked_sender {
+            Some(sender) => Some(AgentMessageSender::LinkedTitle(sender.title)),
+            None => item.sender_thread_id.map(AgentMessageSender::LocalThread),
+        },
         created_at: Some(item.started_at.unwrap_or(item.updated_at)),
         attachments: item.attachments,
         is_steer,

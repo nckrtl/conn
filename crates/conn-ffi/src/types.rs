@@ -1330,6 +1330,7 @@ mod tests {
             id: "u1".to_owned(),
             text: "Hello".to_owned(),
             created_by_agent: true,
+            sender: None,
             created_at: Some("2026-11-22T10:00:00Z".to_owned()),
             attachments: vec![ChatAttachment::Image(ChatImageAttachment {
                 r#type: lit::Image,
@@ -1714,6 +1715,7 @@ mod tests {
                 id: "u1".to_owned(),
                 text: "Fix build".to_owned(),
                 created_by_agent: false,
+                sender: None,
                 created_at: Some("2026-11-22T10:00:00Z".to_owned()),
                 attachments: Vec::new(),
                 is_steer: false,
@@ -1745,6 +1747,7 @@ mod tests {
                 id: "u2".to_owned(),
                 text: "Also run clippy".to_owned(),
                 created_by_agent: false,
+                sender: None,
                 created_at: Some("2026-11-22T10:00:09Z".to_owned()),
                 attachments: Vec::new(),
                 is_steer: true,

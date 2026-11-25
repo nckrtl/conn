@@ -55,6 +55,7 @@ pub(super) struct Offline {
     shadow: HashMap<ThreadKey, ThreadState>,
     subscriptions: HashMap<(String, String), Connection>,
     dirty: HashSet<(String, String)>,
+    task_links_dirty: HashSet<ThreadKey>,
     expired: HashSet<(String, String)>,
     deadlines: HashMap<ThreadKey, i64>,
     deadlines_dirty: bool,
@@ -161,6 +162,12 @@ impl Offline {
             self.dirty.insert((env.to_owned(), id.to_owned()));
         }
     }
+    pub(super) fn task_links_changed(&mut self, env: &str, id: &str) {
+        if self.db.is_some() {
+            self.task_links_dirty
+                .insert((env.to_owned(), id.to_owned()));
+        }
+    }
     pub(super) fn shell_changed(&mut self) {
         self.shell_dirty = true;
     }
@@ -179,6 +186,7 @@ enum Save {
     Shell(PathBuf, LinkedShellSnapshot),
     Deadlines(Vec<(ThreadKey, i64)>),
     Chat(ThreadKey, Vec<Message>, Option<Commit>, Option<Weak<u64>>),
+    TaskLinks(ThreadKey, conn_state::ThreadTaskLinks, Option<Weak<u64>>),
     Remove(String, String),
     Outline(String, String, String),
 }
@@ -231,7 +239,15 @@ fn read_chat(db: &MessageCache, env: &str, id: &str) -> io::Result<ThreadState> 
     let mut state = ThreadState::new(id);
     state.replace_cached_prefix(decode_messages(rows)?);
     state.has_more_history = state.entries.len() == 100;
+    restore_task_links(&mut state, db, env);
     Ok(state)
+}
+
+fn restore_task_links(state: &mut ThreadState, db: &MessageCache, env: &str) {
+    match crate::live::RT.block_on(db.task_links(env, &state.thread_id)) {
+        Ok(links) => state.task_links = links,
+        Err(err) => eprintln!("offline task links: {err}"),
+    }
 }
 
 fn decode_messages(rows: Vec<String>) -> serde_json::Result<Vec<TimelineEntry>> {
@@ -285,6 +301,16 @@ fn save(dir: &Path, db: Option<&MessageCache>, write: Save) -> io::Result<()> {
                     }
                     None => merge_chat(db, &env, &id, &messages)?,
                 }
+            }
+            Ok(())
+        }
+        Save::TaskLinks((env, id), links, snapshot) => {
+            if let Some(db) = db
+                && !snapshot.is_some_and(|snapshot| snapshot.strong_count() == 0)
+            {
+                crate::live::RT
+                    .block_on(db.save_task_links(&env, &id, &links))
+                    .map_err(io::Error::other)?;
             }
             Ok(())
         }
@@ -377,19 +403,27 @@ impl ConnApp {
             }
         }
         let snapshot = matches!(item, conn_state::ThreadStreamItem::Snapshot(_));
-        let changed = if self.cache_env(id) == Some(env) {
+        let state = if self.cache_env(id) == Some(env) {
             self.route_cached_thread(env, id);
             self.threads
                 .entry(id.to_owned())
                 .or_insert_with(|| ThreadState::new(id))
-                .apply(item)
         } else {
             self.offline
                 .shadow
                 .entry((env.to_owned(), id.to_owned()))
                 .or_insert_with(|| ThreadState::new(id))
-                .apply(item)
         };
+        // Open-thread and approval subscriptions can install an empty state before the first snapshot.
+        if state.sequence.is_none()
+            && state.task_links == Default::default()
+            && !matches!(&item, conn_state::ThreadStreamItem::Synchronized(_))
+            && !matches!(&item, conn_state::ThreadStreamItem::Snapshot(s) if s.history_cursor.as_ref().is_none_or(Option::is_none))
+            && let Some(db) = &self.offline.db
+        {
+            restore_task_links(state, db, env);
+        }
+        let changed = state.apply(item);
         if changed || snapshot {
             self.offline.changed(env, id);
         }
@@ -486,7 +520,11 @@ impl ConnApp {
         if self.shell.find_thread(id).is_none_or(expired) {
             return;
         }
-        if self.threads.contains_key(id) {
+        if self.threads.get(id).is_some_and(|state| {
+            state.sequence.is_some()
+                || !state.entries.is_empty()
+                || !state.task_links.links.is_empty()
+        }) {
             self.fill_warm_preview(id);
             return;
         }
@@ -497,7 +535,7 @@ impl ConnApp {
             return;
         };
         match import_legacy(db, env, id, &path).and_then(|()| read_chat(db, env, id)) {
-            Ok(state) if !state.entries.is_empty() => {
+            Ok(state) if !state.entries.is_empty() || !state.task_links.links.is_empty() => {
                 self.threads.insert(id.to_owned(), state);
             }
             Ok(_) => (),
@@ -1035,7 +1073,10 @@ impl ConnApp {
                 .retain(|t| !origins.is_linked_thread(&t.id));
             writes.push(Save::Shell(path, primary));
         }
-        for (env, id) in std::mem::take(&mut self.offline.dirty) {
+        let chats = std::mem::take(&mut self.offline.dirty);
+        let mut keys = std::mem::take(&mut self.offline.task_links_dirty);
+        keys.extend(chats.iter().cloned());
+        for (env, id) in keys {
             let key = (env.clone(), id.clone());
             if self.offline.expired.contains(&key)
                 || self.cache_shell(&env, &id).is_some_and(expired)
@@ -1045,13 +1086,21 @@ impl ConnApp {
                 && state.sequence.is_some()
             {
                 let key = (env, id);
-                let start = state.history_prefix_len();
-                writes.push(Save::Chat(
+                let snapshot = self.offline.snapshots.get(&key).map(Arc::downgrade);
+                writes.push(Save::TaskLinks(
                     key.clone(),
-                    capture_chat(&state.entries[start..]),
-                    self.offline.commits.remove(&key),
-                    self.offline.snapshots.get(&key).map(Arc::downgrade),
+                    state.task_links.clone(),
+                    snapshot.clone(),
                 ));
+                if chats.contains(&key) {
+                    let start = state.history_prefix_len();
+                    writes.push(Save::Chat(
+                        key.clone(),
+                        capture_chat(&state.entries[start..]),
+                        self.offline.commits.remove(&key),
+                        snapshot,
+                    ));
+                }
             }
         }
         if std::mem::take(&mut self.offline.deadlines_dirty) {
@@ -1071,6 +1120,7 @@ impl ConnApp {
             || (!self.offline.shell_dirty
                 && !self.offline.deadlines_dirty
                 && self.offline.dirty.is_empty()
+                && self.offline.task_links_dirty.is_empty()
                 && self.offline.outline_writes.is_empty())
         {
             return;
@@ -1150,6 +1200,82 @@ impl ConnApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn cached_task_opens_from_details_before_reconnect(cx: &mut gpui_kit::TestAppContext) {
+        use crate::ui_tests::{
+            click_row,
+            details_tasks::{LINK, THREAD, snapshot},
+            kitchen_sink_shell, mount_app,
+        };
+        use gpui_kit::MouseButton;
+
+        let dir = tempfile::tempdir().expect("cache directory");
+        let path = dir.path().join("messages.sqlite3");
+        let db = crate::live::RT
+            .block_on(MessageCache::open(&path))
+            .expect("cache");
+        let env = "http://test.local";
+        let (_, online) = mount_app(cx);
+        cx.update(|cx| {
+            online.update(cx, |app, cx| {
+                app.offline.dir = Some(dir.path().to_owned());
+                app.offline.db = Some(db.clone());
+                app.server_url = Some(env.into());
+                app.set_shell(kitchen_sink_shell(), cx);
+                for view in [snapshot(None, true), snapshot(Some("recent"), false)] {
+                    app.apply_cache_stream(
+                        env,
+                        THREAD,
+                        conn_contract::from_json(view).expect("snapshot"),
+                    );
+                }
+                for write in app.pending_saves() {
+                    save(dir.path(), Some(&db), write).expect("save observed links");
+                }
+            })
+        });
+
+        let (window, offline) = mount_app(cx);
+        cx.update(|cx| {
+            offline.update(cx, |app, cx| {
+                app.offline.dir = Some(dir.path().to_owned());
+                app.offline.db = Some(
+                    crate::live::RT
+                        .block_on(MessageCache::open(&path))
+                        .expect("reopen cache"),
+                );
+                app.server_url = Some(env.into());
+                app.set_shell(kitchen_sink_shell(), cx);
+                app.select_thread(THREAD, cx);
+                let state = app.selected_timeline().expect("cached conversation");
+                assert!(state.sequence.is_none());
+                assert!(
+                    !state
+                        .entries
+                        .iter()
+                        .any(|e| matches!(e, TimelineEntry::OrbitTask { .. }))
+                );
+                assert_eq!(state.task_links.next_page(), Some(("recent", "recent")));
+            })
+        });
+        click_row(cx, window, "Toggle thread details panel", MouseButton::Left);
+        click_row(cx, window, LINK, MouseButton::Left);
+        cx.read(|cx| {
+            let app = offline.read(cx);
+            assert!(app.layout().right_panel_open);
+            assert_eq!(
+                app.layout().right_panel_tab,
+                conn_state::RightPanelTab::Tasks
+            );
+            assert_eq!(
+                app.right_panel_for_test()
+                    .read(cx)
+                    .selected_task_for_test(cx),
+                Some(482)
+            );
+        });
+    }
 
     #[test]
     fn cache_retains_latest_thousand_messages_and_opens_latest_hundred_in_order() {

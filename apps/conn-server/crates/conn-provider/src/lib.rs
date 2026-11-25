@@ -41,6 +41,8 @@ pub use set::ProviderSet;
 use tokio::sync::mpsc;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// Checks for undelivered delegated work when the native Stop hook evaluates the goal.
+pub type GoalStopCheck = std::sync::Arc<dyn Fn() -> BoxFuture<'static, bool> + Send + Sync>;
 pub type ProviderResult<T> = Result<T, ProviderError>;
 
 /// A configured provider instance, such as the user's Claude install.
@@ -51,6 +53,17 @@ pub trait Provider: Send + Sync {
     fn driver(&self) -> &str;
 
     fn capabilities(&self) -> BoxFuture<'_, ProviderResult<ProviderCapabilities>>;
+
+    /// Reads confirmed native child work under one provider-owned root session.
+    fn native_child_work(
+        &self,
+        _root_session_id: String,
+        _native_task_id: String,
+        _launch: serde_json::Value,
+        _siblings: Vec<serde_json::Value>,
+    ) -> BoxFuture<'_, ProviderResult<Vec<serde_json::Value>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 
     /// Starts or resumes a native session. Events flow on the returned channel until the
     /// session closes; the engine is its only reader.
@@ -85,6 +98,11 @@ pub trait Provider: Send + Sync {
         _request: TextGenerationRequest,
     ) -> BoxFuture<'_, ProviderResult<serde_json::Value>> {
         unsupported("generate_text")
+    }
+
+    /// Discovers project-scoped commands in the requested workspace.
+    fn refresh_workspace(&self, _cwd: String) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
     }
 
     /// Probes the provider again (`ManagedServerProvider.refresh`) with the instance's
@@ -143,6 +161,8 @@ pub struct TextGenerationRequest {
     pub operation: String,
     /// The folder the CLI runs in.
     pub cwd: String,
+    /// Original project checkout when a helper reads a disposable worktree.
+    pub project_cwd: Option<String>,
     pub prompt: String,
     /// The JSON Schema of the answer as the text T3 writes for it
     /// (`JSON.stringify(toJsonSchemaObject(schema))`, key order kept).
@@ -213,6 +233,32 @@ pub enum Closed {
 /// arrive as events.
 pub trait Session: Send + Sync {
     fn provider_session_id(&self) -> &ProviderSessionId;
+
+    /// Starts a sign-in for this thread's MCP server. None means it is already signed in.
+    fn start_mcp_sign_in(
+        &self,
+        _thread: ProviderThread,
+        _server: String,
+    ) -> BoxFuture<'_, ProviderResult<Option<String>>> {
+        unsupported("start_mcp_sign_in")
+    }
+
+    /// Completes the challenge on the same native session that started it.
+    fn complete_mcp_sign_in(
+        &self,
+        _thread: ProviderThread,
+        _server: String,
+        _callback_url: String,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        unsupported("complete_mcp_sign_in")
+    }
+
+    fn set_goal_stop_check(&self, _check: GoalStopCheck) {}
+
+    /// Updates the native conversation title after a local rename.
+    fn rename_thread(&self, _title: String) -> BoxFuture<'_, ProviderResult<()>> {
+        unsupported("rename_thread")
+    }
 
     /// Creates the native thread for an app thread, or returns `existing` when it is usable.
     fn ensure_thread(
@@ -486,6 +532,8 @@ pub struct ThreadSnapshot {
     pub provider_thread: ProviderThread,
     pub provider_turns: Vec<ProviderTurn>,
     pub messages: Vec<ConversationMessage>,
+    /// Native thought messages represented as assistant transcript rows.
+    pub reasoning_message_ids: Vec<String>,
     pub runtime_requests: Vec<RuntimeRequest>,
 }
 
@@ -505,6 +553,23 @@ pub struct ContinuationRequest {
     /// server (`creationSource: "server"`), else by the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<String>,
+}
+
+/// Evidence from a registered native command's structured completion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeCommandEvidence {
+    pub exit_code: Option<i64>,
+    pub output: NativeCommandOutput,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeCommandOutput {
+    #[default]
+    Absent,
+    /// Replaces provisional tool text with the first native output.
+    Initial,
+    /// A later native snapshot extends confirmed output.
+    Extended,
 }
 
 /// `ProviderAdapterV2Event` `steer.updated` status.
@@ -831,6 +896,13 @@ pub enum ProviderEvent {
     MessageUpdated { message: ConversationMessage },
     #[serde(rename = "turn_item.updated")]
     TurnItemUpdated { turn_item: TurnItem },
+    /// Private evidence for terminal corrections. Public replays use the normal item.
+    #[serde(rename = "turn_item.updated", skip_deserializing)]
+    NativeCommandExit {
+        turn_item: TurnItem,
+        #[serde(skip)]
+        evidence: NativeCommandEvidence,
+    },
     #[serde(rename = "mcp_app.capture")]
     McpAppCapture {
         turn_item: TurnItem,

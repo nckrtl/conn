@@ -5,7 +5,7 @@
 //!   window edge (`36px` inside the sidebar column, right of macOS traffic lights).
 //! - Inset panel card:
 //!   - Fixed top `SidebarGroup` (`p-2` = `8px`): `"Search"` (`h-8`, `text-sm font-medium`)
-//!     + trailing `28x28` icon buttons (`ListFilter`, `FolderPlus`, `SquarePen`).
+//!     + trailing `28x28` icon buttons (`ListFilter`, `SquarePen`).
 //!   - Scrollable `SidebarGroup` (`px-2 pb-2`, `gap-px`): pinned cards, a subtle divider, then
 //!     active cards (`SidebarThreadRow.tsx` `variant="card"`, two lines, `rounded-md`:
 //!     line 1 favicon + status dot + title + pin + hover icon-only settle; line 2 provider ·
@@ -296,16 +296,7 @@ pub(crate) fn render_thread_sidebar(
                 cx,
             ));
         }
-        header_actions = header_actions.child(filter_slot).child(
-            sidebar_header_icon_btn(
-                "sidebar-add-project",
-                header_icon(IconName::FolderPlus, tokens),
-                tokens,
-                cx.listener(|app, _event, window, cx| app.add_project_via_picker(window, cx)),
-            )
-            .a11y_button("sidebar.add-project", "Add project")
-            .conn_tooltip("Add project", tokens),
-        );
+        header_actions = header_actions.child(filter_slot);
     }
     header_actions = header_actions.child(
         sidebar_header_icon_btn(
@@ -316,6 +307,7 @@ pub(crate) fn render_thread_sidebar(
                 app.start_general_draft(Some(window), cx).detach()
             }),
         )
+        .test_support()
         .a11y_button("sidebar.new-thread", "New thread")
         .aria_keyshortcuts("Meta+N")
         .conn_tooltip("New thread (⌘N)", tokens),

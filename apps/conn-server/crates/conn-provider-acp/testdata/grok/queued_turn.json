@@ -1,5 +1,5 @@
 {
- "note": "ProviderAdapterV2 calls and events from T3's grok adapter replaying fixtures/queued_turn/grok_transcript.ndjson through the orchestrator fixture runner at 328fe32fd0; driver dropped.",
+ "note": "ProviderAdapterV2 calls and events from T3's grok adapter replaying fixtures/queued_turn/grok_transcript.ndjson through the orchestrator fixture runner at 328fe32fd0; driver dropped. Thread usage projections captured separately from T3 16acd71825.",
  "capturedOn": "2026-11-22",
  "outcome": "passed",
  "gates": [],
@@ -4488,7 +4488,39 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 2263
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.003Z"
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Aqueued_turn%253Aproject%253Aproject%25253Afixture%25253Aqueued_turn%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Aqueued_turn%3Aproject%3Aproject%253Afixture%253Aqueued_turn%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:queued_turn:project:project%3Afixture%3Aqueued_turn%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 2641
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },
@@ -4665,6 +4697,36 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Aqueued_turn%253Aproject%253Aproject%25253Afixture%25253Aqueued_turn%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Aqueued_turn%3Aproject%3Aproject%253Afixture%253Aqueued_turn%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:queued_turn:project:project%3Afixture%3Aqueued_turn%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 22196
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.003Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Aassistant%3A0",
@@ -4776,7 +4838,9 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 22196
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },
@@ -4833,7 +4897,41 @@
     "handoffIds": [],
     "forkedFrom": null,
     "pendingBackgroundTasks": [],
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 22196
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "goal": null,
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.003Z"
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Aqueued_turn%253Aproject%253Aproject%25253Afixture%25253Aqueued_turn%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Aqueued_turn%3Aproject%3Aproject%253Afixture%253Aqueued_turn%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:queued_turn:project:project%3Afixture%3Aqueued_turn%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 2,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "pendingBackgroundTasks": [],
+    "contextUsage": {
+     "usedTokens": 22480
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },
@@ -5011,6 +5109,38 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Aqueued_turn%253Aproject%253Aproject%25253Afixture%25253Aqueued_turn%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Aqueued_turn%3Aproject%3Aproject%253Afixture%253Aqueued_turn%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:queued_turn:project:project%3Afixture%3Aqueued_turn%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 2,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "pendingBackgroundTasks": [],
+    "contextUsage": {
+     "usedTokens": 22503
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "goal": null,
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.003Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A2%3Aassistant%3A0",
@@ -5123,7 +5253,9 @@
     "handoffIds": [],
     "forkedFrom": null,
     "pendingBackgroundTasks": [],
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 22503
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },

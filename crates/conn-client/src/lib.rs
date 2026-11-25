@@ -422,6 +422,20 @@ impl Connection {
         self.post_json("api/pull-requests/diff", input).await
     }
 
+    /// Fetches one page of the host diff and preserves structured PR errors for the desktop.
+    pub async fn pull_request_diff_page(
+        &self,
+        input: conn_contract::PullRequestDiffInput,
+    ) -> Result<conn_contract::PullRequestDiffResult, ClientError> {
+        self.post_json_with_error("api/pull-requests/diff", input, |status, message| {
+            serde_json::from_str(&message).map_or_else(
+                |_| ClientError::Connection(format!("Pull request diff failed ({status})")),
+                ClientError::Rpc,
+            )
+        })
+        .await
+    }
+
     async fn post_json<
         Q: Serialize + Send + Sync + 'static,
         R: DeserializeOwned + Send + 'static,
@@ -429,6 +443,21 @@ impl Connection {
         &self,
         endpoint: &str,
         query: Q,
+    ) -> Result<R, ClientError> {
+        self.post_json_with_error(endpoint, query, |status, message| {
+            ClientError::Connection(format!("Request failed ({status}): {message}"))
+        })
+        .await
+    }
+
+    async fn post_json_with_error<
+        Q: Serialize + Send + Sync + 'static,
+        R: DeserializeOwned + Send + 'static,
+    >(
+        &self,
+        endpoint: &str,
+        query: Q,
+        http_error: impl FnOnce(reqwest::StatusCode, String) -> ClientError + Send + 'static,
     ) -> Result<R, ClientError> {
         let url = self.http_base_url.join(endpoint)?;
         let token = self
@@ -450,9 +479,7 @@ impl Connection {
                 if !res.status().is_success() {
                     let status = res.status();
                     let message = res.text().await.unwrap_or_default();
-                    return Err(ClientError::Connection(format!(
-                        "Request failed ({status}): {message}"
-                    )));
+                    return Err(http_error(status, message));
                 }
                 res.json()
                     .await

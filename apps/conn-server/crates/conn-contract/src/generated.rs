@@ -351,6 +351,7 @@ pub mod lit {
     literal!(ProviderAdapterThreadInUseError = "ProviderAdapterThreadInUseError");
     literal!(ProviderAdapterTurnStartError = "ProviderAdapterTurnStartError");
     literal!(ProviderCompactionUnsupportedError = "ProviderCompactionUnsupportedError");
+    literal!(ProviderMcpSignInError = "ProviderMcpSignInError");
     literal!(ProviderResumeUnsupportedError = "ProviderResumeUnsupportedError");
     literal!(ProviderSessionDetach = "provider-session.detach");
     literal!(ProviderSessionDetached = "provider-session.detached");
@@ -5620,6 +5621,8 @@ pub struct OrchestrationV2TurnCapabilities {
     pub emits_turn_started: bool,
     pub emits_turn_completed: bool,
     pub supports_interrupt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_resume: Option<bool>,
     pub supports_active_steering: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_steering_interrupts_tools: Option<bool>,
@@ -7003,6 +7006,12 @@ pub enum OrchestrationV2TurnItemSystemNoticeLevel {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OrchestrationV2TurnItemSystemNoticeMcpSignIn {
+    pub server: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2TurnItemSystemNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_work: Option<OrchestrationV2TurnItemNotificationDeferredWork>,
@@ -7032,6 +7041,8 @@ pub struct OrchestrationV2TurnItemSystemNotice {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<OrchestrationV2TurnItemSystemNoticeLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_sign_in: Option<OrchestrationV2TurnItemSystemNoticeMcpSignIn>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -15982,6 +15993,55 @@ pub struct ProviderInstallState {
     pub source: Option<Option<ProviderInstallStateSource>>,
     pub can_remove: bool,
     pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpSignInCompleteInput {
+    pub thread_id: String,
+    pub provider_thread_id: String,
+    pub server: String,
+    pub callback_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpSignInCompleteResult {
+    pub signed_in_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpSignInError {
+    #[serde(rename = "_tag")]
+    pub tag: lit::ProviderMcpSignInError,
+    pub server: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpSignInStartInput {
+    pub thread_id: String,
+    pub provider_thread_id: String,
+    pub server: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMcpSignInStartResult {
+    pub authorization_url: Option<String>,
+    pub signed_in_at: Option<String>,
+}
+
+tagged_union! {
+    ProviderMcpSignInStartError, "_tag",
+    variants { ProviderMcpSignInError(ProviderMcpSignInError), EnvironmentAuthorizationError(EnvironmentAuthorizationError) },
+    dispatch {
+        "ProviderMcpSignInError" => [ProviderMcpSignInError(ProviderMcpSignInError)],
+        "EnvironmentAuthorizationError" => [EnvironmentAuthorizationError(EnvironmentAuthorizationError)],
+    },
+    fallback []
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25727,6 +25787,20 @@ pub mod rpc {
             pub type Payload = ProviderSetupInput;
             pub type Item = ProviderInstallState;
             pub type Error = ProviderAuthCancelError;
+        }
+        /// `provider.mcpSignIn.complete`
+        pub mod mcp_sign_in_complete {
+            use crate::{support::*, *};
+            pub type Payload = ProviderMcpSignInCompleteInput;
+            pub type Success = ProviderMcpSignInCompleteResult;
+            pub type Error = ProviderMcpSignInStartError;
+        }
+        /// `provider.mcpSignIn.start`
+        pub mod mcp_sign_in_start {
+            use crate::{support::*, *};
+            pub type Payload = ProviderMcpSignInStartInput;
+            pub type Success = ProviderMcpSignInStartResult;
+            pub type Error = ProviderMcpSignInStartError;
         }
         /// `provider.uploadFeedback`
         pub mod upload_feedback {

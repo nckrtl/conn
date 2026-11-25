@@ -23,7 +23,11 @@ use tokio::sync::{Notify, mpsc};
 use crate::client::{AppServer, CallError, ChildRead, Claim, SessionMsg};
 use crate::context::ToolAvailability;
 use crate::launch;
+
+mod capacity;
+mod oauth;
 use crate::mapper::{self, DRIVER, GoalCommand, Mapper, Out};
+pub(crate) use oauth::Logins;
 
 pub const EVENT_CAPACITY: usize = 256;
 /// `CODEX_THREAD_IN_USE_MESSAGE`.
@@ -91,6 +95,8 @@ struct Inner {
     open_model: Option<String>,
     open_cwd: Option<String>,
     server: Arc<AppServer>,
+    catalog: Arc<Mutex<Value>>,
+    applied_name: tokio::sync::Mutex<Option<(String, String)>>,
     inbox: mpsc::Sender<SessionMsg>,
     state: Mutex<State>,
     /// Signalled after every batch the driver delivers, so waiters can re-check the mapper.
@@ -119,6 +125,9 @@ struct State {
     logged: HashSet<String>,
     /// MCP app notes sent to the native thread, by key (T3's `additionalContextByThread`):
     /// a turn's `additionalContext`, then what steers added. Bounded by the thread's notes.
+    capacity: Option<capacity::Capacity>,
+    sent_context: Value,
+    compacted_thread: Option<String>,
     sent_app_notes: Option<(String, HashMap<String, String>)>,
     /// The goal grace timers and expiry pauses running; close cancels them. Finished ones are
     /// dropped at each spawn, and a session holds one goal run at a time.
@@ -159,6 +168,7 @@ impl CodexSession {
                 Ok(())
             })
             .await?;
+        capacity::wait_for_writer(inner).await;
         let model = launch::selection_model(&input.model_selection);
         if inner.lock().thread.is_none() {
             let native = native_thread_id(&input.provider_thread)
@@ -177,6 +187,33 @@ impl CodexSession {
         if inner.lock().mapper.thread_busy(&native) {
             return Err(failed("start_turn", "the previous turn is still running"));
         }
+        if input.restart_continuation_of_run_id.is_none()
+            && input.message.attachments.is_empty()
+            && input.message.text.trim().eq_ignore_ascii_case("/compact")
+        {
+            inner.lock().mapper.begin_turn(&native, &input);
+            let result = inner
+                .unless_abandoned(run_id, async {
+                    inner
+                        .server
+                        .request("thread/compact/start", json!({"threadId":native}))
+                        .await
+                        .map_err(call_failed("compact_thread"))
+                })
+                .await;
+            if result.is_err() {
+                inner.lock().mapper.abandon_turn(&native);
+            }
+            return result.map(|_| ());
+        }
+        if let Some(title) = to_json(&input.app_thread)["title"].as_str() {
+            inner
+                .unless_abandoned(run_id, async {
+                    inner.apply_name(&native, title).await;
+                    Ok(())
+                })
+                .await?;
+        }
         if let Some(command) = goal {
             return self.run_goal_command(&native, &input, command).await;
         }
@@ -185,11 +222,12 @@ impl CodexSession {
         let codex_input = if input.restart_continuation_of_run_id.is_some() {
             json!([])
         } else {
-            launch::user_input(
+            launch::prepare_input(
                 &input.message.text,
                 &input.message.attachments,
                 inner.attachments_dir.as_deref(),
             )
+            .await
             .map_err(|detail| ProviderError::Protocol { detail })?
         };
         self.start_native_turn(&native, &input, codex_input).await
@@ -204,19 +242,15 @@ impl CodexSession {
     ) -> ProviderResult<()> {
         let inner = &self.inner;
         let run_id = input.run_id.as_str();
-        let config = inner.server.request(
-            "config/read",
-            json!({"cwd": input.runtime_policy.cwd, "includeLayers": false}),
-        );
-        let summary = inner
-            .unless_abandoned(run_id, async { Ok(config.await) })
-            .await?
-            .ok()
-            .and_then(|r| {
-                r["config"]["model_reasoning_summary"]
-                    .as_str()
-                    .map(str::to_owned)
-            });
+        let config = inner
+            .unless_abandoned(run_id, async {
+                inner
+                    .config(input.runtime_policy.cwd.as_deref())
+                    .await
+                    .map_err(call_failed("config/read"))
+            })
+            .await?;
+        let summary = config["config"]["model_reasoning_summary"].as_str();
         inner.check_open()?;
         // TS: `hasT3Mcp` when the thread has an MCP session; the engine passes it as the
         // `conn` server, with the session's `device` capability. Browser tools on: the
@@ -230,18 +264,25 @@ impl CodexSession {
                 device: s.device_tools,
                 ..ToolAvailability::default()
             });
-        let params = launch::turn_start_params(
+        let mut params = launch::turn_start_params(
             native,
             codex_input,
             &input.runtime_policy,
             &input.model_selection,
-            summary.as_deref(),
+            summary,
             t3_tools,
             &input.app_context,
         );
+        if let Some(program) =
+            launch::cyber_program(&crate::lock(&inner.catalog), &input.model_selection)
+        {
+            params["cyberAccessProgram"] = json!(program);
+        }
         {
             let mut state = inner.lock();
             state.mapper.begin_turn(native, input);
+            state.capacity = Some(capacity::Capacity::new(input, &params));
+            state.sent_context = params["additionalContext"].clone();
             state.sent_app_notes = Some((
                 native.to_owned(),
                 input
@@ -534,11 +575,12 @@ impl CodexSession {
                 // Paused until our turn starts, so Codex cannot start one first.
                 set(json!({"threadId": native, "objective": objective, "status": "paused"}))
                     .await?;
-                let codex_input = launch::user_input(
+                let codex_input = launch::prepare_input(
                     &format!("{GOAL_START_PROMPT}{objective}"),
                     &input.message.attachments,
                     inner.attachments_dir.as_deref(),
                 )
+                .await
                 .map_err(|detail| ProviderError::Protocol { detail })?;
                 return self.activate_goal(native, input, codex_input).await;
             }
@@ -637,7 +679,7 @@ impl CodexSession {
         server: Arc<AppServer>,
         events: mpsc::Sender<ProviderEvent>,
         config: &crate::CodexConfig,
-        open: (Option<String>, Option<String>),
+        open: (Option<String>, Option<String>, Arc<Mutex<Value>>),
         mcp_servers: Vec<McpServer>,
     ) -> Self {
         let (inbox, rx) = mpsc::channel(EVENT_CAPACITY);
@@ -653,9 +695,21 @@ impl CodexSession {
             open_model: open.0,
             open_cwd: open.1,
             server,
+            catalog: open.2,
+            applied_name: Default::default(),
             inbox,
             state: Mutex::new(State {
-                mapper: Mapper::new(SystemEnv),
+                mapper: {
+                    let mut mapper = Mapper::new(SystemEnv);
+                    mapper.time_zone = config
+                        .instance_env
+                        .0
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == "TZ")
+                        .map(|(_, v)| v.clone());
+                    mapper
+                },
                 events: Some(events),
                 thread: None,
                 app_thread_id: None,
@@ -667,6 +721,9 @@ impl CodexSession {
                 abandoned_run: None,
                 logged: HashSet::new(),
                 sent_app_notes: None,
+                capacity: None,
+                sent_context: Value::Null,
+                compacted_thread: None,
                 goal_tasks: Vec::new(),
             }),
             progressed: Notify::new(),
@@ -900,6 +957,108 @@ impl Inner {
         state.goal_tasks.push(tokio::spawn(task).abort_handle());
     }
 
+    async fn live_terminals(&self, native: &str) -> ProviderResult<HashSet<String>> {
+        let mut live = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut params = json!({"threadId":native});
+        loop {
+            let page = self
+                .server
+                .request("thread/backgroundTerminals/list", params.clone())
+                .await
+                .map_err(call_failed("list_terminals"))?;
+            let data = page["data"]
+                .as_array()
+                .ok_or_else(|| failed("list_terminals", "Missing terminal list"))?;
+            for terminal in data {
+                let id = terminal["processId"]
+                    .as_str()
+                    .ok_or_else(|| failed("list_terminals", "Missing terminal process ID"))?;
+                live.insert(id.to_owned());
+            }
+            let Some(cursor) = page["nextCursor"].as_str() else {
+                return Ok(live);
+            };
+            if !seen.insert(cursor.to_owned()) {
+                return Err(failed("list_terminals", "Repeated terminal list cursor"));
+            }
+            params["cursor"] = json!(cursor);
+        }
+    }
+
+    async fn apply_name(&self, native: &str, title: &str) {
+        let mut applied = self.applied_name.lock().await;
+        if applied
+            .as_ref()
+            .is_some_and(|(thread, name)| thread == native && name == title)
+        {
+            return;
+        }
+        let rename = self.server.request(
+            "thread/name/set",
+            json!({"threadId": native, "name": title}),
+        );
+        *applied = matches!(
+            tokio::time::timeout(Duration::from_secs(10), rename).await,
+            Ok(Ok(_))
+        )
+        .then(|| (native.to_owned(), title.to_owned()));
+    }
+
+    async fn apply_tier(&self, native: &str, selection: &conn_contract::ModelSelection) {
+        if to_json(selection)["instanceId"]
+            .as_str()
+            .is_some_and(|id| id != self.instance_id)
+        {
+            return;
+        }
+        if let Some(tier) = launch::service_tier(selection)
+            && self
+                .server
+                .request(
+                    "thread/settings/update",
+                    json!({"threadId":native, "serviceTier":tier}),
+                )
+                .await
+                .is_ok()
+            && let Some(cap) = &mut self.lock().capacity
+        {
+            cap.set_service_tier(&tier);
+        }
+    }
+
+    async fn config(&self, cwd: Option<&str>) -> Result<Value, CallError> {
+        let mut params = json!({"includeLayers": false});
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd);
+        }
+        match self.server.request("config/read", params).await {
+            Err(CallError::Rpc(_)) => Ok(Value::Null),
+            other => other,
+        }
+    }
+
+    async fn thread_params(
+        &self,
+        thread: Option<&str>,
+        cwd: Option<&str>,
+        model: Option<&str>,
+    ) -> ProviderResult<Value> {
+        let config = self.config(cwd).await.map_err(call_failed("config/read"))?;
+        let mut params = launch::thread_params(thread, cwd, model, &self.lock().mcp_servers);
+        if let (Some(thread), Some(servers)) = (thread, config["config"]["mcp_servers"].as_object())
+        {
+            for (name, server) in servers {
+                if !name.contains('.') && server["command"].is_string() {
+                    params["config"]
+                        [format!("mcp_servers.{name}.env.{}", launch::AGENT_THREAD_ENV)] =
+                        json!(thread);
+                }
+            }
+        }
+        Ok(params)
+    }
+
     /// The native thread loaded on the running app-server, resuming it after a restart.
     async fn loaded_thread(
         &self,
@@ -941,7 +1100,6 @@ impl Inner {
         // Another session that owns the thread (a closed one waiting for its subagent) keeps
         // its frames until Codex accepts the resume: a completion sent before a refusal reaches
         // it.
-        let claim = self.server.claim_route(native, &self.inbox);
         if !force && self.server.is_loaded(native) {
             self.server.route(native, self.inbox.clone());
             let generation = self.server.generation();
@@ -950,11 +1108,16 @@ impl Inner {
             }
             return Ok(json!({ "thread": { "id": native } }));
         }
-        let mcp = self.lock().mcp_servers.clone();
-        let mut params = launch::thread_params(app_thread, cwd, model, &mcp);
+        let mut params = self.thread_params(app_thread, cwd, model).await?;
         params["threadId"] = json!(native);
         params["excludeTurns"] = json!(true);
-        let result = match self.server.request("thread/resume", params.clone()).await {
+        let claim = self.server.claim_route(native, &self.inbox);
+        let mut closes = self.server.watch_closes();
+        let result = match self
+            .server
+            .resume_for(native, params.clone(), &self.inbox)
+            .await
+        {
             Err(CallError::Rpc(e))
                 if e.message.contains("is archived") || e.message.contains("codex unarchive") =>
             {
@@ -963,9 +1126,29 @@ impl Inner {
                     .request("thread/unarchive", json!({ "threadId": native }))
                     .await
                 {
-                    Ok(_) => self.server.request("thread/resume", params).await,
+                    Ok(_) => self.server.resume_for(native, params, &self.inbox).await,
                     Err(e) => Err(e),
                 }
+            }
+            Err(CallError::Rpc(e))
+                if e.message.to_ascii_lowercase().contains(&format!(
+                    "thread {} is closing",
+                    native.to_ascii_lowercase()
+                )) =>
+            {
+                let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        match closes.recv().await {
+                            Ok(thread) if thread == native => break,
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                continue;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .await;
+                self.server.resume_for(native, params, &self.inbox).await
             }
             other => other,
         };
@@ -996,32 +1179,129 @@ impl Inner {
 
 /// The driver: reads routed frames until the session closes; flushes streamed text.
 async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>) {
+    let mut flush_at = None;
     let mut last_plan_flush = tokio::time::Instant::now();
     loop {
         let Some(strong) = inner.upgrade() else {
             return;
         };
-        let dirty = strong.lock().mapper.has_dirty(true);
+        let (dirty, retry, capacity_due) = {
+            let state = strong.lock();
+            (
+                state.mapper.has_dirty(true),
+                state.mapper.retry_deadline(),
+                state.capacity.as_ref().and_then(|cap| cap.deadline()),
+            )
+        };
         drop(strong);
-        let msg = if dirty {
-            tokio::select! {
-                msg = rx.recv() => msg,
-                _ = tokio::time::sleep(FLUSH_INTERVAL) => {
-                    let Some(inner) = inner.upgrade() else { return };
-                    let plans = last_plan_flush.elapsed() >= PLAN_FLUSH_INTERVAL;
-                    if plans {
-                        last_plan_flush = tokio::time::Instant::now();
-                    }
-                    let outs = inner.lock().mapper.flush(plans);
-                    inner.deliver(outs).await;
-                    continue;
-                }
+        if !dirty {
+            flush_at = None;
+        }
+        let flush = dirty
+            .then(|| *flush_at.get_or_insert_with(|| tokio::time::Instant::now() + FLUSH_INTERVAL));
+        let wait = |at: Option<tokio::time::Instant>| async move {
+            match at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
             }
-        } else {
-            rx.recv().await
+        };
+        let msg = tokio::select! {
+            biased;
+            _ = wait(capacity_due) => {
+                let Some(inner) = inner.upgrade() else { return };
+                capacity::continue_run(&inner).await;
+                continue;
+            }
+            _ = wait(retry) => {
+                let Some(inner) = inner.upgrade() else { return };
+                let outs = {
+                    let mut state = inner.lock();
+                    state.mapper.limit_reset = inner.server.limit_reset();
+                    state.mapper.expire_retries(tokio::time::Instant::now())
+                };
+                inner.deliver(outs).await;
+                continue;
+            }
+            _ = wait(flush) => {
+                flush_at = None;
+                let Some(inner) = inner.upgrade() else { return };
+                let plans = last_plan_flush.elapsed() >= PLAN_FLUSH_INTERVAL;
+                if plans { last_plan_flush = tokio::time::Instant::now(); }
+                let outs = inner.lock().mapper.flush(plans);
+                inner.deliver(outs).await;
+                continue;
+            }
+            msg = rx.recv() => msg,
         };
         let Some(msg) = msg else { return };
         let Some(inner) = inner.upgrade() else { return };
+        if let SessionMsg::Frame(crate::protocol::Inbound::Notification { method, params }) = &msg
+            && let Some(thread) = params["threadId"].as_str()
+        {
+            let context = {
+                let mut state = inner.lock();
+                if method == "item/completed"
+                    && params["item"]["type"] == "contextCompaction"
+                    && state.thread.as_ref().is_some_and(|(t, _)| t == thread)
+                {
+                    state.compacted_thread = Some(thread.to_owned());
+                }
+                if method == "turn/completed" && state.compacted_thread.as_deref() == Some(thread) {
+                    state.compacted_thread = None;
+                    state.sent_context.as_object().cloned()
+                } else {
+                    None
+                }
+            };
+            if let Some(context) = context {
+                let items: Vec<_> = context.iter().map(|(key, entry)| {
+                    let external = entry["kind"] == "untrusted";
+                    let tag = if external {format!("external_{key}")} else {key.clone()};
+                    let value = entry["value"].as_str().unwrap_or_default();
+                    json!({"type":"message", "role":if external {"user"} else {"developer"},
+                        "content":[{"type":"input_text", "text":format!("<{tag}>{value}</{tag}>")}]})
+                }).collect();
+                if !items.is_empty() {
+                    let inject = inner.server.request(
+                        "thread/inject_items",
+                        json!({"threadId":thread, "items":items}),
+                    );
+                    let _ = tokio::time::timeout(Duration::from_secs(10), inject).await;
+                }
+            }
+        }
+        if let SessionMsg::Frame(crate::protocol::Inbound::Notification { method, params }) = &msg
+            && method == "turn/completed"
+            && params["turn"]["status"] == "failed"
+        {
+            let native = params["turn"]["id"].as_str().unwrap_or_default();
+            if inner.server.limit_reset().is_none()
+                && inner
+                    .lock()
+                    .mapper
+                    .may_have_usage_limit(native, &params["turn"]["error"]["codexErrorInfo"])
+            {
+                inner.server.read_usage_limits().await;
+            }
+            inner.lock().mapper.limit_reset = inner.server.limit_reset();
+        }
+        if let SessionMsg::Frame(crate::protocol::Inbound::Notification { method, params }) = &msg
+            && method == "turn/completed"
+            && capacity::schedule(&mut inner.lock(), params)
+        {
+            continue;
+        }
+        let completed = match &msg {
+            SessionMsg::Frame(crate::protocol::Inbound::Notification { method, params })
+                if method == "turn/completed" =>
+            {
+                params["threadId"]
+                    .as_str()
+                    .zip(params["turn"]["id"].as_str())
+                    .map(|(th, tu)| (th.to_owned(), tu.to_owned()))
+            }
+            _ => None,
+        };
         let outs = {
             let mut state = inner.lock();
             match msg {
@@ -1042,7 +1322,28 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                 SessionMsg::GoalPaused { thread, response } => {
                     state.mapper.goal_paused(&thread, response.as_ref())
                 }
+                SessionMsg::ListedTerminals { turn, live } => {
+                    state.mapper.reconcile_terminals(&turn, &live)
+                }
+                SessionMsg::AccountLimits => state.mapper.update_reset(inner.server.limit_reset()),
+                SessionMsg::AccountChanged => {
+                    state.mapper.forget_account();
+                    vec![]
+                }
+                SessionMsg::Overloaded => {
+                    state.capacity = None;
+                    if let Some((native, generation)) = &mut state.thread {
+                        inner.server.forget_loaded(native);
+                        *generation = None;
+                    }
+                    let active = state.mapper.open_turns();
+                    for (thread, turn) in active {
+                        tokio::spawn(interrupt(inner.server.clone(), thread, turn));
+                    }
+                    state.mapper.on_exit(false, "The Codex session could not keep up with provider events. Resume the conversation.")
+                }
                 SessionMsg::Exited(detail) => {
+                    state.capacity = None;
                     if let Some(thread) = &mut state.thread {
                         thread.1 = None;
                     }
@@ -1051,6 +1352,22 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                 }
             }
         };
+        if let Some((thread, turn)) = completed
+            && inner.lock().mapper.needs_terminal_list(&turn)
+        {
+            let task = inner.clone();
+            inner.spawn_goal_task(async move {
+                if let Ok(Ok(live)) =
+                    tokio::time::timeout(Duration::from_secs(10), task.live_terminals(&thread))
+                        .await
+                {
+                    let _ = task
+                        .inbox
+                        .send(SessionMsg::ListedTerminals { turn, live })
+                        .await;
+                }
+            });
+        }
         inner.deliver(outs).await;
         inner.settle_closed();
     }
@@ -1525,6 +1842,23 @@ impl Session for CodexSession {
         &self.id
     }
 
+    fn start_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+    ) -> BoxFuture<'_, ProviderResult<Option<String>>> {
+        Box::pin(oauth::start(&self.inner, thread, server))
+    }
+
+    fn complete_mcp_sign_in(
+        &self,
+        thread: ProviderThread,
+        server: String,
+        callback_url: String,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(oauth::complete(&self.inner, thread, server, callback_url))
+    }
+
     fn mcp_app_request(
         &self,
         input: conn_provider::mcp_apps::Request,
@@ -1592,6 +1926,29 @@ impl Session for CodexSession {
         })
     }
 
+    fn rename_thread(&self, title: String) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let native = self.inner.lock().thread.as_ref().map(|(id, _)| id.clone());
+            if let Some(native) = native {
+                self.inner.apply_name(&native, &title).await;
+            }
+            Ok(())
+        })
+    }
+
+    fn apply_model_selection(
+        &self,
+        thread: ProviderThread,
+        selection: conn_contract::ModelSelection,
+    ) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            if let Some(native) = native_thread_id(&thread) {
+                self.inner.apply_tier(&native, &selection).await;
+            }
+            Ok(())
+        })
+    }
+
     fn thread_load_model_selection(
         &self,
         selection: &conn_contract::ModelSelection,
@@ -1618,13 +1975,20 @@ impl Session for CodexSession {
                     .await;
             }
             let model = launch::selection_model(&input.model_selection);
-            let mcp = inner.lock().mcp_servers.clone();
-            let params = launch::thread_params(
-                Some(input.thread_id.as_str()),
-                input.runtime_policy.cwd.as_deref(),
-                Some(&model),
-                &mcp,
-            );
+            let mut params = inner
+                .thread_params(
+                    Some(input.thread_id.as_str()),
+                    input.runtime_policy.cwd.as_deref(),
+                    Some(&model),
+                )
+                .await?;
+            if input
+                .thread_id
+                .as_str()
+                .starts_with("thread:delegated-task:")
+            {
+                params["threadSource"] = json!("subagent");
+            }
             let result = inner
                 .server
                 .request("thread/start", params)
@@ -1683,6 +2047,10 @@ impl Session for CodexSession {
                 let mut state = inner.lock();
                 state.thread = Some((native.clone(), None));
                 state.app_thread_id = app_thread.clone();
+                state
+                    .mapper
+                    .remember_root_thread(&native, row.clone(), false);
+                state.mapper.hold_goal_updates(&native);
             }
             let model = input.model_selection.as_ref().map(launch::selection_model);
             let cwd = input.runtime_policy.as_ref().and_then(|p| p.cwd.clone());
@@ -1694,14 +2062,34 @@ impl Session for CodexSession {
                     model.as_deref(),
                     true,
                 )
-                .await?;
+                .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let outs = inner.lock().mapper.release_goal_updates(&native);
+                    inner.deliver(outs).await;
+                    return Err(error);
+                }
+            };
             let mut row = row;
             row["providerSessionId"] = json!(inner.id);
             row["providerInstanceId"] = json!(inner.instance_id);
             row["status"] = json!("idle");
             row["nativeThreadRef"] = json!({"driver": DRIVER, "nativeId": result["thread"]["id"].as_str().unwrap_or(&native), "strength": "strong"});
             row["updatedAt"] = json!(codex_time(&result["thread"]["updatedAt"]));
-            from_json(row).map_err(|e| failed("resume_thread", e.to_string()))
+            let (outs, resumed) = {
+                let mut state = inner.lock();
+                state
+                    .mapper
+                    .remember_root_thread(&native, row.clone(), false);
+                let outs = state.mapper.release_goal_updates(&native);
+                (
+                    outs,
+                    state.mapper.root_thread(&native).cloned().unwrap_or(row),
+                )
+            };
+            inner.deliver(outs).await;
+            from_json(resumed).map_err(|e| failed("resume_thread", e.to_string()))
         })
     }
 
@@ -1732,6 +2120,7 @@ impl Session for CodexSession {
     fn steer_turn(&self, input: SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
             let inner = &self.inner;
+            capacity::wait_for_continuation(inner, input.run_id.as_str()).await;
             let (native_turn, native_thread) = {
                 let state = inner.lock();
                 (
@@ -1742,11 +2131,15 @@ impl Session for CodexSession {
             let (Some(turn), Some(thread)) = (native_turn, native_thread) else {
                 return Err(failed("steer_turn", "that turn is not running"));
             };
-            let codex_input = launch::user_input(
+            if let Some(selection) = &input.model_selection {
+                inner.apply_tier(&thread, selection).await;
+            }
+            let codex_input = launch::prepare_input(
                 &input.message.text,
                 &input.message.attachments,
                 inner.attachments_dir.as_deref(),
             )
+            .await
             .map_err(|detail| ProviderError::Protocol { detail })?;
             // `turn/steer` takes no `additionalContext`: notes the thread has not been sent go
             // as quoted user input before the message (T3's `steerTurn`).
@@ -1787,6 +2180,9 @@ impl Session for CodexSession {
                     .is_some_and(|(native, _)| *native == thread)
                 {
                     state.sent_app_notes = Some((thread.clone(), HashMap::new()));
+                }
+                for entry in &unsent {
+                    state.sent_context[&entry.key] = json!({"kind":"untrusted","value":entry.text});
                 }
                 if let Some((_, sent)) = state.sent_app_notes.as_mut() {
                     sent.extend(unsent.iter().map(|e| (e.key.clone(), e.text.clone())));
@@ -1856,9 +2252,73 @@ impl Session for CodexSession {
     /// `resolveGoalStopTarget` first: an active goal is paused, and a run held between goal
     /// turns ends interrupted with no `turn/interrupt`. A Stop that names an earlier turn of a
     /// goal run stops the turn Codex continued with.
+    fn stop_background_work(&self, input: InterruptInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let Some(native) = native_thread_id(&input.provider_thread) else {
+                return Ok(());
+            };
+            let targets = self.inner.lock().mapper.idle_targets(&native);
+            for (thread, turn, id, process) in targets {
+                let process = process.ok_or_else(|| {
+                    failed(
+                        "stop_background_work",
+                        "Codex did not identify the command's background terminal",
+                    )
+                })?;
+                let stop = async {
+                    match self
+                        .inner
+                        .server
+                        .request(
+                            "thread/backgroundTerminals/terminate",
+                            json!({"threadId":thread,"processId":process}),
+                        )
+                        .await
+                    {
+                        Ok(result) if result["terminated"] == true => Ok(()),
+                        Err(CallError::Stopped) => Ok(()),
+                        Err(CallError::Rpc(e))
+                            if e.code == -32600 && e.message.contains("thread not found:") =>
+                        {
+                            Ok(())
+                        }
+                        Ok(result) if result["terminated"] == false => {
+                            if self.inner.live_terminals(&thread).await?.contains(&process) {
+                                Err(failed(
+                                    "stop_background_work",
+                                    format!("Terminal {process} is still running"),
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Ok(_) => Err(failed(
+                            "stop_background_work",
+                            "Codex did not confirm termination",
+                        )),
+                        Err(e) => Err(call_failed("stop_background_work")(e)),
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(10), stop)
+                    .await
+                    .map_err(|_| {
+                        failed("stop_background_work", "Codex did not confirm termination")
+                    })??;
+                let outs = self.inner.lock().mapper.stopped_command(&turn, &id);
+                self.inner.deliver(outs).await;
+            }
+            Ok(())
+        })
+    }
+
     fn interrupt_turn(&self, input: InterruptInput) -> BoxFuture<'_, ProviderResult<()>> {
         Box::pin(async move {
             let inner = &self.inner;
+            let stopped = capacity::stop(&mut inner.lock(), input.provider_turn_id.as_str());
+            if let Some(outs) = stopped {
+                inner.deliver(outs).await;
+                return Ok(());
+            }
             let Some(goal_thread) = native_thread_id(&input.provider_thread) else {
                 return self.interrupt_native(input, Vec::new()).await;
             };
@@ -1999,6 +2459,7 @@ impl Session for CodexSession {
                 provider_thread: from_json(row).map_err(|e| failed(OP, e.to_string()))?,
                 provider_turns: Vec::new(),
                 messages: Vec::new(),
+                reasoning_message_ids: Vec::new(),
                 runtime_requests: Vec::new(),
             })
         })
@@ -2038,16 +2499,16 @@ impl Session for CodexSession {
                     }
                 }
             };
-            let mcp = inner.lock().mcp_servers.clone();
             // `codexThreadRuntimeParams`: the fork's own model and cwd, left out when absent.
             let model = input.model_selection.as_ref().map(launch::selection_model);
             let cwd = input.runtime_policy.as_ref().and_then(|p| p.cwd.clone());
-            let mut params = launch::thread_params(
-                Some(input.target_thread_id.as_str()),
-                cwd.as_deref(),
-                model.as_deref(),
-                &mcp,
-            );
+            let mut params = inner
+                .thread_params(
+                    Some(input.target_thread_id.as_str()),
+                    cwd.as_deref(),
+                    model.as_deref(),
+                )
+                .await?;
             params["threadId"] = json!(native);
             params["excludeTurns"] = json!(true);
             if let Some(turn) = &last_turn {
@@ -2336,6 +2797,7 @@ while IFS= read -r line; do
       emit '{"method":"turn/completed","params":{"threadId":"th1","turn":{"id":"tu2","status":"interrupted","completedAt":3}}}' ;;
     *'"method":"turn/steer"'*'reject me'*) emit "{\"id\":$id,\"error\":{\"code\":-32600,\"message\":\"no active turn\"}}" ;;
     *'"method":"turn/steer"'*) emit "{\"id\":$id,\"result\":{}}" ;;
+    *'"method":"thread/name/set"'*) emit "{\"id\":$id,\"result\":{}}" ;;
     *'"method":"thread/unsubscribe"'*) emit "{\"id\":$id,\"result\":{}}" ;;
     *'"method":"thread/resume"'*'th-busy'*)
       emit "{\"id\":$id,\"error\":{\"code\":-32600,\"message\":\"thread th-busy already has an active writer\"}}" ;;

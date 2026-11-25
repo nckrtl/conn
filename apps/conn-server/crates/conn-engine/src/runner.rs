@@ -5,6 +5,8 @@
 //! running assistant node is never stored, and a streaming message or turn item is stored only
 //! at a Markdown boundary or after it was idle. What is stored stays in the log.
 
+mod native_history;
+
 use std::{
     sync::{Arc, Mutex, atomic::Ordering},
     time::Duration,
@@ -31,6 +33,9 @@ use crate::streaming::AssistantStreaming;
 /// A thread whose provider session is open.
 pub(crate) struct LiveThread {
     session: Arc<dyn Session>,
+    /// Grok fixes the approval mode at process launch.
+    grok_launch_mode: Option<conn_contract::RuntimeMode>,
+    native_resume: bool,
     /// The provider instance the session belongs to. A run on another instance reopens.
     instance: String,
     state: Mutex<LiveState>,
@@ -81,6 +86,8 @@ struct LiveState {
     /// Provider turns whose work goes on after their terminal (`background_work.updated`).
     /// Bounded by [`MAX_BACKGROUND_TURNS`].
     background_turns: std::collections::HashSet<String>,
+    /// Per-server identity and expiry for an MCP browser sign-in on this native session.
+    mcp_sign_ins: std::collections::HashMap<String, (Arc<()>, u64)>,
     /// `responseStreamingMode` of the run's project, read at each turn start, as T3's
     /// `RunExecutionService` reads it per run.
     streaming_mode: crate::ResponseStreamingMode,
@@ -106,6 +113,32 @@ impl LiveThread {
         *lock(&self.last_used) = now;
     }
 
+    /// Reserve the callback window while the session is still in the live registry.
+    pub(crate) fn hold_mcp_sign_in(&self, server: &str, begin: bool, now: u64) -> (Arc<()>, bool) {
+        let mut state = lock(&self.state);
+        state.mcp_sign_ins.retain(|_, (_, until)| *until > now);
+        if !begin && let Some((token, _)) = state.mcp_sign_ins.get(server) {
+            return (token.clone(), true);
+        }
+        let token = Arc::new(());
+        state.mcp_sign_ins.insert(
+            server.to_owned(),
+            (token.clone(), now.saturating_add(600_000)),
+        );
+        (token, false)
+    }
+
+    pub(crate) fn release_mcp_sign_in(&self, server: &str, token: &Arc<()>) {
+        let mut state = lock(&self.state);
+        if state
+            .mcp_sign_ins
+            .get(server)
+            .is_some_and(|(current, _)| Arc::ptr_eq(current, token))
+        {
+            state.mcp_sign_ins.remove(server);
+        }
+    }
+
     pub(crate) fn session(&self) -> &Arc<dyn Session> {
         &self.session
     }
@@ -121,9 +154,21 @@ impl LiveThread {
 
     /// Idle: no run and no provider event for `idle`, and no background work, which holds the
     /// session at most `max_hold` past that (T3's idle pin).
-    pub(crate) fn idle_for(&self, now: u64, idle: Duration, max_hold: Duration) -> bool {
+    pub(crate) fn idle_for(
+        &self,
+        now: u64,
+        policy: crate::IdleTimeout,
+        max_hold: Duration,
+    ) -> bool {
+        let Some(idle) = policy.duration(self.native_resume) else {
+            return false;
+        };
         let elapsed = |since: u64| Duration::from_millis(now.saturating_sub(since));
-        if lock(&self.state).active.is_some() || elapsed(*lock(&self.last_used)) < idle {
+        let state = lock(&self.state);
+        let has_sign_in = state.mcp_sign_ins.values().any(|(_, until)| *until > now);
+        let active = state.active.is_some();
+        drop(state);
+        if active || has_sign_in || elapsed(*lock(&self.last_used)) < idle {
             return false;
         }
         let mut held = lock(&self.held_since);
@@ -136,7 +181,7 @@ impl LiveThread {
     }
 
     /// Work goes on after the session's last turn (`sessionHasBackgroundWork`).
-    fn has_background_work(&self) -> bool {
+    pub(crate) fn has_background_work(&self) -> bool {
         !lock(&self.state).background_turns.is_empty() || self.session.has_pending_background_work()
     }
 
@@ -175,8 +220,10 @@ struct TurnContext {
     handoffs: Vec<Value>,
     /// The handoffs this run's turn delivers (`isPendingForRun`).
     ready: Vec<Value>,
+    side_note: Option<Value>,
     /// The run starts a new provider conversation (`freshContext`).
     fresh: bool,
+    recover_history: bool,
     /// The run goes back to the thread's own conversation past a scheduled fresh run's, so
     /// the session that holds the schedule's conversation is released first.
     leaves_side_conversation: bool,
@@ -205,7 +252,7 @@ fn status_name(status: TurnStatus) -> &'static str {
 
 impl Inner {
     pub(crate) async fn start_turn(self: Arc<Self>, thread_id: String, run_id: String) {
-        let result = self.try_start_turn(&thread_id, &run_id).await;
+        let result = Box::pin(self.try_start_turn(&thread_id, &run_id)).await;
         // One write decides, under the store lock, whether Stop got here first: a Stop that
         // commits later sees the start accepted and interrupts the provider turn instead.
         let accepted = result.is_ok();
@@ -548,6 +595,26 @@ impl Inner {
                 e.to_string()
             })?;
         let session: Arc<dyn Session> = Arc::from(opened.session);
+        if provider.driver() == "claudeAgent" && tools.is_some() {
+            let inner = Arc::downgrade(self);
+            let thread_id = thread_id.to_owned();
+            session.set_goal_stop_check(Arc::new(move || {
+                let inner = inner.clone();
+                let tid = thread_id.clone();
+                Box::pin(async move {
+                    let Some(inner) = inner.upgrade() else {
+                        return false;
+                    };
+                    inner
+                        .db(move |store| -> Result<bool, String> {
+                            let tx = store.tx()?;
+                            crate::families::delegated_task_will_wake(&tx, &tid)
+                        })
+                        .await
+                        .unwrap_or(false)
+                })
+            }));
+        }
         let provider_session = to_json(&opened.provider_session);
         // `open_session` must not yield before the session is in
         // `live`: on the one runtime thread, nothing else can then open a session for
@@ -564,6 +631,10 @@ impl Inner {
         } else {
             let live = Arc::new(LiveThread {
                 session,
+                grok_launch_mode: (provider.driver() == "grok")
+                    .then_some(runtime_policy.runtime_mode),
+                native_resume: provider_session["capabilities"]["turns"]["supportsNativeResume"]
+                    == true,
                 instance: instance.to_owned(),
                 state: Mutex::new(LiveState::default()),
                 last_used: Mutex::new(self.clock.now_millis()),
@@ -716,23 +787,69 @@ impl Inner {
                             })
                         }
                     };
+                    let all_handoffs = tx.entities(&tid, "contextHandoffs")?;
+                    let uncertain_for = |handoff: &Value, pt: &Value| {
+                        handoff["toProviderThreadId"] == pt["id"]
+                            && handoff["delivery"]["status"] == "pending"
+                            && pt["nativeThreadRef"]["nativeId"].is_string()
+                            && handoff["delivery"]["nativeThreadId"] == pt["nativeThreadRef"]["nativeId"]
+                    };
+                    let recover_history =
+                        if let Some(pt) = provider_thread.as_ref().filter(|_| !fresh) {
+                            let replace = pt["nativeMetadata"]["connRestoreKeptHistory"] == true
+                                || all_handoffs.iter().any(|h| uncertain_for(h, pt));
+                            if replace && crate::shell::has_native_background_work(&tx, &tid, pt)? {
+                                return Err(
+                                    "Stop the active background work before recovering the conversation.".into()
+                                );
+                            }
+                            replace || native_history::rejected(&tx, &tid, &run, pt)?
+                        } else {
+                            false
+                        };
                     let fork = match provider_thread {
                         Some(_) => None,
                         None if fresh => None,
                         None => crate::fork::native_fork_input(&tx, &tid)?,
                     };
-                    let all_handoffs = tx.entities(&tid, "contextHandoffs")?;
                     let mut handoffs = all_handoffs.clone();
-                    // The run's turn delivers these; a compaction or goal turn none.
-                    let ready = if crate::merge_back::defers_history(&message) {
-                        vec![]
+                    let mut ready = crate::merge_back::pending_for_run(
+                        &all_handoffs, &tx.entities(&tid,"runs")?,
+                        &tx.entities(&tid,"messages")?, &run
+                    );
+                    if recover_history && let Some(pt) = provider_thread.as_ref() {
+                        for pending in all_handoffs.iter().filter(|h| uncertain_for(h, pt)) {
+                            if !ready.iter().any(|h| h["id"] == pending["id"]) {
+                                ready.push(pending.clone());
+                            }
+                        }
+                    }
+                    let side_note = if thread["lineage"]["sideChat"] == true
+                        && !fresh
+                        && !crate::merge_back::defers_inline(&message)
+                    {
+                        let runs = tx.entities(&tid, "runs")?;
+                        let boundary = crate::fresh::boundary(
+                            &runs,
+                            &tx.entities_where(&tid, "turnItems", "type", "user_message")?,
+                        );
+                        all_handoffs
+                            .iter()
+                            .find(|h| {
+                                h["strategy"] == "manual_context"
+                                    && h["transferId"].is_string()
+                                    && h["delivery"].is_null()
+                                    && runs.iter().any(|r| {
+                                        r["id"] == h["targetRunId"]
+                                            && r["ordinal"].as_u64().is_some_and(|n| {
+                                                n >= boundary
+                                                    && n <= run["ordinal"].as_u64().unwrap_or(0)
+                                            })
+                                    })
+                            })
+                            .cloned()
                     } else {
-                        crate::merge_back::pending_for_run(
-                            &all_handoffs,
-                            &tx.entities(&tid, "runs")?,
-                            &tx.entities(&tid, "messages")?,
-                            &run,
-                        )
+                        None
                     };
                     handoffs.retain(|h| h.get("delivery").is_some_and(|d| !d.is_null()));
                     Ok(Some(TurnContext {
@@ -745,6 +862,8 @@ impl Inner {
                         fork,
                         handoffs,
                         ready,
+                        side_note,
+                        recover_history,
                         fresh,
                         leaves_side_conversation,
                     }))
@@ -788,15 +907,85 @@ impl Inner {
         let instance = context.run["providerInstanceId"]
             .as_str()
             .unwrap_or_default();
+        let replaced_native = context
+            .provider_thread
+            .as_ref()
+            .filter(|_| context.recover_history)
+            .and_then(native_thread_id);
+        if context.recover_history {
+            if self
+                .live_thread(thread_id)
+                .is_some_and(|live| live.has_background_work())
+                || context.provider_thread.as_ref().is_some_and(|pt| {
+                    pt["pendingBackgroundTasks"]
+                        .as_array()
+                        .is_some_and(|tasks| !tasks.is_empty())
+                })
+            {
+                return Err(StartError::Failed(
+                    "Stop the active background work before recovering the conversation.".into(),
+                ));
+            }
+            self.close_session(thread_id).await;
+            let (tid, rid) = (thread_id.to_owned(), run_id.to_owned());
+            let handoff = self
+                .write(move |tx| {
+                    let thread = tx.thread(&tid)?.ok_or("Missing recovery thread")?;
+                    let run = tx
+                        .entity(&tid, "runs", &rid)?
+                        .filter(crate::commands::is_active)
+                        .ok_or("Recovery run ended")?;
+                    let handoff =
+                        crate::provider_handoff::prepare_recovered_history(tx, &thread, &run)?;
+                    tx.append(
+                        Draft::new(&tid, "context-handoff.updated", handoff.clone())
+                            .run(Some(&rid)),
+                    )?;
+                    Ok(handoff)
+                })
+                .await?;
+            // Preserve external fork/merge history and rank it the way T3's withRecoveryHandoff
+            // does: old transfers first, replacement history next, current-run transfers last.
+            context.ready.sort_by_key(|h| h["targetRunId"] == run_id);
+            let before_current = context
+                .ready
+                .iter()
+                .position(|h| h["targetRunId"] == run_id)
+                .unwrap_or(context.ready.len());
+            context.ready.insert(before_current, handoff);
+            if let Some(previous) = &context.provider_thread {
+                for h in &mut context.ready {
+                    if h["toProviderThreadId"] == previous["id"] {
+                        h["toProviderThreadId"] =
+                            json!(crate::merge_back::provisional_provider_thread(run_id));
+                    }
+                }
+            }
+            context.provider_thread = None;
+        }
         // A live session of another instance closes; the run opens one on its own instance.
         // A fresh run releases the session too: each holds one native conversation
         // (`sessionsReleasedByFreshContext`). One still running background work stays open
         // beside the new session, as closing it would end that work.
         if let Some(live) = self.live_thread(thread_id) {
+            let changed_policy = live
+                .grok_launch_mode
+                .as_ref()
+                .is_some_and(|mode| mode != &runtime_policy.runtime_mode);
+            if changed_policy && !context.fresh && live.has_background_work() {
+                return Err(
+                    "Stop the active Grok background work before switching its permission mode."
+                        .to_owned()
+                        .into(),
+                );
+            }
             if context.fresh && live.has_background_work() {
                 lock(&self.live).remove(thread_id);
                 lock(&self.detached).push((thread_id.to_owned(), live));
-            } else if live.instance != instance || context.fresh || context.leaves_side_conversation
+            } else if changed_policy
+                || live.instance != instance
+                || context.fresh
+                || context.leaves_side_conversation
             {
                 self.close_session(thread_id).await;
             }
@@ -883,9 +1072,65 @@ impl Inner {
                             f.input.clone()
                         });
                         match fork {
-                            Some(input) => live.session.fork_thread(input).await.map_err(|e| {
-                                StartError::Failed(format!("The native fork failed: {e}"))
-                            })?,
+                            Some(input) => match live.session.fork_thread(input).await {
+                                Ok(thread) => thread,
+                                Err(_) => {
+                                    let pending =
+                                        context.fork.take().ok_or(StartError::Abandoned)?.transfer;
+                                    let (tid, rid) = (thread_id.to_owned(), run_id.to_owned());
+                                    let handoff = self
+                                        .write(move |tx| {
+                                            let thread = tx
+                                                .thread(&tid)?
+                                                .ok_or("Fork target disappeared")?;
+                                            let run = tx
+                                                .entity(&tid, "runs", &rid)?
+                                                .filter(crate::commands::is_active)
+                                                .ok_or("Fork run ended")?;
+                                            let now = tx.now().to_owned();
+                                            let place = crate::provider_handoff::Place {
+                                                thread_id: &tid,
+                                                run_id: &rid,
+                                                root_node_id: run["rootNodeId"]
+                                                    .as_str()
+                                                    .unwrap_or_default(),
+                                                ordinal: run["ordinal"].as_u64().unwrap_or(1),
+                                                model_selection: &run["modelSelection"],
+                                                created_by: &run["createdBy"],
+                                                requires_full: true,
+                                                queued: false,
+                                                now: &now,
+                                            };
+                                            let switch = crate::provider_handoff::prepare_fork(
+                                                tx, &thread, &place, &pending,
+                                            )?;
+                                            switch.append_records(tx, &tid, &rid, None)?;
+                                            tx.append(
+                                                Draft::new(
+                                                    &tid,
+                                                    "turn-item.updated",
+                                                    switch.turn_item,
+                                                )
+                                                .run(Some(&rid)),
+                                            )?;
+                                            Ok(switch.handoff)
+                                        })
+                                        .await?;
+                                    context.ready.push(handoff);
+                                    live.session
+                                        .ensure_thread(EnsureThreadInput {
+                                            thread_id: thread_id.into(),
+                                            title: context.thread["title"]
+                                                .as_str()
+                                                .map(str::to_owned),
+                                            model_selection: model_selection.clone(),
+                                            runtime_policy: runtime_policy.clone(),
+                                            existing_provider_thread: None,
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())?
+                                }
+                            },
                             None => return Err(StartError::Abandoned),
                         }
                     }
@@ -911,6 +1156,12 @@ impl Inner {
             .to_owned();
         let attempt_id = format!("{run_id}:attempt:1");
         let mut provider_thread_json = to_json(&provider_thread);
+        if replaced_native.is_some() && native_thread_id(&provider_thread_json) == replaced_native {
+            self.close_session(thread_id).await;
+            return Err(StartError::Failed(
+                "The provider returned the previous native thread during context recovery.".into(),
+            ));
+        }
         if provider_thread_json.is_object() {
             provider_thread_json["providerInstanceId"] = json!(instance);
             // `runningProviderThread` in T3's `ProviderTurnStartService`.
@@ -955,6 +1206,17 @@ impl Inner {
             attempt_id.clone(),
             root.clone(),
         );
+        // Save the destination along with the replacement provider thread. A crash between
+        // this transaction and delivery must leave the fork/merge source eligible for replay.
+        let mut rebound = Vec::new();
+        if context.recover_history {
+            for handoff in &mut context.ready {
+                if crate::merge_back::is_provisional(&handoff["toProviderThreadId"]) {
+                    handoff["toProviderThreadId"] = provider_thread_json["id"].clone();
+                    rebound.push(handoff.clone());
+                }
+            }
+        }
         let fork_transfer = context.fork.as_ref().map(|f| f.transfer.clone());
         // The running row, for the handoff delivery after the write below takes its copy.
         let running_json = provider_thread_json.clone();
@@ -973,11 +1235,18 @@ impl Inner {
                 }
                 let now = tx.now().to_owned();
                 let pt_id = provider_thread_json["id"].clone();
+                let activating = tx
+                    .thread(&tid)?
+                    .is_some_and(|thread| thread["activeProviderThreadId"] != pt_id);
                 let draft = |event_type, payload| {
                     Draft::new(&tid, event_type, payload)
                         .run(Some(&rid))
                         .node(Some(&root_id))
                 };
+                for mut handoff in rebound {
+                    handoff["updatedAt"] = json!(now);
+                    tx.append(draft("context-handoff.updated", handoff))?;
+                }
                 let mut stored_row = None;
                 // `providerTurnOrdinal`: after every turn already on the provider thread, as a
                 // goal run Codex continued holds more turns than runs.
@@ -1017,30 +1286,33 @@ impl Inner {
                         .run(Some(&rid)),
                     )?;
                 }
-                if let Some(mut thread) = tx.thread(&tid)?
-                    && thread["activeProviderThreadId"] != pt_id
-                {
+                // The provider row also activates the pointer in the projection.
+                // Preserve the normal turn-start metadata event for a newly selected thread.
+                if activating && let Some(mut thread) = tx.thread(&tid)? {
                     thread["activeProviderThreadId"] = pt_id.clone();
                     tx.append(
                         Draft::new(&tid, "thread.metadata-updated", thread).payload_instance(),
                     )?;
                 }
-                tx.append(draft(
-                    "run-attempt.created",
-                    json!({
-                        "id": aid,
-                        "runId": rid,
-                        "attemptOrdinal": 1,
-                        "rootNodeId": root_id,
-                        "providerInstanceId": run["providerInstanceId"],
-                        "providerThreadId": pt_id,
-                        "providerTurnId": null,
-                        "reason": "initial",
-                        "status": "running",
-                        "startedAt": now,
-                        "completedAt": null,
-                    }),
-                ))?;
+                let mut attempt = json!({
+                    "id": aid,
+                    "runId": rid,
+                    "attemptOrdinal": 1,
+                    "rootNodeId": root_id,
+                    "providerInstanceId": run["providerInstanceId"],
+                    "providerThreadId": pt_id,
+                    "providerTurnId": null,
+                    "reason": "initial",
+                    "status": "running",
+                    "startedAt": now,
+                    "completedAt": null,
+                });
+                if provider_thread_json["driver"] == "codex"
+                    && let Some(native) = native_thread_id(&provider_thread_json)
+                {
+                    attempt["nativeThreadId"] = json!(native);
+                }
+                tx.append(draft("run-attempt.created", attempt))?;
                 run["status"] = json!("running");
                 run["startedAt"] = json!(now);
                 run["activeAttemptId"] = json!(aid);
@@ -1111,10 +1383,21 @@ impl Inner {
                 &user_text,
             )
             .await?;
-        let text = match &delivery {
-            Some(plan) => crate::handoff::with_inline_context(&plan.inline_text(), &user_text),
-            None => user_text,
-        };
+        let intro = delivery
+            .as_ref()
+            .map(|plan| plan.inline_text())
+            .into_iter()
+            .chain(
+                context
+                    .side_note
+                    .as_ref()
+                    .and_then(|note| note["summaryText"].as_str())
+                    .map(str::to_owned),
+            )
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let text = crate::handoff::with_inline_context(&intro, &user_text);
         let input = TurnInput {
             // The provider decides from the turn ordinal, as before.
             native_thread_has_turns: None,
@@ -1170,6 +1453,16 @@ impl Inner {
             .start_turn(input)
             .await
             .map_err(|e| StartError::Failed(e.to_string()));
+        if started.is_ok()
+            && let Some(native) = native_thread_id(&running_json)
+            && let Some(mut note) = context.side_note
+        {
+            note["toProviderThreadId"] = running_json["id"].clone();
+            note["delivery"] = json!({"nativeThreadId":native,"status":"inline","itemIds":[]});
+            if let Err(error) = self.persist_handoffs(thread_id, run_id, vec![note]).await {
+                eprintln!("conn-engine: could not record side chat context delivery: {error}");
+            }
+        }
         // Inline history went with the prompt, or the handoffs wait as they were.
         if let Some(plan) = delivery {
             let native = native_thread_id(&running_json);
@@ -1204,7 +1497,9 @@ impl Inner {
         run_id: &str,
         user_text: &str,
     ) -> Result<Option<crate::handoff::Delivery>, StartError> {
-        if ready.is_empty() {
+        let defer_inline = crate::merge_back::defers_inline(message);
+        let injects = live.session.injects_history();
+        if ready.is_empty() || (defer_inline && !injects) {
             return Ok(None);
         }
         // A handoff made before its run had a provider thread now names the run's.
@@ -1247,7 +1542,6 @@ impl Inner {
             0,
             None,
         );
-        let injects = live.session.injects_history();
         let plan = crate::handoff::plan_delivery(
             &ready,
             native.as_deref(),
@@ -1289,6 +1583,16 @@ impl Inner {
                 })?;
                 return Ok(None);
             }
+        }
+        if defer_inline {
+            // Native injection declined. Undo our pending marker so this ready
+            // handoff moves to the next ordinary prompt, even after a restart.
+            self.persist_handoffs(thread_id, run_id, plan.handoffs)
+                .await
+                .map_err(|e| {
+                    StartError::Failed(format!("Could not defer the context handoff: {e}"))
+                })?;
+            return Ok(None);
         }
         Ok(Some(plan))
     }
@@ -1481,6 +1785,10 @@ impl Inner {
             }
             let active = live.active();
             let run_id = active.as_ref().map(|a| a.run_id.clone());
+            let native_command_exit = match &event {
+                ProviderEvent::NativeCommandExit { evidence, .. } => Some(*evidence),
+                _ => None,
+            };
             let mut translated = translate(&thread_id, active.as_ref(), event);
             // T3's `ProviderEventIngestor` names the session's instance on every event it
             // stores.
@@ -1502,18 +1810,21 @@ impl Inner {
                     *lock(&live.loaded_key) = None;
                 }
             }
-            // A settled command's stored item has its output; its live tail goes.
-            if let Translated::Event(draft) = &translated
-                && draft.event_type == "turn-item.updated"
-                && draft.payload["type"] == "command_execution"
-                && !matches!(
-                    draft.payload["status"].as_str(),
-                    Some("running" | "pending" | "waiting")
-                )
-                && let Some(item_id) = draft.payload["id"].as_str()
-            {
-                self.command_output.finish(&draft.thread_id, item_id);
-            }
+            let ended_command = match &translated {
+                Translated::Event(draft)
+                    if draft.event_type == "turn-item.updated"
+                        && draft.payload["type"] == "command_execution"
+                        && !matches!(
+                            draft.payload["status"].as_str(),
+                            Some("running" | "pending" | "waiting")
+                        ) =>
+                {
+                    draft.payload["id"]
+                        .as_str()
+                        .map(|id| (draft.thread_id.clone(), id.to_owned()))
+                }
+                _ => None,
+            };
             // A finished push can start new checks on the thread's watched pull requests
             // (`PullRequestSyncReactor.reopenWatchedChecks`).
             let pushed = match &translated {
@@ -1554,6 +1865,35 @@ impl Inner {
                         self.deliver_deferred_steers(&thread_id, run_id).await;
                     }
                 }
+                Translated::Event(draft)
+                    if draft.event_type == "turn-item.updated"
+                        && draft.thread_id == thread_id
+                        && matches!(
+                            draft.payload["type"].as_str(),
+                            Some("command_execution" | "dynamic_tool" | "subagent")
+                        )
+                        && run_id
+                            .as_deref()
+                            .zip(draft.payload["runId"].as_str())
+                            .is_some_and(|(active, owner)| active != owner) =>
+                {
+                    // A wake may poll an earlier run's command again after its last output.
+                    // A native exit can also correct that command's earlier sparse completion.
+                    let provider_thread = lock(&live.state)
+                        .provider_thread
+                        .as_ref()
+                        .map(|thread| thread.id.as_str().to_owned());
+                    if !self
+                        .commit_inherited_background_item(
+                            draft,
+                            provider_thread,
+                            native_command_exit,
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                }
                 Translated::Event(draft) => {
                     let held_item = (draft.event_type == "turn-item.updated"
                         && draft.payload["streaming"] == true)
@@ -1581,8 +1921,9 @@ impl Inner {
                         }
                     }
                 }
-                Translated::CreateThread(thread) => {
-                    self.create_provider_thread(thread, &live.instance).await;
+                Translated::CreateThread(thread, create_only) => {
+                    self.create_provider_thread(thread, &live.instance, create_only)
+                        .await;
                 }
                 Translated::Subagent(draft, subagent) => {
                     self.commit(vec![draft]).await;
@@ -1615,6 +1956,9 @@ impl Inner {
                         }
                     }
                 }
+            }
+            if let Some((owner, item)) = ended_command {
+                self.command_output.finish(&owner, &item);
             }
             if let Some(command) = pushed
                 && let Err(e) = self.dispatch_value(command).await
@@ -1669,14 +2013,28 @@ impl Inner {
 
     /// `app_thread.created`: the child thread a subagent's rows are written to. Created once;
     /// a provider that announces it again changes nothing.
-    async fn create_provider_thread(&self, thread: Value, instance: &str) {
+    async fn create_provider_thread(&self, thread: Value, instance: &str, create_only: bool) {
         let instance = instance.to_owned();
         let Some(id) = thread["id"].as_str().map(str::to_owned) else {
             return;
         };
         let result = self
             .write(move |tx| {
-                if tx.thread(&id)?.is_none() {
+                if let Some(mut existing) = tx.thread(&id)? {
+                    if !create_only
+                        && thread["titleRenamed"] == true
+                        && thread["title"].is_string()
+                        && existing["title"] != thread["title"]
+                    {
+                        existing["title"] = thread["title"].clone();
+                        existing["titleRenamed"] = true.into();
+                        existing["updatedAt"] = tx.now().into();
+                        tx.append(
+                            Draft::new(&id, "thread.metadata-updated", existing)
+                                .provider_instance(Some(&instance)),
+                        )?;
+                    }
+                } else {
                     tx.append(
                         Draft::new(&id, "thread.created", thread)
                             .provider_instance(Some(&instance)),
@@ -1827,6 +2185,94 @@ impl Inner {
             .await
         {
             eprintln!("conn-engine: could not reserve a turn item position: {e}");
+        }
+    }
+
+    /// Route inherited work to its original run. A structured native command exit can
+    /// correct a sparse terminal update from that same turn and tool call.
+    async fn commit_inherited_background_item(
+        self: &Arc<Self>,
+        mut draft: Draft,
+        provider_thread: Option<String>,
+        native_command_exit: Option<conn_provider::NativeCommandEvidence>,
+    ) -> bool {
+        let Some(provider_thread) = provider_thread else {
+            return false;
+        };
+        let result = self
+            .write(move |tx| {
+                let item = &draft.payload;
+                let (Some(id), Some(run_id), Some(native_thread)) = (
+                    item["id"].as_str(),
+                    item["runId"].as_str(),
+                    item["providerThreadId"].as_str(),
+                ) else {
+                    return Ok(false);
+                };
+                let Some(previous) = tx.entity(&draft.thread_id, "turnItems", id)? else {
+                    return Ok(false);
+                };
+                if previous["runId"] != item["runId"]
+                    || previous["type"] != item["type"]
+                    || previous["providerThreadId"] != item["providerThreadId"]
+                {
+                    return Ok(false);
+                }
+                let open = matches!(
+                    previous["status"].as_str(),
+                    Some("pending" | "running" | "waiting")
+                );
+                if let Some(evidence) = native_command_exit {
+                    if !is_grok_command_correction(&previous, item, evidence, open) {
+                        return Ok(false);
+                    }
+                } else if !open {
+                    return Ok(false);
+                }
+                if native_thread != provider_thread {
+                    // A native subagent item lives on the parent timeline but identifies the
+                    // child's provider thread. Its spawning run identifies the parent session.
+                    if item["type"] != "subagent"
+                        || !item["childThreadId"].is_string()
+                        || previous["childThreadId"] != item["childThreadId"]
+                        || !tx
+                            .entity(&draft.thread_id, "runs", run_id)?
+                            .is_some_and(|owner| {
+                                owner["providerThreadId"].as_str() == Some(provider_thread.as_str())
+                            })
+                    {
+                        return Ok(false);
+                    }
+                }
+                draft.run_id = Some(run_id.to_owned());
+                if let Some(evidence) = native_command_exit {
+                    if let Some(code) = evidence.exit_code.or_else(|| previous["exitCode"].as_i64())
+                    {
+                        draft.payload["exitCode"] = json!(code);
+                    }
+                    let old = previous["output"].as_str().unwrap_or_default();
+                    let new = draft.payload["output"].as_str().unwrap_or_default();
+                    if evidence.output == conn_provider::NativeCommandOutput::Absent
+                        || new.is_empty()
+                        || (previous["status"] == draft.payload["status"] && old.starts_with(new))
+                    {
+                        if let Some(old) = previous.get("output") {
+                            draft.payload["output"] = old.clone();
+                        } else if let Some(row) = draft.payload.as_object_mut() {
+                            row.remove("output");
+                        }
+                    }
+                }
+                tx.append(draft)?;
+                Ok(true)
+            })
+            .await;
+        match result {
+            Ok(stored) => stored,
+            Err(error) => {
+                eprintln!("conn-engine: could not record an inherited turn item: {error}");
+                false
+            }
         }
     }
 
@@ -2040,6 +2486,7 @@ impl Inner {
         thread_id: String,
         run_id: String,
         message_id: String,
+        model_selection: Option<Value>,
     ) {
         let (tid, mid) = (thread_id.clone(), message_id.clone());
         let message = self
@@ -2080,7 +2527,9 @@ impl Inner {
                         text: provider_text(message),
                         attachments: from_json(message["attachments"].clone()).unwrap_or_default(),
                     },
-                    model_selection: None,
+                    model_selection: model_selection
+                        .as_ref()
+                        .and_then(|s| from_json(s.clone()).ok()),
                     app_context: self
                         .app_context(thread_id.clone())
                         .await
@@ -2106,6 +2555,9 @@ impl Inner {
             "createdBy": message["createdBy"],
             "creationSource": message["creationSource"],
         });
+        if let Some(selection) = model_selection {
+            command["modelSelection"] = selection;
+        }
         if message["context"].is_object() {
             command["context"] = message["context"].clone();
         }
@@ -2299,14 +2751,28 @@ impl Inner {
 
     /// Closes provider sessions idle for `idle`, so an idle thread does not keep a provider
     /// process. The next turn opens a session and resumes the stored provider thread.
-    pub(crate) async fn reap_idle(self: &Arc<Self>, idle: Duration) {
-        let idle_threads: Vec<String> = lock(&self.live)
+    pub(crate) async fn reap_idle(self: &Arc<Self>, idle: crate::IdleTimeout) {
+        let idle_threads: Vec<_> = lock(&self.live)
             .iter()
             .filter(|(_, live)| live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold))
-            .map(|(id, _)| id.clone())
+            .map(|(id, live)| (id.clone(), Arc::downgrade(live)))
             .collect();
-        for thread_id in idle_threads {
-            self.close_session(&thread_id).await;
+        for (thread_id, observed) in idle_threads {
+            let live = {
+                let mut sessions = lock(&self.live);
+                if sessions.get(&thread_id).is_some_and(|live| {
+                    observed.ptr_eq(&Arc::downgrade(live))
+                        && live.idle_for(self.clock.now_millis(), idle, self.idle_max_hold)
+                }) {
+                    sessions.remove(&thread_id)
+                } else {
+                    None
+                }
+            };
+            if let Some(live) = live {
+                self.command_output.finish_thread(&thread_id);
+                self.release(&thread_id, live, self.now_ms()).await;
+            }
         }
         let idle_detached: Vec<(String, Arc<LiveThread>)> = lock(&self.detached)
             .extract_if(.., |(_, live)| {
@@ -2632,7 +3098,7 @@ enum Translated {
         end: RunEnd,
     },
     /// A provider-made thread (a subagent's child): created once, never overwritten.
-    CreateThread(Value),
+    CreateThread(Value, bool),
     /// A steer was taken or dropped: the user message's turn item follows.
     Steer {
         message_id: String,
@@ -2669,6 +3135,54 @@ fn thread_load_key(
         "runtimePolicy": to_json(policy),
     })
     .to_string()
+}
+
+fn is_grok_command_correction(
+    previous: &Value,
+    item: &Value,
+    evidence: conn_provider::NativeCommandEvidence,
+    open: bool,
+) -> bool {
+    use conn_provider::NativeCommandOutput;
+    if item["type"] != "command_execution"
+        || previous["monitor"] == true
+        || item["monitor"] == true
+        || item["nativeItemRef"]["driver"] != "grok"
+        || item["nativeItemRef"]["nativeId"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        || previous["nativeItemRef"] != item["nativeItemRef"]
+        || item["providerTurnId"].as_str().is_none_or(str::is_empty)
+        || previous["providerTurnId"] != item["providerTurnId"]
+    {
+        return false;
+    }
+    let prior_status = previous["status"].as_str();
+    let status = item["status"].as_str();
+    let prior_exit = previous["exitCode"].as_i64();
+    let new_exit = evidence.exit_code;
+    if !matches!(status, Some("completed" | "failed"))
+        || (!open && !matches!(prior_status, Some("completed" | "failed")))
+        || (prior_status == Some("failed") && status != prior_status)
+        || new_exit.is_some_and(|code| (code == 0) != (status == Some("completed")))
+        || new_exit
+            .zip(prior_exit)
+            .is_some_and(|(new, old)| new != old)
+        || (!open && new_exit.is_none() && status != prior_status)
+    {
+        return false;
+    }
+    let old = previous["output"].as_str().unwrap_or_default();
+    let new = item["output"].as_str().unwrap_or_default();
+    let richer = !new.is_empty()
+        && match evidence.output {
+            NativeCommandOutput::Absent => false,
+            NativeCommandOutput::Initial => new != old && !old.starts_with(new),
+            NativeCommandOutput::Extended => new.len() > old.len() && new.starts_with(old),
+        };
+    (open && (evidence.output != NativeCommandOutput::Absent || new_exit.is_some()))
+        || (new_exit.is_some() && prior_exit.is_none())
+        || richer
 }
 
 /// Maps one provider event to a domain event. Adding an event kind is one arm here.
@@ -2740,17 +3254,25 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
                 Err(_) => Translated::Event(draft),
             }
         }
-        ProviderEvent::NodeUpdated { node } => {
-            Translated::Event(scoped("node.updated", to_json(&node)))
-        }
+        // A child's lifecycle can outlast its spawning turn. Its row identifies the
+        // owning run and node even while another run consumes the event stream.
+        ProviderEvent::NodeUpdated { node } => Translated::Event(
+            Draft::new(&node.thread_id, "node.updated", to_json(&node))
+                .run(node.run_id.as_deref().or(run_id))
+                .node(Some(&node.id)),
+        ),
         ProviderEvent::SubagentUpdated { subagent } => {
             let payload = to_json(&subagent);
-            Translated::Subagent(scoped("subagent.updated", payload.clone()), payload)
+            let draft = Draft::new(&subagent.thread_id, "subagent.updated", payload.clone())
+                .run(subagent.run_id.as_deref().or(run_id))
+                .node(Some(&subagent.id));
+            Translated::Subagent(draft, payload)
         }
         ProviderEvent::MessageUpdated { message } => {
             Translated::Event(scoped("message.updated", to_json(&message)))
         }
         ProviderEvent::TurnItemUpdated { turn_item }
+        | ProviderEvent::NativeCommandExit { turn_item, .. }
         | ProviderEvent::McpAppCapture { turn_item, .. } => {
             Translated::Event(scoped("turn-item.updated", to_json(&turn_item)))
         }
@@ -2825,9 +3347,10 @@ fn translate(thread_id: &str, active: Option<&ActiveRun>, event: ProviderEvent) 
                 },
             }
         }
-        ProviderEvent::AppThreadCreated { app_thread, .. } => {
-            Translated::CreateThread(to_json(&app_thread))
-        }
+        ProviderEvent::AppThreadCreated {
+            app_thread,
+            create_only,
+        } => Translated::CreateThread(to_json(&app_thread), create_only.unwrap_or(false)),
         ProviderEvent::SteerUpdated {
             message_id, status, ..
         } => Translated::Steer {

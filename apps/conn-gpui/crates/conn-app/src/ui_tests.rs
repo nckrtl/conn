@@ -30,6 +30,8 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+pub(crate) mod details_tasks;
+
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;
 
@@ -175,7 +177,7 @@ fn make_thread_shell(spec: ThreadSeedSpec<'_>) -> ThreadShell {
     }
 }
 
-fn kitchen_sink_shell() -> ShellState {
+pub(crate) fn kitchen_sink_shell() -> ShellState {
     let project_val = json!({
         "id": "proj-parity",
         "title": "conn-gpui",
@@ -265,6 +267,7 @@ fn kitchen_sink_thread() -> ThreadState {
             id: "u-1".to_owned(),
             text: "Build a kitchen-sink parity view.".to_owned(),
             created_by_agent: false,
+            sender: None,
             created_at: Some("2026-11-22T15:00:00.000Z".to_owned()),
             attachments: Vec::new(),
             is_steer: false,
@@ -275,6 +278,7 @@ fn kitchen_sink_thread() -> ThreadState {
             id: "u-2".to_owned(),
             text: "Also verify consecutive user bubble grouping and steer markers.".to_owned(),
             created_by_agent: false,
+            sender: None,
             created_at: Some("2026-11-22T15:00:10.000Z".to_owned()),
             attachments: Vec::new(),
             is_steer: true,
@@ -408,6 +412,95 @@ fn kitchen_sink_thread() -> ThreadState {
         },
     );
     thread
+}
+
+#[gpui_kit::test]
+fn agent_cards_use_local_and_linked_sender_titles(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    for (sender, expected) in [
+        (
+            Some(conn_state::AgentMessageSender::LocalThread(
+                "thread-working-bg".into(),
+            )),
+            "Unselected background working thread",
+        ),
+        (
+            Some(conn_state::AgentMessageSender::LinkedTitle(
+                " Linked sender ".into(),
+            )),
+            "Linked sender",
+        ),
+        (
+            Some(conn_state::AgentMessageSender::LinkedTitle("Agent".into())),
+            "Message",
+        ),
+        (None, "Message"),
+    ] {
+        let mut thread = kitchen_sink_thread();
+        thread.entries.truncate(1);
+        let TimelineEntry::User {
+            created_by_agent,
+            sender: source,
+            ..
+        } = &mut thread.entries[0]
+        else {
+            panic!("user fixture")
+        };
+        *created_by_agent = true;
+        *source = sender;
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(kitchen_sink_shell(), cx);
+                app.set_thread_for_test("thread-selected".into(), thread, cx);
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find_by_label("Expand agent message").description(),
+                Some(expected)
+            );
+        })
+        .expect("agent message card");
+    }
+}
+
+#[gpui_kit::test]
+fn changed_files_bulk_action_tracks_individual_folders(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let mut thread = kitchen_sink_thread();
+    thread
+        .entries
+        .retain(|entry| matches!(entry, TimelineEntry::Assistant { .. }));
+    thread.entry_timings.insert(
+        "dup-id".to_owned(),
+        conn_state::EntryTiming {
+            run_id: Some("run-1".to_owned()),
+            ..Default::default()
+        },
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), thread, cx);
+        });
+    });
+    let click = |cx: &mut TestAppContext, name| click_row(cx, window, name, MouseButton::Left);
+    let file = "crates/conn-app/src/chat/mod.rs";
+    click(cx, "Expand all folders");
+    assert!(labelled(cx, window, file));
+    click(cx, "chat");
+    assert!(!labelled(cx, window, file));
+    click(cx, "Expand all folders");
+    assert!(labelled(cx, window, file));
+    click(cx, "Collapse all folders");
+    assert!(!labelled(cx, window, file));
+
+    click(cx, "crates/conn-app/src");
+    click(cx, "chat");
+    click(cx, "sidebar");
+    click(cx, "Collapse all folders");
+    assert!(!labelled(cx, window, file));
 }
 
 #[gpui_kit::test]
@@ -757,19 +850,25 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
         != "subscribeServerConfig"
     {}
 
-    let start = cx
-        .update_window(window, |_, window, cx| {
-            app.update(cx, |app, cx| {
-                app.set_shell(two_project_shell(), cx);
-                app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
-                app.start_general_draft(Some(window), cx)
-            })
-        })
-        .expect("test window");
-    let draft_id = start.await.expect("opened General draft");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let filter = window.find_by_label("Filter by project").bounds();
+        let new_thread = window.find_by_label("New thread").bounds();
+        assert_eq!(filter.right(), new_thread.left());
+    })
+    .expect("sidebar actions");
+    click_row(cx, window, "New thread", MouseButton::Left);
+    cx.condition(&app, |app, _| app.open_draft_for_test().is_some())
+        .await;
     assert_eq!(
-        cx.read(|cx| app.read(cx).open_draft_for_test()),
-        Some((draft_id, "primary-scratch".to_owned()))
+        cx.read(|cx| app.read(cx).open_draft_for_test().expect("General draft").1),
+        "primary-scratch"
     );
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -2668,7 +2767,12 @@ fn labelled(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) -> bo
         .unwrap_or(false)
 }
 
-fn click_row(cx: &mut TestAppContext, window: AnyWindowHandle, title: &str, button: MouseButton) {
+pub(crate) fn click_row(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    title: &str,
+    button: MouseButton,
+) {
     let at = match cx.update_window(window, |_, window, cx| center_by_label(window, cx, title)) {
         Ok(at) => at,
         Err(err) => panic!("failed to locate the row `{title}`: {err}"),
@@ -5472,6 +5576,53 @@ fn mount_with_right_panel(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<C
     }
     render_twice(cx, window);
     (window, app)
+}
+
+#[gpui_kit::test]
+fn add_panel_menu_fits_at_the_right_window_edge(cx: &mut TestAppContext) {
+    use conn_state::{PanelSurface, RightPanelTab};
+
+    let (window, app) = mount_with_right_panel(cx);
+    let minimum = size(
+        px(crate::MIN_WINDOW_WIDTH_PX),
+        px(crate::MIN_WINDOW_HEIGHT_PX),
+    );
+    cx.simulate_window_resize(window, minimum);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            for n in 1..=8 {
+                app.select_right_panel_surface(PanelSurface::File(format!("document-{n}.md")), cx);
+            }
+        });
+    });
+    click_row(cx, window, "Add panel tab", MouseButton::Left);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let trigger = window.find_by_label("Add panel tab").bounds();
+        let menu = window.find_by_label("Add panel").bounds();
+        let viewport = window.viewport_size();
+        assert_eq!(viewport, minimum);
+        assert!(trigger.left() + menu.size.width > viewport.width);
+        assert!(
+            menu.right() <= viewport.width - px(8.0),
+            "{menu:?} in {viewport:?}"
+        );
+        assert!(menu.left() >= px(0.0) && menu.top() >= trigger.bottom());
+        let last = window.find("right-panel-add-Device").bounds();
+        assert!(last.bottom() <= viewport.height && last.right() <= menu.right());
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&PanelSurface::File("document-8.md".into()))
+        );
+        window.click("right-panel-add-Tasks", cx);
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Tasks))
+        );
+        assert!(window.try_find_by_label("Add panel").is_none());
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

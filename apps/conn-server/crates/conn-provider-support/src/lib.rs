@@ -12,6 +12,7 @@
 //! Used by `conn-provider-claude` and `conn-provider-codex`. Id helpers take the driver kind.
 
 pub mod attachments;
+pub mod elicitation;
 pub mod host_files;
 pub mod ids;
 pub mod instance;
@@ -24,3 +25,4 @@ pub mod process;
 pub mod process_tree;
 pub mod redact;
 pub mod sdk_host;
+pub mod skill_mentions;

@@ -168,7 +168,7 @@ fn render_board_toolbar(
 ) -> AnyElement {
     let muted = to_hsla(tokens.muted_foreground);
     let fg = to_hsla(tokens.foreground);
-    let control_hover = to_hsla(tokens.shell_control);
+    let control_hover = to_hsla(tokens.shell_highlight);
 
     let mut search_group = chrome::soft_input_group(tokens)
         .id("tasks-search")
@@ -184,6 +184,7 @@ fn render_board_toolbar(
         .child(
             div().flex_1().min_w_0().child(
                 Input::new(search_input)
+                    .aria_label("Search tasks")
                     .appearance(false)
                     .text_size(px(UI_TEXT_PX)),
             ),
@@ -209,17 +210,20 @@ fn render_board_toolbar(
         .a11y_button("panel.tasks.board-settings", "Board settings")
         .flex()
         .flex_shrink_0()
-        .size(px(26.0))
+        .size(px(32.0))
+        .tab_index(0)
+        .aria_expanded(settings_open)
+        .bg(to_hsla(tokens.shell_control))
+        .border_1()
+        .border_color(to_hsla(tokens.shell_divider_header))
         .items_center()
         .justify_center()
         .rounded(px(9999.0))
         .cursor_pointer()
         .when(settings_open, |el| el.bg(control_hover))
         .hover(move |s| s.bg(control_hover))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            on_toggle(window, cx);
-        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| on_toggle(window, cx))
         .conn_tooltip("Board settings", tokens)
         .child(superhero_icon(
             "superhero/adjust.svg",
@@ -227,16 +231,12 @@ fn render_board_toolbar(
             if settings_open { fg } else { muted },
         ));
 
-    let mut settings_anchor = div()
-        .relative()
-        .flex_shrink_0()
-        .child(chrome::toolbar_group(tokens).child(settings_btn));
+    let mut settings_anchor = div().relative().flex_shrink_0().child(settings_btn);
 
     if settings_open {
         settings_anchor = settings_anchor.child(render_settings_menu(tokens, settings, callbacks));
     }
 
-    // `flex shrink-0 items-center gap-2 px-2 py-toolbar` (no divider above or below the insights strip).
     h_flex()
         .id("tasks-board-toolbar")
         .a11y_group("panel.tasks.toolbar", "Tasks toolbar")
@@ -245,7 +245,9 @@ fn render_board_toolbar(
         .items_center()
         .gap(px(8.0))
         .px(px(8.0))
-        .py(px(chrome::TOOLBAR_PAD_Y_PX))
+        .py(px(8.0))
+        .border_b_1()
+        .border_color(to_hsla(tokens.shell_divider))
         .child(search_group)
         .child(settings_anchor)
         .into_any_element()
@@ -298,10 +300,11 @@ fn render_settings_menu(
             .py(px(4.0))
             .gap(px(8.0))
             .items_center()
-            .rounded(px(8.0))
+            .rounded(px(5.0))
             .text_size(px(UI_TEXT_PX))
             .line_height(px(UI_LINE_HEIGHT_PX))
             .text_color(fg)
+            .child(div().min_w_0().flex_1().truncate().child(label))
             .child(
                 div()
                     .w(px(16.0))
@@ -313,15 +316,15 @@ fn render_settings_menu(
                     .when(checked, |el| {
                         el.child(superhero_icon("superhero/check.svg", 14.0, fg))
                     }),
-            )
-            .child(div().min_w_0().flex_1().truncate().child(label));
+            );
         if disabled {
             row = row.opacity(0.50);
         } else {
             row = row
+                .tab_index(0)
                 .cursor_pointer()
                 .hover(move |s| s.bg(highlight))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     on_press(window, cx);
                 });
@@ -333,11 +336,11 @@ fn render_settings_menu(
     let mut menu = v_flex()
         .id("tasks-board-settings-menu")
         .a11y_group("panel.tasks.board-settings-menu", "Board settings menu")
-        .min_w(px(208.0))
+        .w(px(200.0))
         .max_h(px(520.0))
         .overflow_y_scroll()
         .p(px(4.0))
-        .rounded(px(12.0))
+        .rounded(px(10.0))
         .bg(to_hsla(tokens.popover))
         .border_1()
         .border_color(divider)
@@ -391,7 +394,7 @@ fn render_settings_menu(
     deferred(
         div()
             .absolute()
-            .top(px(chrome::CONTROL_HEIGHT_PX + 6.0))
+            .top(px(chrome::CONTROL_HEIGHT_PX + 4.0))
             .right(px(0.0))
             .child(menu),
     )
@@ -459,7 +462,6 @@ fn render_lane(
         .rounded(px(LANE_RADIUS_PX))
         .bg(to_hsla(surface.lane_bg))
         .p(px(6.0))
-        .pt(px(0.0))
         .child(
             h_flex()
                 .flex_shrink_0()
@@ -467,7 +469,7 @@ fn render_lane(
                 .items_center()
                 .justify_between()
                 .px(px(8.0))
-                .py(px(8.0))
+                .h(px(28.0))
                 .text_size(px(UI_TEXT_PX))
                 .line_height(px(UI_LINE_HEIGHT_PX))
                 .text_color(muted)
@@ -490,9 +492,7 @@ fn render_task_card(
     let muted = to_hsla(tokens.muted_foreground);
     let card_bg = to_hsla(surface.card_bg);
     let card_hover = to_hsla(surface.card_hover_bg);
-    let divider = to_hsla(tokens.shell_divider);
 
-    let working = task.lane() == TaskLane::InProgress && task.attention.is_none();
     let detail = task_card_detail(task);
     let time_label = task_card_time_label(task, now_ms);
     let (letter, proj_color) = task_project_monogram(&task.project);
@@ -504,7 +504,7 @@ fn render_task_card(
     let leading_icon = render_status_dot_badge(
         monogram,
         task_status_dot(task),
-        to_hsla(surface.card_ring_fill),
+        to_hsla(surface.card_bg),
         tokens,
     );
 
@@ -545,12 +545,11 @@ fn render_task_card(
         .w_full()
         .gap(px(6.0))
         .rounded(px(8.0))
-        .border_1()
-        .border_color(divider)
         .bg(card_bg)
-        .px(px(9.0))
-        .pt(px(10.0))
-        .pb(px(8.0))
+        .tab_index(0)
+        .flex_shrink_0()
+        .px(px(10.0))
+        .py(px(8.0))
         .cursor_pointer()
         .hover(move |s| s.bg(card_hover))
         .on_click(move |_, window, cx| on_open(task_id, window, cx))
@@ -560,7 +559,7 @@ fn render_task_card(
                 .w_full()
                 .items_center()
                 .gap(px(6.0))
-                .text_size(px(UI_TEXT_PX))
+                .text_size(px(12.0))
                 .line_height(px(16.0))
                 .child(leading_icon)
                 .child(
@@ -578,18 +577,13 @@ fn render_task_card(
                         .child(time_label),
                 ),
         )
-        // Row 2: title (`font-normal` while working, `font-medium` otherwise).
+        // Row 2: task title.
         .child(
             div()
                 .w_full()
-                .text_size(px(UI_TEXT_PX))
+                .text_size(px(14.0))
                 .line_height(px(UI_LINE_HEIGHT_PX))
-                .text_color(fg.opacity(0.90))
-                .font_weight(if working {
-                    FontWeight::NORMAL
-                } else {
-                    FontWeight::MEDIUM
-                })
+                .text_color(fg)
                 .child(task.title.clone()),
         )
         // Row 3: subtask count / machine + optional PR badge.
@@ -599,7 +593,7 @@ fn render_task_card(
                     .w_full()
                     .items_center()
                     .gap(px(8.0))
-                    .text_size(px(UI_TEXT_PX))
+                    .text_size(px(12.0))
                     .line_height(px(16.0))
                     .text_color(muted)
                     .child(div().min_w_0().flex_1().truncate().child(detail))

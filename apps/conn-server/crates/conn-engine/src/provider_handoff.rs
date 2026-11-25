@@ -237,6 +237,7 @@ fn items_of(
     run_ids: &[Value],
     imported: bool,
 ) -> StoreResult<Vec<Value>> {
+    let selected: std::collections::HashSet<_> = run_ids.iter().filter_map(Value::as_str).collect();
     let mut items: Vec<Value> = tx
         .entities(thread_id, "turnItems")?
         .into_iter()
@@ -244,7 +245,9 @@ fn items_of(
             if item["runId"].is_null() {
                 imported
             } else {
-                run_ids.contains(&item["runId"])
+                item["runId"]
+                    .as_str()
+                    .is_some_and(|id| selected.contains(id))
             }
         })
         .collect();
@@ -254,50 +257,89 @@ fn items_of(
     Ok(items)
 }
 
-/// `readInheritedHandoffItems`: the history a run fork shows from its ancestors, oldest
-/// first; each ancestor's visible items through the fork run. Side chats inherit none.
+/// T3's readOwnHistoryItems. Only the history visible at the fork and after the last
+/// interactive context reset can reach the child.
+fn fork_history_segment(
+    tx: &Tx<'_>,
+    source: &Value,
+    fork: &Value,
+    source_runs: &[Value],
+    through: u64,
+) -> StoreResult<(Vec<Value>, bool)> {
+    let source_id = source["id"].as_str().unwrap_or_default();
+    let frozen = if fork["lineage"]["sideChat"] == true {
+        None
+    } else {
+        Some(tx.fork_run_ids(fork, source_id, through)?)
+    };
+    let mut runs: Vec<_> = source_runs
+        .iter()
+        .filter(|r| {
+            ordinal(r) <= through
+                && frozen
+                    .as_ref()
+                    .is_none_or(|ids| r["id"].as_str().is_some_and(|id| ids.contains(id)))
+        })
+        .cloned()
+        .collect();
+    for run in &mut runs {
+        if frozen.is_some() && run["status"] == "rolled_back" {
+            run["status"] = if run["startedAt"].is_null() {
+                "cancelled"
+            } else {
+                "completed"
+            }
+            .into();
+        }
+    }
+    let ids = runs.iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
+    let mut items = items_of(tx, source_id, &ids, source["historyOrigin"] == "v1_import")?;
+    let boundary = crate::fresh::boundary(&runs, &items);
+    if boundary > 0 {
+        let kept: std::collections::HashSet<_> = runs
+            .iter()
+            .filter(|r| ordinal(r) >= boundary)
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        items.retain(|item| item["runId"].as_str().is_some_and(|id| kept.contains(id)));
+    }
+    let attempts = tx.entities(source_id, "attempts")?;
+    let visible = crate::visibility::visible_items(&runs, &attempts, &items);
+    Ok((
+        visible.into_iter().map(|at| items[at].clone()).collect(),
+        boundary > 0,
+    ))
+}
+
+/// The history a run fork shows from its ancestors, oldest first.
 fn inherited_items(tx: &Tx<'_>, thread: &Value) -> StoreResult<Vec<Value>> {
-    let mut segments: Vec<Vec<Value>> = Vec::new();
-    let mut seen = vec![thread["id"].clone()];
+    let mut segments = Vec::new();
+    let mut seen = std::collections::HashSet::from([thread["id"].clone()]);
     let mut current = thread.clone();
     while segments.len() < MAX_FORK_ANCESTORS
         && current["forkedFrom"]["type"] == "run"
         && current["lineage"]["sideChat"] != true
-        && !seen.contains(&current["forkedFrom"]["threadId"])
+        && seen.insert(current["forkedFrom"]["threadId"].clone())
     {
         let source_id = current["forkedFrom"]["threadId"]
             .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        seen.push(json!(source_id));
-        let Some(source) = tx.thread(&source_id)? else {
+            .unwrap_or_default();
+        let Some(source) = tx.thread(source_id)? else {
             break;
         };
-        let runs = tx.entities(&source_id, "runs")?;
+        let runs = tx.entities(source_id, "runs")?;
         let Some(fork_run) = runs
             .iter()
             .find(|r| r["id"] == current["forkedFrom"]["runId"])
         else {
             break;
         };
-        let through: Vec<Value> = runs
-            .iter()
-            .filter(|r| ordinal(r) <= ordinal(fork_run))
-            .map(|r| r["id"].clone())
-            .collect();
-        let items = items_of(
-            tx,
-            &source_id,
-            &through,
-            source["historyOrigin"] == "v1_import",
-        )?;
-        let attempts = tx.entities(&source_id, "attempts")?;
-        segments.push(
-            crate::visibility::visible_items(&runs, &attempts, &items)
-                .into_iter()
-                .filter_map(|at| items.get(at).cloned())
-                .collect(),
-        );
+        let (items, cleared) =
+            fork_history_segment(tx, &source, &current, &runs, ordinal(fork_run))?;
+        segments.push(items);
+        if cleared {
+            break;
+        }
         current = source;
     }
     Ok(segments.into_iter().rev().flatten().collect())
@@ -474,6 +516,59 @@ pub(crate) fn prepare(
     )))
 }
 
+/// A side chat's first prompt carries a digest of the activity after the fork point.
+pub(crate) fn side_chat_note(
+    tx: &Tx<'_>,
+    place: &Place<'_>,
+    transfer: &Value,
+) -> StoreResult<Value> {
+    let parent = transfer["sourceThreadId"].as_str().unwrap_or_default();
+    let source = tx.thread(parent)?.ok_or("Side chat parent disappeared")?;
+    let runs = tx.entities(parent, "runs")?;
+    let start = runs
+        .iter()
+        .find(|r| r["id"] == transfer["sourcePoint"]["runId"])
+        .map_or(0, ordinal);
+    let ids: Vec<Value> = runs
+        .iter()
+        .filter(|r| r["status"] != "queued" && ordinal(r) > start)
+        .map(|r| r["id"].clone())
+        .collect();
+    let own = items_of(
+        tx,
+        parent,
+        &ids,
+        start == 0 && source["historyOrigin"] == "v1_import",
+    )?;
+    let attempts = tx.entities(parent, "attempts")?;
+    let mut items = if start == 0 {
+        inherited_items(tx, &source)?
+    } else {
+        vec![]
+    };
+    items.extend(
+        crate::visibility::visible_items(&runs, &attempts, &own)
+            .into_iter()
+            .filter_map(|i| own.get(i).cloned()),
+    );
+    let visible: std::collections::HashSet<_> =
+        items.iter().filter_map(|i| i["runId"].as_str()).collect();
+    let mut ordinals = runs
+        .iter()
+        .filter(|run| run["id"].as_str().is_some_and(|id| visible.contains(id)))
+        .map(ordinal);
+    let first = ordinals.next().unwrap_or(1);
+    let (from, to) = ordinals.fold((first, first), |(lo, hi), n| (lo.min(n), hi.max(n)));
+    Ok(
+        json!({"id":join_id("context-handoff",&["side-chat",place.run_id]), "transferId":transfer["id"],
+        "threadId":place.thread_id,"targetRunId":place.run_id,"fromProviderThreadIds":[],
+        "toProviderThreadId":crate::merge_back::provisional_provider_thread(place.run_id),
+        "coveredRunOrdinals":{"from":from,"to":to},"strategy":"manual_context","status":"ready",
+        "summaryMessageId":null,"summaryText":crate::handoff::side_chat_digest(parent,&items),
+        "createdByProviderInstanceId":null,"createdAt":place.now,"updatedAt":place.now}),
+    )
+}
+
 /// A run's first message on a fork that cannot fork natively (`decideForkExecution`
 /// `portable_context`): the fork's pending transfer is consumed, and the run gets the history
 /// the fork inherits through its fork point (`readForkHistoryItems`), in full.
@@ -498,7 +593,23 @@ pub(crate) fn prepare_fork(
         .filter(|r| is_handoff_source(r) && ordinal(r) <= fork_ordinal)
         .cloned()
         .collect();
-    let items = inherited_items(tx, thread)?;
+    let side = thread["lineage"]["sideChat"] == true;
+    let early = side && pending["sourcePoint"]["runId"].is_null();
+    let items = if early {
+        Vec::new()
+    } else if side {
+        let source = tx.thread(source_id)?.ok_or("Fork parent disappeared")?;
+        let (mut own, cleared) = fork_history_segment(tx, &source, thread, &runs, fork_ordinal)?;
+        if cleared {
+            own
+        } else {
+            let mut history = inherited_items(tx, &source)?;
+            history.append(&mut own);
+            history
+        }
+    } else {
+        inherited_items(tx, thread)?
+    };
     let from_provider_threads: Vec<Value> = runs
         .iter()
         .filter(|r| r["id"] == pending["sourcePoint"]["runId"])
@@ -523,25 +634,31 @@ pub(crate) fn prepare_fork(
         "from": covered.first().map_or(0, ordinal),
         "to": covered.last().map_or(0, ordinal),
     });
-    let handoff = crate::handoff::prepare_provider_handoff(&crate::handoff::ProviderHandoff {
-        id: handoff_id.clone(),
-        thread_id: place.thread_id,
-        source_thread_id: Some(source_id),
-        target_run_id: place.run_id,
-        transfer_id: &pending["id"],
-        from_provider_thread_ids: from_provider_threads,
-        to_provider_thread_id: json!(crate::merge_back::provisional_provider_thread(place.run_id)),
-        covered: range,
-        strategy: "full_thread_summary",
-        items: &items,
-        runs: &runs,
-        token_cap: crate::handoff::token_cap(
-            std::env::var("T3CODE_CONTEXT_HANDOFF_TOKEN_CAP")
-                .ok()
-                .as_deref(),
-        ),
-        now: place.now,
-    });
+    let handoff = if early {
+        side_chat_note(tx, place, pending)?
+    } else {
+        crate::handoff::prepare_provider_handoff(&crate::handoff::ProviderHandoff {
+            id: handoff_id,
+            thread_id: place.thread_id,
+            source_thread_id: Some(source_id),
+            target_run_id: place.run_id,
+            transfer_id: &pending["id"],
+            from_provider_thread_ids: from_provider_threads,
+            to_provider_thread_id: json!(crate::merge_back::provisional_provider_thread(
+                place.run_id
+            )),
+            covered: range,
+            strategy: "full_thread_summary",
+            items: &items,
+            runs: &runs,
+            token_cap: crate::handoff::token_cap(
+                std::env::var("T3CODE_CONTEXT_HANDOFF_TOKEN_CAP")
+                    .ok()
+                    .as_deref(),
+            ),
+            now: place.now,
+        })
+    };
     let mut transfer = pending.clone();
     for (field, value) in [
         ("targetProviderInstanceId", json!(instance)),
@@ -549,7 +666,7 @@ pub(crate) fn prepare_fork(
         ("status", json!("consumed")),
         (
             "resolution",
-            json!({"strategy": "portable_context", "contextHandoffId": handoff_id}),
+            json!({"strategy": "portable_context", "contextHandoffId": handoff["id"]}),
         ),
         ("updatedAt", json!(place.now)),
         ("consumedAt", json!(place.now)),
@@ -565,6 +682,77 @@ pub(crate) fn prepare_fork(
             transfer_event: "context-transfer.updated",
             provider_thread_id: Value::Null,
             covered,
+        },
+    ))
+}
+
+/// Rebuilds a replacement native conversation from the visible runs before the new input.
+pub(crate) fn prepare_recovered_history(
+    tx: &Tx<'_>,
+    thread: &Value,
+    run: &Value,
+) -> StoreResult<Value> {
+    let tid = thread["id"].as_str().unwrap_or_default();
+    let rid = run["id"].as_str().unwrap_or_default();
+    let all = tx.entities(tid, "runs")?;
+    let boundary = crate::fresh::boundary(
+        &all,
+        &tx.entities_where(tid, "turnItems", "type", "user_message")?,
+    );
+    let mut runs: Vec<_> = all
+        .into_iter()
+        .filter(|candidate| {
+            is_handoff_source(candidate)
+                && ordinal(candidate) >= boundary
+                && ordinal(candidate) < ordinal(run)
+        })
+        .collect();
+    runs.sort_by_key(ordinal);
+    let ids = runs.iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
+    let mut items = if boundary == 0 {
+        inherited_items(tx, thread)?
+    } else {
+        vec![]
+    };
+    let own = items_of(
+        tx,
+        tid,
+        &ids,
+        boundary == 0 && thread["historyOrigin"] == "v1_import",
+    )?;
+    let attempts = tx.entities(tid, "attempts")?;
+    items.extend(
+        crate::visibility::visible_items(&runs, &attempts, &own)
+            .into_iter()
+            .filter_map(|i| own.get(i).cloned()),
+    );
+    let mut threads = Vec::new();
+    for source in &runs {
+        if let Some(id) = source["providerThreadId"].as_str()
+            && !threads.iter().any(|pt: &Value| pt == id)
+        {
+            threads.push(id.into());
+        }
+    }
+    Ok(crate::handoff::prepare_provider_handoff(
+        &crate::handoff::ProviderHandoff {
+            id: join_id("context-handoff", &["recovery", tid, rid]),
+            thread_id: tid,
+            source_thread_id: None,
+            target_run_id: rid,
+            transfer_id: &Value::Null,
+            from_provider_thread_ids: threads,
+            to_provider_thread_id: json!(crate::merge_back::provisional_provider_thread(rid)),
+            covered: json!({"from":runs.first().map_or(0,ordinal),"to":runs.last().map_or(0,ordinal)}),
+            strategy: "full_thread_summary",
+            items: &items,
+            runs: &runs,
+            token_cap: crate::handoff::token_cap(
+                std::env::var("T3CODE_CONTEXT_HANDOFF_TOKEN_CAP")
+                    .ok()
+                    .as_deref(),
+            ),
+            now: tx.now(),
         },
     ))
 }

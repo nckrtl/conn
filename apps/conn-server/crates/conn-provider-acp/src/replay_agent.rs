@@ -12,7 +12,7 @@
 //! - A gated label (T3's replay gate, `release_replay_gate`) holds its entry until the test
 //!   releases it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use conn_provider_support::lines::Line;
@@ -107,7 +107,7 @@ pub(crate) fn spawn(
 struct Agent {
     script: Arc<Mutex<Script>>,
     next_agent_request_id: i64,
-    pending_client_requests: HashMap<String, Value>,
+    pending_client_requests: HashMap<String, VecDeque<Value>>,
     pending_agent_requests: HashMap<String, String>,
 }
 
@@ -188,7 +188,7 @@ impl Agent {
 
 fn inbound(
     next_agent_request_id: &mut i64,
-    pending_client_requests: &mut HashMap<String, Value>,
+    pending_client_requests: &mut HashMap<String, VecDeque<Value>>,
     pending_agent_requests: &mut HashMap<String, String>,
     frame: &Value,
 ) -> Result<Value, String> {
@@ -218,8 +218,13 @@ fn inbound(
             }
             Some("response") => {
                 let id = pending_client_requests
-                    .remove(method)
-                    .ok_or_else(|| format!("no pending client request for {method}"))?;
+                    .get_mut(method)
+                    .and_then(|requests| {
+                        // Overlapping session/prompt requests may reply out of order.
+                        let index = frame["pendingRequestIndex"].as_u64().unwrap_or(0) as usize;
+                        requests.remove(index)
+                    })
+                    .ok_or_else(|| format!("no matching pending client request for {method}"))?;
                 message.insert("id".into(), id);
                 if let Some(result) = frame.get("result") {
                     message.insert("result".into(), result.clone());
@@ -270,7 +275,10 @@ impl Agent {
             match (actual["kind"].as_str(), id) {
                 (Some("request"), Some(id)) => {
                     let method = actual["method"].as_str().unwrap_or("").to_owned();
-                    self.pending_client_requests.insert(method, id);
+                    self.pending_client_requests
+                        .entry(method)
+                        .or_default()
+                        .push_back(id);
                 }
                 (Some("response"), Some(id)) => {
                     self.pending_agent_requests.remove(&id_key(&id));

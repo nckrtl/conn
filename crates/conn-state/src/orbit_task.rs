@@ -144,6 +144,106 @@ pub fn orbit_task_create_row(tool_name: &str, output: &Value) -> Option<Value> {
     card_row(unwrap_row(&parsed, 0)?)
 }
 
+/// Task receipts survive replacement of the visible conversation by a bounded snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ThreadTaskLinks {
+    pub links: std::collections::BTreeMap<i64, String>,
+    history: Option<TaskLinkHistory>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct TaskLinkHistory {
+    snapshot: String,
+    next: Option<String>,
+    // Previously seen links stay available until the new snapshot's history confirms or removes them.
+    unconfirmed: std::collections::BTreeSet<i64>,
+}
+
+impl ThreadTaskLinks {
+    pub(crate) fn begin_snapshot(&mut self, cursor: Option<&str>) {
+        let Some(cursor) = cursor else {
+            *self = Self::default();
+            return;
+        };
+        if self
+            .history
+            .as_ref()
+            .is_none_or(|history| history.snapshot != cursor)
+        {
+            self.history = Some(TaskLinkHistory {
+                snapshot: cursor.to_owned(),
+                next: Some(cursor.to_owned()),
+                unconfirmed: self.links.keys().copied().collect(),
+            });
+        }
+    }
+
+    pub(crate) fn observe_entry(&mut self, entry: &crate::TimelineEntry) {
+        if let crate::TimelineEntry::OrbitTask { task, .. } = entry {
+            self.observe(task);
+        }
+    }
+
+    fn observe(&mut self, task: &Value) {
+        if let (Some(id), Some(title)) = (task["id"].as_i64(), task["title"].as_str()) {
+            self.links.insert(id, title.to_owned());
+            if let Some(history) = &mut self.history {
+                history.unconfirmed.remove(&id);
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn next_page(&self) -> Option<(&str, &str)> {
+        let history = self.history.as_ref()?;
+        Some((&history.snapshot, history.next.as_deref()?))
+    }
+
+    /// Records only receipts. The transcript keeps its own page cursor and scroll position.
+    pub fn apply_page(
+        &mut self,
+        snapshot: &str,
+        cursor: &str,
+        page: conn_contract::OrchestrationV2ThreadHistoryPage,
+    ) -> bool {
+        if self.next_page() != Some((snapshot, cursor))
+            || (page.has_more_history
+                && page
+                    .next_cursor
+                    .as_deref()
+                    .is_none_or(|next| next == cursor))
+        {
+            return false;
+        }
+        for row in page.items {
+            if let conn_contract::OrchestrationV2ThreadProjectionTurnItemsItem::DynamicTool(tool) =
+                row.item
+                && let Some(task) = completed_task_row(&tool)
+            {
+                self.observe(&task);
+            }
+        }
+        if let Some(history) = &mut self.history {
+            history.next = page.next_cursor.filter(|_| page.has_more_history);
+            if history.next.is_none() {
+                for id in std::mem::take(&mut history.unconfirmed) {
+                    self.links.remove(&id);
+                }
+            }
+        }
+        true
+    }
+}
+
+pub(crate) fn completed_task_row(
+    item: &conn_contract::OrchestrationV2TurnItemDynamicTool,
+) -> Option<Value> {
+    if item.status != conn_contract::OrchestrationV2TurnItemStatus::Completed {
+        return None;
+    }
+    orbit_task_create_row(item.tool_name.as_deref()?, item.output.as_ref()?.as_ref()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +263,34 @@ mod tests {
             "updated_at": "2026-11-17T11:30:00+00:00",
             "last_activity_at": null,
         })
+    }
+
+    #[test]
+    fn saved_task_history_resumes_and_removes_links_absent_after_rollback() {
+        let page = |next: Option<&str>| {
+            conn_contract::from_json(json!({
+            "snapshotSequence":10, "items":[], "hasMoreHistory":next.is_some(), "nextCursor":next
+        })).expect("history page")
+        };
+        let mut index = ThreadTaskLinks::default();
+        index.observe(&row());
+        index.begin_snapshot(Some("initial"));
+        assert!(index.apply_page("initial", "initial", page(Some("older"))));
+        let saved = serde_json::to_vec(&index).expect("save progress");
+        let mut reopened: ThreadTaskLinks =
+            serde_json::from_slice(&saved).expect("restore progress");
+        reopened.begin_snapshot(Some("initial"));
+        assert!(reopened.links.contains_key(&5753));
+        assert_eq!(reopened.next_page(), Some(("initial", "older")));
+        // The existing receipt is still present in the live window.
+        reopened.observe(&row());
+        assert!(reopened.apply_page("initial", "older", page(None)));
+        reopened.begin_snapshot(Some("initial"));
+        assert_eq!(reopened.next_page(), None);
+        assert!(reopened.links.contains_key(&5753));
+        reopened.begin_snapshot(Some("rolled-back"));
+        assert!(reopened.apply_page("rolled-back", "rolled-back", page(None)));
+        assert!(reopened.links.is_empty());
     }
 
     #[test]

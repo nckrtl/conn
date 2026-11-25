@@ -1243,3 +1243,152 @@ fn a_hook_that_stops_a_turn_gives_its_terminal_the_reason() {
         assert!(ended.get("reason").is_none(), "{frames:?}: {ended}");
     }
 }
+
+fn json_events(outs: &[Out]) -> Vec<Value> {
+    outs.iter()
+        .filter_map(|o| match o {
+            Out::Event(e) => Some(serde_json::to_value(e).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn file_changes_include_each_hunk_and_the_move_destination() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    turn_with_command(&mut mapper);
+    let outs = feed(
+        &mut mapper,
+        &[
+            json!({"method":"item/completed","params":{"threadId":"th","turnId":"tu","item":{
+        "type":"fileChange","id":"files","status":"completed","changes":[
+            {"path":"original","kind":{"type":"update","move_path":"renamed"},"diff":"@@ -1 +1 @@\n-before\n+after"},
+            {"path":"new file","kind":{"type":"add"},"diff":"one\ntwo"},
+            {"path":"removed","kind":{"type":"delete"},"diff":"gone\n"}]}}}),
+        ],
+    );
+    let items = json_events(&outs);
+    let patch = items
+        .iter()
+        .find_map(|e| e["turnItem"]["diffStr"].as_str())
+        .unwrap();
+    assert_eq!(patch.matches("diff --git ").count(), 3);
+    assert!(patch.contains("b/renamed"));
+    assert!(patch.contains("+one\n+two\n\\ No newline at end of file"));
+    assert!(patch.contains("+++ /dev/null\n@@ -1,1 +0,0 @@\n-gone"));
+}
+
+#[test]
+fn async_questions_stay_message_answerable_after_the_native_turn_ends() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    turn_with_command(&mut mapper);
+    let outs = feed(
+        &mut mapper,
+        &[
+            json!({"method":"item/completed","params":{"threadId":"th","turnId":"tu","item":{"type":"agentMessage","id":"async","text":"prompt","delivery":"async","questions":[{"title":"Proceed?","options":["Yes","No"]}]}}}),
+            json!({"method":"turn/completed","params":{"threadId":"th","turn":{"id":"tu","status":"completed"}}}),
+        ],
+    );
+    let events = json_events(&outs);
+    let req = events.iter().find_map(|e| e.get("runtimeRequest")).unwrap();
+    assert_eq!(req["responseCapability"], json!({"type":"message"}));
+    assert_eq!(req["nativeRequestRef"]["nativeId"], "async:async");
+    let item = events
+        .iter()
+        .find(|e| e["turnItem"]["type"] == "user_input_request")
+        .unwrap();
+    assert_eq!(item["turnItem"]["responseMode"], "message");
+    assert_eq!(
+        item["turnItem"]["questions"][0]["options"][1]["label"],
+        "No"
+    );
+}
+
+#[test]
+fn terminal_inventory_settles_missing_shells_and_keeps_late_results() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    turn_with_command(&mut mapper);
+    feed(
+        &mut mapper,
+        &[
+            json!({"method":"turn/completed","params":{"threadId":"th","turn":{"id":"tu","status":"completed"}}}),
+        ],
+    );
+    assert!(
+        mapper
+            .reconcile_terminals("tu", &["9".to_owned()].into_iter().collect())
+            .is_empty()
+    );
+    let cancelled = mapper.reconcile_terminals("tu", &Default::default());
+    assert!(
+        json_events(&cancelled)
+            .iter()
+            .any(|e| e["turnItem"]["status"] == "cancelled")
+    );
+    let late = feed(
+        &mut mapper,
+        &[
+            json!({"method":"item/completed","params":{"threadId":"th","turnId":"tu","item":{
+        "type":"commandExecution","id":"c1","command":"npm test","processId":"9","status":"completed","exitCode":0}}}),
+        ],
+    );
+    assert_eq!(wakes(&late).len(), 1);
+    assert!(
+        json_events(&late)
+            .iter()
+            .any(|e| e["turnItem"]["status"] == "completed")
+    );
+}
+
+#[test]
+fn retry_notices_share_a_deadline_while_output_clears_it() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    turn_with_command(&mut mapper);
+    let notice = json!({"method":"error","params":{"threadId":"th","turnId":"tu","willRetry":true,
+        "error":{"message":"Retrying","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}});
+    let first =
+        json_events(&feed(&mut mapper, std::slice::from_ref(&notice)))[0]["turnItem"].clone();
+    assert_eq!(first["title"], "Provider retry");
+    assert_eq!(first["retry"]["attempt"], 1);
+    assert_eq!(first["failure"]["class"], "usage_limit");
+    let initial = mapper.retry_deadline().unwrap();
+    let mut reported = notice.clone();
+    reported["params"]["error"]["message"] = json!("Reconnecting... 2 / 5");
+    let updated = json_events(&feed(&mut mapper, &[reported]))[0]["turnItem"].clone();
+    assert_eq!(updated["id"], first["id"]);
+    assert_eq!(
+        updated["retry"],
+        json!({"attempt":2,"maxAttempts":5,"retryDelayMs":null})
+    );
+    assert_eq!(mapper.retry_deadline(), Some(initial));
+    let recovery = feed(
+        &mut mapper,
+        &[
+            json!({"method":"item/agentMessage/delta","params":{"threadId":"th","turnId":"tu","itemId":"answer","delta":"progress"}}),
+        ],
+    );
+    let recovered = json_events(&recovery)[0]["turnItem"].clone();
+    assert_eq!(recovered["title"], "Provider recovered");
+    assert_eq!(recovered["id"], first["id"]);
+    assert!(mapper.retry_deadline().is_none());
+    feed(&mut mapper, &[notice]);
+    let outs = mapper.expire_retries(mapper.retry_deadline().unwrap());
+    let events = json_events(&outs);
+    let failed = events
+        .iter()
+        .find(|v| v["turnItem"]["title"] == "Usage limit reached")
+        .unwrap();
+    assert_ne!(failed["turnItem"]["id"], first["id"]);
+    assert_eq!(failed["turnItem"]["failure"]["retryable"], false);
+    let end = events
+        .iter()
+        .find(|e| e["type"] == "turn.terminal")
+        .unwrap();
+    assert_eq!(end["failure"]["class"], "usage_limit");
+    assert_eq!(end["failure"]["retryable"], false);
+    assert!(
+        outs.iter().any(
+            |o| matches!(o,Out::InterruptAbandoned {thread,turn} if thread=="th" && turn=="tu")
+        )
+    );
+}

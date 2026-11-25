@@ -9,13 +9,6 @@ use serde_json::{Map, Value};
 const CATALOG: &str = include_str!("model_catalog.json");
 /// `CLAUDE_EFFORT_LEVELS`.
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-/// Boolean option id → settings key.
-const FLAGS: &[(&str, &str)] = &[
-    ("thinking", "alwaysThinkingEnabled"),
-    ("fastMode", "fastMode"),
-    ("ultracode", "ultracode"),
-];
-
 /// `CompiledClaudeModelSelection`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Compiled {
@@ -24,6 +17,209 @@ pub struct Compiled {
     /// `ultrathink` when the prompt gets T3's `Ultrathink:` prefix.
     pub prompt_effort: Option<String>,
     pub settings: Map<String, Value>,
+}
+
+/// The instance-specific models accepted by the Claude settings contract.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CustomModels(Vec<CustomModel>);
+
+#[derive(Clone, Debug, PartialEq)]
+struct CustomModel {
+    slug: String,
+    name: String,
+    capabilities: Option<Value>,
+}
+
+impl CustomModels {
+    pub(crate) fn parse(value: &Value) -> Self {
+        let mut entries = Vec::<CustomModel>::new();
+        for raw in value.as_array().into_iter().flatten() {
+            let Some(slug) = raw
+                .as_str()
+                .or_else(|| raw["slug"].as_str())
+                .map(str::trim)
+                .filter(|slug| !slug.is_empty())
+            else {
+                continue;
+            };
+            if entries.iter().any(|entry| entry.slug == slug) {
+                continue;
+            }
+            let name = raw["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(slug);
+            let capabilities = raw["capabilities"].as_object().and_then(|caps| {
+                let descriptors = match caps.get("optionDescriptors") {
+                    None => Vec::new(),
+                    Some(value) => value.as_array()?.clone(),
+                };
+                Some(with_ultracode_toggle(
+                    serde_json::json!({"optionDescriptors": descriptors}),
+                ))
+            });
+            entries.push(CustomModel {
+                slug: slug.to_owned(),
+                name: name.to_owned(),
+                capabilities,
+            });
+        }
+        Self(entries)
+    }
+
+    pub(crate) fn slugs(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|m| m.slug.as_str())
+    }
+
+    /// The snapshot overlays display names, then appends the instance's additional models.
+    pub(crate) fn display(&self, mut models: Vec<Value>) -> Vec<Value> {
+        for entry in &self.0 {
+            if let Some(builtin) = models.iter_mut().find(|m| m["slug"] == entry.slug) {
+                if entry.name != entry.slug {
+                    builtin["name"] = Value::from(entry.name.as_str());
+                    if let Some(object) = builtin.as_object_mut() {
+                        object.remove("shortName");
+                    }
+                }
+            } else {
+                models.push(serde_json::json!({"slug": entry.slug, "name": entry.name, "isCustom": true,
+                    "capabilities": entry.capabilities.clone().unwrap_or_else(|| serde_json::json!({"optionDescriptors": []}))}));
+            }
+        }
+        models
+    }
+
+    /// Selection and native subagent routing use the scoped T3 catalog. A configured slug
+    /// shadows a built-in alias even when it has no option descriptors.
+    pub(crate) fn scope(&self, mut models: Vec<Value>) -> Vec<Value> {
+        if self.0.is_empty() {
+            return models;
+        }
+        for model in &mut models {
+            if let Some(aliases) = model.get_mut("aliases").and_then(Value::as_array_mut) {
+                aliases.retain(|alias| {
+                    !alias.as_str().is_some_and(|alias| {
+                        self.slugs().any(|slug| slug.eq_ignore_ascii_case(alias))
+                    })
+                });
+            }
+        }
+        for entry in &self.0 {
+            if let Some(caps) = &entry.capabilities
+                && !models.iter().any(|m| m["slug"] == entry.slug)
+            {
+                models.push(serde_json::json!({"slug": entry.slug, "name": entry.name, "isCustom": true, "capabilities": caps}));
+            }
+        }
+        models
+    }
+
+    pub(crate) fn compile(
+        &self,
+        selection: &Value,
+        manifest: &conn_provider::LiveManifest,
+    ) -> Compiled {
+        let model = selection["model"].as_str().unwrap_or("default").trim();
+        if !self.slugs().any(|slug| slug.eq_ignore_ascii_case(model)) {
+            return compile(selection, manifest);
+        }
+        let builtins = current_provider_models(manifest, 0);
+        if builtins.iter().any(|m| m["slug"] == model) {
+            return compile(selection, manifest);
+        }
+        let custom = self
+            .0
+            .iter()
+            .find(|m| m.slug == model)
+            .and_then(|m| m.capabilities.as_ref());
+        let models = custom
+            .map(|caps| serde_json::json!({"slug": model, "capabilities": caps}))
+            .into_iter()
+            .collect::<Vec<_>>();
+        compile_resolved(
+            &serde_json::json!({"providerModels": models, "runtime": [{}]}),
+            selection,
+        )
+    }
+}
+
+/// Catalog entries for turn mapping. Runtime fields stay private to the adapter.
+pub(crate) fn turn_models(
+    manifest: &conn_provider::LiveManifest,
+    now_ms: i64,
+    custom: &CustomModels,
+) -> Vec<Value> {
+    let mut resolved = current(manifest, now_ms);
+    let Value::Array(mut models) = resolved["providerModels"].take() else {
+        return Vec::new();
+    };
+    if let Some(runtime) = resolved["runtime"].as_array_mut() {
+        for (model, fields) in models.iter_mut().zip(runtime.iter_mut()) {
+            model["runtime"] = fields.take();
+        }
+    }
+    custom.scope(models)
+}
+
+pub(crate) struct ModelContext {
+    pub api_model_id: String,
+    pub catalog_window: Option<u64>,
+}
+
+pub(crate) fn model_context(models: &[Value], selection: &Value) -> ModelContext {
+    // Direct mapper callers use the same bundled catalog as a default provider session.
+    static BUNDLED: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    let models = if models.is_empty() {
+        BUNDLED.get_or_init(|| turn_models(&Default::default(), 0, &Default::default()))
+    } else {
+        models
+    };
+    let selected = selection["model"].as_str().unwrap_or("default");
+    let Some(model) = catalog_model(models, selected) else {
+        return ModelContext {
+            api_model_id: selected.to_owned(),
+            catalog_window: None,
+        };
+    };
+    let runtime = &model["runtime"];
+    let descriptors = option_descriptors(
+        &model["capabilities"],
+        selection["options"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice),
+    );
+    let catalog_window = runtime["fixedContextWindowTokens"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .or_else(|| {
+            let window = descriptors
+                .iter()
+                .find(|d| d["id"] == "contextWindow")
+                .and_then(current_value)?;
+            runtime["contextWindowTokens"][window.as_str()?].as_u64()
+        });
+    ModelContext {
+        api_model_id: api_model_id(model, runtime, &descriptors, selected),
+        catalog_window,
+    }
+}
+
+fn catalog_model<'a>(models: &'a [Value], selected: &str) -> Option<&'a Value> {
+    let model = selected.trim();
+    if model.is_empty() {
+        return None;
+    }
+    models.iter().find(|m| m["slug"] == model).or_else(|| {
+        models.iter().find(|m| {
+            m["aliases"].as_array().is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|a| a.eq_ignore_ascii_case(model))
+            })
+        })
+    })
 }
 
 /// The generated catalog as JSON.
@@ -299,7 +495,7 @@ pub fn compile(selection: &Value, manifest: &conn_provider::LiveManifest) -> Com
         .and_then(|section| resolve(&section, 0))
     {
         Some(resolved) => compile_resolved(&resolved, selection),
-        None => compile_bundled(selection),
+        None => compile_resolved(&catalog_json(), selection),
     }
 }
 
@@ -393,22 +589,6 @@ fn compile_resolved(resolved: &Value, selection: &Value) -> Compiled {
     {
         settings.insert("ultracode".into(), Value::Bool(ultracode));
     }
-    // `resolveClaudeCatalogApiModelId`: the slug with the suffix of a chosen option.
-    let slug = entry["slug"].as_str().unwrap_or(model);
-    let suffix = runtime["modelSuffixes"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .find_map(|(option_id, suffixes)| {
-            let value = descriptors
-                .iter()
-                .find(|d| d["id"] == option_id.as_str())
-                .and_then(current_value)?;
-            suffixes[value.as_str()?]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-        });
     // `resolvePromptInjectedEffort`.
     let prompt_effort = raw_effort
         .map(str::trim)
@@ -423,11 +603,31 @@ fn compile_resolved(resolved: &Value, selection: &Value) -> Compiled {
         })
         .map(str::to_owned);
     Compiled {
-        api_model_id: format!("{slug}{}", suffix.unwrap_or_default()),
+        api_model_id: api_model_id(entry, runtime, &descriptors, model),
         effort,
         prompt_effort,
         settings,
     }
+}
+
+fn api_model_id(entry: &Value, runtime: &Value, descriptors: &[Value], selected: &str) -> String {
+    // `resolveClaudeCatalogApiModelId`: the slug with the suffix of a chosen option.
+    let slug = entry["slug"].as_str().unwrap_or(selected);
+    let suffix = runtime["modelSuffixes"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .find_map(|(option_id, suffixes)| {
+            let value = descriptors
+                .iter()
+                .find(|d| d["id"] == option_id.as_str())
+                .and_then(current_value)?;
+            suffixes[value.as_str()?]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        });
+    format!("{slug}{}", suffix.unwrap_or_default())
 }
 
 /// A boolean option's resolved `currentValue` for `selection` (`getProviderOptionDescriptors`
@@ -576,55 +776,6 @@ fn current_value(descriptor: &Value) -> Option<Value> {
         .map(Value::String)
 }
 
-/// `compileClaudeModelSelection` from the generated table of T3's results for the bundled
-/// catalog.
-fn compile_bundled(selection: &Value) -> Compiled {
-    let model = selection["model"].as_str().unwrap_or("default").trim();
-    let options = selection["options"].as_array().cloned().unwrap_or_default();
-    let option = |id: &str| options.iter().find(|o| o["id"] == id).map(|o| &o["value"]);
-    let raw_effort = option("effort").and_then(Value::as_str).map(str::trim);
-    let catalog: Value = serde_json::from_str(CATALOG).unwrap_or(Value::Null);
-    let entry = catalog["models"].as_array().and_then(|models| {
-        models.iter().find(|m| m["slug"] == model).or_else(|| {
-            models.iter().find(|m| {
-                m["aliases"].as_array().is_some_and(|aliases| {
-                    aliases
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(|a| a.eq_ignore_ascii_case(model))
-                })
-            })
-        })
-    });
-    let Some(entry) = entry else {
-        return outside_catalog(model, raw_effort, &options);
-    };
-    let base = raw_effort
-        .and_then(|e| entry["efforts"].get(e))
-        .unwrap_or(&entry["efforts"][""]);
-    let mut settings = base["settings"].as_object().cloned().unwrap_or_default();
-    let booleans = entry["booleans"].as_array().cloned().unwrap_or_default();
-    for (id, key) in FLAGS {
-        if !booleans.iter().any(|b| b == id) {
-            continue;
-        }
-        if let Some(flag) = option(id).and_then(Value::as_bool) {
-            let compiled = &entry["flags"][format!("{id}={flag}")]["settings"];
-            match compiled.get(*key) {
-                Some(value) => settings.insert((*key).to_string(), value.clone()),
-                None => settings.remove(*key),
-            };
-        }
-    }
-    // T3's order: alwaysThinkingEnabled, fastMode, ultracode (ordered.rs keeps it on the wire).
-    Compiled {
-        api_model_id: base["apiModelId"].as_str().unwrap_or(model).to_string(),
-        effort: base["effort"].as_str().map(str::to_string),
-        prompt_effort: base["promptEffort"].as_str().map(str::to_string),
-        settings,
-    }
-}
-
 /// The bundled catalog's slugs with their aliases, parsed once (a fixed, small table).
 fn slugs() -> &'static [(String, Vec<String>)] {
     static SLUGS: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
@@ -676,23 +827,10 @@ pub fn resolve_slug(value: &str) -> String {
 
 /// [`resolve_slug`] over `models` (the turn's resolved catalog, as the picker lists it).
 pub fn resolve_slug_in(models: &[Value], value: &str) -> String {
-    let trimmed = value.trim();
-    models
-        .iter()
-        .find(|m| m["slug"] == trimmed)
-        .or_else(|| {
-            models.iter().find(|m| {
-                m["aliases"].as_array().is_some_and(|aliases| {
-                    aliases
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(|a| a.eq_ignore_ascii_case(trimmed))
-                })
-            })
-        })
+    catalog_model(models, value)
         .and_then(|m| m["slug"].as_str())
-        .filter(|_| !trimmed.is_empty())
-        .map_or_else(|| value.to_string(), str::to_owned)
+        .unwrap_or(value)
+        .to_owned()
 }
 
 /// `applyClaudePromptEffortPrefix`: trims the text, and prefixes `Ultrathink:` for the

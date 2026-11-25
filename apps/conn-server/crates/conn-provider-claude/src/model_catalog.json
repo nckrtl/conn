@@ -1908,5 +1908,109 @@
   {
    "slug": "claude-haiku-4-5"
   }
+ ],
+ "runtime": [
+  {
+   "effortMap": {
+    "ultracode": "xhigh",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultracode": "xhigh",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultracode": "xhigh",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultracode": "xhigh",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultracode": "xhigh",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultracode": "xhigh",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "xhigh": "max",
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "ultrathink": null
+   },
+   "modelSuffixes": {
+    "contextWindow": {
+     "1m": "[1m]"
+    }
+   },
+   "contextWindowTokens": {
+    "200k": 200000,
+    "1m": 1000000
+   }
+  },
+  {
+   "fixedContextWindowTokens": 200000
+  },
+  {
+   "effortMap": {
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "effortMap": {
+    "max": "high",
+    "ultrathink": null
+   },
+   "modelSuffixes": {
+    "contextWindow": {
+     "1m": "[1m]"
+    }
+   },
+   "contextWindowTokens": {
+    "200k": 200000,
+    "1m": 1000000
+   }
+  },
+  {
+   "effortMap": {
+    "ultrathink": null
+   },
+   "fixedContextWindowTokens": 1000000
+  },
+  {
+   "fixedContextWindowTokens": 200000
+  }
  ]
 }

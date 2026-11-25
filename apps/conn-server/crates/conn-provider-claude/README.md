@@ -45,10 +45,11 @@ T3 server's Claude driver and `createClaudeAdapterV2` build theirs; the server
 | `binaryPath` | trimmed, `~` expanded (`expandHomePath`), `claude` when empty: `pathToClaudeCodeExecutable`, the `--version` probe, titles |
 | `homePath` | trimmed, `~` expanded, made absolute: `CLAUDE_CONFIG_DIR` everywhere, over an instance variable of that name |
 | `environment` | each entry with a value, `~` expanded only in `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`; a sensitive value is the real one from the secret store. `Debug` prints names only |
-| `launchArgs` | per query (`launch_args`): `--add-dir` values after the cwd and attachments; `--permission-mode`, then `--dangerously-skip-permissions`, over the policy's mode; `--append-system-prompt-file` text (one trailing newline trimmed) and `--append-system-prompt` text after T3's append text; `--settings` (inline JSON or a file, comments and trailing commas allowed) beneath T3's settings keys, in its own key order; every other flag to `extraArgs` in T3's order, then `thinking-display`. A missing value or an unreadable file fails the start. Probes and titles do not use them, as in T3 |
+| `launchArgs` | per query (`launch_args`): `--add-dir` values after the cwd and attachments; `--permission-mode`, then `--dangerously-skip-permissions`, over the policy's mode; `--append-system-prompt-file` text (one trailing newline trimmed) and `--append-system-prompt` text after T3's append text; `--settings` (inline JSON or a file, comments and trailing commas allowed) beneath T3's settings keys, in its own key order; every other flag to `extraArgs` in T3's order, then `thinking-display`. A missing value or an unreadable file fails the start. Text generation uses the launch settings too. Review guides resolve settings in the original project, preserve deny rules, and pass a private settings file to the CLI |
 | `enabled` | T3's rule; a disabled instance gets T3's disabled entry, also with the probe off, and the engine refuses its turns |
 | `displayName`, `accentColor` | on the entry, pending and probed (`withInstanceIdentity`) |
-| `customModels`, `autoCompactWindow` | not read yet |
+| `customModels` | Adds and renames picker entries. Configured slugs shadow native aliases for chat and text generation. |
+| `autoCompactWindow` | Sets the native compaction window and the context-usage threshold. An empty value preserves Claude’s settings. |
 
 Proof: the conformance scenarios `instance_*` and the probe scenarios `instance-settings` and
 `title-instance` (below); `instances-flow.mjs` in `conn-server` for a turn through the server.
@@ -148,7 +149,7 @@ source, API provider; never a token), slash commands, models, usage windows and 
 Before the first probe the entry is T3's pending one. `CONN_CLAUDE_STATUS_PROBE=off` turns the
 probe off; every check that starts the server sets it, so no check runs this machine's
 `claude`. Not ported: reset credits (Anthropic's API), the organization id (Claude's account
-file), the version advisory (a registry lookup), skills, custom models, applying effort caps.
+file), the version advisory (a registry lookup), custom models and applying effort caps.
 Proof: `tools/probe-conformance/run.mjs`, 11 status scenarios against T3's own function (and
 5 title scenarios against T3's `generateThreadTitle`); `instance-settings` and
 `title-instance` run an instance with a `~` binary path, a sensitive variable and
@@ -194,7 +195,7 @@ counts as background work (`Session::has_pending_background_work`).
 | steer written (`priority: "now"`)                 | `steer.updated` pending; completed on `command_lifecycle` started or an echo; the `aborted_*` result folds in          |
 | `can_use_tool`                                    | approval: `node` + `runtime_request` + `turn_item` (`approval_request`)                                                |
 | `can_use_tool` AskUserQuestion / ExitPlanMode     | `user_input_request` / `plan.updated` (proposed plan)                                                                  |
-| `elicitation`, `request_user_dialog`              | field-less form as an approval card; `resume_return` as a question                                                     |
+| `elicitation`, `request_user_dialog`              | consent forms as an approval card; `resume_return` as a question                                                     |
 | `control_cancel_request`                          | request, node and item `cancelled`                                                                                     |
 | `system` `status` compacting / `compact_boundary` | `compaction` row running, then completed with token counts and a usage update                                          |
 | `system` `api_retry`                              | `error` row with `retry` (running, then recovered); on failure the retry goes on `turn.terminal`                       |
@@ -257,11 +258,10 @@ Normalized in the comparison:
 - **Tool titles:** T3's own `/mcp` tools (`conn` and its aliases) get no presentation, as
   T3; T3 decides by its tool table, this provider by the server name. `normalizeMcpHttpUrl`
   keeps an icon URL as sent, where T3 normalizes it with `new URL`.
-- **Attachments:** PDFs stay path-only. No skill splitting of slash commands. The 28 MiB
-  inline budget lives in memory and starts over after a restart.
-- **Not passed:** `autoCompactWindow`, `customModels`,
-  `ENABLE_TOOL_SEARCH`, the delegated child's prompt cache TTL, prompt suggestions, the
-  device-tool text and hook (no device tools), custom models.
+- **Attachments:** eligible PDFs with verifiable page counts are native document blocks.
+  Claude restores its 28 MiB and 100-page budgets from the provider thread.
+- **Not passed:** `ENABLE_TOOL_SEARCH`, the delegated child's prompt cache TTL, prompt suggestions, the
+  device-tool text and hook (no device tools).
 - **Process:** no Linux `systemd-run` agent scope (T3's `AgentScope`; macOS and containers
   without systemd have none either). T3 records each CLI before it opens the fd 4 gate, so a
   restarted server can reap survivors (`ProviderProcesses`); the helper opens the gate at once
@@ -275,18 +275,16 @@ Normalized in the comparison:
   `ClaudeTextGeneration.ts` does (`text_generation.rs`): `claude -p --output-format json
   --json-schema … --tools "" --permission-mode dontAsk`, the prompt on stdin, a fresh temp
   folder, 180 s, a retry without `--no-session-persistence` for CLIs before 2.0.63. No SDK host.
-  Proven by the four `title*` scenarios of `tools/probe-conformance`.
-- **Stop hook and goals:** every query gets T3's `Stop` hook (`onStop`), so `initialize` is
-  equal. T3's hook answers `{continue: false}` while a Claude `/goal` is active and a
-  delegated task will wake the thread; this provider tracks no Claude goals (`active_goal` is
-  ignored), so its hook always answers `{}`, T3's answer without an active goal.
-- **Native session title:** as T3, a turn sends `rename_session` (`source: "host"`) when the
-  thread title differs from the one last applied to the native session; a new session applies
-  its title at spawn, and the applied titles live per provider instance, across sessions.
-  T3 also records the applied title in `nativeMetadata.title`, so it survives a restart; this
-  provider reads a recorded title but writes none, so after a restart it renames once more.
-  A native `/rename` does not retitle the thread here (T3 #36879).
-- **Elicitation:** only field-less forms; TS fills simple forms.
+  An image title uses a stream-json user message. A successful text-only retry caches a model that explicitly rejects images. The CLI boundary test captures both attempts.
+  For review guides the conformance check validates the bundled TS CLI flags and the private settings file required by upstream T3 #41972.
+- **Skills:** discovers managed, user, project, additional and plugin skill roots, including account-scoped synced plugins. The active project selects the workspace catalog. The final selected skill and its raw arguments reach the native CLI as a slash command.
+- **Stop hook and goals:** the adapter follows native goal confirmations and checks. The Stop
+  hook pauses a live goal while an app-owned child still owes its parent a wake.
+- **Native session title:** a successful native `/rename` updates the Conn thread title.
+  Applying a Conn title uses the SDK's `rename_session` control request.
+- **Elicitation:** the approval card accepts one-time consent and persistence toggles. Forms
+  requiring an input the card cannot collect receive an MCP cancellation. Unshown defaults
+  cannot grant a permission.
 - **No `/mcp` instructions text** in this crate: the server passes it as `mcp_instructions`.
 
 ## History operations

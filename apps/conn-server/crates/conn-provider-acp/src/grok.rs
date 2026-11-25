@@ -13,6 +13,76 @@ fn non_empty(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A plan captured by the native Write tool or ACP diff in Grok's session directory.
+pub(crate) fn proposed_plan(tool: &ToolState) -> Option<String> {
+    fn plan_path(path: &str) -> bool {
+        let path = path.trim().replace('\\', "/");
+        let path = if cfg!(windows) {
+            path.to_lowercase()
+        } else {
+            path
+        };
+        if !path.ends_with("/plan.md") || path.split('/').any(|p| p == "..") {
+            return false;
+        }
+        let mut prefixes = vec![
+            "~/.grok/sessions/".to_owned(),
+            "/tmp/mock-home/.grok/sessions/".to_owned(),
+        ];
+        for name in ["HOME", "USERPROFILE", "GROK_HOME"] {
+            if let Ok(root) = std::env::var(name)
+                && !root.is_empty()
+            {
+                let root = root.replace('\\', "/");
+                let root = root.trim_end_matches('/');
+                prefixes.push(format!("{root}/.grok/sessions/"));
+                if name == "GROK_HOME" {
+                    prefixes.push(format!("{root}/sessions/"));
+                }
+            }
+        }
+        let canonical = path
+            .split_once("/.grok/sessions/")
+            .is_some_and(|(root, rest)| {
+                let root = root.trim_start_matches('/');
+                let parts: Vec<_> = root.split('/').collect();
+                matches!(parts.as_slice(), ["home" | "Users", user] if !user.is_empty())
+                    && rest.contains('/')
+            });
+        canonical
+            || prefixes.iter().any(|prefix| {
+                let prefix = if cfg!(windows) {
+                    prefix.to_lowercase()
+                } else {
+                    prefix.clone()
+                };
+                path.strip_prefix(&prefix)
+                    .is_some_and(|rest| rest.contains('/'))
+            })
+    }
+    let raw = tool.data.get("rawInput");
+    let from_input = raw.and_then(|r| {
+        Some((
+            r.get("file_path").or_else(|| r.get("path"))?.as_str()?,
+            r.get("content")?.as_str()?,
+        ))
+    });
+    let diffs = tool
+        .data
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == "diff")
+        .filter_map(|c| Some((c["path"].as_str()?, c["newText"].as_str()?)));
+    from_input
+        .into_iter()
+        .chain(diffs)
+        .find_map(|(path, text)| {
+            (plan_path(path) && !text.trim().is_empty()).then(|| text.trim().to_owned())
+        })
+}
+
 fn is_generic_title(title: Option<&str>) -> bool {
     let key = title.unwrap_or("").trim().to_lowercase();
     key.is_empty() || key == "tool" || key == "tool call" || key == "terminal"

@@ -47,6 +47,13 @@ fn codex_found_only_on_the_login_shell_path_is_a_provider() {
         ),
     )
     .unwrap();
+    let state = dir.0.join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::write(
+        state.join("settings.json"),
+        r#"{"providerInstances":{"customGrok":{"driver":"grok","config":{}}}}"#,
+    )
+    .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_conn-server"))
         .args([
             "serve",
@@ -55,7 +62,7 @@ fn codex_found_only_on_the_login_shell_path_is_a_provider() {
             "--no-browser",
             "--state-dir",
         ])
-        .arg(dir.0.join("state"))
+        .arg(state)
         .arg(&dir.0)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -82,6 +89,7 @@ fn codex_found_only_on_the_login_shell_path_is_a_provider() {
     let _ = child.kill();
     let _ = child.wait();
     let names = names.expect("the server named its providers");
+    assert!(names.split(", ").any(|n| n == "customGrok"), "{names}");
     assert!(
         names.split(", ").any(|n| n == "codex"),
         "codex is not a provider: {names}"

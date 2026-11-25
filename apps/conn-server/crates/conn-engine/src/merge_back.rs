@@ -36,6 +36,22 @@ pub(crate) fn defers_history(message: &Value) -> bool {
     (no_attachments && text == "/compact") || text == "/goal" || text.starts_with("/goal ")
 }
 
+/// A native user slash command must stay at the start of its prompt. Absolute
+/// path arguments such as `/src/main.rs` remain ordinary conversation text.
+pub(crate) fn defers_inline(message: &Value) -> bool {
+    if defers_history(message) {
+        return true;
+    }
+    if message["role"] != "user" {
+        return false;
+    }
+    conn_support::text::js_trim(message["text"].as_str().unwrap_or_default())
+        .split(conn_support::text::is_js_space)
+        .next()
+        .and_then(|word| word.strip_prefix('/'))
+        .is_some_and(|word| !word.is_empty() && !word.contains('/'))
+}
+
 /// `isPendingForRun`: the handoffs a run's turn delivers. Its own, and those of an earlier
 /// run on the same provider thread that never delivered them (it failed, was stopped, or was a
 /// compaction or goal turn).
@@ -66,7 +82,7 @@ pub(crate) fn pending_for_run(
                             Some("completed") => {
                                 h.get("delivery").is_none_or(Value::is_null)
                                     && messages.iter().any(|m| {
-                                        m["id"] == source["userMessageId"] && defers_history(m)
+                                        m["id"] == source["userMessageId"] && defers_inline(m)
                                     })
                             }
                             _ => false,
@@ -483,6 +499,17 @@ mod tests {
             let message = json!({"text": text, "attachments": attachments});
             assert_eq!(defers_history(&message), defers, "{text}");
         }
+    }
+
+    #[test]
+    fn native_commands_and_absolute_paths_have_different_delivery_rules() {
+        assert!(defers_inline(
+            &json!({"role":"user","text":" /review this"})
+        ));
+        assert!(!defers_inline(&json!({"role":"user","text":"/src/lib.rs"})));
+        assert!(!defers_inline(
+            &json!({"role":"assistant","text":"/review this"})
+        ));
     }
 
     #[test]

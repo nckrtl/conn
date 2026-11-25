@@ -479,7 +479,9 @@ mod tests {
             attach["providerInstanceId"] = json!(instance);
         }
         client.request(id, "terminal.attach", attach);
-        client.until(|f| f["_tag"] == "Chunk").await;
+        client
+            .until(|f| f["_tag"] == "Chunk" && f["requestId"] == id)
+            .await;
         client.send(json!({"_tag": "Ack", "requestId": id}));
         client.request(
             id + 1,
@@ -492,9 +494,16 @@ mod tests {
             let Some((_, frame)) = client.next(Duration::from_secs(15)).await else {
                 panic!("no marker from {terminal}; the shell printed {seen:?}");
             };
-            if frame["_tag"] == "Chunk" && frame["requestId"] == id {
-                client.send(json!({"_tag": "Ack", "requestId": id}));
+            if is_exit(&frame, id + 1) {
+                assert_eq!(
+                    frame["exit"]["_tag"], "Success",
+                    "terminal write failed: {frame}"
+                );
             }
+            if frame["_tag"] != "Chunk" || frame["requestId"] != id {
+                continue;
+            }
+            client.send(json!({"_tag": "Ack", "requestId": id}));
             seen.push_str(&output(&frame));
             // The echoed command line holds `${`, the output does not.
             let printed = seen

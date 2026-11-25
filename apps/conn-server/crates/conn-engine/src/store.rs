@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS threads (
   thread      TEXT NOT NULL,
   shell       TEXT
 );
+CREATE INDEX IF NOT EXISTS threads_usage_limited ON threads(id)
+WHERE deleted=0 AND json_extract(shell,'$.status')='failed' AND json_extract(shell,'$.lastErrorClass')='usage_limit';
+CREATE TABLE IF NOT EXISTS fork_history (
+  fork_id TEXT PRIMARY KEY,
+  run_ids TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS entities (
   thread_id TEXT NOT NULL,
   kind      TEXT NOT NULL,
@@ -99,6 +105,8 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 -- The store's high-water mark reads the newest receipt at open.
 CREATE INDEX IF NOT EXISTS receipts_by_sequence ON receipts(sequence);
+CREATE INDEX IF NOT EXISTS recovery_stops_by_sequence ON receipts(sequence)
+WHERE command_type IN ('thread.stop', 'thread.settle', 'thread.auto-settle');
 ";
 
 /// A command's receipt: a key lookup, never a scan of the event log.
@@ -111,6 +119,14 @@ pub(crate) const TRANSCRIPT_INTERRUPTS_SQL: &str = "SELECT DISTINCT json_extract
      FROM entities WHERE thread_id = ?1 AND kind = 'turnItems'
      AND json_extract(body, '$.type') = 'run_interrupt_request'
      AND json_extract(body, '$.runId') IS NOT NULL";
+
+// The next queued run can reserve a provider row before it owns a native conversation.
+fn is_queued_provider_thread_placeholder(row: &Value) -> bool {
+    row["status"] == "not_loaded"
+        && row["firstRunOrdinal"].is_null()
+        && row["nativeThreadRef"].is_null()
+        && row["providerSessionId"].is_null()
+}
 
 /// `inheritedRunFork`: the source thread and run of a run fork that is not a side chat.
 fn inherited_run_fork(thread: &Value) -> Option<(String, String)> {
@@ -194,7 +210,7 @@ fn streams_only(event_type: &str, payload: &Value) -> bool {
     if event_type == "turn-item.updated"
         && matches!(
             payload.get("type").and_then(Value::as_str),
-            Some("secret_request" | "link_request" | "user_message")
+            Some("secret_request" | "link_request" | "user_message" | "error")
         )
     {
         return false;
@@ -326,6 +342,7 @@ pub(crate) struct Store {
     /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
     /// after its transaction), so a caller that goes away cannot keep clients from seeing it.
     pub(crate) published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    pub(crate) limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
     /// The engine that may write here ([`Store::take_ownership`]); `None` for a store opened
     /// without an engine.
     owner: Option<Owner>,
@@ -469,10 +486,72 @@ impl Store {
             attention: None,
             effects_wake: std::sync::Arc::default(),
             published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
+            limit_recovery_wake: Default::default(),
             owner: None,
             #[cfg(test)]
             settle_faults: std::cell::Cell::new(0),
         })
+    }
+
+    /// Older native subagents had a provider row and a parent link, but no active
+    /// provider pointer. Only restore an unambiguous, untouched native child.
+    fn restore_native_child_threads(&mut self) -> StoreResult<()> {
+        const KEY: &str = "native_child_active_provider_v1";
+        if self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+                [KEY],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(err)?
+        {
+            return Ok(());
+        }
+        let mut tx = self.tx()?;
+        let children = {
+            let mut stmt = tx.tx.prepare(
+                "WITH children AS MATERIALIZED (
+                     SELECT id, json_extract(thread, '$.lineage.parentThreadId') AS parent_id FROM threads
+                     WHERE deleted = 0 AND json_extract(thread, '$.activeProviderThreadId') IS NULL
+                       AND json_extract(thread, '$.lineage.relationshipToParent') = 'subagent'
+                 )
+                 SELECT child.id, provider.id FROM children child
+                 JOIN entities link ON link.thread_id = child.parent_id AND link.kind = 'subagents'
+                     AND json_extract(link.body, '$.childThreadId') = child.id
+                 JOIN entities provider ON provider.thread_id = child.id AND provider.kind = 'providerThreads'
+                     AND provider.id = json_extract(link.body, '$.providerThreadId')
+                 WHERE json_extract(link.body, '$.origin') = 'provider_native'
+                   AND json_extract(provider.body, '$.appThreadId') = child.id
+                   AND json_extract(provider.body, '$.nativeThreadRef.nativeId') IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM entities other WHERE other.thread_id = child.id
+                       AND (other.kind = 'runs' OR (other.kind = 'providerThreads' AND other.id != provider.id
+                           AND json_extract(other.body, '$.appThreadId') = child.id
+                           AND json_extract(other.body, '$.nativeThreadRef.nativeId') IS NOT NULL)))
+                   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.thread_id = child.id AND e.type = 'thread.provider-switched')"
+            ).map_err(err)?;
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(err)?
+        };
+        for (child, provider) in children {
+            if let Some(mut thread) = tx.thread(&child)? {
+                thread["activeProviderThreadId"] = json!(provider);
+                // Existing clients resuming an event cursor must see the repair too.
+                tx.append(
+                    Draft::new(&child, "thread.metadata-updated", thread).payload_instance(),
+                )?;
+            }
+        }
+        tx.tx
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, 1)",
+                [KEY],
+            )
+            .map_err(err)?;
+        tx.commit(None)?;
+        Ok(())
     }
 
     /// Makes this store's engine the one that may write: a newer epoch fences every engine
@@ -510,6 +589,8 @@ impl Store {
             epoch,
             released: std::sync::Arc::clone(&released),
         });
+        // Repairs append domain events, so they need the same lease as a user command.
+        self.restore_native_child_threads()?;
         Ok(released)
     }
 
@@ -580,6 +661,7 @@ impl Store {
             effects_wake: self.effects_wake.clone(),
             effects_written: false,
             published: self.published.clone(),
+            limit_recovery_wake: self.limit_recovery_wake.clone(),
             owner: self.owner.clone(),
             now_ms,
             generates_titles,
@@ -841,6 +923,18 @@ impl Store {
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(err)?
             .map(|row| row.map_err(err))
+            .collect()
+    }
+
+    pub(crate) fn limit_recovery_page(&self, after: &str) -> StoreResult<Vec<Value>> {
+        let mut statement = self.conn.prepare(
+            "SELECT shell FROM threads WHERE deleted = 0 AND json_extract(shell, '$.status') = 'failed'
+                AND json_extract(shell, '$.lastErrorClass') = 'usage_limit' AND id > ?1 ORDER BY id LIMIT 32"
+        ).map_err(err)?;
+        statement
+            .query_map([after], |row| row.get::<_, String>(0))
+            .map_err(err)?
+            .map(|row| parse(row.map_err(err)?))
             .collect()
     }
 
@@ -1902,6 +1996,7 @@ pub(crate) struct Tx<'a> {
     effects_wake: std::sync::Arc<tokio::sync::Notify>,
     effects_written: bool,
     published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
     owner: Option<Owner>,
     now_ms: u64,
     zone: jiff::tz::TimeZone,
@@ -2275,7 +2370,47 @@ impl Tx<'_> {
             .map_err(err)?;
         // Every other event moves the thread's `updatedAt` to its time, in the row and in the
         // stored thread, as T3's `writeThreadTouches`.
-        if !payload_sets_updated_at {
+        let row = &event["payload"];
+        if event_type == "provider-thread.updated"
+            && row["appThreadId"] == thread_id
+            && !is_queued_provider_thread_placeholder(row)
+        {
+            if let Some(mut selected) = self.thread(&thread_id)?
+                && selected["activeProviderThreadId"] != row["id"]
+            {
+                let other_instance = row["providerInstanceId"].is_string()
+                    && selected["providerInstanceId"].is_string()
+                    && selected["providerInstanceId"] != row["providerInstanceId"];
+                let released = match row["providerSessionId"].as_str() {
+                    Some(session) if !other_instance => self
+                        .entity(&thread_id, "providerSessions", session)?
+                        .is_some_and(|owner| {
+                            matches!(owner["status"].as_str(), Some("stopped" | "error"))
+                        }),
+                    _ => false,
+                };
+                if other_instance || released {
+                    // Clients also project a provider-thread event as an activation. Keep the
+                    // historical row update and restore the current selection in the same batch.
+                    selected["updatedAt"] = json!(self.now);
+                    self.append(
+                        Draft::new(&thread_id, "thread.metadata-updated", selected)
+                            .payload_instance(),
+                    )?;
+                    return Ok(seq);
+                }
+            }
+            // Native child threads do not start an app run. Their first provider row
+            // activates their conversation just as it does on an ordinary app thread.
+            self.tx
+                .execute(
+                    "UPDATE threads SET activity_at = ?2,
+                    thread = json_set(thread, '$.updatedAt', ?2, '$.activeProviderThreadId', ?3)
+                 WHERE id = ?1",
+                    params![thread_id, self.now, row["id"].as_str()],
+                )
+                .map_err(err)?;
+        } else if !payload_sets_updated_at {
             self.tx
                 .execute(
                     "UPDATE threads SET activity_at = ?2, thread = json_set(thread, '$.updatedAt', ?2)
@@ -2451,6 +2586,50 @@ impl Tx<'_> {
                 |row| row.get::<_, bool>(0),
             )
             .map_err(err)
+    }
+
+    /// Freeze membership at fork creation. A later rollback in the parent must not change it.
+    pub(crate) fn snapshot_fork_runs(
+        &self,
+        fork: &str,
+        source: &str,
+        through: u64,
+    ) -> StoreResult<()> {
+        self.tx
+            .execute(
+                "INSERT OR REPLACE INTO fork_history(fork_id, run_ids)
+             SELECT ?1, json_group_array(id) FROM entities WHERE thread_id = ?2 AND kind = 'runs'
+             AND ordinal <= ?3 AND json_extract(body, '$.status') != 'rolled_back'",
+                params![fork, source, through],
+            )
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Older and imported forks use the rollback timestamp, as in T3's getForkSourceRunIds.
+    pub(crate) fn fork_run_ids(
+        &self,
+        fork: &Value,
+        source: &str,
+        through: u64,
+    ) -> StoreResult<std::collections::HashSet<String>> {
+        let encoded: String = self
+            .tx
+            .query_row(
+                "SELECT COALESCE((SELECT run_ids FROM fork_history WHERE fork_id = ?1),
+               (SELECT json_group_array(id) FROM entities WHERE thread_id = ?2 AND kind = 'runs'
+               AND ordinal <= ?3 AND NOT COALESCE(json_extract(body, '$.status') = 'rolled_back'
+                 AND julianday(json_extract(body, '$.completedAt')) < julianday(?4), 0)))",
+                params![
+                    fork["id"].as_str(),
+                    source,
+                    through,
+                    fork["createdAt"].as_str()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
+        serde_json::from_str(&encoded).map_err(|e| format!("invalid fork run IDs: {e}"))
     }
 
     pub(crate) fn entity(
@@ -2752,6 +2931,7 @@ impl Tx<'_> {
     /// Recomputes touched shell rows, records the receipt, and commits. Returns the sequence
     /// a client waits for: the last change of this write, or the high water if it wrote none.
     pub(crate) fn commit(mut self, receipt: Option<&ReceiptKey<'_>>) -> StoreResult<u64> {
+        let mut limited_thread_changed = false;
         for (thread_id, seq) in std::mem::take(&mut self.touched) {
             let previous: Option<(Option<String>, bool)> = self
                 .tx
@@ -2788,6 +2968,8 @@ impl Tx<'_> {
                 if previous.as_deref() == Some(text.as_str()) {
                     continue;
                 }
+                limited_thread_changed |=
+                    row["status"] == "failed" && row["lastErrorClass"] == "usage_limit";
                 if self.attention.is_some() {
                     let before = previous
                         .as_deref()
@@ -2863,6 +3045,9 @@ impl Tx<'_> {
             return Err(NOT_OWNER.into());
         }
         self.tx.commit().map_err(err)?;
+        if limited_thread_changed {
+            self.limit_recovery_wake.notify_one();
+        }
         *self.store_seq = self.next_seq;
         self.published.send_if_modified(|published| {
             let newer = high > *published;
@@ -3975,6 +4160,121 @@ mod tests {
         assert_eq!(ordinal(&tx, "next"), 4);
         tx.commit(None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_released_session_cannot_replace_the_current_conversation_on_the_same_instance() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut tx = store.tx().unwrap();
+        tx.append(Draft::new("t", "thread.created", json!({
+            "id":"t", "projectId":"p", "providerInstanceId":"claude", "activeProviderThreadId":"current"
+        }))).unwrap();
+        tx.append(Draft::new(
+            "t",
+            "provider-session.updated",
+            json!({
+                "id":"closed-session", "providerInstanceId":"claude", "status":"stopped"
+            }),
+        ))
+        .unwrap();
+        tx.append(Draft::new(
+            "t",
+            "provider-thread.updated",
+            json!({
+                "id":"retired", "appThreadId":"t", "providerInstanceId":"claude",
+                "providerSessionId":"closed-session", "status":"idle", "pendingBackgroundTasks":[]
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            tx.thread("t").unwrap().unwrap()["activeProviderThreadId"],
+            "current"
+        );
+        assert_eq!(
+            tx.entity("t", "providerThreads", "retired")
+                .unwrap()
+                .unwrap()["pendingBackgroundTasks"],
+            json!([])
+        );
+        tx.commit(None).unwrap();
+        assert_eq!(
+            store.stored_shell("t").unwrap().unwrap()["activeProviderThreadId"],
+            "current"
+        );
+    }
+
+    #[test]
+    fn native_child_provider_activation_survives_queueing_and_repairs_legacy_projections() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        {
+            let mut tx = store.tx().unwrap();
+            tx.append(Draft::new(
+                "parent",
+                "thread.created",
+                json!({"id":"parent","projectId":"p"}),
+            ))
+            .unwrap();
+            for child in ["child", "switched", "ambiguous"] {
+                let thread = json!({"id":child,"projectId":"p","lineage":{"parentThreadId":"parent","relationshipToParent":"subagent"}});
+                tx.append(Draft::new(child, "thread.created", thread.clone()))
+                    .unwrap();
+                tx.append(Draft::new("parent","subagent.updated",json!({"id":child,"childThreadId":child,"providerThreadId":"native","origin":"provider_native"}))).unwrap();
+                tx.append(Draft::new(child,"provider-thread.updated",json!({"id":"native","appThreadId":child,"status":"idle","nativeThreadRef":{"nativeId":"session"}}))).unwrap();
+                tx.append(Draft::new(child,"provider-thread.updated",json!({"id":"queued","appThreadId":child,"status":"not_loaded","firstRunOrdinal":null,"providerSessionId":null,"nativeThreadRef":null}))).unwrap();
+                tx.append(Draft::new(
+                    child,
+                    "provider-thread.updated",
+                    json!({"id":"unowned","appThreadId":null,"status":"idle"}),
+                ))
+                .unwrap();
+                assert_eq!(
+                    tx.thread(child).unwrap().unwrap()["activeProviderThreadId"],
+                    "native"
+                );
+                if child == "ambiguous" {
+                    tx.append(Draft::new(child, "provider-thread.updated", json!({"id":"other","appThreadId":child,"status":"idle","nativeThreadRef":{"nativeId":"other-session"}}))).unwrap();
+                }
+                if child == "switched" {
+                    tx.append(Draft::new(child, "thread.provider-switched", thread))
+                        .unwrap();
+                }
+            }
+            tx.commit(None).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "DELETE FROM meta WHERE key='native_child_active_provider_v1';
+             UPDATE threads SET thread=json_set(thread,'$.activeProviderThreadId',NULL),
+                 shell=json_set(shell,'$.activeProviderThreadId',NULL);",
+            )
+            .unwrap();
+        let before = store.high_water();
+        let _lease = store.take_ownership(None).unwrap();
+        let updates = store.stored_events_after(before, 5).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["event"]["type"], "thread.metadata-updated");
+        assert_eq!(
+            updates[0]["event"]["payload"]["activeProviderThreadId"],
+            "native"
+        );
+        for (child, expected) in [
+            ("child", json!("native")),
+            ("switched", Value::Null),
+            ("ambiguous", Value::Null),
+        ] {
+            assert_eq!(
+                store.thread_projection(child).unwrap().unwrap()["thread"]["activeProviderThreadId"],
+                expected
+            );
+            assert_eq!(
+                store.stored_shell(child).unwrap().unwrap()["activeProviderThreadId"],
+                expected
+            );
+        }
+        let boundary = store.high_water();
+        store.restore_native_child_threads().unwrap();
+        assert_eq!(store.high_water(), boundary);
     }
 
     #[test]

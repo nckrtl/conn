@@ -266,6 +266,20 @@ impl EngineHost for Host {
             .queue_instance_enabled(project_id, instance_id)
     }
 
+    fn usage_limit_preferences(&self) -> (bool, bool) {
+        let settings = self.environment.settings.raw();
+        let enabled = |key: &str| {
+            settings
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        (
+            enabled("autoResumeLimitedThreads"),
+            enabled("snoozeLimitedThreads"),
+        )
+    }
+
     fn response_streaming_mode(
         &self,
         project_id: Option<&str>,

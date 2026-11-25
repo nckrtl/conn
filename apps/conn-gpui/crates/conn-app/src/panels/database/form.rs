@@ -22,11 +22,10 @@ use super::store::{default_port_placeholder, name_placeholder, parse_port_input}
 
 /// Conn's `Button size="sm"` (`sm:h-7`, 28px; `text-sm`, 14px / 20px; `gap-1.5`, 6px;
 /// `px-[calc(--spacing(2.5)-1px)]`, 9px; `rounded-(--control-radius)`, 6px).
-const SM_BUTTON_HEIGHT_PX: f32 = 28.0;
-const SM_BUTTON_PAD_X_PX: f32 = 9.0;
+const SM_BUTTON_HEIGHT_PX: f32 = 30.0;
+const SM_BUTTON_PAD_X_PX: f32 = 12.0;
 const SM_TEXT_PX: f32 = 14.0;
 const SM_LINE_HEIGHT_PX: f32 = 20.0;
-const PILL_RADIUS_PX: f32 = 9999.0;
 
 /// State for the open connection editor form (`editing` in `DatabasePanel.tsx`).
 pub(crate) struct ConnectionFormState {
@@ -166,8 +165,11 @@ impl ConnectionFormState {
         let sqlite = driver == DatabaseDriver::Sqlite;
         let can_save = self.can_save();
 
-        // Driver selector inside `ToolbarGroup className="w-fit"`.
-        let mut driver_group = chrome::toolbar_group(tokens);
+        let mut driver_group = h_flex()
+            .overflow_hidden()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(to_hsla(tokens.shell_divider_header));
         for candidate in DatabaseDriver::ALL {
             let active = candidate == driver;
             let entity = entity.clone();
@@ -188,10 +190,9 @@ impl ConnectionFormState {
                         candidate.label(),
                         active,
                     )
-                    .h(px(24.0))
-                    .px(px(7.0))
+                    .h(px(28.0))
+                    .px(px(8.0))
                     .items_center()
-                    .rounded(px(PILL_RADIUS_PX))
                     .cursor_pointer()
                     .text_size(px(XS_TEXT_PX))
                     .line_height(px(XS_LINE_HEIGHT_PX))
@@ -391,11 +392,11 @@ fn soft_text_input(state: &Entity<InputState>, tokens: &Tokens) -> impl IntoElem
         .w_full()
         .h(px(chrome::CONTROL_HEIGHT_PX))
         .items_center()
-        .rounded(px(PILL_RADIUS_PX))
+        .rounded(px(5.0))
         .bg(to_hsla(tokens.shell_field))
         .border_1()
         .border_color(to_hsla(tokens.shell_divider_header))
-        .px(px(12.0))
+        .px(px(8.0))
         .text_size(px(UI_TEXT_PX))
         .text_color(to_hsla(tokens.foreground))
         .hover(move |s| s.bg(hover))

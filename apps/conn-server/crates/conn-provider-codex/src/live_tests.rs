@@ -305,13 +305,15 @@ const answers = {
 };
 const turn = (id) => ({ id, status: "inProgress", items: [], startedAt: null });
 let starts = 0;
+let opened = false;
 require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
   if (msg.method === undefined) return;
   const turnId = msg.method === "turn/interrupt" ? ` ${msg.params.turnId}` : "";
   fs.appendFileSync(LOG, `${msg.id === undefined ? "notify " : ""}${msg.method}${turnId}\n`);
-  if (msg.id === undefined || msg.method === HOLD) return;
+  if (msg.id === undefined || (opened && msg.method === HOLD)) return;
+  if (msg.method === "thread/start") opened = true;
   if (msg.method === "turn/start" && starts++ === 0) {
     setTimeout(() => {
       if (MODE === "answer") {

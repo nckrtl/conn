@@ -607,6 +607,7 @@ async fn run_title(
     };
     let provider = CodexProvider::new("codex".into(), config);
     let request = conn_provider::TextGenerationRequest {
+        project_cwd: None,
         operation: "generateThreadTitle".into(),
         cwd: dir.to_string_lossy().into_owned(),
         prompt: calls["request"]["prompt"]

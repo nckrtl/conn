@@ -89,7 +89,12 @@ impl AntigravityProvider {
     }
 
     /// The agent process for a session in `cwd`: `agy acp` from the resolved executable.
-    async fn session_spawner(&self, cwd: &str) -> ProviderResult<session::Spawner> {
+    async fn session_spawner(
+        &self,
+        cwd: &str,
+        thread: Option<&str>,
+        servers: &[conn_provider::McpServer],
+    ) -> ProviderResult<session::Spawner> {
         #[cfg(test)]
         if let Some(spawner) = &self.test_spawner {
             return Ok(spawner.clone());
@@ -101,11 +106,15 @@ impl AntigravityProvider {
                 operation: "resolve",
                 detail,
             })?;
+        let mut env = self.base_env();
+        if let Some(thread) = thread {
+            session::apply_thread_environment(&mut env, thread, servers, &self.self_command());
+        }
         Ok(spawner(
             executable,
             self.dirs.clone(),
             self.settings.clone(),
-            self.base_env(),
+            env,
             self.self_command(),
             cwd.to_owned(),
         ))
@@ -251,9 +260,9 @@ impl AntigravityProvider {
         mcp_servers: Vec<conn_provider::McpServer>,
         purpose: Purpose,
     ) -> Result<(AcpSession, mpsc::Receiver<conn_provider::ProviderEvent>), OpenError> {
-        let (workspace, control) = match purpose {
-            Purpose::Thread => (true, OpenControl::default()),
-            Purpose::Throwaway(control) => (false, control),
+        let (thread, control) = match purpose {
+            Purpose::Thread(id) => (Some(id), OpenControl::default()),
+            Purpose::Throwaway(control) => (None, control),
         };
         if let Some(issue) = self.settings.config_issue() {
             return Err(OpenError::Other(ProviderError::Failed {
@@ -261,7 +270,10 @@ impl AntigravityProvider {
                 detail: issue.into(),
             }));
         }
-        let spawner = self.session_spawner(&cwd).await?;
+        let workspace = thread.is_some();
+        let spawner = self
+            .session_spawner(&cwd, thread.as_deref(), &mcp_servers)
+            .await?;
         let (dirs, settings) = (self.dirs.clone(), self.settings.clone());
         tokio::task::spawn_blocking(move || antigravity::prepare_profile(&dirs, &settings))
             .await
@@ -275,6 +287,8 @@ impl AntigravityProvider {
         let config = session::Config {
             flush_interval: Some(session::FLUSH_INTERVAL),
             finalize_debounce: session::FINALIZE_DEBOUNCE,
+            #[cfg(feature = "fixture-replay")]
+            deferred_finalize_gate: None,
             flavor: &ANTIGRAVITY,
             instance_id: self.instance_id.as_str().to_owned(),
             provider_session_id,
@@ -295,6 +309,8 @@ impl AntigravityProvider {
             self_command,
             // A thread applies the configured default; a model refresh starts, as T3's does,
             // from the model the agent has selected.
+            profile: Some(self.dirs.profile.clone()),
+            skill_cli: None,
             default_model: workspace
                 .then(|| antigravity::catalog(&self.config.model_manifest))
                 .flatten()
@@ -420,7 +436,11 @@ impl AntigravityProvider {
             .map_err(|error| ProviderError::Failed {
                 operation: "refresh-models",
                 detail: match error {
-                    OpenError::Aborted => REFRESH_TIMED_OUT.to_owned(),
+                    OpenError::Aborted
+                    | OpenError::Other(ProviderError::Failed {
+                        operation: "acp_setup_timeout",
+                        ..
+                    }) => REFRESH_TIMED_OUT.to_owned(),
                     error => refresh_failure_detail(&ProviderError::from(error)),
                 },
             })
@@ -454,7 +474,7 @@ impl AntigravityProvider {
 /// refresh or a credential check) runs in a scratch folder that is no workspace, with its own
 /// abort and steps.
 enum Purpose {
-    Thread,
+    Thread(String),
     Throwaway(OpenControl),
 }
 
@@ -653,7 +673,10 @@ impl Provider for AntigravityProvider {
 
     fn capabilities(&self) -> BoxFuture<'_, ProviderResult<ProviderCapabilities>> {
         Box::pin(async move {
-            from_json((ANTIGRAVITY.capabilities)()).map_err(|e| ProviderError::Protocol {
+            from_json(antigravity::runtime_capabilities(
+                lock(&self.observed).version.as_deref(),
+            ))
+            .map_err(|e| ProviderError::Protocol {
                 detail: e.to_string(),
             })
         })
@@ -689,6 +712,81 @@ impl Provider for AntigravityProvider {
             if load {
                 let _ = self.load_models().await;
             }
+        })
+    }
+
+    fn native_child_work(
+        &self,
+        root_session_id: String,
+        native_task_id: String,
+        launch: Value,
+        siblings: Vec<Value>,
+    ) -> BoxFuture<'_, ProviderResult<Vec<Value>>> {
+        let profile = self.dirs.profile.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::antigravity_work::children(
+                    &profile,
+                    &root_session_id,
+                    &native_task_id,
+                    &launch,
+                    &siblings,
+                )
+            })
+            .await
+            .map_err(|_| ProviderError::SessionStopped)
+        })
+    }
+
+    fn generate_text(
+        &self,
+        request: conn_provider::TextGenerationRequest,
+    ) -> BoxFuture<'_, ProviderResult<Value>> {
+        Box::pin(async move {
+            if !self.settings.enabled || request.investigate {
+                return Err(ProviderError::Unsupported {
+                    operation: "generate_text",
+                });
+            }
+            let profile = self.dirs.profile.clone();
+            let parent = self.dirs.runtime_temp.join("text");
+            // Own the empty directory across executable discovery. Cancellation can also occur
+            // while the blocking creation is returning its result to this task.
+            struct Scratch(Option<PathBuf>);
+            impl Drop for Scratch {
+                fn drop(&mut self) {
+                    if let Some(dir) = &self.0 {
+                        let _ = std::fs::remove_dir(dir);
+                    }
+                }
+            }
+            let mut scratch = tokio::task::spawn_blocking(move || {
+                if !crate::text_generation::profile_allows_generation(&profile) {
+                    return Err(std::io::Error::other("Antigravity text generation is unavailable for profiles with global hooks or MCP configuration."));
+                }
+                make_run_temp(&parent).map(|dir| Scratch(Some(dir)))
+            }).await.map_err(|_| ProviderError::SessionStopped)?.map_err(|e| ProviderError::Failed {operation:"generate_text",detail:e.to_string()})?;
+            let cwd = scratch
+                .0
+                .as_deref()
+                .ok_or(ProviderError::SessionStopped)?
+                .to_string_lossy()
+                .into_owned();
+            let spawner = self.session_spawner(&cwd, None, &[]).await?;
+            // From the first poll of generate onward, the worker owns cleanup through child exit.
+            scratch.0.take();
+            crate::text_generation::Helper {
+                cwd,
+                spawner,
+                antigravity: Some(crate::text_generation::Antigravity {
+                    profile: self.dirs.profile.clone(),
+                    auth_method: self.settings.auth_method.clone(),
+                    default_model: antigravity::catalog(&self.config.model_manifest)
+                        .and_then(|catalog| catalog.default_model),
+                }),
+            }
+            .generate(request)
+            .await
         })
     }
 
@@ -731,10 +829,12 @@ impl Provider for AntigravityProvider {
                     selection["model"].as_str().unwrap_or("").to_owned(),
                     input.provider_session_id.as_str().to_owned(),
                     input.mcp_servers.clone(),
-                    Purpose::Thread,
+                    Purpose::Thread(input.thread_id.as_str().to_owned()),
                 )
                 .await?;
             let now = SystemEnv.now();
+            let (initialize, _) = session.handshake().await;
+            session.bind_thread(input.thread_id.as_str()).await;
             let row = json!({
                 "id": input.provider_session_id.as_str(),
                 "driver": ANTIGRAVITY.driver,
@@ -742,7 +842,7 @@ impl Provider for AntigravityProvider {
                 "status": "ready",
                 "cwd": cwd,
                 "model": selection["model"],
-                "capabilities": (ANTIGRAVITY.capabilities)(),
+                "capabilities": session.negotiated_capabilities(antigravity::runtime_capabilities(initialize["agentInfo"]["version"].as_str())).await,
                 "createdAt": now,
                 "updatedAt": now,
                 "lastError": null,

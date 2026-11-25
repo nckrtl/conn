@@ -4,6 +4,12 @@
 
 Keep this file accurate. Update it whenever a milestone lands, a proof passes, or a blocker is found.
 
+## Approved desktop panel reference, 25 November 2026
+
+The desktop reference is `apps/lab-gpui` at `b4f0ac5512b823431dea8cca12eb84ace6502e21`. The native VM captured MCP and Database at 1440 × 900. Both search controls line up with their 32px list rows, with 6px below search and 2px between rows. Database result rows and MCP log entries use 10px vertical padding. A real SQLite query returned 23. A stdio MCP tool read the same database. Overview displayed its declared field and whole-input examples. A second stdio session verified all four hint pills.
+
+The VM also opened an Orbit task from thread details, expanded its subtask brief and deliverables, opened and returned from a workspace file, and sent GET and HEAD requests. HEAD displayed the 204 status and empty response. The pull request inbox filtered a live GitHub list through the selected Conn server, opened a three-file breakdown, then loaded the PR detail and code patch.
+
 ## Milestones (from `GOAL.md`)
 
 | Phase | Area | State | Proof |
@@ -83,7 +89,7 @@ PHP files open in Zed by default. Hold ⌘ over a PHP class to prepare its decla
   - Thread items decode straight into the variant struct (`wire::decode_thread_stream_item`) instead of through `tagged_union!`'s whole-item `Value` DOM; `TCP_NODELAY` (`disable_nagle = true`) on the socket; `ChatView::set_thread` skips unchanged timelines via `ThreadState::revision`; `RowCache::sync` keeps unchanged rows instead of cloning them.
   - Measured (synthetic deduped snapshots, `conn_state::testkit`): decode 24 MiB 50–141 ms (tagged union) → 42–73 ms (direct), 6 MiB 12–19 → 11–12 ms (release); `ThreadState::apply` 6 ms for 12k entries; `RowCache::sync` 32 ms (dev, opt-level 0) for 12k entries, previously repeated on every event batch; mock-server end to end, 6 MiB snapshot in 48 KiB frame parts → decoded `ClientEvent` 28 ms after `subscribe_thread`.
   - `CONN_GPUI_PERF_LOG=1` logs `app.open_thread` → `client.subscribe_sent` → `client.decoded` (bytes, receive and decode ms) → `app.applied` → `app.chat_synced` (RowCache ms) → `app.first_paint`, each with ms since open.
-  - **Server-backed queued messages:** `ThreadState` now projects `TimelineEntry::QueuedUser` (no longer dropping pending `QueuedTurn` items) with live edit/cancel/promotion handling; `ChatView` renders Conn's dashed-border queued bubbles with attachment chips, timestamps, `↑ Send now`, inline composer Edit (`Esc` cancels, check button saves), and `×` Remove wired to `queued-message.promote-to-steer` / `queued-run.{start,edit,cancel}`.
+  - **Server-backed queued messages:** `ThreadState` now projects `TimelineEntry::QueuedUser` (no longer dropping pending `QueuedTurn` items) with live edit/cancel/promotion handling; `ChatView` renders queued bubbles with a raised fill, a dashed outline, and the regular message attachment layout below the text, timestamps, `↑ Send now`, inline composer Edit (`Esc` cancels, check button saves), and `×` Remove wired to `queued-message.promote-to-steer` / `queued-run.{start,edit,cancel}`.
   - **1:1 Parity Matrices (`docs/parity/`):** Completed exhaustive file-by-file audits against `apps/web/src/components/` across all 4 surfaces ([`composer.md`](./parity/composer.md), [`timeline.md`](./parity/timeline.md), [`shell-sidebar.md`](./parity/shell-sidebar.md) incl. Section 8 `ThreadDetailsCard`, and [`panels.md`](./parity/panels.md)), locked the 1:1 porting rule in `AGENTS.md`, and shipped initial 1:1 fixes (`liveThoughtLine` first-sentence cutoff, continuous live shimmer, `Thinking` row before first work group, Queue/Steer button on typing while running, composer placeholder alignment, and un-maximizing the right panel on thread selection).
 - **Orbit `agent` node role, `OrbitProjectsClient`, and keepalive fix (2026-11-22):**
   - Locked Section 5 in [`docs/scope.md`](./scope.md): dedicated Orbit `agent`-role node (`mini` first, later an agent VPS) as the General orchestrator entry point, and Orbit as single source of truth for Projects.

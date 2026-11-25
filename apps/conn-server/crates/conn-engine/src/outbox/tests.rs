@@ -79,8 +79,19 @@ fn every_effect_round_trips_under_its_effect_type() {
             checkpoint_id: "k".into(),
             scope_id: "s".into(),
             restore_files: Some(false),
+            portable: false,
             resume_snapshot: None,
         }),
+        Effect::RenameThread {
+            thread_id: "t".into(),
+            title: "new title".into(),
+        },
+        Effect::StopSubagent {
+            thread_id: "t".into(),
+            task_id: "child".into(),
+            provider_session_id: "session".into(),
+            provider_thread: json!({"id":"p"}),
+        },
         Effect::CaptureCheckpoint {
             thread_id: "t".into(),
             run_id: "r".into(),
@@ -90,6 +101,7 @@ fn every_effect_round_trips_under_its_effect_type() {
             thread_id: "t".into(),
             run_id: "r".into(),
             message_id: "m".into(),
+            model_selection: None,
         },
         Effect::Interrupt {
             thread_id: "t".into(),
@@ -166,6 +178,56 @@ async fn rows_commit_with_their_command_and_wake_the_worker() {
         .await
         .expect("the commit wakes the worker");
     assert_eq!(claimed(&t.1).len(), 1);
+}
+
+#[test]
+fn steer_receipts_preserve_send_order_and_allow_native_control() {
+    let mut t = TempStore::new("steer-control");
+    let steer = |id: &str| Effect::Steer {
+        thread_id: "t".into(),
+        run_id: "r".into(),
+        message_id: id.into(),
+        model_selection: None,
+    };
+    enqueue(
+        &mut t.1,
+        &[
+            steer("a"),
+            steer("b"),
+            Effect::RenameThread {
+                thread_id: "t".into(),
+                title: "new title".into(),
+            },
+            Effect::Respond {
+                thread_id: "t".into(),
+                request: json!({"requestId":"permission"}),
+            },
+            Effect::Interrupt {
+                thread_id: "t".into(),
+                run_id: "r".into(),
+            },
+        ],
+    );
+    let first = claimed(&t.1);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].2, "provider-turn.steer");
+    for kind in ["runtime-request.respond", "provider-turn.interrupt"] {
+        let next = claimed(&t.1);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].2, kind);
+        assert!(claimed(&t.1).is_empty());
+        t.1.settle_effect(next[0].0, Settled::Succeeded, None)
+            .unwrap();
+    }
+    assert!(
+        claimed(&t.1).is_empty(),
+        "the second steer cannot overtake the first"
+    );
+    t.1.settle_effect(first[0].0, Settled::Succeeded, None)
+        .unwrap();
+    let second = claimed(&t.1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].2, "provider-turn.steer");
 }
 
 /// "allows only one worker to claim an available effect", "runs distinct threads concurrently
@@ -361,6 +423,7 @@ fn a_replaced_engine_cannot_move_a_rollback_on() {
             checkpoint_id: "k".into(),
             scope_id: "s".into(),
             restore_files: Some(false),
+            portable: false,
             resume_snapshot: None,
         })],
     )
@@ -487,6 +550,7 @@ fn rollback_row(thread: &str, command: &str) -> Effect {
         checkpoint_id: "k".into(),
         scope_id: "s".into(),
         restore_files: Some(false),
+        portable: false,
         resume_snapshot: None,
     })
 }

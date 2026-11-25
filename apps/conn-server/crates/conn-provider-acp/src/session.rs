@@ -118,6 +118,8 @@ pub(crate) struct Config {
     /// `ACP_DEFERRED_FINALIZE_DEBOUNCE` (3 s); the replay shortens it, as T3's test clock
     /// skips it.
     pub finalize_debounce: Duration,
+    #[cfg(feature = "fixture-replay")]
+    pub deferred_finalize_gate: Option<crate::DeferredFinalizeGate>,
     pub flavor: &'static Flavor,
     pub instance_id: String,
     pub provider_session_id: String,
@@ -141,6 +143,8 @@ pub(crate) struct Config {
     /// The catalog's default model, used when the selection asks for the default
     /// (`applyAntigravityAcpModelSelection`'s `defaultModel`).
     pub default_model: Option<String>,
+    pub profile: Option<std::path::PathBuf>,
+    pub skill_cli: Option<(String, Vec<(String, String)>)>,
     /// Told about the session's config options and commands as the agent reports them.
     pub observer: Option<Observer>,
 }
@@ -218,10 +222,38 @@ struct State<E: Env> {
     prompt_seq: u64,
     /// The request id of the running `session/prompt`.
     prompt_request: Option<i64>,
+    /// Antigravity can ask us to retry an overlapping prompt once its current work is idle.
+    retry_prompt: Option<J>,
+    /// Until its native echo, the first request could still be rejected as busy.
+    awaiting_initial_prompt: bool,
+    /// Antigravity's overlapping prompt is provisional until its own user echo or RPC reply.
+    pending_steer: Option<PendingSteer>,
+    /// Once a steer is queued, subsequent steers for this turn must wait behind it.
+    queue_steers: bool,
+    /// Duplicate text has no unique wire echo. Its request id still proves acceptance.
+    prompt_texts: std::collections::HashSet<String>,
     /// The prompt id of the running turn, for Grok's `prompt_complete`.
     active_prompt: Option<(u64, String)>,
+    detached_requests: Vec<(RequestId, Value)>,
+    step_boundary: i64,
+    resumed_outcome: bool,
+    last_progress: tokio::time::Instant,
+    prompt_watchdog: Option<tokio::task::JoinHandle<()>>,
+    commands: Option<Vec<String>>,
+    previous_mode: Option<String>,
     instruction_state: Option<InstructionState>,
     delivered_notes: Option<String>,
+    delivered_context: std::collections::HashMap<String, String>,
+    snapshot: crate::snapshot::Snapshot,
+    loading_snapshot: Option<crate::snapshot::Snapshot>,
+    snapshot_enabled: bool,
+    snapshot_needs_load: bool,
+    app_thread: Option<String>,
+    activation_epoch: u64,
+    replay_activity: Option<(
+        String,
+        tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    )>,
     /// What the running prompt delivers once it succeeds.
     delivery: Option<Delivery>,
     flush_armed: bool,
@@ -265,12 +297,24 @@ fn is_startup_metadata(params: &Value) -> bool {
     )
 }
 
+struct PendingSteer {
+    request: i64,
+    echo: Option<String>,
+    entries: Vec<conn_provider::AppContextEntry>,
+    marker: Option<u64>,
+    accepted: tokio::sync::oneshot::Sender<ProviderResult<()>>,
+    // The preceding prompt can reply before this steer. It remains the active request
+    // if the peer subsequently declines the steer.
+    previous_reply: Option<(i64, Result<Value, CallError>)>,
+}
+
 type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
 
 /// What a prompt carried (`promptParts`): recorded only when the prompt succeeds, as T3
 /// records `promptInstructionStates` and `promptRuntimeInstructions` in the reply callback.
 #[derive(Debug)]
 struct Delivery {
+    app_context: Vec<conn_provider::AppContextEntry>,
     instruction_state: Option<InstructionState>,
     notes: Option<String>,
     /// The compaction marker the prompt saw when it was built.
@@ -293,6 +337,9 @@ impl std::fmt::Debug for AcpSession {
 struct Inner {
     config: Config,
     spawner: Spawner,
+    activation: Mutex<()>,
+    command_updates: tokio::sync::Notify,
+    pending_background: std::sync::atomic::AtomicBool,
     state: Mutex<State<DynEnv>>,
     /// The run whose start Stop abandoned (`abandon_turn_start`). Outside `state`, which a
     /// start holds across awaits; one is enough, as a stale id matches no later run.
@@ -462,50 +509,8 @@ impl AcpSession {
         let flavor = inner.config.flavor;
         let run_id = input.run_id.as_str();
         inner.check_abandoned(run_id)?;
-        if inner.state.lock().await.restart_required {
-            // A new agent loads the session (T3 `restartRuntimeAfterTeardownIfRequired`).
-            let connection = inner.start_runtime().await?;
-            let initialize = match inner.initialize(&connection).await {
-                Ok(initialize) => initialize,
-                Err(error) => {
-                    inner.end_runtime().await;
-                    return Err(error);
-                }
-            };
-            let session_id = inner
-                .state
-                .lock()
-                .await
-                .session_id
-                .clone()
-                .unwrap_or_default();
-            // `resumeMethod: "resume"` (Antigravity): `session/resume` when the agent offers it.
-            let method = if inner.config.flavor.resume
-                && !initialize["agentCapabilities"]["sessionCapabilities"]["resume"].is_null()
-            {
-                "session/resume"
-            } else {
-                "session/load"
-            };
-            let setup = match connection
-                .call(
-                    method,
-                    inner.session_setup_params(&initialize, Some(&session_id)),
-                )
-                .await
-            {
-                Ok(setup) => setup,
-                Err(error) => {
-                    inner.end_runtime().await;
-                    return Err(failed(inner.config.flavor, method, &error));
-                }
-            };
-            let mut state = inner.state.lock().await;
-            state.initialize = initialize;
-            state.setup = setup;
-            state.restart_required = false;
-            state.active_model = None;
-        }
+        let _transition = inner.activation.lock().await;
+        inner.ensure_active_thread(&input.provider_thread).await?;
         // The step it was in has ended; an abandoned start sends nothing more.
         inner.check_abandoned(run_id)?;
         let model = to_json(&input.model_selection)["model"]
@@ -517,7 +522,39 @@ impl AcpSession {
         inner.check_abandoned(run_id)?;
         // `compactThread`: T3's orchestrator sends `/compact` in any case as exactly
         // `/compact` to a flavor that compacts.
-        let user_text = if flavor.supports_compaction
+        let agent_compacts = if flavor.driver == "antigravity"
+            && attachments.is_empty()
+            && input.message.text.trim().eq_ignore_ascii_case("/compact")
+        {
+            let available = async {
+                loop {
+                    let changed = inner.command_updates.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    let state = inner.state.lock().await;
+                    if state.closed || state.commands.is_some() {
+                        return state
+                            .commands
+                            .as_ref()
+                            .is_some_and(|c| c.iter().any(|n| n == "compact"));
+                    }
+                    drop(state);
+                    changed.await;
+                }
+            };
+            if !tokio::time::timeout(Duration::from_secs(2), available)
+                .await
+                .unwrap_or(false)
+            {
+                return Err(ProviderError::Unsupported {
+                    operation: "compact_thread",
+                });
+            }
+            true
+        } else {
+            flavor.supports_compaction
+        };
+        let user_text = if agent_compacts
             && attachments.is_empty()
             && input.message.text.trim().eq_ignore_ascii_case("/compact")
         {
@@ -526,18 +563,37 @@ impl AcpSession {
             input.message.text.clone()
         };
         // The attachment paths check the disk: off the runtime thread.
-        let message_text = {
-            let (text, attachments, dir) = (
-                user_text.clone(),
-                attachments.clone(),
-                inner.config.attachments_dir.clone(),
-            );
-            tokio::task::spawn_blocking(move || {
-                conn_provider_support::attachments::prompt_text(&text, &attachments, dir.as_deref())
-            })
-            .await
-            .map_err(|_| protocol_error("attachment paths"))?
+        let user_text = if let Some((binary, env)) = &inner.config.skill_cli
+            && let Some(mention) = user_text.trim_start().strip_prefix('$')
+        {
+            let end = mention
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':')))
+                .unwrap_or(mention.len());
+            let (name, rest) = mention.split_at(end);
+            if name.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && name.chars().any(|c| c.is_ascii_alphabetic())
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                && crate::grok_status::discover_skills(
+                    binary,
+                    env,
+                    Some(std::path::Path::new(&inner.config.cwd)),
+                    Duration::from_secs(4),
+                )
+                .await
+                .is_some_and(|skills| {
+                    skills
+                        .iter()
+                        .any(|sk| sk["name"] == name && sk["enabled"] == true)
+                })
+            {
+                format!("/{name}{rest}")
+            } else {
+                user_text
+            }
+        } else {
+            user_text
         };
+        let message_text = inner.attachment_text(&user_text, &attachments).await?;
         let live = inner
             .state
             .lock()
@@ -550,10 +606,29 @@ impl AcpSession {
             let effort = crate::grok::selection_effort(&selection);
             let options = selection["options"].as_array().cloned().unwrap_or_default();
             inner
+                .configure_mode(&connection, &to_json(&input.runtime_policy))
+                .await?;
+            inner
                 .configure(&connection, &model, effort.as_deref(), &options)
                 .await?;
         }
         inner.check_abandoned(run_id)?;
+        let step_boundary = if let Some(path) = inner.config.profile.clone() {
+            let session = inner
+                .state
+                .lock()
+                .await
+                .session_id
+                .clone()
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || crate::antigravity_work::last_step(&path, &session))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(-1)
+        } else {
+            -1
+        };
         {
             let mut state = inner.state.lock().await;
             if state.closed {
@@ -583,6 +658,11 @@ impl AcpSession {
                     .mapper
                     .begin_turn(&input, &session_id, &input.message.text);
                 inner.deliver(&mut state, outs).await;
+                let requests = std::mem::take(&mut state.detached_requests);
+                drop(state);
+                for (id, params) in requests {
+                    handle_permission(inner, generation, id, &params).await;
+                }
                 return Ok(());
             }
             let instruction_state = InstructionState {
@@ -590,7 +670,11 @@ impl AcpSession {
                     .ok()
                     .is_some_and(|v| v == "plan"),
                 has_t3_mcp: inner.has_t3_mcp(),
-                has_device_tools: false,
+                has_device_tools: inner
+                    .config
+                    .mcp_servers
+                    .iter()
+                    .any(|s| s.name == "conn" && s.device_tools),
             };
             // A compacted session gets T3's instructions and notes again.
             let compaction_marker = state.mapper.compaction_marker();
@@ -624,22 +708,36 @@ impl AcpSession {
                     "ACP driver did not negotiate image prompt support",
                 ));
             }
-            // Antigravity (`buildAntigravityPrompt`): without `promptCapabilities.image` an
-            // image goes as its path only, which the text already carries.
-            let images_as_paths = flavor.client_file_reads
-                && state.initialize["agentCapabilities"]["promptCapabilities"]["image"] != true;
-            if !images_as_paths {
-                blocks.extend(image_blocks);
-            }
+            blocks.extend(image_blocks);
             if blocks.is_empty() {
                 return Err(protocol_error(
                     "ACP turn requires non-empty text or attachments",
                 ));
             }
+            let app_context: Vec<_> = input
+                .app_context
+                .iter()
+                .filter(|entry| {
+                    !slash
+                        && (compaction_marker.is_some()
+                            || state.delivered_context.get(&entry.key) != Some(&entry.text))
+                })
+                .cloned()
+                .collect();
+            blocks.splice(
+                0..0,
+                app_context.iter().map(|entry| {
+                    obj().with("type", "text").with(
+                        "text",
+                        format!("<external_{0}>{1}</external_{0}>", entry.key, entry.text),
+                    )
+                }),
+            );
             if send_notes {
                 blocks.push(obj().with("type", "text").with("text", notes.clone()));
             }
             state.delivery = Some(Delivery {
+                app_context,
                 instruction_state: (text != message_text).then_some(instruction_state),
                 notes: send_notes.then_some(notes),
                 compaction_marker,
@@ -660,11 +758,37 @@ impl AcpSession {
             } else {
                 None
             };
+            state.step_boundary = step_boundary;
+            state.resumed_outcome = false;
+            state.queue_steers = false;
+            state.awaiting_initial_prompt = flavor.driver == "antigravity";
+            state.prompt_texts.clear();
+            if flavor.driver == "antigravity" {
+                state.prompt_texts.insert(input.message.text.clone());
+                state.prompt_texts.insert(user_text.clone());
+                state.prompt_texts.insert(text);
+            }
             state.active_prompt = Some((generation, prompt_id.unwrap_or_default()));
+            if state.snapshot_enabled {
+                state.snapshot.remember_input(&input);
+            }
             let outs = state.mapper.begin_turn(&input, &session_id, &user_text);
             inner.deliver(&mut state, outs).await;
             // The reply comes back through the driver, in order with the turn's updates.
+            state.retry_prompt = (flavor.driver == "antigravity").then(|| params.clone());
             state.prompt_request = connection.send("session/prompt", params).await;
+            if state.prompt_request.is_none() {
+                state.active_prompt = None;
+                state.delivery = None;
+                state.restart_required = true;
+                let outs = state.mapper.prompt_settled(PromptOutcome::Failed {
+                    message: "The ACP agent closed before accepting this prompt.".to_owned(),
+                    code: None,
+                });
+                inner.deliver(&mut state, outs).await;
+                return Err(ProviderError::SessionStopped);
+            }
+            inner.arm_inactivity(&mut state);
         }
         Ok(())
     }
@@ -699,6 +823,9 @@ impl AcpSession {
         let runtime_mode = config.runtime_mode.clone();
         let inner = Arc::new(Inner {
             spawner,
+            activation: Mutex::new(()),
+            command_updates: tokio::sync::Notify::new(),
+            pending_background: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(State {
                 mapper,
                 events: Some(events),
@@ -710,9 +837,29 @@ impl AcpSession {
                 setup: Value::Null,
                 prompt_seq: 0,
                 active_prompt: None,
+                detached_requests: Vec::new(),
+                step_boundary: -1,
+                resumed_outcome: false,
+                last_progress: tokio::time::Instant::now(),
+                prompt_watchdog: None,
+                commands: None,
+                previous_mode: None,
                 prompt_request: None,
+                retry_prompt: None,
+                awaiting_initial_prompt: false,
+                pending_steer: None,
+                queue_steers: false,
+                prompt_texts: Default::default(),
                 instruction_state: None,
                 delivered_notes: None,
+                delivered_context: Default::default(),
+                snapshot: Default::default(),
+                loading_snapshot: None,
+                snapshot_enabled: false,
+                snapshot_needs_load: false,
+                app_thread: None,
+                activation_epoch: 0,
+                replay_activity: None,
                 delivery: None,
                 flush_armed: false,
                 subagent_flush_armed: false,
@@ -738,8 +885,9 @@ impl AcpSession {
         let steps = Self::open_steps(&inner, on_step.as_deref(), session_new.as_deref());
         let outcome = match abort {
             Some(abort) => tokio::select! {
-                outcome = steps => outcome,
+                biased;
                 () = abort => Err(OpenError::Aborted),
+                outcome = steps => outcome,
             },
             None => steps.await,
         };
@@ -776,6 +924,23 @@ impl AcpSession {
     pub(crate) async fn handshake(&self) -> (Value, Value) {
         let state = self.inner.state.lock().await;
         (state.initialize.clone(), state.setup.clone())
+    }
+
+    pub(crate) async fn bind_thread(&self, thread: &str) {
+        self.inner.state.lock().await.app_thread = Some(thread.to_owned());
+    }
+
+    pub(crate) async fn negotiated_capabilities(&self, mut base: Value) -> Value {
+        let s = self.inner.state.lock().await;
+        let caps = &s.initialize["agentCapabilities"];
+        base["threads"]["canForkThread"] = json!(
+            caps["sessionCapabilities"]["fork"].is_object()
+                || s.initialize["capabilities"]["session"]["fork"].is_object()
+        );
+        base["threads"]["canForkFromTurn"] = json!(false);
+        base["threads"]["canReadThreadSnapshot"] = json!(s.snapshot_enabled);
+        base["checkpointing"]["providerCanReadConversationSnapshot"] = json!(s.snapshot_enabled);
+        base
     }
 
     /// `setConfigOption`, then `drainEvents`: sets a session config option and waits until
@@ -936,7 +1101,7 @@ impl Inner {
         self.authenticate(connection, &initialize).await?;
         record(SessionNew::Sent);
         let setup = connection
-            .call("session/new", self.session_setup_params(&initialize, None))
+            .setup_call("session/new", self.session_setup_params(&initialize, None))
             .await
             .map_err(|e| call_failed(self.config.flavor, "session/new", e))?;
         let session_id = setup["sessionId"]
@@ -949,7 +1114,9 @@ impl Inner {
             let mut state = self.state.lock().await;
             state.session_id = Some(session_id.clone());
             state.mapper.set_root_session(&session_id);
+            state.snapshot_enabled = supports_snapshots(&initialize);
             state.initialize = initialize;
+            state.mapper.model_window = grok_window(&setup, &state.initialize, &self.config.model);
             state.setup = setup;
             let buffered = std::mem::take(&mut state.startup_updates);
             for params in buffered
@@ -972,12 +1139,212 @@ impl Inner {
         Ok(session_id)
     }
 
+    /// Called with the transition permit, so two starts cannot create competing subprocesses.
+    // An import or fork can change the active native conversation on this runtime.
+    // Each prompt and resume must reselect its own thread under the transition permit.
+    async fn ensure_active_thread(self: &Arc<Self>, thread: &ProviderThread) -> ProviderResult<()> {
+        let native = acp_native_thread_id(thread)?;
+        if thread.driver != self.config.flavor.driver
+            || thread.provider_instance_id != self.config.instance_id
+        {
+            return Err(protocol_error(
+                "The conversation belongs to another ACP provider instance",
+            ));
+        }
+        self.restart_if_needed(native, false).await?;
+        let state = self.state.lock().await;
+        if state.closed {
+            return Err(ProviderError::SessionStopped);
+        }
+        if state.session_id.as_deref() != Some(native) {
+            let connection = state
+                .runtime
+                .as_ref()
+                .ok_or(ProviderError::SessionStopped)?
+                .connection
+                .clone();
+            let initialize = state.initialize.clone();
+            drop(state);
+            self.activate(&connection, &initialize, native, false)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn restart_if_needed(
+        self: &Arc<Self>,
+        target: &str,
+        for_snapshot: bool,
+    ) -> ProviderResult<Option<Box<crate::snapshot::Snapshot>>> {
+        let state = self.state.lock().await;
+        if !state.restart_required {
+            return Ok(None);
+        }
+        drop(state);
+        let connection = self.start_runtime().await?;
+        let restored = async {
+            let initialize = self.initialize(&connection).await?;
+            let snapshot = self
+                .activate(&connection, &initialize, target, for_snapshot)
+                .await?;
+            Ok::<_, ProviderError>((initialize, snapshot))
+        }
+        .await;
+        let (initialize, snapshot) = match restored {
+            Ok(restored) => restored,
+            Err(e) => {
+                self.end_runtime().await;
+                return Err(e);
+            }
+        };
+        let mut state = self.state.lock().await;
+        state.snapshot_enabled = supports_snapshots(&initialize);
+        state.initialize = initialize;
+        state.restart_required = false;
+        state.active_model = None;
+        Ok(snapshot)
+    }
+
+    /// Activate the saved native conversation before publishing its thread or accepting input.
+    async fn activate(
+        self: &Arc<Self>,
+        connection: &Connection,
+        initialize: &Value,
+        session_id: &str,
+        for_snapshot: bool,
+    ) -> ProviderResult<Option<Box<crate::snapshot::Snapshot>>> {
+        let agent = &initialize["agentCapabilities"];
+        let caps = &initialize["capabilities"]["session"];
+        let method = if !for_snapshot
+            && self.config.flavor.resume
+            && (agent["sessionCapabilities"]["resume"].is_object() || caps["resume"].is_object())
+        {
+            "session/resume"
+        } else if supports_snapshots(initialize) {
+            "session/load"
+        } else if for_snapshot {
+            return Err(ProviderError::Unsupported {
+                operation: "read_thread_snapshot",
+            });
+        } else {
+            return Err(protocol_error(
+                "The ACP agent did not advertise conversation loading or resumption",
+            ));
+        };
+        let params = self.session_setup_params(initialize, Some(session_id));
+        let (tx, mut rx) = tokio::sync::watch::channel(None);
+        // A prompt may proceed after Grok stops emitting replay. An import needs the
+        // load acknowledgement: a quiet interval is not the end of the transcript.
+        let allow_idle = !for_snapshot
+            && method == "session/load"
+            && self.config.flavor.completion == Completion::XAiPromptComplete;
+        let (epoch, generation) = {
+            let mut state = self.state.lock().await;
+            if state.mapper.has_turn()
+                || state.closed
+                || (for_snapshot && state.mapper.pending_background_work())
+            {
+                return Err(protocol_error(
+                    "Cannot activate a saved ACP conversation while work is running or after close",
+                ));
+            }
+            state.loading_snapshot = Some(crate::snapshot::Snapshot::for_load(for_snapshot));
+            state.activation_epoch += 1;
+            state.replay_activity = Some((session_id.to_owned(), tx));
+            (state.activation_epoch, state.generation)
+        };
+        let idle = async {
+            loop {
+                let at = *rx.borrow_and_update();
+                if let Some(at) = at {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(at + Duration::from_secs(2)) => break,
+                        changed = rx.changed() => if changed.is_err() { std::future::pending::<()>().await; },
+                    }
+                } else if rx.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        let conn = connection.clone();
+        let mut reply = tokio::spawn(async move { conn.setup_call(method, params).await });
+        let result = tokio::select! {
+            biased;
+            result = &mut reply => Some(result.unwrap_or(Err(CallError::Closed))),
+            () = idle, if allow_idle => None,
+        };
+        connection.barrier().await;
+        let mut state = self.state.lock().await;
+        state.replay_activity = None;
+        let mut loaded = state.loading_snapshot.take().unwrap_or_default();
+        let uncached = loaded.take_uncached_read();
+        let buffered = std::mem::take(&mut state.startup_updates);
+        if state.closed || state.generation != generation {
+            return Err(ProviderError::SessionStopped);
+        }
+        let completed_load = result.is_some() && method == "session/load";
+        let setup = match result {
+            Some(result) => result.map_err(|e| failed(self.config.flavor, method, &e))?,
+            None => {
+                let weak = Arc::downgrade(self);
+                let connection = connection.clone();
+                tokio::spawn(async move {
+                    let (Ok(Ok(setup)), Some(inner)) = (reply.await, weak.upgrade()) else {
+                        return;
+                    };
+                    connection.barrier().await;
+                    let mut state = inner.state.lock().await;
+                    if state.closed
+                        || state.activation_epoch != epoch
+                        || state.generation != generation
+                    {
+                        return;
+                    }
+                    state.snapshot_needs_load = false;
+                    // A streamed config/mode change or a local write is newer than this reply.
+                    if let (Some(current), Some(late)) =
+                        (state.setup.as_object_mut(), setup.as_object())
+                    {
+                        for (key, value) in late {
+                            current.entry(key.clone()).or_insert_with(|| value.clone());
+                        }
+                    }
+                    state.mapper.model_window =
+                        grok_window(&state.setup, &state.initialize, &inner.config.model);
+                });
+                json!({})
+            }
+        };
+        if state.session_id.as_deref() != Some(session_id) {
+            state.instruction_state = None;
+            state.delivered_notes = None;
+            state.delivered_context.clear();
+            state.commands = None;
+            state.previous_mode = None;
+        }
+        if method == "session/load" || state.session_id.as_deref() != Some(session_id) {
+            state.snapshot = loaded;
+            // Native resume selects a conversation without replaying its existing messages.
+            state.snapshot_needs_load = !completed_load;
+        }
+        state.session_id = Some(session_id.to_owned());
+        state.mapper.set_root_session(session_id);
+        state.mapper.model_window = grok_window(&setup, initialize, &self.config.model);
+        state.setup = setup;
+        for params in buffered.iter().filter(|p| p["sessionId"] == session_id) {
+            self.root_update(&mut state, params).await;
+        }
+        state.active_model = None;
+        Ok(uncached)
+    }
+
     /// Ends the current runtime as a close does, and keeps the session: a failed restart
     /// leaves no agent, no `run-*` folder and (on Linux) no process tree behind. The driver
     /// ignores its exit; when it is ending the agent already, this waits for it.
     async fn end_runtime(&self) {
         let stopper = {
             let mut state = self.state.lock().await;
+            state.pending_steer.take();
             state.generation += 1;
             state.runtime = None;
             state.stopper.clone()
@@ -987,12 +1354,66 @@ impl Inner {
         }
     }
 
+    fn accept_steer(self: &Arc<Self>, state: &mut State<DynEnv>, steer: PendingSteer) {
+        state.prompt_request = Some(steer.request);
+        state.retry_prompt = None;
+        state.mapper.resume_deferred_turn();
+        state.active_prompt = Some((state.generation, String::new()));
+        if state.mapper.compaction_marker() == steer.marker {
+            state
+                .delivery
+                .get_or_insert_with(|| Delivery {
+                    app_context: Vec::new(),
+                    instruction_state: None,
+                    notes: None,
+                    compaction_marker: steer.marker,
+                })
+                .app_context
+                .extend(steer.entries);
+        }
+        self.arm_inactivity(state);
+        let _ = steer.accepted.send(Ok(()));
+    }
+
     /// One `session/update` of the root session: its config options and commands, then the
     /// mapper.
     async fn root_update(self: &Arc<Self>, state: &mut State<DynEnv>, params: &Value) {
         // `ConfigOptionsUpdated` and `AvailableCommandsUpdated`: the session's options follow
         // the agent, and the observer hears both.
         let update = &params["update"];
+        if update["sessionUpdate"] == "user_message_chunk"
+            && update["content"]["type"] == "text"
+            && let Some(echo) = update["content"]["text"].as_str()
+        {
+            if state.awaiting_initial_prompt && state.prompt_texts.contains(echo) {
+                state.awaiting_initial_prompt = false;
+            } else if let Some(steer) = state
+                .pending_steer
+                .take_if(|s| s.echo.as_deref() == Some(echo))
+            {
+                self.accept_steer(state, steer);
+            }
+        }
+        if matches!(
+            update["sessionUpdate"].as_str(),
+            Some(
+                "agent_message_chunk"
+                    | "agent_thought_chunk"
+                    | "agent_message"
+                    | "agent_thought"
+                    | "tool_call"
+                    | "tool_call_update"
+                    | "plan"
+                    | "plan_update"
+                    | "compaction_update"
+                    | "usage_update"
+            )
+        ) {
+            state.last_progress = tokio::time::Instant::now();
+        }
+        if update["sessionUpdate"] == "current_mode_update" {
+            state.setup["modes"]["currentModeId"] = update["currentModeId"].clone();
+        }
         if update["sessionUpdate"] == "config_option_update"
             && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
         {
@@ -1003,10 +1424,123 @@ impl Inner {
         if update["sessionUpdate"] == "available_commands_update"
             && let Some(commands) = update.get("availableCommands").filter(|c| c.is_array())
         {
+            state.commands = commands.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|c| c["name"].as_str().map(str::to_owned))
+                    .collect()
+            });
+            self.command_updates.notify_waiters();
             self.observe(state, HeldUpdate::AvailableCommands(commands.clone()));
         }
         let outs = state.mapper.session_update(params);
         self.deliver(state, outs).await;
+    }
+
+    async fn configure_mode(&self, connection: &Connection, policy: &Value) -> ProviderResult<()> {
+        if self.config.flavor.driver != "antigravity" {
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        let config = state.setup["configOptions"]
+            .as_array()
+            .and_then(|o| {
+                o.iter()
+                    .find(|o| o["category"] == "mode" && o["type"] == "select")
+            })
+            .cloned();
+        let modes = &state.setup["modes"];
+        let current = config
+            .as_ref()
+            .and_then(|o| o["currentValue"].as_str())
+            .or_else(|| modes["currentModeId"].as_str())
+            .unwrap_or("default")
+            .to_owned();
+        let mut available = Vec::new();
+        if let Some(opts) = config.as_ref().and_then(|c| c["options"].as_array()) {
+            for opt in opts {
+                if let Some(v) = opt["value"].as_str() {
+                    available.push(v.to_owned())
+                } else if let Some(group) = opt["options"].as_array() {
+                    available.extend(
+                        group
+                            .iter()
+                            .filter_map(|c| c["value"].as_str().map(str::to_owned)),
+                    );
+                }
+            }
+        } else if let Some(opts) = modes["availableModes"].as_array() {
+            available.extend(
+                opts.iter()
+                    .filter_map(|c| c["id"].as_str().map(str::to_owned)),
+            );
+        }
+        let plan = policy["interactionMode"] == "plan";
+        let desired = if plan {
+            let Some(id) = available
+                .iter()
+                .find(|id| id.eq_ignore_ascii_case("plan") || id.eq_ignore_ascii_case("architect"))
+            else {
+                return Ok(());
+            };
+            if *id != current && state.previous_mode.is_none() {
+                state.previous_mode = Some(current.clone());
+            }
+            id.clone()
+        } else if policy["runtimeMode"] == "auto" && available.iter().any(|s| s == "auto") {
+            "auto".to_owned()
+        } else if let Some(previous) = &state.previous_mode {
+            previous.clone()
+        } else if current == "auto" || current == "plan" {
+            "default".to_owned()
+        } else {
+            return Ok(());
+        };
+        if desired == current || !available.contains(&desired) {
+            return Ok(());
+        }
+        let id = state
+            .session_id
+            .clone()
+            .ok_or(ProviderError::SessionStopped)?;
+        let config_id = config
+            .as_ref()
+            .and_then(|v| v["id"].as_str())
+            .map(str::to_owned);
+        drop(state);
+        let (method, params) = if let Some(key) = config_id.as_deref() {
+            (
+                "session/set_config_option",
+                obj()
+                    .with("sessionId", id)
+                    .with("configId", key)
+                    .with("value", desired.clone()),
+            )
+        } else {
+            (
+                "session/set_mode",
+                obj().with("sessionId", id).with("modeId", desired.clone()),
+            )
+        };
+        let reply = connection
+            .setup_call(method, params)
+            .await
+            .map_err(|e| failed(self.config.flavor, method, &e))?;
+        let mut state = self.state.lock().await;
+        if reply["configOptions"].is_array() {
+            state.setup["configOptions"] = reply["configOptions"].clone();
+        } else if let Some(key) = config_id
+            && let Some(opts) = state.setup["configOptions"].as_array_mut()
+            && let Some(opt) = opts.iter_mut().find(|v| v["id"] == key)
+        {
+            opt["currentValue"] = json!(desired);
+        }
+        if state.setup["modes"].is_object() {
+            state.setup["modes"]["currentModeId"] = json!(desired);
+        }
+        if !plan {
+            state.previous_mode = None;
+        }
+        Ok(())
     }
 
     /// `initialize`, as `AcpSessionRuntime.initializeOnce` and effect-acp's negotiating
@@ -1026,7 +1560,7 @@ impl Inner {
         };
         let params = initialize_params(flavor, &name, &version, true);
         connection
-            .call("initialize", params)
+            .setup_call("initialize", params)
             .await
             .map_err(|e| call_failed(flavor, "initialize", e))
     }
@@ -1048,7 +1582,7 @@ impl Inner {
             "authenticate"
         };
         connection
-            .call(
+            .setup_call(
                 method,
                 obj().with(
                     "methodId",
@@ -1119,7 +1653,7 @@ impl Inner {
         if let Some((model_id, effort)) = &switch {
             let call = |effort: Option<&String>| {
                 let meta = effort.map(|e| obj().with("reasoningEffort", e.clone()));
-                connection.call(
+                connection.setup_call(
                     "session/set_model",
                     obj()
                         .with("sessionId", session_id.clone())
@@ -1135,7 +1669,7 @@ impl Inner {
                     if let Some((model_id, _)) = retry {
                         let meta: Option<J> = None;
                         connection
-                            .call(
+                            .setup_call(
                                 "session/set_model",
                                 obj()
                                     .with("sessionId", session_id.clone())
@@ -1154,6 +1688,7 @@ impl Inner {
         if let Some(model_id) = sent {
             state.setup["models"]["currentModelId"] = json!(model_id);
         }
+        state.mapper.model_window = grok_window(&state.setup, &state.initialize, model);
         state.active_model = Some(key);
         Ok(())
     }
@@ -1187,7 +1722,7 @@ impl Inner {
         })?;
         if let Some((config_id, value)) = switch {
             let reply = connection
-                .call(
+                .setup_call(
                     "session/set_config_option",
                     obj()
                         .with("sessionId", session_id)
@@ -1225,7 +1760,10 @@ impl Inner {
             .with("sessionId", session_id)
             .with("configId", config_id.clone())
             .with("value", value.clone());
-        match connection.call("session/set_config_option", params).await {
+        match connection
+            .setup_call("session/set_config_option", params)
+            .await
+        {
             Ok(reply) => {
                 let mut state = self.state.lock().await;
                 self.apply_config_reply(&mut state, before, &config_id, &value, &reply);
@@ -1307,8 +1845,37 @@ impl Inner {
 
     /// `resolvePromptParts`' image blocks: each native image attachment read from the
     /// attachments folder, as `{type: image, data, mimeType}` after the text.
+    async fn attachment_text(&self, text: &str, attachments: &[Value]) -> ProviderResult<String> {
+        if attachments.is_empty() {
+            return Ok(text.to_owned());
+        }
+        let (text, files, dir) = (
+            text.to_owned(),
+            attachments.to_vec(),
+            self.config.attachments_dir.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            conn_provider_support::attachments::prompt_text(&text, &files, dir.as_deref())
+        })
+        .await
+        .map_err(|_| protocol_error("attachment paths"))
+    }
+
     async fn image_blocks(&self, attachments: &[Value]) -> ProviderResult<Vec<J>> {
         use conn_provider_support::attachments::{is_native_image, saved_path};
+        if self.config.flavor.driver == "antigravity" {
+            let state = self.state.lock().await;
+            let caps = state.initialize["agentCapabilities"]["promptCapabilities"].clone();
+            drop(state);
+            let dir = self.config.attachments_dir.clone();
+            let attachments = attachments.to_vec();
+            return tokio::task::spawn_blocking(move || {
+                crate::antigravity::attachment_blocks(&attachments, dir.as_deref(), &caps)
+            })
+            .await
+            .map_err(|_| protocol_error("Could not read Antigravity attachments"))?
+            .map_err(protocol_error);
+        }
         let mut blocks = Vec::new();
         for attachment in attachments.iter().filter(|a| is_native_image(a)) {
             let id = attachment["id"].as_str().unwrap_or("").to_owned();
@@ -1340,6 +1907,16 @@ impl Inner {
     /// Applies outs: events to the engine, replies to the agent, a flush timer. Runs under
     /// the state lock, so order holds.
     async fn deliver(self: &Arc<Self>, state: &mut State<DynEnv>, outs: Vec<Out>) {
+        if !state.mapper.has_turn() {
+            state.pending_steer.take();
+            state.prompt_texts.clear();
+            state.awaiting_initial_prompt = false;
+            state.queue_steers = false;
+        }
+        self.pending_background.store(
+            state.mapper.pending_background_work(),
+            std::sync::atomic::Ordering::Release,
+        );
         let mut arm = false;
         let mut arm_subagent = false;
         for out in outs {
@@ -1386,18 +1963,153 @@ impl Inner {
     /// Runs a mapper timer; when it fires, the mapper decides under the state lock.
     fn run_timer(self: &Arc<Self>, timer: mapper::Timer) {
         let delay = match &timer {
+            mapper::Timer::Finalize {
+                open_reply: true, ..
+            } => Duration::from_secs(120),
             mapper::Timer::Finalize { .. } => self.config.finalize_debounce,
             mapper::Timer::Hydration { .. } => mapper::HYDRATION_WAIT,
             mapper::Timer::InjectedReport { .. } => mapper::INJECTED_REPORT_WAIT,
         };
+        let elapsed = tokio::time::sleep(delay);
+        #[cfg(feature = "fixture-replay")]
+        let elapsed = {
+            let release = self
+                .config
+                .deferred_finalize_gate
+                .as_ref()
+                .filter(|_| {
+                    matches!(
+                        timer,
+                        mapper::Timer::Finalize {
+                            open_reply: false,
+                            ..
+                        }
+                    )
+                })
+                .and_then(|gate| {
+                    let (receipt, release) = tokio::sync::oneshot::channel();
+                    gate.send(receipt).ok().map(|()| release)
+                });
+            async move {
+                match release {
+                    Some(release) => {
+                        let _ = release.await;
+                    }
+                    None => elapsed.await,
+                }
+            }
+        };
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+            elapsed.await;
             let Some(inner) = weak.upgrade() else { return };
             let mut state = inner.state.lock().await;
+            if let Some(profile) = inner.config.profile.clone()
+                && state.mapper.recheck_reply(&timer)
+                && let Some(session) = state.session_id.clone()
+            {
+                drop(state);
+                let pending = tokio::task::spawn_blocking(move || {
+                    crate::antigravity_work::pending_reply(&profile, &session)
+                })
+                .await
+                .unwrap_or(false);
+                state = inner.state.lock().await;
+                if pending && state.mapper.recheck_reply(&timer) {
+                    let out = state.mapper.wait_for_native_reply();
+                    Box::pin(inner.deliver(&mut state, out)).await;
+                    return;
+                }
+            }
             let outs = state.mapper.timer_fired(timer);
             Box::pin(inner.deliver(&mut state, outs)).await;
         });
+    }
+
+    fn arm_inactivity(self: &Arc<Self>, state: &mut State<DynEnv>) {
+        if let Some(previous) = state.prompt_watchdog.take() {
+            previous.abort();
+        }
+        if self.config.flavor.driver != "antigravity" {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let generation = state.generation;
+        let turn = state.mapper.current_provider_turn_id().map(str::to_owned);
+        state.last_progress = tokio::time::Instant::now();
+        state.prompt_watchdog = Some(tokio::spawn(async move {
+            const LIMIT: Duration = Duration::from_secs(15 * 60);
+            loop {
+                let slice = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let Some(inner) = weak.upgrade() else { return };
+                let mut state = inner.state.lock().await;
+                if state.generation != generation
+                    || state.active_prompt.is_none()
+                    || state.mapper.current_provider_turn_id() != turn.as_deref()
+                {
+                    return;
+                }
+                if slice.elapsed() > Duration::from_secs(60)
+                    || state.mapper.waiting_for_input_or_tool()
+                {
+                    state.last_progress = tokio::time::Instant::now();
+                    continue;
+                }
+                if state.last_progress.elapsed() < LIMIT {
+                    continue;
+                }
+                state.active_prompt = None;
+                state.prompt_request = None;
+                state.retry_prompt = None;
+                state.delivery = None;
+                let outs = state.mapper.prompt_settled(PromptOutcome::Failed {
+                    message: "The Antigravity agent stopped responding for 15 minutes.".into(),
+                    code: None,
+                });
+                inner.deliver(&mut state, outs).await;
+                state.restart_required = true;
+                state.prompt_watchdog.take();
+                state.generation += 1;
+                let stopper = state.runtime.take().map(|runtime| runtime.stopper);
+                drop(state);
+                if let Some(stopper) = stopper {
+                    stopper.stop(StopKind::Kill).await;
+                }
+                return;
+            }
+        }));
+    }
+
+    async fn reconcile_children(self: &Arc<Self>, generation: u64) {
+        if self.config.flavor.driver != "antigravity" {
+            return;
+        }
+        let state = self.state.lock().await;
+        let ids = state.mapper.running_child_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let turn = state.mapper.current_provider_turn_id().map(str::to_owned);
+        let session = state.session_id.clone().unwrap_or_default();
+        drop(state);
+        let active = if let Some(profile) = self.config.profile.clone() {
+            tokio::task::spawn_blocking(move || {
+                crate::antigravity_work::active_children(&profile, &session, &ids)
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut state = self.state.lock().await;
+        if state.generation != generation
+            || state.mapper.current_provider_turn_id() != turn.as_deref()
+        {
+            return;
+        }
+        let out = state.mapper.idle_recorded_children(&active);
+        self.deliver(&mut state, out).await;
     }
 
     /// Settles the running prompt once (reply, or Grok's completion notification).
@@ -1405,10 +2117,82 @@ impl Inner {
         self: &Arc<Self>,
         generation: u64,
         prompt_id: Option<&str>,
+        request: Option<i64>,
+        usage: Option<Value>,
         outcome: PromptOutcome,
     ) {
+        if request.is_some() && self.state.lock().await.prompt_request != request {
+            return;
+        }
+        self.reconcile_children(generation).await;
+        let mut outcome = outcome;
+        let mut native_reply_pending = false;
+        if let Some(profile) = self.config.profile.clone()
+            && matches!(&outcome,PromptOutcome::Stopped(r) if r=="end_turn" || r=="refusal")
+        {
+            let state = self.state.lock().await;
+            let (session, after, request) = (
+                state.session_id.clone().unwrap_or_default(),
+                state.step_boundary,
+                state.prompt_request,
+            );
+            drop(state);
+            let refusal = matches!(&outcome, PromptOutcome::Stopped(r) if r == "refusal");
+            let (failure, next_boundary, pending) = tokio::task::spawn_blocking(move || {
+                let failure =
+                    crate::antigravity_work::terminal_error(&profile, &session, after, refusal);
+                let boundary = if failure.as_ref().is_some_and(|f| f.resume) {
+                    crate::antigravity_work::last_step(&profile, &session)
+                } else {
+                    None
+                };
+                let pending = failure.is_none()
+                    && !refusal
+                    && crate::antigravity_work::pending_reply(&profile, &session);
+                (failure, boundary, pending)
+            })
+            .await
+            .unwrap_or_default();
+            native_reply_pending = pending;
+            if self.state.lock().await.prompt_request != request {
+                return;
+            }
+            if let Some(failure) = failure {
+                let mut state = self.state.lock().await;
+                if state.generation != generation || state.prompt_request != request {
+                    return;
+                }
+                if failure.resume
+                    && !state.resumed_outcome
+                    && !state.mapper.turn_interrupted()
+                    && crate::antigravity::version_triple(
+                        state.initialize["agentInfo"]["version"].as_str(),
+                    )
+                    .is_some_and(|v| v >= [1, 5, 0])
+                    && let (Some(boundary), Some(rt)) = (next_boundary, state.runtime.as_ref())
+                {
+                    let params = obj()
+                        .with("sessionId", state.session_id.clone().unwrap_or_default())
+                        .with(
+                            "prompt",
+                            J::Arr(vec![obj().with("type", "text").with("text", "continue")]),
+                        );
+                    let retry = params.clone();
+                    if let Some(id) = rt.connection.send("session/prompt", params).await {
+                        state.retry_prompt = Some(retry);
+                        state.resumed_outcome = true;
+                        state.prompt_request = Some(id);
+                        state.step_boundary = boundary;
+                        self.arm_inactivity(&mut state);
+                        return;
+                    }
+                }
+                outcome = PromptOutcome::Native(failure);
+            }
+        }
         let mut state = self.state.lock().await;
-        if state.generation != generation {
+        if state.generation != generation || (request.is_some() && request != state.prompt_request)
+        {
             return;
         }
         if let Some(prompt_id) = prompt_id
@@ -1419,11 +2203,28 @@ impl Inner {
         if state.active_prompt.take().is_none() {
             return;
         }
+        state.retry_prompt = None;
+        state.awaiting_initial_prompt = false;
+        if let Some(usage) = usage {
+            state.mapper.record_prompt_usage(&usage);
+        }
+        let outcome = state.mapper.prompt_outcome(outcome);
+        if let Some(timer) = state.prompt_watchdog.take() {
+            timer.abort();
+        }
         let delivery = state.delivery.take();
         // Grok cancels locally, refusals discard the prompt, and errors need a retry.
         if let Some(delivery) = delivery
             && matches!(&outcome, PromptOutcome::Stopped(reason) if reason != "cancelled" && reason != "refusal" && reason != "error")
         {
+            if state.mapper.compaction_marker() == delivery.compaction_marker {
+                if delivery.compaction_marker.is_some() {
+                    state.delivered_context.clear();
+                }
+                state
+                    .delivered_context
+                    .extend(delivery.app_context.into_iter().map(|e| (e.key, e.text)));
+            }
             if let Some(instruction_state) = delivery.instruction_state {
                 state.instruction_state = Some(instruction_state);
                 state
@@ -1434,14 +2235,54 @@ impl Inner {
                 state.delivered_notes = Some(notes);
             }
         }
+        if native_reply_pending {
+            state.mapper.mark_native_reply_pending();
+        }
         let outs = state.mapper.prompt_settled(outcome);
         self.deliver(&mut state, outs).await;
+        if self.config.flavor.driver == "antigravity"
+            && let Some(turn) = state.mapper.current_provider_turn_id().map(str::to_owned)
+        {
+            let weak = Arc::downgrade(self);
+            state.last_progress = tokio::time::Instant::now();
+            state.prompt_watchdog = Some(tokio::spawn(async move {
+                let limit = Duration::from_secs(30 * 60);
+                let mut delay = limit;
+                loop {
+                    tokio::time::sleep(delay).await;
+                    let Some(inner) = weak.upgrade() else { return };
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation
+                        || state.mapper.current_provider_turn_id() != Some(&turn)
+                        || state.active_prompt.is_some()
+                        || state.closed
+                    {
+                        return;
+                    }
+                    delay = limit.saturating_sub(state.last_progress.elapsed());
+                    if !delay.is_zero() {
+                        continue;
+                    }
+                    let out = state.mapper.expire_command_hold();
+                    inner.deliver(&mut state, out).await;
+                    if !state.mapper.has_turn() {
+                        return;
+                    }
+                    delay = limit;
+                }
+            }));
+        }
     }
 }
 
 async fn deliver_one(state: &mut State<DynEnv>, out: Out) {
     match out {
         Out::Event(event) => {
+            if state.snapshot_enabled
+                && let ProviderEvent::MessageUpdated { message } = &event
+            {
+                state.snapshot.remember(message);
+            }
             if let Some(events) = &state.events
                 && events.send(event).await.is_err()
             {
@@ -1466,6 +2307,54 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 handle_notification(&inner, generation, &method, &params).await;
             }
             Incoming::Request { id, method, params } => {
+                if inner.config.flavor.driver == "grok"
+                    && matches!(
+                        method.as_str(),
+                        "x.ai/exit_plan_mode" | "_x.ai/exit_plan_mode"
+                    )
+                {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        continue;
+                    }
+                    let mut outs = state.mapper.capture_exit_plan(&params);
+                    outs.push(Out::Reply{id,result:obj().with("outcome","abandoned").with("feedback","The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.")});
+                    inner.deliver(&mut state, outs).await;
+                    continue;
+                }
+                if method == "elicitation/create" {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        continue;
+                    }
+                    let schema = &params["requestedSchema"];
+                    let out = if state.mapper.has_turn()
+                        && params["mode"] == "form"
+                        && let Some(questions) = crate::elicitation::form_questions(
+                            schema,
+                            params["message"].as_str().unwrap_or("Choose an option."),
+                        ) {
+                        let native_id = format!(
+                            "{}:elicitation:{}",
+                            state.session_id.as_deref().unwrap_or(""),
+                            id.to_value()
+                        );
+                        state.mapper.user_input_request(
+                            id,
+                            &native_id,
+                            &native_id,
+                            questions,
+                            mapper::Pending::Form(schema.clone()),
+                        )
+                    } else {
+                        vec![Out::Reply {
+                            id,
+                            result: obj().with("action", "decline"),
+                        }]
+                    };
+                    inner.deliver(&mut state, out).await;
+                    continue;
+                }
                 if method == "session/request_permission" {
                     handle_permission(&inner, generation, id, &params).await;
                     continue;
@@ -1524,13 +2413,89 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     let _ = waiter.send(result);
                     continue;
                 }
-                let is_prompt = {
-                    let state = inner.state.lock().await;
-                    state.generation == generation && state.prompt_request == Some(id)
+                let (id, result) = {
+                    let mut state = inner.state.lock().await;
+                    if state.generation != generation {
+                        continue;
+                    }
+                    if let Some(steer) = state.pending_steer.take_if(|steer| steer.request == id) {
+                        match result {
+                            Err(error) => {
+                                state.queue_steers = true;
+                                let _ = steer.accepted.send(Err(failed(
+                                    inner.config.flavor,
+                                    "session/prompt",
+                                    &error,
+                                )));
+                                let Some(previous) = steer.previous_reply else {
+                                    continue;
+                                };
+                                previous
+                            }
+                            Ok(reply) => {
+                                inner.accept_steer(&mut state, steer);
+                                (id, Ok(reply))
+                            }
+                        }
+                    } else if state.prompt_request == Some(id) {
+                        if state.mapper.turn_interrupted() {
+                            state.pending_steer.take();
+                        } else if let Some(steer) = state.pending_steer.as_mut() {
+                            steer.previous_reply = Some((id, result));
+                            continue;
+                        }
+                        (id, result)
+                    } else {
+                        continue;
+                    }
                 };
-                if !is_prompt {
+                if inner.config.flavor.driver == "antigravity"
+                    && matches!(&result,Err(CallError::Rpc(error)) if error.message.starts_with("Agent is already processing"))
+                {
+                    // A new turn can be busy while the preceding turn's native work drains.
+                    // A steer rejection already returned to the engine above.
+                    let weak = Arc::downgrade(&inner);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let Some(inner) = weak.upgrade() else { return };
+                        let mut state = inner.state.lock().await;
+                        if state.closed
+                            || state.generation != generation
+                            || state.prompt_request != Some(id)
+                            || state.active_prompt.is_none()
+                        {
+                            return;
+                        }
+                        // The peer rejected this request already and has nothing left to cancel.
+                        if state.mapper.turn_interrupted() {
+                            drop(state);
+                            inner
+                                .settle(
+                                    generation,
+                                    None,
+                                    Some(id),
+                                    None,
+                                    PromptOutcome::Stopped("cancelled".into()),
+                                )
+                                .await;
+                            return;
+                        }
+                        if let (Some(runtime), Some(params)) = (&state.runtime, &state.retry_prompt)
+                        {
+                            state.prompt_request = runtime
+                                .connection
+                                .send("session/prompt", params.clone())
+                                .await;
+                        }
+                    });
                     continue;
                 }
+                let usage = result
+                    .as_ref()
+                    .ok()
+                    .filter(|_| inner.config.flavor.driver == "antigravity")
+                    .and_then(|r| r.get("usage"))
+                    .cloned();
                 let outcome = match result {
                     Ok(reply) => PromptOutcome::Stopped(
                         reply["stopReason"]
@@ -1544,7 +2509,9 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                     },
                     Err(CallError::Closed | CallError::Provider(_)) => continue,
                 };
-                inner.settle(generation, None, outcome).await;
+                inner
+                    .settle(generation, None, Some(id), usage, outcome)
+                    .await;
             }
             Incoming::Closed { exit, failure } => {
                 let kind = if exit.is_some() {
@@ -1623,6 +2590,28 @@ async fn handle_read_text_file(inner: &Arc<Inner>, generation: u64, id: RequestI
 /// `handleRequestPermission`: an immediate allow or deny under the policy, or a request the
 /// user answers.
 async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, params: &Value) {
+    if inner.config.flavor.driver == "antigravity" {
+        let mut state = inner.state.lock().await;
+        if state.generation != generation {
+            return;
+        }
+        if !state.mapper.has_turn() && state.session_id.as_deref() == params["sessionId"].as_str() {
+            let mut outs = Vec::new();
+            state.mapper.offer_continuation(&mut outs);
+            if !outs.is_empty() || !state.detached_requests.is_empty() {
+                if state.detached_requests.len() < 64 {
+                    state.detached_requests.push((id, params.clone()));
+                } else {
+                    outs.push(Out::Reply {
+                        id,
+                        result: obj().with("outcome", obj().with("outcome", "cancelled")),
+                    });
+                }
+                inner.deliver(&mut state, outs).await;
+                return;
+            }
+        }
+    }
     let (params, policy, kind) = {
         let state = inner.state.lock().await;
         if state.generation != generation {
@@ -1636,6 +2625,34 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
             .or_else(|| state.mapper.tracked_tool_kind(tool_call_id));
         (params, state.policy.clone(), kind)
     };
+    if inner.config.flavor.driver == "antigravity"
+        && let Some(key) = params["toolCall"]["toolCallId"]
+            .as_str()
+            .filter(|s| s.starts_with("interaction_"))
+    {
+        let mut state = inner.state.lock().await;
+        if state.generation != generation {
+            return;
+        }
+        let out = if state.mapper.has_turn()
+            && let Some(questions) = crate::elicitation::permission_question(&params)
+        {
+            state.mapper.user_input_request(
+                id,
+                key,
+                key,
+                questions.clone(),
+                mapper::Pending::AntigravityQuestion(questions),
+            )
+        } else {
+            vec![Out::Reply {
+                id,
+                result: obj().with("outcome", obj().with("outcome", "cancelled")),
+            }]
+        };
+        inner.deliver(&mut state, out).await;
+        return;
+    }
     let locations: Vec<String> = params["toolCall"]["locations"]
         .as_array()
         .into_iter()
@@ -1670,11 +2687,92 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
 
 async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, params: &Value) {
     if method == "session/update" {
+        if inner.config.flavor.driver == "antigravity"
+            && params["update"]["sessionUpdate"] == "usage_update"
+            && inner.state.lock().await.active_prompt.is_none()
+        {
+            inner.reconcile_children(generation).await;
+        }
+        let enriched = if inner.config.flavor.driver == "antigravity"
+            && params["update"]["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|v| v["type"] == "diff"))
+        {
+            let mut params = params.clone();
+            let cwd = inner.config.cwd.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::antigravity_edits::enrich(&mut params, std::path::Path::new(&cwd));
+                params
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let params = enriched.as_ref().unwrap_or(params);
         let mut state = inner.state.lock().await;
         if state.generation != generation {
             return;
         }
-        let Some(root) = state.session_id.clone() else {
+        let replaying = state
+            .replay_activity
+            .as_ref()
+            .filter(|(target, _)| params["sessionId"] == target.as_str());
+        let loading = replaying.is_some();
+        if let Some((_, activity)) = replaying {
+            let update = &params["update"];
+            let progress = match update["sessionUpdate"].as_str() {
+                Some("agent_message_chunk" | "agent_thought_chunk") => update["content"]["text"]
+                    .as_str()
+                    .is_some_and(|t| !t.is_empty()),
+                Some("agent_message" | "agent_thought") => {
+                    update["content"].as_array().is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|v| v["text"].as_str().is_some_and(|t| !t.is_empty()))
+                    })
+                }
+                Some(
+                    "tool_call"
+                    | "tool_call_update"
+                    | "plan"
+                    | "plan_update"
+                    | "plan_removed"
+                    | "available_commands_update"
+                    | "current_mode_update"
+                    | "config_option_update"
+                    | "session_info_update"
+                    | "usage_update"
+                    | "compaction_update"
+                    | "compaction_summary_chunk",
+                ) => true,
+                _ => false,
+            };
+            if params["_meta"]["isReplay"] == true || progress {
+                activity.send_replace(Some(tokio::time::Instant::now()));
+            }
+            if let Some(snapshot) = state.loading_snapshot.as_mut() {
+                snapshot.update(params, inner.config.flavor.driver == "grok");
+            }
+            // A load can replay the user's entire history. The engine already owns those turns.
+            if !is_startup_metadata(params) {
+                return;
+            }
+        }
+        let replay = params["_meta"]["isReplay"] == true;
+        if !loading
+            && state.snapshot_enabled
+            && params["sessionId"].as_str() == state.session_id.as_deref()
+            && (replay || !state.mapper.has_turn())
+        {
+            state
+                .snapshot
+                .update(params, inner.config.flavor.driver == "grok");
+        }
+        if replay && !is_startup_metadata(params) {
+            return;
+        }
+        let Some(root) = state.session_id.clone().filter(|_| !loading) else {
             // Starting: keep the latest metadata per session and kind until the root is known.
             if is_startup_metadata(params) {
                 let kind = &params["update"]["sessionUpdate"];
@@ -1728,7 +2826,9 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
     if inner.config.flavor.completion == Completion::XAiPromptComplete
         && let Some((prompt_id, outcome)) = xai_prompt_complete(method, params)
     {
-        inner.settle(generation, Some(&prompt_id), outcome).await;
+        inner
+            .settle(generation, Some(&prompt_id), None, None, outcome)
+            .await;
         return;
     }
     let mut state = inner.state.lock().await;
@@ -1847,6 +2947,56 @@ fn xai_prompt_complete(method: &str, params: &Value) -> Option<(String, PromptOu
 
 /// `acpMcpContext` + `sessionMcpServers` for each `/mcp` server (see
 /// `Inner::session_mcp_servers`).
+pub(crate) fn apply_thread_environment(
+    env: &mut Vec<(String, String)>,
+    thread_id: &str,
+    servers: &[McpServer],
+    command: &str,
+) {
+    let Some(server) = servers.iter().find(|s| s.name == "conn") else {
+        return;
+    };
+    let Some((_, auth)) = server
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    else {
+        return;
+    };
+    for (name, value) in [
+        ("T3CODE_THREAD_ID", thread_id),
+        ("T3_ACP_MCP_NODE", command),
+        ("T3_ACP_MCP_ENDPOINT", server.url.as_str()),
+        ("T3_ACP_MCP_AUTHORIZATION", auth),
+    ] {
+        env.retain(|(k, _)| k != name);
+        env.push((name.to_owned(), value.to_owned()));
+    }
+}
+
+fn acp_native_thread_id(thread: &ProviderThread) -> ProviderResult<&str> {
+    thread
+        .native_thread_ref
+        .as_ref()
+        .and_then(|native| native.native_id.as_deref())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| protocol_error("Missing native ACP session ID"))
+}
+
+fn supports_snapshots(initialize: &Value) -> bool {
+    initialize["agentCapabilities"]["loadSession"] == true
+        || initialize["capabilities"]["session"]["load"].is_object()
+}
+
+fn grok_window(setup: &Value, initialize: &Value, model: &str) -> Option<u64> {
+    let models = setup["models"]["availableModels"]
+        .as_array()
+        .or_else(|| initialize["_meta"]["modelState"]["availableModels"].as_array())?;
+    models.iter().find(|m| m["modelId"] == model)?["_meta"]["totalContextTokens"]
+        .as_u64()
+        .filter(|n| *n > 0)
+}
+
 fn mcp_entries(
     flavor: &Flavor,
     servers: &[McpServer],
@@ -1907,7 +3057,9 @@ impl Session for AcpSession {
         input: EnsureThreadInput,
     ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
         Box::pin(async move {
+            let _transition = self.inner.activation.lock().await;
             let mut state = self.inner.state.lock().await;
+            state.app_thread = Some(input.thread_id.as_str().to_owned());
             let Some(session_id) = state.session_id.clone() else {
                 return Err(protocol_error("ACP runtime did not produce a session id"));
             };
@@ -1924,6 +3076,9 @@ impl Session for AcpSession {
     ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
         Box::pin(async move {
             let mut thread = to_json(&input.provider_thread);
+            let inner = &self.inner;
+            let _transition = inner.activation.lock().await;
+            inner.ensure_active_thread(&input.provider_thread).await?;
             thread["providerSessionId"] = json!(self.inner.config.provider_session_id);
             thread["status"] = json!("idle");
             from_json(thread).map_err(|e| protocol_error(format!("provider thread: {e}")))
@@ -1946,6 +3101,294 @@ impl Session for AcpSession {
         })
     }
 
+    fn read_thread_snapshot(
+        &self,
+        thread: ProviderThread,
+    ) -> BoxFuture<'_, ProviderResult<conn_provider::ThreadSnapshot>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            let native = acp_native_thread_id(&thread)?;
+            if thread.driver != inner.config.flavor.driver
+                || thread.provider_instance_id != inner.config.instance_id
+            {
+                return Err(protocol_error(
+                    "The snapshot belongs to another provider instance",
+                ));
+            }
+            let _transition = inner.activation.lock().await;
+            let mut uncached = inner.restart_if_needed(native, true).await?;
+            let mut state = inner.state.lock().await;
+            if state.closed {
+                return Err(ProviderError::SessionStopped);
+            }
+            if !state.snapshot_enabled {
+                return Err(ProviderError::Unsupported {
+                    operation: "read_thread_snapshot",
+                });
+            }
+            if uncached.is_none()
+                && (state.session_id.as_deref() != Some(native)
+                    || state.snapshot_needs_load
+                    || state.snapshot.needs_load())
+            {
+                let connection = state
+                    .runtime
+                    .as_ref()
+                    .ok_or(ProviderError::SessionStopped)?
+                    .connection
+                    .clone();
+                let initialize = state.initialize.clone();
+                drop(state);
+                uncached = inner
+                    .activate(&connection, &initialize, native, true)
+                    .await?;
+                state = inner.state.lock().await;
+            }
+            if state.closed || state.session_id.as_deref() != Some(native) {
+                return Err(ProviderError::SessionStopped);
+            }
+            if let Some(transcript) = uncached {
+                let app_thread = state.app_thread.clone();
+                let session_id = inner.config.provider_session_id.clone();
+                drop(state);
+                drop(_transition);
+                return tokio::task::spawn_blocking(move || {
+                    transcript.read(&thread, &session_id, app_thread.as_deref())
+                })
+                .await
+                .map_err(|e| {
+                    protocol_error(format!("Could not assemble the ACP transcript: {e}"))
+                })?;
+            }
+            state.snapshot.read(
+                &thread,
+                &inner.config.provider_session_id,
+                state.app_thread.as_deref(),
+            )
+        })
+    }
+
+    fn fork_thread(
+        &self,
+        input: conn_provider::ForkThreadInput,
+    ) -> BoxFuture<'_, ProviderResult<ProviderThread>> {
+        Box::pin(async move {
+            let source = to_json(&input.source_provider_thread);
+            let native = source["nativeThreadRef"]["nativeId"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| protocol_error("The fork source has no native ACP session id"))?;
+            let inner = &self.inner;
+            if source["driver"] != inner.config.flavor.driver
+                || source["providerInstanceId"] != inner.config.instance_id
+            {
+                return Err(protocol_error(
+                    "The fork source belongs to another provider instance",
+                ));
+            }
+            if let Some(turn) = &input.provider_turn_id {
+                let turns: Vec<_> = input
+                    .source_provider_turns
+                    .iter()
+                    .map(to_json)
+                    .filter(|t| t["providerThreadId"] == source["id"])
+                    .collect();
+                let head = turns.iter().map(|t| t["ordinal"].as_u64()).max().flatten();
+                if !turns.iter().any(|t| {
+                    t["id"] == turn.as_str() && t["ordinal"].as_u64() == head && head.is_some()
+                }) {
+                    return Err(protocol_error(
+                        "This ACP agent can only fork the native conversation head",
+                    ));
+                }
+            }
+            let _activation = inner.activation.lock().await;
+            let mut s = inner.state.lock().await;
+            if s.closed || s.mapper.has_turn() {
+                return Err(protocol_error(
+                    "Cannot fork while the ACP session is busy or closed",
+                ));
+            }
+            if !s.initialize["agentCapabilities"]["sessionCapabilities"]["fork"].is_object()
+                && !s.initialize["capabilities"]["session"]["fork"].is_object()
+            {
+                return Err(ProviderError::Unsupported {
+                    operation: "fork_thread",
+                });
+            }
+            let connection = s
+                .runtime
+                .as_ref()
+                .ok_or(ProviderError::SessionStopped)?
+                .connection
+                .clone();
+            let params = inner.session_setup_params(&s.initialize, Some(native));
+            let generation = s.generation;
+            s.activation_epoch += 1;
+            drop(s);
+            let setup = connection
+                .setup_call("session/fork", params)
+                .await
+                .map_err(|e| failed(inner.config.flavor, "session/fork", &e))?;
+            let child = setup["sessionId"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty() && *id != native)
+                .ok_or_else(|| protocol_error("session/fork returned no new native session"))?
+                .to_owned();
+            let mut s = inner.state.lock().await;
+            if s.closed || s.generation != generation {
+                return Err(ProviderError::SessionStopped);
+            }
+            s.snapshot = Default::default();
+            // A native fork includes its parent's transcript. ACP fork does not send it.
+            s.snapshot_needs_load = true;
+            s.session_id = Some(child.clone());
+            s.mapper.set_root_session(&child);
+            s.mapper.model_window = grok_window(&setup, &s.initialize, &inner.config.model);
+            s.setup = setup;
+            s.commands = None;
+            s.active_model = None;
+            s.previous_mode = None;
+            s.instruction_state = None;
+            s.delivered_context.clear();
+            s.delivered_notes = None;
+            let mut thread = s
+                .mapper
+                .make_provider_thread(input.target_thread_id.as_str(), &child);
+            thread["ownerNodeId"] = json!(input.owner_node_id.as_ref().map(|id| id.as_str()));
+            thread["forkedFrom"] = json!({"providerThreadId": source["id"]});
+            if let Some(turn) = &input.provider_turn_id {
+                thread["forkedFrom"]["providerTurnId"] = json!(turn.as_str());
+            }
+            s.mapper.remember_thread(&thread);
+            from_json(thread).map_err(|e| protocol_error(format!("forked provider thread: {e}")))
+        })
+    }
+
+    fn has_pending_background_work(&self) -> bool {
+        self.inner
+            .pending_background
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn steer_turn(&self, input: conn_provider::SteerInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            let attachments: Vec<_> = input.message.attachments.iter().map(to_json).collect();
+            let images = inner.image_blocks(&attachments).await?;
+            let text = inner
+                .attachment_text(&input.message.text, &attachments)
+                .await?;
+            let mut state = inner.state.lock().await;
+            if state.mapper.current_provider_turn_id() != Some(input.provider_turn_id.as_str())
+                || state.mapper.turn_interrupted()
+            {
+                return Err(protocol_error("The ACP turn is no longer active"));
+            }
+            let connection = state
+                .runtime
+                .as_ref()
+                .ok_or(ProviderError::SessionStopped)?
+                .connection
+                .clone();
+            let native = state
+                .session_id
+                .clone()
+                .ok_or(ProviderError::SessionStopped)?;
+            let entries: Vec<_> = input
+                .app_context
+                .into_iter()
+                .filter(|e| {
+                    !input.message.text.trim_start().starts_with('/')
+                        && state.delivered_context.get(&e.key) != Some(&e.text)
+                })
+                .collect();
+            let notes: Vec<_> = entries
+                .iter()
+                .map(|e| format!("<external_{0}>{1}</external_{0}>", e.key, e.text))
+                .collect();
+            if inner.config.flavor.driver == "grok" {
+                let text = if notes.is_empty() {
+                    text
+                } else {
+                    [notes.join("\n"), text].join("\n\n")
+                };
+                let params = obj()
+                    .with("sessionId", native)
+                    .with("text", text)
+                    .with_opt("content", (!images.is_empty()).then_some(J::Arr(images)));
+                let generation = state.generation;
+                let epoch = state.activation_epoch;
+                let marker = state.mapper.compaction_marker();
+                drop(state);
+                let reply = connection
+                    .setup_call("_x.ai/interject", params)
+                    .await
+                    .map_err(|e| failed(inner.config.flavor, "_x.ai/interject", &e))?;
+                if reply["result"]["status"] != "queued" {
+                    return Err(protocol_error("Grok did not queue the interjection"));
+                }
+                let mut state = inner.state.lock().await;
+                if state.generation == generation
+                    && state.activation_epoch == epoch
+                    && state.mapper.compaction_marker() == marker
+                {
+                    if let Some(pending) = state.delivery.as_mut() {
+                        pending
+                            .app_context
+                            .retain(|e| !entries.iter().any(|newer| newer.key == e.key));
+                    }
+                    state
+                        .delivered_context
+                        .extend(entries.into_iter().map(|e| (e.key, e.text)));
+                }
+                return Ok(());
+            }
+            if !crate::antigravity::version_triple(
+                state.initialize["agentInfo"]["version"].as_str(),
+            )
+            .is_some_and(|v| v >= [1, 5, 0])
+            {
+                return Err(ProviderError::Unsupported {
+                    operation: "steer_turn",
+                });
+            }
+            if state.queue_steers || state.pending_steer.is_some() || state.awaiting_initial_prompt
+            {
+                state.queue_steers = true;
+                return Err(protocol_error(
+                    "An earlier Antigravity message is awaiting delivery",
+                ));
+            }
+            let echo =
+                (!text.is_empty() && state.prompt_texts.insert(text.clone())).then(|| text.clone());
+            let mut blocks: Vec<_> = notes
+                .into_iter()
+                .map(|s| obj().with("type", "text").with("text", s))
+                .collect();
+            blocks.push(obj().with("type", "text").with("text", text));
+            blocks.extend(images);
+            let params = obj()
+                .with("sessionId", native)
+                .with("prompt", J::Arr(blocks));
+            let request = connection
+                .send("session/prompt", params)
+                .await
+                .ok_or(ProviderError::SessionStopped)?;
+            let (accepted, receipt) = tokio::sync::oneshot::channel();
+            state.pending_steer = Some(PendingSteer {
+                request,
+                echo,
+                entries,
+                marker: state.mapper.compaction_marker(),
+                accepted,
+                previous_reply: None,
+            });
+            drop(state);
+            receipt.await.unwrap_or(Err(ProviderError::SessionStopped))
+        })
+    }
+
     /// Stop ended the run before the agent accepted the turn: the start finishes the step it
     /// is in (an agent restart is not cut short, so no half-started process is left) and
     /// sends nothing more, no prompt, as T3's interrupted `startTurn` sends none.
@@ -1957,6 +3400,33 @@ impl Session for AcpSession {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(input.run_id.as_str().to_owned());
+        })
+    }
+
+    fn stop_background_work(&self, input: InterruptInput) -> BoxFuture<'_, ProviderResult<()>> {
+        Box::pin(async move {
+            let inner = &self.inner;
+            let thread = to_json(&input.provider_thread);
+            let mut state = inner.state.lock().await;
+            if state.mapper.has_turn()
+                || !state.mapper.pending_background_work()
+                || thread["providerInstanceId"] != inner.config.instance_id
+                || thread["nativeThreadRef"]["nativeId"].as_str() != state.session_id.as_deref()
+            {
+                return Ok(());
+            }
+            let runtime = state.runtime.take();
+            state.generation += 1;
+            state.restart_required = true;
+            state.mapper.interrupt();
+            inner
+                .pending_background
+                .store(false, std::sync::atomic::Ordering::Release);
+            drop(state);
+            if let Some(runtime) = runtime {
+                runtime.stopper.stop(StopKind::Terminate).await;
+            }
+            Ok(())
         })
     }
 
@@ -2053,6 +3523,11 @@ impl Session for AcpSession {
                     return Closed::RuntimeStopped;
                 }
                 state.closed = true;
+                state.pending_steer.take();
+                if let Some(timer) = state.prompt_watchdog.take() {
+                    timer.abort();
+                }
+                state.detached_requests.clear();
                 state.mapper.close_background();
                 let can_close =
                     !state.initialize["agentCapabilities"]["sessionCapabilities"]["close"]
@@ -2117,6 +3592,8 @@ mod spawn_tests {
         Config {
             flush_interval: None,
             finalize_debounce: FINALIZE_DEBOUNCE,
+            #[cfg(feature = "fixture-replay")]
+            deferred_finalize_gate: None,
             flavor: &crate::flavor::GROK,
             instance_id: "grok".into(),
             provider_session_id: "s".into(),
@@ -2132,6 +3609,8 @@ mod spawn_tests {
             runtime_version: None,
             self_command: "/conn-server".into(),
             default_model: None,
+            profile: None,
+            skill_cli: None,
             observer: None,
         }
     }

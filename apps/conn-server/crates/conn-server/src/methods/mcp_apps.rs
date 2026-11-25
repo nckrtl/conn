@@ -8,6 +8,16 @@ use conn_contract::{
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
     if let Some(engine) = &deps.engine {
+        engine_unary::<
+            conn_contract::ProviderMcpSignInStartInput,
+            conn_contract::ProviderMcpSignInStartResult,
+            conn_contract::ProviderMcpSignInError,
+        >(table, engine, "provider.mcpSignIn.start");
+        engine_unary::<
+            conn_contract::ProviderMcpSignInCompleteInput,
+            conn_contract::ProviderMcpSignInCompleteResult,
+            conn_contract::ProviderMcpSignInError,
+        >(table, engine, "provider.mcpSignIn.complete");
         engine_unary::<McpAppCallToolInput, McpAppCallToolResult, McpAppRequestError>(
             table,
             engine,

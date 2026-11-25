@@ -87,9 +87,11 @@ impl Lane {
 /// made them. After a process loss they are cancelled, and the restart decides again from the
 /// stored runs (`restart.rs`). Every other effect is replay-safe and runs again
 /// (`REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS`).
-pub(crate) const PROCESS_BOUND: [&str; 7] = [
+pub(crate) const PROCESS_BOUND: [&str; 9] = [
     "provider-turn.start",
     "provider-turn.steer",
+    "provider-thread.rename",
+    "provider-subagent.stop",
     "provider-turn.interrupt",
     "provider-turn.abandon-start",
     "provider-turn.stop-background-work",
@@ -104,6 +106,8 @@ impl Effect {
             Self::Rollback(_) => "provider-thread.rollback",
             Self::CaptureCheckpoint { .. } => "checkpoint.capture",
             Self::StartTurn { .. } => "provider-turn.start",
+            Self::RenameThread { .. } => "provider-thread.rename",
+            Self::StopSubagent { .. } => "provider-subagent.stop",
             Self::Steer { .. } => "provider-turn.steer",
             Self::Interrupt { .. } => "provider-turn.interrupt",
             Self::AbandonStart { .. } => "provider-turn.abandon-start",
@@ -124,6 +128,8 @@ impl Effect {
             Self::Rollback(request) => &request.thread_id,
             Self::CaptureCheckpoint { thread_id, .. }
             | Self::StartTurn { thread_id, .. }
+            | Self::RenameThread { thread_id, .. }
+            | Self::StopSubagent { thread_id, .. }
             | Self::Steer { thread_id, .. }
             | Self::Interrupt { thread_id, .. }
             | Self::AbandonStart { thread_id, .. }
@@ -219,7 +225,9 @@ pub(crate) fn insert(
 }
 
 /// Pending rows that may run now: the oldest of their thread's lane, with nothing of that lane
-/// running (`claimableCandidatePredicate`). A free row may always run.
+/// running (`claimableCandidatePredicate`). A free row may always run. A steer can be
+/// awaiting its native receipt or an interactive tool. Let Stop and runtime answers reach
+/// that provider while the receipt is outstanding. Steers themselves remain serialized.
 const CLAIMABLE: &str = "
 SELECT candidate.id FROM effect_outbox AS candidate
 WHERE candidate.status = 'pending'
@@ -228,7 +236,15 @@ WHERE candidate.status = 'pending'
     WHERE active.thread_id = candidate.thread_id
       AND active.lane = candidate.lane
       AND active.status IN ('pending', 'running')
-      AND (active.status = 'running' OR active.id < candidate.id)))
+      AND (active.status = 'running' OR active.id < candidate.id)
+      AND NOT (
+        candidate.effect_type IN ('provider-turn.interrupt', 'runtime-request.respond')
+        AND (active.effect_type = 'provider-turn.steer'
+             OR (active.status = 'pending' AND active.effect_type NOT IN ('provider-turn.interrupt', 'runtime-request.respond')))
+        AND EXISTS (SELECT 1 FROM effect_outbox AS steer
+                    WHERE steer.thread_id = candidate.thread_id AND steer.lane = candidate.lane
+                      AND steer.effect_type = 'provider-turn.steer' AND steer.status = 'running')
+      )))
 ORDER BY candidate.id
 LIMIT ?1";
 

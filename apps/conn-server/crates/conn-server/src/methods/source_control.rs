@@ -264,7 +264,7 @@ fn register_repositories(table: &mut MethodTable, inputs: &HostInputs, deps: &De
 
 /// `refreshPathFromLoginShell` before discovery, at most every 10 s, so a CLI installed since
 /// the start is found here and by every later child (`conn_support::login_env`).
-async fn refresh_login_path() {
+pub(super) async fn refresh_login_path() {
     use conn_support::login_env;
     if !(cfg!(target_os = "macos") || cfg!(target_os = "linux")) {
         return;

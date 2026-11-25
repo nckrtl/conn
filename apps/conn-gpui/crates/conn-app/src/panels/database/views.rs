@@ -16,10 +16,7 @@ use gpui_kit::{
     SharedString, Styled, deferred, div, point, px, relative,
 };
 
-use super::super::chrome::{
-    self, ROW_PAD_START_PX, TOOLBAR_PAD_END_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX,
-    XS_TEXT_PX,
-};
+use super::super::chrome::{self, ROW_PAD_START_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_TEXT_PX};
 use super::super::color::to_hsla;
 use super::super::header::superhero_icon;
 use super::DatabasePanel;
@@ -59,7 +56,7 @@ pub(crate) fn render_connection_menu(
         .min_w(px(160.0))
         .max_w(px(360.0))
         .p(px(4.0))
-        .rounded(px(12.0))
+        .rounded(px(8.0))
         .bg(to_hsla(tokens.popover))
         .border_1()
         .border_color(divider)
@@ -68,7 +65,19 @@ pub(crate) fn render_connection_menu(
 
     let selected_id = selected.map(|conn| conn.id.as_str());
     if !connections.is_empty() {
+        let mut vault_heading_shown = false;
         for connection in connections {
+            if connection.source == ConnectionSource::Vault && !vault_heading_shown {
+                vault_heading_shown = true;
+                list = list.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(px(12.0))
+                        .text_color(muted)
+                        .child("Vault"),
+                );
+            }
             let is_selected = selected_id == Some(connection.id.as_str());
             let target = connection_target(&connection.connection, connection.ssh_host.as_deref());
             let id = connection.id.clone();
@@ -78,7 +87,7 @@ pub(crate) fn render_connection_menu(
                     .id(SharedString::from(format!("db-conn-item-{id}")))
                     .a11y_button(
                         format!("panel.database.connection.{id}"),
-                        "Database connection",
+                        connection.name.clone(),
                     )
                     .w_full()
                     .min_h(px(28.0))
@@ -86,7 +95,7 @@ pub(crate) fn render_connection_menu(
                     .py(px(4.0))
                     .gap(px(6.0))
                     .items_center()
-                    .rounded(px(8.0))
+                    .rounded(px(4.0))
                     .cursor_pointer()
                     .text_size(px(14.0))
                     .line_height(px(20.0))
@@ -121,6 +130,7 @@ pub(crate) fn render_connection_menu(
         let entity = entity.clone();
         h_flex()
             .id(id)
+            .a11y_button(format!("panel.database.{id}"), label)
             .w_full()
             .min_h(px(28.0))
             .px(px(8.0))
@@ -247,8 +257,7 @@ pub(crate) fn render_connection_alert(tokens: &Tokens, error: &str) -> AnyElemen
         .into_any_element()
 }
 
-/// Result rows table (`RowsGrid` in `DatabasePanel.tsx`): mono `text-xs`, `h-8` column header,
-/// `px-3 py-1.5 first:ps-4` cells with `max-w-72` truncation and italic `NULL`.
+/// The header and rows share a horizontal viewport. Only the rows scroll vertically.
 pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) -> AnyElement {
     if result.columns.is_empty() {
         return div()
@@ -274,27 +283,26 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
     let last_col = widths.len().saturating_sub(1);
 
     let mut header_row = h_flex()
+        .id("db-results-header")
+        .a11y_group("panel.database.results.header", "Result columns")
+        .flex_shrink_0()
         .w_full()
         .min_w(px(total_width))
-        .h(px(32.0))
         .items_center()
         .bg(header_bg)
         .border_b_1()
         .border_color(divider)
         .font_family(mono.clone())
         .text_size(px(XS_TEXT_PX))
-        .line_height(px(XS_LINE_HEIGHT_PX))
+        .line_height(px(17.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(muted);
 
     for (index, column) in result.columns.iter().enumerate() {
         let width = widths.get(index).copied().unwrap_or(120.0);
         let mut cell = div()
-            .h_full()
-            .flex()
-            .items_center()
-            .pl(px(if index == 0 { 16.0 } else { 12.0 }))
-            .pr(px(12.0))
+            .px(px(12.0))
+            .py(px(10.0))
             .overflow_hidden()
             .whitespace_nowrap()
             .truncate()
@@ -307,13 +315,15 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
         header_row = header_row.child(cell);
     }
 
-    let mut table = v_flex()
+    let mut body = v_flex()
+        .id("db-results-body")
         .w_full()
-        .min_w(px(total_width))
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
         .font_family(mono)
         .text_size(px(XS_TEXT_PX))
-        .line_height(px(XS_LINE_HEIGHT_PX))
-        .child(header_row);
+        .line_height(px(17.0));
 
     for (row_index, row) in result.rows.iter().enumerate() {
         let mut line = h_flex()
@@ -322,6 +332,7 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
                 format!("panel.database.row.{row_index}"),
                 format!("Result row {}", row_index + 1),
             )
+            .flex_shrink_0()
             .w_full()
             .min_w(px(total_width))
             .items_center()
@@ -333,9 +344,8 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
         for (col_index, column) in result.columns.iter().enumerate() {
             let width = widths.get(col_index).copied().unwrap_or(120.0);
             let mut cell = div()
-                .pl(px(if col_index == 0 { 16.0 } else { 12.0 }))
-                .pr(px(12.0))
-                .py(px(6.0))
+                .px(px(12.0))
+                .py(px(10.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .truncate();
@@ -354,10 +364,15 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
             }
             line = line.child(cell);
         }
-        table = table.child(line);
+        body = body.child(line);
     }
 
-    table.into_any_element()
+    v_flex()
+        .size_full()
+        .min_w(px(total_width))
+        .child(header_row)
+        .child(body)
+        .into_any_element()
 }
 
 /// Column metadata list (`StructureList` in `DatabasePanel.tsx`).
@@ -378,12 +393,12 @@ pub(crate) fn render_structure_list(tokens: &Tokens, columns: &[DatabaseColumn])
             .gap(px(6.0))
             .font_family(mono.clone())
             .text_size(px(XS_TEXT_PX))
-            .line_height(px(XS_LINE_HEIGHT_PX))
+            .line_height(px(17.0))
             .text_color(fg)
-            .child(div().min_w_0().truncate().child(column.name.clone()));
+            .child(div().min_w_0().child(column.name.clone()));
 
         if column.primary {
-            name_col = name_col.child(superhero_icon("superhero/key.svg", 14.0, warning));
+            name_col = name_col.child(superhero_icon("superhero/key.svg", 12.0, warning));
         }
 
         list = list.child(
@@ -392,8 +407,7 @@ pub(crate) fn render_structure_list(tokens: &Tokens, columns: &[DatabaseColumn])
                 .items_center()
                 .gap(px(12.0))
                 .py(px(8.0))
-                .pl(px(ROW_PAD_START_PX))
-                .pr(px(TOOLBAR_PAD_END_PX))
+                .px(px(16.0))
                 .border_b_1()
                 .border_color(divider)
                 .child(name_col)
@@ -401,10 +415,9 @@ pub(crate) fn render_structure_list(tokens: &Tokens, columns: &[DatabaseColumn])
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
                         .font_family(mono.clone())
                         .text_size(px(XS_TEXT_PX))
-                        .line_height(px(XS_LINE_HEIGHT_PX))
+                        .line_height(px(17.0))
                         .text_color(muted)
                         .child(format_column_details(column)),
                 ),

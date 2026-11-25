@@ -32,6 +32,8 @@ use crate::protocol::{Inbound, reply, reply_error};
 mod goals;
 mod subagents;
 
+mod rate_limits;
+mod retries;
 pub use goals::{
     GoalCommand, describe as describe_goal, objective_too_long, parse_command, provider_goal,
 };
@@ -165,6 +167,7 @@ struct Turn {
     running_tools: Vec<Value>,
     running_compactions: Vec<String>,
     latest_failure: Option<(String, Option<String>, Value)>,
+    recovered_retries: u32,
     /// Earlier provider turns of the same run that Codex continued with this one (a goal's
     /// turns, `continuedRuns`): Stop may name any of them.
     continues: Vec<String>,
@@ -274,7 +277,7 @@ pub struct Mapper<E: Env> {
     usage: HashMap<String, UsageState>,
     /// Native thread id → (runtime mode, kinds accepted for the session).
     allowances: HashMap<String, (String, HashSet<&'static str>)>,
-    mcp_failures: HashMap<String, Vec<(String, String)>>,
+    mcp_failures: HashMap<String, Vec<(String, String, bool)>>,
     interrupting: HashSet<String>,
     ended_unfinished: HashSet<String>,
     /// The latest ended turns, newest last; at most [`ENDED_TURNS_KEPT`].
@@ -299,6 +302,11 @@ pub struct Mapper<E: Env> {
     /// `runningCommandItemsByTurn` when it settles the lineage).
     stop_processes: VecDeque<(String, Vec<String>)>,
     goals: goals::Goals,
+    // Timed from the first unanswered retry. Repeated notices only update its failure evidence.
+    retries: HashMap<String, retries::Retry>,
+    pub(crate) limit_reset: Option<String>,
+    limited_item: Option<Value>,
+    pub(crate) time_zone: Option<String>,
 }
 
 /// A completed turn kept for its running commands, and the commands whose end already asked
@@ -306,6 +314,8 @@ pub struct Mapper<E: Env> {
 struct Settled {
     turn: Turn,
     offered: Vec<String>,
+    // Keep the native context for a completion that races a terminal list response.
+    unknown_outcome: HashSet<String>,
 }
 
 impl<E: Env> std::fmt::Debug for Mapper<E> {
@@ -444,6 +454,10 @@ impl<E: Env> Mapper<E> {
             closing: false,
             stop_processes: VecDeque::new(),
             goals: goals::Goals::default(),
+            retries: Default::default(),
+            limit_reset: None,
+            limited_item: None,
+            time_zone: None,
         }
     }
 
@@ -486,6 +500,7 @@ impl<E: Env> Mapper<E> {
     /// Called before `turn/start` goes out: a `turn/started` that beats the response registers
     /// the turn from this input.
     pub fn begin_turn(&mut self, native_thread_id: &str, input: &TurnInput) {
+        self.limited_item = None;
         let thread = to_json(&input.provider_thread);
         self.remember_root_thread(native_thread_id, thread.clone(), false);
         self.pending_turns.insert(
@@ -715,6 +730,7 @@ impl<E: Env> Mapper<E> {
             running_tools: Vec::new(),
             running_compactions: Vec::new(),
             latest_failure: None,
+            recovered_retries: 0,
             continues: Vec::new(),
             hook_stop_reason: None,
         }
@@ -887,6 +903,13 @@ impl<E: Env> Mapper<E> {
     /// The app-server is gone: every open turn ends. `expected` (a close) ends them as
     /// interrupted, a crash as failed.
     /// The running subagent turns: (native thread, native turn).
+    pub fn open_turns(&self) -> Vec<(String, String)> {
+        self.turns
+            .values()
+            .map(|turn| (turn.native_thread_id.clone(), turn.native_turn_id.clone()))
+            .collect()
+    }
+
     pub fn open_child_turns(&self) -> Vec<(String, String)> {
         self.turns
             .values()
@@ -986,6 +1009,22 @@ impl<E: Env> Mapper<E> {
 
     fn notification(&mut self, method: &str, p: &Value, out: &mut Vec<Out>) {
         let turn_id = p["turnId"].as_str().unwrap_or_default();
+        if matches!(
+            method,
+            "item/started"
+                | "item/completed"
+                | "item/agentMessage/delta"
+                | "item/reasoning/textDelta"
+                | "item/reasoning/summaryTextDelta"
+                | "item/plan/delta"
+                | "turn/plan/updated"
+        ) && let Some(retry) = self.retries.remove(turn_id)
+        {
+            retry.end("completed", &self.env.now(), None, out);
+            if let Some(turn) = self.turns.get_mut(turn_id) {
+                turn.recovered_retries += 1;
+            }
+        }
         match method {
             "turn/started" => {
                 let native_turn = p["turn"]["id"].as_str().unwrap_or_default();
@@ -1512,6 +1551,55 @@ impl<E: Env> Mapper<E> {
                 }
             }
             "agentMessage" => {
+                if item["delivery"] == "async"
+                    && let Some(qs) = item["questions"].as_array().filter(|q| !q.is_empty())
+                {
+                    let Some(turn) = self.turns.get_mut(turn_id) else {
+                        return;
+                    };
+                    let questions: Vec<_> = qs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, q)| {
+                            let options: Vec<_> = q["options"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|label| json!({"label":label}))
+                                .collect();
+                            json!({"id":i.to_string(),"question":q["title"],"options":options})
+                        })
+                        .collect();
+                    let native = format!("async:{id}");
+                    let request_id = ids::runtime_request_id(
+                        DRIVER,
+                        &turn.provider_turn_id,
+                        &native,
+                        &self.env.uuid(),
+                    );
+                    let (node, mut item, mut request) = user_input_artifacts(
+                        turn,
+                        &id,
+                        &native,
+                        &request_id,
+                        &json!(questions),
+                        &Value::Null,
+                        &self.env.now(),
+                    );
+                    item["responseMode"] = json!("message");
+                    request["responseCapability"] = json!({"type":"message"});
+                    turn.final_answer_ids.retain(|key| key != &id);
+                    self.bufs
+                        .retain(|buf| !(buf.turn == turn_id && buf.item == id));
+                    push_event(out, json!({"type":"node.updated","node":node}));
+                    push_event(out, json!({"type":"turn_item.updated","turnItem":item}));
+                    push_event(
+                        out,
+                        json!({"type":"runtime_request.updated","threadId":turn.thread_id,"runtimeRequest":request}),
+                    );
+                    return;
+                }
+
                 let phase = item["phase"].as_str();
                 let final_answer = phase.is_none_or(|p| p == "final_answer");
                 if let Some(turn) = self.turns.get_mut(turn_id) {
@@ -1721,7 +1809,7 @@ impl<E: Env> Mapper<E> {
         };
         let name = p["name"].as_str().unwrap_or_default().to_owned();
         let failures = self.mcp_failures.entry(thread.to_owned()).or_default();
-        failures.retain(|(n, _)| *n != name);
+        failures.retain(|(n, _, _)| *n != name);
         if p["status"] != "failed" {
             if failures.is_empty() {
                 self.mcp_failures.remove(thread);
@@ -1730,7 +1818,9 @@ impl<E: Env> Mapper<E> {
         }
         let message =
             trimmed(&p["error"]).unwrap_or_else(|| format!("MCP server {name} failed to start."));
-        failures.push((name, message));
+        let sign_in =
+            p["failureReason"] == "reauthenticationRequired" || message.contains("mcp login");
+        failures.push((name, message, sign_in));
         let active = self
             .turns
             .values()
@@ -1748,7 +1838,7 @@ impl<E: Env> Mapper<E> {
         let Some(failures) = self.mcp_failures.remove(&turn.native_thread_id) else {
             return;
         };
-        for (name, message) in failures {
+        for (name, message, sign_in) in failures {
             let item = format!("mcp-startup-failed:{}:{name}", turn.provider_turn_id);
             let now = self.env.now();
             let (ordinal, started_at) = turn.position(&item, now);
@@ -1770,6 +1860,9 @@ impl<E: Env> Mapper<E> {
                     "message": message,
                 }),
             );
+            if sign_in {
+                turn_item["mcpSignIn"] = json!({"server":name});
+            }
             push_event(
                 out,
                 json!({"type": "turn_item.updated", "turnItem": turn_item}),
@@ -1777,12 +1870,137 @@ impl<E: Env> Mapper<E> {
         }
     }
 
-    fn error(&mut self, turn_id: &str, p: &Value, _out: &mut Vec<Out>) {
+    pub fn forget_account(&mut self) {
+        self.limit_reset = None;
+        self.limited_item = None;
+    }
+
+    pub fn update_reset(&mut self, reset: Option<String>) -> Vec<Out> {
+        self.limit_reset = reset.clone();
+        let mut out = Vec::new();
+        if let Some(reset) = reset
+            && let Some(mut item) = self.limited_item.take()
+        {
+            item["failure"]["resetAt"] = json!(reset);
+            item["updatedAt"] = json!(self.env.now());
+            push_event(
+                &mut out,
+                json!({"type":"turn_item.updated","turnItem":item}),
+            );
+        }
+        out
+    }
+
+    pub fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+        self.retries.values().map(|retry| retry.deadline).min()
+    }
+
+    pub fn expire_retries(&mut self, now: tokio::time::Instant) -> Vec<Out> {
+        let expired: Vec<_> = self
+            .retries
+            .iter()
+            .filter(|(_, retry)| retry.deadline <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in expired {
+            let Some(error) = self.retries.get(&id).map(|retry| retry.error.clone()) else {
+                continue;
+            };
+            let Some(turn) = self.turns.get_mut(&id) else {
+                continue;
+            };
+            let info = &error["codexErrorInfo"];
+            let code = error_info_code(info);
+            let message = error["message"]
+                .as_str()
+                .unwrap_or("Codex stopped making progress during a retry.");
+            turn.latest_failure = Some((
+                message.to_owned(),
+                code,
+                retries::retry_failure(&error, false),
+            ));
+            let thread = turn.native_thread_id.clone();
+            let at = self.env.now();
+            self.finalize(
+                &id,
+                "failed",
+                at,
+                Some(message),
+                Some(info.clone()),
+                &mut out,
+            );
+            out.push(Out::InterruptAbandoned { thread, turn: id });
+        }
+        out
+    }
+
+    pub fn overloaded(&self, native: &str, run: &str, code: &Value) -> bool {
+        !self.closing
+            && !self.interrupting.contains(native)
+            && self.turns.get(native).is_some_and(|turn| {
+                turn.subagent.is_none()
+                    && turn.run_id.as_deref() == Some(run)
+                    && error_info_code(code)
+                        .or_else(|| turn.latest_failure.as_ref().and_then(|(_, c, _)| c.clone()))
+                        .as_deref()
+                        == Some("serverOverloaded")
+            })
+    }
+
+    pub fn hand_over_capacity(
+        &mut self,
+        old: &str,
+        completion: &Value,
+        thread: &str,
+        input: &TurnInput,
+        result: &Value,
+    ) -> Vec<Out> {
+        let mut earlier = self
+            .turns
+            .get(old)
+            .map(|t| t.continues.clone())
+            .unwrap_or_default();
+        earlier.push(ids::provider_turn_id(DRIVER, old));
+        let mut out = Vec::new();
+        self.turn_completed(completion, &mut out);
+        out.retain(|o| !matches!(o, Out::Event(ProviderEvent::TurnTerminal(_))));
+        self.begin_turn(thread, input);
+        out.extend(self.turn_start_result(thread, result));
+        if let Some(next) = result["turn"]["id"]
+            .as_str()
+            .and_then(|id| self.turns.get_mut(id))
+        {
+            next.continues = earlier;
+        }
+        out
+    }
+
+    pub fn capacity_failed(&mut self, completion: &Value) -> Vec<Out> {
+        let mut out = Vec::new();
+        self.turn_completed(completion, &mut out);
+        out
+    }
+
+    pub fn may_have_usage_limit(&self, native: &str, info: &Value) -> bool {
+        usage_limit(error_info_code(info).as_deref(), info)
+            || self
+                .turns
+                .get(native)
+                .and_then(|t| t.latest_failure.as_ref())
+                .is_some_and(|(_, _, f)| f["class"] == "usage_limit")
+    }
+
+    fn error(&mut self, turn_id: &str, p: &Value, out: &mut Vec<Out>) {
         let Some(turn) = self.turns.get_mut(turn_id) else {
             return;
         };
         if p["willRetry"] == true {
-            // Retry rows are not projected; the turn keeps running.
+            let at = self.env.now();
+            self.retries
+                .entry(turn_id.to_owned())
+                .or_insert_with(|| retries::Retry::new(turn, &at))
+                .notice(&p["error"], &at, out);
             return;
         }
         let error = &p["error"];
@@ -1961,7 +2179,7 @@ impl<E: Env> Mapper<E> {
                 json!({"type": "turn_item.updated", "turnItem": turn_item}),
             );
         }
-        let failure = (terminal_status == "failed").then(|| {
+        let mut failure = (terminal_status == "failed").then(|| {
             let code = failure_info.as_ref().and_then(error_info_code);
             let class = if usage_limit(
                 code.as_deref(),
@@ -1981,6 +2199,53 @@ impl<E: Env> Mapper<E> {
                 _ => failure_json(class, failure_message.unwrap_or(""), code.as_deref(), None),
             }
         });
+        if let Some(failure) = &mut failure
+            && failure["class"] == "usage_limit"
+        {
+            let shared = failure["code"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("subscription_sharing_"));
+            if !shared
+                && let Some(reset) = self.limit_reset.clone().or_else(|| {
+                    rate_limits::message_reset(
+                        failure["message"].as_str()?,
+                        &completed_at,
+                        self.time_zone.as_deref(),
+                    )
+                })
+            {
+                failure["resetAt"] = json!(reset);
+            }
+            let key = format!("terminal-failure:{}", turn.provider_turn_id);
+            let (ordinal, _) = turn.position(&key, completed_at.clone());
+            let mut item = item_json(
+                &turn,
+                &key,
+                &turn.root_node_id,
+                ordinal,
+                "failed",
+                &completed_at,
+                Some(&completed_at),
+                &completed_at,
+            );
+            extend(
+                &mut item,
+                json!({"type":"error","title":"Usage limit reached","nativeItemRef":null,"failure":failure}),
+            );
+            if let Some(run) = &turn.run_id {
+                // The engine writes this row when it settles the run. A later account
+                // update changes that same error so its queue can resume exactly once.
+                if !shared && failure["resetAt"].is_null() {
+                    item["id"] = json!(format!("turn-item:{run}:error"));
+                    self.limited_item = Some(item);
+                }
+            } else {
+                push_event(out, json!({"type":"turn_item.updated","turnItem":item}));
+            }
+        }
+        if let Some(retry) = self.retries.remove(native) {
+            retry.end(terminal_status, &completed_at, failure.as_ref(), out);
+        }
         // The turn is gone: drop what was kept for it.
         self.ended_unfinished.remove(native);
         self.interrupting.remove(native);
@@ -2038,6 +2303,7 @@ impl<E: Env> Mapper<E> {
             self.settled.push_back(Settled {
                 turn,
                 offered: Vec::new(),
+                unknown_outcome: Default::default(),
             });
         }
     }
@@ -2071,6 +2337,7 @@ impl<E: Env> Mapper<E> {
         let Some(settled) = self.settled.get_mut(at) else {
             return;
         };
+        settled.unknown_outcome.remove(&id);
         settled.turn.running_commands.retain(|c| c.id != id);
         command_artifacts(&mut self.env, &mut settled.turn, item, out);
         if settled.turn.subagent.is_none() && !interrupting && !settled.offered.contains(&id) {
@@ -2102,9 +2369,87 @@ impl<E: Env> Mapper<E> {
                 },
             )));
         }
-        if settled.turn.running_commands.is_empty() {
+        if settled.turn.running_commands.is_empty() && settled.unknown_outcome.is_empty() {
             self.settled.remove(at);
         }
+    }
+
+    pub fn needs_terminal_list(&self, turn: &str) -> bool {
+        self.settled
+            .iter()
+            .any(|s| s.turn.native_turn_id == turn && !s.turn.running_commands.is_empty())
+    }
+
+    pub fn reconcile_terminals(&mut self, native_turn: &str, live: &HashSet<String>) -> Vec<Out> {
+        let claimed: HashSet<_> = self
+            .turns
+            .values()
+            .chain(self.settled.iter().map(|s| &s.turn))
+            .flat_map(|t| &t.running_commands)
+            .filter_map(|c| c.process_id.clone())
+            .collect();
+        let unclaimed = live.iter().any(|id| !claimed.contains(id));
+        let mut out = Vec::new();
+        let now = self.env.now();
+        if let Some(s) = self
+            .settled
+            .iter_mut()
+            .find(|s| s.turn.native_turn_id == native_turn)
+        {
+            for cmd in std::mem::take(&mut s.turn.running_commands) {
+                if cmd
+                    .process_id
+                    .as_ref()
+                    .map_or(unclaimed, |id| live.contains(id))
+                {
+                    s.turn.running_commands.push(cmd);
+                } else {
+                    s.unknown_outcome.insert(cmd.id.clone());
+                    terminal_command(&mut s.turn, &cmd, "cancelled", &now, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn idle_targets(&self, root: &str) -> Vec<(String, String, String, Option<String>)> {
+        let roots: Vec<_> = self
+            .settled
+            .iter()
+            .filter(|s| s.turn.native_thread_id == root)
+            .map(|s| s.turn.provider_turn_id.clone())
+            .collect();
+        self.settled
+            .iter()
+            .filter(|s| s.turn.native_thread_id == root || self.descends_from(&s.turn, &roots))
+            .flat_map(|s| {
+                s.turn.running_commands.iter().map(|c| {
+                    (
+                        s.turn.native_thread_id.clone(),
+                        s.turn.native_turn_id.clone(),
+                        c.id.clone(),
+                        c.process_id.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub fn stopped_command(&mut self, native: &str, id: &str) -> Vec<Out> {
+        let mut out = Vec::new();
+        let now = self.env.now();
+        if let Some(s) = self
+            .settled
+            .iter_mut()
+            .find(|s| s.turn.native_turn_id == native)
+            && let Some(pos) = s.turn.running_commands.iter().position(|c| c.id == id)
+        {
+            let cmd = s.turn.running_commands.remove(pos);
+            terminal_command(&mut s.turn, &cmd, "interrupted", &now, &mut out);
+        }
+        self.settled
+            .retain(|s| !s.turn.running_commands.is_empty() || !s.unknown_outcome.is_empty());
+        out
     }
 
     /// `thread/closed`: a settled turn's commands on that thread end as interrupted.
@@ -2924,8 +3269,65 @@ fn tool_rows(
     (node, turn_item)
 }
 
+// Codex supplies raw file contents for additions/deletions and several patch forms for updates.
+fn file_patches(changes: &[Value]) -> String {
+    let mut result = String::new();
+    for change in changes {
+        let path = change["path"].as_str().unwrap_or_default();
+        let kind = change["kind"]["type"].as_str().unwrap_or_default();
+        let destination = change["kind"]["move_path"]
+            .as_str()
+            .filter(|s| !s.is_empty() && kind == "update")
+            .unwrap_or(path);
+        let before = json!(format!("a/{path}")).to_string();
+        let after = json!(format!("b/{destination}")).to_string();
+        let diff = change["diff"].as_str().unwrap_or_default();
+        if kind != "update" || !diff.starts_with("diff --git ") {
+            result.push_str(&format!("diff --git {before} {after}\n"));
+            if kind != "update" || !diff.starts_with("--- ") {
+                let before = if kind == "add" { "/dev/null" } else { &before };
+                let after = if kind == "delete" {
+                    "/dev/null"
+                } else {
+                    &after
+                };
+                result.push_str(&format!("--- {before}\n+++ {after}\n"));
+            }
+        }
+        if kind == "update" {
+            result.push_str(diff);
+        } else {
+            let lines: Vec<_> = diff
+                .strip_suffix('\n')
+                .unwrap_or(diff)
+                .split('\n')
+                .collect();
+            let range = format!("1,{}", lines.len());
+            let (old, new, prefix) = if kind == "add" {
+                ("0,0", range.as_str(), '+')
+            } else {
+                (range.as_str(), "0,0", '-')
+            };
+            result.push_str(&format!("@@ -{old} +{new} @@\n"));
+            for line in lines {
+                result.push(prefix);
+                result.push_str(line);
+                result.push('\n');
+            }
+            if !diff.ends_with('\n') {
+                result.push_str("\\ No newline at end of file\n");
+            }
+        }
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
+    result
+}
+
 fn file_change_artifacts(env: &mut impl Env, turn: &mut Turn, item: &Value, out: &mut Vec<Out>) {
-    let Some(first) = item["changes"].as_array().and_then(|c| c.first()) else {
+    let files = item["changes"].as_array().map_or(&[][..], Vec::as_slice);
+    let Some((first, others)) = files.split_first() else {
         return;
     };
     let id = item["id"].as_str().unwrap_or_default();
@@ -2968,7 +3370,7 @@ fn file_change_artifacts(env: &mut impl Env, turn: &mut Turn, item: &Value, out:
     extend(
         &mut turn_item,
         json!({
-            "type": "file_change", "fileName": first["path"], "diffStr": first["diff"], "changes": changes,
+            "type": "file_change", "fileName": first["path"], "diffStr": if others.is_empty() { first["diff"].clone() } else { json!(file_patches(files)) }, "changes": changes,
         }),
     );
     push_event(out, json!({"type": "node.updated", "node": node}));
@@ -3246,6 +3648,37 @@ fn usage_limit(code: Option<&str>, info: &Value) -> bool {
 
 /// `makeProviderFailure`: message and code with secrets removed and the length capped.
 fn failure_json(class: &str, message: &str, code: Option<&str>, retryable: Option<bool>) -> Value {
+    let structured: Option<Value> = serde_json::from_str(message).ok();
+    let native_code = structured
+        .as_ref()
+        .and_then(|v| v.get("error").unwrap_or(v)["code"].as_str())
+        .or(Some(message));
+    let managed = [native_code, code].into_iter().flatten().find(|c| {
+        matches!(
+            *c,
+            "invalid_encrypted_content"
+                | "subscription_sharing_usage_limit_exceeded"
+                | "subscription_sharing_workplace_individual_usage_limit_exceeded"
+        )
+    });
+    let (class, message, code) = match managed {
+        Some("invalid_encrypted_content") => (
+            "provider_error",
+            "Codex could not verify the encrypted conversation history.",
+            managed,
+        ),
+        Some(_) => (
+            "usage_limit",
+            "This account reached its ChatGPT sharing allowance.",
+            managed,
+        ),
+        None if message.contains("has reached their Subscription Sharing usage limit") => (
+            "usage_limit",
+            "This account reached its ChatGPT sharing allowance.",
+            Some("subscription_sharing_usage_limit_exceeded"),
+        ),
+        None => (class, message, code),
+    };
     let message = redact::bounded(message, redact::MAX_MESSAGE_LENGTH);
     let message = if message.is_empty() {
         "Provider turn failed.".to_owned()

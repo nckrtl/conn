@@ -194,6 +194,8 @@ pub struct CanUseTool {
     #[serde(default)]
     pub decision_reason: Option<String>,
     #[serde(default)]
+    pub matched_ask_rule: Option<Value>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -233,6 +235,10 @@ pub struct UserDialog {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SystemMsg {
+    #[serde(skip)]
+    pub recovered_launch: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
     pub subtype: String,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -392,6 +398,8 @@ pub enum Block {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Usage {
     #[serde(default)]
+    pub iterations: Option<Vec<UsageIteration>>,
+    #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
@@ -403,6 +411,14 @@ pub struct Usage {
     pub cache_creation: Option<CacheCreation>,
     #[serde(default)]
     pub output_tokens_details: Option<OutputTokensDetails>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct UsageIteration {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(flatten)]
+    pub usage: Usage,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -424,6 +440,7 @@ impl Usage {
                 .and_then(|d| d.thinking_tokens)
         };
         Usage {
+            iterations: None,
             input_tokens: self.input_tokens + other.input_tokens,
             output_tokens: self.output_tokens + other.output_tokens,
             cache_creation_input_tokens: add(
@@ -459,6 +476,8 @@ pub struct CacheCreation {
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct UsageDelta {
+    #[serde(default)]
+    pub iterations: Option<Vec<UsageIteration>>,
     #[serde(default)]
     pub input_tokens: Option<u64>,
     #[serde(default)]
@@ -592,7 +611,7 @@ pub struct ResultMsg {
 pub enum Delivery {
     /// Starts a turn.
     Turn,
-    /// `priority: "now"`: steers the running turn.
+    /// `priority: "next"`: steers the running turn.
     Steer,
 }
 
@@ -606,7 +625,7 @@ pub fn user_message_value(content: Value, uuid: &str, delivery: Delivery) -> Val
         "uuid": uuid,
     });
     if delivery == Delivery::Steer {
-        message["priority"] = json!("now");
+        message["priority"] = json!("next");
     }
     message
 }

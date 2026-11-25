@@ -17,8 +17,8 @@ use crate::orbit::{
     orbit_connect_failure,
 };
 use crate::types::{
-    FfiConnectionStatus, FfiCredential, FfiError, FfiSavedSession, FfiShellSnapshot,
-    FfiThreadSnapshot,
+    FfiConnectionStatus, FfiCredential, FfiError, FfiOrbitErrorReason, FfiSavedSession,
+    FfiShellSnapshot, FfiThreadSnapshot,
 };
 
 /// The cache directory's record of which server (identity) its contents belong to.
@@ -171,11 +171,21 @@ pub(crate) enum Effect<C> {
         core: C,
         thread_id: String,
     },
+    /// After `after`, start attempt `id` again if it is still the current one.
+    RetryStart {
+        id: u64,
+        after: Duration,
+    },
 }
 
 /// Failed tries in a row before a reconnect counts as offline. The first try after launch or
 /// resume often fails while the network wakes; the next follows 250 ms later.
 const OFFLINE_AFTER_FAILED_TRIES: u32 = 2;
+
+/// A start that fails for a reason that may pass is tried again this many times, 500 ms, 1 s
+/// and 2 s apart, before the attempt fails. The network is often still waking at launch.
+const START_RETRIES: u32 = 3;
+const START_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 struct Attempt<C> {
     id: u64,
@@ -188,6 +198,8 @@ struct Attempt<C> {
     connected_once: bool,
     /// Connection tries that failed since the last handshake, fresh try or foreground.
     failed_tries: u32,
+    /// Starts that failed transiently and were scheduled again, since this attempt began.
+    start_retries: u32,
     /// A rejected bearer may re-pair through Orbit. False for a re-pair attempt until it
     /// connects, so a fresh pairing that is rejected too can't loop.
     may_recover: bool,
@@ -330,6 +342,7 @@ impl<C: SessionCore> Machine<C> {
             early_failure: None,
             connected_once: false,
             failed_tries: 0,
+            start_retries: 0,
             may_recover: may_recover == Recover::Allowed,
             identity: None,
             offline_ready: false,
@@ -485,6 +498,7 @@ impl<C: SessionCore> Machine<C> {
             Some(a) => {
                 // The nudge is a fresh try: connecting again until it fails too.
                 a.failed_tries = 0;
+                a.start_retries = 0;
                 a.core.clone().map(Effect::Reconnect).into_iter().collect()
             }
             None => match self.rest.clone() {
@@ -593,7 +607,67 @@ impl<C: SessionCore> Machine<C> {
         fx
     }
 
-    /// The attempt could not produce a connection.
+    /// The attempt could not produce a connection, for a reason that may pass: the network is
+    /// waking, the Gateway didn't answer. An Orbit target stays connecting and starts again after
+    /// a pause, a few times; then it fails like [`Self::start_failed`].
+    pub(crate) fn start_failed_transient(
+        &mut self,
+        id: u64,
+        message: String,
+        detail: Option<String>,
+    ) -> Effects<C> {
+        match self.start_again_later(id) {
+            Some(fx) => fx,
+            None => self.start_failed(id, message, detail),
+        }
+    }
+
+    /// Takes the attempt back to connecting under a new id, so nothing a dropped connection or
+    /// an older timer reports counts. `None` for a manual target or when the tries are used up.
+    fn start_again_later(&mut self, id: u64) -> Option<Effects<C>> {
+        let next_id = self.next_id;
+        let attempt = self.attempt.as_mut().filter(|a| a.id == id)?;
+        if matches!(attempt.target, FfiSessionTarget::Manual { .. })
+            || attempt.start_retries >= START_RETRIES
+        {
+            return None;
+        }
+        let after = START_RETRY_DELAY * 2u32.pow(attempt.start_retries);
+        attempt.start_retries += 1;
+        attempt.id = next_id;
+        attempt.status = FfiConnectionStatus::Connecting;
+        attempt.early_failure = None;
+        attempt.failed_tries = 0;
+        attempt.offline_ready = false;
+        let mut fx: Effects<C> = attempt
+            .core
+            .take()
+            .map(Effect::Disconnect)
+            .into_iter()
+            .collect();
+        self.next_id += 1;
+        fx.push(Effect::RetryStart { id: next_id, after });
+        Some(fx)
+    }
+
+    /// The pause before a start retry is over.
+    pub(crate) fn restart(&mut self, id: u64) -> Effects<C> {
+        let Some(attempt) = self
+            .attempt
+            .as_ref()
+            .filter(|a| a.id == id && a.core.is_none())
+        else {
+            return Vec::new();
+        };
+        vec![Effect::Start {
+            id,
+            target: attempt.target.clone(),
+            saved: self.saved.clone(),
+            credential: None,
+        }]
+    }
+
+    /// The attempt could not produce a connection, for good.
     pub(crate) fn start_failed(
         &mut self,
         id: u64,
@@ -647,6 +721,7 @@ impl<C: SessionCore> Machine<C> {
         }
         if status == FfiConnectionStatus::Connected {
             attempt.connected_once = true;
+            attempt.start_retries = 0;
             attempt.may_recover = true;
             self.has_connected = true;
         }
@@ -676,11 +751,21 @@ impl<C: SessionCore> Machine<C> {
             .as_ref()
             .is_some_and(SessionCore::reused_bearer);
         let orbit = !matches!(target, FfiSessionTarget::Manual { .. });
-        if orbit && rejected && attempt.may_recover && (attempt.connected_once || reused) {
+        let never_connected = !attempt.connected_once;
+        let recover = attempt.may_recover && (attempt.connected_once || reused);
+        if orbit && rejected && recover {
             // The bearer is dead: forget it and pair again through Orbit, once.
             self.saved = None;
             let mut fx = vec![Effect::Save(None)];
             fx.extend(self.begin(target, None, Recover::AfterConnecting));
+            return fx;
+        }
+        // The first connection of an attempt may fail for a reason that passes (a pairing the
+        // server wasn't ready for). A rejection or a changed identity never does.
+        if !rejected
+            && never_connected
+            && let Some(fx) = self.start_again_later(id)
+        {
             return fx;
         }
         let headline = if rejected {
@@ -904,6 +989,18 @@ impl ConnSession {
                     this.open_offline(id, &core, dir, identity).await;
                 });
             }
+            Effect::RetryStart { id, after } => {
+                let Some(this) = self.this.upgrade() else {
+                    return;
+                };
+                self.orbit.handle().spawn(async move {
+                    tokio::time::sleep(after).await;
+                    // A newer attempt, a cancel or a manual connect replaced this one meanwhile.
+                    if this.is_current(id) {
+                        this.step(|m| m.restart(id));
+                    }
+                });
+            }
             Effect::OpenThread { core, thread_id } => core.open_thread(thread_id),
             Effect::CloseThread { core, thread_id } => core.close_thread(thread_id),
             Effect::ExpectEnvironment {
@@ -987,6 +1084,13 @@ impl ConnSession {
                         ..
                     } => self.step(|m| m.attached(id, core, server_url, Some(server_id))),
                     FfiOrbitConnectOutcome::Failed {
+                        reason: FfiOrbitConnectFailure::GatewayUnreachable,
+                        message,
+                        detail,
+                    } => {
+                        self.step(|m| m.start_failed_transient(id, message, detail));
+                    }
+                    FfiOrbitConnectOutcome::Failed {
                         message, detail, ..
                     } => self.step(|m| m.start_failed(id, message, detail)),
                 }
@@ -1011,7 +1115,16 @@ impl ConnSession {
                             let url = core.server_url();
                             self.step(|m| m.attached(id, core, url, Some(environment_id)));
                         }
-                        Err(err) => self.step(|m| m.start_failed(id, err.to_string(), None)),
+                        Err(err) => {
+                            let message = err.to_string();
+                            self.step(|m| {
+                                if is_transient(&err) {
+                                    m.start_failed_transient(id, message, None)
+                                } else {
+                                    m.start_failed(id, message, None)
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -1064,7 +1177,13 @@ impl ConnSession {
             Ok(fleet) => fleet,
             Err(err) => {
                 let (message, detail) = fail(&err);
-                self.step(|m| m.start_failed(id, message, detail));
+                self.step(|m| {
+                    if is_transient(&err) {
+                        m.start_failed_transient(id, message, detail)
+                    } else {
+                        m.start_failed(id, message, detail)
+                    }
+                });
                 return;
             }
         };
@@ -1083,7 +1202,13 @@ impl ConnSession {
             && let Err(err) = self.orbit.wake_instance(instance_id).await
         {
             let (message, detail) = fail(&err);
-            self.step(|m| m.start_failed(id, message, detail));
+            self.step(|m| {
+                if is_transient(&err) {
+                    m.start_failed_transient(id, message, detail)
+                } else {
+                    m.start_failed(id, message, detail)
+                }
+            });
             return;
         }
         let mut last = None;
@@ -1454,6 +1579,19 @@ impl CoreListener for AttemptListener {
     }
 }
 
+/// A start error that may pass with time: no route yet, a timeout, a proxy that answers nonsense
+/// while a host wakes. Everything else (auth, a missing environment, a bad URL) will not.
+fn is_transient(err: &FfiError) -> bool {
+    matches!(
+        err,
+        FfiError::Connection { .. }
+            | FfiError::Orbit {
+                reason: FfiOrbitErrorReason::Unreachable | FfiOrbitErrorReason::InvalidResponse,
+                ..
+            }
+    )
+}
+
 /// Empties `dir` unless it already belongs to `identity`, then marks it as `identity`'s.
 fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<PathBuf> {
     let marker = dir.join(IDENTITY_FILE);
@@ -1782,6 +1920,230 @@ mod tests {
         assert!(!m.state().shows_offline);
         let _ = m.status(1, failed("Lost connection"));
         assert!(m.state().shows_offline);
+    }
+
+    /// The `(id, delay)` of the start retry in `fx`, if it holds one.
+    fn retry_start(fx: &[Effect<FakeCore>]) -> Option<(u64, Duration)> {
+        fx.iter().find_map(|e| match e {
+            Effect::RetryStart { id, after } => Some((*id, *after)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_cold_launch_whose_discovery_fails_twice_then_connects_never_shows_offline() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let mut id = 1;
+        for expected in [500, 1000] {
+            let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+            let (next, after) = retry_start(&fx).expect("a transient failure schedules a retry");
+            assert_eq!(after, Duration::from_millis(expected));
+            assert!(!m.state().shows_offline, "waiting to retry is connecting");
+            assert!(
+                matches!(m.state().phase, FfiSessionPhase::Connecting { .. }),
+                "{:?}",
+                m.state().phase
+            );
+            assert_eq!(m.state().connection_id, next);
+            assert_eq!(
+                starts(&m.restart(next)),
+                vec![(next, FfiSessionTarget::PrimaryAgent)],
+                "the timer starts the attempt again"
+            );
+            assert!(!m.state().shows_offline);
+            id = next;
+        }
+        let _ = m.attached(id, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(id, FfiConnectionStatus::Connected);
+        assert!(!m.state().shows_offline);
+        assert!(m.state().has_connected);
+    }
+
+    #[test]
+    fn three_start_failures_in_a_row_are_retried_and_the_fourth_shows_offline() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let mut id = 1;
+        let mut delays = Vec::new();
+        for _ in 0..START_RETRIES {
+            let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+            let (next, after) = retry_start(&fx).expect("retry");
+            delays.push(after);
+            assert!(!m.state().shows_offline);
+            id = next;
+        }
+        assert_eq!(
+            delays,
+            [500, 1000, 2000].map(Duration::from_millis),
+            "the pause doubles"
+        );
+        let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+        assert!(retry_start(&fx).is_none(), "the tries are used up");
+        assert!(m.state().shows_offline);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Failed {
+                retry: FfiSessionTarget::PrimaryAgent,
+                ..
+            }
+        ));
+        // Try again starts over with a full set of retries.
+        assert_eq!(
+            starts(&m.retry()),
+            vec![(id + 1, FfiSessionTarget::PrimaryAgent)]
+        );
+        let fx = m.start_failed_transient(id + 1, "Can't reach the Orbit Gateway.".into(), None);
+        assert_eq!(
+            retry_start(&fx).map(|(_, after)| after),
+            Some(START_RETRY_DELAY)
+        );
+        assert!(!m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_definitive_failure_shows_at_once_without_retries() {
+        // An identity change after the handover, before any connection.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_environment("inst-7".to_owned());
+        let changed = FakeCore {
+            mismatch: true,
+            ..FakeCore::default()
+        };
+        let _ = m.status(1, failed("Another server answers"));
+        let fx = m.attached(
+            1,
+            changed,
+            "http://inst/".to_owned(),
+            Some("inst-7".to_owned()),
+        );
+        assert!(retry_start(&fx).is_none());
+        assert!(m.state().shows_offline);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Failed { message, .. } if message == IDENTITY_CHANGED
+        ));
+
+        // A rejected sign-in.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.status(1, failed(AUTH));
+        let fx = m.attached(1, rejected(), "http://agent/".into(), Some("a".into()));
+        assert!(retry_start(&fx).is_none());
+        assert!(m.state().shows_offline);
+
+        // A definitive start error (the executor calls `start_failed`).
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let fx = m.start_failed(1, "Orbit couldn't pair this iPhone.".into(), None);
+        assert!(fx.is_empty());
+        assert!(m.state().shows_offline);
+
+        // A manual target never retries on its own, even for a transient failure.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
+        let fx = m.start_failed_transient(1, "Couldn't reach it.".into(), None);
+        assert!(retry_start(&fx).is_none());
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Idle { message: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn a_first_connection_failure_that_is_not_a_rejection_is_retried() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.status(1, failed("The server closed the pairing."));
+        let fx = m.attached(
+            1,
+            FakeCore::default(),
+            "http://agent/".into(),
+            Some("a".into()),
+        );
+        let (next, after) = retry_start(&fx).expect("retry");
+        assert_eq!(after, START_RETRY_DELAY);
+        assert!(fx.iter().any(|e| matches!(e, Effect::Disconnect(_))));
+        assert!(!m.state().shows_offline);
+        assert_eq!(m.state().connection_id, next);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Connecting { .. }
+        ));
+
+        // A connection that worked once and then ended for good is not a start failure.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.attached(
+            1,
+            FakeCore::default(),
+            "http://agent/".into(),
+            Some("a".into()),
+        );
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let fx = m.status(1, failed("Lost connection"));
+        assert!(retry_start(&fx).is_none());
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_retry_timer_for_a_replaced_or_cancelled_attempt_does_nothing() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let fx = m.start_failed_transient(1, "Can't reach the Orbit Gateway.".into(), None);
+        let (pending, _) = retry_start(&fx).expect("retry");
+
+        // The user connects manually while the timer runs.
+        let _ = m.connect_manually();
+        let revision = m.state().revision;
+        assert!(m.restart(pending).is_empty(), "cancelled");
+        assert!(!m.is_current(pending));
+        assert_eq!(m.state().revision, revision);
+
+        // A foreground starts a new attempt while an older timer is pending.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let fx = m.start_failed_transient(1, "Can't reach the Orbit Gateway.".into(), None);
+        let (pending, _) = retry_start(&fx).expect("retry");
+        let _ = m.pair_manual("http://mac:3773".into(), "code".into());
+        assert!(m.restart(pending).is_empty(), "replaced");
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Connecting {
+                target: FfiSessionTarget::Manual { .. }
+            }
+        ));
+
+        // A late failure of a start the retry replaced is dropped too.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let fx = m.start_failed_transient(1, "Can't reach the Orbit Gateway.".into(), None);
+        assert!(retry_start(&fx).is_some());
+        assert!(
+            m.start_failed_transient(1, "late".into(), None).is_empty(),
+            "id 1 is no longer current"
+        );
+    }
+
+    #[test]
+    fn a_successful_connect_resets_the_start_retries() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let mut id = 1;
+        for _ in 0..START_RETRIES {
+            let fx = m.start_failed_transient(id, "x".into(), None);
+            id = retry_start(&fx).expect("retry").0;
+        }
+        let _ = m.attached(
+            id,
+            FakeCore::default(),
+            "http://agent/".into(),
+            Some("a".into()),
+        );
+        let _ = m.status(id, FfiConnectionStatus::Connected);
+        // A later start failure of the same attempt has the full set of retries again.
+        let fx = m.start_failed_transient(id, "x".into(), None);
+        assert_eq!(retry_start(&fx).map(|(_, a)| a), Some(START_RETRY_DELAY));
     }
 
     #[test]

@@ -1032,6 +1032,11 @@ void uniffi_conn_ffi_fn_method_connsession_sign_out(uint64_t ptr, RustCallStatus
 RustBuffer uniffi_conn_ffi_fn_method_connsession_state(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SUSPEND
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_SUSPEND
+void uniffi_conn_ffi_fn_method_connsession_suspend(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_SESSIONLISTENER
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_SESSIONLISTENER
 uint64_t uniffi_conn_ffi_fn_clone_sessionlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -2109,6 +2114,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_sign_out(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_STATE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_STATE
 uint16_t uniffi_conn_ffi_checksum_method_connsession_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_SUSPEND
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_SUSPEND
+uint16_t uniffi_conn_ffi_checksum_method_connsession_suspend(void
     
 );
 #endif

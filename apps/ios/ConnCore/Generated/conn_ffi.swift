@@ -1684,6 +1684,8 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     func state()  -> FfiSessionState
     
+    func suspend() 
+    
 }
 /**
  * UniFFI handle to the app's connection: one state machine plus the Orbit client it uses.
@@ -1995,6 +1997,14 @@ open func state() -> FfiSessionState  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func suspend()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_suspend(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 
@@ -5550,12 +5560,14 @@ public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendP
 public struct FfiLinkedDiscovery: Equatable, Hashable {
     public var targets: [FfiOrbitEnvironment]
     public var unresolvedEndpoints: [String]
+    public var unresolvedServerIds: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String]) {
+    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String], unresolvedServerIds: [String]) {
         self.targets = targets
         self.unresolvedEndpoints = unresolvedEndpoints
+        self.unresolvedServerIds = unresolvedServerIds
     }
 
     
@@ -5575,13 +5587,15 @@ public struct FfiConverterTypeFfiLinkedDiscovery: FfiConverterRustBuffer {
         return
             try FfiLinkedDiscovery(
                 targets: FfiConverterSequenceTypeFfiOrbitEnvironment.read(from: &buf), 
-                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf)
+                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf), 
+                unresolvedServerIds: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiLinkedDiscovery, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeFfiOrbitEnvironment.write(value.targets, into: &buf)
         FfiConverterSequenceString.write(value.unresolvedEndpoints, into: &buf)
+        FfiConverterSequenceString.write(value.unresolvedServerIds, into: &buf)
     }
 }
 
@@ -14181,6 +14195,7 @@ public enum FfiSessionPhase: Equatable, Hashable {
      */
     case failed(message: String, detail: String?, retry: FfiSessionTarget
     )
+    case suspended
 
 
 
@@ -14214,6 +14229,8 @@ public struct FfiConverterTypeFfiSessionPhase: FfiConverterRustBuffer {
         case 4: return .failed(message: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf), retry: try FfiConverterTypeFfiSessionTarget.read(from: &buf)
         )
         
+        case 5: return .suspended
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -14243,6 +14260,10 @@ public struct FfiConverterTypeFfiSessionPhase: FfiConverterRustBuffer {
             FfiConverterOptionString.write(detail, into: &buf)
             FfiConverterTypeFfiSessionTarget.write(retry, into: &buf)
             
+        
+        case .suspended:
+            writeInt(&buf, Int32(5))
+        
         }
     }
 }
@@ -18313,6 +18334,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_state() != 16395) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_suspend() != 44540) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_state() != 42113) {

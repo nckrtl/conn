@@ -2,7 +2,10 @@
 //! `PullRequestSummaryTab`, `PullRequestTimelineTab`, `PullRequestCodeTab`,
 //! `PullRequestActionsMenu`, `PullRequestTitleEditor`, `PullRequestCommentForm`).
 
+mod filters;
 mod header;
+mod host_diff;
+pub(super) mod inbox;
 mod logic;
 mod pickers;
 mod tabs;
@@ -20,7 +23,6 @@ use conn_contract::rpc::pull_requests::{
     list, reply_to_thread, request_reviewers, reviewer_candidates, run_action, set_files_viewed,
     set_labels, set_reaction, set_thread_resolution, submit_review, update,
 };
-use conn_contract::rpc::review::get_diff_preview;
 use conn_contract::{
     GitPullRequestRefInput, IssueReactionContent, OrchestrationV2ThreadProjection,
     PullRequestAction, PullRequestActionInput, PullRequestActionInputUpdateMethod,
@@ -32,7 +34,7 @@ use conn_contract::{
     PullRequestReviewerRequestInput, PullRequestReviewerRequestInputReviewersItem,
     PullRequestSetFilesViewedInput, PullRequestSetFilesViewedInputFilesItem,
     PullRequestSubmitReviewInput, PullRequestThreadReplyInput, PullRequestThreadResolutionInput,
-    PullRequestUpdateInput, ReviewDiffChangeType, ReviewDiffPreviewInput,
+    PullRequestUpdateInput, ReviewDiffChangeType,
 };
 use conn_theme::Tokens;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
@@ -40,7 +42,7 @@ use gpui_kit::component::v_flex;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, EventEmitter, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, Render, ScrollHandle, Styled, Subscription, Window, div,
+    MouseButton, ParentElement, Render, ScrollHandle, Styled, Subscription, Window, div, px,
 };
 use serde_json::json;
 
@@ -63,7 +65,6 @@ use self::tabs::{
     render_floating_composer, render_tab_bar, render_timeline_tab, render_timeline_tab_trailing,
 };
 use super::chrome;
-use super::diff_parser::parse_unified_diff;
 
 const CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(60);
 const METADATA_FOLD_HEIGHT_PX: f32 = 220.0;
@@ -72,6 +73,7 @@ const METADATA_FOLD_HEIGHT_PX: f32 = 220.0;
 #[derive(Clone, Debug)]
 pub(crate) enum PullRequestEvent {
     SendPrompt(String),
+    OpenInbox,
 }
 
 impl EventEmitter<PullRequestEvent> for PullRequestPanel {}
@@ -162,6 +164,7 @@ pub(crate) struct PullRequestPanel {
     active_tab: DetailTab,
     timeline_order: TimelineOrder,
     comment_filter: CommentFilter,
+    check_filter: Option<&'static str>,
     filter_menu_open: bool,
     expanded_groups: HashSet<String>,
     expanded_threads: HashMap<String, bool>,
@@ -345,6 +348,7 @@ impl PullRequestPanel {
             header_manual_override: None,
             active_tab: DetailTab::Summary,
             timeline_order: TimelineOrder::Newest,
+            check_filter: None,
             comment_filter: CommentFilter::default(),
             filter_menu_open: false,
             expanded_groups: HashSet::new(),
@@ -460,6 +464,7 @@ impl PullRequestPanel {
     }
 
     fn reset_transient_ui(&mut self) {
+        self.check_filter = None;
         self.editing_title = false;
         self.editing_body = false;
         self.actions_menu_open = false;
@@ -1101,19 +1106,12 @@ impl PullRequestPanel {
     }
 
     fn load_code_tab_data(&mut self, cx: &mut Context<'_, Self>) {
-        let (Some(conn), PanelState::Ready { target, detail }) =
-            (self.connection.clone(), &self.state)
+        let (Some(conn), PanelState::Ready { target, .. }) = (self.connection.clone(), &self.state)
         else {
             return;
         };
         let generation = self.generation;
         let pr_ref = target.reference.clone();
-        let base_branch = detail.base_branch.clone();
-        let cwd = if detail.workspace_root.is_empty() {
-            self.workspace_root.clone()
-        } else {
-            Some(detail.workspace_root.clone())
-        };
         let review_paths: Vec<String> = self
             .activity
             .as_ref()
@@ -1140,28 +1138,7 @@ impl PullRequestPanel {
                 )
                 .await;
 
-            // 2. Also query `review.getDiffPreview` against the local checkout when available,
-            //    giving changed file stats & unified diff patches immediately.
-            let preview_res = if let Some(cwd) = cwd {
-                let input = ReviewDiffPreviewInput {
-                    cwd,
-                    base_ref: Some(base_branch),
-                    commit_sha: None,
-                    ignore_whitespace: None,
-                    source_kind: None,
-                    tracked_only: Some(true),
-                    metadata_only: None,
-                    file: None,
-                };
-                conn.call::<get_diff_preview::Payload, get_diff_preview::Success>(
-                    "review.getDiffPreview",
-                    &input,
-                )
-                .await
-                .ok()
-            } else {
-                None
-            };
+            let host_files = host_diff::load(&conn, &pr_ref).await;
 
             let _ = this.update(cx, |panel, cx| {
                 if panel.generation != generation {
@@ -1183,6 +1160,7 @@ impl PullRequestPanel {
                                 CodeFileEntry {
                                     path: item.path.clone(),
                                     old_path: item.path.clone(),
+                                    change_type: ReviewDiffChangeType::Change,
                                     additions: None,
                                     deletions: None,
                                 },
@@ -1191,31 +1169,18 @@ impl PullRequestPanel {
                     }
                 }
 
-                if let Some(preview) = preview_res {
-                    for source in preview.sources {
-                        for parsed in parse_unified_diff(&source.diff) {
-                            let path = parsed
-                                .new_path
-                                .clone()
-                                .or_else(|| parsed.old_path.clone())
-                                .unwrap_or_else(|| parsed.display_path.clone());
-                            let old_path = parsed.old_path.clone().unwrap_or_else(|| path.clone());
-                            if !files_map.contains_key(&path) {
-                                order.push(path.clone());
-                            }
-                            files_map.insert(
-                                path.clone(),
-                                CodeFileEntry {
-                                    path: path.clone(),
-                                    old_path,
-                                    additions: Some(parsed.additions),
-                                    deletions: Some(parsed.deletions),
-                                },
-                            );
+                panel.code_diffs.clear();
+                if let Ok(files) = host_files.as_ref() {
+                    for file in files {
+                        let path = &file.entry.path;
+                        if !files_map.contains_key(path) {
+                            order.push(path.clone());
+                        }
+                        files_map.insert(path.clone(), file.entry.clone());
+                        if let Some(patch) = &file.patch {
                             panel
                                 .code_diffs
-                                .entry(path)
-                                .or_insert(FileDiffState::Loaded(parsed));
+                                .insert(path.clone(), FileDiffState::Loaded(patch.clone()));
                         }
                     }
                 }
@@ -1228,6 +1193,7 @@ impl PullRequestPanel {
                             CodeFileEntry {
                                 path: path.clone(),
                                 old_path: path,
+                                change_type: ReviewDiffChangeType::Change,
                                 additions: None,
                                 deletions: None,
                             },
@@ -1241,7 +1207,7 @@ impl PullRequestPanel {
                     .collect();
 
                 if panel.code_files.is_empty()
-                    && let Err(err) = viewed_res
+                    && let Err(err) = host_files
                 {
                     panel.code_files_error = Some(describe_rpc_error(&err).1);
                 }
@@ -1275,11 +1241,10 @@ impl PullRequestPanel {
             cx.notify();
             return;
         };
-        let old_path = self
-            .code_files
-            .iter()
-            .find(|f| f.path == path)
-            .map_or_else(|| path.clone(), |f| f.old_path.clone());
+        let (old_path, change_type) = self.code_files.iter().find(|f| f.path == path).map_or_else(
+            || (path.clone(), ReviewDiffChangeType::Change),
+            |f| (f.old_path.clone(), f.change_type),
+        );
         let generation = self.generation;
         self.code_diffs.insert(path.clone(), FileDiffState::Loading);
         cx.notify();
@@ -1292,11 +1257,7 @@ impl PullRequestPanel {
             repository: target.reference.repository.clone(),
             number: target.reference.number,
             commit: None,
-            change_type: if old_path != path {
-                ReviewDiffChangeType::RenameChanged
-            } else {
-                ReviewDiffChangeType::Change
-            },
+            change_type,
             old_path: old_path.clone(),
             new_path: path.clone(),
         };
@@ -2528,52 +2489,90 @@ impl Render for PullRequestPanel {
                     &tab_cb,
                 );
 
-                let tab_body: AnyElement = match self.active_tab {
-                    DetailTab::Summary => render_description_tab(
-                        &self.tokens,
-                        detail,
-                        pr_reactions,
-                        &reaction_state,
-                        self.editing_body,
-                        &self.body_input,
-                        self.body_saving,
-                        &tab_cb,
-                    ),
-                    DetailTab::Checks => render_checks_tab(&self.tokens, detail, &tab_cb),
-                    DetailTab::Timeline => render_timeline_tab(
-                        &self.tokens,
-                        detail,
-                        comments,
-                        review_threads,
-                        commits,
-                        self.activity_loading,
-                        self.activity_error.as_deref(),
-                        self.timeline_order,
-                        self.comment_filter,
-                        &self.expanded_groups,
-                        &self.expanded_threads,
-                        self.replying_thread.as_deref(),
-                        &self.reply_input,
-                        self.reply_submitting,
-                        &reaction_state,
-                        self.now_ms,
-                        &tab_cb,
-                    ),
-                    DetailTab::Code => render_code_tab(
-                        &self.tokens,
-                        detail,
-                        &self.code_files,
-                        self.code_files_loading,
-                        self.code_files_error.as_deref(),
-                        self.code_selected_path.as_deref(),
-                        &self.code_diffs,
-                        &self.files_viewed,
-                        detail.capabilities.viewed_files.is_some(),
-                        self.code_tree_open,
-                        self.code_word_wrap,
-                        &tab_cb,
-                    ),
-                };
+                let tab_body: AnyElement =
+                    match self.active_tab {
+                        DetailTab::Summary => render_description_tab(
+                            &self.tokens,
+                            detail,
+                            pr_reactions,
+                            &reaction_state,
+                            self.editing_body,
+                            &self.body_input,
+                            self.body_saving,
+                            &tab_cb,
+                        ),
+                        DetailTab::Checks => {
+                            let mut section = v_flex().w_full().min_w_0();
+                            if !detail.checks.is_empty() {
+                                let mut options =
+                                    vec![(None, format!("All ({})", detail.checks.len()))];
+                                let mut counts = std::collections::BTreeMap::new();
+                                for check in &detail.checks {
+                                    *counts
+                                        .entry(logic::check_status_label(check))
+                                        .or_insert(0usize) += 1;
+                                }
+                                options.extend(counts.into_iter().map(|(label, count)| {
+                                    (Some(label), format!("{label} ({count})"))
+                                }));
+                                let entity = cx.entity();
+                                section = section.child(div().p(px(8.)).child(filters::control(
+                                    &self.tokens,
+                                    "panel.pull-request.filter-checks",
+                                    "Filter checks",
+                                    self.check_filter,
+                                    options,
+                                    move |value, cx| {
+                                        entity.update(cx, |p, cx| {
+                                            p.check_filter = value;
+                                            cx.notify();
+                                        })
+                                    },
+                                )));
+                            }
+                            section
+                                .child(render_checks_tab(
+                                    &self.tokens,
+                                    detail,
+                                    self.check_filter,
+                                    &tab_cb,
+                                ))
+                                .into_any_element()
+                        }
+                        DetailTab::Timeline => render_timeline_tab(
+                            &self.tokens,
+                            detail,
+                            comments,
+                            review_threads,
+                            commits,
+                            self.activity_loading,
+                            self.activity_error.as_deref(),
+                            self.timeline_order,
+                            self.comment_filter,
+                            &self.expanded_groups,
+                            &self.expanded_threads,
+                            self.replying_thread.as_deref(),
+                            &self.reply_input,
+                            self.reply_submitting,
+                            &reaction_state,
+                            self.now_ms,
+                            &tab_cb,
+                        ),
+                        DetailTab::Code => render_code_tab(
+                            &self.tokens,
+                            detail,
+                            &self.code_files,
+                            self.code_files_loading,
+                            self.code_files_error.as_deref(),
+                            self.code_selected_path.as_deref(),
+                            &self.code_diffs,
+                            &self.files_viewed,
+                            detail.capabilities.viewed_files.is_some(),
+                            self.code_tree_open,
+                            self.code_word_wrap,
+                            &tab_cb,
+                        ),
+                    };
 
                 let composer = render_floating_composer(
                     &self.tokens,
@@ -2683,6 +2682,37 @@ impl Render for PullRequestPanel {
                     }
                 }
             }))
+            .child(
+                gpui_kit::component::h_flex()
+                    .flex_shrink_0()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(13.))
+                    .text_color(super::color::to_hsla(self.tokens.muted_foreground))
+                    .child(
+                        gpui_kit::component::h_flex()
+                            .id("pr-inbox-back")
+                            .a11y_button("panel.pull-request.back", "Back to pull requests")
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .gap(px(4.))
+                            .items_center()
+                            .child(super::header::superhero_icon(
+                                "superhero/chevron-left.svg",
+                                12.,
+                                super::color::to_hsla(self.tokens.muted_foreground),
+                            ))
+                            .child("Pull requests")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(PullRequestEvent::OpenInbox)),
+                            ),
+                    )
+                    .when_some(self.active_target(), |el, t| {
+                        el.child(format!("/ #{}", t.reference.number))
+                    }),
+            )
             .child(content)
     }
 }

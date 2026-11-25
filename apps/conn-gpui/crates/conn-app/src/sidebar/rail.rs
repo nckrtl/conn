@@ -407,7 +407,7 @@ pub(crate) fn render_workspace_rail(
         tokens,
         icons::concept(icons::PULL_REQUEST, icons::CHROME_ICON_PX, muted),
         cx.listener(|app, _event, _window, cx| {
-            app.activate_or_toggle_right_panel_tab(RightPanelTab::LinkedItems, cx);
+            app.activate_or_toggle_right_panel_tab(RightPanelTab::PullRequests, cx);
         }),
     )
     .a11y_button("rail.pull-requests", "Pull requests")

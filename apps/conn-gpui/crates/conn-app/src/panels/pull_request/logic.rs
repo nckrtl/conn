@@ -1255,6 +1255,11 @@ pub(super) fn label_chip_colors(tokens: &Tokens, raw_color: Option<&str>) -> (Rg
 pub(super) fn describe_rpc_error(err: &conn_client::ClientError) -> (Option<String>, String) {
     match err {
         conn_client::ClientError::Rpc(val) => {
+            let val = if val.get("_tag").and_then(serde_json::Value::as_str) == Some("Fail") {
+                val.get("error").unwrap_or(val)
+            } else {
+                val
+            };
             let tag = val.get("_tag").and_then(serde_json::Value::as_str);
             let reason = val.get("reason").and_then(serde_json::Value::as_str);
             if tag == Some("PullRequestOperationError") && reason == Some("not-found") {
@@ -2260,6 +2265,22 @@ mod tests {
             merge_queue_removal: None,
             maintainer_can_modify: None,
         }
+    }
+
+    #[test]
+    fn reports_the_sign_in_action_from_a_failed_list_rpc() {
+        let error = conn_client::ClientError::Rpc(serde_json::json!({
+            "_tag": "Fail",
+            "error": {
+                "_tag": "PullRequestUnavailableError",
+                "reason": "cli-unauthenticated",
+                "listResult": {"entries": []}
+            }
+        }));
+        assert_eq!(
+            super::describe_rpc_error(&error).1,
+            "Sign in to your source-control host to view pull requests."
+        );
     }
 
     #[test]

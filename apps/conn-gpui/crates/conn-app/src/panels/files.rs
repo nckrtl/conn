@@ -40,28 +40,25 @@ use gpui_kit::component::input::{
     Editor, EditorState, RangeDecoration, RangeDecorationStyle, RopeExt as _,
 };
 
-/// Pierre tree compact row height (`FileBrowserPanel.tsx`: `itemHeight: 28`).
 /// Space above the first source line in the preview.
-const PREVIEW_TOP_PAD_PX: f32 = 6.0;
+const PREVIEW_TOP_PAD_PX: f32 = 12.0;
 /// Width of the fade at a breadcrumb trail edge that has more crumbs beyond it.
-const CRUMB_FADE_PX: f32 = 16.0;
+const CRUMB_FADE_PX: f32 = 14.0;
 const TREE_ROW_HEIGHT_PX: f32 = 28.0;
-/// Pierre tree row radius (`pierre-tree-theme.ts`: `border-radius: 5px`).
-const TREE_ROW_RADIUS_PX: f32 = 5.0;
+/// Corner radius of the Files tree hover and selection highlight.
+const TREE_ROW_RADIUS_PX: f32 = 8.0;
 /// Standard panel UI text size (`text-ui`: 13px / 20px).
 const UI_TEXT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
 const FILE_TEXT_INSET_PX: f32 = 12.0;
 const CRUMB_PAD_PX: f32 = 2.0;
-/// Breadcrumb font size (`text-sm`: 14px / 20px).
-const BREADCRUMB_TEXT_PX: f32 = 14.0;
-/// Panel toolbar metrics (`index.css`: `--spacing-toolbar: 7.5px`, `--spacing-toolbar-end: 11.5px`).
-const TOOLBAR_PAD_Y_PX: f32 = 7.5;
-const TOOLBAR_PAD_START_PX: f32 = 8.0;
-const TOOLBAR_PAD_END_PX: f32 = 11.5;
+/// Breadcrumb text size.
+const BREADCRUMB_TEXT_PX: f32 = 13.0;
+/// Shared search and path toolbar padding.
+const TOOLBAR_PAD_PX: f32 = 8.0;
 const TOOLBAR_HEIGHT_PX: f32 = 32.0;
 const TOOLBAR_INNER_PAD_PX: f32 = 3.0;
-const TOOLBAR_BTN_SIZE_PX: f32 = 24.0;
+const TOOLBAR_BTN_SIZE_PX: f32 = 25.0;
 
 #[derive(Clone, Debug)]
 enum PreviewState {
@@ -1257,16 +1254,12 @@ impl FilesPanel {
             );
         }
 
-        // `FileBrowserPanel` subheader: `py-toolbar ps-2 pe-toolbar-end gap-2`; inline its
-        // bottom border is transparent (it keeps its 1px).
         h_flex()
             .w_full()
             .flex_shrink_0()
-            .py(px(TOOLBAR_PAD_Y_PX))
-            .pl(px(TOOLBAR_PAD_START_PX))
-            .pr(px(TOOLBAR_PAD_END_PX))
+            .p(px(TOOLBAR_PAD_PX))
             .border_b_1()
-            .border_color(gpui_kit::transparent_black())
+            .border_color(control_border)
             .items_center()
             .gap(px(8.0))
             .child(
@@ -1279,19 +1272,20 @@ impl FilesPanel {
                     .bg(field_bg)
                     .border_1()
                     .border_color(control_border)
-                    .pl(px(8.0))
-                    .pr(px(10.0))
+                    .px(px(9.0))
                     .gap(px(6.0))
                     .items_center()
                     // `FileSearchField`: Escape clears the search and leaves the field.
-                    .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" {
-                            this.search_input
-                                .update(cx, |input, cx| input.set_value("", window, cx));
-                            window.blur(cx);
-                            cx.stop_propagation();
-                        }
-                    }))
+                    .on_key_down(
+                        cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                this.search_input
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                                window.blur(cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
                     .child(superhero_icon("superhero/search.svg", 14.0, muted))
                     .child(
                         div().flex_1().min_w_0().child(
@@ -1307,19 +1301,42 @@ impl FilesPanel {
     fn render_preview_subheader(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let fg = to_hsla(self.tokens.foreground);
         let muted = to_hsla(self.tokens.muted_foreground);
+        let control_border = to_hsla(self.tokens.shell_divider_header);
         let mut row = h_flex()
             .w_full()
             .flex_shrink_0()
-            .h(px(36.0))
-            .pl(px(FILE_TEXT_INSET_PX - CRUMB_PAD_PX))
-            .pr(px(FILE_TEXT_INSET_PX))
+            .p(px(TOOLBAR_PAD_PX))
             .border_b_1()
-            .border_color(to_hsla(self.tokens.shell_divider_header))
-            .items_center();
+            .border_color(control_border)
+            .items_center()
+            .gap(px(8.));
         if let Some(path) = self.preview.path() {
             row = row
-                .child(self.render_breadcrumbs(path, fg, muted, cx))
-                .children(self.render_crumb_menu(path, cx));
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(TOOLBAR_HEIGHT_PX))
+                        .items_center()
+                        .pl(px(3.))
+                        .pr(px(9.))
+                        .gap(px(6.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(control_border)
+                        .bg(to_hsla(self.tokens.shell_field))
+                        .child(self.toolbar_button(
+                            "files-back-to-tree",
+                            "panel.files.back",
+                            "Back to files",
+                            "superhero/chevron-left.svg",
+                            false,
+                            cx.listener(|_, _, _, cx| cx.emit(FilesEvent::RevealFolder)),
+                        ))
+                        .child(self.render_breadcrumbs(path, fg, muted, cx)),
+                )
+                .children(self.render_crumb_menu(path, cx))
+                .children(self.render_preview_actions(cx));
         }
         row
     }
@@ -1333,10 +1350,6 @@ impl FilesPanel {
         let document = matches!(self.preview, PreviewState::Document { .. });
         let rendered = kind.has_rendered_view() && self.render_preview;
         let mut group = h_flex()
-            .absolute()
-            .top(px(8.0))
-            .right(px(8.0))
-            .occlude()
             .flex_shrink_0()
             .h(px(TOOLBAR_HEIGHT_PX))
             .px(px(TOOLBAR_INNER_PAD_PX))
@@ -1500,8 +1513,7 @@ impl FilesPanel {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .py(px(4.0))
-            .px(px(6.0));
+            .p(px(8.0));
 
         if self.workspace_root.is_none() {
             return col.child(muted_message("Open a project to browse files.", muted));
@@ -1547,8 +1559,7 @@ impl FilesPanel {
         for row in rows {
             let is_dir = row.kind == ProjectEntryKind::Directory;
             let is_selected = selected == Some(row.path.as_str());
-            // Row margin-x is 2px (6+2 = 8px from panel edge), padding-x is 8px (8+8 = 16px to icon).
-            let indent_px = 8.0 + (row.depth as f32) * 14.0;
+            let indent_px = 12.0 + (row.depth as f32) * 14.0;
             let row_path = row.path.clone();
             let text_color = if row.ignored && !is_selected {
                 muted
@@ -1564,7 +1575,6 @@ impl FilesPanel {
             let item = h_flex()
                 .id(SharedString::from(format!("tree-row-{}", row.path)))
                 .a11y_button(format!("panel.files.row.{}", row.path), row.name.clone())
-                .mx(px(2.0))
                 .h(px(TREE_ROW_HEIGHT_PX))
                 .pl(px(indent_px))
                 .pr(px(8.0))
@@ -2143,8 +2153,7 @@ impl Render for FilesPanel {
                         .min_h_0()
                         .w_full()
                         .overflow_hidden()
-                        .child(self.render_preview_column(window, cx))
-                        .children(self.render_preview_actions(cx)),
+                        .child(self.render_preview_column(window, cx)),
                 )
                 .children(self.render_row_menu(cx))
                 .into_any_element();
@@ -2183,7 +2192,9 @@ impl FilesPanel {
             .line_height(px(UI_LINE_HEIGHT_PX));
         // A long trail scrolls, kept at its end where the file is; a new path scrolls to its end.
         if self.crumbs_scrolled_for.borrow().as_deref() != Some(path) {
-            self.crumb_scroll.scroll_to_item(last);
+            // Each folder contributes a label and a separator.
+            self.crumb_scroll.scroll_to_item(last * 2);
+            cx.notify();
             *self.crumbs_scrolled_for.borrow_mut() = Some(path.to_owned());
         }
         for (index, crumb) in crumbs.into_iter().enumerate() {
@@ -2275,21 +2286,21 @@ impl FilesPanel {
         // Fades at the edges that have more crumbs beyond them (`FileBreadcrumbs` mask).
         let offset = f32::from(self.crumb_scroll.offset().x);
         let reach = f32::from(self.crumb_scroll.max_offset().x);
-        let card = to_hsla(self.tokens.shell_card);
+        let card = to_hsla(self.tokens.shell_card).blend(to_hsla(self.tokens.shell_field));
         let fade = |left: bool| {
             let (from, to) = (card, card.opacity(0.0));
             let el = div().absolute().top_0().bottom_0().w(px(CRUMB_FADE_PX));
             if left {
                 el.left_0().bg(gpui_kit::linear_gradient(
                     90.0,
-                    gpui_kit::linear_color_stop(to, 0.0),
-                    gpui_kit::linear_color_stop(from, 1.0),
+                    gpui_kit::linear_color_stop(from, 0.0),
+                    gpui_kit::linear_color_stop(to, 1.0),
                 ))
             } else {
                 el.right_0().bg(gpui_kit::linear_gradient(
                     90.0,
-                    gpui_kit::linear_color_stop(from, 0.0),
-                    gpui_kit::linear_color_stop(to, 1.0),
+                    gpui_kit::linear_color_stop(to, 0.0),
+                    gpui_kit::linear_color_stop(from, 1.0),
                 ))
             }
         };

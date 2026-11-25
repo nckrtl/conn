@@ -12,7 +12,15 @@ pub struct FfiComposerFile {
     pub mime_type: String,
 }
 
-#[derive(uniffi::Enum)]
+impl std::fmt::Debug for FfiComposerFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiComposerFile")
+            .field("mime_type", &self.mime_type)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, uniffi::Enum)]
 pub enum FfiComposerTarget {
     New {
         project_id: Option<String>,

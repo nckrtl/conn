@@ -208,7 +208,7 @@ pub async fn fetch_history_prefix(
         let mut state = ThreadState::new(thread);
         state.prepend_history_page(page);
         if state.has_more_history {
-            next = Some(state.history_cursor.ok_or_else(|| {
+            next = Some(state.history_cursor.take().ok_or_else(|| {
                 ClientError::Connection("missing server history cursor".to_owned())
             })?);
         }

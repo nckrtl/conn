@@ -127,7 +127,9 @@ struct ConnComposerPill<Trailing: View>: View {
 
                         HStack(spacing: 0) {
                             trailing().frame(minHeight: Self.control)
-                            if !isBusy && !draft.locked { micButton }
+                            // Conn mobile keeps the mic beside stop while the agent works, so a follow-up
+                            // can be dictated and queued; it is only disabled while the draft is locked.
+                            micButton.disabled(draft.locked).opacity(draft.locked ? 0.4 : 1)
                             if draft.locked {
                                 ProgressView()
                                     .frame(width: Self.control, height: Self.control)

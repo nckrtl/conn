@@ -1466,6 +1466,8 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["inbox.thread.witness-running"].waitForExistence(timeout: 15))
         app.open(try XCTUnwrap(URL(string: "conn://thread/linked/old-linked")))
         let back = app.buttons["Back"]
+        let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Saved linked message")).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 15))
         XCTAssertTrue(back.waitForExistence(timeout: 15))
         back.tap()
         let row = app.buttons["inbox.thread.old-linked"]
@@ -1479,13 +1481,40 @@ final class ConnSpikeUITests: XCTestCase {
         _ = try await step("discover-sleeping")
         XCTAssertTrue(app.buttons["inbox.thread.witness-stopped"].waitForExistence(timeout: 15))
         XCTAssertTrue(row.exists, "Successful discovery must retain the sleeping machine")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "The sleeping machine must read its cached message")
+        back.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "Closing a cached thread must preserve its inbox row")
+
+        _ = try await step("wake-machine")
+        XCTAssertTrue(app.staticTexts["Linked machine resumed 1"].waitForExistence(timeout: 15))
+        _ = try await step("sleep-live")
+        _ = try await step("driver-stopped")
+        XCTAssertTrue(row.exists, "Discovery must stop the running driver and retain its rows")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 10))
+        back.tap()
         let attempts = try await step("sleeping-connection-attempts")
         XCTAssertEqual(attempts, "0")
-        app.terminate()
+        _ = try await step("wake-machine")
+        XCTAssertTrue(app.staticTexts["Linked machine resumed 2"].waitForExistence(timeout: 15))
+        let witness = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.witness-'"))
+        XCTAssertEqual(witness.count, 1)
+        let savedWitness = witness.firstMatch.identifier
         _ = try await step("remove-machine")
-        app.launch()
-        XCTAssertTrue(app.buttons["inbox.thread.witness-removed"].waitForExistence(timeout: 15))
-        XCTAssertFalse(row.exists, "Discovery must drop an environment that left the fleet")
+        app.buttons["workspace.settingsButton"].tap()
+        app.buttons.containing(.staticText, identifier: "Environments").firstMatch.tap()
+        XCTAssertTrue(app.buttons["Retry discovery"].waitForExistence(timeout: 15), "The witness descriptor is unreachable")
+        app.navigationBars.buttons["Settings"].tap()
+        app.buttons["settings.closeButton"].tap()
+        XCTAssertFalse(row.exists, "An unrelated unresolved endpoint must not retain a removed machine")
+        XCTAssertTrue(app.buttons[savedWitness].exists, "Keep the cached witness while its endpoint is unresolved")
+        XCTAssertEqual(witness.count, 1)
     }
 
     func testChildArtifactFollowUpProject() async throws {

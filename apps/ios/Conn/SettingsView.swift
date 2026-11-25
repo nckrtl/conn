@@ -88,7 +88,9 @@ private struct SettingsEnvironmentsDetailView: View {
                             if case let .failed(message, detail, _) = child.state?.phase {
                                 Text([message, detail].compactMap { $0 }.joined(separator: " ")).font(.caption)
                             } else if let message = child.lastError { Text(message).font(.caption) }
-                            Button("Retry " + child.displayName) { child.reconnect() }
+                            if child.state?.phase != .suspended {
+                                Button("Retry " + child.displayName) { child.reconnect() }
+                            }
                         }
                     }
                 }

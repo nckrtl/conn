@@ -97,3 +97,17 @@ extension UIImage {
             ?? conn_systemImageNamed(name, compatibleWithTraitCollection: traitCollection)
     }
 }
+
+/// The thread lab uses the full 24-unit view box, including the padding around the drawing.
+struct ThreadGlyph: View {
+    let name: String
+    let size: CGFloat
+
+    var body: some View {
+        Image("thread-" + name)
+            .resizable()
+            .renderingMode(.template)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}

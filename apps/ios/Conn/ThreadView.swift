@@ -14,6 +14,7 @@ struct ThreadView: View {
     @State private var setup: FfiWorktreeSetup?
 
     @Environment(\.connTheme) private var theme
+    @Environment(\.dismiss) private var dismiss
     @State private var readingWindow: FfiThreadSnapshot?
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
@@ -222,6 +223,11 @@ struct ThreadView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    private var canReadEarlier: Bool {
+        guard let snapshot, store.offlineReader != nil, !snapshot.entries.isEmpty, !pageExhausted else { return false }
+        return readingWindow != nil || !snapshot.synchronized || snapshot.historyCursor != nil
+    }
+
     private var isWorking: Bool {
         snapshot?.working == true
     }
@@ -234,7 +240,7 @@ struct ThreadView: View {
     private var overlayHasCards: Bool {
         !pendingApprovals.isEmpty || questionPanelModel != nil
             || (snapshot?.queuedCount ?? 0) > 0
-            || historyNotice != nil || readingWindow != nil || store.status != .connected
+            || historyNotice != nil || (store.showsOffline && !store.showsSavedConnectionAlert)
     }
 
     private var composerCanSend: Bool {
@@ -257,6 +263,8 @@ struct ThreadView: View {
 
     private func latest() {
         historyRequest = UUID()
+        requestedByScroll = false
+        prependAnchor = nil
         paging = false
         pageExhausted = false
         readingWindow = nil
@@ -267,7 +275,7 @@ struct ThreadView: View {
 
     private func readHistory(prompt: String? = nil) {
         guard let reader = store.offlineReader, var current = snapshot else { return }
-        if prompt == nil && (paging || pageExhausted) { return }
+        if prompt == nil && (paging || !canReadEarlier) { return }
         let request = UUID()
         historyRequest = request
         paging = true
@@ -321,11 +329,15 @@ struct ThreadView: View {
                     var ids = Set(current.entries.map(\.entryId))
                     current.entries.insert(contentsOf: older.filter { ids.insert($0.entryId).inserted }, at: 0)
                     pageExhausted = current.serverPage && current.historyCursor == nil
+                    guard !older.isEmpty else {
+                        historyNotice = nil
+                        return
+                    }
                     stickToBottom = false
                     let visible = viewport.frames.filter { $0.value.minY >= 0 && $0.value.minY < viewHeight }
                         .min { $0.value.minY < $1.value.minY }
                     readingWindow = current
-                    if !older.isEmpty, let visible {
+                    if let visible {
                         let fraction = visible.value.minY / max(1, viewHeight - visible.value.height)
                         prependAnchor = UnitPoint(x: 0.5, y: min(1, fraction))
                         scrollTarget = visible.key
@@ -352,13 +364,13 @@ struct ThreadView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: Kit.Space.l) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     if let error = store.lastError, !error.isEmpty {
                         KitNotice(error, icon: .warning, tone: .error)
                     }
 
                     if let snapshot {
-                        if !snapshot.entries.isEmpty, store.offlineReader != nil, !pageExhausted {
+                        if canReadEarlier {
                             Button("Earlier messages") { readHistory() }
                                 .disabled(paging)
                                 .font(.kitDetail)
@@ -429,39 +441,34 @@ struct ThreadView: View {
                         .id("timeline-bottom")
                 }
                 .scrollTargetLayout()
-                // `ThreadFeed`: full width, `paddingTop: 12`, 16 at the sides; the end inset is 12.
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
-                .padding(.bottom, 12)
+                // The stack gap and bottom anchor already contribute 13 of the 14 points.
+                .padding(.bottom, 1)
             }
             .background(theme.background.ignoresSafeArea())
             .defaultScrollAnchor(.bottom, for: .alignment)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .coordinateSpace(name: "timeline-viewport")
             .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
-            .onScrollPhaseChange { _, phase in
+            .onScrollPhaseChange { _, phase, context in
                 if phase == .interacting { userScrolling = true }
-                if phase == .idle || phase == .animating { userScrolling = false }
-                if phase == .idle && requestedByScroll {
-                    requestedByScroll = false
-                    readHistory()
+                if phase == .idle {
+                    if userScrolling { stickToBottom = TimelineEdges(context.geometry).nearEnd }
+                    userScrolling = false
+                    if requestedByScroll {
+                        requestedByScroll = false
+                        readHistory()
+                    }
                 }
             }
-            .onScrollGeometryChange(for: Int.self) { geometry in
-                Int(min(160, geometry.contentOffset.y + geometry.contentInsets.top))
-            } action: { previous, offset in
-                if userScrolling && offset < previous && !paging {
-                    userScrolling = false
-                    requestedByScroll = true
+            .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
+                if userScrolling {
+                    stickToBottom = edges.nearEnd
+                    if edges.top < previous.top && !paging { requestedByScroll = true }
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .onScrollGeometryChange(for: Bool.self) { geo in
-                let maxOffset = max(0, geo.contentSize.height - geo.containerSize.height)
-                return geo.contentOffset.y >= maxOffset - 80
-            } action: { _, nearBottom in
-                stickToBottom = nearBottom
-            }
             .onChange(of: scrollFingerprint) { _, _ in
                 if stickToBottom && readingWindow == nil {
                     withAnimation(Kit.Motion.fast) {
@@ -481,12 +488,26 @@ struct ThreadView: View {
             // bottom scroll-edge blur its height (mobile's `EdgeBlur` behind the composer).
             .safeAreaBar(edge: .bottom, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
+                    if snapshot != nil && (!stickToBottom || readingWindow != nil) {
+                        Button {
+                            UISelectionFeedbackGenerator().selectionChanged()
+                            latest()
+                        } label: {
+                            ThreadGlyph(name: "chevron-down", size: 16)
+                                .foregroundStyle(theme.foreground)
+                                .frame(width: 38.5, height: 38.5)
+                                .modifier(ThreadControlSurface(shape: Circle()))
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityLabel("Jump to latest")
+                        .accessibilityIdentifier("thread.scrollToEnd")
+                    }
                   VStack(alignment: .leading, spacing: 10.5) {
                     if let historyNotice {
                         Text(historyNotice).font(.kitDetail)
-                    }
-                    if readingWindow != nil {
-                        Button("Back to latest") { latest() }
                     }
                     if store.showsOffline && !store.showsSavedConnectionAlert {
                         OfflinePill().frame(maxWidth: .infinity)
@@ -566,7 +587,7 @@ struct ThreadView: View {
                                             await store.stopThread(threadId: threadId)
                                         }
                                     } label: {
-                                        KitIconImage(.stop, size: 13)
+                                        ThreadGlyph(name: "stop", size: 13)
                                             .foregroundStyle(theme.destructive)
                                             .frame(width: 28, height: 28)
                                     }
@@ -584,50 +605,58 @@ struct ThreadView: View {
                     )
                     .disabled(store.status != .connected || readingWindow != nil)
                     .accessibilityIdentifier("thread.composer")
-                    .padding(.top, 6)
                 }
-                // `FloatingWorkingControl`: a 38.5pt glass chevron, centred 40.5pt above the overlay
-                // (`CONTROL_OVERLAY_OFFSET`), while the reader is away from the end of the feed.
-                .overlay(alignment: .top) {
-                    if snapshot != nil && !stickToBottom {
-                        Button {
-                            UISelectionFeedbackGenerator().selectionChanged()
-                            stickToBottom = true
-                            if readingWindow != nil {
-                                latest()
-                            } else {
-                                withAnimation(Kit.Motion.fast) {
-                                    proxy.scrollTo("timeline-bottom", anchor: .bottom)
-                                }
-                            }
-                        } label: {
-                            ConnIcon("chevron.down")
-                                .font(.system(size: 14))
-                                .foregroundStyle(theme.foreground)
-                                .frame(width: 38.5, height: 38.5)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .glassEffect(.regular.interactive(), in: Circle())
-                        .offset(y: -40.5)
-                        .transition(.opacity)
-                        .accessibilityLabel("Scroll to end")
-                        .accessibilityIdentifier("thread.scrollToEnd")
-                    }
-                }
-                .animation(.easeOut(duration: 0.18), value: stickToBottom)
                 // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
                 .padding(.horizontal, 12)
                 .padding(.bottom, 2)
             }
-            .scrollEdgeEffectStyle(.soft, for: .top)
+            .scrollEdgeEffectHidden(true, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
         }
-        // Mobile's `GLASS_HEADER_OPTIONS`: the native transparent bar with a centered title and
-        // subtitle. The root has no title, so the back button is the bare chevron.
         .navigationTitle(displayTitle)
-        .navigationSubtitle(displaySubtitle ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(theme.background, for: .navigationBar)
+        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+        .navigationBarBackButtonHidden()
+        .background { ThreadEdgePopGesture() }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { dismiss() } label: {
+                    ThreadGlyph(name: "chevron-left", size: 22)
+                        .flipsForRightToLeftLayoutDirection(true)
+                        .foregroundStyle(theme.foreground)
+                        .frame(width: 44, height: 44)
+                        .modifier(ThreadControlSurface(shape: Circle()))
+                }
+                .accessibilityLabel("Back")
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 0) {
+                    Text(displayTitle).font(.headline)
+                    if let displaySubtitle {
+                        Text(displaySubtitle).font(.caption).foregroundStyle(theme.mutedForeground)
+                    }
+                }
+                .lineLimit(1)
+                .foregroundStyle(theme.foreground)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { showsOutline = true } label: { Label("Thread outline", systemImage: "list.bullet") }
+                } label: {
+                    ThreadGlyph(name: "more-horizontal", size: 22)
+                        .foregroundStyle(theme.foreground)
+                        .frame(width: 44, height: 44)
+                        .modifier(ThreadControlSurface(shape: Circle()))
+                }
+                .accessibilityLabel("More actions")
+                .accessibilityIdentifier("thread.moreButton")
+            }
+            .sharedBackgroundVisibility(.hidden)
+        }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewHeight = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)
@@ -635,17 +664,6 @@ struct ThreadView: View {
             // Drafts of answered, skipped or expired questions go (`pruneResolvedRequestDrafts`).
             questionDrafts = questionDrafts.filter { $0.key == current }
             questionSteps = questionSteps.filter { $0.key == current }
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button { showsOutline = true } label: { Label("Thread outline", systemImage: "list.bullet") }
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .accessibilityLabel("More actions")
-                .accessibilityIdentifier("thread.moreButton")
-            }
         }
         .sheet(isPresented: $showsOutline) {
             NavigationStack {
@@ -807,5 +825,51 @@ private struct TimelineFrames: PreferenceKey {
 
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct TimelineEdges: Equatable {
+    let top: Int
+    let nearEnd: Bool
+
+    init(_ geometry: ScrollGeometry) {
+        top = Int(min(160, geometry.contentOffset.y + geometry.contentInsets.top))
+        nearEnd = geometry.visibleRect.maxY >= geometry.contentSize.height - 80
+    }
+}
+
+/// SwiftUI turns off UIKit's edge pop when a screen supplies its own back button.
+private struct ThreadEdgePopGesture: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        private weak var pop: UIGestureRecognizer?
+        private weak var previousDelegate: (any UIGestureRecognizerDelegate)?
+        private var previouslyEnabled = false
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard let gesture = navigationController?.interactivePopGestureRecognizer,
+                  gesture.delegate !== self else { return }
+            pop = gesture
+            previousDelegate = gesture.delegate
+            previouslyEnabled = gesture.isEnabled
+            gesture.delegate = self
+            gesture.isEnabled = true
+        }
+
+        override func viewDidDisappear(_ animated: Bool) {
+            super.viewDidDisappear(animated)
+            if let pop, pop.delegate === self {
+                pop.delegate = previousDelegate
+                pop.isEnabled = previouslyEnabled
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let navigationController else { return false }
+            return navigationController.viewControllers.count > 1 && navigationController.transitionCoordinator == nil
+        }
     }
 }

@@ -350,6 +350,75 @@ final class ConnSpikeUITests: XCTestCase {
         }
     }
 
+    func testJumpFromReadingAndHistory() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairing = env["CONN_READING_PAIRING"] else { throw XCTSkip("Requires the long reading thread fixture") }
+        let app = XCUIApplication()
+        let theme = env["CONN_APPEARANCE"] ?? "light"
+        app.launchEnvironment["CONN_TEST_APPEARANCE"] = theme
+        app.launchArguments = ["--reset-session", "--manual-pairing", "-AppleLocale", "en_GB"]
+        app.launch()
+        let url = app.textFields["pairing.urlField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 15))
+        url.tap()
+        url.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        let row = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Long reading thread")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 20))
+        row.tap()
+
+        func capture(_ state: String) {
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = theme + "-" + state
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        let newest = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "The first native comparisons")).firstMatch
+        let jumps = app.buttons.matching(identifier: "thread.scrollToEnd")
+        let jump = jumps.firstMatch
+        func assertAtLatest() {
+            XCTAssertTrue(newest.wait(for: \.isHittable, toEqual: true, timeout: 10))
+            XCTAssertTrue(jump.waitForNonExistence(timeout: 5))
+        }
+        assertAtLatest()
+        capture("latest")
+        let feed = app.scrollViews.firstMatch
+        feed.swipeDown()
+        XCTAssertTrue(jump.waitForExistence(timeout: 5))
+        XCTAssertEqual(jumps.count, 1)
+        capture("reading")
+        jump.tap()
+        assertAtLatest()
+
+        app.buttons["thread.moreButton"].tap()
+        app.buttons["Thread outline"].tap()
+        let prompt = "Reading prompt 04"
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        search.tap()
+        search.typeText(prompt)
+        let match = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", prompt)).firstMatch
+        XCTAssertTrue(match.waitForExistence(timeout: 10))
+        match.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prompt)).firstMatch.wait(for: \.isHittable, toEqual: true, timeout: 10))
+        capture("history")
+        XCTAssertFalse(app.buttons["Back to latest"].exists)
+        XCTAssertEqual(jumps.count, 1)
+        let field = app.textFields["thread.composer"]
+        XCTAssertFalse(field.isEnabled)
+        jump.tap()
+        assertAtLatest()
+        XCTAssertTrue(field.isEnabled)
+
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
+        edge.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        let excerpt = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Conn iOS WireGuard Launch Experience")).firstMatch
+        excerpt.tap()
+        assertAtLatest()
+        capture("excerpt")
+    }
+
     func testWorkspaceRecords() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_PAIRING_URL"] else { throw XCTSkip("Requires an isolated Conn server") }
@@ -1278,6 +1347,7 @@ final class ConnSpikeUITests: XCTestCase {
         tap(child)
         XCTAssertTrue(app.staticTexts["Only the linked environment has this reply"].firstMatch.waitForExistence(timeout: 15))
         capture("02-offline-linked-child")
+        tap(app.buttons["thread.moreButton"])
         tap(app.buttons["Thread outline"])
         let outlineSearch = app.searchFields.firstMatch
         tap(outlineSearch)
@@ -1298,11 +1368,12 @@ final class ConnSpikeUITests: XCTestCase {
         print("Outline u 573 midpoint before foreground: \(anchorY), after catch-up: \(reconnectedY)")
         XCTAssertEqual(reconnectedY, anchorY, accuracy: 20)
         capture("04-reconnected-anchor")
-        tap(app.buttons["Back to latest"])
+        tap(app.buttons["thread.scrollToEnd"])
         let tail = app.staticTexts["Foreground catch-up reply"].firstMatch
         XCTAssertTrue(tail.waitForExistence(timeout: 15))
         XCTAssertTrue(tail.isHittable)
         capture("05-new-tail")
+        tap(app.buttons["thread.moreButton"])
         tap(app.buttons["Thread outline"])
         tap(outlineSearch)
         let clearSearch = outlineSearch.buttons.firstMatch
@@ -1330,7 +1401,7 @@ final class ConnSpikeUITests: XCTestCase {
         }
         XCTAssertTrue(reachedSecondPage)
         capture("07-server-continuation")
-        tap(app.buttons["Back to latest"])
+        tap(app.buttons["thread.scrollToEnd"])
         XCTAssertTrue(app.staticTexts["Foreground catch-up reply"].firstMatch.waitForExistence(timeout: 10))
     }
 

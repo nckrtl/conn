@@ -7,18 +7,31 @@ struct MarkdownView: View {
     var fillsWidth = true
     var muted = false
     var recordStyle = false
+    enum MessageStyle { case assistant, user }
+    var messageStyle: MessageStyle?
+    @ScaledMetric(relativeTo: .footnote) private var messageSize: CGFloat = 13
     var onTemplate: ((String) -> Void)? = nil
     @Environment(\.connTheme) private var theme
 
-    private var bodyFont: Font { muted || recordStyle ? .system(size: 15) : .kitBody }
-    private var textColor: Color { muted ? theme.mutedForeground : theme.foreground }
+    private var bodyFont: Font {
+        if messageStyle != nil { return .system(size: messageSize) }
+        return muted || recordStyle ? .system(size: 15) : .kitBody
+    }
+    private var textColor: Color {
+        switch messageStyle {
+        case .user: theme.messageForeground
+        case .assistant: theme.foreground.opacity(0.9)
+        case nil: muted ? theme.mutedForeground : theme.foreground
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Kit.Space.m) {
+        VStack(alignment: .leading, spacing: messageStyle == nil ? Kit.Space.m : 10.4) {
             ForEach(Array(parseBlocks(source).enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
+        .lineHeight(messageStyle == nil ? nil : .exact(points: messageSize * 1.625))
         .lineSpacing(recordStyle ? 4 : 0)
         .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
     }
@@ -98,6 +111,7 @@ struct MarkdownView: View {
     }
 
     private func headingFont(for level: Int) -> Font {
+        if messageStyle != nil { return .system(size: messageSize, weight: .semibold) }
         if recordStyle { return .system(size: 16, weight: .medium) }
         return switch level {
         case 1: .title2.weight(.semibold)

@@ -94,8 +94,8 @@ struct TimelineEntryRow: View {
             ThreadMessage(text: text, date: date, agent: agent, badge: "Queued", files: files,
                           detail: detail, store: store, onOpenThread: onOpenThread)
         case let .assistant(_, markdown, streaming, timestamp, _, status):
-            VStack(alignment: .leading, spacing: 4) {
-                MarkdownView(source: markdown, onTemplate: onTemplate)
+            VStack(alignment: .leading, spacing: 6) {
+                MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
                 if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
                 else {
                     HStack {

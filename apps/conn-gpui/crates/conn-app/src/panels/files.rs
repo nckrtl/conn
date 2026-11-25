@@ -15,6 +15,7 @@ use conn_contract::{
     ProjectEntryKind, ProjectListEntriesInput, ProjectReadFileInput, ProjectSearchEntriesInput,
 };
 use conn_theme::Tokens;
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -1367,27 +1368,6 @@ impl FilesPanel {
             .border_1()
             .border_color(control_border);
         let mut buttons = 0;
-        if loaded && kind.has_rendered_view() {
-            let (icon, label) = if self.render_preview {
-                ("superhero/code.svg", "Show source")
-            } else if matches!(kind, PreviewKind::Markdown) {
-                ("superhero/show.svg", "Preview Markdown")
-            } else {
-                ("superhero/table.svg", "Show table")
-            };
-            group = group.child(self.toolbar_button(
-                "files-preview-render-btn",
-                "panel.files.preview-render",
-                label,
-                icon,
-                self.render_preview,
-                cx.listener(|this, _, _, cx| {
-                    this.render_preview = !this.render_preview;
-                    cx.notify();
-                }),
-            ));
-            buttons += 1;
-        }
         if loaded && !rendered {
             group = group.child(self.toolbar_button(
                 "files-preview-wrap-btn",
@@ -1674,6 +1654,46 @@ impl FilesPanel {
         }
 
         col
+    }
+
+    fn render_view_switch(&self, cx: &mut Context<'_, Self>) -> Option<impl IntoElement> {
+        let PreviewState::Loaded { path, .. } = &self.preview else {
+            return None;
+        };
+        let (icon, label) = match file_kind::preview_kind(path) {
+            PreviewKind::Markdown if !self.render_preview => {
+                ("superhero/show.svg", "Preview Markdown")
+            }
+            PreviewKind::Delimited { .. } if !self.render_preview => {
+                ("superhero/table.svg", "Show table")
+            }
+            kind if kind.has_rendered_view() => ("superhero/code.svg", "Show source"),
+            _ => return None,
+        };
+        Some(
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .justify_end()
+                .px(px(TOOLBAR_PAD_PX))
+                .pt(px(6.0))
+                .child(
+                    super::chrome::text_button(
+                        "files.preview-render",
+                        Some(icon),
+                        label,
+                        &self.tokens,
+                        cx.listener(|this, _, _, cx| {
+                            this.render_preview = !this.render_preview;
+                            cx.notify();
+                        }),
+                    )
+                    .test_support()
+                    .bg(to_hsla(self.tokens.shell_control))
+                    .border_1()
+                    .border_color(to_hsla(self.tokens.shell_divider_header)),
+                ),
+        )
     }
 
     fn render_preview_column(
@@ -2153,8 +2173,11 @@ impl Render for FilesPanel {
             return v_flex()
                 .size_full()
                 .child(self.render_preview_subheader(cx))
+                .children(self.render_view_switch(cx))
                 .child(
                     v_flex()
+                        .id("file-preview-viewport")
+                        .test_support()
                         .relative()
                         .flex_1()
                         .min_h_0()
@@ -2546,6 +2569,50 @@ mod tests {
             assert!(files.read(cx).zed.is_some());
             assert!(reply.try_recv().unwrap().is_ok());
             assert!(files.read(cx).selected_source(cx).is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn markdown_view_switch_stays_available_while_scrolling(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let (window, files) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut files = FilesPanel::new(tokens, None, window, cx);
+                    files.showing_preview = true;
+                    files.preview = PreviewState::Loaded {
+                        path: "AGENTS.md".into(),
+                        raw_contents: "# Build instructions\n\nRun **tests** before shipping.\n\n"
+                            .repeat(80),
+                        truncated: false,
+                    };
+                    files
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find_by_label("Preview Markdown").is_some());
+            window.click("files.preview-render", cx);
+            let button = window.find_by_label("Show source").bounds();
+            let document = window.find("file-preview-viewport").bounds();
+            assert!(button.bottom() <= document.top());
+            assert_eq!(button.right(), document.right() - px(TOOLBAR_PAD_PX));
+            window.scroll(
+                "file-preview-viewport",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-250.))),
+                cx,
+            );
+            assert!(files.read(cx).preview_scroll.offset().y < px(0.));
+            assert_eq!(window.find_by_label("Show source").bounds(), button);
+            window.click("files.preview-render", cx);
+            assert!(window.try_find_by_label("Preview Markdown").is_some());
+            assert!(!files.read(cx).render_preview);
+            assert!(files.read(cx).editor.is_some());
         })
         .unwrap();
     }

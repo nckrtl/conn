@@ -229,6 +229,7 @@ pub struct Connection {
     http_base_url: url::Url,
     bearer: Arc<RwLock<Option<String>>>,
     http: reqwest::Client,
+    asset_http: Arc<std::sync::OnceLock<Result<reqwest::Client, String>>>,
     rt: tokio::runtime::Handle,
     auth_rejected: Arc<AtomicBool>,
     identity_mismatch: Arc<std::sync::Mutex<Option<String>>>,
@@ -292,6 +293,7 @@ impl Connection {
             http_base_url,
             bearer,
             http,
+            asset_http: Default::default(),
             rt: rt.clone(),
             auth_rejected,
             identity_mismatch,
@@ -585,7 +587,7 @@ impl Connection {
     ) -> Result<Vec<u8>, ClientError> {
         let created = self.create_attachment_url(attachment_id).await?;
         let url = self.signed_asset_url(&created.relative_url)?;
-        let http = self.http.clone();
+        let http = self.asset_http()?;
         self.run_on_tokio(download_bytes(http, url, None, None), "attachment download")
             .await
     }
@@ -616,6 +618,19 @@ impl Connection {
         Ok(url)
     }
 
+    fn asset_http(&self) -> Result<reqwest::Client, ClientError> {
+        self.asset_http
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .referer(false)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|error| error.to_string())
+            })
+            .clone()
+            .map_err(ClientError::Connection)
+    }
+
     pub async fn fetch_attachment_bytes_limited(
         &self,
         attachment_id: &str,
@@ -633,7 +648,7 @@ impl Connection {
                 )
                 .await?;
                 let url = this.signed_asset_url(&created.relative_url)?;
-                download_bytes(this.http.clone(), url, limit, Some(deadlines.download)).await
+                download_bytes(this.asset_http()?, url, limit, Some(deadlines.download)).await
             },
             "attachment download",
         )

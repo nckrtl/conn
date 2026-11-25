@@ -56,6 +56,12 @@ impl FfiComposerLimits {
         connection: &Connection,
         files: Vec<FfiComposerFile>,
         ready: &mut Vec<ChatAttachment>,
+        cache: Option<(
+            &std::sync::Arc<crate::OfflineReader>,
+            &str,
+            &str,
+            &tokio::runtime::Handle,
+        )>,
     ) -> Result<(), FfiError> {
         let invalid = |message: String| FfiError::InvalidInput { message };
         if files.len() > 100 {
@@ -90,11 +96,25 @@ impl FfiComposerLimits {
             }
             // These are private, immutable copies made by the native picker.
             let bytes = std::fs::read(&file.path).map_err(read_error)?;
-            ready.push(
-                connection
-                    .upload_chat_attachment(file.name, file.mime_type, bytes)
-                    .await?,
-            );
+            let pick = cache.filter(|_| image).map(|cache| (cache, bytes.clone()));
+            let uploaded = connection
+                .upload_chat_attachment(file.name, file.mime_type, bytes)
+                .await?;
+            if let Some(((reader, thread, item, runtime), bytes)) = pick {
+                let (reader, thread, item, index, file) = (
+                    reader.clone(),
+                    thread.to_owned(),
+                    item.to_owned(),
+                    ready.len(),
+                    (&uploaded).into(),
+                );
+                let _ = runtime
+                    .spawn(
+                        async move { reader.seed_pick(&thread, &item, index, file, &bytes).await },
+                    )
+                    .await;
+            }
+            ready.push(uploaded);
         }
         Ok(())
     }

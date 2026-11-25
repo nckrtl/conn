@@ -161,6 +161,7 @@ pub struct ConnCore {
     shell_watch: watch::Receiver<Option<FfiShellSnapshot>>,
     status_watch: watch::Receiver<FfiConnectionStatus>,
     limits: watch::Receiver<FfiComposerLimits>,
+    image_reader: RwLock<std::sync::Weak<crate::OfflineReader>>,
     disconnected: AtomicBool,
     started_with_bearer: bool,
 }
@@ -379,6 +380,7 @@ impl ConnCore {
             shell_watch,
             status_watch,
             limits,
+            image_reader: Default::default(),
             disconnected: AtomicBool::new(false),
             started_with_bearer,
         }))
@@ -625,6 +627,10 @@ impl ConnCore {
         self.ctrl_tx
             .send(PumpControl::EnableOffline(reader.clone()))
             .map_err(|_| FfiError::Closed)?;
+        *self
+            .image_reader
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&reader);
         Ok(reader)
     }
 
@@ -754,9 +760,26 @@ impl ConnCore {
     ) -> Result<String, FfiError> {
         self.ensure_connected()?;
         let mut attachments = Vec::new();
+        let reader = self
+            .image_reader
+            .read()
+            .ok()
+            .and_then(|reader| reader.upgrade());
+        let thread = match &target {
+            FfiComposerTarget::New { .. } => format!("thread-{key}"),
+            FfiComposerTarget::Reply { thread_id, .. } => thread_id.clone(),
+        };
+        let item = format!("turn-item:message-{key}");
         let result = async {
             self.composer_limits()
-                .upload(&self.connection, files, &mut attachments)
+                .upload(
+                    &self.connection,
+                    files,
+                    &mut attachments,
+                    reader.as_ref().map(|reader| {
+                        (reader, thread.as_str(), item.as_str(), &self.runtime_handle)
+                    }),
+                )
                 .await?;
             match target {
                 FfiComposerTarget::New { project_id } => {
@@ -1473,6 +1496,9 @@ impl PumpState {
                 if let Some(projection) = *projection {
                     let mut state = ThreadState::new(thread_id.clone());
                     state.apply_projection(projection, sequence);
+                    if let Some(sync) = &mut self.offline {
+                        sync.thread(&state, sequence);
+                    }
                     self.update_thread_run_meta(&thread_id, &state);
                     self.threads.insert(thread_id.clone(), state);
                     let meta = self.resolve_thread_meta(&thread_id);

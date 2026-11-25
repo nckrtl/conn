@@ -168,6 +168,7 @@ final class CoreStore {
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
     var environmentId: String? { state?.environmentId ?? coldLaunchSession?.environmentId }
+    var attachmentEnvironment: String { environmentId ?? coldLaunchSession?.orbitServerId ?? scope }
 
     var orbitConnect: OrbitConnectState? {
         var phase = state?.phase

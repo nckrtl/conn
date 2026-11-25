@@ -305,20 +305,3 @@ struct OfflinePill: View {
             .background(Color(red: 1, green: 0.83, blue: 0.30), in: Capsule())
     }
 }
-
-struct ConnectionStatusPill: View {
-    let status: FfiConnectionStatus?
-
-    var body: some View {
-        switch status {
-        case .connected:
-            KitStatusPill("Connected", tone: .ok)
-        case .connecting, .none:
-            KitStatusPill("Connecting", tone: .working)
-        case let .reconnecting(attempt):
-            KitStatusPill("Reconnecting (\(attempt))", tone: .working)
-        case .failed:
-            KitStatusPill("Failed", tone: .error)
-        }
-    }
-}

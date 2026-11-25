@@ -104,7 +104,7 @@ private struct SettingsNoteRow: View {
 }
 
 /// The lab's status words, not a status pill.
-private func connectionStatusText(_ store: CoreStore) -> String {
+@MainActor private func connectionStatusText(_ store: CoreStore) -> String {
     if store.showsOffline { return "Not connected" }
     switch store.status {
     case .connected: return "Connected"

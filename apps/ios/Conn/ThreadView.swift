@@ -80,6 +80,10 @@ struct ThreadView: View {
         self.onOpenThread = onOpenThread
         self.onTemplate = onTemplate
         self._settled = State(initialValue: initialSettled)
+        // Start at the screen size, so the first frame of a push already lays the title out
+        // between the buttons instead of full width (the geometry arrives a frame later).
+        let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.size
+        self._viewSize = State(initialValue: screen ?? .zero)
     }
 
     private var snapshot: FfiThreadSnapshot? {

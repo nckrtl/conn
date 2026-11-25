@@ -742,6 +742,14 @@ impl AppServer {
             }
             Inbound::Notification { method, params } => {
                 if method == "mcpServer/oauthLogin/completed" {
+                    let state = self.lock();
+                    if state
+                        .live
+                        .as_ref()
+                        .is_none_or(|live| live.generation != generation)
+                    {
+                        return;
+                    }
                     if let (Some(name), Some(success)) =
                         (params["name"].as_str(), params["success"].as_bool())
                     {

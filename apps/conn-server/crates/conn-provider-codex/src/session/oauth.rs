@@ -16,21 +16,34 @@ use url::Url;
 pub(crate) struct Logins(Mutex<HashMap<String, Login>>);
 
 struct Login {
-    session: String,
+    session: Option<String>,
     thread: String,
     issued: tokio::time::Instant,
+    authorization_url: watch::Receiver<Option<String>>,
     callback: Option<(Url, String)>,
     result: watch::Sender<Option<bool>>,
 }
 
 impl Logins {
     pub(crate) fn finish(&self, server: &str, success: bool) {
-        if let Some(login) = crate::lock(&self.0).get(server) {
+        let mut logins = crate::lock(&self.0);
+        if let Some(login) = logins.get(server) {
             login.result.send_replace(Some(success));
+            if login.session.is_none() {
+                logins.remove(server);
+            }
         }
     }
     pub(crate) fn release(&self, session: &str) {
-        crate::lock(&self.0).retain(|_, login| login.session != session);
+        crate::lock(&self.0).retain(|_, login| {
+            if login.session.as_deref() != Some(session) {
+                return true;
+            }
+            // Native completion identifies only the server. Drain it before any new login.
+            login.session = None;
+            login.callback = None;
+            login.result.borrow().is_none()
+        });
     }
     pub(crate) fn clear(&self) {
         crate::lock(&self.0).clear();
@@ -46,17 +59,22 @@ impl Logins {
     }
 }
 
+enum RequestError {
+    Resume(super::ProviderError),
+    Native(CallError),
+}
+
 async fn request(
     inner: &Inner,
     thread: &ProviderThread,
     method: &'static str,
     params: Value,
-) -> ProviderResult<Value> {
+) -> Result<Value, RequestError> {
     let mut response = inner.server.request(method, params.clone()).await;
     if matches!(&response, Err(CallError::Rpc(e)) if e.code == -32600 && e.message.starts_with("thread not found:"))
     {
-        let native =
-            native_thread_id(thread).ok_or_else(|| failed(method, "Missing native thread ID"))?;
+        let native = native_thread_id(thread)
+            .ok_or_else(|| RequestError::Resume(failed(method, "Missing native thread ID")))?;
         inner
             .resume(
                 &native,
@@ -65,10 +83,11 @@ async fn request(
                 inner.open_model.as_deref(),
                 true,
             )
-            .await?;
+            .await
+            .map_err(RequestError::Resume)?;
         response = inner.server.request(method, params).await;
     }
-    response.map_err(call_failed(method))
+    response.map_err(RequestError::Native)
 }
 
 fn query(url: &Url, key: &str) -> Option<String> {
@@ -104,62 +123,88 @@ pub(super) async fn start(
     }
     let logins = &inner.server.logins;
     let (result, watch) = watch::channel(None);
-    {
+    let (publish_url, authorization_url) = watch::channel(None);
+    let pending_url = {
         let mut all = crate::lock(&logins.0);
-        all.retain(|_, l| l.issued.elapsed() < Duration::from_secs(600));
-        if all.get(&server).is_some_and(|l| {
-            (l.session != inner.id || l.thread != native) && l.result.borrow().is_none()
-        }) {
-            return Err(failed(
-                "mcp_sign_in",
-                "A sign-in for this MCP server is already open on another thread.",
-            ));
-        }
-        all.insert(
-            server.clone(),
-            Login {
-                session: inner.id.clone(),
-                thread: native.clone(),
-                issued: tokio::time::Instant::now(),
-                callback: None,
-                result,
-            },
-        );
-    }
-    let opened = async {
-        let response = request(
-            inner,
-            &thread,
-            "mcpServer/oauth/login",
-            json!({"name":server,"threadId":native}),
-        )
-        .await?;
-        let url = response["authorizationUrl"]
-            .as_str()
-            .and_then(|s| Url::parse(s).ok())
-            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
-            .ok_or_else(|| {
-                failed(
+        all.retain(|_, l| {
+            l.issued.elapsed() < Duration::from_secs(600) || l.result.borrow().is_none()
+        });
+        if let Some(login) = all.get(&server).filter(|l| l.result.borrow().is_none()) {
+            if login.session.as_deref() != Some(inner.id.as_str())
+                || login.thread != native
+                || login.issued.elapsed() >= Duration::from_secs(600)
+            {
+                return Err(failed(
                     "mcp_sign_in",
-                    "Codex returned an invalid authorization URL.",
-                )
-            })?;
-        let callback = query(&url, "redirect_uri")
-            .and_then(|s| Url::parse(&s).ok())
-            .zip(query(&url, "state"));
-        let mut all = crate::lock(&logins.0);
-        let login = all
-            .get_mut(&server)
-            .filter(|s| watch.same_channel(&s.result.subscribe()))
-            .ok_or_else(|| failed("mcp_sign_in", "The sign-in was replaced."))?;
-        login.callback = callback;
-        Ok(Some(url.to_string()))
+                    "A previous sign-in for this MCP server is still pending.",
+                ));
+            }
+            Some(login.authorization_url.clone())
+        } else {
+            all.insert(
+                server.clone(),
+                Login {
+                    session: Some(inner.id.clone()),
+                    thread: native.clone(),
+                    issued: tokio::time::Instant::now(),
+                    authorization_url,
+                    callback: None,
+                    result,
+                },
+            );
+            None
+        }
+    };
+    if let Some(mut pending) = pending_url {
+        return pending
+            .wait_for(Option::is_some)
+            .await
+            .map(|url| url.clone())
+            .map_err(|_| failed("mcp_sign_in", "The native sign-in did not open."));
     }
-    .await;
-    if opened.is_err() {
-        logins.forget(&server, &watch);
-    }
-    opened
+    let method = "mcpServer/oauth/login";
+    let response = request(
+        inner,
+        &thread,
+        method,
+        json!({"name":server,"threadId":native}),
+    )
+    .await
+    .map_err(|error| {
+        // A timed-out request may already have opened the native listener.
+        if !matches!(error, RequestError::Native(CallError::Timeout)) {
+            logins.forget(&server, &watch);
+        }
+        match error {
+            RequestError::Resume(e) => e,
+            RequestError::Native(e) => call_failed(method)(e),
+        }
+    })?;
+    let url = response["authorizationUrl"]
+        .as_str()
+        .and_then(|s| Url::parse(s).ok())
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
+        .ok_or_else(|| {
+            failed(
+                "mcp_sign_in",
+                "Codex returned an invalid authorization URL.",
+            )
+        })?;
+    let callback = query(&url, "redirect_uri")
+        .and_then(|s| Url::parse(&s).ok())
+        .zip(query(&url, "state"));
+    let mut all = crate::lock(&logins.0);
+    let login = all
+        .get_mut(&server)
+        .filter(|s| {
+            s.session.as_deref() == Some(inner.id.as_str())
+                && watch.same_channel(&s.result.subscribe())
+        })
+        .ok_or_else(|| failed("mcp_sign_in", "The sign-in was replaced."))?;
+    login.callback = callback;
+    let url = url.to_string();
+    publish_url.send_replace(Some(url.clone()));
+    Ok(Some(url))
 }
 
 fn checked_callback(redirect: &Url, state: &str, pasted: &str) -> Option<Url> {
@@ -228,7 +273,7 @@ pub(super) async fn complete(
         let login = all
             .get(&server)
             .filter(|s| {
-                s.session == inner.id
+                s.session.as_deref() == Some(inner.id.as_str())
                     && s.thread == native
                     && s.issued.elapsed() < Duration::from_secs(600)
             })
@@ -251,8 +296,11 @@ pub(super) async fn complete(
     )
     .await;
     let success = matches!(done, Ok(Ok(ref value)) if **value == Some(true));
+    let finished = matches!(done, Ok(Ok(_)));
     drop(done);
-    logins.forget(&server, &result);
+    if finished {
+        logins.forget(&server, &result);
+    }
     if success {
         Ok(())
     } else {

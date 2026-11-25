@@ -134,6 +134,9 @@ the reset time from the account snapshot or Codex's dated message when available
 turn's additional context after compaction completes. Explicit title changes update the
 native thread. A steer applies the selected service tier first. Thread-scoped MCP sign-in
 relays the validated local OAuth callback and waits for the server's completion event.
+Retrying a pending sign-in on the same thread returns the original authorization URL.
+Codex names only the MCP server in its completion event, so Conn keeps one native attempt
+per server until it finishes or the app-server process changes.
 An async question in an agent message becomes a user-input request.
 
 ## Not implemented

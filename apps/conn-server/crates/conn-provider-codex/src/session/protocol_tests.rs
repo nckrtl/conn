@@ -217,7 +217,7 @@ async fn stop_confirms_retained_processes_without_ending_the_completed_run_twice
 }
 
 #[tokio::test]
-async fn mcp_oauth_validates_the_thread_callback_and_waits_for_native_success() {
+async fn mcp_oauth_retry_preserves_the_callback_until_native_completion() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -225,9 +225,12 @@ async fn mcp_oauth_validates_the_thread_callback_and_waits_for_native_success() 
       if test -e "$0.connected"; then state=connected; else state=needsAuth; fi
       emit "{\"id\":$id,\"result\":{\"data\":[{\"name\":\"calendar\",\"runtimeStatus\":\"$state\",\"tools\":{}}]}}" ;;
     *'"method":"mcpServer/oauth/login"'*)
-      emit "{\"id\":$id,\"result\":{\"authorizationUrl\":\"https://provider.test/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3APORT%2Fcallback&state=state1\"}}"
-      while test ! -e "$0.connected"; do sleep 0.02; done
-      emit '{"method":"mcpServer/oauthLogin/completed","params":{"name":"calendar","success":true}}' ;;"#.replace("PORT",&port.to_string());
+      attempts=$((${attempts:-0} + 1))
+      emit "{\"id\":$id,\"result\":{\"authorizationUrl\":\"https://provider.test/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3APORT%2Fcallback&state=state$attempts\"}}" ;;
+    *'"method":"test/finishLogin"'*)
+      touch "$0.connected"
+      emit '{"method":"mcpServer/oauthLogin/completed","params":{"name":"calendar","success":true}}'
+      emit "{\"id\":$id,\"result\":{}}" ;;"#.replace("PORT",&port.to_string());
     let f = Fixture::open(
         "mcp-signin",
         &script_with("null", &[], &script),
@@ -241,6 +244,12 @@ async fn mcp_oauth_validates_the_thread_callback_and_waits_for_native_success() 
         .unwrap()
         .unwrap();
     assert!(url.starts_with("https://provider.test/"));
+    let retry = f
+        .session
+        .start_mcp_sign_in(f.thread.clone(), "calendar".into())
+        .await
+        .unwrap();
+    assert_eq!(retry.as_deref(), Some(url.as_str()));
     let wrong = format!("http://127.0.0.1:{port}/callback?code=c&state=wrong");
     assert!(
         f.session
@@ -248,7 +257,7 @@ async fn mcp_oauth_validates_the_thread_callback_and_waits_for_native_success() 
             .await
             .is_err()
     );
-    let marker = f.dir.join("codex.connected");
+    let server = f.provider.server.clone();
     let handle = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut data = [0; 512];
@@ -262,14 +271,20 @@ async fn mcp_oauth_validates_the_thread_callback_and_waits_for_native_success() 
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .await
             .unwrap();
-        std::fs::write(marker, "").unwrap();
+        server.request("test/finishLogin", json!({})).await.unwrap();
     });
     let callback = format!("http://127.0.0.1:{port}/callback?code=c&state=state1");
     f.session
-        .complete_mcp_sign_in(f.thread.clone(), "calendar".into(), callback)
+        .complete_mcp_sign_in(f.thread.clone(), "calendar".into(), callback.clone())
         .await
         .unwrap();
     handle.await.unwrap();
+    assert!(
+        f.session
+            .complete_mcp_sign_in(f.thread.clone(), "calendar".into(), callback)
+            .await
+            .is_err()
+    );
     assert!(
         f.session
             .start_mcp_sign_in(f.thread.clone(), "calendar".into())
@@ -278,11 +293,15 @@ async fn mcp_oauth_validates_the_thread_callback_and_waits_for_native_success() 
             .is_none()
     );
     let frames = all_frames(&f);
-    let login = frames
+    let logins: Vec<_> = frames
         .iter()
-        .find(|v| v["method"] == "mcpServer/oauth/login")
-        .unwrap();
-    assert_eq!(login["params"], json!({"name":"calendar","threadId":"th1"}));
+        .filter(|v| v["method"] == "mcpServer/oauth/login")
+        .collect();
+    assert_eq!(logins.len(), 1);
+    assert_eq!(
+        logins[0]["params"],
+        json!({"name":"calendar","threadId":"th1"})
+    );
     f.finish().await;
 }
 

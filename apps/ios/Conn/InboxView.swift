@@ -15,13 +15,7 @@ struct InboxView: View {
     @State private var renameDraft = ""
 
     var body: some View {
-        Group {
-            if store.inboxOwners.contains(where: { $0.shell != nil }) {
-                inboxList()
-            } else {
-                loadingState
-            }
-        }
+        inboxList()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background.ignoresSafeArea())
         .alert(
@@ -72,12 +66,14 @@ struct InboxView: View {
         return List {
             ZStack(alignment: .trailing) {
                 VStack(spacing: 0) {
-                    Text("Threads").font(.system(size: 18, weight: .medium))
-                    Text("\(rows.count) threads").font(.caption).foregroundStyle(.secondary)
+                    Text("Threads").font(.system(size: 18, weight: .medium)).frame(height: 20)
+                    Text("\(rows.count) \(rows.count == 1 ? "thread" : "threads")")
+                        .font(.system(size: 12)).frame(height: 16)
+                        .foregroundStyle(theme.mutedForeground)
                         .accessibilityIdentifier("inbox.threadCount")
                 }.frame(maxWidth: .infinity)
                 Menu {
-                    Picker("Environment", selection: $environmentFilter) {
+                    Picker("Environments", selection: $environmentFilter) {
                         Text("All environments").tag(nil as String?)
                         Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
                         ForEach(store.linked.keys.sorted(), id: \.self) { scope in
@@ -86,7 +82,7 @@ struct InboxView: View {
                         }
                     }
                     .pickerStyle(.inline)
-                    Picker("Project", selection: $selectedProjectFilter) {
+                    Picker("Projects", selection: $selectedProjectFilter) {
                         Text("All projects").tag(nil as String?)
                         ForEach(projectChoices.keys.sorted { (projectChoices[$0] ?? $0, $0) < (projectChoices[$1] ?? $1, $1) }, id: \.self) { key in
                             Text(projectChoices[key] ?? key).tag(Optional(key))
@@ -96,7 +92,7 @@ struct InboxView: View {
                 } label: {
                     WorkspaceFilterIcon()
                 }.accessibilityLabel("Filter threads")
-            }.padding(.horizontal, 16).frame(height: 56)
+            }.padding(.horizontal, 16).frame(height: 56).padding(.bottom, 10)
             .listRowInsets(EdgeInsets())
             .listRowSeparator(.hidden)
             .listRowBackground(theme.background)
@@ -113,18 +109,17 @@ struct InboxView: View {
                             settledExpanded.toggle()
                         }
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 10) {
                             Text("Settled (\(settled.count + missing))")
-                                .font(.system(size: 13, weight: .medium).monospacedDigit())
-                                .foregroundStyle(theme.mutedForeground)
-                            Spacer()
-                            ConnIcon(settledExpanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(theme.mutedForeground)
+                                .font(.system(size: 14, weight: .medium))
+                                .frame(height: 19)
+                            Rectangle().fill(theme.border).frame(height: 1)
+                            ThreadGlyph(name: settledExpanded ? "chevron-down" : "chevron-right", size: 14)
                         }
-                        .padding(.horizontal, 16)
+                        .foregroundStyle(theme.mutedForeground)
+                        .padding(.horizontal, 12)
                         .padding(.top, 16)
-                        .padding(.bottom, 8)
+                        .padding(.bottom, 6)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -260,21 +255,8 @@ struct InboxView: View {
         }
     }
 
-    private var loadingState: some View {
-        VStack(spacing: Kit.Space.m) {
-            KitStatusIcon(.working, size: 22, label: "Syncing")
-            Text("Syncing threads…")
-                .font(.kitDetail)
-                .foregroundStyle(theme.mutedForeground)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     private var emptyState: some View {
-        VStack(spacing: Kit.Space.m) {
-            ConnIcon("text.bubble")
-                .font(.system(size: 28, weight: .light))
-                .foregroundStyle(theme.mutedForeground)
+        VStack(spacing: 4) {
             Text(searchQuery.isEmpty ? "No threads yet" : "No matching threads")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(theme.foreground)
@@ -284,8 +266,13 @@ struct InboxView: View {
                     .foregroundStyle(theme.mutedForeground)
             }
         }
+        .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 80)
+        .padding(.horizontal, 32)
+        .padding(.vertical, 40)
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(theme.background)
     }
 
     private func inboxRows(owners: [CoreStore]) -> [ScopedRow] {
@@ -327,59 +314,34 @@ private struct ThreadListV2RowView: View {
 
     @Environment(\.connTheme) private var theme
 
-    /// `thread-list-v2-row-appearance.ts`: a 20pt favicon, 12 to the title, line 2 indented 32.
+    /// Lab `ProjectListRow`: a 20pt favicon, 12 to the title, line 2 indented 32.
     private let iconSize: CGFloat = 20
     private let titleGap: CGFloat = 12
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Line 1: project favicon with 6pt status dot on top-right + one-line title
             HStack(alignment: .center, spacing: titleGap) {
                 ProjectFaviconView(title: projectTitle, size: iconSize)
                     .opacity(settled ? 0.6 : 1)
-                    .projectStatusDot(statusDotColor)
+                    .projectStatusDot(settled ? nil : statusTone)
 
                 Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
                     .font(.system(size: 16, weight: settled ? .regular : .medium))
                     .foregroundStyle(settled ? theme.mutedForeground : theme.foreground)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if thread.pinned {
-                    ConnIcon("pin")
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.mutedForeground)
-                }
+                    .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
             }
 
-            // Line 2: indented provider/agent icon · project · branch · time
-            HStack(spacing: 4) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
-                Text("·")
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.mutedForeground)
-                Text(subtitleText)
-                    .font(.system(size: 13).monospacedDigit())
-                    .foregroundStyle(theme.mutedForeground)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .padding(.leading, iconSize + titleGap)
-
-            // Line 3 (failed threads only): the provider's error, as in Expo's ThreadListV2Row
-            // (`text-xs` = 13pt, same gap as line 2; a usage limit shows as a warning).
-            if let failureMessage = thread.failureMessage {
-                Text(failureMessage)
-                    .font(.system(size: 13))
-                    .foregroundStyle(thread.usageLimited ? theme.warning : theme.destructive)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .padding(.leading, iconSize + titleGap)
-                    .accessibilityIdentifier("inbox.threadFailureMessage")
-            }
+            // project · branch · agent · 23m, one line that truncates as a whole.
+            Text(metaLine)
+                .font(.system(size: 13))
+                .foregroundStyle(theme.mutedForeground)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minHeight: 17)
+                .padding(.leading, iconSize + titleGap)
+                .opacity(settled ? 0.6 : 1)
         }
         // Row: padding 12 top / 8 right / 12 bottom / 4 left, inset 8 from the screen edges.
         .padding(EdgeInsets(top: 12, leading: 4, bottom: 12, trailing: 8))
@@ -387,34 +349,25 @@ private struct ThreadListV2RowView: View {
         .contentShape(Rectangle())
     }
 
-    private var statusDotColor: Color? {
-        if settled { return nil }
+    private var statusTone: StatusDotTone {
+        if thread.usageLimited { return .limited }
         switch thread.activity {
-        case .working:
-            return Color.blue
-        case .needsAttention:
-            return theme.warning
-        case .failed:
-            return theme.destructive
-        case .idle:
-            return theme.success
+        case .working: return .working
+        case .needsAttention: return .waiting
+        case .failed: return .failed
+        case .idle: return .done
         }
     }
 
-    private var subtitleText: String {
-        var parts: [String] = []
-        if let projectTitle, !projectTitle.isEmpty {
-            parts.append(projectTitle)
-        } else {
-            parts.append("No project")
-        }
-        if let branch = thread.branch, !branch.isEmpty {
-            parts.append(branch)
-        }
-        if let date = parseISODate(from: thread.updatedAt) {
-            parts.append(wholeMinuteRelativeTime(from: date))
-        }
-        return parts.joined(separator: " · ")
+    private var metaLine: AttributedString {
+        // The lab's line: ✦ (Claude's orange) · project · branch · age.
+        var line = AttributedString("✦")
+        line.foregroundColor = Color(red: 0xd9 / 255, green: 0x79 / 255, blue: 0x57 / 255)
+        var parts: [String] = [projectTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "No project"]
+        if let branch = thread.branch, !branch.isEmpty { parts.append(branch) }
+        if let date = parseISODate(from: thread.updatedAt) { parts.append(wholeMinuteRelativeTime(from: date)) }
+        line += AttributedString(" · " + parts.joined(separator: " · "))
+        return line
     }
 }
 
@@ -432,7 +385,7 @@ struct ProjectFaviconView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        if isScratchProjectTitle(title) {
+        if title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
             ConnIcon("text.bubble")
                 .font(.system(size: size * 0.85))
                 .foregroundStyle(theme.mutedForeground)
@@ -445,7 +398,7 @@ struct ProjectFaviconView: View {
                 RoundedRectangle(cornerRadius: size * 0.25, style: .continuous)
                     .fill(accent.opacity(0.16))
                 Text(monogram)
-                    .font(.system(size: size * (monogram.count == 1 ? 0.6 : 0.51), weight: .bold, design: .monospaced))
+                    .font(.system(size: size * 0.515, weight: .bold, design: .monospaced))
                     .foregroundStyle(accent)
                     .lineLimit(1)
             }
@@ -517,19 +470,50 @@ private func wholeMinuteRelativeTime(from date: Date) -> String {
     return "\(days)d"
 }
 
-extension View {
-    func projectStatusDot(_ color: Color?) -> some View {
-        overlay(alignment: .topTrailing) {
-            if let color { ProjectStatusDot(color: color) }
+/// Lab `StatusDot.css` states: blue working, grey waiting, green done, red failed, amber limited.
+enum StatusDotTone {
+    case working, waiting, done, failed, limited, merged
+
+    func color(_ theme: ConnTheme, dark: Bool) -> Color {
+        switch self {
+        case .working: dark ? rgb(0x00BCFF) : rgb(0x0084D1) // sky-400 / sky-600
+        case .waiting: theme.mutedForeground // --color-foreground-tertiary
+        case .done: dark ? rgb(0x00D492) : rgb(0x009966) // emerald-400 / emerald-600
+        case .failed: dark ? rgb(0xFF6467) : rgb(0xC10007) // --color-danger-foreground
+        case .limited: dark ? rgb(0xFFB900) : rgb(0xBB4D00) // --color-warning-foreground
+        case .merged: dark ? rgb(0xA684FF) : rgb(0x7F22FE) // violet-400 / violet-600
         }
     }
 }
 
+private func rgb(_ hex: UInt32) -> Color {
+    Color(.sRGB, red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
+          blue: Double(hex & 0xFF) / 255, opacity: 1)
+}
+
+extension View {
+    func projectStatusDot(_ tone: StatusDotTone?) -> some View {
+        overlay(alignment: .topTrailing) {
+            if let tone { ProjectStatusDot(tone: tone) }
+        }
+    }
+
+    func projectStatusDot(_ color: Color?) -> some View {
+        overlay(alignment: .topTrailing) {
+            if let color { ProjectStatusDot(fill: color) }
+        }
+    }
+}
+
+/// A 6pt dot in a 2pt ring of the surface colour, hanging 4pt past the icon's top-right corner.
 private struct ProjectStatusDot: View {
-    let color: Color
+    var tone: StatusDotTone?
+    var fill: Color?
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        Circle().fill(color).frame(width: 6, height: 6)
+        Circle().fill(fill ?? tone?.color(theme, dark: colorScheme == .dark) ?? theme.mutedForeground)
+            .frame(width: 6, height: 6)
             .padding(2).background(theme.background, in: Circle()).offset(x: 4, y: -4)
     }
 }

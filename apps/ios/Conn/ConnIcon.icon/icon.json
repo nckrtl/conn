@@ -1,0 +1,35 @@
+{
+  "fill": {
+    "solid": "display-p3:0.00000,0.00000,0.00000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "ConnMark.svg",
+          "name": "Conn mark",
+          "position": {
+            "scale": 8.5,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          },
+          "glass": false
+        }
+      ],
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      },
+      "specular": false
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

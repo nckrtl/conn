@@ -177,6 +177,7 @@ pub struct FfiThreadSummary {
 /// Point-in-time shell snapshot emitted to [`crate::CoreListener::on_shell`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiShellSnapshot {
+    pub older_settled_count: u64,
     pub projects: Vec<FfiProject>,
     pub threads: Vec<FfiThreadSummary>,
     pub synchronized: bool,
@@ -693,6 +694,11 @@ pub(crate) fn build_shell_snapshot(shell: &ShellState) -> FfiShellSnapshot {
     let threads = active.chain(settled).chain(children).collect();
 
     FfiShellSnapshot {
+        older_settled_count: if shell.older_settled().frontier.is_some() {
+            shell.unloaded_older_settled(None) as u64
+        } else {
+            0
+        },
         projects,
         threads,
         synchronized: shell.synchronized,

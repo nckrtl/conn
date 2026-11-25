@@ -87,11 +87,14 @@ private struct SettingsEnvironmentsDetailView: View {
             Section("Linked environments") {
                 ForEach(store.linked.keys.sorted(), id: \.self) { id in
                     if let child = store.linked[id] {
-                        LabeledContent(child.serverURL ?? id) { ConnectionStatusPill(status: child.status) }
+                        LabeledContent(child.displayName) { ConnectionStatusPill(status: child.status) }
                             .swipeActions {
                                 Button("Disconnect", role: .destructive) { store.removeLinked(id) }
                             }
                     }
+                }
+                ForEach(store.disabledOrbitLinks, id: \.self) { id in
+                    Button("Reconnect " + id) { store.enableOrbitLink(id) }
                 }
                 Button("Link environment") { pairingURL = ""; adding = true }
             }

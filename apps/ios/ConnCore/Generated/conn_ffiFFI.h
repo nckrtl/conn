@@ -487,6 +487,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_launch_general_thread(uint64_t ptr, 
 uint64_t uniffi_conn_ffi_fn_method_conncore_launch_thread(uint64_t ptr, RustBuffer project_id, RustBuffer text
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LOAD_OLDER_SETTLED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LOAD_OLDER_SETTLED
+uint64_t uniffi_conn_ffi_fn_method_conncore_load_older_settled(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_MARK_THREAD_UNREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_MARK_THREAD_UNREAD
 uint64_t uniffi_conn_ffi_fn_method_conncore_mark_thread_unread(uint64_t ptr, RustBuffer thread_id
@@ -952,6 +957,11 @@ void uniffi_conn_ffi_fn_method_connsession_connect_primary_agent(uint64_t ptr, R
 RustBuffer uniffi_conn_ffi_fn_method_connsession_core(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_FOLLOW_ENVIRONMENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_FOLLOW_ENVIRONMENT
+void uniffi_conn_ffi_fn_method_connsession_follow_environment(uint64_t ptr, RustBuffer environment_id, RustBuffer saved, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_FOREGROUND
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_FOREGROUND
 void uniffi_conn_ffi_fn_method_connsession_foreground(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -960,6 +970,11 @@ void uniffi_conn_ffi_fn_method_connsession_foreground(uint64_t ptr, RustCallStat
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LAUNCH
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LAUNCH
 void uniffi_conn_ffi_fn_method_connsession_launch(uint64_t ptr, RustBuffer saved, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LINKED_NODES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LINKED_NODES
+uint64_t uniffi_conn_ffi_fn_method_connsession_linked_nodes(uint64_t ptr, RustBuffer primary_id, RustBuffer saved, RustBuffer disabled
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_OFFLINE_READER
@@ -1554,6 +1569,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_launch_thread(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LOAD_OLDER_SETTLED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LOAD_OLDER_SETTLED
+uint16_t uniffi_conn_ffi_checksum_method_conncore_load_older_settled(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_MARK_THREAD_UNREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_MARK_THREAD_UNREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_mark_thread_unread(void
@@ -1986,6 +2007,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_core(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_FOLLOW_ENVIRONMENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_FOLLOW_ENVIRONMENT
+uint16_t uniffi_conn_ffi_checksum_method_connsession_follow_environment(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_FOREGROUND
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_FOREGROUND
 uint16_t uniffi_conn_ffi_checksum_method_connsession_foreground(void
@@ -1995,6 +2022,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_foreground(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LAUNCH
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LAUNCH
 uint16_t uniffi_conn_ffi_checksum_method_connsession_launch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LINKED_NODES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LINKED_NODES
+uint16_t uniffi_conn_ffi_checksum_method_connsession_linked_nodes(void
     
 );
 #endif

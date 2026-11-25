@@ -26,6 +26,7 @@
 		51DF3AD000F6B7995E0FCEA7 /* PushRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 293A0DC9F8A7EF5B24D84EC7 /* PushRegistration.swift */; };
 		5202B5BF50FD24ED57D8454C /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 953DAB675D1E26DF4D62D777 /* MarkdownView.swift */; };
 		53C3272026A88E6B1AA893D4 /* TasksTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0F3FADEDA515DE053342539 /* TasksTab.swift */; };
+		571000A86F8E9FD83F204E35 /* ConnIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 79DE46450E24FDC86CEC7BD4 /* ConnIcon.icon */; };
 		61076398806FFD92BE0A5E40 /* ModelPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 195AC4C2F3764E276F2218A3 /* ModelPickerSheet.swift */; };
 		69C03BDDBBAF2D4F5AC8F26E /* ThreadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CCA06E54355676CFB571582 /* ThreadView.swift */; };
 		6A166A14F61CD909AA333A65 /* ConnSymbols.swift in Sources */ = {isa = PBXBuildFile; fileRef = F44D3E63F9DA6645C0DFCA78 /* ConnSymbols.swift */; };
@@ -83,6 +84,7 @@
 		68138261D10D816E0BD5FD86 /* ThreadAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadAttachments.swift; sourceTree = "<group>"; };
 		6BEEC1EEE1A9677F008F2091 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 		7008F6E4031009E6DD67DF79 /* TimelineEntryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEntryViews.swift; sourceTree = "<group>"; };
+		79DE46450E24FDC86CEC7BD4 /* ConnIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = ConnIcon.icon; sourceTree = "<group>"; };
 		8CCA06E54355676CFB571582 /* ThreadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadView.swift; sourceTree = "<group>"; };
 		953DAB675D1E26DF4D62D777 /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
 		9801FA3C8411705F36721B72 /* WorkspaceRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRootView.swift; sourceTree = "<group>"; };
@@ -184,6 +186,7 @@
 				0AF68E89FDEB6E0FCFB1897A /* ConnApp.swift */,
 				F0ABEB932FF5357EF1B48C2F /* ConnAppDelegate.swift */,
 				F68DE7A95743889502EF21AA /* ConnComposerPill.swift */,
+				79DE46450E24FDC86CEC7BD4 /* ConnIcon.icon */,
 				3D3FE73635BB92AB18553D21 /* ConnSymbolNames.swift */,
 				F44D3E63F9DA6645C0DFCA78 /* ConnSymbols.swift */,
 				5E65CBEE5DAA2A531FDBEFB8 /* ConnSymbols.xcassets */,
@@ -317,6 +320,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A542EEDF57194C0E8081457 /* Assets.xcassets in Resources */,
+				571000A86F8E9FD83F204E35 /* ConnIcon.icon in Resources */,
 				086E11C4D2557C0F73E0B7FA /* ConnSymbols.xcassets in Resources */,
 				3A296D5A1DBE936247D7E801 /* ProviderIcons.xcassets in Resources */,
 			);
@@ -418,7 +422,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 9SVJ4SYB9B;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -448,7 +452,7 @@
 		1E0B82D2E0CB90BF5D29FD83 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = ConnIcon;
 				CODE_SIGN_ENTITLEMENTS = Conn/Conn.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				FRAMEWORK_SEARCH_PATHS = (
@@ -469,7 +473,7 @@
 		34E13B12D8F9C816073BD9FD /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = ConnIcon;
 				CODE_SIGN_ENTITLEMENTS = Conn/Conn.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				FRAMEWORK_SEARCH_PATHS = (
@@ -522,7 +526,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 9SVJ4SYB9B;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

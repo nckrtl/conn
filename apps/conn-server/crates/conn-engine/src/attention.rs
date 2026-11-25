@@ -139,7 +139,7 @@ fn monitor_holds_wake_completion(shell: &Value) -> bool {
 
 /// A listed top-level thread the user owns (`isDelegatedAppThread`, `isListedThreadLineage`),
 /// not archived or deleted.
-pub(crate) fn eligible(shell: &Value) -> bool {
+pub fn eligible(shell: &Value) -> bool {
     let lineage = &shell["lineage"];
     lineage["relationshipToParent"] != "subagent"
         && lineage["sideChat"] != true

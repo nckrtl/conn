@@ -397,6 +397,31 @@ is written.
   wait on that field. Proof: `cargo test` (the attention tests in conn-contract, conn-support,
   conn-engine and conn-server), with a fake sender; no live Gateway yet.
 
+## New threads reach the Orbit Gateway (2026-11-25)
+
+A native host tells the Gateway of a new thread when its first turn starts, so the Gateway's
+thread librarian files it in seconds instead of after its next read of this server's shell
+(5.2 MB on mini).
+
+- **Call.** `POST {gateway}/api/v1/conn/environments/{environment_id}/threads` with
+  `{"thread_id", "title"}` (Gateway route `conn:thread:record`). The Gateway knows this machine
+  by its WireGuard address, so there is no credential. It goes through the system `curl`, as the
+  Orbit link does. The environment id is the one in this server's own descriptor, which
+  `t3-orbit-register` sent to the Gateway.
+- **On.** `ORBIT_GATEWAY_URL` set to the Gateway's http(s) URL, in the server's launch
+  environment. Registration leaves no state in this server, so the variable is the switch.
+  Container servers and inert copies never push.
+- **Once per thread.** `thread_push.rs` wraps the host's turn observer and acts on
+  `run_ordinal == 1`. It reads the thread's shell row and skips subagents, delegated tasks,
+  side chats, archived threads and threads without a title.
+- **Never in the turn's way.** The call runs on its own task, with a 5 s limit. A failure is
+  logged (never the title) and dropped; the Gateway's read stays the fallback.
+- **Not covered.** A thread whose first run never starts, or one whose title is still the
+  client's placeholder when its first turn starts (a repeat call updates the title on the
+  Gateway; this server does not send one after the generated title). Proof: `cargo test -p
+  conn-server thread_push`, with a fake sender and, for the request, a stand-in Gateway on
+  loopback.
+
 ## Typed Gateway client (2026-11-22)
 
 `crates/conn-gateway-api` (#227): types and one value per operation, generated from Orbit's

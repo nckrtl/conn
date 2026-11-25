@@ -28,7 +28,9 @@ mod types;
 uniffi::setup_scaffolding!();
 
 pub use crate::approvals::{FfiApprovalOption, FfiButtonTone, FfiPendingApproval};
-pub use crate::composer::composer_restore_draft;
+pub use crate::composer::{
+    FfiComposerFile, FfiComposerLimits, FfiComposerTarget, composer_restore_draft,
+};
 pub use crate::core::{ConnCore, CoreListener, FfiPullRequestOperation};
 pub use crate::model_picker::{
     FfiModelControl, FfiModelPicker, FfiModelPickerRow, FfiModelPickerSection, FfiModelSave,

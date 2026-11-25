@@ -555,7 +555,7 @@ struct TaskRecordView: View {
 
     /// `SubtasksList`: indicator, title and line stats on one line, the status under the title;
     /// a tap shows the brief and deliverables.
-    private func subtaskRow(_ step: FfiTaskSubtask, first: Bool) -> some View {
+    private func subtaskRow(_ step: FfiSubtask, first: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 if !expanded.insert(step.id).inserted { expanded.remove(step.id) }

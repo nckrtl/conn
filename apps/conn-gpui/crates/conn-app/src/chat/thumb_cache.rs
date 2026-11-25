@@ -127,22 +127,18 @@ pub(super) fn fit_frame(frame: &RgbaImage, target: TargetPx, max_bytes: usize) -
 /// decode). Always a still: a GIF shows its first frame.
 pub(super) struct Thumbnail {
     pub(super) pixels: RgbaImage,
-    /// Width over height of the upright picture before the crop.
-    pub(super) aspect: Option<f32>,
 }
 
 impl Thumbnail {
     /// Crops and scales an upright `picture` for `target`. `to_bgra` swaps RGBA input.
     pub(super) fn fit(picture: &RgbaImage, target: TargetPx, to_bgra: bool) -> Self {
-        let (width, height) = picture.dimensions();
-        let aspect = (width > 0 && height > 0).then(|| width as f32 / height as f32);
         let mut pixels = fit_frame(picture, target, ENTRY_MAX_BYTES);
         if to_bgra {
             for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
-        Self { pixels, aspect }
+        Self { pixels }
     }
 
     /// Decoded bytes: what GPUI keeps for it.
@@ -612,7 +608,6 @@ mod tests {
         let pixels = &thumb.pixels;
         // Turned clockwise: 32 wide, 64 tall, the red left half now on top.
         assert_eq!(pixels.dimensions(), (32, 64));
-        assert!((thumb.aspect.unwrap_or_default() - 0.5).abs() < 1e-4);
         // BGRA: red has its weight in byte 2, blue in byte 0.
         let red = pixels.get_pixel(16, 12).0;
         let blue = pixels.get_pixel(16, 52).0;

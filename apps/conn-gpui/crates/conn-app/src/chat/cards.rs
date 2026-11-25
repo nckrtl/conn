@@ -46,14 +46,6 @@ use super::{
 use crate::a11y::ConnA11yExt as _;
 use crate::panels::chrome::ConnTooltipExt as _;
 
-fn attachment_name(att: &conn_contract::ChatAttachment) -> &str {
-    match att {
-        conn_contract::ChatAttachment::Image(image) => &image.name,
-        conn_contract::ChatAttachment::File(file) => &file.name,
-        conn_contract::ChatAttachment::Unknown(unknown) => &unknown.name,
-    }
-}
-
 /// The `expanded_ids` key of a subagent card's summary.
 pub(super) fn subagent_summary_key(entry_id: &str) -> String {
     format!("subagent-summary-{entry_id}")
@@ -244,7 +236,7 @@ impl ChatView {
         image: &conn_contract::ChatImageAttachment,
         target: super::thumb_cache::TargetPx,
         cx: &mut Context<'_, Self>,
-    ) -> Option<(gpui_kit::ImageSource, Option<f32>)> {
+    ) -> Option<gpui_kit::ImageSource> {
         use super::attachment_thumb::{SentImage, ThumbJob};
         self.connection.as_ref()?;
         let key = (image.id.clone(), target);
@@ -375,107 +367,10 @@ impl ChatView {
         }
     }
 
-    /// Attachment chips/thumbnails shown in queued bubbles (a sent bubble uses
-    /// [`Self::render_sent_attachments`]). Images are `4:3`
-    /// cells with `object-cover`, `rounded-lg` and a `border-border/80` edge, `20rem` wide for one image
-    /// and two columns for several (`TimelineUserMessageRow.tsx`).
-    pub(super) fn render_attachment_chips(
-        &self,
-        key: &str,
-        attachments: &[conn_contract::ChatAttachment],
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let image_count = attachments
-            .iter()
-            .filter(|att| matches!(att, conn_contract::ChatAttachment::Image(_)))
-            .count();
-        let (image_w, image_h) = if image_count == 1 {
-            (320.0, 240.0)
-        } else {
-            (156.0, 117.0)
-        };
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.0));
-        for (idx, att) in attachments.iter().enumerate() {
-            let chip_id = (SharedString::from(format!("att-{key}")), idx);
-            let chip = match att {
-                conn_contract::ChatAttachment::Image(img) => {
-                    use super::attachment_thumb::{ThumbFit, chip_target, thumbnail};
-                    let target =
-                        chip_target(image_count == 1, (image_w, image_h), self.thumb_scale);
-                    let (loaded, aspect) = match self.attachment_image(img, target, cx) {
-                        Some((image, aspect)) => (Some(image), aspect),
-                        None => (None, None),
-                    };
-                    let cell = div()
-                        .id(chip_id)
-                        .overflow_hidden()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(hsla_alpha(self.tokens.border, 0.80))
-                        .conn_tooltip(img.name.clone(), &self.tokens);
-                    // One image takes the bubble's full width at its own aspect ratio (Nick,
-                    // #343); several keep web's two-column 4:3 cells. The picture inside the
-                    // 1px border paints a 7px radius (#342).
-                    if image_count == 1 {
-                        cell.w_full().child(thumbnail(
-                            loaded,
-                            &self.tokens,
-                            7.0,
-                            ThumbFit::FullWidth(aspect),
-                        ))
-                    } else {
-                        cell.flex_none()
-                            .w(px(image_w))
-                            .max_w_full()
-                            .h(px(image_h))
-                            .child(thumbnail(loaded, &self.tokens, 7.0, ThumbFit::Cover))
-                    }
-                }
-                other => self.file_attachment_pill(chip_id, other),
-            };
-            row = row.child(chip.a11y_group(
-                format!("chat.attachment.{key}.{idx}"),
-                format!("Attachment {}", attachment_name(att)),
-            ));
-        }
-        row.into_any_element()
-    }
-
-    /// The pill of a non-image attachment: file icon and name, or the name alone.
-    fn file_attachment_pill(
-        &self,
-        id: (SharedString, usize),
-        att: &conn_contract::ChatAttachment,
-    ) -> gpui_kit::Stateful<gpui_kit::Div> {
-        match att {
-            conn_contract::ChatAttachment::File(file) => {
-                let file_icon = crate::file_icons::file_icon(&file.name);
-                let icon_color = file_icon
-                    .color
-                    .map(|c| hsla(c.for_appearance(self.tokens.appearance)))
-                    .unwrap_or_else(|| hsla(self.tokens.muted_foreground));
-                self.attachment_pill(id, file.name.clone())
-                    .child(icons::icon(file_icon.asset, 12.0, icon_color))
-                    .child(div().min_w_0().truncate().child(file.name.clone()))
-            }
-            conn_contract::ChatAttachment::Unknown(unknown) => self
-                .attachment_pill(id, unknown.name.clone())
-                .child(div().min_w_0().truncate().child(unknown.name.clone())),
-            conn_contract::ChatAttachment::Image(image) => {
-                self.attachment_pill(id, image.name.clone())
-            }
-        }
-    }
-
-    /// The attachments of a sent user bubble, in their own order: each run of images is one
+    /// The attachments of a user message, in their own order: each run of images is one
     /// gallery, each run of videos one stack of players, each run of files one stack of rows. The
     /// bubble's own 3px padding frames all three, so none carries an inset.
-    pub(super) fn render_sent_attachments(
+    pub(super) fn render_message_attachments(
         &self,
         key: &str,
         attachments: &[conn_contract::ChatAttachment],
@@ -541,9 +436,7 @@ impl ChatView {
                 };
                 let offset = row_index * columns + column;
                 let idx = start + offset;
-                let loaded = self
-                    .attachment_image(image, target, cx)
-                    .map(|(image, _)| image);
+                let loaded = self.attachment_image(image, target, cx);
                 let radii = tile_radii(offset, run.len(), columns);
                 let cell = gallery_cell((SharedString::from(format!("att-{key}")), idx))
                     .flex_1()
@@ -866,30 +759,6 @@ impl ChatView {
             )
             .when(!comment.diff.is_empty(), |card| card.child(body))
             .into_any_element()
-    }
-
-    fn attachment_pill(
-        &self,
-        id: (SharedString, usize),
-        name: String,
-    ) -> gpui_kit::Stateful<gpui_kit::Div> {
-        div()
-            .id(id)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .h(px(24.0))
-            .max_w(px(200.0))
-            .px(px(8.0))
-            .rounded(px(6.0))
-            .bg(hsla_alpha(self.tokens.muted, 0.45))
-            .border_1()
-            .border_color(hsla_alpha(self.tokens.border, 0.70))
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_color(hsla(self.tokens.muted_foreground))
-            .conn_tooltip(name, &self.tokens)
     }
 
     /// Conn `UserMessageIntentMarker`: `Redo2` + `Steer` above a steering bubble.

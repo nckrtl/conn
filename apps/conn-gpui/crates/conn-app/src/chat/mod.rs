@@ -96,6 +96,15 @@ pub(crate) struct DraftViewInfo {
     pub(crate) launching: bool,
 }
 
+struct MessageBody<'a> {
+    caption_key: &'a str,
+    attachment_key: &'a str,
+    text: &'a str,
+    attachments: &'a [ChatAttachment],
+    review_comments: &'a [conn_state::ReviewComment],
+    notes: &'a [Option<String>],
+}
+
 /// One human user bubble's render inputs.
 struct UserBubble<'a> {
     id: &'a str,
@@ -1920,6 +1929,7 @@ impl ChatView {
                         attachments,
                         created_at,
                         above_toggle,
+                        window,
                         cx,
                     )
                 } else {
@@ -2156,8 +2166,7 @@ impl ChatView {
         }
     }
 
-    /// Words inside a framed sent bubble: 16px from its sides (13px of padding on the bubble's
-    /// 3px frame), its own Label in the AX tree.
+    /// The bubble's 3px frame and the caption's 13px padding align its text with plain messages.
     fn render_bubble_caption(&self, key: &str, text: &str, bottom_px: f32) -> AnyElement {
         let caption = SharedString::from(text.to_owned());
         div()
@@ -2286,6 +2295,109 @@ impl ChatView {
         }))
     }
 
+    fn render_message_body(
+        &self,
+        mut bubble: gpui_kit::Stateful<gpui_kit::Div>,
+        body: MessageBody<'_>,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        let MessageBody {
+            caption_key,
+            attachment_key,
+            text,
+            attachments,
+            review_comments,
+            notes,
+        } = body;
+        bubble = bubble
+            .relative()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .rounded(px(BUBBLE_RADIUS_PX))
+            .text_size(px(BODY_FONT_PX))
+            .line_height(px(BODY_LINE_HEIGHT_PX))
+            .text_color(hsla(self.tokens.message_foreground));
+        if !attachments.is_empty() || !review_comments.is_empty() {
+            // Up to 80% wide with words, 54% without (a gallery alone is never narrower than
+            // 32%; a player always fills the cap). The caption comes first (16px sides, 10px
+            // from the top), then each review comment (its note, then its quote), then the
+            // attachments in their own order, all 3px apart. A gallery below the caption sits
+            // 13px under its last line.
+            let gallery_follows = review_comments.is_empty()
+                && matches!(attachments.first(), Some(ChatAttachment::Image(_)));
+            let has_images = attachments
+                .iter()
+                .any(|att| matches!(att, ChatAttachment::Image(_)));
+            let has_video = attachments.iter().any(|att| {
+                attachment_thumb::attachment_kind(att) == attachment_thumb::AttachmentKind::Video
+            });
+            let has_words = !text.is_empty() || !review_comments.is_empty();
+            let cap = if has_words { 0.8 } else { 0.54 };
+            bubble = bubble
+                .gap(px(attachment_thumb::GALLERY_INSET_PX))
+                .p(px(attachment_thumb::GALLERY_INSET_PX));
+            // A gallery or a player has no width of its own, and its height follows its width:
+            // the bubble gets a definite width before layout. Other bubbles fit their content.
+            let definite = (has_images || has_video)
+                .then(|| {
+                    self.framed_bubble_width(window, text, notes, review_comments, attachments)
+                })
+                .flatten();
+            bubble = match definite {
+                Some(width) => bubble.w(px(width)),
+                // No lane measured yet (the first frame): the fractional caps, until the repaint
+                // that `framed_bubble_width` asked for.
+                None => {
+                    let bubble = bubble.max_w(relative(cap));
+                    let bubble = if has_images {
+                        bubble.min_w(relative(0.32))
+                    } else {
+                        bubble
+                    };
+                    if has_video {
+                        bubble.w(relative(cap))
+                    } else {
+                        bubble
+                    }
+                }
+            };
+
+            if !text.is_empty() {
+                bubble = bubble.child(self.render_bubble_caption(
+                    caption_key,
+                    text,
+                    if gallery_follows { 10.0 } else { 7.0 },
+                ));
+            }
+            for (idx, comment) in review_comments.iter().enumerate() {
+                if let Some(note) = &notes[idx] {
+                    bubble = bubble.child(self.render_bubble_caption(
+                        &format!("{caption_key}.note.{idx}"),
+                        note,
+                        7.0,
+                    ));
+                }
+                bubble = bubble.child(self.render_review_comment(attachment_key, idx, comment));
+            }
+            for block in self.render_message_attachments(attachment_key, attachments, cx) {
+                bubble = bubble.child(block);
+            }
+        } else {
+            bubble = bubble
+                .max_w(relative(0.8))
+                .px(px(16.0))
+                .pt(px(10.0))
+                .pb(px(12.0));
+            if !text.is_empty() {
+                bubble = bubble.child(div().min_w_0().child(text.to_owned()));
+            }
+        }
+
+        bubble
+    }
+
     fn render_user_bubble(
         &self,
         bubble: UserBubble<'_>,
@@ -2328,9 +2440,6 @@ impl ChatView {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let has_images = attachments
-            .iter()
-            .any(|att| matches!(att, ChatAttachment::Image(_)));
         // Attachments and review comments are painted on the bubble itself: a 3px frame around
         // the caption and the blocks, which keep the 14px radius when grouped.
         let framed = !attachments.is_empty() || !review_comments.is_empty();
@@ -2341,95 +2450,27 @@ impl ChatView {
             text.chars().take(120).collect()
         };
         // No top highlight: a sent message is one flat surface.
-        let mut bubble = div()
+        let bubble = div()
             .id(SharedString::from(format!("chat-user-{id}")))
             .a11y(
                 gpui_kit::Role::Article,
                 SharedString::from(format!("chat.message.user.{id}")),
                 article_label,
             )
-            .relative()
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .rounded(px(BUBBLE_RADIUS_PX))
-            .bg(hsla(self.tokens.message_surface))
-            .text_size(px(BODY_FONT_PX))
-            .line_height(px(BODY_LINE_HEIGHT_PX))
-            .text_color(hsla(self.tokens.message_foreground));
-        if framed {
-            // Up to 80% wide with words, 54% without (a gallery alone is never narrower than
-            // 32%; a player always fills the cap). The caption comes first (16px sides, 10px
-            // from the top), then each review comment (its note, then its quote), then the
-            // attachments in their own order, all 3px apart. A gallery below the caption sits
-            // 13px under its last line.
-            let gallery_follows = review_comments.is_empty()
-                && matches!(attachments.first(), Some(ChatAttachment::Image(_)));
-            let has_video = attachments.iter().any(|att| {
-                attachment_thumb::attachment_kind(att) == attachment_thumb::AttachmentKind::Video
-            });
-            let has_words = !text.is_empty() || !review_comments.is_empty();
-            let cap = if has_words { 0.8 } else { 0.54 };
-            bubble = bubble
-                .gap(px(attachment_thumb::GALLERY_INSET_PX))
-                .p(px(attachment_thumb::GALLERY_INSET_PX));
-            // A gallery or a player has no width of its own, and its height follows its width:
-            // the bubble gets a definite width before layout. Other bubbles fit their content.
-            let definite = (has_images || has_video)
-                .then(|| {
-                    self.framed_bubble_width(window, text, &notes, review_comments, attachments)
-                })
-                .flatten();
-            bubble = match definite {
-                Some(width) => bubble.w(px(width)),
-                // No lane measured yet (the first frame): the fractional caps, until the repaint
-                // that `framed_bubble_width` asked for.
-                None => {
-                    let bubble = bubble.max_w(relative(cap));
-                    let bubble = if has_images {
-                        bubble.min_w(relative(0.32))
-                    } else {
-                        bubble
-                    };
-                    if has_video {
-                        bubble.w(relative(cap))
-                    } else {
-                        bubble
-                    }
-                }
-            };
-
-            if !text.is_empty() {
-                bubble = bubble.child(self.render_bubble_caption(
-                    id,
-                    text,
-                    if gallery_follows { 10.0 } else { 7.0 },
-                ));
-            }
-            for (idx, comment) in review_comments.iter().enumerate() {
-                if let Some(note) = &notes[idx] {
-                    bubble = bubble.child(self.render_bubble_caption(
-                        &format!("{id}.note.{idx}"),
-                        note,
-                        7.0,
-                    ));
-                }
-                bubble =
-                    bubble.child(self.render_review_comment(&format!("user-{id}"), idx, comment));
-            }
-            for block in self.render_sent_attachments(&format!("user-{id}"), attachments, cx) {
-                bubble = bubble.child(block);
-            }
-        } else {
-            bubble = bubble
-                .max_w(relative(0.8))
-                .px(px(16.0))
-                .pt(px(10.0))
-                .pb(px(12.0));
-            if !text.is_empty() {
-                bubble = bubble.child(div().min_w_0().child(text.to_owned()));
-            }
-        }
+            .bg(hsla(self.tokens.message_surface));
+        let mut bubble = self.render_message_body(
+            bubble,
+            MessageBody {
+                caption_key: id,
+                attachment_key: &format!("user-{id}"),
+                text,
+                attachments,
+                review_comments,
+                notes: &notes,
+            },
+            window,
+            cx,
+        );
 
         if grouped_with_previous && !framed {
             bubble = bubble.rounded_tr(px(BUBBLE_GROUPED_RADIUS_PX));
@@ -2480,12 +2521,6 @@ impl ChatView {
         row.into_any_element()
     }
 
-    /// Renders a server-backed queued user message at the bottom of the timeline, matching
-    /// Conn's `QueuedRunsControl.tsx`:
-    /// - Right-aligned bubble with `1px` dashed border (`rounded-[14px]`), unfilled background,
-    ///   optional attachment thumbnails/pills, and wrapped prompt text.
-    /// - Quiet right-aligned action row below: timestamp, `↑ Send now`, pencil Edit button,
-    ///   and `×` Remove button (or `"Editing in the composer"` + `Cancel` while being edited).
     #[expect(
         clippy::too_many_arguments,
         reason = "renders one queued message from its fields, plus whether the toggle follows it"
@@ -2498,6 +2533,7 @@ impl ChatView {
         attachments: &[ChatAttachment],
         created_at: &str,
         above_toggle: bool,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let is_editing =
@@ -2510,42 +2546,33 @@ impl ChatView {
         } else {
             hsla_alpha(self.tokens.muted_foreground, 0.40)
         };
-        let bubble_fg = if is_editing { fg } else { muted };
         let preview: String = text.chars().take(120).collect();
 
-        let mut bubble = div()
+        let bubble = div()
             .id(SharedString::from(format!("chat-queued-{id}")))
             .a11y(
                 gpui_kit::Role::Article,
                 SharedString::from(format!("chat.message.queued.{id}")),
                 format!("Queued message: {preview}"),
             )
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .max_w(relative(0.8))
-            .min_w_0()
-            .rounded(px(BUBBLE_RADIUS_PX))
+            .bg(hsla(self.tokens.shell_raised))
             .border_1()
             .border_dashed()
-            .border_color(bubble_border)
-            .px(px(12.0))
-            .py(px(8.0))
-            .text_size(px(BODY_FONT_PX))
-            .line_height(px(BODY_LINE_HEIGHT_PX))
-            .text_color(bubble_fg);
-
-        if !attachments.is_empty() {
-            bubble = bubble.child(self.render_attachment_chips(
-                &format!("queued-{id}"),
+            .border_color(bubble_border);
+        let key = format!("queued-{id}");
+        let bubble = self.render_message_body(
+            bubble,
+            MessageBody {
+                caption_key: &key,
+                attachment_key: &key,
+                text,
                 attachments,
-                cx,
-            ));
-        }
-
-        if !text.is_empty() {
-            bubble = bubble.child(div().min_w_0().child(text.to_owned()));
-        }
+                review_comments: &[],
+                notes: &[],
+            },
+            window,
+            cx,
+        );
 
         let mut actions = div()
             .flex()

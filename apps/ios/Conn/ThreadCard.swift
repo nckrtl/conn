@@ -34,6 +34,12 @@ func threadCardSurface(_ theme: ConnTheme, _ appearance: ColorScheme) -> Color {
     theme.background.mix(with: theme.foreground, by: appearance == .light ? 0.06 : 0.056, in: .device)
 }
 
+/// The work divider line (lab `--thread-divider`): the sidebar colour mixed 89% (dark) or 90% (light)
+/// with the text colour in OKLab, which is conn-theme's `shell_divider`.
+func threadDividerColor(_ theme: ConnTheme, _ appearance: ColorScheme) -> Color {
+    Color(ffi: theme.tokens.shellDivider)
+}
+
 /// A card icon's status dot: 5 pt, a 2 pt ring in the card surface, 4 pt past the icon's
 /// top-right corner (lab `.m-feed-card-header .m-dot`).
 struct CardStatusDot: View {
@@ -147,8 +153,12 @@ struct HighlightedSource: View {
     let code: String
     let language: String
     @Environment(\.connTheme) private var theme
+    /// The base size: the thread text in the feed, 13 in the composer panels (lab `.m-code-body`).
+    var baseSize: CGFloat = ThreadText.size
     @State private var formatted: AttributedString?
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
+
+    private var size: CGFloat { baseSize * scale }
 
     private struct Input: Equatable { let code, language, theme: String }
 
@@ -190,6 +200,30 @@ func attributedCodeLine(_ spans: [FfiCodeSpan]) -> AttributedString {
     return line
 }
 
+/// Lab `.m-composer-panel` / `-body` top edge: a 1 pt border in `--composer-panel-edge` that fades
+/// out round the corners, as a CSS `border-top` does.
+struct ComposerPanelEdge: ViewModifier {
+    let radius: CGFloat
+    @Environment(\.colorScheme) private var appearance
+    @Environment(\.connTheme) private var theme
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(appearance == .light ? Color.white.opacity(0.45) : theme.foreground.opacity(0.05), lineWidth: 1)
+                .mask(alignment: .top) {
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: radius)
+                }
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+extension View {
+    func composerPanelEdge(radius: CGFloat) -> some View { modifier(ComposerPanelEdge(radius: radius)) }
+}
+
 struct ComposerDeck: ViewModifier {
     let remaining: Int
     @Environment(\.colorScheme) private var appearance
@@ -197,14 +231,18 @@ struct ComposerDeck: ViewModifier {
 
     func body(content: Content) -> some View {
         let layers = min(max(remaining - 1, 0), 2)
+        let surface = threadCardSurface(theme, appearance)
+        let shadow = Color.black.opacity(appearance == .light ? 0.07 : 0.16)
         content
+            .shadow(color: layers > 0 ? shadow : .clear, radius: 16, y: 1)
             .padding(.top, CGFloat(layers * 6))
             .background {
                 ForEach((1..<(layers + 1)).reversed(), id: \.self) { depth in
-                    RoundedRectangle(cornerRadius: 28)
-                        .fill(theme.settingsGroup)
-                        .overlay { RoundedRectangle(cornerRadius: 28).strokeBorder(theme.border.opacity(0.5)) }
-                        .shadow(color: .black.opacity(appearance == .light ? 0.07 : 0.16), radius: 16, y: 1)
+                    // Lab `.m-composer-deck::before` (85% panel surface) and `::after` (70%) over the page.
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(surface.mix(with: theme.background, by: depth == 1 ? 0.15 : 0.30, in: .device))
+                        .composerPanelEdge(radius: 28)
+                        .shadow(color: shadow, radius: 16, y: 1)
                         .padding(.horizontal, CGFloat(depth * 8))
                         .padding(.top, CGFloat((layers - depth) * 6))
                         .padding(.bottom, CGFloat(depth * 6))

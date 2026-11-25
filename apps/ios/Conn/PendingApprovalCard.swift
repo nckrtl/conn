@@ -12,23 +12,29 @@ struct PendingApprovalCard: View {
     let onRespond: (FfiApprovalDecision) -> Void
 
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
     @State private var explanationOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            // Lab `.m-composer-panel-header`: 8 gap, `10 17` padding, 500 13/16, a 14 pt shield.
             HStack(spacing: 8) {
-                Label("Approval needed", systemImage: "lock")
+                ThreadGlyph(name: "needs-approval", size: 14)
+                Text("Approval needed")
                 Spacer()
                 if approval.title.caseInsensitiveCompare("Command") == .orderedSame {
-                    ConnIcon("terminal").accessibilityLabel(approval.title)
+                    ThreadGlyph(name: "terminal", size: 16).accessibilityLabel(approval.title)
                 } else { Text(approval.title) }
                 if remaining > 1 { Text("\(remaining) pending") }
             }
-            .font(.system(size: 13, weight: .medium)).foregroundStyle(theme.mutedForeground)
+            .font(.system(size: 13, weight: .medium)).lineHeight(.exact(points: 16))
+            .foregroundStyle(theme.mutedForeground)
             .padding(.horizontal, 17).padding(.vertical, 10)
+            .frame(minHeight: 30)
             VStack(alignment: .leading, spacing: 8) {
                 if let detail = approval.detail {
-                    HighlightedSource(code: detail, language: approval.title.lowercased() == "command" ? "sh" : "")
+                    // Lab `.m-code-body.m-composer-approval-detail`: 13 pt mono, `13 21` padding.
+                    HighlightedSource(code: detail, language: approval.title.lowercased() == "command" ? "sh" : "", baseSize: 13)
                 }
                 if let reason = approval.reason {
                     Text(reason)
@@ -73,25 +79,30 @@ struct PendingApprovalCard: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 18).padding(.vertical, 12)
-            .background(theme.codeBackground, in: .rect(cornerRadius: 24))
+            .padding(.horizontal, 21).padding(.vertical, 13)
+            .background(theme.codeBackground, in: .rect(cornerRadius: 25))
+            .composerPanelEdge(radius: 25)
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { actions }
-                VStack(alignment: .trailing, spacing: 4) { actions }
+                VStack(alignment: .trailing, spacing: 8) { actions }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.horizontal, 8).padding(.vertical, 7)
+            .padding(.horizontal, 8).padding(.vertical, 10)
         }
         .padding(3)
-        .background(theme.settingsGroup, in: .rect(cornerRadius: 28))
+        .background(threadCardSurface(theme, appearance), in: .rect(cornerRadius: 28))
+        .composerPanelEdge(radius: 28)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.approval.\(approval.requestId)")
     }
     private var actions: some View {
         ForEach(approval.options, id: \.decision) { option in
             if option.decision == .cancel {
+                // Lab `.m-composer-text-action`: 500 14/19, 21 pt in from the panel's edge.
                 Button(option.label) { onRespond(.cancel) }.font(.system(size: 14, weight: .medium))
+                    .lineHeight(.exact(points: 19))
+                    .padding(.leading, 13).frame(minHeight: 40)
                     .foregroundStyle(theme.mutedForeground).disabled(!approval.answerable || responding)
                     .accessibilityIdentifier("approval.option." + option.label)
                 Spacer(minLength: 0)
@@ -154,7 +165,7 @@ struct ConnButton: View {
     private var labelColor: Color {
         switch tone {
         case .primary: theme.primaryForeground
-        case .secondary: theme.foreground
+        case .secondary: theme.secondaryForeground
         case .danger: theme.destructive
         }
     }

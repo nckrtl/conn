@@ -718,16 +718,18 @@ struct ThreadView: View {
                     }
                 },
                 trailing: {
-                    HStack(spacing: 4) {
-                        if isWorking && (hasDraft || questionPanelModel != nil) {
+                    HStack(spacing: 0) {
+                        if isWorking && hasDraft && questionPanelModel == nil {
                             Button {
                                 Task {
                                     await store.stopThread(threadId: threadId)
                                 }
                             } label: {
+                                // Lab `.ios-stop`: a bare 13 pt `stop` in the text colour.
                                 ThreadGlyph(name: "stop", size: 13)
-                                    .foregroundStyle(theme.destructive)
-                                    .frame(width: 28, height: 28)
+                                    .foregroundStyle(theme.foreground)
+                                    .frame(minHeight: 44)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Stop")

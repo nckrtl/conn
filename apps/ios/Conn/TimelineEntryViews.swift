@@ -5,6 +5,7 @@ struct WorkGroupCard: View {
     let group: FfiWorkGroupTiming
     let entries: [FfiTimelineEntry]
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
     @State private var expanded = false
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
@@ -58,8 +59,9 @@ struct WorkGroupCard: View {
                 .padding(.bottom, 4)
             }
 
-            Divider()
-                .overlay(theme.border.opacity(0.6))
+            Rectangle()
+                .fill(threadDividerColor(theme, appearance))
+                .frame(height: 1)
         }
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
     }

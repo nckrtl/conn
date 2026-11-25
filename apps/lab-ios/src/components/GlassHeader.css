@@ -1,7 +1,7 @@
 .m-header {
   position: absolute;
   inset: 0 0 auto 0;
-  height: 116px;
+  height: var(--thread-header-height, 116px);
   z-index: 20;
   pointer-events: none;
 }
@@ -48,7 +48,7 @@
   padding: 0 8px;
 }
 .m-header-title-text {
-  font-size: 17px;
+  font-size: var(--m-text-headline);
   line-height: 22px;
   font-weight: 500;
   overflow: hidden;

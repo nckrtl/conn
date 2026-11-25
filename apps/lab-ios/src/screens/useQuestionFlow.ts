@@ -108,6 +108,7 @@ export function useQuestionFlow(scenario: QuestionScenario) {
     question,
     draft: question ? draftOf(question.id) : EMPTY,
     canSubmit,
+    draftOf,
     advancing,
     select,
     goTo,

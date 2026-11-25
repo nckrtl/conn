@@ -1,0 +1,189 @@
+.ios-record {
+  position: absolute;
+  inset: 0;
+  background: var(--color-screen);
+}
+.ios-record-scroll {
+  --record-section-gap: 28px;
+  position: absolute;
+  inset: calc(var(--ios-header-row-top) + var(--ios-header-row-height)) 0 0;
+  overflow-y: auto;
+  padding-bottom: 100px;
+}
+.ios-record:has(.ios-offline-pill) .ios-record-scroll {
+  padding-bottom: 140px;
+}
+.ios-record .ios-record-nav {
+  justify-content: center;
+}
+.ios-record-heading,
+.ios-detail-body {
+  padding: 0 20px;
+}
+.ios-detail-link,
+.ios-detail-row,
+.ios-detail-row summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ios-record-heading h1 {
+  font: 500 var(--m-text-headline)/1.375 var(--m-font);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ios-record-heading dl {
+  display: grid;
+  row-gap: 14px;
+  margin: 0 0 var(--record-section-gap);
+}
+.ios-record-heading dl:empty {
+  display: none;
+}
+.ios-detail-field {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: start;
+  font-size: 14px;
+  line-height: 19px;
+}
+.ios-field-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.ios-detail-field dt {
+  padding-top: 2px;
+  color: var(--color-foreground-muted);
+}
+.ios-detail-muted,
+.ios-detail-row small {
+  color: var(--color-foreground-muted);
+}
+.ios-detail-field dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ios-detail-link {
+  background: none;
+  color: inherit;
+  border: none;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ios-detail-body {
+  line-height: 1.48;
+}
+.ios-record-scroll {
+  padding-top: var(--record-section-gap);
+}
+.ios-record-heading + .ios-detail-body {
+  padding-top: var(--m-paragraph-gap);
+}
+.ios-detail-body > :first-child {
+  margin-top: 0;
+}
+.ios-detail-body .m-md {
+  font: 400 15px/1.5 var(--m-font);
+  color: var(--color-foreground);
+}
+[data-screen="task-detail"] .ios-detail-body .m-md :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 500;
+}
+.ios-detail-body .m-md h2,
+.ios-detail-body h3 {
+  font-size: 16px;
+  margin: 18px 0 6px;
+}
+.ios-detail-row,
+details.ios-detail-row summary {
+  min-height: 46px;
+  padding: 8px 0;
+  font-size: 14px;
+}
+.ios-detail-row strong {
+  display: block;
+  font-weight: 550;
+}
+.ios-detail-row small {
+  display: block;
+  font-size: 13px;
+}
+details.ios-detail-row {
+  display: block;
+  padding: 0;
+}
+/* The scroll area supplies the space above the first line on every tab. */
+.ios-detail-row:first-child,
+details.ios-detail-row:first-child summary {
+  padding-top: 0;
+  align-items: flex-start;
+}
+details.ios-subtask summary {
+  cursor: pointer;
+  list-style: none;
+}
+details.ios-subtask summary::-webkit-details-marker {
+  display: none;
+}
+details.ios-subtask summary {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 8px;
+}
+.ios-subtask summary small {
+  grid-column: 2 / -1;
+}
+.ios-subtask summary .ios-detail-diff {
+  justify-self: end;
+}
+.ios-agent-row {
+  align-items: flex-start;
+}
+.ios-agent-row strong,
+.ios-subtask summary strong {
+  font-weight: 500;
+}
+.ios-agent-icon {
+  flex: 0 0 18px;
+}
+.ios-agent-icon,
+.ios-subtask-indicator {
+  display: grid;
+  place-items: center;
+  height: 1lh;
+}
+.ios-subtask-indicator[data-status="To do"] {
+  color: var(--color-foreground-tertiary);
+  opacity: 0.6;
+}
+.ios-subtask-indicator[data-status="Completed"] {
+  color: var(--color-adaptive-emerald-600-400);
+}
+.ios-detail-expanded {
+  padding: 0 0 10px 25px;
+  font-size: 14px;
+}
+.ios-detail-expanded p {
+  margin: 3px 0 8px;
+}
+.ios-detail-expanded ul {
+  margin: 0;
+  padding-left: 20px;
+}
+.ios-detail-diff {
+  display: inline-flex;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-adaptive-emerald-700-300);
+}
+.ios-detail-diff span:last-child {
+  color: var(--thread-destructive);
+}

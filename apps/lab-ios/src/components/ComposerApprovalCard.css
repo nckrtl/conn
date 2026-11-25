@@ -1,0 +1,57 @@
+.m-composer-approval {
+  --approval-command-inset: 21px;
+}
+.m-composer-approval-kind {
+  margin-inline-start: auto;
+}
+.m-composer-approval-code {
+  --composer-panel-inner: var(--ios-code);
+}
+.m-code-body.m-composer-approval-detail {
+  padding: 13px var(--approval-command-inset);
+  color: var(--color-md-code-text);
+}
+.m-composer-approval-result {
+  margin: 0;
+  color: var(--color-foreground-muted);
+  font: 13px/1.4 var(--m-font);
+}
+.m-composer-decision-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.m-composer-decision-actions button {
+  min-height: 40px;
+}
+.m-composer-decision-actions button:not([data-decision="cancel"]) {
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-secondary);
+  color: var(--color-secondary-foreground);
+  font: 500 16px/23px var(--m-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.m-composer-decision-actions button[data-decision="cancel"] {
+  margin-inline-start: calc(var(--approval-command-inset) - 8px);
+  margin-inline-end: auto;
+}
+.m-composer-decision-actions button[data-decision="decline"] {
+  background: var(--color-danger);
+  color: var(--color-danger-foreground);
+}
+.m-composer-decision-actions button[data-decision="accept"] {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+.m-composer-decision-actions button[data-decision="accept"]:disabled {
+  background: var(--thread-control);
+  color: var(--color-foreground-muted);
+  cursor: default;
+}
+.m-composer-decision-actions button:active {
+  opacity: 0.7;
+}

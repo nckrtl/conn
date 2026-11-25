@@ -13,6 +13,7 @@ const NAMES = [
   "chevron-right",
   "more-horizontal",
   "copy",
+  "download",
   "wrap-lines",
   "check",
   "pull-request",
@@ -42,15 +43,28 @@ const NAMES = [
   "branch",
   "circle-dot",
   "check-circle",
+  "needs-approval",
+  "terminal",
   "error-circle",
   "folder",
   "file-text",
+  "code",
   "workflow",
   "pin",
   "laptop",
   "server",
   "cloud",
   "computer-mini",
+  "desktop",
+  "paint",
+  "keyboard",
+  "microphone",
+  "user-circle",
+  "layers",
+  "refresh",
+  "tests",
+  "info",
+  "archive",
 ] as const;
 
 const icons: Record<string, string> = {};
@@ -63,7 +77,7 @@ for (const name of NAMES) {
 }
 // Brand marks come from the desktop's Icons.tsx, as the mobile app uses the same artwork.
 const brands = FS.readFileSync(
-  Path.resolve(import.meta.dirname, "../../src/components/Icons.tsx"),
+  Path.resolve(import.meta.dirname, "../../web/src/components/Icons.tsx"),
   "utf8",
 );
 const pathsOf = (name: string) => {

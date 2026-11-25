@@ -1,78 +1,107 @@
-import { Fragment, useState } from "react";
+import { copyFeedText } from "./copyFeedText";
+import { lazy, Suspense, useState } from "react";
 import { Icon } from "./Icon";
+import "./CardHeader.css";
 import "./CodeBlock.css";
 
-const KEYWORDS =
-  /^(const|let|var|export|import|from|return|function|if|else|new|await|async|class|type|interface)$/;
+const HighlightedCode = lazy(() => import("./HighlightedCode"));
 
-/** A tiny highlighter for the lab: keywords, strings, builtins, operators. */
-function highlight(line: string) {
-  const parts = line.match(/"[^"]*"|'[^']*'|\w+|\s+|[^\w\s]/g) ?? [];
-  let offset = 0;
-  return parts.map((part) => {
-    const key = offset;
-    offset += part.length;
-    let kind: string | null = null;
-    if (/^["']/.test(part)) kind = "string";
-    else if (KEYWORDS.test(part)) kind = "keyword";
-    else if (/^[A-Z]\w*$/.test(part)) kind = "builtin";
-    else if (/^[=+\-*/<>|&]+$/.test(part)) kind = "operator";
-    else if (/^[[\](){};,.:]$/.test(part)) kind = "punct";
-    return kind ? (
-      <span key={key} data-syn={kind}>
-        {part}
-      </span>
-    ) : (
-      <Fragment key={key}>{part}</Fragment>
-    );
-  });
-}
+// Match the language names used by the native mobile code header.
+const FENCE_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  css: "CSS",
+  html: "HTML",
+  js: "JavaScript",
+  json: "JSON",
+  jsx: "JSX",
+  md: "Markdown",
+  py: "Python",
+  rs: "Rust",
+  sh: "Shell",
+  ts: "TypeScript",
+  tsx: "TSX",
+  typescript: "TypeScript",
+  javascript: "JavaScript",
+  yaml: "YAML",
+  yml: "YAML",
+  cc: "C++",
+  cpp: "C++",
+  cxx: "C++",
+  cs: "C#",
+  csharp: "C#",
+  graphql: "GraphQL",
+  objc: "Objective-C",
+  objectivec: "Objective-C",
+  php: "PHP",
+  rb: "Ruby",
+  scss: "SCSS",
+  sql: "SQL",
+  toml: "TOML",
+  xml: "XML",
+};
 
-function label(language: string | undefined) {
-  if (!language) return null;
-  return language.charAt(0).toUpperCase() + language.slice(1);
-}
-
-/**
- * A code block as the app draws it: one rounded surface, the language and quiet wrap/copy actions on
- * a row above the code, no divider (apps/mobile CodeBlockFrame). The first row is the 30pt strip.
- */
-export function CodeBlock(props: {
-  readonly code: string;
-  readonly language?: string | undefined;
+export function CodeBlock({
+  code,
+  language,
+  title,
+}: {
+  code: string;
+  language?: string | undefined;
+  title?: string;
 }) {
   const [wrap, setWrap] = useState(false);
   const [copied, setCopied] = useState(false);
-  const copy = () => {
-    void navigator.clipboard?.writeText(props.code).catch(() => undefined);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
-  };
+  const lang = language?.toLowerCase();
+  const plain = !lang || ["text", "txt", "plain", "plaintext"].includes(lang);
+  const languageLabel = plain
+    ? "Text"
+    : Object.hasOwn(FENCE_DISPLAY_NAMES, lang)
+      ? FENCE_DISPLAY_NAMES[lang]
+      : lang.charAt(0).toUpperCase() + lang.slice(1);
+  const label = title ?? languageLabel;
+  async function copy() {
+    if (await copyFeedText(code)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    }
+  }
   return (
-    <div className="m-code m-continuous">
-      <div className="m-code-header">
-        <span className="m-code-label">{label(props.language)}</span>
-        <span className="m-code-actions">
-          {props.language ? (
-            <button
-              className="m-code-button"
-              data-active={wrap}
-              aria-label="Wrap lines"
-              onClick={() => setWrap(!wrap)}
-            >
-              <Icon name="wrap-lines" size={15} />
-            </button>
-          ) : null}
-          <button className="m-code-button" aria-label="Copy code" onClick={copy}>
-            <Icon name={copied ? "check" : "copy"} size={15} />
+    <div
+      className="m-code"
+      role="group"
+      aria-label={plain && title === undefined ? "Code block" : `Code block (${label})`}
+    >
+      <div className="m-card-header m-code-header">
+        <span className="m-code-label" data-lang={lang}>
+          {label}
+        </span>
+        <span className="m-card-actions">
+          <button
+            className="m-card-action"
+            aria-label="Toggle word wrap"
+            aria-pressed={wrap}
+            onClick={() => setWrap(!wrap)}
+          >
+            <Icon name="wrap-lines" size={12} />
+          </button>
+          <button
+            className="m-card-action"
+            aria-label={copied ? "Code copied" : "Copy code"}
+            onClick={copy}
+          >
+            <Icon name={copied ? "check" : "copy"} size={12} />
           </button>
         </span>
       </div>
       <pre className="m-code-body" data-wrap={wrap}>
-        {props.code.split("\n").map((line, index) => (
-          // oxlint-disable-next-line react/no-array-index-key -- static lines
-          <div key={index}>{highlight(line) || " "}</div>
-        ))}
+        <code>
+          {plain ? (
+            code
+          ) : (
+            <Suspense fallback={code}>
+              <HighlightedCode language={lang} code={code} />
+            </Suspense>
+          )}
+        </code>
       </pre>
     </div>
   );

@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
+import { nativeTheme, type PhoneTheme } from "../nativeTheme";
 import "./PhoneFrame.css";
 
-export const PHONE_WIDTH = 393;
-export const PHONE_HEIGHT = 852;
+export const PHONE_WIDTH = 402;
+export const PHONE_HEIGHT = 874;
 
 function StatusBar() {
   return (
@@ -42,10 +43,11 @@ function StatusBar() {
   );
 }
 
-/** A 393×852pt iPhone: rounded screen, status bar, home indicator. `theme` picks the token set. */
+/** A 402×874pt iPhone: rounded screen, status bar, home indicator. `theme` picks the token set. */
 export function PhoneFrame(props: {
-  readonly theme: "dark-mono" | "light";
+  readonly theme: PhoneTheme;
   readonly scale: number;
+  readonly offline?: boolean;
   readonly children: ReactNode;
 }) {
   return (
@@ -55,9 +57,16 @@ export function PhoneFrame(props: {
     >
       <div
         className="m-phone"
-        data-mobile-theme={props.theme}
+        data-mobile-theme={props.theme === "light" ? "light" : "dark-mono"}
+        data-offline={props.offline}
+        data-ios-theme={props.theme}
         data-testid={`phone-${props.theme}`}
-        style={{ width: PHONE_WIDTH, height: PHONE_HEIGHT, transform: `scale(${props.scale})` }}
+        style={{
+          ...nativeTheme(props.theme),
+          width: PHONE_WIDTH,
+          height: PHONE_HEIGHT,
+          transform: `scale(${props.scale})`,
+        }}
       >
         <div className="m-screen">{props.children}</div>
         <StatusBar />

@@ -1,39 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { observeResize } from "~/lib/observeResize";
-import { MarkdownText } from "./Markdown";
+import { observeResize } from "../../../web/src/lib/observeResize";
+import { MarkdownText, markdownPreviewText } from "./Markdown";
+import { Icon } from "./Icon";
 import { isAnswered, type QuestionFlow } from "../screens/useQuestionFlow";
+import { ComposerPanelDeck } from "./ComposerPanelDeck";
 import "./QuestionPanel.css";
 
 const CONTEXT_CLAMP_LINES = 3;
 const CONTEXT_LINE_HEIGHT = 21;
-
-/** The markdown as plain lines, syntax dropped (apps/mobile markdownPreview.ts). */
-function markdownPreviewText(markdown: string) {
-  const lines: string[] = [];
-  let inFence = false;
-  for (const raw of markdown.split(/\r?\n/)) {
-    const line = raw.trimEnd();
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (line.trim() === "") continue;
-    if (inFence) {
-      lines.push(line);
-      continue;
-    }
-    lines.push(
-      line
-        .replace(/^\s{0,3}#{1,6}\s+/, "")
-        .replace(/^\s*[-*+]\s+/, "• ")
-        .replace(/^\s*>\s?/, "")
-        .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-        .replace(/\*\*(.+?)\*\*/g, "$1")
-        .replace(/`([^`]*)`/g, "$1"),
-    );
-  }
-  return lines.join("\n");
-}
 
 /** Agents mark their pick with a trailing "(Recommended)"; the row shows it as a pill. */
 function splitRecommended(label: string) {
@@ -159,15 +133,13 @@ function OptionRow(props: {
   );
 }
 
-/**
- * The question panel above the prompt box. One content column: the last action's right edge is the
- * right edge of option highlights and code blocks; marks, title, context and "1 of 3" share the
- * left edge. Padding is --q-pad on the sides and the bottom. Port of PendingUserInputCard.tsx.
- */
+/** The scrollable question above the composer, with its title and controls outside the scroll area. */
 export function QuestionPanel(props: {
   readonly flow: QuestionFlow;
+  readonly onDismiss: () => void;
+  readonly onSubmit: () => void;
   readonly context: string | undefined;
-  readonly maxHeight: number;
+  readonly queuedAfter?: number;
 }) {
   const { flow } = props;
   const { question, step, list, draft } = flow;
@@ -200,82 +172,87 @@ export function QuestionPanel(props: {
   const showNext =
     !isLast && flow.advancing !== step && (question.multiSelect === true || answered);
   const showSend = isLast && flow.canSubmit;
-  const skipIsLast = step === 0 && !showNext && !showSend;
   const multiple = question.multiSelect === true;
 
   return (
-    <div
-      className="m-q m-continuous"
-      style={{ maxHeight: props.maxHeight }}
-      data-testid="question-panel"
-    >
-      <div className="m-q-column" data-testid="question-column">
-        <div className="m-q-scroll m-scroll" key={question.id} ref={scrollRef} onScroll={measure}>
-          <div className="m-q-content">
-            <MarkdownText markdown={question.question} />
-            {props.context ? <AgentContext markdown={props.context} /> : null}
-            {question.options.length > 0 || customActive ? (
-              <div className="m-q-options" data-testid="question-options">
-                {question.options.map((option) => {
-                  const { text, recommended } = splitRecommended(option.label);
-                  return (
-                    <OptionRow
-                      key={option.label}
-                      selected={draft.picked.includes(option.label)}
-                      multiple={multiple}
-                      onPress={() => flow.select(option.label)}
-                      badge={recommended ? <span className="m-q-pill">Recommended</span> : null}
-                    >
-                      <span className="m-q-option-title">{text}</span>
-                      {option.description !== option.label ? (
-                        <span className="m-q-option-description">{option.description}</span>
-                      ) : null}
-                    </OptionRow>
-                  );
-                })}
-                {customActive ? (
-                  <OptionRow selected multiple={multiple} disabled onPress={() => undefined}>
-                    <span className="m-q-option-your">Your answer</span>
-                    <span className="m-q-option-text">{draft.custom}</span>
-                  </OptionRow>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
+    <ComposerPanelDeck remaining={list.length - step + (props.queuedAfter ?? 0)} kind="question">
+      <div className="m-composer-panel" data-testid="question-panel">
+        <div className="m-composer-panel-header">
+          <Icon name="comment-text" size={14} />
+          <span>Question</span>
+          {list.length > 1 && (
+            <span className="m-q-progress" role="status">
+              {step + 1} of {list.length}
+            </span>
+          )}
         </div>
-        {edges.top ? <div className="m-q-fade m-q-fade-top" /> : null}
-        {edges.bottom ? <div className="m-q-fade m-q-fade-bottom" /> : null}
-      </div>
-      <div className="m-q-actions" data-testid="question-actions">
-        {list.length > 1 ? (
-          <span className="m-q-progress">
-            {step + 1} of {list.length}
-          </span>
-        ) : null}
-        <span className="m-q-spacer" />
-        <button
-          className="m-q-text-action"
-          data-last={skipIsLast}
-          aria-label="Skip question without answering"
-        >
-          Skip
-        </button>
-        {step > 0 ? (
-          <button
-            className="m-q-text-action"
-            data-last={!showSend && !showNext}
-            onClick={() => flow.goTo(step - 1)}
+        <div className="m-composer-panel-body" data-testid="question-column">
+          <div
+            className="m-composer-panel-scroll m-scroll"
+            key={question.id}
+            ref={scrollRef}
+            onScroll={measure}
           >
-            Back
+            <div className="m-q-content">
+              <MarkdownText markdown={question.question} />
+              {props.context ? <AgentContext markdown={props.context} /> : null}
+              {question.options.length > 0 || customActive ? (
+                <div className="m-q-options" data-testid="question-options">
+                  {question.options.map((option) => {
+                    const { text, recommended } = splitRecommended(option.label);
+                    return (
+                      <OptionRow
+                        key={option.label}
+                        selected={draft.picked.includes(option.label)}
+                        multiple={multiple}
+                        onPress={() => flow.select(option.label)}
+                        badge={recommended ? <span className="m-q-pill">Recommended</span> : null}
+                      >
+                        <span className="m-q-option-title">{text}</span>
+                        {option.description !== option.label ? (
+                          <span className="m-q-option-description">{option.description}</span>
+                        ) : null}
+                      </OptionRow>
+                    );
+                  })}
+                  {customActive ? (
+                    <OptionRow selected multiple={multiple} disabled onPress={() => undefined}>
+                      <span className="m-q-option-your">Your answer</span>
+                      <span className="m-q-option-text">{draft.custom}</span>
+                    </OptionRow>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+          {edges.top ? <div className="m-q-fade m-q-fade-top" /> : null}
+          {edges.bottom ? <div className="m-q-fade m-q-fade-bottom" /> : null}
+        </div>
+        <div className="m-composer-panel-actions m-q-actions" data-testid="question-actions">
+          {step > 0 && (
+            <button className="m-composer-text-action m-q-back" onClick={() => flow.goTo(step - 1)}>
+              Back
+            </button>
+          )}
+          <button
+            className="m-composer-text-action m-q-skip"
+            aria-label="Skip question without answering"
+            onClick={props.onDismiss}
+          >
+            Skip
           </button>
-        ) : null}
-        {showSend ? <button className="m-q-button">Send</button> : null}
-        {showNext ? (
-          <button className="m-q-button" disabled={!answered} onClick={() => flow.goTo(step + 1)}>
-            Next
-          </button>
-        ) : null}
+          {showSend ? (
+            <button className="m-q-button" aria-label="Send answers" onClick={props.onSubmit}>
+              Send
+            </button>
+          ) : null}
+          {showNext ? (
+            <button className="m-q-button" disabled={!answered} onClick={() => flow.goTo(step + 1)}>
+              Next
+            </button>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </ComposerPanelDeck>
   );
 }

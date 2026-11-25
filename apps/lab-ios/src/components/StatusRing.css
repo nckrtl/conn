@@ -1,0 +1,13 @@
+.ios-status-spinner {
+  color: var(--color-adaptive-sky-600-400);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ios-status-spinner {
+    animation: ios-status-spin 1s linear infinite;
+  }
+}
+@keyframes ios-status-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}

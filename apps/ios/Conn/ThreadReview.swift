@@ -11,6 +11,8 @@ struct TurnCheckpointCard: View {
     @State private var overrides: [String: Bool] = [:]
     @State private var expanded = false
     @State private var selected: ReviewPath?
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @Environment(\.connTheme) private var theme
 
     private struct ReviewPath: Identifiable { let id: String }
 
@@ -20,16 +22,17 @@ struct TurnCheckpointCard: View {
         let allOpen = folders.allSatisfy(\.expanded)
         ThreadCard {
             Text("\(fileCount) changed \(fileCount == 1 ? "file" : "files")")
+                .fontWeight(.medium).foregroundStyle(theme.foreground)
             DiffCounts(additions: additions, deletions: deletions)
             Spacer(minLength: 0)
             if !folders.isEmpty {
                 Button { expanded = !allOpen; overrides = [:] } label: {
-                    Image(systemName: allOpen ? "arrow.up.and.down.text.horizontal" : "arrow.down.left.and.arrow.up.right")
+                    ThreadGlyph(name: allOpen ? "chevrons-down-up" : "chevrons-up-down", size: size * 14 / 13).padding(5)
                 }.accessibilityLabel(allOpen ? "Collapse all folders" : "Expand all folders")
             }
             if ordinal != nil {
                 Button { selected = ReviewPath(id: files.first?.path ?? "") } label: {
-                    Image(systemName: "plus.forwardslash.minus").padding(5)
+                    ThreadGlyph(name: "file-diff", size: size * 14 / 13).padding(5)
                 }.accessibilityLabel("Open diff")
             }
         } content: {
@@ -40,13 +43,16 @@ struct TurnCheckpointCard: View {
                         else { selected = ReviewPath(id: row.path) }
                     } label: {
                         HStack(spacing: 6) {
-                            if row.directory { Image(systemName: row.expanded ? "chevron.down" : "chevron.right").font(.caption2) }
-                            Image(systemName: row.directory ? "folder" : "doc.text")
+                            if row.directory {
+                                ThreadGlyph(name: row.expanded ? "chevron-down" : "chevron-right", size: size * 12 / 13)
+                            }
+                            ThreadGlyph(name: row.directory ? "folder" : "file-text", size: size * 14 / 13)
                             Text(row.name).lineLimit(1).truncationMode(.middle)
                             Spacer()
-                            DiffCounts(additions: row.additions, deletions: row.deletions)
+                            DiffCounts(additions: row.additions, deletions: row.deletions, columns: true)
                         }
-                        .font(.system(size: 13))
+                        .font(.system(size: size))
+                        .foregroundStyle(theme.mutedForeground)
                         .padding(.leading, 9 + CGFloat(row.depth) * 12)
                         .padding(.trailing, 9).frame(minHeight: 32).contentShape(Rectangle())
                     }
@@ -66,13 +72,18 @@ struct TurnCheckpointCard: View {
 private struct DiffCounts: View {
     let additions: Int64
     let deletions: Int64
+    /// File rows right-align both counts in fixed columns (lab: 5ch and 4ch).
+    var columns = false
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
     @Environment(\.connTheme) private var theme
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: columns ? 0 : 5) {
             Text("+\(additions.formatted(.number.notation(.compactName)))").foregroundStyle(theme.diffAdded)
+                .frame(minWidth: columns ? size * 0.6 * 5 : nil, alignment: .trailing)
             Text("−\(deletions.formatted(.number.notation(.compactName)))").foregroundStyle(theme.diffRemoved)
+                .frame(minWidth: columns ? size * 0.6 * 4 : nil, alignment: .trailing)
         }
-        .font(.caption.monospacedDigit())
+        .font(.system(size: size).monospacedDigit())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(additions) additions, \(deletions) deletions")
     }

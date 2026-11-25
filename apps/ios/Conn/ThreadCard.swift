@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 struct ThreadCard<Header: View, Content: View>: View {
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
-    @ScaledMetric(relativeTo: .footnote) private var headerSize: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var headerSize: CGFloat = ThreadText.size
     var code = false
     @ViewBuilder let header: Header
     @ViewBuilder let content: Content
@@ -121,7 +121,7 @@ struct HighlightedSource: View {
     let language: String
     @Environment(\.connTheme) private var theme
     @State private var formatted: AttributedString?
-    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
     private struct Input: Equatable { let code, language, theme: String }
 

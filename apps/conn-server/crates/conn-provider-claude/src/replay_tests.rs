@@ -505,13 +505,13 @@ fn plan_dialog_and_withdrawn_requests() {
     assert_eq!(cancelled.unwrap()["status"], "cancelled");
     assert!(matches!(outs.last(), Some(Out::Write(w)) if w.contains("\"interrupt\":true")));
 
-    // Elicitations with fields, and dialogs T3 does not show, are declined at once.
+    // Required fields the approval card cannot answer are cancelled.
     let outs = mapper.handle(Inbound::from_value(json!({
         "type": "control_request", "request_id": "cli-3",
         "request": {"subtype": "elicitation", "mcp_server_name": "s", "message": "token?",
-                    "requested_schema": {"type": "object", "properties": {"t": {"type": "string"}}}},
+                    "requested_schema": {"type": "object", "required": ["t"], "properties": {"t": {"type": "string"}}}},
     })));
-    assert!(matches!(&outs[..], [Out::Write(w)] if w.contains("decline")));
+    assert!(matches!(&outs[..], [Out::Write(w)] if w.contains("cancel")));
     let outs = mapper.handle(Inbound::from_value(json!({
         "type": "control_request", "request_id": "cli-4",
         "request": {"subtype": "request_user_dialog", "dialog_kind": "other_kind", "payload": {}},
@@ -1333,4 +1333,259 @@ fn a_byte_truncated_transcript_shows_no_excerpt() {
     assert_eq!(answers.last().map(String::as_str), Some("FINAL ANSWER"));
     assert!(!answers.iter().any(|a| a.starts_with("Partial answer")));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_full_steer_queue_preserves_every_accepted_message_receipt() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("steer"), "first", "full-access"),
+        "default",
+    );
+    for i in 0..64 {
+        assert!(
+            !mapper
+                .steer_sent(&format!("uuid-{i}"), &format!("msg-{i}"))
+                .is_empty()
+        );
+    }
+    assert!(mapper.steer_sent("excess", "unsent").is_empty());
+    let first = mapper.handle(Inbound::from_value(
+        json!({"type":"command_lifecycle","command_uuid":"uuid-0","state":"started"}),
+    ));
+    assert!(first.iter().any(|out| matches!(
+        out,
+        Out::Event(ProviderEvent::SteerUpdated {
+            status: conn_provider::SteerStatus::Completed,
+            ..
+        })
+    )));
+    assert!(!mapper.steer_sent("retry", "unsent").is_empty());
+}
+
+#[test]
+fn the_previous_result_cannot_acknowledge_an_unread_steer() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("steer"), "first", "full-access"),
+        "default",
+    );
+    mapper.set_prompt_uuid("first");
+    mapper.steer_sent("second", "second-item");
+    let result = |id: &str| {
+        Inbound::from_value(
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id],"result":"ok"}),
+        )
+    };
+    let first = mapper.handle(result("first"));
+    assert!(mapper.turn_active());
+    assert!(!first.iter().any(|out| matches!(
+        out,
+        Out::Event(ProviderEvent::SteerUpdated { .. } | ProviderEvent::TurnTerminal(_))
+    )));
+    let accepted = mapper.handle(Inbound::from_value(
+        json!({"type":"command_lifecycle","command_uuid":"second","state":"started"}),
+    ));
+    assert!(accepted.iter().any(|out| matches!(
+        out,
+        Out::Event(ProviderEvent::SteerUpdated {
+            status: conn_provider::SteerStatus::Completed,
+            ..
+        })
+    )));
+    let last = mapper.handle(result("second"));
+    assert!(
+        last.iter()
+            .any(|out| matches!(out, Out::Event(ProviderEvent::TurnTerminal(_))))
+    );
+}
+
+#[test]
+fn provider_safety_denials_and_user_ask_rules_remain_distinct() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("test"), "test", "full-access"),
+        "bypassPermissions",
+    );
+    let mut params = json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"fixture"},"tool_use_id":"test","decision_reason":"Dangerous rm warning"});
+    let frame = |request: Value| {
+        Inbound::from_value(
+            json!({"type":"control_request","request_id":"fixture","request":request}),
+        )
+    };
+    let denied = mapper.handle(frame(params.clone()));
+    assert!(
+        denied
+            .iter()
+            .any(|o| matches!(o,Out::Write(line) if line.contains("\"behavior\":\"deny\"")))
+    );
+    params["matched_ask_rule"] = json!({"rule":"Bash(fixture)"});
+    let asks = mapper.handle(frame(params));
+    assert!(
+        asks.iter()
+            .any(|o| matches!(o, Out::Event(ProviderEvent::RuntimeRequestUpdated { .. })))
+    );
+}
+
+#[test]
+fn a_successful_native_rename_publishes_the_new_app_title_once() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(
+            1,
+            &provider_thread("native"),
+            "/rename New title",
+            "full-access",
+        ),
+        "default",
+    );
+    let event = mapper.handle(Inbound::from_value(
+        json!({"type":"system","subtype":"session_title_changed","title":" New title "}),
+    ));
+    assert!(
+        !event
+            .iter()
+            .any(|o| matches!(o, Out::Event(ProviderEvent::AppThreadCreated { .. })))
+    );
+    let result = mapper.handle(Inbound::from_value(
+        json!({"type":"result","subtype":"success","is_error":false,"local_command":"rename"}),
+    ));
+    assert!(result.iter().any(|o|matches!(o,Out::Event(ProviderEvent::AppThreadCreated{app_thread,..}) if app_thread.title=="New title")));
+}
+
+#[test]
+fn the_final_main_model_iteration_sets_the_context_window() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.begin_turn(
+        &turn_input(1, &provider_thread("advisor"), "test", "full-access"),
+        "default",
+    );
+    let event=mapper.handle(Inbound::from_value(json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"a","model":"claude-opus","usage":{
+        "input_tokens":1089209,"iterations":[{"type":"message","input_tokens":500000},{"type":"message","input_tokens":545100,"output_tokens":96},{"type":"advisor","input_tokens":543000}]}}}})));
+    assert!(event.iter().any(|out|matches!(out,Out::Event(ProviderEvent::ProviderTurnUpdated{provider_turn,..}) if to_json(provider_turn)["tokenUsage"]["usedTokens"]==545196)));
+}
+
+#[test]
+fn explicit_compaction_window_reaches_normal_and_post_compaction_usage() {
+    for (window, threshold) in [
+        (None, None),
+        (Some(120_000), Some(87_000)),
+        (Some(1_000_000), None),
+    ] {
+        let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+        mapper.auto_compact_window = window;
+        mapper.begin_turn(
+            &turn_input(1, &provider_thread("compact"), "test", "full-access"),
+            "default",
+        );
+        for frame in [
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{
+                "id":"a","model":"claude-sonnet","usage":{"input_tokens":54}}}}),
+            json!({"type":"system","subtype":"compact_boundary","uuid":"b",
+                "compact_metadata":{"trigger":"auto","pre_tokens":54,"post_tokens":10}}),
+        ] {
+            let usage = mapper
+                .handle(Inbound::from_value(frame))
+                .into_iter()
+                .find_map(|out| {
+                    if let Out::Event(ProviderEvent::ProviderTurnUpdated {
+                        provider_turn, ..
+                    }) = out
+                    {
+                        to_json(&provider_turn).get("tokenUsage").cloned()
+                    } else {
+                        None
+                    }
+                })
+                .expect("root token usage");
+            assert_eq!(usage["autoCompactThreshold"].as_u64(), threshold);
+        }
+    }
+}
+
+#[test]
+fn custom_model_usage_waits_for_its_reported_capacity() {
+    let config = crate::ClaudeConfig::default().with_instance(Some(&json!({"config":{
+        "customModels":["orbit-model", "sonnet"], "autoCompactWindow":"300000",
+    }})));
+    let models = crate::catalog::turn_models(&config.model_manifest, 0, &config.custom_models);
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    mapper.set_catalog(models);
+    mapper.auto_compact_window = config.auto_compact_window;
+
+    let frame = || {
+        Inbound::from_value(
+            json!({"type":"assistant","uuid":"root","parent_tool_use_id":null,
+        "message":{"id":"assistant","model":"upstream-deployment","content":[],"usage":{"input_tokens":54}}}),
+        )
+    };
+    let result = |capacities| {
+        Inbound::from_value(json!({"type":"result","subtype":"success","is_error":false,
+        "modelUsage":capacities,"usage":{},"result":"ok","num_turns":1,"total_cost_usd":0}))
+    };
+    let usage = |outputs: Vec<Out>| {
+        outputs
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Event(ProviderEvent::ProviderTurnUpdated { provider_turn, .. }) => {
+                    to_json(&provider_turn).get("tokenUsage").cloned()
+                }
+                _ => None,
+            })
+            .expect("a context usage update")
+    };
+    let cases = [
+        // The deployment name on an assistant message does not identify the selected API model.
+        (
+            "orbit-model",
+            json!(null),
+            json!({"upstream-deployment":{"contextWindow":200000}, "orbit-model":{"contextWindow":500000}}),
+            json!(500000),
+        ),
+        // A preceding result's capacity persists across turns on the same session.
+        (
+            "orbit-model",
+            json!(500000),
+            json!({"orbit-model":{"contextWindow":250000}}),
+            json!(250000),
+        ),
+        // Custom aliases shadow the stock catalog entry and start with unknown capacity.
+        (
+            "sonnet",
+            json!(null),
+            json!({"sonnet":{"contextWindow":300000}}),
+            json!(300000),
+        ),
+        // Included models keep their catalog capacity when the result supplies a different one.
+        (
+            "claude-haiku-5-5",
+            json!(1000000),
+            json!({"claude-haiku-5-5":{"contextWindow":199999}}),
+            json!(1000000),
+        ),
+    ];
+    for (i, (slug, initial_max, reported, final_max)) in (1..).zip(cases) {
+        let mut input = turn_input(i, &provider_thread("compact"), "test", "full-access");
+        input.model_selection.model = json!(slug);
+        mapper.begin_turn(&input, "default");
+        let start = usage(mapper.handle(frame()));
+        assert_eq!(
+            start.get("maxTokens"),
+            Some(&initial_max),
+            "{slug} first message"
+        );
+        assert_eq!(
+            start.get("autoCompactThreshold"),
+            Some(&json!(267_000)),
+            "{slug} first message"
+        );
+        let updated = usage(mapper.handle(result(reported)));
+        assert_eq!(updated.get("maxTokens"), Some(&final_max), "{slug} result");
+        let threshold = (final_max.as_u64().unwrap() > 300_000).then(|| json!(267_000));
+        assert_eq!(
+            updated.get("autoCompactThreshold"),
+            threshold.as_ref(),
+            "{slug} result"
+        );
+    }
 }

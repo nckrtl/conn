@@ -107,8 +107,20 @@ impl ChatView {
         &self,
         id: &str,
         text: &str,
+        sender: Option<&conn_state::AgentMessageSender>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let sender = match sender {
+            Some(conn_state::AgentMessageSender::LinkedTitle(title)) => Some(title.as_str()),
+            Some(conn_state::AgentMessageSender::LocalThread(id)) => {
+                self.local_sender_titles.get(id).map(String::as_str)
+            }
+            None => None,
+        };
+        let title_text = sender
+            .map(str::trim)
+            .filter(|title| !title.is_empty() && *title != "Agent")
+            .unwrap_or("Message");
         let key = format!("agent-msg-{id}");
         let text = &*super::cache::humanize_task_ids(self.cache.rows(), text);
         let expanded = self.expanded_ids.contains(&key);
@@ -134,7 +146,7 @@ impl ChatView {
             .line_height(px(CARD_LINE_PX))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg)
-            .child("Message")
+            .child(div().truncate().child(title_text.to_owned()))
             .child(disclosure_chevron(expanded, muted));
         let summary = if expanded {
             let mut options = self.markdown_options(cx);
@@ -176,11 +188,16 @@ impl ChatView {
                     "Expand agent message"
                 },
             )
+            .aria_description(title_text.to_owned())
+            .aria_expanded(expanded)
+            .tab_index(0)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .on_click(cx.listener(move |view, _, _, cx| view.toggle_expanded(&toggle_key, cx)))
             .child(header)
             .child(card_body(colors).child(title).child(summary));
+        #[cfg(test)]
+        let card = gpui_kit::TestSupportExt::test_support(card);
         div()
             .w_full()
             .min_w_0()

@@ -217,35 +217,42 @@ pub fn apply(args: &str, cwd: Option<&str>) -> Result<Applied, String> {
     {
         applied.append.push(text);
     }
-    // `readClaudeLaunchArgSettings`.
-    if let Some(value) = flag("settings") {
-        let trimmed = value.as_deref().map(str::trim).unwrap_or_default();
-        if trimmed.is_empty() {
-            return Err("The --settings launch argument needs a value.".into());
-        }
-        let (text, path) = if trimmed.starts_with('{') {
-            (trimmed.to_owned(), None)
-        } else {
-            let path = resolve(cwd, trimmed);
-            let text = std::fs::read_to_string(&path).map_err(|e| {
-                format!("Could not read the --settings file {}: {e}", path.display())
-            })?;
-            (text, Some(path))
-        };
-        // Never the text itself in an error: it may hold a secret.
-        let failed = || match &path {
-            Some(path) => format!(
-                "The --settings file {} is not a JSON object.",
-                path.display()
-            ),
-            None => "The --settings launch argument is not a JSON object.".to_owned(),
-        };
-        match conn_support::json::parse_lenient(&text) {
-            Some(Json::Object(entries)) => applied.settings = Some(entries),
-            _ => return Err(failed()),
-        }
-    }
+    applied.settings = read_settings(flag("settings").as_ref().map(Option::as_deref), cwd)?;
     Ok(applied)
+}
+
+/// The JSON settings override for this query. Context reporting also reads it between turns.
+pub(super) fn read_settings(
+    flag: Option<Option<&str>>,
+    cwd: Option<&str>,
+) -> Result<Option<Vec<(String, Json)>>, String> {
+    let Some(value) = flag else {
+        return Ok(None);
+    };
+    let trimmed = value.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        return Err("The --settings launch argument needs a value.".into());
+    }
+    let (text, path) = if trimmed.starts_with('{') {
+        (trimmed.to_owned(), None)
+    } else {
+        let path = resolve(cwd, trimmed);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Could not read the --settings file {}: {e}", path.display()))?;
+        (text, Some(path))
+    };
+    // Never the text itself in an error: it may hold a secret.
+    let failed = || match &path {
+        Some(path) => format!(
+            "The --settings file {} is not a JSON object.",
+            path.display()
+        ),
+        None => "The --settings launch argument is not a JSON object.".to_owned(),
+    };
+    match conn_support::json::parse_lenient(&text) {
+        Some(Json::Object(entries)) => Ok(Some(entries)),
+        _ => Err(failed()),
+    }
 }
 
 fn missing_value(flag: &str) -> String {

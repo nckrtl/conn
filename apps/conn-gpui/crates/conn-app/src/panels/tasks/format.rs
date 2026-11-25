@@ -9,7 +9,7 @@ use conn_desktop::orbit::tasks::{
     AttentionKind, InsightsPeriod, TaskInsights, TaskLabelTone, TaskLane, TaskProject, TaskStatus,
     TaskSummary,
 };
-use conn_theme::{Appearance, Rgba, Tokens, color_mix_oklab, color_mix_srgb};
+use conn_theme::{Rgba, Tokens, color_mix_oklab, color_mix_srgb};
 
 /// Conn's 18-color project icon palette order (`apps/web/src/projectIconColors.ts`).
 const PROJECT_ICON_COLORS: [ProjectIconColor; 18] = [
@@ -184,7 +184,7 @@ pub(super) struct InsightGridLayout {
 /// Computes the insight grid dimensions for `count` visible metrics.
 #[must_use]
 pub(super) fn insight_grid_layout(count: usize) -> InsightGridLayout {
-    let columns = if count <= 2 { 3 } else { count.div_ceil(2) };
+    let columns = if count <= 2 { count } else { count.div_ceil(2) };
     let rows = if count <= 2 { 1 } else { 2 };
     let last_span = if rows == 2 {
         columns * 2 - count + 1
@@ -196,33 +196,6 @@ pub(super) fn insight_grid_layout(count: usize) -> InsightGridLayout {
         rows,
         last_span,
     }
-}
-
-/// Returns `[top_left, top_right, bottom_right, bottom_left]` booleans indicating whether each
-/// corner of insight cell `index` is an outer corner of the grid (`12px` radius vs `0px`).
-#[must_use]
-pub(super) fn insight_block_corners(
-    grid: InsightGridLayout,
-    index: usize,
-    count: usize,
-) -> [bool; 4] {
-    let row = index / grid.columns;
-    let start = index % grid.columns;
-    let end = start
-        + if index + 1 == count {
-            grid.last_span
-        } else {
-            1
-        };
-    let top = row == 0;
-    let bottom = row + 1 == grid.rows;
-    let right = end == grid.columns || (grid.rows == 1 && index + 1 == count);
-    [
-        top && start == 0,
-        top && right,
-        bottom && right,
-        bottom && start == 0,
-    ]
 }
 
 /// Live-status text in the task detail header (`TaskDetail.tsx:240-244`).
@@ -291,49 +264,24 @@ pub(super) struct TasksSurfaceColors {
     pub(super) shell_chart_grid: Rgba,
     /// `--popover-rule`: dashed separator inside chart tooltips.
     pub(super) popover_rule: Rgba,
-    /// Card surface fill (`bg-(--shell-card)` light / `bg-(--shell-highlight)/70` dark).
     pub(super) card_bg: Rgba,
-    /// Card hover fill (`bg-(--shell-card)/70` light / `bg-(--shell-highlight)` dark).
     pub(super) card_hover_bg: Rgba,
-    /// Opaque approximation of the card fill (`--task-card-fill`) for `StatusDotBadge` rings.
-    pub(super) card_ring_fill: Rgba,
-    /// Lane background fill (`bg-(--shell-highlight)/60` light / `bg-(--shell-highlight)/30` dark).
     pub(super) lane_bg: Rgba,
 }
 
 impl TasksSurfaceColors {
     #[must_use]
     pub(super) fn from_tokens(tokens: &Tokens) -> Self {
-        let is_dark = tokens.appearance == Appearance::Dark;
         let shell_chart_grid = color_mix_oklab(tokens.shell_divider, 0.93, tokens.foreground);
         let popover_rule = color_mix_oklab(tokens.popover, 0.80, tokens.foreground);
-        let (card_bg, card_hover_bg, card_ring_fill, lane_bg) = if is_dark {
-            (
-                tokens
-                    .shell_highlight
-                    .with_alpha(tokens.shell_highlight.a * 0.70),
-                tokens.shell_highlight,
-                color_mix_srgb(tokens.foreground, 0.056, tokens.shell_card),
-                tokens
-                    .shell_highlight
-                    .with_alpha(tokens.shell_highlight.a * 0.30),
-            )
-        } else {
-            (
-                tokens.shell_card,
-                tokens.shell_card.with_alpha(0.70),
-                tokens.shell_card,
-                tokens
-                    .shell_highlight
-                    .with_alpha(tokens.shell_highlight.a * 0.60),
-            )
-        };
+        let card_bg = tokens.shell_control;
+        let card_hover_bg = color_mix_oklab(card_bg, 0.95, tokens.foreground);
+        let lane_bg = color_mix_srgb(card_bg, 0.4, tokens.shell_card);
         Self {
             shell_chart_grid,
             popover_rule,
             card_bg,
             card_hover_bg,
-            card_ring_fill,
             lane_bg,
         }
     }
@@ -413,66 +361,19 @@ mod tests {
     }
 
     #[test]
-    fn computes_insight_grid_and_outer_corners() {
-        let eight = insight_grid_layout(8);
-        assert_eq!(
-            eight,
-            InsightGridLayout {
-                columns: 4,
-                rows: 2,
-                last_span: 1
-            },
-            "8 insights form 4x2"
-        );
-        assert_eq!(
-            insight_block_corners(eight, 0, 8),
-            [true, false, false, false],
-            "top-left card rounds only TL"
-        );
-        assert_eq!(
-            insight_block_corners(eight, 3, 8),
-            [false, true, false, false],
-            "top-right card rounds only TR"
-        );
-        assert_eq!(
-            insight_block_corners(eight, 4, 8),
-            [false, false, false, true],
-            "bottom-left card rounds only BL"
-        );
-        assert_eq!(
-            insight_block_corners(eight, 7, 8),
-            [false, false, true, false],
-            "bottom-right card rounds only BR"
-        );
-        assert_eq!(
-            insight_block_corners(eight, 1, 8),
-            [false, false, false, false],
-            "interior card has square corners"
-        );
-
-        let seven = insight_grid_layout(7);
-        assert_eq!(seven.last_span, 2, "odd count spans trailing cell");
-        assert_eq!(
-            insight_block_corners(seven, 6, 7),
-            [false, false, true, false],
-            "spanning bottom-right card rounds BR"
-        );
-
-        let two = insight_grid_layout(2);
-        assert_eq!(
-            two,
-            InsightGridLayout {
-                columns: 3,
-                rows: 1,
-                last_span: 1
-            },
-            "2 insights stay on 1 row"
-        );
-        assert_eq!(
-            insight_block_corners(two, 1, 2),
-            [false, true, true, false],
-            "last cell of 1-row strip rounds TR and BR"
-        );
+    fn visible_insights_fill_available_columns() {
+        for (count, rows, columns, last_span) in
+            [(1, 1, 1, 1), (2, 1, 2, 1), (7, 2, 4, 2), (8, 2, 4, 1)]
+        {
+            assert_eq!(
+                insight_grid_layout(count),
+                InsightGridLayout {
+                    columns,
+                    rows,
+                    last_span
+                }
+            );
+        }
     }
 
     #[test]

@@ -112,8 +112,13 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
             }
             // A workspace (`cwd`, `fresh`) is not scanned and keeps main's behaviour: the
             // instance is probed, nothing else is fetched, and the reply lists every entry.
-            if input["cwd"].is_string() {
+            if let Some(cwd) = input["cwd"].as_str() {
                 super::provider::refresh(&deps, only).await;
+                for provider in deps.providers.snapshot() {
+                    if only.is_none_or(|id| id == provider.instance_id().as_str()) {
+                        provider.refresh_workspace(cwd.to_owned()).await;
+                    }
+                }
                 return Ok(json!({ "providers": current_providers(&deps) }));
             }
             let refresh_models = input["refreshModels"] == true;

@@ -8,11 +8,11 @@
 //! rejects `--no-session-persistence`; then the run is repeated without it. The answer is the
 //! `structured_output` of the JSON envelope (or of the last `result` message of a list).
 //! An investigating request (a review guide) gets read-only tools in place of `--tools ""`
-//! (`--tools`, `--allowedTools`, `--disallowedTools`, `--setting-sources user`) and its own
+//! (`--tools`, `--allowedTools`, `--disallowedTools`, `--setting-sources ""`) and its own
 //! deadline; `probe-conformance` compares its argv with T3's.
 //!
 //! The environment is the Claude process environment (`mergeClaudeProcessEnvironment`, then
-//! `makeClaudeEnvironment`). The model's input attachments are not sent, as in T3.
+//! `makeClaudeEnvironment`). An image title uses a stream-json user message and falls back to text when the CLI rejects it.
 
 use std::time::Duration;
 
@@ -79,10 +79,36 @@ pub fn cli_args(
     managed_mcp_config: bool,
     investigate: bool,
 ) -> Vec<String> {
+    cli_args_scoped(
+        selection,
+        &crate::ClaudeConfig {
+            model_manifest: manifest.clone(),
+            ..Default::default()
+        },
+        output_schema,
+        no_session_persistence,
+        managed_mcp_config,
+        investigate,
+    )
+}
+
+fn cli_args_scoped(
+    selection: &Value,
+    config: &crate::ClaudeConfig,
+    output_schema: &str,
+    no_session_persistence: bool,
+    managed_mcp_config: bool,
+    investigate: bool,
+) -> Vec<String> {
     let model = selection["model"].as_str().unwrap_or_default();
-    let compiled = catalog::compile(selection, manifest);
+    let compiled = config
+        .custom_models
+        .compile(selection, &config.model_manifest);
     let now = i64::try_from(conn_support::time::now_ms()).unwrap_or(i64::MAX);
-    let models = catalog::current_provider_models(manifest, now);
+    let models = config.custom_models.scope(catalog::current_provider_models(
+        &config.model_manifest,
+        now,
+    ));
     let capabilities = model_entry(&models, model).map(|m| &m["capabilities"]);
     let has_boolean = |id: &str| {
         capabilities
@@ -132,7 +158,7 @@ pub fn cli_args(
                 "--disallowedTools",
                 INVESTIGATION_DENIED,
                 "--setting-sources",
-                "user",
+                "",
             ]
             .map(str::to_owned),
         );
@@ -202,16 +228,163 @@ fn structured_output(stdout: &str) -> Result<Value, ProviderError> {
         .unwrap_or(Value::Null))
 }
 
+struct SettingsFile(std::path::PathBuf);
+
+impl Drop for SettingsFile {
+    fn drop(&mut self) {
+        let path = self.0.clone();
+        // A cancelled guide must also remove its private settings file.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn_blocking(move || std::fs::remove_file(path));
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn merge_settings(target: &mut Value, source: Value) {
+    if let (Some(map), Value::Object(source)) = (target.as_object_mut(), &source) {
+        for (key, value) in source {
+            merge_settings(map.entry(key).or_insert(Value::Null), value.clone());
+        }
+    } else {
+        *target = source;
+    }
+}
+
+/// Models known to reject image blocks on this provider instance.
+pub type TextOnlyModels = std::sync::Mutex<std::collections::HashSet<String>>;
+
+fn rejects_images(detail: &str) -> bool {
+    detail.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("image") && (line.contains("not support") || line.contains("unsupported"))
+    })
+}
+
 /// One request. `env` is the Claude process environment; `program` the CLI; `manifest` the
 /// instance's live model manifest.
 pub async fn generate(
     program: &str,
     env: &[(String, String)],
-    manifest: &conn_provider::LiveManifest,
+    config: &crate::launch::ClaudeConfig,
+    text_only_models: &TextOnlyModels,
     managed_mcp_config: bool,
     request: TextGenerationRequest,
 ) -> Result<Value, ProviderError> {
     let selection = conn_contract::to_json(&request.model_selection);
+    let mut args = cli_args_scoped(
+        &selection,
+        config,
+        &request.output_schema,
+        true,
+        managed_mcp_config,
+        request.investigate,
+    );
+    let launch_args = config.launch_args.clone();
+    let project_cwd = request
+        .project_cwd
+        .clone()
+        .unwrap_or_else(|| request.cwd.clone());
+    let home = crate::launch::config_dir(
+        config,
+        &env.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
+    );
+    let investigate = request.investigate;
+    let at = args
+        .iter()
+        .position(|arg| arg == "--settings")
+        .and_then(|at| at.checked_add(1));
+    let base = at
+        .and_then(|i| args.get(i))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or_else(|| json!({}));
+    let (settings, temp_settings) = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        use std::io::Write;
+        let parsed = crate::launch_args::apply(&launch_args, Some(&project_cwd))?;
+        let launch = parsed
+            .settings
+            .map(|entries| crate::launch_args::Json::Object(entries).to_text())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or_else(|| json!({}));
+        let mut merged = if investigate {
+            std::fs::read_to_string(home.join("settings.json"))
+                .ok()
+                .and_then(|text| conn_support::json::parse_lenient::<Value>(&text))
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}))
+        } else {
+            json!({})
+        };
+        let mut denies = Vec::new();
+        for source in [&merged, &launch] {
+            for rule in source["permissions"]["deny"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r.is_string())
+            {
+                if !denies.contains(rule) {
+                    denies.push(rule.clone())
+                }
+            }
+        }
+        merge_settings(&mut merged, launch);
+        merge_settings(&mut merged, base);
+        if investigate {
+            if let Some(map) = merged.as_object_mut() {
+                map.remove("permissions");
+            }
+            if !denies.is_empty() {
+                merged["permissions"] = json!({"deny":denies});
+            }
+            let path = std::env::temp_dir().join(format!(
+                "conn-claude-settings-{}.json",
+                conn_support::uuid_v4()
+            ));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(&path).map_err(|e| e.to_string())?;
+            let guard = SettingsFile(path);
+            file.write_all(merged.to_string().as_bytes())
+                .map_err(|e| e.to_string())?;
+            return Ok((guard.0.to_string_lossy().into_owned(), Some(guard)));
+        }
+        Ok((merged.to_string(), None))
+    })
+    .await
+    .map_err(|e| failed(e.to_string()))?
+    .map_err(failed)?;
+    if let Some(slot) = at.and_then(|i| args.get_mut(i)) {
+        *slot = settings;
+    }
+    let _settings_file = temp_settings;
+    let api_model = args
+        .windows(2)
+        .find(|pair| pair[0] == "--model")
+        .map(|pair| pair[1].clone())
+        .unwrap_or_default();
+    let paths = if crate::lock(text_only_models).contains(&api_model) {
+        vec![]
+    } else {
+        request.image_paths.clone()
+    };
+    let text = request.prompt.clone();
+    let image_input=tokio::task::spawn_blocking(move || {
+        let mut content=vec![json!({"type":"text","text":text})];
+        for path in paths {
+            let mime=match path.extension().and_then(|ext|ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(){
+                "png"=>"image/png","jpg"|"jpeg"=>"image/jpeg","webp"=>"image/webp","gif"=>"image/gif",_=>continue,
+            };
+            if let Ok(bytes)=std::fs::read(path){content.push(json!({"type":"image","source":{"type":"base64","media_type":mime,"data":conn_support::base64::encode(&bytes)}}));}
+        }
+        (content.len()>1).then(||format!("{}\n",json!({"type":"user","message":{"role":"user","content":content}})))
+    }).await.map_err(|e|failed(e.to_string()))?;
     let title = request.operation == "generateThreadTitle";
     // A thread title runs in a fresh folder of its own (`makeTempDirectoryScoped`), removed
     // after.
@@ -236,36 +409,68 @@ pub async fn generate(
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from(&request.cwd));
     let timeout = request.timeout.unwrap_or(TIMEOUT);
-    let run = |persistence: bool| {
-        let args = cli_args(
-            &selection,
-            manifest,
-            &request.output_schema,
-            persistence,
-            managed_mcp_config,
-            request.investigate,
-        );
+    let started = tokio::time::Instant::now();
+    let run = |persistence: bool, images: bool| {
+        let mut args = args.clone();
+        if !persistence {
+            args.retain(|s| s != NO_SESSION_PERSISTENCE);
+        }
+        if images && let Some(at) = args.iter().position(|s| s == "--output-format") {
+            args.splice(
+                at..at + 2,
+                [
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                ]
+                .map(str::to_owned),
+            );
+        }
         let cwd = cwd.clone();
-        let prompt = request.prompt.clone();
+        let prompt = if images {
+            image_input.as_deref().unwrap_or(&request.prompt)
+        } else {
+            &request.prompt
+        };
+        let left = timeout.saturating_sub(started.elapsed());
         async move {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            run_collect(program, &args, env, Some(&cwd), Some(&prompt), timeout).await
+            let mut out = run_collect(program, &args, env, Some(&cwd), Some(prompt), left).await?;
+            if images && let Some(out) = out.as_mut() {
+                out.stdout = out
+                    .stdout
+                    .lines()
+                    .rfind(|s| !s.trim().is_empty())
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            Ok::<_, CommandError>(out)
         }
     };
-    let started = tokio::time::Instant::now();
-    let mut result = run(true).await;
-    if let Ok(Some(out)) = &result
-        && out.code != 0
-        && out.stderr.contains(NO_SESSION_PERSISTENCE_REJECTED)
+    let attempt = |images| {
+        let run = &run;
+        async move {
+            let result = run(true, images).await;
+            if matches!(&result, Ok(Some(out)) if out.code!=0 && out.stderr.contains(NO_SESSION_PERSISTENCE_REJECTED))
+            {
+                run(false, images).await
+            } else {
+                result
+            }
+        }
+    };
+    let mut result = attempt(image_input.is_some()).await;
+    if image_input.is_some()
+        && matches!(&result,Ok(Some(out)) if out.code!=0)
+        && started.elapsed() < timeout
     {
-        let left = timeout.saturating_sub(started.elapsed());
-        result = if left.is_zero() {
-            Ok(None)
-        } else {
-            tokio::time::timeout(left, run(false))
-                .await
-                .unwrap_or(Ok(None))
-        };
+        let unsupported = matches!(&result, Ok(Some(output)) if rejects_images(&output.stdout) || rejects_images(&output.stderr));
+        result = attempt(false).await;
+        if unsupported && matches!(&result, Ok(Some(output)) if output.code == 0) {
+            crate::lock(text_only_models).insert(api_model);
+        }
     }
     if let Some(dir) = temp {
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
@@ -304,6 +509,122 @@ pub async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guide_settings_and_image_title_cross_the_cli_boundary() {
+        let root =
+            std::env::temp_dir().join(format!("conn-claude-text-{}", conn_support::uuid_v4()));
+        let home = root.join("profile");
+        let project = root.join("original-project");
+        let review = root.join("review-copy");
+        for d in [&home, &project, &review] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"permissions":{"deny":["Bash(rm:*)"], "allow":["Bash(*)"]}, "env":{"KEEP":"yes"}}"#,
+        )
+        .unwrap();
+        std::fs::write(project.join("model.json"),r#"{"permissions":{"deny":["Read(/private)"],"allow":["Edit(*)"]},"env":{"PROJECT":"yes"}}"#).unwrap();
+        let program = root.join("fixture");
+        std::fs::write(&program, r#"#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const arg = (name) => args[args.indexOf(name)+1];
+const settings = arg("--settings"), file = !settings.startsWith("{");
+const raw = fs.readFileSync(0, "utf8");
+const entry = {args,settings: JSON.parse(file?fs.readFileSync(settings,"utf8"):settings),mode:file?fs.statSync(settings).mode & 511:null,input:raw, cwd:process.cwd()};
+fs.appendFileSync(process.env.TEST_INPUTS, JSON.stringify(entry)+"\n");
+if (args.includes("--input-format") && process.env.TEXT_ONLY === "1") {console.error("unsupported image input");process.exit(1);}
+if (args.includes("--input-format")) console.log(JSON.stringify({type:"system"}));
+console.log(JSON.stringify({type:"result",structured_output:{title:"test"}}));
+"#).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let image = root.join("title.png");
+        std::fs::write(&image, b"image").unwrap();
+        let log = root.join("log");
+        let mut env = conn_support::login_env::child_env();
+        env.push(("TEST_INPUTS".into(), log.to_string_lossy().into_owned()));
+        let mut config = crate::launch::ClaudeConfig {
+            home_path: Some(home),
+            launch_args: "--settings model.json".into(),
+            ..Default::default()
+        };
+        let cache = TextOnlyModels::default();
+        let request = |guide: bool| TextGenerationRequest {
+            operation: if guide {
+                "generateReviewGuide"
+            } else {
+                "generateThreadTitle"
+            }
+            .into(),
+            cwd: review.to_string_lossy().into_owned(),
+            project_cwd: Some(project.to_string_lossy().into_owned()),
+            prompt: "describe".into(),
+            output_schema: "{}".into(),
+            model_selection: conn_contract::from_json(
+                json!({"instanceId":"claudeAgent","model":"claude-haiku-4-5"}),
+            )
+            .unwrap(),
+            image_paths: if guide { vec![] } else { vec![image.clone()] },
+            timeout: Some(Duration::from_secs(8)),
+            investigate: guide,
+        };
+        let program = program.to_str().unwrap();
+        generate(program, &env, &config, &cache, false, request(true))
+            .await
+            .unwrap();
+        config.launch_args.clear();
+        generate(program, &env, &config, &cache, false, request(false))
+            .await
+            .unwrap();
+        env.push(("TEXT_ONLY".into(), "1".into()));
+        generate(program, &env, &config, &cache, false, request(false))
+            .await
+            .unwrap();
+        generate(program, &env, &config, &cache, false, request(false))
+            .await
+            .unwrap();
+        let rows: Vec<Value> = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        let guide = &rows[0];
+        assert_eq!(
+            guide["settings"]["permissions"],
+            json!({"deny":["Bash(rm:*)","Read(/private)"]})
+        );
+        assert_eq!(
+            guide["settings"]["env"],
+            json!({"KEEP":"yes","PROJECT":"yes"})
+        );
+        assert_eq!(guide["mode"], 0o600);
+        let args = guide["args"].as_array().unwrap();
+        for (key, value) in [
+            ("--setting-sources", ""),
+            ("--allowedTools", INVESTIGATION_ALLOWED),
+            ("--permission-mode", "dontAsk"),
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == key && pair[1] == value),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            rows.len(),
+            5,
+            "successful image run, image rejection with one fallback, then cached text-only model"
+        );
+        let user: Value = serde_json::from_str(rows[1]["input"].as_str().unwrap()).unwrap();
+        assert_eq!(user["message"]["content"][1]["source"]["data"], "aW1hZ2U=");
+        assert_eq!(rows[3]["input"], "describe");
+        assert_eq!(rows[4]["input"], "describe");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn the_answer_is_the_structured_output() {

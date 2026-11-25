@@ -842,6 +842,41 @@ fn latest_open_follow_up(
         .map(|_| latest))
 }
 
+/// A native goal's Stop hook reads the current delegated work and owner disposition.
+pub(crate) fn delegated_task_will_wake(tx: &Tx<'_>, tid: &str) -> StoreResult<bool> {
+    let Some(thread) = tx.thread(tid)? else {
+        return Ok(false);
+    };
+    if !thread["archivedAt"].is_null() || !thread["deletedAt"].is_null() {
+        return Ok(false);
+    }
+    for task in tx.entities(tid, "subagents")? {
+        if task["origin"] != "app_owned"
+            || !matches!(
+                task["status"].as_str(),
+                Some("running" | "waiting" | "pending")
+            )
+            || matches!(
+                task["completionDelivery"]["state"].as_str(),
+                Some("disposed" | "delivered" | "acknowledged")
+            )
+        {
+            continue;
+        }
+        if let Some(id) = task["runId"].as_str()
+            && tx.entity(tid, "runs", id)?.is_some_and(|run| {
+                run["delegatedCompletion"]["disposition"]
+                    .as_str()
+                    .unwrap_or("open")
+                    == "open"
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Wakes `thread_id` with one message naming every finished task still `pending`. A task
 /// with `settled_only` waits while the thread has an active run, unless `settled` says the
 /// run just ended.
@@ -915,12 +950,19 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
     // child's second turn never overwrites the parent's first completion message.
     let ordinal = tx.next_run_ordinal(thread_id)?;
     let command_id = format!("delegated-completion:{first}:{ordinal}");
+    let mut mode = json!({"type": "queue_after_active"});
+    if busy
+        && let Some(run) = active_run(tx, thread_id)?
+        && commands::can_steer_delegated_wake(tx, thread_id, &run)?
+    {
+        mode = json!({"type": "steer_active", "targetRunId":run["id"]});
+    }
     match dispatch(
         tx,
         json!({
             "type": "message.dispatch", "commandId": command_id, "threadId": thread_id,
             "messageId": format!("message:{command_id}"), "text": parts.join("\n\n"),
-            "attachments": [], "dispatchMode": {"type": "queue_after_active"},
+            "attachments": [], "dispatchMode": mode,
             "createdBy": "agent", "creationSource": "server",
         }),
     ) {

@@ -30,7 +30,26 @@ pub struct ProjectConfig {
 }
 
 /// T3's `DEFAULT_IDLE_TIMEOUT_MS`.
-pub const DEFAULT_IDLE_SESSION: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_IDLE_SESSION: Duration = Duration::from_secs(2 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IdleTimeout {
+    #[default]
+    ProviderDefault,
+    After(Duration),
+    Disabled,
+}
+
+impl IdleTimeout {
+    pub(crate) fn duration(self, native_resume: bool) -> Option<Duration> {
+        match self {
+            Self::ProviderDefault if native_resume => Some(DEFAULT_IDLE_SESSION),
+            Self::ProviderDefault => Some(Duration::from_secs(30 * 60)),
+            Self::After(duration) => Some(duration),
+            Self::Disabled => None,
+        }
+    }
+}
 
 pub struct EngineConfig {
     /// The SQLite file. Created when missing.
@@ -43,9 +62,8 @@ pub struct EngineConfig {
     /// The server's shared, changing list of instances. When set, it replaces `providers`.
     pub provider_set: Option<conn_provider::ProviderSet>,
     /// A provider session with no turn for this long is closed, ending its process (a
-    /// `claude` child holds about 140 MiB). Default 30 minutes, as T3's session manager;
-    /// `None` keeps sessions open.
-    pub idle_session: Option<Duration>,
+    /// `claude` child holds about 140 MiB). By default a native-resumable session closes after two minutes, others after thirty.
+    pub idle_session: IdleTimeout,
     /// How long background work (a background subagent) may keep an idle session open past
     /// `idle_session`. Default 4 hours, as T3.
     pub idle_max_hold: Duration,
@@ -150,7 +168,7 @@ impl EngineConfig {
             projects: vec![],
             providers: vec![],
             provider_set: None,
-            idle_session: Some(DEFAULT_IDLE_SESSION),
+            idle_session: IdleTimeout::ProviderDefault,
             idle_max_hold: Duration::from_secs(4 * 60 * 60),
             launch_grace: Duration::from_secs(10),
             host: None,
@@ -317,7 +335,7 @@ pub(crate) struct Inner {
     /// [`EngineConfig::clock`].
     pub(crate) clock: Arc<dyn crate::Clock>,
     /// [`EngineConfig::idle_session`].
-    pub(crate) idle_session: Option<Duration>,
+    pub(crate) idle_session: IdleTimeout,
     /// Raised when outbox rows may be claimable (`outbox.rs`); the effect worker waits on it.
     pub(crate) effects_wake: Arc<tokio::sync::Notify>,
     /// The effect worker started ([`Inner::ensure_effect_worker`]).
@@ -507,6 +525,7 @@ impl SqliteEngine {
         tx.enqueue(None, &effects)?;
         tx.commit(None)?;
         let notify = store.published.clone();
+        let limit_recovery_wake = store.limit_recovery_wake.clone();
         let engine = Self {
             inner: Arc::new(Inner {
                 store: Arc::new(Mutex::new(store)),
@@ -550,11 +569,12 @@ impl SqliteEngine {
         };
         // The reaper starts on the caller's runtime; `open` never blocks.
         if tokio::runtime::Handle::try_current().is_ok()
-            && let Some(idle) = config.idle_session
+            && let Some(minimum) = config.idle_session.duration(true)
         {
             let inner = Arc::downgrade(&engine.inner);
+            let idle = config.idle_session;
             tokio::spawn(async move {
-                let every = (idle / 2).max(Duration::from_millis(10));
+                let every = (minimum / 2).max(Duration::from_millis(10));
                 loop {
                     tokio::time::sleep(every).await;
                     // The engine is gone: stop.
@@ -564,6 +584,7 @@ impl SqliteEngine {
             });
         }
         engine.inner.ensure_effect_worker();
+        crate::limit_recovery::start(&engine.inner, limit_recovery_wake);
         Ok(engine)
     }
 
@@ -845,9 +866,7 @@ impl SqliteEngine {
     /// [`crate::ManualClock`] calls it after it moves the clock, as T3's `TestClock.adjust`
     /// wakes T3's idle release.
     pub async fn release_idle_sessions(&self) {
-        if let Some(idle) = self.inner.idle_session {
-            self.inner.reap_idle(idle).await;
-        }
+        self.inner.reap_idle(self.inner.idle_session).await;
     }
 
     /// One page of the whole event log after `after`, oldest first, as
@@ -1543,11 +1562,46 @@ impl Inner {
             Effect::CaptureCheckpoint { thread_id, run_id } => {
                 self.capture_run(thread_id, run_id).await;
             }
+            Effect::RenameThread { thread_id, title } => {
+                if let Some(live) = self.live_thread(&thread_id) {
+                    match live.session().rename_thread(title).await {
+                        Ok(()) | Err(conn_provider::ProviderError::Unsupported { .. }) => {}
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+            }
+            Effect::StopSubagent {
+                thread_id,
+                provider_session_id,
+                provider_thread,
+                task_id,
+            } => {
+                let live = self
+                    .live_thread(&thread_id)
+                    .filter(|live| {
+                        live.session().provider_session_id().as_str() == provider_session_id
+                    })
+                    .ok_or_else(|| {
+                        "The requested native subagent has no owning provider session.".to_owned()
+                    })?;
+                live.session()
+                    .stop_task(conn_provider::StopTaskInput {
+                        provider_thread: serde_json::from_value(provider_thread)
+                            .map_err(|e| e.to_string())?,
+                        task_id,
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             Effect::Steer {
                 thread_id,
                 run_id,
                 message_id,
-            } => self.steer(thread_id, run_id, message_id).await,
+                model_selection,
+            } => {
+                self.steer(thread_id, run_id, message_id, model_selection)
+                    .await
+            }
             Effect::Interrupt { thread_id, run_id } => self.interrupt(thread_id, run_id).await,
             Effect::AbandonStart { thread_id, run_id } => {
                 self.abandon_start(&thread_id, &run_id).await;

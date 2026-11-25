@@ -1428,6 +1428,7 @@ builder with a test that fails without the fix.
 - **Release `conn-server-v0.5.0`**: sessions that last until revoked, `clients/extend` and self `logout` (#336), the T3-parity audit fixes (#266-#332), and a Developer-ID-signed macOS app in each release (#334); the version bump is its own PR.
 - **Release `conn-server-v0.5.1`**: existing peer links extend themselves to until-revoked, with no re-pair (#338); the version bump is its own PR.
 - **Release `conn-server-v0.5.2`**: filing General threads under Orbit projects (#351), native thread-card server support (#352), Zed PHP navigation (#343), and upload and recording fixes (#331, #346); the version bump is its own PR.
+- **Release `conn-server-v0.5.3`**: Claude Code, Codex, Grok and Antigravity aligned with upstream T3, including the Codex MCP sign-in fixes (#358); the version bump is its own PR.
 
 ## Partly followed to Conn `444f032be7` (the 2026-11-18 sync)
 
@@ -2738,7 +2739,7 @@ Not built, with the reason:
 
 - **The Codex status probe.** Built on 2026-11-15 (see "Codex: the abandoned start and the
   status probe"), with Codex's `customModels`.
-- Claude's `customModels` and `autoCompactWindow`, Codex's `shadowHomePath` and `setupMode`
+- Codex's `shadowHomePath` and `setupMode`
   (T3's managed Codex home).
 - More than one instance of Grok (its default instance follows its settings as before).
 
@@ -3198,9 +3199,8 @@ T3 Code.
 2. **Provider interface.** The server side of the host handle
    (`ProviderHost`: only the trait and a rooted file host exist; no terminals, and the
    server passes none); titles through an agent provider (see
-   "Claude provider: background work, …"); Claude's workflow tasks and `stopTask`; Claude's
-   `customModels` and `autoCompactWindow` (see "Provider instance settings for Claude and
-   Codex"). The Codex status probe and Codex's `customModels` are built (2026-11-15).
+   "Claude provider: background work, …"); Claude's workflow tasks and `stopTask`. Claude instance
+   settings now apply `customModels` and `autoCompactWindow`. The Codex status probe and Codex's `customModels` are built (2026-11-15).
 3. **Other providers.** One ACP provider for Grok, Kiro, fx, Antigravity and the ACP registry:
    `crates/conn-provider-acp`. **Grok is offered by the server (2026-11-14):** T3's default
    `grok` instance, off until `providerInstances.grok` enables it, probed as T3 probes the CLI

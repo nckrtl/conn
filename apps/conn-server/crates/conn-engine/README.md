@@ -96,10 +96,9 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   `a_restart_finishes_or_fails_a_rollback_left_pending`.
 - **Fork** (`src/fork.rs`). `thread.fork` makes the fork thread and a pending `fork` transfer
   (`ThreadForkService.plan`). Its first turn forks the source's native thread from the source
-  run's turn (`Session::fork_thread`) and consumes the transfer (`native_fork`). T3's portable
-  path (a `full_thread_summary` handoff when the fork cannot be native, or after a failed
-  native fork) is not built: such a message is refused, and a failed native fork fails the
-  turn.
+  run's turn (`Session::fork_thread`) and consumes the transfer. If the provider cannot fork or
+  declines the native request, the first turn receives the visible parent history through the
+  selected run. Side chats receive a bounded digest of parent activity on their first prompt.
 - **T3 state import** (`src/t3_import.rs`). `import_t3_state` builds `engine.sqlite` once
   from a T3 server's `statev2.sqlite` in the same folder: projects, threads and every
   projection row with its id and body, read-only from T3's file, renamed into place when

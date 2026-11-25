@@ -12,9 +12,13 @@
 //! monorepo. See `README.md` for what is ported, what is not, and the proofs.
 
 mod antigravity;
+mod antigravity_edits;
+mod antigravity_outcome;
 mod antigravity_provider;
+mod antigravity_work;
 mod connection;
 mod diff;
+mod elicitation;
 pub mod flavor;
 mod grok;
 mod grok_background;
@@ -27,6 +31,8 @@ mod policy;
 mod prompt;
 mod protocol;
 mod session;
+mod snapshot;
+mod text_generation;
 mod tools;
 
 #[cfg(test)]
@@ -147,6 +153,11 @@ pub(crate) async fn initialize_probe(
     }
 }
 
+/// A T3 replay step releases the actual deferred-finalize timer the adapter scheduled.
+#[cfg(feature = "fixture-replay")]
+pub type DeferredFinalizeGate =
+    tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>;
+
 /// One configured ACP agent instance.
 #[derive(Clone, Debug)]
 pub struct AcpConfig {
@@ -166,6 +177,8 @@ pub struct AcpConfig {
     /// this long after the last change. Replays of T3's fixtures shorten it, as T3's test
     /// clock skips it.
     pub finalize_debounce: Duration,
+    #[cfg(feature = "fixture-replay")]
+    pub deferred_finalize_gate: Option<DeferredFinalizeGate>,
     /// The executable an agent starts for the stdio MCP bridge (`<it> acp-mcp-bridge`);
     /// `None`: this process's own executable (T3's `resolveSelfInvocation`).
     pub self_command: Option<String>,
@@ -182,6 +195,8 @@ impl Default for AcpConfig {
             workspace_cwd: None,
             text_flush_interval: Some(session::FLUSH_INTERVAL),
             finalize_debounce: session::FINALIZE_DEBOUNCE,
+            #[cfg(feature = "fixture-replay")]
+            deferred_finalize_gate: None,
             self_command: None,
             attachments_dir: None,
         }
@@ -405,15 +420,37 @@ impl Provider for AcpProvider {
         defer: bool,
     ) -> BoxFuture<'_, bool> {
         Box::pin(async move {
-            // `shouldRefreshOnInterval`: a disabled instance has nothing to probe.
-            if !lock(&self.status).entry["enabled"]
-                .as_bool()
-                .unwrap_or(false)
-            {
-                return false;
-            }
             let settings = GrokSettings::from_instance(instance.as_ref());
+            {
+                let status = lock(&self.status);
+                if status.settings == settings
+                    && (!settings.enabled || status.entry["status"] == "ready")
+                {
+                    return false;
+                }
+            }
             self.probe(settings, defer).await
+        })
+    }
+
+    fn generate_text(
+        &self,
+        request: conn_provider::TextGenerationRequest,
+    ) -> BoxFuture<'_, ProviderResult<serde_json::Value>> {
+        Box::pin(async move {
+            if !self.settings().enabled || request.investigate {
+                return Err(ProviderError::Unsupported {
+                    operation: "generate_text",
+                });
+            }
+            let cwd = request.cwd.clone();
+            text_generation::Helper {
+                spawner: process_spawner(self.launch(Some("approval-required")), cwd.clone()),
+                cwd,
+                antigravity: None,
+            }
+            .generate(request)
+            .await
         })
     }
 
@@ -435,11 +472,13 @@ impl Provider for AcpProvider {
                     .unwrap_or_default()
             });
             let runtime_mode = launch_runtime_mode(&input);
-            let launch = self.launch(Some(&runtime_mode));
+            let mut launch = self.launch(Some(&runtime_mode));
             let policy = to_json(&input.runtime_policy);
             let config = session::Config {
                 flush_interval: self.config.text_flush_interval,
                 finalize_debounce: self.config.finalize_debounce,
+                #[cfg(feature = "fixture-replay")]
+                deferred_finalize_gate: self.config.deferred_finalize_gate.clone(),
                 flavor: self.flavor,
                 instance_id: self.instance_id.as_str().to_owned(),
                 provider_session_id: input.provider_session_id.as_str().to_owned(),
@@ -460,6 +499,15 @@ impl Provider for AcpProvider {
                 auth_method: None,
                 runtime_version: None,
                 default_model: None,
+                profile: None,
+                skill_cli: Some((launch.program.clone(), {
+                    let mut env = conn_support::login_env::child_env();
+                    for (k, v) in &launch.env {
+                        env.retain(|(name, _)| name != k);
+                        env.push((k.clone(), v.clone()));
+                    }
+                    env
+                })),
                 observer: None,
                 self_command: self.config.self_command.clone().unwrap_or_else(|| {
                     std::env::current_exe()
@@ -467,6 +515,12 @@ impl Provider for AcpProvider {
                         .unwrap_or_default()
                 }),
             };
+            session::apply_thread_environment(
+                &mut launch.env,
+                input.thread_id.as_str(),
+                &config.mcp_servers,
+                &config.self_command,
+            );
             let (tx, events) = mpsc::channel(session::EVENT_CAPACITY);
             let (session, _) = AcpSession::open(
                 config,
@@ -476,6 +530,7 @@ impl Provider for AcpProvider {
             )
             .await?;
             let now = SystemEnv.now();
+            session.bind_thread(input.thread_id.as_str()).await;
             let row = json!({
                 "id": input.provider_session_id.as_str(),
                 "driver": self.flavor.driver,
@@ -483,7 +538,7 @@ impl Provider for AcpProvider {
                 "status": "ready",
                 "cwd": cwd,
                 "model": to_json(&input.model_selection)["model"],
-                "capabilities": (self.flavor.capabilities)(),
+                "capabilities": session.negotiated_capabilities((self.flavor.capabilities)()).await,
                 "createdAt": now,
                 "updatedAt": now,
                 "lastError": null,
@@ -519,7 +574,17 @@ pub mod testing {
         TurnInput {
             native_thread_has_turns: v["nativeThreadHasTurns"].as_bool(),
             restart_continuation_of_run_id: None,
-            app_context: vec![],
+            app_context: v["appContext"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    Some(conn_provider::AppContextEntry {
+                        key: e["key"].as_str()?.into(),
+                        text: e["text"].as_str()?.into(),
+                    })
+                })
+                .collect(),
             app_thread: field(&v["appThread"]),
             thread_id: field(&v["threadId"]),
             run_id: field(&v["runId"]),
@@ -537,7 +602,7 @@ pub mod testing {
             message: TurnMessage {
                 message_id: field(&message["messageId"]),
                 text: message["text"].as_str().unwrap_or("").to_owned(),
-                attachments: vec![],
+                attachments: message.get("attachments").map(field).unwrap_or_default(),
                 created_by: field(&message["createdBy"]),
                 creation_source: field(&message["creationSource"]),
                 scheduled_task_id: None,

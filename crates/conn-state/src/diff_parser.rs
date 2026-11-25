@@ -37,6 +37,7 @@ pub struct DiffFile {
     pub additions: usize,
     pub deletions: usize,
     pub is_binary: bool,
+    pub is_approximate: bool,
     /// The blob hashes and mode of git's `index <old>..<new> <mode>` header line, when the diff
     /// has one. They change with the content, so a binary or a mode-only change has an identity.
     pub index: Option<String>,
@@ -81,6 +82,7 @@ pub fn parse_unified_diff(patch: &str) -> Vec<DiffFile> {
                 additions: 0,
                 deletions: 0,
                 is_binary: false,
+                is_approximate: false,
                 index: None,
                 hunks: Vec::new(),
             });
@@ -98,12 +100,13 @@ pub fn parse_unified_diff(patch: &str) -> Vec<DiffFile> {
                     additions: 0,
                     deletions: 0,
                     is_binary: false,
+                    is_approximate: false,
                     index: None,
                     hunks: Vec::new(),
                 });
             }
             if let Some(file) = current_file.as_mut() {
-                file.old_path = clean_diff_path(path);
+                file.old_path = clean_diff_path(path, "a/");
             }
             continue;
         }
@@ -112,21 +115,21 @@ pub fn parse_unified_diff(patch: &str) -> Vec<DiffFile> {
             && let Some(path) = line.strip_prefix("+++ ")
         {
             if let Some(file) = current_file.as_mut() {
-                file.new_path = clean_diff_path(path);
+                file.new_path = clean_diff_path(path, "b/");
             }
             continue;
         }
 
         if let Some(renamed_from) = line.strip_prefix("rename from ") {
             if let Some(file) = current_file.as_mut() {
-                file.old_path = Some(renamed_from.to_owned());
+                file.old_path = Some(decode_git_path(renamed_from, ""));
             }
             continue;
         }
 
         if let Some(renamed_to) = line.strip_prefix("rename to ") {
             if let Some(file) = current_file.as_mut() {
-                file.new_path = Some(renamed_to.to_owned());
+                file.new_path = Some(decode_git_path(renamed_to, ""));
             }
             continue;
         }
@@ -207,27 +210,89 @@ pub fn parse_unified_diff(patch: &str) -> Vec<DiffFile> {
     files
 }
 
-fn clean_diff_path(raw: &str) -> Option<String> {
-    let trimmed = raw.split('\t').next().unwrap_or(raw).trim();
-    if trimmed == "/dev/null" || trimmed.is_empty() {
+fn clean_diff_path(raw: &str, prefix: &str) -> Option<String> {
+    let token = raw.split('\t').next().unwrap_or(raw);
+    (!token.is_empty() && token != "/dev/null").then(|| decode_git_path(token, prefix))
+}
+
+fn decode_git_path(token: &str, prefix: &str) -> String {
+    let Some(body) = token.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+        return token.strip_prefix(prefix).unwrap_or(token).to_owned();
+    };
+    let body = body.strip_prefix(prefix).unwrap_or(body);
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut input = body.as_bytes();
+    while let [first, rest @ ..] = input {
+        match input {
+            [
+                b'\\',
+                a @ b'0'..=b'3',
+                b @ b'0'..=b'7',
+                c @ b'0'..=b'7',
+                tail @ ..,
+            ] => {
+                bytes.push((a - b'0') * 64 + (b - b'0') * 8 + (c - b'0'));
+                input = tail;
+            }
+            [b'\\', escaped, tail @ ..] => {
+                let byte = match escaped {
+                    b'"' | b'\\' => *escaped,
+                    b'a' => 7,
+                    b'b' => 8,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 11,
+                    b'f' => 12,
+                    b'r' => b'\r',
+                    _ => {
+                        bytes.push(b'\\');
+                        *escaped
+                    }
+                };
+                bytes.push(byte);
+                input = tail;
+            }
+            _ => {
+                bytes.push(*first);
+                input = rest;
+            }
+        }
+    }
+    String::from_utf8(bytes)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
+fn git_header_separator(rest: &str) -> Option<usize> {
+    if rest.starts_with('"') {
+        let mut bytes = rest.bytes().enumerate().skip(1);
+        while let Some((i, byte)) = bytes.next() {
+            match byte {
+                b'\\' => {
+                    bytes.next();
+                }
+                b'"' => return Some(i + 1),
+                _ => {}
+            }
+        }
         return None;
     }
-    let unquoted = trimmed
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(trimmed);
-    let stripped = unquoted
-        .strip_prefix("a/")
-        .or_else(|| unquoted.strip_prefix("b/"))
-        .unwrap_or(unquoted);
-    Some(stripped.to_owned())
+    // Unquoted names can contain " b/". Equal old and new names identify the separator.
+    rest.find(" \"")
+        .or_else(|| {
+            rest.match_indices(" b/")
+                .map(|(i, _)| i)
+                .find(|&i| rest[..i].strip_prefix("a/") == Some(&rest[i + 3..]))
+        })
+        .or_else(|| rest.find(" b/"))
+        .or_else(|| rest.find(' '))
 }
 
 fn parse_git_header_paths(rest: &str) -> (Option<String>, Option<String>) {
-    let mut parts = rest.split_whitespace();
-    let old_p = parts.next().and_then(clean_diff_path);
-    let new_p = parts.next().and_then(clean_diff_path);
-    (old_p, new_p)
+    let (old, new) = rest.split_at(git_header_separator(rest).unwrap_or(rest.len()));
+    (
+        clean_diff_path(old, "a/"),
+        new.strip_prefix(' ').and_then(|s| clean_diff_path(s, "b/")),
+    )
 }
 
 fn resolve_display_path(old_path: Option<&str>, new_path: Option<&str>) -> String {
@@ -386,5 +451,21 @@ Binary files a/old.png and b/new.png differ
             "renamed file display path"
         );
         assert!(files[0].is_binary, "binary flag should be set");
+    }
+
+    #[test]
+    fn decodes_quoted_paths_in_header_only_and_rename_diffs() {
+        let patch = r#"diff --git "a/caf\303\251 \"v2\".png" "b/caf\303\251 \"v2\".png"
+Binary files differ
+diff --git a/plain "b/b/quoted\tname"
+similarity index 100%
+rename from plain
+rename to "b/quoted\tname"
+"#;
+        let files = parse_unified_diff(patch);
+        assert_eq!(files[0].old_path.as_deref(), Some("café \"v2\".png"));
+        assert_eq!(files[0].new_path, files[0].old_path);
+        assert_eq!(files[1].old_path.as_deref(), Some("plain"));
+        assert_eq!(files[1].new_path.as_deref(), Some("b/quoted\tname"));
     }
 }

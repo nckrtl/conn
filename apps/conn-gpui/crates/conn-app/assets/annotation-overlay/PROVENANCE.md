@@ -1,7 +1,7 @@
 # Conn Annotation Overlay (`inject.js`)
 
-- **Source:** `../conn-annotation-first-dictation/packages/annotation-overlay/dist/inject.js`
-- **Commit:** `ab68a8de0e` (`fix(annotations): keep the popup out of screenshots, and dictate in a tab's first guest`, 2026-11-19)
+- **Source:** `packages/annotation-overlay/dist/inject.js`, built with `vp build` in `packages/annotation-overlay`
+- **Source commit:** `52495101c64fac136e5f9afcfba0969b191fa10a`
 - **Package:** `@t3tools/annotation-overlay` (`vite.config.ts` self-contained IIFE)
 
 ## Bridge contract expected by `inject.js`

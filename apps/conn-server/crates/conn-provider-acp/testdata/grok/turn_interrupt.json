@@ -1,5 +1,5 @@
 {
- "note": "ProviderAdapterV2 calls and events from T3's grok adapter replaying fixtures/turn_interrupt/grok_transcript.ndjson through the orchestrator fixture runner at 328fe32fd0; driver dropped.",
+ "note": "ProviderAdapterV2 calls and events from T3's grok adapter replaying fixtures/turn_interrupt/grok_transcript.ndjson through the orchestrator fixture runner at 328fe32fd0; driver dropped. Thread usage projections captured separately from T3 16acd71825.",
  "capturedOn": "2026-11-22",
  "outcome": "passed",
  "gates": [],
@@ -2064,7 +2064,9 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 2263
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },
@@ -2116,7 +2118,9 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 2263
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },

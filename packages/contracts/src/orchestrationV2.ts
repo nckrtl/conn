@@ -300,6 +300,8 @@ export const OrchestrationV2TurnCapabilities = Schema.Struct({
   emitsTurnStarted: Schema.Boolean,
   emitsTurnCompleted: Schema.Boolean,
   supportsInterrupt: Schema.Boolean,
+  // Absent on sessions recorded before providers declared native resume support.
+  supportsNativeResume: Schema.optional(Schema.Boolean),
   supportsActiveSteering: Schema.Boolean,
   // Some native steering mechanisms cancel pending tools before consuming the message.
   activeSteeringInterruptsTools: Schema.optional(Schema.Boolean),
@@ -1608,6 +1610,9 @@ export type OrchestrationV2UserMessageInputIntent =
 /** Notices without a level predate it and are warnings. */
 const OrchestrationV2SystemNoticeLevel = Schema.Literals(["info", "warning", "error"]);
 
+/** A notice about an MCP server that a sign-in from the thread would fix. */
+const OrchestrationV2McpSignIn = Schema.Struct({ server: Schema.String });
+
 /** A same-harness model or effort change that took effect with this message. */
 export const OrchestrationV2ModelSwitch = Schema.Struct({
   from: ModelSelection,
@@ -1857,6 +1862,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     type: Schema.Literal("system_notice"),
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
+    mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2754,6 +2760,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     type: Schema.Literal("system_notice"),
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
+    mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

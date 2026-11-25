@@ -1,5 +1,5 @@
 {
- "note": "ProviderAdapterV2 calls and events from T3's grok adapter replaying fixtures/todo_list/grok_transcript.ndjson through the orchestrator fixture runner at 328fe32fd0; driver dropped.",
+ "note": "ProviderAdapterV2 calls and events from T3's grok adapter replaying fixtures/todo_list/grok_transcript.ndjson through the orchestrator fixture runner at 328fe32fd0; driver dropped. Thread usage projections captured separately from T3 16acd71825.",
  "capturedOn": "2026-11-22",
  "outcome": "passed",
  "gates": [],
@@ -12274,7 +12274,39 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 2263
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 2680
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2
     },
@@ -12448,6 +12480,36 @@
     "messageId": "message:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Aassistant%3A0",
     "text": "I'll",
     "streaming": true
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 22768
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
    }
   },
   {
@@ -12685,6 +12747,36 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 22820
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Areasoning%3A1",
@@ -12754,7 +12846,40 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 22820
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 23068
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2,
      "title": "Three-step plan inspect package.json tsconfig.json"
@@ -13085,6 +13210,37 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 23120
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Atool%3Acall-30b045aa-32fd-4c38-8271-33bae722ed1d-2",
@@ -13142,6 +13298,37 @@
       "absolute_root_path": "<workspace>"
      }
     }
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 23140
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
    }
   },
   {
@@ -13310,6 +13497,37 @@
     "messageId": "message:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Aassistant%3A1",
     "text": "The",
     "streaming": true
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 23996
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
    }
   },
   {
@@ -14044,6 +14262,37 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24034
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Atool%3Acall-9377c9cb-a627-401d-a535-f88b6c67dd74-6",
@@ -14109,6 +14358,37 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24038
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Atool%3Acall-9377c9cb-a627-401d-a535-f88b6c67dd74-4",
@@ -14164,6 +14444,37 @@
      "type": "ReadFile",
      "FileNotFound": "Error: <workspace>/package.json does not exist.\nNote: your current working directory is <workspace>"
     }
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24090
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
    }
   },
   {
@@ -14225,6 +14536,37 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24142
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Areasoning%3A3",
@@ -14272,6 +14614,37 @@
     "type": "reasoning",
     "text": "The",
     "streaming": true
+   }
+  },
+  {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24357
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
    }
   },
   {
@@ -14670,6 +15043,37 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24396
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Areasoning%3A4",
@@ -14838,6 +15242,37 @@
    }
   },
   {
+   "type": "provider_thread.updated",
+   "providerThread": {
+    "id": "provider-thread:provider:grok:native-thread:pending%3Arun%3Athread%3Athread%253Afixture%253Atodo_list%253Aproject%253Aproject%25253Afixture%25253Atodo_list%25253Af2604e9d-55b7-45de-a716-838867faae7e%253A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7%3Aordinal%3A1",
+    "driver": "grok",
+    "providerInstanceId": "grok",
+    "providerSessionId": "provider-session:provider-instance:grok:thread:thread%3Afixture%3Atodo_list%3Aproject%3Aproject%253Afixture%253Atodo_list%253Af2604e9d-55b7-45de-a716-838867faae7e%3A0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7:ea50ea93-b0ab-4c77-a9e4-4fcde38dabb3",
+    "appThreadId": "thread:fixture:todo_list:project:project%3Afixture%3Atodo_list%3Af2604e9d-55b7-45de-a716-838867faae7e:0f2eb5a3-17c3-45d8-831a-e78b17f6c3d7",
+    "ownerNodeId": null,
+    "nativeThreadRef": {
+     "driver": "grok",
+     "nativeId": "00000000-0000-4000-8000-000000000001",
+     "strength": "strong"
+    },
+    "nativeConversationHeadRef": null,
+    "status": "active",
+    "firstRunOrdinal": 1,
+    "lastRunOrdinal": 1,
+    "handoffIds": [],
+    "forkedFrom": null,
+    "contextUsage": {
+     "usedTokens": 24428
+    },
+    "nativeMetadata": {
+     "itemIdentityVersion": 2,
+     "title": "Three-step plan inspect package.json tsconfig.json"
+    },
+    "createdAt": "1970-01-01T00:00:00.001Z",
+    "updatedAt": "1970-01-01T00:00:00.002Z"
+   }
+  },
+  {
    "type": "node.updated",
    "node": {
     "id": "node:provider:grok:native-item:provider-instance%3Agrok%3A00000000-0000-4000-8000-000000000001%3Aturn%3A1%3Aassistant%3A2",
@@ -14949,7 +15384,9 @@
     "lastRunOrdinal": 1,
     "handoffIds": [],
     "forkedFrom": null,
-    "contextUsage": null,
+    "contextUsage": {
+     "usedTokens": 24428
+    },
     "nativeMetadata": {
      "itemIdentityVersion": 2,
      "title": "Three-step plan inspect package.json tsconfig.json"

@@ -74,6 +74,23 @@ const SCENARIOS = [
   { name: "version-fails", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: { version: { code: 1, stdout: "2.1.300\n", stderr: "boom\n" } } },
   { name: "version-hangs", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: { version: { hang: true } } },
   { name: "old-cli", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: { ...signedIn(PRO), version: ok("2.1.200") } },
+  {
+    name: "custom-models",
+    instance: { driver: "claudeAgent", config: { customModels: [
+      "sonnet", " sonnet ", { slug: "claude-sonnet-4-6", name: "Team Sonnet" },
+      { slug: "gateway-model-x", name: "Orbit model", capabilities: { optionDescriptors: [
+        { id: "fastMode", type: "boolean", label: "Fast Mode", currentValue: true },
+      ] } },
+    ] } },
+    binary: "stub", behaviour: signedIn(PRO),
+  },
+  {
+    name: "title-custom-alias",
+    instance: { driver: "claudeAgent", config: { customModels: ["sonnet"] } },
+    binary: "stub",
+    title: { message: "Add dark mode", modelSelection: { instanceId: "claudeAgent", model: "sonnet" } },
+    behaviour: { title: [{ code: 0, stdout: JSON.stringify({ type: "result", structured_output: { title: "Dark mode", needsRefinement: false } }) }] },
+  },
   { name: "signed-in", instance: { driver: "claudeAgent" }, binary: "stub", behaviour: signedIn(PRO) },
   {
     name: "signed-out",
@@ -138,7 +155,7 @@ const SCENARIOS = [
     behaviour: { title: [{ code: 1, stdout: JSON.stringify({ is_error: true, result: "Credit balance is too low" }), stderr: "wrapper notice\n" }] },
   },
   // A review guide (`generateReviewGuide`): the read-only investigation tools, the user's
-  // setting sources and the 15-minute limit, in the request's folder.
+  // permission denies and the 15-minute limit, in the request's folder.
   {
     name: "review-guide",
     instance: { driver: "claudeAgent" },
@@ -202,8 +219,19 @@ const plan = SCENARIOS.map((scenario) => {
   const dir = NodePath.join(work, scenario.name);
   const cwd = NodePath.join(dir, "state");
   NodeFS.mkdirSync(cwd, { recursive: true });
+  const guideHome = NodePath.join(dir, "guide-profile");
+  if (scenario.title?.guide) {
+    NodeFS.mkdirSync(guideHome, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(guideHome, "settings.json"), JSON.stringify({
+      env: { CONN_GUIDE_USER: "kept" }, permissions: { allow: ["Edit(*)"], deny: ["Read(/private)"] },
+    }));
+    NodeFS.writeFileSync(NodePath.join(cwd, "guide.json"), JSON.stringify({
+      env: { CONN_GUIDE_LAUNCH: "kept" }, permissions: { allow: ["Bash(*)"], deny: ["Bash(rm:*)"] },
+    }));
+  }
   const withBinary = (binary) => {
     const instance = fill(scenario.instance);
+    if (scenario.title?.guide) instance.config = { ...instance.config, homePath: guideHome, launchArgs: "--settings guide.json" };
     // `tilde`: the stub named from the throwaway HOME, as `~/../<scenario>/<side>/claude`.
     const binaryPath = scenario.tilde ? `~/${NodePath.relative(home, binary)}` : binary;
     return { ...instance, config: { ...instance.config, binaryPath } };
@@ -334,8 +362,6 @@ try {
       env: { ...sealedNodeEnv(work), HOME: home },
     },
   );
-} catch {
-  // A failed T3 run leaves entries missing; the comparison reports them.
 } finally {
   cleanup();
 }
@@ -353,7 +379,7 @@ NodeFS.writeFileSync(
 const binary = exampleBinary("conn-provider-claude", "claude_probe");
 // The example runs with a known environment, so its SDK host's is known too.
 const rustParent = { ...BASE_ENV };
-NodeChildProcess.spawnSync(binary, [planFile, rustOut], {
+NodeChildProcess.execFileSync(binary, [planFile, rustOut], {
   cwd: repoRoot,
   env: rustParent,
   stdio: ["ignore", "inherit", "inherit"],
@@ -391,10 +417,38 @@ const runs = (scenario, side, parent) => {
   const dir = NodePath.join(scenario.dir, side, "records");
   if (!NodeFS.existsSync(dir)) return [];
   return NodeFS.readdirSync(dir)
+    // The fixture replaces each numbered record atomically. Its in-progress .tmp
+    // file may still be present after a kill or while the last signal is recorded.
+    .filter((name) => /^\d+\.json$/.test(name))
     .toSorted()
     .map((f) => readJson(NodePath.join(dir, f)))
-    .map((r) => scrub({ argv: r.argv, env: r.env, cwd: r.cwd, stdin: r.stdin, signals: r.signals }, scenario, side));
+    .map((r) => scrub({ argv: r.argv, env: r.env, cwd: r.cwd, stdin: r.stdin, signals: r.signals, guide: r.guide }, scenario, side));
 };
+
+// The bundled TS guide predates T3 #41972 (16acd718). Compare each side's settings
+// transport and policy with its own contract; compare the rest of argv byte for byte.
+function checkGuide(run, side, problems) {
+  const args = [...run.argv];
+  const valueOf = (flag) => args.indexOf(flag) + 1;
+  const sources = valueOf("--setting-sources");
+  const settings = valueOf("--settings");
+  const legacy = side === "ts" && args[sources] === "user";
+  const shape = { ...run.guide };
+  delete shape.model;
+  const expected = {
+    storage: legacy ? "inline" : "file", mode: legacy ? null : 0o600, disableAllHooks: true,
+    user: !legacy, launch: true, permissionKeys: legacy ? ["allow", "deny"] : ["deny"],
+    launchGrant: legacy, deny: legacy ? ["Bash(rm:*)"] : ["Read(/private)", "Bash(rm:*)"],
+  };
+  if (!sources || !settings || args[sources] !== (legacy ? "user" : "") ||
+      JSON.stringify(canonical(shape)) !== JSON.stringify(canonical(expected))) {
+    problems.push(`${side} guide policy differs: ${JSON.stringify(shape)}; --setting-sources ${JSON.stringify(args[sources])}`);
+  }
+  // Keep compared model settings visible even though the enclosing file paths differ.
+  args[settings] = JSON.stringify(canonical(run.guide?.model));
+  args[sources] = "<validated-guide-source>";
+  return args;
+}
 
 const tsParent = readJson(tsParentEnv) ?? {};
 const ours = readJson(rustOut) ?? {};
@@ -413,6 +467,10 @@ for (const scenario of plan) {
   const connRuns = runs(scenario, "rust", rustParent);
   if (t3Runs.length !== connRuns.length) problems.push(`CLI runs: t3 ${t3Runs.length}, conn ${connRuns.length}`);
   for (let i = 0; i < Math.min(t3Runs.length, connRuns.length); i++) {
+    if (scenario.title?.guide) {
+      t3Runs[i].argv = checkGuide(t3Runs[i], "ts", problems);
+      connRuns[i].argv = checkGuide(connRuns[i], "rust", problems);
+    }
     for (const key of ["argv", "env", "cwd", "stdin", "signals"]) {
       const a = JSON.stringify(canonical(t3Runs[i][key]));
       const b = JSON.stringify(canonical(connRuns[i][key]));

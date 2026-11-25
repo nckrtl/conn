@@ -15,13 +15,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use conn_provider::{NativeCommandEvidence, NativeCommandOutput};
 use serde_json::{Value, json};
 
 use super::{Mapper, Out, content_display_text};
 use crate::flavor::BackgroundHooks;
-use crate::grok_background::{Lifecycle, ReportKind, TaskStatus};
+use crate::grok_background::{Lifecycle, TaskStatus};
 use crate::tools::{self, ToolState};
 use conn_provider_support::ids::Env;
+use conn_provider_support::notification::{Work, WorkKind, background_work_notification};
 
 /// `endedDetachedBackgroundCommandLimit`.
 const ENDED_DETACHED_KEPT: usize = 16;
@@ -41,6 +43,8 @@ pub(crate) const INJECTED_REPORT_WAIT: std::time::Duration = std::time::Duration
 pub(super) struct CommandEnd {
     status: TaskStatus,
     output: Option<String>,
+    exit_code: Option<i64>,
+    native_output: bool,
 }
 
 /// The background part of `ActiveAcpTurn`.
@@ -60,6 +64,8 @@ pub(super) struct TurnBackground {
     pending_injected_report: HashSet<String>,
     early_injected_report_observed: bool,
     pub(super) prompt_settled: bool,
+    pub(super) reply_open: bool,
+    pub(super) native_reply_pending: bool,
     pub(super) prompt_settled_status: Option<String>,
     /// `backgroundFinalizeGeneration`.
     finalize_generation: u64,
@@ -103,6 +109,9 @@ pub(super) struct SessionBackground {
     unreported: HashSet<String>,
     /// `wakeBuffer`: whole `session/update` params.
     wake_buffer: VecDeque<Value>,
+    /// Reports keyed by native task id, in arrival order, and the keys offered to the next run.
+    reports: VecDeque<(String, Work)>,
+    offered_reports: HashSet<String>,
     /// `continuationRequested`.
     continuation_requested: bool,
     /// `lastTurnRoute`: (thread id, provider thread id).
@@ -123,7 +132,11 @@ pub(super) struct SessionBackground {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Timer {
     /// `scheduleDeferredFinalize` (the debounce is the session's).
-    Finalize { turn: u64, generation: u64 },
+    Finalize {
+        turn: u64,
+        generation: u64,
+        open_reply: bool,
+    },
     /// `markAwaitingBackgroundHydration` (60 s).
     Hydration { turn: u64, task_id: String },
     /// `markPendingInjectedReport` (25 s).
@@ -167,6 +180,30 @@ fn output_text(tool: &ToolState) -> String {
 }
 
 impl<E: Env> Mapper<E> {
+    pub(crate) fn pending_background_work(&self) -> bool {
+        if self.bg.quarantined || self.bg.closed {
+            return false;
+        }
+        !self.bg.running.is_empty()
+            || self.bg.continuation_requested
+            || !self.bg.wake_buffer.is_empty()
+            || self.has_deferred_work()
+            || self.carryover.as_ref().is_some_and(|turn| {
+                turn.subagents.list.iter().any(|(_, child)| {
+                    crate::grok_background::subagent_status_blocks_settlement(child.status())
+                })
+            })
+    }
+
+    pub(crate) fn resume_deferred_turn(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.bg.prompt_settled = false;
+            turn.bg.native_reply_pending = false;
+            turn.bg.prompt_settled_status = None;
+            turn.bg.finalize_generation += 1;
+        }
+    }
+
     fn hooks(&self) -> Option<BackgroundHooks> {
         self.flavor.background
     }
@@ -255,9 +292,55 @@ impl<E: Env> Mapper<E> {
 
     /// `hasDeferredBackgroundWork`.
     pub(super) fn has_deferred_work(&self) -> bool {
+        self.blocks_settlement(false)
+    }
+
+    pub(crate) fn mark_native_reply_pending(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.bg.native_reply_pending = true;
+            turn.bg.reply_open = true;
+        }
+    }
+
+    pub(crate) fn recheck_reply(&self, timer: &Timer) -> bool {
+        matches!(timer,Timer::Finalize {turn,generation,open_reply:false}
+            if self.turn.as_ref().is_some_and(|t| t.seq==*turn && t.bg.finalize_generation==*generation && !t.interrupted) && !self.has_deferred_work())
+    }
+
+    pub(crate) fn wait_for_native_reply(&mut self) -> Vec<Out> {
+        self.mark_native_reply_pending();
+        let mut out = Vec::new();
+        self.rearm_deferred_finalize(&mut out);
+        out
+    }
+
+    /// After thirty minutes of silence, a foreground command alone no longer holds the turn.
+    pub(crate) fn expire_command_hold(&mut self) -> Vec<Out> {
+        if self.has_deferred_work() && !self.blocks_settlement(true) {
+            return self.finalize("completed", None);
+        }
+        Vec::new()
+    }
+
+    fn blocks_settlement(&self, ignore_commands: bool) -> bool {
         let Some(turn) = self.turn.as_ref() else {
             return false;
         };
+        if self.flavor.driver == "antigravity"
+            && (!self.pending.is_empty()
+                || turn.tools.values().any(|t| {
+                    open(t)
+                        && t.status.as_deref() != Some("pending")
+                        && (matches!(
+                            t.title.as_deref(),
+                            Some("Running schedule" | "Run schedule")
+                        ) || (!ignore_commands
+                            && t.kind.as_deref() == Some("execute")
+                            && t.data.get("rawInput").is_none_or(|r| r["IsDaemon"] != true)))
+                }))
+        {
+            return true;
+        }
         let bg = &turn.bg;
         if !bg.awaiting_hydration.is_empty() || !bg.pending_injected_report.is_empty() {
             return true;
@@ -297,6 +380,7 @@ impl<E: Env> Mapper<E> {
         out.push(Out::Timer(Timer::Finalize {
             turn: turn.seq,
             generation: turn.bg.finalize_generation,
+            open_reply: turn.bg.reply_open,
         }));
     }
 
@@ -305,7 +389,9 @@ impl<E: Env> Mapper<E> {
         let mut out = Vec::new();
         let current = self.turn.as_ref().map(|t| t.seq);
         match timer {
-            Timer::Finalize { turn, generation } => {
+            Timer::Finalize {
+                turn, generation, ..
+            } => {
                 let Some(t) = self.turn.as_ref() else {
                     return out;
                 };
@@ -586,8 +672,17 @@ impl<E: Env> Mapper<E> {
         for (task_id, end) in ends {
             self.finish_registered_background_tool(&task_id, end.status, end.output, out);
         }
-        if self.turn.is_some() && self.has_deferred_work() {
+        if self.has_deferred_work() {
             self.close_texts(out);
+            return true;
+        }
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|t| t.bg.native_reply_pending)
+        {
+            self.close_texts(out);
+            self.rearm_deferred_finalize(out);
             return true;
         }
         false
@@ -611,6 +706,8 @@ impl<E: Env> Mapper<E> {
         let was_requested = self.bg.continuation_requested;
         let preserve = !continuation && was_requested && !self.bg.wake_buffer.is_empty();
         if !continuation && !app_owned && !preserve {
+            self.bg.reports.clear();
+            self.bg.offered_reports.clear();
             self.bg.wake_buffer.clear();
         }
         if !preserve {
@@ -624,6 +721,10 @@ impl<E: Env> Mapper<E> {
     /// the normal update handler, the turn counts as settled, and it finalizes (or defers).
     pub(super) fn drain_continuation(&mut self, was_requested: bool, out: &mut Vec<Out>) {
         self.bg.continuation_requested = false;
+        self.bg
+            .reports
+            .retain(|(key, _)| !self.bg.offered_reports.contains(key));
+        self.bg.offered_reports.clear();
         let root = self.root_session.clone().unwrap_or_default();
         let drained: Vec<Value> = self
             .bg
@@ -672,6 +773,8 @@ impl<E: Env> Mapper<E> {
     /// `quarantineStoppedRun`: a stopped run's frames wake nothing.
     pub(super) fn quarantine(&mut self) {
         self.bg.quarantined = true;
+        self.bg.reports.clear();
+        self.bg.offered_reports.clear();
         self.bg.wake_buffer.clear();
         self.bg.continuation_requested = false;
         self.bg.running.clear();
@@ -684,6 +787,8 @@ impl<E: Env> Mapper<E> {
     /// `continuationClosed`: the session closed.
     pub(crate) fn close_background(&mut self) {
         self.bg.closed = true;
+        self.bg.reports.clear();
+        self.bg.offered_reports.clear();
         self.bg.wake_buffer.clear();
         self.bg.detached.clear();
         self.detached_turns.clear();
@@ -691,8 +796,27 @@ impl<E: Env> Mapper<E> {
 
     // ---- continuation ----------------------------------------------------------------------
 
+    /// Grok only reports work that ended after the prompt settled.
+    pub(super) fn record_wake_report(&mut self, key: &str, report: Work) {
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| !turn.bg.prompt_settled)
+        {
+            return;
+        }
+        if let Some((_, previous)) = self.bg.reports.iter_mut().find(|(id, _)| id == key) {
+            *previous = report;
+            return;
+        }
+        if self.bg.reports.len() == TASK_IDS_KEPT {
+            self.bg.reports.pop_front();
+        }
+        self.bg.reports.push_back((key.to_owned(), report));
+    }
+
     /// `offerContinuationRun`: asks the engine for one continuation turn.
-    fn offer_continuation(&mut self, out: &mut Vec<Out>) -> bool {
+    pub(crate) fn offer_continuation(&mut self, out: &mut Vec<Out>) -> bool {
         if self.hooks().is_none()
             || self.bg.closed
             || self.bg.quarantined
@@ -704,11 +828,27 @@ impl<E: Env> Mapper<E> {
             return false;
         };
         self.bg.continuation_requested = true;
-        self.event(
-            json!({"type": "continuation.requested", "threadId": thread_id, "providerThreadId": provider_thread_id, "detail": null}),
-            out,
-        );
+        let mut event = json!({"type": "continuation.requested", "threadId": thread_id, "providerThreadId": provider_thread_id, "detail": null});
+        self.bg.offered_reports = self.bg.reports.iter().map(|(key, _)| key.clone()).collect();
+        let reports: Vec<_> = self
+            .bg
+            .reports
+            .iter()
+            .map(|(_, report)| report.clone())
+            .collect();
+        if let Some(notification) = background_work_notification(&reports) {
+            event["notification"] = notification;
+        }
+        self.event(event, out);
         true
+    }
+
+    pub(super) fn buffer_usage_after_wake(&mut self, params: &Value) {
+        if self.is_root(params["sessionId"].as_str().unwrap_or(""))
+            && !self.bg.wake_buffer.is_empty()
+        {
+            self.buffer_wake(params);
+        }
     }
 
     fn buffer_wake(&mut self, params: &Value) {
@@ -869,6 +1009,16 @@ impl<E: Env> Mapper<E> {
             return;
         }
         let Some(hooks) = self.hooks() else { return };
+        if self.flavor.driver == "antigravity"
+            && !self.bg.quarantined
+            && self.is_root(params["sessionId"].as_str().unwrap_or(""))
+            && (hooks.is_wake)(params)
+        {
+            self.buffer_wake(params);
+            self.offer_continuation(out);
+            return;
+        }
+
         let update = &params["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or("");
         if matches!(
@@ -899,7 +1049,11 @@ impl<E: Env> Mapper<E> {
         let Some(turn) = self.turn.as_ref() else {
             return false;
         };
-        if !turn.bg.prompt_settled || turn.bg.continuation || !(hooks.is_wake)(params) {
+        if self.flavor.driver == "antigravity"
+            || !turn.bg.prompt_settled
+            || turn.bg.continuation
+            || !(hooks.is_wake)(params)
+        {
             return false;
         }
         if self.has_deferred_work() {
@@ -1033,16 +1187,22 @@ impl<E: Env> Mapper<E> {
         }
         // `backgroundCommandTurn`: a detached command's completed turn, else the live one.
         let detached = self.detached_turn_of(&life.task_id);
-        let (status, output) = match detached {
+        let (status, output, evidence) = match detached {
             Some(seq) => self
                 .with_detached(seq, |m| m.record_command_end(&life))
-                .unwrap_or((life.status, life.output.clone())),
+                .unwrap_or((life.status, life.output.clone(), None)),
             None => self.record_command_end(&life),
         };
-        // T3 records a wake report here for the continuation's notification; the engine's
-        // continuation request carries none (see the crate README).
+        if status != TaskStatus::Running
+            && !self.bg.handled.contains(&life.task_id)
+            && let Some(mut report) = life.report.clone()
+        {
+            report.outcome = status.tool_status();
+            self.record_wake_report(&life.task_id, report);
+        }
         self.apply_late_background_mutation(&life.session_id, &life.task_id, status, &mut out);
         if status != TaskStatus::Running {
+            let first_command_row = out.len();
             match detached {
                 Some(seq) => {
                     self.with_detached(seq, |m| {
@@ -1053,47 +1213,106 @@ impl<E: Env> Mapper<E> {
                     self.finish_registered_background_tool(&life.task_id, status, output, &mut out)
                 }
             }
+            if let Some(evidence) = evidence {
+                return out
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, event)| match event {
+                        Out::Event(conn_provider::ProviderEvent::TurnItemUpdated {
+                            turn_item: conn_contract::TurnItem::CommandExecution(command),
+                        }) if index >= first_command_row && command.monitor != Some(true) => {
+                            Out::Event(conn_provider::ProviderEvent::NativeCommandExit {
+                                turn_item: conn_contract::TurnItem::CommandExecution(command),
+                                evidence,
+                            })
+                        }
+                        other => other,
+                    })
+                    .collect();
+            }
         }
         out
     }
 
-    /// A command's end, recorded on the turn that owns its row: the reported output, else the
-    /// known one; a missing exit code cannot undo a known failure.
-    fn record_command_end(&mut self, life: &Lifecycle) -> (TaskStatus, Option<String>) {
-        let mut status = life.status;
-        let mut output = life.output.clone();
-        if status != TaskStatus::Running
-            && let Some(turn) = self.turn.as_mut()
-            && (life.report == Some(ReportKind::Command)
-                || turn.bg.command_end(&life.task_id).is_some())
+    /// Retain the first native exit code and monotonic native output. Tool ACKs can
+    /// contain provisional display text before the first structured snapshot.
+    fn record_command_end(
+        &mut self,
+        life: &Lifecycle,
+    ) -> (TaskStatus, Option<String>, Option<NativeCommandEvidence>) {
+        let Some(turn) = self.turn.as_mut() else {
+            return (life.status, life.output.clone(), None);
+        };
+        if life.status == TaskStatus::Running
+            || (turn.bg.command_end(&life.task_id).is_none()
+                && !life
+                    .report
+                    .as_ref()
+                    .is_some_and(|report| report.kind == WorkKind::Command))
         {
-            let previous = turn.bg.command_end(&life.task_id).cloned().flatten();
-            let tool_output = turn
-                .bg
-                .tool_of_task
-                .get(&life.task_id)
-                .and_then(|id| turn.tools.get(id))
-                .map(output_text);
-            output = life
-                .output
-                .clone()
-                .or_else(|| previous.as_ref().and_then(|p| p.output.clone()))
-                .or(tool_output);
-            if previous
-                .as_ref()
-                .is_some_and(|p| p.status == TaskStatus::Failed)
-            {
-                status = TaskStatus::Failed;
-            }
-            turn.bg.set_command_end(
-                &life.task_id,
-                Some(CommandEnd {
-                    status,
-                    output: output.clone(),
-                }),
-            );
+            return (life.status, life.output.clone(), None);
         }
-        (status, output)
+        let previous = turn.bg.command_end(&life.task_id).and_then(Option::as_ref);
+        let previous_code = previous.and_then(|p| p.exit_code);
+        let was_failed = previous
+            .as_ref()
+            .is_some_and(|p| p.status == TaskStatus::Failed);
+        let status = if was_failed {
+            TaskStatus::Failed
+        } else {
+            life.status
+        };
+        // A later success cannot reverse a failure. An absent exit code can still
+        // carry more output for the earlier terminal status.
+        let contradictory = life.exit_code.is_some_and(|code| {
+            (was_failed && code == 0) || previous_code.is_some_and(|prior| prior != code)
+        });
+        if contradictory && let Some(prior) = previous {
+            return (prior.status, prior.output.clone(), None);
+        }
+        let mut output = previous
+            .as_ref()
+            .and_then(|p| p.output.clone())
+            .or_else(|| {
+                turn.bg
+                    .tool_of_task
+                    .get(&life.task_id)
+                    .and_then(|id| turn.tools.get(id))
+                    .map(output_text)
+            });
+        let confirmed = previous
+            .as_ref()
+            .is_some_and(|p| p.native_output && p.status == status);
+        let evidence_output = match life.output.as_deref().filter(|s| !s.is_empty()) {
+            Some(native) if !confirmed => {
+                output = Some(native.to_owned());
+                NativeCommandOutput::Initial
+            }
+            Some(native)
+                if output
+                    .as_deref()
+                    .is_some_and(|old| native.len() > old.len() && native.starts_with(old)) =>
+            {
+                output = Some(native.to_owned());
+                NativeCommandOutput::Extended
+            }
+            _ => NativeCommandOutput::Absent,
+        };
+        turn.bg.set_command_end(
+            &life.task_id,
+            Some(CommandEnd {
+                status,
+                output: output.clone(),
+                exit_code: life.exit_code.or(previous_code),
+                native_output: confirmed || evidence_output != NativeCommandOutput::Absent,
+            }),
+        );
+        let evidence = (life.exit_code.is_some() || evidence_output != NativeCommandOutput::Absent)
+            .then_some(NativeCommandEvidence {
+                exit_code: life.exit_code,
+                output: evidence_output,
+            });
+        (status, output, evidence)
     }
 
     #[cfg(test)]
@@ -1148,6 +1367,8 @@ impl<E: Env> Mapper<E> {
                 &completion.task_id,
                 Some(CommandEnd {
                     status: completion.status,
+                    native_output: false,
+                    exit_code: None,
                     output: Some(output_text(&hydrated)),
                 }),
             );

@@ -920,7 +920,7 @@ async fn probe_models(
 }
 
 /// `discoverGrokSkills`: `grok inspect --json` in the workspace; `None` on any failure.
-async fn discover_skills(
+pub(crate) async fn discover_skills(
     binary: &str,
     env: &[(String, String)],
     cwd: Option<&Path>,

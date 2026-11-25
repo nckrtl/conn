@@ -24,13 +24,14 @@ use super::super::chrome::{
     self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use super::super::color::to_hsla;
-use super::super::diff_parser::{DiffFile, DiffLineKind};
+use super::super::diff_parser::DiffLineKind;
 use super::super::header::superhero_icon;
 use super::super::highlight::highlight_lines;
 use super::header::{
-    ConfirmableAction, render_actor_avatar, render_diff_stat, small_ghost_button,
+    ConfirmableAction, diff_label, render_actor_avatar, render_diff_stat, small_ghost_button,
     small_outline_button,
 };
+use super::host_diff::{CodeFileEntry, FileDiffState};
 use super::logic::{
     ChecksState, CommentFilter, ComposerMode, DetailTab, ReviewOutcome, TimelineEvent,
     TimelineEventKind, TimelineOrder, TimelineRow, TimelineThread, available_review_verdicts,
@@ -49,24 +50,6 @@ use crate::theme::MONO_FONT;
 const INSET_X_PX: f32 = 18.0; // `px-4.5`
 const TAB_BAR_HEIGHT_PX: f32 = 49.0; // `h-12.25`
 const PILL_RADIUS_PX: f32 = 9999.0;
-
-/// Cached per-file diff state in the Code tab.
-#[derive(Clone, Debug)]
-pub(super) enum FileDiffState {
-    Idle,
-    Loading,
-    Loaded(DiffFile),
-    Error(String),
-}
-
-/// One changed file entry shown in the Code tab list.
-#[derive(Clone, Debug)]
-pub(super) struct CodeFileEntry {
-    pub(super) path: String,
-    pub(super) old_path: String,
-    pub(super) additions: Option<usize>,
-    pub(super) deletions: Option<usize>,
-}
 
 /// Callbacks for the tab bar and active tab views.
 pub(super) struct TabCallbacks {
@@ -730,6 +713,7 @@ pub(super) fn render_description_tab(
 pub(super) fn render_checks_tab(
     tokens: &Tokens,
     detail: &PullRequestDetail,
+    filter: Option<&str>,
     cb: &TabCallbacks,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
@@ -752,6 +736,9 @@ pub(super) fn render_checks_tab(
     }
 
     for (idx, check) in detail.checks.iter().enumerate() {
+        if filter.is_some_and(|value| value != check_status_label(check)) {
+            continue;
+        }
         let status_color = to_hsla(check_status_color(tokens, check.status));
         let icon = check_status_icon(check.status);
         let status_label = check_status_label(check);
@@ -1963,7 +1950,7 @@ pub(super) fn render_code_tab(
                     .text_center()
                     .child(if detail.changed_files > 0 {
                         format!(
-                            "{} changed files reported by host (diff index requires HTTP /api/pull-requests/diff).",
+                            "The host reports {} changed files. Open the diff on the host to view them.",
                             format_grouped_count(detail.changed_files)
                         )
                     } else {
@@ -1998,6 +1985,7 @@ pub(super) fn render_code_tab(
             .p(px(6.0))
             .gap(px(2.0));
         for (idx, file) in files.iter().enumerate() {
+            let (add_count, del_count) = file.line_counts(diffs_by_path.get(&file.path));
             let is_sel = selected.is_some_and(|s| s.path == file.path);
             let is_viewed =
                 viewed_states.get(&file.path) == Some(&PullRequestFileViewedState::Viewed);
@@ -2043,32 +2031,29 @@ pub(super) fn render_code_tab(
                         .when(is_viewed && !is_sel, |el| el.opacity(0.70))
                         .child(file.path.clone()),
                 )
-                .when(
-                    file.additions.unwrap_or(0) > 0 || file.deletions.unwrap_or(0) > 0,
-                    |el| {
-                        el.child(
-                            h_flex()
-                                .flex_shrink_0()
-                                .gap(px(4.0))
-                                .font_family(SharedString::from(MONO_FONT))
-                                .text_size(px(11.0))
-                                .when(file.additions.unwrap_or(0) > 0, |s| {
-                                    s.child(
-                                        div()
-                                            .text_color(added)
-                                            .child(format!("+{}", file.additions.unwrap_or(0))),
-                                    )
-                                })
-                                .when(file.deletions.unwrap_or(0) > 0, |s| {
-                                    s.child(
-                                        div()
-                                            .text_color(removed)
-                                            .child(format!("-{}", file.deletions.unwrap_or(0))),
-                                    )
-                                }),
-                        )
-                    },
-                );
+                .when(add_count > 0 || del_count > 0, |el| {
+                    el.child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(4.0))
+                            .font_family(SharedString::from(MONO_FONT))
+                            .text_size(px(11.0))
+                            .when(add_count > 0, |s| {
+                                s.child(diff_label(
+                                    "pr-diff-additions",
+                                    format!("+{add_count}"),
+                                    added,
+                                ))
+                            })
+                            .when(del_count > 0, |s| {
+                                s.child(diff_label(
+                                    "pr-diff-deletions",
+                                    format!("-{del_count}"),
+                                    removed,
+                                ))
+                            }),
+                    )
+                });
             list = list.child(row);
         }
         split = split
@@ -2113,14 +2098,12 @@ fn render_file_diff_pane(
     let removed = to_hsla(tokens.diff_removed);
     let mono = SharedString::from(MONO_FONT);
 
-    let (add_count, del_count) = match state {
-        FileDiffState::Loaded(diff) => (diff.additions, diff.deletions),
-        _ => (entry.additions.unwrap_or(0), entry.deletions.unwrap_or(0)),
-    };
+    let (add_count, del_count) = entry.line_counts(Some(state));
 
     let is_viewed = viewed_state == Some(PullRequestFileViewedState::Viewed);
     let is_stale = viewed_state == Some(PullRequestFileViewedState::Dismissed);
     let mut header = h_flex()
+        .id("pr-code-selected-header")
         .w_full()
         .h(px(38.0))
         .flex_shrink_0()
@@ -2151,6 +2134,13 @@ fn render_file_diff_pane(
         );
 
     let mut right = h_flex().flex_shrink_0().items_center().gap(px(12.0));
+    if matches!(state, FileDiffState::Loaded(diff) if diff.is_approximate) {
+        right = right.child(div().text_size(px(XS_TEXT_PX)).child(diff_label(
+            "pr-approximate-diff",
+            "Approximate diff",
+            muted,
+        )));
+    }
     if add_count > 0 || del_count > 0 {
         right = right.child(render_diff_stat(
             tokens,

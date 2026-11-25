@@ -365,6 +365,19 @@ const places = (scenario, which) => {
     [s.binary, "<agy>"],
   ];
 };
+// The embedded TS snapshot predates two changes in T3 16acd718. Advance only the
+// TS expectation. The Rust agent must send the pinned upstream wire unchanged.
+const pinnedSetupLine = (line) => {
+  const frame = JSON.parse(line);
+  if (
+    frame.method === "session/new" &&
+    JSON.stringify(frame.params?.additionalDirectories) === JSON.stringify(["<attachments>"])
+  ) {
+    delete frame.params.additionalDirectories;
+    return JSON.stringify(frame);
+  }
+  return line;
+};
 const view = (scenario, which, parent) => {
   const log = readLog(scenario[which].log);
   const p = places(scenario, which);
@@ -373,11 +386,14 @@ const view = (scenario, which, parent) => {
       .filter((e) => e.kind === "start")
       .map((e) => ({
         argv: JSON.parse(scrub(JSON.stringify(e.argv), p)),
-        env: JSON.parse(scrub(JSON.stringify(scrubEnv(envDelta(e.env, parent))), p)),
+        env: Object.fromEntries(Object.entries({
+          ...(which === "ts" ? { AGY_CLI_DISABLE_AUTO_UPDATE: "true" } : {}),
+          ...JSON.parse(scrub(JSON.stringify(scrubEnv(envDelta(e.env, parent))), p)),
+        }).toSorted(([a], [b]) => a.localeCompare(b))),
       })),
     lines: log
       .filter((e) => e.kind === "stdin")
-      .map((e) => scrub(e.line, p)),
+      .map((e) => which === "ts" ? pinnedSetupLine(scrub(e.line,p)) : scrub(e.line, p)),
   };
 };
 

@@ -21,9 +21,11 @@ pub mod mapper;
 pub mod ordered;
 pub mod protocol;
 pub mod session;
+mod skills;
 pub mod status;
 mod tail;
 pub mod text_generation;
+mod transcript;
 
 /// Locks a std mutex. A poisoned lock means a thread panicked while it held the lock: a bug.
 /// With `panic = "abort"` a release build stops at the panic itself.
@@ -63,6 +65,7 @@ pub struct ClaudeProvider {
     /// The entry the last status probe built; `None` before the first one.
     status: std::sync::Mutex<Option<Value>>,
     applied_titles: session::AppliedTitles,
+    text_only_models: text_generation::TextOnlyModels,
 }
 
 impl std::fmt::Debug for ClaudeProvider {
@@ -82,6 +85,7 @@ impl ClaudeProvider {
             helper,
             status: std::sync::Mutex::new(None),
             applied_titles: Default::default(),
+            text_only_models: Default::default(),
         }
     }
 
@@ -112,6 +116,7 @@ impl ClaudeProvider {
             helper,
             status: std::sync::Mutex::new(Some(pending)),
             applied_titles: Default::default(),
+            text_only_models: Default::default(),
         }
     }
 
@@ -130,6 +135,9 @@ impl ClaudeProvider {
             && let Some(home) = &self.config.home_path
         {
             settings.home_path = home.to_string_lossy().into_owned();
+        }
+        if config.and_then(|c| c.get("customModels")).is_none() {
+            settings.custom_models = self.config.custom_models.clone();
         }
         if settings.environment.is_empty() {
             settings.environment = self.config.instance_env.clone();
@@ -168,6 +176,29 @@ impl Provider for ClaudeProvider {
         Some(probed.unwrap_or_else(|| pending_entry(self.instance_id.as_str(), checked_at)))
     }
 
+    fn refresh_workspace(&self, cwd: String) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let discovered = skills::list(self.config.clone(), Some(cwd.clone())).await;
+            let now = conn_support::time::iso_from_ms(conn_support::time::now_ms());
+            let mut status = lock(&self.status);
+            let entry =
+                status.get_or_insert_with(|| pending_entry(self.instance_id.as_str(), &now));
+            let commands = entry["slashCommands"].clone();
+            if !entry["workspaceSnapshots"].is_array() {
+                entry["workspaceSnapshots"] = json!([]);
+            }
+            if let Some(snapshots) = entry["workspaceSnapshots"].as_array_mut() {
+                snapshots.retain(|snapshot| snapshot["cwd"] != cwd);
+                if snapshots.len() >= 64 {
+                    snapshots.remove(0);
+                }
+                snapshots.push(
+                    json!({"cwd":cwd,"checkedAt":now,"slashCommands":commands,"skills":discovered}),
+                );
+            }
+        })
+    }
+
     /// `ClaudeTextGeneration`: the `claude` CLI directly, outside any session and the SDK
     /// host (see [`text_generation`]).
     fn generate_text(
@@ -192,7 +223,8 @@ impl Provider for ClaudeProvider {
             text_generation::generate(
                 &program,
                 &env,
-                &self.config.model_manifest,
+                &self.config,
+                &self.text_only_models,
                 managed,
                 request,
             )
@@ -245,14 +277,21 @@ impl Provider for ClaudeProvider {
                 manifest: &self.config.model_manifest,
             };
             let helper = &self.helper;
-            let entry = status::check(input, |options, extra, timeout| async move {
+            let mut entry = status::check(input, |options, extra, timeout| async move {
                 helper
                     .function("probeCapabilities", json!([options, extra]), None, timeout)
                     .await
                     .map_err(|e| e.to_string())
             })
             .await;
-            *lock(&self.status) = Some(entry);
+            if settings.enabled {
+                entry["skills"] = json!(skills::list(self.config.clone(), None).await);
+            }
+            let mut status = lock(&self.status);
+            if let Some(workspaces) = status.as_ref().and_then(|s| s.get("workspaceSnapshots")) {
+                entry["workspaceSnapshots"] = workspaces.clone();
+            }
+            *status = Some(entry);
         })
     }
 
@@ -326,8 +365,9 @@ pub fn capabilities() -> Value {
             "emitsTurnStarted": true,
             "emitsTurnCompleted": true,
             "supportsInterrupt": true,
+            "supportsNativeResume": true,
             "supportsActiveSteering": true,
-            "activeSteeringInterruptsTools": true,
+            "activeSteeringInterruptsTools": false,
             "supportsSteeringByInterruptRestart": false,
             "supportsQueuedMessages": false,
             "terminalStatusQuality": "strong",
@@ -434,9 +474,8 @@ pub fn pending_entry_for(
 ) -> Value {
     let mut entry = pending_entry(instance_id, checked_at);
     let now = conn_support::time::millis_from_iso(checked_at).unwrap_or(0);
-    entry["models"] = Value::Array(catalog::current_provider_models(
-        &config.model_manifest,
-        now,
+    entry["models"] = Value::Array(settings.custom_models.display(
+        catalog::current_provider_models(&config.model_manifest, now),
     ));
     let env = launch::query_env(
         config,

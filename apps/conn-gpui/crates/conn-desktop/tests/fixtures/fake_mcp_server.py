@@ -13,11 +13,21 @@ import sys
 
 TOOLS = [
     {"name": "echo", "description": "Echo a message.",
-     "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}},
-                     "required": ["message"]}},
+     "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {
+         "type": "object",
+         "properties": {
+             "message": {"type": "string", "description": "The text to echo.",
+                         "examples": ["hello", "good morning"]},
+             "uppercase": {"type": "boolean", "description": "Capitalize the response.",
+                           "examples": [False]},
+         },
+         "required": ["message"],
+         "examples": [{"message": "hello"}, {"message": "good morning", "uppercase": True}],
+     }},
     {"name": "fail", "inputSchema": {"type": "object"}},
-    {"name": "exit", "inputSchema": {"type": "object"}},
-    {"name": "spawn", "inputSchema": {"type": "object"}},
+    {"name": "exit", "annotations": {"destructiveHint": True}, "inputSchema": {"type": "object"}},
+    {"name": "spawn", "annotations": {"openWorldHint": True}, "inputSchema": {"type": "object"}},
 ]
 
 
@@ -63,7 +73,10 @@ def main():
             name = params.get("name")
             args = params.get("arguments") or {}
             if name == "echo":
-                result(request_id, {"content": [{"type": "text", "text": args.get("message", "")}]})
+                text = args.get("message", "")
+                if args.get("uppercase"):
+                    text = text.upper()
+                result(request_id, {"content": [{"type": "text", "text": text}]})
             elif name == "fail":
                 send({"jsonrpc": "2.0", "id": request_id,
                       "error": {"code": -32602, "message": "Tool failed on purpose"}})

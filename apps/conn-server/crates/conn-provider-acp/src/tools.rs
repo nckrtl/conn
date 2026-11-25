@@ -137,6 +137,9 @@ fn sanitize_content(content: &[Value]) -> (Option<String>, Vec<Value>) {
                         diff["oldText"] = old.clone();
                     }
                     diff["newText"] = entry["newText"].clone();
+                    if let Some(patch) = entry.get("patch") {
+                        diff["patch"] = patch.clone();
+                    }
                     diff
                 }
             }

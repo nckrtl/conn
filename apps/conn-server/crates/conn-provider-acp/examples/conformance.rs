@@ -103,7 +103,7 @@ async fn main() {
 }
 
 /// T3's replay gates for one scenario: the stub holds a labelled line until this side writes
-/// `<dir>/<label>.released`, once the run before it ended (`finish_held_run`).
+/// `<dir>/gate-<label>.release`, once the run before it ended (`finish_held_run`).
 struct Gates {
     dir: String,
     labels: Vec<(String, u64)>,
@@ -131,7 +131,7 @@ impl Gates {
                         other => format!("%{other:02X}"),
                     })
                     .collect();
-                let _ = std::fs::write(format!("{}/{encoded}.released", self.dir), "");
+                let _ = std::fs::write(format!("{}/gate-{encoded}.release", self.dir), "");
             }
         }
     }

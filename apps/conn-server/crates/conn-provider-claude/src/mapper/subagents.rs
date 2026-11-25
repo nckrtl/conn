@@ -275,6 +275,7 @@ pub(crate) struct Update<'a> {
     pub result: Option<String>,
     pub reopen: bool,
     pub skip_parent_turn: bool,
+    pub recovered_launch: Option<String>,
     pub workflow_name: Option<String>,
     pub workflow_frame: Value,
     pub workflow_handles: Option<Value>,
@@ -323,7 +324,8 @@ impl<E: Env> Mapper<E> {
         };
         if !sub.running()
             || sub.process_generation != self.process_generation
-            || !sub.task["workflow"].is_object()
+            || sub.task["nativeTaskRef"]["strength"] != "strong"
+            || sub.task["nativeTaskRef"]["nativeId"] != task_id
             || sub.parent.thread_id != thread["appThreadId"].as_str().unwrap_or_default()
             || sub.parent.provider_thread_id != thread["id"].as_str().unwrap_or_default()
         {
@@ -331,6 +333,15 @@ impl<E: Env> Mapper<E> {
         }
         sub.stop_requested = requested;
         true
+    }
+
+    pub(crate) fn needs_launch_lookup(&self, task: &str, tool: &str) -> bool {
+        !self.subagents.by_task.contains_key(task)
+            && self
+                .turn
+                .as_ref()
+                .and_then(|t| t.tools.get(tool))
+                .is_some_and(|call| call.name == "SendMessage")
     }
 
     pub(super) fn on_task_started(&mut self, msg: &SystemMsg, out: &mut Vec<Out>) {
@@ -363,6 +374,7 @@ impl<E: Env> Mapper<E> {
                 task_id,
                 tool_use_id,
                 status: "running",
+                recovered_launch: msg.recovered_launch.clone(),
                 workflow_name: msg
                     .workflow_name
                     .as_deref()
@@ -809,14 +821,15 @@ impl<E: Env> Mapper<E> {
     /// `updateClaudeSubagentNode`.
     pub(super) fn update_subagent(&mut self, input: Update<'_>, out: &mut Vec<Out>) {
         let now = self.env.now();
-        let existing = self.subagents.by_task.contains_key(input.task_id);
+        let existing =
+            self.subagents.by_task.contains_key(input.task_id) || input.recovered_launch.is_some();
         if !existing && input.status != "running" {
             return;
         }
         // `task_started` again: a resumed subagent (SendMessage), or a running one a
         // continuation picked up, belongs to the turn that reported it.
         let restarted = input.reopen && input.status == "running";
-        let mut is_reopen = false;
+        let mut is_reopen = input.recovered_launch.is_some();
         let mut prior_status = String::new();
         let current_parent = self.parent_ctx();
         if let Some(sub) = self.subagents.by_task.get_mut(input.task_id) {
@@ -861,13 +874,20 @@ impl<E: Env> Mapper<E> {
             if let Some(turn) = &mut self.turn {
                 turn.had_subagents = true;
             }
+            let launch_tool = input
+                .recovered_launch
+                .as_deref()
+                .unwrap_or(input.tool_use_id);
+            self.subagents
+                .by_tool
+                .insert(launch_tool.to_owned(), input.task_id.to_owned());
             self.subagents
                 .by_tool
                 .insert(input.tool_use_id.to_string(), input.task_id.to_string());
             self.subagents.by_task.insert(
                 input.task_id.to_string(),
                 Sub {
-                    tool_use_id: input.tool_use_id.to_string(),
+                    tool_use_id: launch_tool.to_string(),
                     node_id,
                     child_root: ids::node_from_item(
                         DRIVER,

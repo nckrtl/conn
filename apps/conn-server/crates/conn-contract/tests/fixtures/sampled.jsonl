@@ -2566,6 +2566,14 @@
 {"key":"rpc::provider::install_subscribe::Item","value":{"driver":"O","operationId":"😀","phase":"cancelled","downloadedBytes":16,"totalBytes":null,"version":"h","installedVersion":null,"canRemove":false,"message":"�"}}
 {"key":"rpc::provider::install_subscribe::Error","value":{"_tag":"ProviderSetupError","instanceId":"bZiP","operation":" ","detail":""}}
 {"key":"rpc::provider::install_subscribe::Error","value":{"_tag":"EnvironmentAuthorizationError","message":"�","requiredScope":"orchestration:read","requiredPermission":"0aL"}}
+{"key":"rpc::provider::mcp_sign_in_complete::Payload","value":{"threadId":"8OKe","providerThreadId":"kd@","server":"h&","callbackUrl":"-1"}}
+{"key":"rpc::provider::mcp_sign_in_complete::Success","value":{"signedInAt":"Oka"}}
+{"key":"rpc::provider::mcp_sign_in_complete::Error","value":{"_tag":"ProviderMcpSignInError","server":"7a[J","detail":" "}}
+{"key":"rpc::provider::mcp_sign_in_complete::Error","value":{"_tag":"EnvironmentAuthorizationError","message":"😀","requiredScope":"terminal:read"}}
+{"key":"rpc::provider::mcp_sign_in_start::Payload","value":{"threadId":"-1","providerThreadId":"2y","server":"�"}}
+{"key":"rpc::provider::mcp_sign_in_start::Success","value":{"authorizationUrl":null,"signedInAt":null}}
+{"key":"rpc::provider::mcp_sign_in_start::Error","value":{"_tag":"ProviderMcpSignInError","server":" ","detail":"-1"}}
+{"key":"rpc::provider::mcp_sign_in_start::Error","value":{"_tag":"EnvironmentAuthorizationError","message":"[Xd","requiredScope":"relay:read","requiredPermission":"#xT!"}}
 {"key":"rpc::provider::upload_feedback::Payload","value":{"threadId":"\u0000"}}
 {"key":"rpc::provider::upload_feedback::Success","value":{"feedbackId":"\"v"}}
 {"key":"rpc::provider::upload_feedback::Error","value":{"_tag":"ProviderUploadFeedbackError","threadId":"�"}}

@@ -36,6 +36,7 @@ use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
+pub(crate) mod details_tasks;
 mod linked;
 mod offline;
 mod rail_workspaces;
@@ -548,10 +549,7 @@ impl ConnApp {
                     app.select_right_panel_tab(RightPanelTab::Diff, cx);
                 }
                 crate::chat::ChatEvent::OpenTask { task_id } => {
-                    let task_id = *task_id;
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.open_task(task_id, cx));
-                    app.select_right_panel_tab(RightPanelTab::Tasks, cx);
+                    app.open_task_in_panel(*task_id, cx);
                 }
                 crate::chat::ChatEvent::OpenThread {
                     thread_id,
@@ -1353,7 +1351,21 @@ impl ConnApp {
             chat.set_draft(draft_view, cx);
             chat.set_project_id(project_id.clone(), cx);
             chat.set_workspace_root(root, cx);
-            chat.set_thread(thread, title, cx);
+            chat.set_thread(
+                thread,
+                title,
+                |sender_id| {
+                    if self.linked_environment_of_thread(sender_id)
+                        != selected.and_then(|id| self.linked_environment_of_thread(id))
+                    {
+                        return None;
+                    }
+                    self.shell
+                        .find_thread(sender_id)
+                        .map(|shell| shell.title.as_str())
+                },
+                cx,
+            );
             chat.set_linked_pull_requests(linked_pull_requests, cx);
             chat.set_preferred_editor(preferred_editor);
             chat.set_outline(outline, cx);
@@ -1768,6 +1780,10 @@ impl ConnApp {
                         match result {
                             Ok(page) => {
                                 thread.prepend_history_page(page);
+                                if let Some(env) = &env {
+                                    app.offline.task_links_changed(env, &thread_id);
+                                    app.schedule_offline_save(cx);
+                                }
                             }
                             Err(err) => {
                                 eprintln!(
@@ -3633,6 +3649,7 @@ impl ConnApp {
                 id: format!("big-u-{turn}"),
                 text: format!("Turn #{turn}: {topic} and verify edge cases."),
                 created_by_agent: false,
+                sender: None,
                 created_at: None,
                 attachments: Vec::new(),
                 is_steer: false,
@@ -5312,6 +5329,12 @@ impl ConnApp {
         self.sidebar.remember_widths(sidebar, panel);
     }
 
+    pub(crate) fn open_task_in_panel(&mut self, task_id: i64, cx: &mut Context<'_, Self>) {
+        self.right_panel
+            .update(cx, |panel, cx| panel.open_task(task_id, cx));
+        self.select_right_panel_tab(RightPanelTab::Tasks, cx);
+    }
+
     /// Toggles the top-right Thread Details card and loads its data when it opens.
     pub(crate) fn toggle_thread_details(
         &mut self,
@@ -5662,56 +5685,6 @@ impl ConnApp {
         }
     }
 
-    /// Opens a native folder picker and registers the selected directory via `projects.mutate`
-    /// (`project.create`).
-    pub(crate) fn add_project_via_picker(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(connection) = self.connection.clone() else {
-            return;
-        };
-        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add project".into()),
-        });
-        cx.spawn_in(window, async move |_this, _cx| {
-            let Ok(Ok(Some(mut chosen))) = paths.await else {
-                return;
-            };
-            let Some(path) = chosen.pop() else {
-                return;
-            };
-            let workspace_root = path.to_string_lossy().trim_end_matches('/').to_owned();
-            if workspace_root.is_empty() {
-                return;
-            }
-            let title = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Project")
-                .to_owned();
-            let Ok(mutation) = crate::commands::create_project_mutation(&workspace_root, &title)
-            else {
-                return;
-            };
-            if let Err(err) = connection
-                .call::<conn_contract::rpc::projects::mutate::Payload, conn_contract::rpc::projects::mutate::Success>(
-                    "projects.mutate",
-                    &mutation,
-                )
-                .await
-            {
-                eprintln!("add project: projects.mutate failed: {err}");
-            }
-        })
-        .detach();
-    }
-
     /// Current layout state.
     #[cfg_attr(
         all(not(feature = "automation"), not(test)),
@@ -5827,6 +5800,7 @@ impl ConnApp {
                     shell: &self.shell,
                     thread,
                     state: &self.thread_details,
+                    task_links: self.selected_timeline().map(|t| &t.task_links),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px
@@ -7524,6 +7498,7 @@ fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
 
 impl Render for ConnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.sync_details_task_history(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.sync_thread_menu_focus(window, cx);

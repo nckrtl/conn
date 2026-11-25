@@ -93,6 +93,7 @@ async fn title(scenario: &Value, settings: &StatusSettings) -> Value {
     };
     let guide = scenario["title"]["guide"] == true;
     let request = conn_provider::TextGenerationRequest {
+        project_cwd: None,
         operation: if guide {
             "generateReviewGuide"
         } else {

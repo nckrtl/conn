@@ -198,9 +198,12 @@ order. Assistant text and reasoning are buffered and flushed every 50 ms; plan t
 `completed` turn that the user stopped counts as `interrupted`. A failed turn's failure comes
 from the last `error` notification or `turn.error`. `threadDisposition` is `reusable`.
 
-Ignored: `thread/started`, `thread/status/changed`, `account/updated`,
+`account/updated` clears the session account snapshot. A newer limit push or account change
+takes precedence over an outstanding `account/rateLimits/read` response.
+
+Ignored: `thread/started`, `thread/status/changed`,
 `remoteControl/status/changed`, `configWarning`, `warning`, `deprecationNotice`,
-`serverRequest/resolved`, `item/reasoning/summaryPartAdded`, `hook/*`, and the realtime,
+`item/reasoning/summaryPartAdded`, and the realtime,
 fuzzy-search and fs families.
 
 ## Subagents
@@ -250,6 +253,5 @@ the prompt on stdin and writes the last message, a JSON object, to `--output-las
 
 `review/start`, `command/exec`, the `fs/*`, `plugin/*` and `skills/*` families, and the
 realtime methods. Rollback (`thread/read`, `thread/turns/list`, `thread/revert`) and fork (`thread/fork`)
-are done here as TS does them. Goals (`thread/goal/*`), compaction (`thread/compact/start`), `thread/inject_items`,
-`thread/sample`, `feedback/upload` and the MCP-app calls are used by TS; this crate leaves them
-out (see the README).
+use the native RPCs. The adapter also supports goals (`thread/goal/*`), compaction
+(`thread/compact/start`) and history injection (`thread/inject_items`).

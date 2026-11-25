@@ -13,8 +13,8 @@
 //! The replay gate (`release_replay_gate`) meets the stand-in through files in the plan's
 //! `gateDir`: the stand-in writes `gate-<label>.reached` when it holds before the labelled
 //! frame, the step waits for it and writes `gate-<label>.release` (T3's `releaseReplayGate`).
-//! A step this driver cannot run (a held run) ends the run with an error that names it; the
-//! check then reports the fixture as failed for that reason.
+//! Grok's `finish_held_run` releases the adapter's deferred-finalize debounce and waits for the
+//! run status from the engine, as T3's replay clock does.
 
 #![expect(
     clippy::print_stderr,
@@ -45,7 +45,10 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, Failure> {
         .ok_or_else(|| format!("plan: {key} is not a string"))
 }
 
-fn provider(plan: &Value) -> Result<Arc<dyn Provider>, Failure> {
+fn provider(
+    plan: &Value,
+    finalize_gate: Option<conn_provider_acp::DeferredFinalizeGate>,
+) -> Result<Arc<dyn Provider>, Failure> {
     let driver = text(plan, "driver")?;
     match driver {
         "codex" => {
@@ -100,6 +103,7 @@ fn provider(plan: &Value) -> Result<Arc<dyn Provider>, Failure> {
                 binary: text(plan, "binary")?.to_owned(),
                 // T3's TestClock never fires the 50 ms text flush unless a step moves it.
                 text_flush_interval: None,
+                deferred_finalize_gate: finalize_gate,
                 ..conn_provider_acp::AcpConfig::default()
             },
         ))),
@@ -116,6 +120,7 @@ struct Run {
     captured: Map<String, Value>,
     /// Where the replay gate's files are (`gateDir`).
     gate_dir: Option<PathBuf>,
+    finalize_receipts: tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
 }
 
 const ACTIVE: [&str; 5] = ["preparing", "queued", "starting", "running", "waiting"];
@@ -274,6 +279,30 @@ impl Run {
                     tokio::time::sleep(POLL).await;
                 }
                 Ok(())
+            }
+            "finish_held_run" => {
+                let rid = run_id()?;
+                let status = text(step, "status")?;
+                let deadline = tokio::time::Instant::now() + WAIT;
+                let mut released = false;
+                loop {
+                    // Late frames rearm settlement. Only the current timer may settle the turn.
+                    while let Ok(receipt) = self.finalize_receipts.try_recv() {
+                        released |= receipt.send(()).is_ok();
+                    }
+                    let projection = self.projection(thread()?).await?;
+                    let run = rows(&projection, "runs").find(|r| r["id"] == rid);
+                    if released && run.is_some_and(|r| r["status"] == status) {
+                        return Ok(());
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "finish_held_run:{rid}:{status}:actual={}:timer_released={released}",
+                            run.and_then(|r| r["status"].as_str()).unwrap_or("missing")
+                        ));
+                    }
+                    tokio::time::sleep(POLL).await;
+                }
             }
             "await_run_status" => {
                 let rid = run_id()?.to_owned();
@@ -496,7 +525,12 @@ async fn replay(plan: &Value) -> Result<Value, Value> {
     config.home = Some(state.clone());
     // No project: T3's fixtures name a project its store never saw, and the turn's folder
     // comes from the policy override, as in T3's harness.
-    config.providers = vec![provider(plan).map_err(Value::String)?];
+    let (finalize_gate, finalize_receipts) = tokio::sync::mpsc::unbounded_channel();
+    let hold_finalize = plan["steps"]
+        .as_array()
+        .is_some_and(|steps| steps.iter().any(|step| step["type"] == "finish_held_run"));
+    config.providers =
+        vec![provider(plan, hold_finalize.then_some(finalize_gate)).map_err(Value::String)?];
     config.checkpoints = true;
     let clock = Arc::new(ManualClock::at(0));
     config.clock = clock.clone();
@@ -525,6 +559,7 @@ async fn replay(plan: &Value) -> Result<Value, Value> {
         anonymous: 0,
         captured: Map::new(),
         gate_dir: plan["gateDir"].as_str().map(PathBuf::from),
+        finalize_receipts,
     };
     let steps = field(plan, "steps").map_err(Value::String)?.clone();
     let mut failure = None;

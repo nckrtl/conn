@@ -1,14 +1,14 @@
 {
-  "roots": 1058,
-  "namedSchemas": 1867,
-  "references": 1537,
-  "rustItems": 1830,
-  "literalTypes": 514,
-  "methods": 251,
-  "methodsFullyTyped": 251,
+  "roots": 1064,
+  "namedSchemas": 1873,
+  "references": 1543,
+  "rustItems": 1837,
+  "literalTypes": 515,
+  "methods": 253,
+  "methodsFullyTyped": 253,
   "opaqueFallbacks": 0,
   "lax": 13,
-  "dedupedItems": 836,
+  "dedupedItems": 838,
   "passThroughLinksDropped": 9,
   "opaque": [],
   "laxDetails": [
@@ -66,8 +66,8 @@
     }
   ],
   "fixtures": {
-    "roots": 1054,
-    "samples": 3163,
+    "roots": 1060,
+    "samples": 3171,
     "sampleFailures": 4,
     "encodeForbidden": 6,
     "failed": [
@@ -76,7 +76,7 @@
       "rpc::attachments::create_upload_url::Success#0: SampleError",
       "rpc::server::check_otlp_endpoint::Payload#0: SampleError"
     ],
-    "keys": 1057
+    "keys": 1063
   },
   "methodTypes": [
     {
@@ -1121,6 +1121,24 @@
       "payload": "ProviderSetupInput",
       "item": "ProviderInstallState",
       "error": "ProviderAuthCancelError",
+      "typed": true
+    },
+    {
+      "tag": "provider.mcpSignIn.complete",
+      "stream": false,
+      "origin": "official",
+      "payload": "ProviderMcpSignInCompleteInput",
+      "success": "ProviderMcpSignInCompleteResult",
+      "error": "ProviderMcpSignInStartError",
+      "typed": true
+    },
+    {
+      "tag": "provider.mcpSignIn.start",
+      "stream": false,
+      "origin": "official",
+      "payload": "ProviderMcpSignInStartInput",
+      "success": "ProviderMcpSignInStartResult",
+      "error": "ProviderMcpSignInStartError",
       "typed": true
     },
     {

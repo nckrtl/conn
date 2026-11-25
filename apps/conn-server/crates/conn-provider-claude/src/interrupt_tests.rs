@@ -51,6 +51,35 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       if (cmd.message.message.content === "workflow-background") {
         write({ch:"sdk", t:"msg", ...sessions.get(cmd.sessionId), m:{type:"result",subtype:"success",is_error:false,result:"started",duration_ms:1,duration_api_ms:1,num_turns:1,total_cost_usd:0,usage:{},modelUsage:{},session_id:"fake"}});
       }
+      if (cmd.message.message.content === "goal-hook" || cmd.message.message.content === "ordinary-hook") {
+        if (cmd.message.message.content === "goal-hook")
+          write({ch:"sdk",t:"msg",...sessions.get(cmd.sessionId),m:{type:"assistant",parent_tool_use_id:null,message:{model:"<synthetic>",content:[{type:"text",text:"Goal set: wait for child"}]}}});
+        write({ch:"sdk",t:"request",...sessions.get(cmd.sessionId),kind:"stopHook",id:"stop-hook",args:{}});
+      }
+      if (cmd.message.message.content === "request-silence" || cmd.message.message.content === "retry-silence") {
+        const m=cmd.message.message.content === "request-silence" ? {subtype:"status",status:"requesting"} : {subtype:"api_retry",attempt:1,error:"overloaded",error_status:503};
+        write({ch:"sdk",t:"msg",...sessions.get(cmd.sessionId),m:{type:"system",...m}});
+      }
+      if (cmd.message.message.content === "audit_stream") {
+        const frame = (m) => write({ch:"sdk", t:"msg", ...sessions.get(cmd.sessionId), m});
+        const stream = (event) => frame({type:"stream_event",parent_tool_use_id:null,event});
+        stream({type:"message_start",message:{id:"m",type:"message",role:"assistant",content:[],model:"local"}});
+        stream({type:"content_block_start",index:0,content_block:{type:"text",text:""}});
+        let n=0;
+        const next=setInterval(() => {
+          stream({type:"content_block_delta",index:0,delta:{type:"text_delta",text:"x"}});
+          if (++n===40) {
+            clearInterval(next);
+            stream({type:"content_block_stop",index:0});
+            frame({type:"result",subtype:"success",is_error:false,result:"ok",duration_ms:1,duration_api_ms:1,num_turns:1,total_cost_usd:0,usage:{},modelUsage:{}});
+          }
+        },10);
+      }
+      if (cmd.message.message.content === "/clear") {
+        const frame = (m) => write({ch:"sdk", t:"msg", ...sessions.get(cmd.sessionId), m});
+        frame({type:"system",subtype:"init",session_id:"cleared-native-session",uuid:"00000000-0000-4000-8000-000000000501"});
+        frame({type:"result",subtype:"success",is_error:false,result:"",duration_ms:1,duration_api_ms:1,num_turns:0,total_cost_usd:0,usage:{},modelUsage:{}});
+      }
       if (fs.existsSync(LOG + ".frames")) {
         for (const frame of JSON.parse(fs.readFileSync(LOG + ".frames", "utf8")))
           write({ch:"sdk",t:"msg",...sessions.get(cmd.sessionId),m:{...frame,session_id:cmd.message.session_id}});
@@ -84,6 +113,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         }, 100);
       break;
     }
+    case "response":
+      if(cmd.id==="stop-hook") {
+        log("hook "+JSON.stringify(cmd.value));
+        write({ch:"sdk",t:"msg",...sessions.get(cmd.sessionId),m:{type:"result",subtype:"success",is_error:false,result:"done"}});
+      }
+      break;
     case "fn":
       log(`fn ${cmd.name}`);
       setTimeout(
@@ -474,6 +509,47 @@ async fn an_abandoned_start_aborts_the_booting_query() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn individual_native_agent_stop_leaves_its_sibling_and_parent_running() {
+    use serde_json::json;
+    if !node_available() {
+        return;
+    }
+    let dir = Scratch::new("one-native-agent");
+    let (helper, log) = fake_host(&dir.0, true);
+    let (session, mut events) = session(&helper);
+    let cwd = dir.cwd();
+    let thread = new_thread(&session, "full-access", &cwd).await;
+    let frame = |id: &str| json!({"type":"system","subtype":"task_started","task_id":id,"tool_use_id":format!("launch-{id}"),"task_type":"local_agent","subagent_type":"general-purpose","description":"work","prompt":"work","is_backgrounded":true});
+    std::fs::write(
+        format!("{}.frames", log.display()),
+        json!([frame("one"), frame("two")]).to_string(),
+    )
+    .unwrap();
+    session
+        .start_turn(turn(1, &thread, "agents", "full-access", &cwd))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        until(&mut events, |e| e["type"] == "subagent.updated").await;
+    }
+    session
+        .stop_task(conn_provider::StopTaskInput {
+            provider_thread: thread,
+            task_id: "one".into(),
+        })
+        .await
+        .unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("stop [\"one\"]"), "{text}");
+    assert!(
+        !text.contains("stop [\"two\"]") && !text.contains("call interrupt"),
+        "{text}"
+    );
+    session.close().await;
+    helper.stop_if_idle().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn workflow_stop_calls_the_sdk_without_interrupting_the_turn() {
     use conn_provider::StopTaskInput;
     if !node_available() {
@@ -540,7 +616,7 @@ async fn replacing_a_query_settles_its_workflow_and_refuses_a_stale_stop() {
     assert!(
         error
             .to_string()
-            .contains("No running workflow task belongs to this provider thread"),
+            .contains("No running native task belongs to this provider thread"),
         "{error}"
     );
     let seen = until(&mut events, |e| {
@@ -1612,4 +1688,278 @@ async fn the_flush_wait_keeps_the_driver_draining() {
     .await;
     assert_eq!(texts(before), ["Let me look."]);
     assert_eq!(texts(all), ["Let me look.", "FINAL ANSWER"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_deltas_flush_before_result_and_clear_updates_the_resume_id() {
+    let dir = Scratch::new("audit-stream-continuous");
+    let (helper, _) = fake_host(&dir.0, true);
+    let (session, mut events) = session(&helper);
+    let cwd = dir.cwd();
+    let thread = new_thread(&session, "full-access", &cwd).await;
+    session
+        .start_turn(turn(1, &thread, "audit_stream", "full-access", &cwd))
+        .await
+        .unwrap();
+    let seen = until(&mut events, is_terminal).await;
+    let messages: Vec<_> = seen
+        .iter()
+        .filter(|e| e["type"] == "message.updated")
+        .map(|e| (&e["message"]["streaming"], &e["message"]["text"]))
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|(_, t)| t.as_str().is_some_and(|s| s.len() == 40))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|(streaming, text)| streaming.as_bool() == Some(true)
+                && text.as_str().is_some_and(|t| t.len() < 40))
+    );
+    session
+        .start_turn(turn(2, &thread, "/clear", "full-access", &cwd))
+        .await
+        .unwrap();
+    let seen = until(&mut events, is_terminal).await;
+    let retained = seen
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "provider_thread.updated")
+        .unwrap();
+    assert_eq!(
+        retained["providerThread"]["nativeThreadRef"]["nativeId"],
+        "cleared-native-session"
+    );
+    session.close().await;
+    helper.stop_if_idle().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires npm ci in helpers/sdk-host"]
+async fn native_sdk_fork_rollback_keeps_the_remapped_head() {
+    use conn_contract::{from_json, to_json};
+    use conn_provider::{ForkThreadInput, RollbackTarget, RollbackThreadInput};
+    use serde_json::json;
+    let dir = Scratch::new("audit-sdk-fork");
+    let home = dir.0.join("testclaude");
+    let helperpath =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../helpers/sdk-host/index.mjs");
+    let cmd = HelperCommand::from_path(helperpath);
+    let helper = claude_host(cmd.clone(), "claudeAgent");
+    let (tx, _rx) = mpsc::channel(crate::session::EVENT_CAPACITY);
+    let config = ClaudeConfig {
+        home_path: Some(home.clone()),
+        helper: cmd,
+        ..Default::default()
+    };
+    let session = ClaudeSession::open(
+        "session".into(),
+        "claudeAgent",
+        config,
+        helper.clone(),
+        tx,
+        vec![],
+        Default::default(),
+    );
+    let thread = new_thread(&session, "full-access", &dir.cwd()).await;
+    let j = to_json(&thread);
+    let native = j["nativeThreadRef"]["nativeId"].as_str().unwrap();
+    let project = home.join("projects/-repo");
+    std::fs::create_dir_all(&project).unwrap();
+    let u = "aaaaaaaa-0000-4000-8000-000000000001";
+    let a = "aaaaaaaa-0000-4000-8000-000000000002";
+    let entries = [
+        json!({"type":"user","uuid":u,"parentUuid":null,"sessionId":native,"cwd":"/repo","isSidechain":false,"timestamp":"2026-10-01T00:00:00.000Z","message":{"role":"user","content":"inherited question"}}),
+        json!({"type":"assistant","uuid":a,"parentUuid":u,"sessionId":native,"cwd":"/repo","isSidechain":false,"timestamp":"2026-10-01T00:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"inherited answer"}]}}),
+    ];
+    std::fs::write(
+        project.join(format!("{native}.jsonl")),
+        entries
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let fork = session
+        .fork_thread(ForkThreadInput {
+            source_provider_thread: from_json(j.clone()).unwrap(),
+            source_provider_turns: vec![],
+            provider_turn_id: None,
+            target_thread_id: "fork".into(),
+            owner_node_id: None,
+            model_selection: None,
+            runtime_policy: None,
+        })
+        .await
+        .unwrap();
+    let f = to_json(&fork);
+    let fid = f["nativeThreadRef"]["nativeId"].as_str().unwrap();
+    let path = project.join(format!("{fid}.jsonl"));
+    let content = std::fs::read_to_string(path).unwrap();
+    assert!(content.contains("inherited answer"));
+    let remap = content
+        .lines()
+        .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .find(|r| r["type"] == "assistant")
+        .unwrap()["uuid"]
+        .clone();
+    let rollback = session
+        .rollback_thread(RollbackThreadInput {
+            provider_thread: fork,
+            target: RollbackTarget::ThreadStart {
+                checkpoint_id: "start".into(),
+            },
+            provider_thread_turns: vec![],
+        })
+        .await
+        .unwrap();
+    let r = to_json(&rollback.provider_thread);
+    assert_ne!(remap, a);
+    assert_eq!(f["nativeThreadRef"], r["nativeThreadRef"]);
+    assert_eq!(r["nativeConversationHeadRef"]["nativeId"], remap);
+    session.close().await;
+    helper.stop_if_idle().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reopening_keeps_the_inline_attachment_budget() {
+    use conn_contract::{from_json, to_json};
+    use serde_json::{Value, json};
+    let dir = Scratch::new("audit-retained-budget");
+    let (helper, log) = fake_host(&dir.0, true);
+    let (tx, _events) = mpsc::channel(crate::session::EVENT_CAPACITY);
+    let config = ClaudeConfig {
+        attachments_dir: Some(dir.0.clone()),
+        ..no_home_config()
+    };
+    let session = ClaudeSession::open(
+        "fresh-session".into(),
+        "claudeAgent",
+        config,
+        helper.clone(),
+        tx,
+        vec![],
+        Default::default(),
+    );
+    let thread = new_thread(&session, "full-access", &dir.cwd()).await;
+    let mut j = to_json(&thread);
+    j["nativeMetadata"] = json!({"claudeAttachmentBudget":{"bytesUsed":crate::attachments::BUDGET_BYTES,"pagesUsed":0}});
+    let thread = from_json(j).unwrap();
+    let png = b"synthetic image";
+    std::fs::write(dir.0.join("x1.png"), png).unwrap();
+    let mut input = turn(2, &thread, "look", "full-access", &dir.cwd());
+    input.message.attachments=vec![from_json(json!({"id":"x1","type":"image","name":"x1.png","mimeType":"image/png","sizeBytes":png.len()})).unwrap()];
+    session.start_turn(input).await.unwrap();
+    let sent: Value = serde_json::from_str(
+        std::fs::read_to_string(log.with_extension("log.inputs"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let image = &sent["message"]["content"][0];
+    assert_eq!(image["type"], "text");
+    session.close().await;
+    helper.stop_if_idle().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unanswered_request_and_an_unrecovered_retry_end_their_turn() {
+    for (text, code) in [
+        ("request-silence", "claude_request_unanswered"),
+        ("retry-silence", "api_error_503"),
+    ] {
+        let dir = Scratch::new(text);
+        let (helper, _) = fake_host(&dir.0, true);
+        let (session, mut events) = session(&helper);
+        let session = session.with_retry_budget(Duration::from_millis(50));
+        let cwd = dir.cwd();
+        let thread = new_thread(&session, "full-access", &cwd).await;
+        session
+            .start_turn(turn(1, &thread, text, "full-access", &cwd))
+            .await
+            .unwrap();
+        let seen = until(&mut events, is_terminal).await;
+        let terminal = seen.iter().find(|e| e["type"] == "turn.terminal").unwrap();
+        assert_eq!(terminal["status"], "failed");
+        assert_eq!(terminal["failure"]["code"], code);
+        session.close().await;
+        helper.stop_if_idle().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_forked_skill_can_run_past_the_unanswered_request_budget() {
+    use serde_json::json;
+    let dir = Scratch::new("forked-skill-watch");
+    let (helper, log) = fake_host(&dir.0, true);
+    let (session, mut events) = session(&helper);
+    let budget = Duration::from_millis(100);
+    let session = session.with_retry_budget(budget);
+    let cwd = dir.cwd();
+    let thread = new_thread(&session, "full-access", &cwd).await;
+    // The CLI reports requesting and then starts the skill in the same input batch.
+    std::fs::write(format!("{}.frames", log.display()),json!([{
+        "type":"system","subtype":"task_started","task_id":"forked-skill","description":"Forked skill",
+        "tool_use_id":"tool-skill","task_type":"local_agent","prompt":"work"
+    }]).to_string()).unwrap();
+    session
+        .start_turn(turn(1, &thread, "request-silence", "full-access", &cwd))
+        .await
+        .unwrap();
+    let seen = until(&mut events, |e| {
+        e["type"] == "subagent.updated" || is_terminal(e)
+    })
+    .await;
+    assert_eq!(
+        seen.last().unwrap()["type"],
+        "subagent.updated",
+        "the skill was accepted"
+    );
+    assert!(
+        tokio::time::timeout(budget * 2, until(&mut events, is_terminal))
+            .await
+            .is_err(),
+        "a healthy skill was failed as silence"
+    );
+    session.close().await;
+    helper.stop_if_idle().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_stop_hook_only_holds_an_active_goal_with_a_delegated_wake() {
+    for (text, pending, expected) in [
+        ("goal-hook", true, true),
+        ("goal-hook", false, false),
+        ("ordinary-hook", true, false),
+    ] {
+        let dir = Scratch::new(text);
+        let (helper, log) = fake_host(&dir.0, true);
+        let (session, mut events) = session(&helper);
+        session.set_goal_stop_check(std::sync::Arc::new(move || {
+            Box::pin(async move { pending })
+        }));
+        let cwd = dir.cwd();
+        let thread = new_thread(&session, "full-access", &cwd).await;
+        session
+            .start_turn(turn(1, &thread, text, "full-access", &cwd))
+            .await
+            .unwrap();
+        until(&mut events, is_terminal).await;
+        let transcript = std::fs::read_to_string(log).unwrap();
+        assert!(
+            transcript.contains(if expected {
+                r#"hook {"continue":false}"#
+            } else {
+                "hook {}"
+            }),
+            "{transcript}"
+        );
+        session.close().await;
+        helper.stop_if_idle().await;
+    }
 }

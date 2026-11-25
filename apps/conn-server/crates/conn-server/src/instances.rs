@@ -10,7 +10,7 @@
 //!   keep the provider they opened with until they close, as in T3, where an open session
 //!   keeps its adapter and the instance is rebuilt for the next session.
 //!
-//! Other providers (Grok) are passed in fixed and follow their settings themselves.
+//! Additional test providers may be passed in as fixed instances.
 
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +26,8 @@ pub type Build = dyn Fn(&str, &str, Option<&Value>) -> Option<Arc<dyn Provider>>
 pub struct Instances {
     /// The drivers this builds, in the order their default instances are listed.
     drivers: Vec<String>,
+    reconcile_lock: tokio::sync::Mutex<()>,
+    last_path: Mutex<Option<std::ffi::OsString>>,
     build: Arc<Build>,
     /// What each built instance was built from: one entry per live instance.
     built: Mutex<Vec<(String, Option<Value>)>>,
@@ -49,6 +51,8 @@ struct Wanted {
 impl Instances {
     pub fn new(drivers: &[&str], build: Arc<Build>) -> Self {
         Self {
+            reconcile_lock: tokio::sync::Mutex::new(()),
+            last_path: Mutex::new(conn_support::login_env::var_os("PATH")),
             drivers: drivers.iter().map(|d| (*d).to_owned()).collect(),
             build,
             built: Mutex::new(Vec::new()),
@@ -98,6 +102,24 @@ impl Instances {
         providers: &ProviderSet,
         settings: &Map<String, Value>,
     ) -> Vec<String> {
+        self.reconcile_after_refresh(providers, settings, false)
+            .await
+    }
+
+    pub(crate) async fn reconcile_after_refresh(
+        &self,
+        providers: &ProviderSet,
+        settings: &Map<String, Value>,
+        check_path: bool,
+    ) -> Vec<String> {
+        let _pass = self.reconcile_lock.lock().await;
+        let path_changed = check_path && {
+            let path = conn_support::login_env::var_os("PATH");
+            let mut last = crate::lock(&self.last_path);
+            let changed = *last != path;
+            *last = path;
+            changed
+        };
         let wanted = self.wanted(settings);
         let current = providers.snapshot();
         let built_before = crate::lock(&self.built).clone();
@@ -108,7 +130,14 @@ impl Instances {
             let existing = current
                 .iter()
                 .find(|p| p.instance_id().as_str() == want.id)
-                .filter(|_| {
+                .filter(|provider| {
+                    if path_changed
+                        && provider.server_provider_entry("").is_some_and(|entry| {
+                            entry["enabled"] == true && entry["installed"] == false
+                        })
+                    {
+                        return false;
+                    }
                     built_before
                         .iter()
                         .any(|(id, entry)| *id == want.id && *entry == want.entry)

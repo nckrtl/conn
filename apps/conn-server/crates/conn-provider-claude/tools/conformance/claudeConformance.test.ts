@@ -6,6 +6,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- reads the scenario file and the base environment
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import { deepStrictEqual } from "node:assert";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -89,6 +90,7 @@ interface Scenario {
   /** Spread over the runtime policy, as T3's RuntimePolicy.layerWithOverride does. */
   readonly policyOverride?: { readonly approvalPolicy?: unknown; readonly sandboxPolicy?: unknown };
   readonly claudeSettings?: unknown;
+  readonly expectedFirstContext?: { readonly maxTokens: number | null; readonly autoCompactThreshold: number };
   /**
    * A `providerInstances` entry: its id, `config` (ClaudeSettings) and `environment`, as
    * createClaudeAdapterV2 receives them. `{side}` in a string value is "t3" here.
@@ -197,6 +199,7 @@ const runScenario = (scenario: Scenario) =>
     const path = yield* Path.Path;
     const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
     const runner = yield* ClaudeAdapterV2.ClaudeAgentSdkQueryRunner;
+    let firstContext: unknown;
     const stub = NodePath.join(ROOT, scenario.name, "stub-claude");
     const settingsFile =
       baseEnvironment.CLAUDE_CONFIG_DIR === undefined
@@ -373,6 +376,10 @@ const runScenario = (scenario: Scenario) =>
         if (event.type === "provider_thread.updated") thread = event.providerThread;
         if (event.type === "provider_turn.updated") {
           turns.set(event.providerTurn.id, event.providerTurn);
+          if (scenario.expectedFirstContext && firstContext === undefined && event.providerTurn.tokenUsage != null) {
+            const { maxTokens, autoCompactThreshold } = event.providerTurn.tokenUsage;
+            firstContext = { maxTokens, autoCompactThreshold };
+          }
           if (liveSelection !== undefined && event.providerTurn.tokenUsage != null) {
             const change = liveSelection;
             liveSelection = undefined;
@@ -410,6 +417,7 @@ const runScenario = (scenario: Scenario) =>
       }
     }
     yield* Scope.close(session.scope, Exit.void);
+    if (scenario.expectedFirstContext) deepStrictEqual(firstContext, scenario.expectedFirstContext);
   });
 
 describe("conformance: what claude receives from ClaudeAdapterV2", () => {

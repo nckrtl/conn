@@ -141,6 +141,7 @@ pub struct RightPanel {
     mcp: Entity<McpPanel>,
     tasks: Entity<TasksPanel>,
     pull_request: Entity<PullRequestPanel>,
+    pull_requests: Entity<pull_request::inbox::PullRequestInbox>,
     linked_items: Entity<LinkedItemsPanel>,
     device: Entity<DevicePanel>,
     /// True while the right panel is open and nothing covers it (see `set_surface_visible`).
@@ -228,10 +229,41 @@ impl RightPanel {
             cx.new(|cx| PullRequestPanel::new(tokens.clone(), connection.clone(), window, cx));
         cx.subscribe(
             &pull_request,
-            |_, _, event: &pull_request::PullRequestEvent, cx| match event {
+            |this, _, event: &pull_request::PullRequestEvent, cx| match event {
+                pull_request::PullRequestEvent::OpenInbox => {
+                    this.set_tab(RightPanelTab::PullRequests, cx);
+                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::PullRequests));
+                }
                 pull_request::PullRequestEvent::SendPrompt(prompt) => {
                     cx.emit(RightPanelEvent::SendPrompt(prompt.clone()));
                 }
+            },
+        )
+        .detach();
+        let pull_requests = cx.new(|cx| {
+            pull_request::inbox::PullRequestInbox::new(
+                tokens.clone(),
+                connection.clone(),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &pull_requests,
+            |this, _, target: &pull_request::inbox::OpenRequest, cx| {
+                let entry = &target.0;
+                this.pull_request.update(cx, |panel, cx| {
+                    panel.open_pull_request(
+                        entry.project_id.clone(),
+                        Some(entry.host.clone()),
+                        entry.repository.clone(),
+                        entry.number,
+                        Some(entry.url.clone()),
+                        cx,
+                    )
+                });
+                this.set_tab(RightPanelTab::PullRequest, cx);
+                cx.emit(RightPanelEvent::OpenTab(RightPanelTab::PullRequest));
             },
         )
         .detach();
@@ -278,6 +310,7 @@ impl RightPanel {
             mcp,
             tasks,
             pull_request,
+            pull_requests,
             linked_items,
             device,
             chrome: true,
@@ -699,6 +732,8 @@ impl RightPanel {
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         self.pull_request
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        self.pull_requests
+            .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         self.linked_items
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         for (_, browser) in &self.browsers {
@@ -743,6 +778,8 @@ impl RightPanel {
         self.tasks
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.pull_request
+            .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        self.pull_requests
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.linked_items
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
@@ -850,6 +887,11 @@ impl RightPanel {
             .update(cx, |panel, cx| panel.open_task(task_id, cx));
     }
 
+    #[cfg(test)]
+    pub(crate) fn selected_task_for_test(&self, cx: &gpui_kit::App) -> Option<i64> {
+        self.tasks.read(cx).navigation().task_id
+    }
+
     /// Whether live surfaces (native CEF browser view, device video/input streams) may run:
     /// the shell passes `true` only when the right panel is open and no GPUI overlay covers it.
     pub fn set_surface_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
@@ -882,9 +924,10 @@ impl RightPanel {
         let shows = |tab: RightPanelTab| self.surface_visible && self.tab == tab;
         let (show_browser, show_device) =
             (shows(RightPanelTab::Browser), shows(RightPanelTab::Device));
-        let (show_diff, show_pr, show_linked) = (
+        let (show_diff, show_pr, show_pr_inbox, show_linked) = (
             shows(RightPanelTab::Diff),
             shows(RightPanelTab::PullRequest),
+            shows(RightPanelTab::PullRequests),
             shows(RightPanelTab::LinkedItems),
         );
         for (id, browser) in &self.browsers {
@@ -907,6 +950,8 @@ impl RightPanel {
         self.diff.update(cx, |p, cx| p.set_active(show_diff, cx));
         self.pull_request
             .update(cx, |p, cx| p.set_active(show_pr, cx));
+        self.pull_requests
+            .update(cx, |p, cx| p.set_active(show_pr_inbox, cx));
         self.linked_items
             .update(cx, |p, cx| p.set_active(show_linked, cx));
     }
@@ -1181,6 +1226,7 @@ impl Render for RightPanel {
             RightPanelTab::Database => self.database.clone().into_any_element(),
             RightPanelTab::Mcp => self.mcp.clone().into_any_element(),
             RightPanelTab::Tasks => self.tasks.clone().into_any_element(),
+            RightPanelTab::PullRequests => self.pull_requests.clone().into_any_element(),
             RightPanelTab::PullRequest => self.pull_request.clone().into_any_element(),
             RightPanelTab::LinkedItems => self.linked_items.clone().into_any_element(),
             RightPanelTab::Device => self.device.clone().into_any_element(),

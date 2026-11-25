@@ -1667,6 +1667,24 @@ pub(crate) fn round_trip(
         "rpc::provider::install_subscribe::Payload" => {
             go::<conn_contract::rpc::provider::install_subscribe::Payload>(value)
         }
+        "rpc::provider::mcp_sign_in_complete::Error" => {
+            go::<conn_contract::rpc::provider::mcp_sign_in_complete::Error>(value)
+        }
+        "rpc::provider::mcp_sign_in_complete::Payload" => {
+            go::<conn_contract::rpc::provider::mcp_sign_in_complete::Payload>(value)
+        }
+        "rpc::provider::mcp_sign_in_complete::Success" => {
+            go::<conn_contract::rpc::provider::mcp_sign_in_complete::Success>(value)
+        }
+        "rpc::provider::mcp_sign_in_start::Error" => {
+            go::<conn_contract::rpc::provider::mcp_sign_in_start::Error>(value)
+        }
+        "rpc::provider::mcp_sign_in_start::Payload" => {
+            go::<conn_contract::rpc::provider::mcp_sign_in_start::Payload>(value)
+        }
+        "rpc::provider::mcp_sign_in_start::Success" => {
+            go::<conn_contract::rpc::provider::mcp_sign_in_start::Success>(value)
+        }
         "rpc::provider::upload_feedback::Error" => {
             go::<conn_contract::rpc::provider::upload_feedback::Error>(value)
         }

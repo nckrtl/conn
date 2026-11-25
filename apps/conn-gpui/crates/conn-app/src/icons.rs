@@ -123,7 +123,7 @@ pub(crate) fn right_panel_tab_icon(tab: RightPanelTab) -> IconName {
         RightPanelTab::Database => IconName::Database,
         RightPanelTab::Mcp => IconName::Plug,
         RightPanelTab::Tasks => IconName::Check,
-        RightPanelTab::PullRequest => IconName::GitPullRequest,
+        RightPanelTab::PullRequest | RightPanelTab::PullRequests => IconName::GitPullRequest,
         RightPanelTab::LinkedItems => IconName::ExternalLink,
         RightPanelTab::Device => IconName::Smartphone,
         RightPanelTab::File => IconName::File,

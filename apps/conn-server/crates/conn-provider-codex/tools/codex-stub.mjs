@@ -117,6 +117,8 @@ const isChildMetadataRead = (frame) => {
 const cursorFile = `${config.log}.cursor`;
 let cursor = NodeFS.existsSync(cursorFile) ? Number(NodeFS.readFileSync(cursorFile, "utf8")) : 0;
 let ended = false;
+let startedTurns = 0;
+let modelReloaded = false;
 // The replay gate: labels not yet released, the label the stub is held at, and the frames
 // that came in while it was held.
 const gates = new Set(config.gates ?? []);
@@ -230,6 +232,36 @@ const onFrame = (frame) => {
   if (frame.id !== undefined && isChildMetadataRead(frame)) {
     log({ kind: "child-metadata", frame });
     send({ id: frame.id, result: { thread: { id: frame.params.threadId }, model: null } });
+    return;
+  }
+  // Recent Codex adapters read the workspace config before each thread load and
+  // send a native name. Old recordings only read config immediately before turn/start.
+  // These reads must not consume a later turn's matching expectation.
+  const nextExpected = entries.slice(cursor).find((entry) => entry.type === "expect_outbound");
+  const params = frame.params ?? {};
+  if (frame.method === "turn/start") startedTurns++;
+  if (frame.method === "thread/resume" && startedTurns === config.modelReloadAfterTurns) modelReloaded = true;
+  const beforeModelReload = !modelReloaded && startedTurns === config.modelReloadAfterTurns;
+  const loadConfig =
+    frame.method === "config/read" &&
+    (beforeModelReload || ["thread/start", "thread/resume", "thread/fork", "thread/unarchive"].includes(nextExpected?.frame.method)) &&
+    params.includeLayers === false && (params.cwd === undefined || typeof params.cwd === "string");
+  const nameThread = frame.method === "thread/name/set" && typeof params.threadId === "string" &&
+    typeof params.name === "string" && nextExpected?.frame.method !== frame.method;
+  // This derived scenario keeps its recorded shell alive past turn/completed.
+  // Answer a current adapter's list call with that shell's actual process id.
+  if (config.liveBackgroundCommand && frame.method === "thread/backgroundTerminals/list" && frame.id !== undefined) {
+    const started = entries.find((entry) => entry.frame?.method === "item/started" &&
+      entry.frame.params?.threadId === params.threadId && entry.frame.params.item?.type === "commandExecution");
+    if (typeof started?.frame.params.item.processId === "string" && params.cursor === undefined) {
+      log({ kind: "current-protocol-request", frame });
+      send({ id: frame.id, result: { data: [{ processId: started.frame.params.item.processId }], nextCursor: null } });
+      return;
+    }
+  }
+  if (frame.id !== undefined && (loadConfig || nameThread)) {
+    log({ kind: "current-protocol-request", frame });
+    send({ id: frame.id, result: loadConfig ? { config: {}, origins: {} } : {} });
     return;
   }
   if (held !== null) {

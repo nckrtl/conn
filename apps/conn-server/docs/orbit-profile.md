@@ -163,9 +163,8 @@ container's settings name did not apply, and the task copies' `claudeLow` … `c
 instances did not exist. They are built now, from the settings written before the first
 start and again on each change, as the T3 server builds them [code,
 `R/crates/conn-server/src/instances.rs`; proof, `R/crates/conn-server/tools/instances-flow.mjs`
-and the Claude and Codex conformance checks]. Left: Claude's `customModels` and
-`autoCompactWindow` [docs, `R/docs/status.md`, "Provider instance settings for Claude and
-Codex"].
+and the Claude and Codex conformance checks]. Claude also uses each instance’s `customModels`
+for model discovery and selection and applies its `autoCompactWindow` when starting a query.
 
 **Closed on 2026-11-15: the Codex status probe.** Each Codex instance is probed as the T3
 server probes it: its own `codex app-server` with its binary, home and environment, then

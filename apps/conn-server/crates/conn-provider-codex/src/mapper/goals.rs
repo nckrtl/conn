@@ -207,6 +207,10 @@ impl<E: Env> Mapper<E> {
         out
     }
 
+    pub fn root_thread(&self, native: &str) -> Option<&Value> {
+        self.goals.threads.get(native)
+    }
+
     pub fn hold_goal_updates(&mut self, native: &str) {
         self.goals.updates_held.insert(native.to_owned());
     }

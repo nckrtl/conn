@@ -72,8 +72,6 @@ pub enum Out {
     ReadMemberTranscript(MemberTranscript),
 }
 
-const DEFAULT_CONTEXT_TOKENS: u64 = 200_000;
-const LONG_CONTEXT_TOKENS: u64 = 1_000_000;
 /// Frames held for a continuation turn the engine has not started yet.
 const WAKE_FRAME_CAP: usize = 512;
 /// Steers in flight in one turn.
@@ -125,6 +123,7 @@ pub struct Mapper<E: Env> {
     closing: bool,
     /// The picker's models for the turn's catalog ([`Self::set_catalog`]).
     catalog: Vec<Value>,
+    pub(crate) auto_compact_window: Option<u64>,
 }
 
 /// `ClaudeLiveQueryContext.promptEchoMode`.
@@ -254,6 +253,9 @@ struct Turn {
     attempt_id: String,
     root_node_id: String,
     provider_thread: Value,
+    native_title: Option<String>,
+    held_result: Option<ResultMsg>,
+    goal_checked: bool,
     provider_thread_id: String,
     provider_turn_id: String,
     native_turn_id: String,
@@ -280,6 +282,8 @@ struct Turn {
     app_thread: Value,
     instance_id: String,
     root_model: String,
+    context: crate::catalog::ModelContext,
+    auto_compact_window: Option<u64>,
     /// Steers written but not yet taken: prompt uuid → message id.
     pending_steers: Vec<(String, String)>,
     steered: bool,
@@ -303,6 +307,21 @@ struct Turn {
 }
 
 impl Turn {
+    fn context_tokens(&self, reported: &HashMap<String, u64>) -> Option<u64> {
+        self.context
+            .catalog_window
+            .or_else(|| reported.get(&self.context.api_model_id).copied())
+    }
+
+    fn set_compact_threshold(&self, usage: &mut Value, max_tokens: Option<u64>) {
+        if let Some(window) = self
+            .auto_compact_window
+            .filter(|window| max_tokens.is_none_or(|max| *window < max))
+        {
+            usage["autoCompactThreshold"] = json!(window - 33_000);
+        }
+    }
+
     fn parent_ctx(&self) -> ParentCtx {
         ParentCtx {
             thread_id: self.thread_id.clone(),
@@ -328,7 +347,7 @@ enum PendingKind {
         tool_use_id: String,
         input: Value,
     },
-    Elicitation,
+    Elicitation(Value),
     ResumeDialog {
         question: String,
     },
@@ -370,6 +389,7 @@ impl<E: Env> Mapper<E> {
             scheduled: wakes::Scheduled::default(),
             closing: false,
             catalog: Vec::new(),
+            auto_compact_window: None,
         }
     }
 
@@ -471,7 +491,7 @@ impl<E: Env> Mapper<E> {
             return Vec::new();
         };
         if turn.pending_steers.len() >= STEER_CAP {
-            turn.pending_steers.remove(0);
+            return Vec::new();
         }
         turn.pending_steers
             .push((prompt_uuid.to_string(), message_id.to_string()));
@@ -491,8 +511,8 @@ impl<E: Env> Mapper<E> {
         else {
             return Vec::new();
         };
-        let (_, message_id) = turn.pending_steers.remove(index);
-        vec![steer_event(turn, &message_id, SteerStatus::Completed)]
+        turn.pending_steers.remove(index);
+        Vec::new()
     }
 
     /// Stop with no turn running: the process and its background work are gone
@@ -560,6 +580,9 @@ impl<E: Env> Mapper<E> {
             attempt_id: input.attempt_id.as_str().into(),
             root_node_id: input.root_node_id.as_str().into(),
             provider_thread: provider_thread.clone(),
+            native_title: None,
+            held_result: None,
+            goal_checked: false,
             provider_thread_id,
             provider_turn_id: ids::provider_turn_id(DRIVER, &native_turn_id),
             native_turn_id,
@@ -587,6 +610,8 @@ impl<E: Env> Mapper<E> {
                 .as_str()
                 .unwrap_or(DRIVER)
                 .to_string(),
+            context: crate::catalog::model_context(&self.catalog, &selection),
+            auto_compact_window: self.auto_compact_window,
             root_model: selection["model"].as_str().unwrap_or("").to_string(),
             pending_steers: Vec::new(),
             steered: false,
@@ -656,7 +681,39 @@ impl<E: Env> Mapper<E> {
             return out;
         }
         if let Some(turn) = &mut self.turn {
+            let pending = turn.pending_steers.len();
             accept_echoed_steers(turn, &message, &mut out);
+            if turn.pending_steers.len() < pending
+                && let Some(result) = turn.held_result.take()
+            {
+                if let Some(usage) = result.usage {
+                    turn.steered_usage = Some(
+                        turn.steered_usage
+                            .take()
+                            .map_or_else(|| usage.clone(), |sum| sum.plus(&usage)),
+                    );
+                }
+                turn.steered_ledger = Ledger::add(
+                    turn.steered_ledger,
+                    result
+                        .ledger_growth
+                        .map(|(input, output)| Ledger { input, output }),
+                );
+            }
+            if let Inbound::CommandLifecycle {
+                command_uuid,
+                state,
+            } = &message
+                && matches!(state.as_str(), "cancelled" | "discarded" | "refused")
+            {
+                turn.pending_steers.retain(|(uuid, _)| uuid != command_uuid);
+                if turn.pending_steers.is_empty()
+                    && let Some(held) = turn.held_result.take()
+                {
+                    self.on_result(held, &mut out);
+                    return out;
+                }
+            }
         }
         let Some(message) = self.echo_gate(message, &mut out) else {
             return out;
@@ -734,11 +791,7 @@ impl<E: Env> Mapper<E> {
                 turn.stream_blocks.clear();
                 if let Some(usage) = message.usage {
                     turn.usage = Some((message.id, usage, now_ms));
-                    let max = context_tokens(
-                        &self.context_windows,
-                        &turn.root_model,
-                        turn.model.as_deref(),
-                    );
+                    let max = turn.context_tokens(&self.context_windows);
                     emit_usage(turn, max, &now, out);
                 } else {
                     turn.usage = None;
@@ -754,11 +807,10 @@ impl<E: Env> Mapper<E> {
                         .cache_read_input_tokens
                         .or(usage.cache_read_input_tokens);
                     usage.output_tokens = delta.output_tokens.unwrap_or(usage.output_tokens);
-                    let max = context_tokens(
-                        &self.context_windows,
-                        &turn.root_model,
-                        turn.model.as_deref(),
-                    );
+                    if delta.iterations.is_some() {
+                        usage.iterations = delta.iterations;
+                    }
+                    let max = turn.context_tokens(&self.context_windows);
                     emit_usage(turn, max, &now, out);
                 }
             }
@@ -886,11 +938,7 @@ impl<E: Env> Mapper<E> {
                 .is_some_and(|(id, _, _)| *id == message_id);
             if !same {
                 turn.usage = Some((message_id, usage, now_ms));
-                let max = context_tokens(
-                    &self.context_windows,
-                    &turn.root_model,
-                    turn.model.as_deref(),
-                );
+                let max = turn.context_tokens(&self.context_windows);
                 emit_usage(turn, max, &now, out);
             }
         }
@@ -1034,14 +1082,31 @@ impl<E: Env> Mapper<E> {
             _ => {}
         }
         let now = self.env.now();
-        let max_tokens = |turn: &Turn, windows: &HashMap<String, u64>| {
-            context_tokens(windows, &turn.root_model, turn.model.as_deref())
-        };
         let Some(turn) = &mut self.turn else {
             return;
         };
         match msg.subtype.as_str() {
+            "session_title_changed" => {
+                turn.native_title = msg
+                    .title
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+            }
             "init" => {
+                if let Some(id) = msg.session_id.filter(|id| !id.is_empty())
+                    && turn.provider_thread["nativeThreadRef"]["nativeId"] != id
+                {
+                    turn.provider_thread["nativeThreadRef"] =
+                        json!({"driver": DRIVER,"nativeId":id,"strength":"strong"});
+                    turn.provider_thread["nativeConversationHeadRef"] = Value::Null;
+                    turn.provider_thread["updatedAt"] = json!(now);
+                    self.last_provider_thread = Some(turn.provider_thread.clone());
+                    emit(
+                        out,
+                        |provider_thread| ProviderEvent::ProviderThreadUpdated { provider_thread },
+                        turn.provider_thread.clone(),
+                    );
+                }
                 if let Some(mode) = msg.permission_mode {
                     turn.permission_mode = mode;
                 }
@@ -1120,11 +1185,13 @@ impl<E: Env> Mapper<E> {
                     let after = post.round() as u64;
                     item["afterTokenCount"] = json!(after);
                     let mut provider_turn = provider_turn(turn, "running", None, false);
+                    let max_tokens = turn.context_tokens(&self.context_windows);
                     provider_turn["tokenUsage"] = json!({
                         "usedTokens": after,
-                        "maxTokens": max_tokens(turn, &self.context_windows),
+                        "maxTokens": max_tokens,
                         "updatedAt": now,
                     });
+                    turn.set_compact_threshold(&mut provider_turn["tokenUsage"], max_tokens);
                     emit(
                         out,
                         |v| ProviderEvent::ProviderTurnUpdated {
@@ -1210,10 +1277,12 @@ impl<E: Env> Mapper<E> {
         // A result that reports a context window not seen before refreshes the usage row.
         let mut new_window = false;
         if let Some(Value::Object(models)) = &msg.model_usage {
-            for (model, usage) in models.iter().take(16) {
-                if let Some(window) = usage.get("contextWindow").and_then(Value::as_u64)
+            for (model, usage) in models {
+                if let Some(window) = usage
+                    .get("contextWindow")
+                    .and_then(Value::as_f64)
+                    .map(|n| n.round() as u64)
                     && window > 0
-                    && (self.context_windows.len() < 16 || self.context_windows.contains_key(model))
                 {
                     new_window |=
                         self.context_windows.insert(model.clone(), window) != Some(window);
@@ -1226,11 +1295,7 @@ impl<E: Env> Mapper<E> {
             return;
         };
         if new_window && turn.usage.is_some() {
-            let max = context_tokens(
-                &self.context_windows,
-                &turn.root_model,
-                turn.model.as_deref(),
-            );
+            let max = turn.context_tokens(&self.context_windows);
             emit_usage(turn, max, &now, out);
         }
         let steer_abort = matches!(
@@ -1250,6 +1315,24 @@ impl<E: Env> Mapper<E> {
                 complete_stream(turn, &item_id, None, "interrupted", &now, out);
             }
             return;
+        }
+        if msg.subtype == "success"
+            && !msg.is_error
+            && msg.local_command.as_ref().is_some_and(|v| v == "rename")
+            && let Some(title) = turn.native_title.take()
+        {
+            turn.provider_thread["nativeMetadata"]["title"] = json!(title);
+            if turn.app_thread["title"] != title {
+                turn.app_thread["title"] = json!(title);
+                emit(
+                    out,
+                    |app_thread| ProviderEvent::AppThreadCreated {
+                        app_thread,
+                        create_only: None,
+                    },
+                    turn.app_thread.clone(),
+                );
+            }
         }
         let auth_hint = turn.auth_failed.then_some(AUTH_FAILED_TEXT);
         let usage_limited = auth_hint.is_none()
@@ -1283,6 +1366,16 @@ impl<E: Env> Mapper<E> {
             });
             (status, failure)
         };
+        if status == TurnStatus::Completed
+            && !turn.pending_steers.is_empty()
+            && msg
+                .user_message_uuids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty())
+        {
+            turn.held_result = Some(msg);
+            return;
+        }
         self.finalize(status, failure, Some(&msg), out);
     }
 
@@ -1314,6 +1407,160 @@ impl<E: Env> Mapper<E> {
         out
     }
 
+    pub(super) fn active_goal(&self) -> bool {
+        self.turn
+            .as_ref()
+            .is_some_and(|turn| turn.provider_thread["goal"]["status"] == "active")
+    }
+
+    pub(super) fn observe_goal(&mut self, frame: &Value) -> Vec<Out> {
+        let Some(turn) = &mut self.turn else {
+            return vec![];
+        };
+        if !frame["parent_tool_use_id"].is_null() {
+            return vec![];
+        }
+        let current = &turn.provider_thread["goal"];
+        if frame["type"] == "assistant" && frame["message"]["model"] != "<synthetic>" {
+            turn.goal_checked |= current["status"] == "active";
+            return vec![];
+        }
+        let content = &frame["message"]["content"];
+        let text = || {
+            content.as_str().map(str::to_owned).unwrap_or_else(|| {
+                content
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["type"] == "text")
+                    .filter_map(|p| p["text"].as_str())
+                    .collect()
+            })
+        };
+        let next = match frame["type"].as_str() {
+            Some("system")
+                if frame["subtype"] == "informational"
+                    && frame["content"].as_str().is_some_and(|s| {
+                        s.starts_with("Goal cleared after an unrecoverable error (")
+                    }) =>
+            {
+                Value::Null
+            }
+            Some("assistant") => {
+                let text = text();
+                let text = text.trim();
+                if let Some(objective) = text
+                    .strip_prefix("Goal set: ")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    json!({"status":"active","objective":objective,"checks":0})
+                } else if text.starts_with("Goal cleared: ") || text.starts_with("No goal set") {
+                    Value::Null
+                } else if let Some((objective, count)) = text
+                    .strip_prefix("Goal active: ")
+                    .and_then(|s| s.rsplit_once(" ("))
+                {
+                    let count = count.split_once(')').and_then(|(count, _)| {
+                        if count == "not yet evaluated" {
+                            Some(0)
+                        } else {
+                            count
+                                .strip_suffix(" turns")
+                                .or_else(|| count.strip_suffix(" turn"))
+                                .and_then(|s| s.parse::<u64>().ok())
+                        }
+                    });
+                    let Some(count) = count else { return vec![] };
+                    let mut goal = if current["objective"] == objective {
+                        current.clone()
+                    } else {
+                        json!({"objective":objective})
+                    };
+                    goal["status"] = json!("active");
+                    goal["checks"] = json!(count);
+                    goal
+                } else {
+                    return vec![];
+                }
+            }
+            Some("user") if frame["isSynthetic"] == true && current.is_object() => {
+                let text = text();
+                let prefix = format!(
+                    "Stop hook feedback:\n[{}]: ",
+                    current["objective"].as_str().unwrap_or("")
+                );
+                let Some(check) = text.strip_prefix(&prefix) else {
+                    return vec![];
+                };
+                let mut goal = current.clone();
+                goal["lastCheck"] = json!(check.trim());
+                goal["status"] = json!("active");
+                goal["checks"] = json!(current["checks"].as_u64().unwrap_or(0).saturating_add(1));
+                goal
+            }
+            _ => return vec![],
+        };
+        if *current == next {
+            return vec![];
+        }
+        turn.provider_thread["goal"] = next;
+        turn.provider_thread["updatedAt"] = json!(self.env.now());
+        self.last_provider_thread = Some(turn.provider_thread.clone());
+        let mut out = vec![];
+        emit(
+            &mut out,
+            |provider_thread| ProviderEvent::ProviderThreadUpdated { provider_thread },
+            turn.provider_thread.clone(),
+        );
+        out
+    }
+
+    pub(super) fn mcp_sign_in_notices(&mut self, names: &[&str]) -> Vec<Out> {
+        let Some(turn) = &mut self.turn else {
+            return vec![];
+        };
+        let now = self.env.now();
+        names
+            .iter()
+            .map(|name| {
+                let mut item = notice_base(turn, &format!("mcp-sign-in:{name}"), &now, "completed");
+                item["type"] = json!("system_notice");
+                item["title"] = json!(format!("MCP server {name} needs a sign-in"));
+                item["message"] = json!(format!(
+                    "The {name} MCP server needs a sign-in before Claude can use it."
+                ));
+                item["mcpSignIn"] = json!({"server":name});
+                turn_item(item)
+            })
+            .collect()
+    }
+
+    pub(super) fn is_turn_prompt(&self, uuid: &Value) -> bool {
+        uuid.as_str().is_some_and(|uuid| {
+            self.turn
+                .as_ref()
+                .and_then(|turn| turn.prompt_uuid.as_deref())
+                == Some(uuid)
+        })
+    }
+
+    pub(super) fn retry_active(&self) -> bool {
+        self.turn.as_ref().is_some_and(|turn| turn.retry.is_some())
+    }
+
+    pub(super) fn expire_request(&mut self) -> Vec<Out> {
+        let mut out = Vec::new();
+        let Some(turn) = &self.turn else { return out };
+        let mut failure = turn.retry.as_ref().map(|r| r.failure.clone()).unwrap_or_else(|| json!({
+            "class":"transport_error", "code":"claude_request_unanswered",
+            "message":"Claude sent nothing for 10 minutes. The API or its gateway is not responding."
+        }));
+        failure["retryable"] = json!(false);
+        self.finalize(TurnStatus::Failed, Some(failure), None, &mut out);
+        out
+    }
+
     pub fn on_exit(&mut self, expected: bool, detail: &str) -> Vec<Out> {
         let mut out = Vec::new();
         self.cancel_all_pending(&mut out);
@@ -1327,7 +1574,13 @@ impl<E: Env> Mapper<E> {
         let Some(turn) = &self.turn else {
             return out;
         };
-        if expected || turn.interrupt_requested {
+        if !turn.interrupt_requested
+            && let Some(turn) = self.turn.as_mut()
+        {
+            // The process can no longer read these prompts. Leave the app messages pending.
+            turn.pending_steers.clear();
+        }
+        if expected || self.turn.as_ref().is_some_and(|t| t.interrupt_requested) {
             self.finalize(TurnStatus::Interrupted, None, None, &mut out);
         } else {
             let failure = json!({
@@ -1449,6 +1702,18 @@ impl<E: Env> Mapper<E> {
             provider_turn,
         );
         let mut thread = turn.provider_thread.clone();
+        if completed
+            && turn.goal_checked
+            && thread["goal"]["status"] == "active"
+            && !self.has_pending_background_work()
+            && result.is_some_and(|r| {
+                r.terminal_reason
+                    .as_deref()
+                    .is_none_or(|s| s == "completed")
+            })
+        {
+            thread["goal"]["status"] = json!("complete");
+        }
         thread["providerSessionId"] = json!(self.provider_session_id);
         if thread.get("firstRunOrdinal").is_none_or(Value::is_null) {
             thread["firstRunOrdinal"] = json!(turn.run_ordinal);
@@ -1587,6 +1852,15 @@ impl<E: Env> Mapper<E> {
             out.push(Out::Write(control_success(&cli_id, deny)));
             return;
         }
+        if req.tool_name == "Bash"
+            && turn.permission_mode == "bypassPermissions"
+            && req.matched_ask_rule.is_none()
+            && let Some(reason) = req.decision_reason.as_deref().filter(|r| removal_denial(r))
+        {
+            out.push(Out::Write(control_success(&cli_id, json!({"behavior":"deny","toolUseID":tool_use_id,
+                "message":format!("Claude Code denied this removal. The command did not run. Warning: {reason}")}))));
+            return;
+        }
         if self.plan_without_approvals {
             let deny = json!({
                 "behavior": "deny",
@@ -1599,7 +1873,7 @@ impl<E: Env> Mapper<E> {
         let asks = self
             .policy_asks
             .unwrap_or_else(|| launch::asks_user_mode(&turn.permission_mode));
-        if !asks {
+        if !asks && req.matched_ask_rule.is_none() {
             let allow =
                 json!({"behavior": "allow", "updatedInput": req.input, "toolUseID": tool_use_id});
             out.push(Out::Write(control_success(&cli_id, allow)));
@@ -1646,13 +1920,17 @@ impl<E: Env> Mapper<E> {
 
     fn on_elicitation(&mut self, cli_id: String, req: Elicitation, out: &mut Vec<Out>) {
         let now = self.env.now();
-        if self.turn.is_none() || elicitation_acceptance(&req).is_none() {
+        let Some(acceptance) = self
+            .turn
+            .as_ref()
+            .and_then(|_| elicitation_acceptance(&req))
+        else {
             out.push(Out::Write(control_success(
                 &cli_id,
-                json!({"action": "decline"}),
+                json!({"action": "cancel"}),
             )));
             return;
-        }
+        };
         let native_id = format!("mcp-elicitation:{cli_id}");
         let Some(thread_id) = self.turn.as_ref().map(|t| t.thread_id.clone()) else {
             return;
@@ -1680,7 +1958,13 @@ impl<E: Env> Mapper<E> {
             },
             &now,
         );
-        self.open_request(cli_id, PendingKind::Elicitation, artifacts, thread_id, out);
+        self.open_request(
+            cli_id,
+            PendingKind::Elicitation(acceptance),
+            artifacts,
+            thread_id,
+            out,
+        );
     }
 
     fn on_user_dialog(&mut self, cli_id: String, req: UserDialog, out: &mut Vec<Out>) {
@@ -1851,10 +2135,8 @@ impl<E: Env> Mapper<E> {
                 },
                 "toolUseID": tool_use_id,
             }),
-            PendingKind::Elicitation => match decision.as_deref() {
-                Some("accept" | "acceptForSession" | "acceptAlways") => {
-                    json!({"action": "accept", "content": {}})
-                }
+            PendingKind::Elicitation(acceptance) => match decision.as_deref() {
+                Some("accept" | "acceptForSession" | "acceptAlways") => acceptance.clone(),
                 Some("cancel") => json!({"action": "cancel"}),
                 _ => json!({"action": "decline"}),
             },
@@ -2149,22 +2431,30 @@ fn provider_turn(turn: &Turn, status: &str, completed_at: Option<&str>, settled:
 }
 
 /// `emitContextUsage` → `provider_turn.updated` with `tokenUsage`.
-fn emit_usage(turn: &Turn, max_tokens: u64, now: &str, out: &mut Vec<Out>) {
+fn emit_usage(turn: &Turn, max_tokens: Option<u64>, now: &str, out: &mut Vec<Out>) {
     let Some((_, usage, requested_ms)) = &turn.usage else {
         return;
     };
-    let input = usage.input_total();
+    let sample = usage
+        .iterations
+        .iter()
+        .flatten()
+        .rev()
+        .find(|i| i.kind == "message")
+        .map_or(usage, |i| &i.usage);
+    let input = sample.input_total();
     if input == 0 {
         return;
     }
     let mut token_usage = json!({
-        "usedTokens": input + usage.output_tokens,
+        "usedTokens": input.saturating_add(sample.output_tokens),
         "maxTokens": max_tokens,
         "inputTokens": input,
-        "cachedInputTokens": usage.cache_read_input_tokens.unwrap_or(0),
-        "outputTokens": usage.output_tokens,
+        "cachedInputTokens": sample.cache_read_input_tokens.unwrap_or(0),
+        "outputTokens": sample.output_tokens,
         "reasoningOutputTokens": 0,
     });
+    turn.set_compact_threshold(&mut token_usage, max_tokens);
     let ttl = usage.cache_creation.as_ref().and_then(|c| {
         if c.ephemeral_1h_input_tokens > 0 {
             Some(3_600_000)
@@ -2631,7 +2921,7 @@ fn cancel_answer(kind: &PendingKind) -> Value {
                 "interrupt": true,
             })
         }
-        PendingKind::Elicitation => json!({"action": "cancel"}),
+        PendingKind::Elicitation(_) => json!({"action": "cancel"}),
         PendingKind::ResumeDialog { .. } => json!({"behavior": "cancelled"}),
     }
 }
@@ -2714,16 +3004,37 @@ fn sdk_answers(answers: &Value) -> Map<String, Value> {
 
 /// `claudeMcpElicitationAcceptance`, reduced: only a form with no fields can be accepted
 /// from the approval card; anything else is declined.
+fn removal_denial(reason: &str) -> bool {
+    let reason = reason.trim().to_ascii_lowercase();
+    let words: Vec<_> = reason
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .collect();
+    matches!(words.as_slice(), ["dangerous", "rm" | "rmdir", ..])
+        || words.windows(2).any(|w| w == ["dangerous", "removal"])
+        || matches!(
+            reason.as_str(),
+            "this shell -c script runs rm and could not be checked"
+                | "a permission rule denies a command in this shell -c script"
+        )
+}
+
 fn elicitation_acceptance(req: &Elicitation) -> Option<Value> {
     if req.mode.as_deref() == Some("url") {
         return None;
     }
     let schema = req.requested_schema.as_ref()?;
-    let empty = schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_none_or(Map::is_empty);
-    empty.then(|| json!({"action": "accept", "content": {}}))
+    let mut schema = schema.clone();
+    if let Some(fields) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for field in fields.values_mut().filter_map(Value::as_object_mut) {
+            field.remove("default");
+        }
+    }
+    let response = conn_provider_support::elicitation::response(
+        &json!({"mode":"form","requestedSchema":schema}),
+        "accept",
+    );
+    (response["action"] == "accept" && response["content"].is_object()).then_some(response)
 }
 
 /// `normalizeClaudeTurnTokenUsage` (`provider/ClaudeTurnTokenUsage.ts`). `ledger` is the
@@ -2783,32 +3094,7 @@ fn turn_token_usage(
     });
     usage
 }
-
 const AUTH_FAILED_TEXT: &str = "Claude could not authenticate. For subscription login, run `claude auth login` on this environment's machine, then start a new thread. For API-key authentication, check this instance's configured credentials.";
-
-/// `claudeContextWindow`: the selected model's window from the catalog (the bundled
-/// `model-manifest.json` profiles, copied for the current models), else what the CLI reported
-/// for the model it ran, else 1M for `[1m]` slugs, else 200k.
-fn context_tokens(windows: &HashMap<String, u64>, selected: &str, ran: Option<&str>) -> u64 {
-    let catalog = match selected.trim_end_matches("[1m]") {
-        "claude-opus-5-5" | "claude-opus-5" | "claude-sonnet-5-5" | "claude-sonnet-5"
-        | "claude-haiku-5-5" => Some(LONG_CONTEXT_TOKENS),
-        "claude-haiku-4-5" => Some(DEFAULT_CONTEXT_TOKENS),
-        "claude-sonnet-4-6" | "claude-opus-4-6" => Some(if selected.ends_with("[1m]") {
-            LONG_CONTEXT_TOKENS
-        } else {
-            DEFAULT_CONTEXT_TOKENS
-        }),
-        _ => None,
-    };
-    catalog
-        .or_else(|| ran.and_then(|m| windows.get(m).copied()))
-        .unwrap_or(if selected.ends_with("[1m]") {
-            LONG_CONTEXT_TOKENS
-        } else {
-            DEFAULT_CONTEXT_TOKENS
-        })
-}
 
 /// The latest reset among the blocked windows, or null if any is unknown.
 fn usage_reset_at(limits: &LimitState) -> Value {

@@ -364,6 +364,35 @@ fn summarize_item(item: &Value) -> Option<String> {
     })
 }
 
+/// T3 keeps the most recent activity and reserves space for the framing and read pointer.
+pub(crate) fn side_chat_digest(parent: &str, items: &[Value]) -> String {
+    let framing = "You are in a side chat beside the main thread. The main thread may still be running in the same worktree. Answer the user's questions; do not continue or redo the main thread's task.";
+    let header = "Main thread activity since this side chat's starting point:";
+    let truncated = "- Earlier items truncated.";
+    let footer =
+        format!("Use conn_thread_read on thread {parent} to see the main thread's live state.");
+    let mut budget = 8_000usize.saturating_sub(js_len(
+        &[framing, "", header, truncated, "", &footer].join("\n"),
+    ));
+    let mut lines = vec![];
+    for line in items.iter().rev().filter_map(summarize_item) {
+        let cost = js_len(&line) + 1;
+        if cost > budget {
+            if !lines.is_empty() {
+                lines.push(truncated.to_owned());
+            }
+            break;
+        }
+        budget -= cost;
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return format!("{framing}\n\n{footer}");
+    }
+    lines.reverse();
+    format!("{framing}\n\n{header}\n{}\n\n{footer}", lines.join("\n"))
+}
+
 /// `makeForkDeltaSummary`.
 pub(crate) fn fork_delta_summary(
     source_thread_id: &str,

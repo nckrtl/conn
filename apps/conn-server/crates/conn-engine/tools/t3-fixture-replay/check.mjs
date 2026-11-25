@@ -153,7 +153,18 @@ vi.mock("./ProviderReplayHarness.ts", async (importOriginal) => {
     }
     if (driver === "claudeAgent") {
       const ndjson = path.join(dir, "transcript.ndjson");
-      fs.writeFileSync(ndjson, transcript.entries.map((e: any) => JSON.stringify(e)).join("\n") + "\n");
+      const entries = transcript.entries.map((entry: any) => {
+        // T3 e8c4824b70 changed exactly this recorded field. The legacy TS adapter in this
+        // monorepo still shares the older recording. Keep the Rust host comparison strict.
+        if (transcript.scenario === "message_steering" && entry.type === "expect_outbound" &&
+            entry.label === "prompt.offer:2" && entry.frame.type === "prompt.offer" &&
+            entry.frame.message.priority === "now") {
+          const frame = entry.frame;
+          return { ...entry, frame: { ...frame, message: { ...frame.message, priority: "next" } } };
+        }
+        return entry;
+      });
+      fs.writeFileSync(ndjson, entries.map((e: any) => JSON.stringify(e)).join("\n") + "\n");
       // T3 pins the session id to the recording's (nativeSessionIdFor); the shim maps ours.
       const recorded = transcript.metadata?.nativeSessionId ?? "00000000-0000-4000-8000-000000000000";
       // T3's harness writes each foreground Bash call's recorded output where Claude Code
@@ -182,6 +193,8 @@ vi.mock("./ProviderReplayHarness.ts", async (importOriginal) => {
           log: path.join(dir, "stub.ndjson"),
           replayAgent: CONFIG.acpReplayAgent,
           workspace,
+          gates,
+          gateDir: dir,
         }),
       );
       const wrapper = path.join(dir, "grok");

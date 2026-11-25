@@ -25,6 +25,8 @@ pub enum RightPanelTab {
     Mcp,
     Tasks,
     PullRequest,
+    /// Environment-wide pull requests opened from the project rail.
+    PullRequests,
     LinkedItems,
     Device,
     /// A file opened from the Files tree (Conn's `file` surface); its path lives in
@@ -102,7 +104,7 @@ impl RightPanelTab {
             Self::PullRequest => "P",
             Self::LinkedItems => "L",
             Self::Device => "M",
-            Self::File => "",
+            Self::PullRequests | Self::File => "",
         }
     }
 

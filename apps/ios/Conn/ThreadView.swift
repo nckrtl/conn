@@ -44,6 +44,10 @@ struct ThreadView: View {
     @State private var advancingStep: Int?
     @State private var advanceTask: Task<Void, Never>?
     @State private var viewSize: CGSize = .zero
+    /// The whole floating composer area; the feed's bottom inset.
+    @State private var composerAreaHeight: CGFloat = 0
+    /// The composer pill and its gutter; the bottom blur's solid band.
+    @State private var composerPillHeight: CGFloat = 0
 
     private var composer: ComposerDraft { store.composerDraft(.thread(threadId)) }
     private var draft: String {
@@ -364,16 +368,24 @@ struct ThreadView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            VStack(spacing: 0) {
+            // The feed runs under the floating header and composer and fades into `EdgeBlur` there.
+            ZStack(alignment: .bottom) {
                 timeline(proxy)
+                    .safeAreaPadding(.bottom, composerAreaHeight)
+                EdgeBlur(edge: .bottom, solid: composerPillHeight)
+                    .ignoresSafeArea(.container, edges: .bottom)
                 composerArea(proxy)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerAreaHeight = $0 }
+            }
+            .overlay(alignment: .top) {
+                EdgeBlur(edge: .top)
+                    .ignoresSafeArea(.container, edges: .top)
             }
             .background(theme.background.ignoresSafeArea())
         }
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.background, for: .navigationBar)
-        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+        .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden()
         .background { ThreadEdgePopGesture() }
         .toolbar {
@@ -623,6 +635,12 @@ struct ThreadView: View {
                 proxy.scrollTo("timeline-bottom", anchor: .bottom)
             }
         }
+        // A taller composer (more lines, a card) covers the tail; keep it in view.
+        .onChange(of: composerAreaHeight) { old, new in
+            if old != new && stickToBottom && readingWindow == nil {
+                proxy.scrollTo("timeline-bottom", anchor: .bottom)
+            }
+        }
     }
 
     private func composerArea(_ proxy: ScrollViewProxy) -> some View {
@@ -743,6 +761,7 @@ struct ThreadView: View {
             .id(ObjectIdentifier(composer))
             .disabled(store.status != .connected || readingWindow != nil)
             .accessibilityIdentifier("thread.composer")
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerPillHeight = $0 + 2 }
         }
         // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
         .padding(.horizontal, 12)

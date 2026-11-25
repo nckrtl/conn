@@ -66,31 +66,30 @@ case ${1:?} in
   deadline)
     [[ ${PUBLISHED:?} =~ ^[0-9]+$ ]]
     deadline=$((PUBLISHED + 300))
-    while (( $(date +%s) < deadline )); do
-      pr=$(pin_pr)
-      if [[ $(jq -r '.state' <<<"$pr") == open || $(jq -r '.merged_at' <<<"$pr") != null ]]; then
+    while true; do
+      if pr=$(pin_pr) && jq -e --argjson deadline "$deadline" '
+        (.state == "open" or .merged_at != null) and
+        ((.created_at | fromdateiso8601?) <= $deadline)
+      ' <<<"$pr" > /dev/null; then
         exit 0
       fi
-      sleep 10
+      remaining=$((deadline - $(date +%s)))
+      if (( remaining <= 0 )); then
+        break
+      fi
+      sleep "$((remaining < 10 ? remaining : 10))"
     done
 
-    pr=$(pin_pr)
-    if jq -e --argjson deadline "$deadline" '
-      (.state == "open" or .merged_at != null) and
-      ((.created_at | fromdateiso8601) <= $deadline)
-    ' <<<"$pr" > /dev/null; then
-      exit 0
-    fi
     title="Orbit pin PR missed its five-minute deadline for $tag"
     issues=$(gh api --paginate --slurp "repos/$conn/issues?state=all&creator=github-actions%5Bbot%5D&per_page=100")
     existing=$(jq -r --arg title "$title" '[.[][] | select(.title == $title and .pull_request == null)] | first | .html_url // empty' <<<"$issues")
     if [[ -z "$existing" ]]; then
-      printf '%s\n' "The Orbit pin PR was missing five minutes after [$tag](https://github.com/$conn/releases/tag/$tag) was published." \
+      printf '%s\n' "The watchdog could not confirm that the Orbit pin PR for [$tag](https://github.com/$conn/releases/tag/$tag) was created within five minutes of publication." \
         "" "@nckrtl Check the proposal job for the failure and retry it for this exact tag. Review and merge the pin through Orbit's merge queue." \
         "" "Run: https://github.com/$conn/actions/runs/${GITHUB_RUN_ID:?}" > "${RUNNER_TEMP:?}/conn-pin-alert.md"
       existing=$(gh issue create --repo "$conn" --title "$title" --assignee nckrtl --body-file "$RUNNER_TEMP/conn-pin-alert.md")
     fi
-    echo "::error::Orbit pin PR missed its publication deadline. Owner alert: $existing"
+    echo "::error::Could not confirm an Orbit pin PR created within five minutes of publication. Owner alert: $existing"
     exit 1
     ;;
   *)

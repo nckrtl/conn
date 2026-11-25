@@ -88,11 +88,11 @@ token for Orbit alone, then verifies that token can read the repository. A manua
 run against the already pinned tag can prove access without opening a new PR. The
 Mac runner uses its existing Developer ID. It has no App credentials.
 
-A parallel job checks the PR at five minutes after publication. If the deadline
-is missed, it fails visibly in Actions and opens one issue on `nckrtl/conn`
-assigned to Nick. Nick checks the proposal job, fixes the cause and dispatches
-the same tag again. The five minutes are measured from the release timestamp.
-An Actions runner queue can delay delivery of the alert.
+A parallel job retries Orbit lookups through five minutes after publication.
+It checks when the PR was created, even if the lookup returns after the deadline.
+If it cannot confirm timely creation, it fails in Actions and opens one issue on
+`nckrtl/conn` assigned to Nick. Nick checks the proposal job, fixes the cause and
+dispatches the same tag again. An Actions runner queue can delay the alert.
 
 Once the Gateway serves the reviewed pin, it dry-runs and updates the standalone
 canary, then verifies the exact version and an authenticated thread read. Promote

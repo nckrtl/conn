@@ -103,3 +103,98 @@ for (const openPr of [false, true]) {
     assert.ok(!existsSync(env.GITHUB_STEP_SUMMARY));
   });
 }
+
+const published = 1_795_600_000;
+const alertUrl = "https://example.invalid/conn/issues/1";
+
+function watchDeadline(t, start, lookups) {
+  const scratch = mkdtempSync(join(tmpdir(), "conn-fleet-deadline-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const env = {
+    HOME: scratch,
+    PATH: `${scratch}:${process.env.PATH}`,
+    RUNNER_TEMP: scratch,
+    GITHUB_RUN_ID: "1",
+    TAG: tag,
+    PUBLISHED: String(published),
+    CLOCK: join(scratch, "clock"),
+    LOOKUP_STARTS: join(scratch, "lookup-starts"),
+    LOOKUPS: JSON.stringify(lookups),
+    ISSUE_CREATED: join(scratch, "issue-created"),
+  };
+  const shim = (name, script) =>
+    writeFileSync(join(scratch, name), `#!/bin/bash\nset -eu\n${script}\n`, { mode: 0o755 });
+  writeFileSync(env.CLOCK, String(published + start));
+  writeFileSync(env.LOOKUP_STARTS, "");
+  shim("date", 'cat "$CLOCK"');
+  shim("sleep", 'echo "$(($(cat "$CLOCK") + $1))" > "$CLOCK"');
+  shim(
+    "gh",
+    `case "$*" in
+  'api --method GET repos/hardimpactdev/orbit/pulls '*)
+    index=$(wc -l < "$LOOKUP_STARTS")
+    now=$(cat "$CLOCK")
+    echo "$((now - PUBLISHED))" >> "$LOOKUP_STARTS"
+    lookup=$(jq -ce --argjson index "$index" '.[$index]' <<<"$LOOKUPS")
+    echo "$((now + $(jq -r '.duration // 0' <<<"$lookup")))" > "$CLOCK"
+    if jq -e '.error // false' <<<"$lookup" > /dev/null; then
+      echo 'Orbit lookup failed' >&2
+      exit 1
+    fi
+    jq -c '.pr // {}' <<<"$lookup"
+    ;;
+  'api --paginate --slurp repos/nckrtl/conn/issues?'*) echo '[[]]' ;;
+  'issue create '*) touch "$ISSUE_CREATED"; echo '${alertUrl}' ;;
+  *) exit 2 ;;
+esac`,
+  );
+  const run = spawnSync("bash", [join(__dirname, "conn-server-fleet-pin.sh"), "deadline"], {
+    cwd: scratch,
+    env,
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  assert.ifError(run.error);
+  return {
+    run,
+    starts: readFileSync(env.LOOKUP_STARTS, "utf8").trim().split("\n").map(Number),
+    alerted: existsSync(env.ISSUE_CREATED),
+  };
+}
+
+function openPin(created) {
+  return {
+    state: "open",
+    created_at: new Date((published + created) * 1000).toISOString().replace(".000Z", "Z"),
+    merged_at: null,
+  };
+}
+
+test("retries an Orbit lookup error and accepts a timely PR", (t) => {
+  const { run, starts, alerted } = watchDeadline(t, 280, [{ error: true }, { pr: openPin(290) }]);
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(starts, [280, 290]);
+  assert.equal(alerted, false);
+});
+
+test("alerts the owner when Orbit lookups fail through the deadline", (t) => {
+  const { run, starts, alerted } = watchDeadline(t, 285, [
+    { error: true },
+    { error: true },
+    { error: true },
+  ]);
+  assert.equal(run.status, 1);
+  assert.deepEqual(starts, [285, 295, 300]);
+  assert.equal(alerted, true);
+  assert.match(run.stdout, /https:\/\/example\.invalid\/conn\/issues\/1/);
+});
+
+for (const created of [300, 301]) {
+  test(`checks a PR created at +${created}s when a +299s lookup finishes after the deadline`, (t) => {
+    const { run, starts, alerted } = watchDeadline(t, 299, [{ duration: 3, pr: openPin(created) }]);
+    const late = created > 300;
+    assert.equal(run.status, late ? 1 : 0, run.stderr);
+    assert.deepEqual(starts, [299]);
+    assert.equal(alerted, late);
+  });
+}

@@ -300,10 +300,16 @@ impl ConnApp {
     }
 
     /// The linked environment new General threads start on: the fleet's primary agent Node, when
-    /// it is not the primary connection and its saved session is connected here.
+    /// it is not the primary connection and its saved session is connected here. A reconnecting
+    /// agent falls back to the primary connection, since its requests would queue unanswered.
     pub(super) fn general_environment(&self) -> Option<(String, Connection)> {
         let agent = self.orbit.fleet.select_primary_agent_node(None)?;
-        if agent.server_id == self.primary_environment_id() {
+        if agent.server_id == self.primary_environment_id()
+            || !matches!(
+                self.linked.statuses.get(&agent.server_id),
+                Some(ConnectionStatus::Connected)
+            )
+        {
             return None;
         }
         let connection = self.linked_connection(&agent.server_id)?;
@@ -855,6 +861,15 @@ impl ConnApp {
             config,
             cx,
         );
+    }
+
+    /// Test helper: whether a linked environment's connection reports Connected.
+    #[cfg(test)]
+    pub(crate) fn linked_connected_for_test(&self, environment_id: &str) -> bool {
+        matches!(
+            self.linked.statuses.get(environment_id),
+            Some(ConnectionStatus::Connected)
+        )
     }
 
     /// Test helper: the Orbit fleet the app knows.

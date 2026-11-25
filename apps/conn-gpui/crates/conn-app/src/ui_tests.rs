@@ -919,16 +919,16 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
     assert_eq!(launch["initialMessage"]["text"], "Help with Mini");
 }
 
-/// The fleet's primary agent Node is connected as a linked environment: New thread opens
-/// General there and the first message launches on its connection, while the primary connection
-/// (another Node) stays the app's own.
-#[gpui_kit::test]
-async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppContext) {
+/// Mounts the app on `nick` as its primary connection, with an Orbit fleet whose primary agent
+/// Node `agent` is linked at `agent_url`.
+fn mount_with_agent_node(
+    cx: &mut TestAppContext,
+    primary_url: url::Url,
+    primary_tags: &std::sync::mpsc::Receiver<String>,
+    agent_url: url::Url,
+) -> (AnyWindowHandle, Entity<ConnApp>) {
     use conn_desktop::orbit::{OrbitFleet, OrbitServerTarget, OrbitTargetKind, OrbitTargetStatus};
 
-    cx.executor().allow_parking();
-    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
-    let (agent_url, agent_tags, mut agent_launch) = spawn_scratch_server("agent-scratch");
     let node = |id: &str, url: &url::Url, is_primary_agent: bool| OrbitServerTarget {
         server_id: id.to_owned(),
         label: id.to_owned(),
@@ -965,7 +965,7 @@ async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppCon
             orbit_server_id: Some("nick".to_owned()),
         }),
     );
-    wait_for_tag(&primary_tags, "subscribeServerConfig");
+    wait_for_tag(primary_tags, "subscribeServerConfig");
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_shell(two_project_shell(), cx);
@@ -980,7 +980,26 @@ async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppCon
             );
         })
     });
+    (window, app)
+}
+
+/// The fleet's primary agent Node is connected as a linked environment: New thread opens
+/// General there and the first message launches on its connection, while the primary connection
+/// (another Node) stays the app's own.
+#[gpui_kit::test]
+async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
+    let (agent_url, agent_tags, mut agent_launch) = spawn_scratch_server("agent-scratch");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
     wait_for_tag(&agent_tags, "subscribeServerConfig");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read(|cx| app.read(cx).linked_connected_for_test("agent")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     let start = cx
         .update_window(window, |_, window, cx| {
@@ -1023,6 +1042,43 @@ async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppCon
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(owner.as_deref(), Some("agent"));
+}
+
+/// An agent Node that is not connected (here, nothing listens on its port) never takes General:
+/// New thread opens it on the primary connection, as it did before agent Nodes.
+#[gpui_kit::test]
+async fn new_thread_falls_back_to_the_primary_while_the_agent_node_is_unreachable(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
+    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .expect("free loopback port");
+    let agent_url = url::Url::parse(&format!("http://127.0.0.1:{closed_port}")).expect("agent URL");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| app.read(cx).linked_connected_for_test("agent")));
+
+    let start = cx
+        .update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| app.start_general_draft(Some(window), cx))
+        })
+        .expect("test window");
+    let draft_id = start.await.expect("opened General draft");
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test()),
+        Some((draft_id, "nick-scratch".to_owned()))
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_model("codex", "test-model", None, cx);
+            app.send_prompt("Help with Mini".into(), cx);
+        })
+    });
+    let launch = primary_launch.recv().await.expect("launch on the primary");
+    assert_eq!(launch["projectId"], "nick-scratch");
 }
 
 #[gpui_kit::test]

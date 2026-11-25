@@ -118,6 +118,8 @@ pub(crate) struct Config {
     /// `ACP_DEFERRED_FINALIZE_DEBOUNCE` (3 s); the replay shortens it, as T3's test clock
     /// skips it.
     pub finalize_debounce: Duration,
+    #[cfg(feature = "fixture-replay")]
+    pub deferred_finalize_gate: Option<crate::DeferredFinalizeGate>,
     pub flavor: &'static Flavor,
     pub instance_id: String,
     pub provider_session_id: String,
@@ -1968,9 +1970,38 @@ impl Inner {
             mapper::Timer::Hydration { .. } => mapper::HYDRATION_WAIT,
             mapper::Timer::InjectedReport { .. } => mapper::INJECTED_REPORT_WAIT,
         };
+        let elapsed = tokio::time::sleep(delay);
+        #[cfg(feature = "fixture-replay")]
+        let elapsed = {
+            let release = self
+                .config
+                .deferred_finalize_gate
+                .as_ref()
+                .filter(|_| {
+                    matches!(
+                        timer,
+                        mapper::Timer::Finalize {
+                            open_reply: false,
+                            ..
+                        }
+                    )
+                })
+                .and_then(|gate| {
+                    let (receipt, release) = tokio::sync::oneshot::channel();
+                    gate.send(receipt).ok().map(|()| release)
+                });
+            async move {
+                match release {
+                    Some(release) => {
+                        let _ = release.await;
+                    }
+                    None => elapsed.await,
+                }
+            }
+        };
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+            elapsed.await;
             let Some(inner) = weak.upgrade() else { return };
             let mut state = inner.state.lock().await;
             if let Some(profile) = inner.config.profile.clone()
@@ -3561,6 +3592,8 @@ mod spawn_tests {
         Config {
             flush_interval: None,
             finalize_debounce: FINALIZE_DEBOUNCE,
+            #[cfg(feature = "fixture-replay")]
+            deferred_finalize_gate: None,
             flavor: &crate::flavor::GROK,
             instance_id: "grok".into(),
             provider_session_id: "s".into(),

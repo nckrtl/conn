@@ -143,16 +143,16 @@ process.env.TMPDIR = fs.realpathSync(os.tmpdir());
 const PLAN = __PLAN__;
 fs.writeFileSync(__PARENT_ENV__, JSON.stringify(process.env));
 
-// The fixture's replay gate reaches across to the stub: the stub writes <label>.reached when it
-// holds the line, and the gate's release writes <label>.released.
+// The fixture's replay gate reaches across to the stub: the stub writes gate-<label>.reached when it
+// holds the line, and the gate's release writes gate-<label>.release.
 const bridgeGates = (scenario: any, gate: any) => {
   if (gate === undefined) return;
   for (const { label } of scenario.gates) {
-    const file = (kind: string) => scenario.tsGateDir + "/" + encodeURIComponent(label) + "." + kind;
+    const file = (kind: string) => scenario.tsGateDir + "/gate-" + encodeURIComponent(label) + "." + kind;
     const timer = setInterval(() => {
       if (!fs.existsSync(file("reached"))) return;
       clearInterval(timer);
-      void gate.beforeEmit(label).then(() => fs.writeFileSync(file("released"), ""));
+      void gate.beforeEmit(label).then(() => fs.writeFileSync(file("release"), ""));
     }, 5);
     timer.unref();
   }

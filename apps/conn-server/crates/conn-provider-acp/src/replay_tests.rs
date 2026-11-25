@@ -164,6 +164,8 @@ pub(crate) async fn replay(flavor: &'static Flavor, golden: &Value) -> Run {
     let config = Config {
         flush_interval: None,
         finalize_debounce: Duration::from_millis(5),
+        #[cfg(feature = "fixture-replay")]
+        deferred_finalize_gate: None,
         flavor,
         instance_id: open["input"]["modelSelection"]["instanceId"]
             .as_str()

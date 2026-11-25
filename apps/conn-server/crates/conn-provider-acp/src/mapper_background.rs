@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 
 use super::{Mapper, Out, content_display_text};
 use crate::flavor::BackgroundHooks;
-use crate::grok_background::{Lifecycle, ReportKind, TaskStatus};
+use crate::grok_background::{Lifecycle, TaskStatus};
 use crate::tools::{self, ToolState};
 use conn_provider_support::ids::Env;
+use conn_provider_support::notification::{Work, WorkKind, background_work_notification};
 
 /// `endedDetachedBackgroundCommandLimit`.
 const ENDED_DETACHED_KEPT: usize = 16;
@@ -105,6 +106,9 @@ pub(super) struct SessionBackground {
     unreported: HashSet<String>,
     /// `wakeBuffer`: whole `session/update` params.
     wake_buffer: VecDeque<Value>,
+    /// Reports keyed by native task id, in arrival order, and the keys offered to the next run.
+    reports: VecDeque<(String, Work)>,
+    offered_reports: HashSet<String>,
     /// `continuationRequested`.
     continuation_requested: bool,
     /// `lastTurnRoute`: (thread id, provider thread id).
@@ -699,6 +703,8 @@ impl<E: Env> Mapper<E> {
         let was_requested = self.bg.continuation_requested;
         let preserve = !continuation && was_requested && !self.bg.wake_buffer.is_empty();
         if !continuation && !app_owned && !preserve {
+            self.bg.reports.clear();
+            self.bg.offered_reports.clear();
             self.bg.wake_buffer.clear();
         }
         if !preserve {
@@ -712,6 +718,10 @@ impl<E: Env> Mapper<E> {
     /// the normal update handler, the turn counts as settled, and it finalizes (or defers).
     pub(super) fn drain_continuation(&mut self, was_requested: bool, out: &mut Vec<Out>) {
         self.bg.continuation_requested = false;
+        self.bg
+            .reports
+            .retain(|(key, _)| !self.bg.offered_reports.contains(key));
+        self.bg.offered_reports.clear();
         let root = self.root_session.clone().unwrap_or_default();
         let drained: Vec<Value> = self
             .bg
@@ -760,6 +770,8 @@ impl<E: Env> Mapper<E> {
     /// `quarantineStoppedRun`: a stopped run's frames wake nothing.
     pub(super) fn quarantine(&mut self) {
         self.bg.quarantined = true;
+        self.bg.reports.clear();
+        self.bg.offered_reports.clear();
         self.bg.wake_buffer.clear();
         self.bg.continuation_requested = false;
         self.bg.running.clear();
@@ -772,12 +784,33 @@ impl<E: Env> Mapper<E> {
     /// `continuationClosed`: the session closed.
     pub(crate) fn close_background(&mut self) {
         self.bg.closed = true;
+        self.bg.reports.clear();
+        self.bg.offered_reports.clear();
         self.bg.wake_buffer.clear();
         self.bg.detached.clear();
         self.detached_turns.clear();
     }
 
     // ---- continuation ----------------------------------------------------------------------
+
+    /// Grok only reports work that ended after the prompt settled.
+    pub(super) fn record_wake_report(&mut self, key: &str, report: Work) {
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| !turn.bg.prompt_settled)
+        {
+            return;
+        }
+        if let Some((_, previous)) = self.bg.reports.iter_mut().find(|(id, _)| id == key) {
+            *previous = report;
+            return;
+        }
+        if self.bg.reports.len() == TASK_IDS_KEPT {
+            self.bg.reports.pop_front();
+        }
+        self.bg.reports.push_back((key.to_owned(), report));
+    }
 
     /// `offerContinuationRun`: asks the engine for one continuation turn.
     pub(crate) fn offer_continuation(&mut self, out: &mut Vec<Out>) -> bool {
@@ -792,10 +825,18 @@ impl<E: Env> Mapper<E> {
             return false;
         };
         self.bg.continuation_requested = true;
-        self.event(
-            json!({"type": "continuation.requested", "threadId": thread_id, "providerThreadId": provider_thread_id, "detail": null}),
-            out,
-        );
+        let mut event = json!({"type": "continuation.requested", "threadId": thread_id, "providerThreadId": provider_thread_id, "detail": null});
+        self.bg.offered_reports = self.bg.reports.iter().map(|(key, _)| key.clone()).collect();
+        let reports: Vec<_> = self
+            .bg
+            .reports
+            .iter()
+            .map(|(_, report)| report.clone())
+            .collect();
+        if let Some(notification) = background_work_notification(&reports) {
+            event["notification"] = notification;
+        }
+        self.event(event, out);
         true
     }
 
@@ -1149,8 +1190,13 @@ impl<E: Env> Mapper<E> {
                 .unwrap_or((life.status, life.output.clone())),
             None => self.record_command_end(&life),
         };
-        // T3 records a wake report here for the continuation's notification; the engine's
-        // continuation request carries none (see the crate README).
+        if status != TaskStatus::Running
+            && !self.bg.handled.contains(&life.task_id)
+            && let Some(mut report) = life.report.clone()
+        {
+            report.outcome = status.tool_status();
+            self.record_wake_report(&life.task_id, report);
+        }
         self.apply_late_background_mutation(&life.session_id, &life.task_id, status, &mut out);
         if status != TaskStatus::Running {
             match detached {
@@ -1174,7 +1220,10 @@ impl<E: Env> Mapper<E> {
         let mut output = life.output.clone();
         if status != TaskStatus::Running
             && let Some(turn) = self.turn.as_mut()
-            && (life.report == Some(ReportKind::Command)
+            && (life
+                .report
+                .as_ref()
+                .is_some_and(|report| report.kind == WorkKind::Command)
                 || turn.bg.command_end(&life.task_id).is_some())
         {
             let previous = turn.bg.command_end(&life.task_id).cloned().flatten();

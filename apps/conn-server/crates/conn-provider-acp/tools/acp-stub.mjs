@@ -109,14 +109,14 @@ function worker() {
 
 // Replay gates (T3's `ProviderReplayGate` across processes): the agent line of a transcript
 // entry with a gated label is held, with every line after it, until the test writes
-// `<gateDir>/<label>.released`; the worker writes `<label>.reached` when it holds one.
-function forwardAgentOutput(agent) {
+// `<gateDir>/gate-<label>.release`; the worker writes `gate-<label>.reached` when it holds one.
+async function forwardAgentOutput(agent) {
   const gates = config.gates ?? [];
   if (gates.length === 0) {
     agent.stdout.pipe(process.stdout);
     return;
   }
-  const gateFile = (label, kind) => `${config.gateDir}/${encodeURIComponent(label)}.${kind}`;
+  const gateFile = (label, kind) => `${config.gateDir}/gate-${encodeURIComponent(label)}.${kind}`;
   const entries = JSON.parse(NodeFS.readFileSync(config.transcript, "utf8")).entries;
   let index = 0;
   try {
@@ -124,23 +124,17 @@ function forwardAgentOutput(agent) {
   } catch {
     // A first process starts at the beginning.
   }
-  let holding = null;
-  const held = [];
   const output = NodeReadline.createInterface({ input: agent.stdout, crlfDelay: Infinity });
-  output.on("line", (line) => {
+  for await (const line of output) {
     while (index < entries.length && entries[index].type !== "emit_inbound") index += 1;
     const label = entries[index]?.label;
     index += 1;
-    if (holding === null && gates.includes(label) && !NodeFS.existsSync(gateFile(label, "released"))) {
-      holding = label;
+    if (gates.includes(label) && !NodeFS.existsSync(gateFile(label, "release"))) {
       NodeFS.writeFileSync(gateFile(label, "reached"), "");
+      while (!NodeFS.existsSync(gateFile(label, "release"))) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
     }
-    if (holding === null) process.stdout.write(`${line}\n`);
-    else held.push(line);
-  });
-  setInterval(() => {
-    if (holding === null || !NodeFS.existsSync(gateFile(holding, "released"))) return;
-    holding = null;
-    for (const line of held.splice(0)) process.stdout.write(`${line}\n`);
-  }, 5).unref();
+    process.stdout.write(`${line}\n`);
+  }
 }

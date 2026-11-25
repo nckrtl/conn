@@ -287,6 +287,8 @@ impl AntigravityProvider {
         let config = session::Config {
             flush_interval: Some(session::FLUSH_INTERVAL),
             finalize_debounce: session::FINALIZE_DEBOUNCE,
+            #[cfg(feature = "fixture-replay")]
+            deferred_finalize_gate: None,
             flavor: &ANTIGRAVITY,
             instance_id: self.instance_id.as_str().to_owned(),
             provider_session_id,

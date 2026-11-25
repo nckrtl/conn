@@ -193,6 +193,8 @@ vi.mock("./ProviderReplayHarness.ts", async (importOriginal) => {
           log: path.join(dir, "stub.ndjson"),
           replayAgent: CONFIG.acpReplayAgent,
           workspace,
+          gates,
+          gateDir: dir,
         }),
       );
       const wrapper = path.join(dir, "grok");

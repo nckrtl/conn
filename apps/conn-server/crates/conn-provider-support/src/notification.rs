@@ -1,6 +1,6 @@
 //! The notice a provider's wake shows (`backgroundWorkNotification` and `reportLabel` in
 //! `packages/provider-core/src/server/notification.ts`): what background work ended, as
-//! `OrchestrationV2Notification` (`source`, `outcome`, `summary`). Claude and Codex both use it.
+//! `OrchestrationV2Notification` (`source`, `outcome`, `summary`). Claude, Codex and Grok use it.
 
 use serde_json::{Value, json};
 

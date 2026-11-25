@@ -1021,37 +1021,63 @@ impl<E: Env> Mapper<E> {
         if self.flavor.background.is_none() || self.bg.quarantined || !self.is_root(session_id) {
             return out;
         }
-        let known = self.turn.as_ref().and_then(|t| {
-            t.subagents
+        let find = |turn: &super::Turn| {
+            turn.subagents
                 .key_of_session(child_session_id)
-                .and_then(|key| t.subagents.get(&key).cloned())
-        });
-        if let Some(subagent) = known {
-            if !crate::grok_background::subagent_status_blocks_settlement(subagent.status()) {
-                return out;
-            }
-            let update = SubagentUpdate {
-                native_task_id: subagent.native_task_id(),
-                prompt: subagent.task["prompt"].as_str().unwrap_or("").to_owned(),
-                title: subagent.task["title"].as_str().map(str::to_owned),
-                model: subagent.task["model"].as_str().map(str::to_owned),
-                status: status.to_owned(),
-                child_session_id: Some(child_session_id.to_owned()),
-                result,
-                suppress_normal_tool: true,
-            };
-            self.emit_subagent(update, &mut out);
-            self.rearm_deferred_finalize(&mut out);
+                .and_then(|key| turn.subagents.get(&key).cloned())
+        };
+        let active = self.turn.as_ref().and_then(find);
+        let carried = active.is_none();
+        let Some(subagent) = active.or_else(|| {
+            self.carryover
+                .as_deref()
+                .filter(|owner| owner.native_thread_id == session_id)
+                .and_then(find)
+        }) else {
+            return out;
+        };
+        if !crate::grok_background::subagent_status_blocks_settlement(subagent.status()) {
             return out;
         }
-        if self.carryover.as_ref().is_some_and(|owner| {
-            owner.native_thread_id == session_id
-                && owner.subagents.key_of_session(child_session_id).is_some()
-        }) {
-            let live = self.turn.take();
-            self.turn = self.carryover.take().map(|t| *t);
-            // The carried owner has the matching child. Its updates retain the original run and node ids.
-            out = self.finish_subagent(session_id, child_session_id, status, result);
+        let update = SubagentUpdate {
+            native_task_id: subagent.native_task_id(),
+            prompt: subagent.task["prompt"].as_str().unwrap_or("").to_owned(),
+            title: subagent.task["title"].as_str().map(str::to_owned),
+            model: subagent.task["model"].as_str().map(str::to_owned),
+            status: status.to_owned(),
+            child_session_id: Some(child_session_id.to_owned()),
+            result,
+            suppress_normal_tool: true,
+        };
+        let outcome = match status {
+            "completed" => "completed",
+            "failed" => "failed",
+            "cancelled" => "cancelled",
+            _ => "unknown",
+        };
+        self.record_wake_report(
+            child_session_id,
+            conn_provider_support::notification::Work {
+                kind: conn_provider_support::notification::WorkKind::Subagent,
+                label: Some(
+                    update
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| update.prompt.clone()),
+                ),
+                outcome,
+                child_thread_id: Some(subagent.child_thread_id),
+                exit_code: None,
+            },
+        );
+        let live = if carried {
+            std::mem::replace(&mut self.turn, self.carryover.take().map(|owner| *owner))
+        } else {
+            None
+        };
+        self.emit_subagent(update, &mut out);
+        self.rearm_deferred_finalize(&mut out);
+        if carried {
             self.carryover = self
                 .turn
                 .take()

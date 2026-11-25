@@ -200,16 +200,15 @@ prompts; our replay and the stub conformance check compare against those.
 
 ## Not built
 
-Grok supports native interjection, plan capture, leading skill mentions and late
-subagent completions. Grok and Antigravity can load a saved conversation, fork
+Grok supports native interjection, plan capture, leading skill mentions, late
+subagent completions and background completion notifications. Grok and Antigravity can load a saved conversation, fork
 a negotiated session head, generate short text and accept external app context.
 The engine handles a fork or rollback at a fixed historical boundary with the
 kept conversation. Its native ACP thread stays immutable on rollback.
 
 Remaining differences include the following.
 
-- Grok continuation notifications, MCP tool presentation in subagent rows,
-  model slug aliases, ACP v2 reasoning effort, search and fetch projections,
+- MCP tool presentation in Grok subagent rows, model slug aliases, ACP v2 reasoning effort, search and fetch projections,
   structured file changes, notices and retries.
 - ACP v2 responses, MCP over ACP, registry client terminal callbacks, file writes
   and authentication on `auth_required`.

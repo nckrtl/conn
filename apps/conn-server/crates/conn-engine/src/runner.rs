@@ -1235,6 +1235,9 @@ impl Inner {
                 }
                 let now = tx.now().to_owned();
                 let pt_id = provider_thread_json["id"].clone();
+                let activating = tx
+                    .thread(&tid)?
+                    .is_some_and(|thread| thread["activeProviderThreadId"] != pt_id);
                 let draft = |event_type, payload| {
                     Draft::new(&tid, event_type, payload)
                         .run(Some(&rid))
@@ -1283,9 +1286,9 @@ impl Inner {
                         .run(Some(&rid)),
                     )?;
                 }
-                if let Some(mut thread) = tx.thread(&tid)?
-                    && thread["activeProviderThreadId"] != pt_id
-                {
+                // The provider row also activates the pointer in the projection.
+                // Preserve the normal turn-start metadata event for a newly selected thread.
+                if activating && let Some(mut thread) = tx.thread(&tid)? {
                     thread["activeProviderThreadId"] = pt_id.clone();
                     tx.append(
                         Draft::new(&tid, "thread.metadata-updated", thread).payload_instance(),
@@ -1803,18 +1806,21 @@ impl Inner {
                     *lock(&live.loaded_key) = None;
                 }
             }
-            // A settled command's stored item has its output; its live tail goes.
-            if let Translated::Event(draft) = &translated
-                && draft.event_type == "turn-item.updated"
-                && draft.payload["type"] == "command_execution"
-                && !matches!(
-                    draft.payload["status"].as_str(),
-                    Some("running" | "pending" | "waiting")
-                )
-                && let Some(item_id) = draft.payload["id"].as_str()
-            {
-                self.command_output.finish(&draft.thread_id, item_id);
-            }
+            let ended_command = match &translated {
+                Translated::Event(draft)
+                    if draft.event_type == "turn-item.updated"
+                        && draft.payload["type"] == "command_execution"
+                        && !matches!(
+                            draft.payload["status"].as_str(),
+                            Some("running" | "pending" | "waiting")
+                        ) =>
+                {
+                    draft.payload["id"]
+                        .as_str()
+                        .map(|id| (draft.thread_id.clone(), id.to_owned()))
+                }
+                _ => None,
+            };
             // A finished push can start new checks on the thread's watched pull requests
             // (`PullRequestSyncReactor.reopenWatchedChecks`).
             let pushed = match &translated {
@@ -1853,6 +1859,31 @@ impl Inner {
                     self.commit(vec![draft]).await;
                     if running && let Some(run_id) = &run_id {
                         self.deliver_deferred_steers(&thread_id, run_id).await;
+                    }
+                }
+                Translated::Event(draft)
+                    if draft.event_type == "turn-item.updated"
+                        && draft.thread_id == thread_id
+                        && matches!(
+                            draft.payload["type"].as_str(),
+                            Some("command_execution" | "dynamic_tool" | "subagent")
+                        )
+                        && run_id
+                            .as_deref()
+                            .zip(draft.payload["runId"].as_str())
+                            .is_some_and(|(active, owner)| active != owner) =>
+                {
+                    // A wake may poll an earlier run's command again after its last output.
+                    // Only an item still open on this provider thread can be inherited.
+                    let provider_thread = lock(&live.state)
+                        .provider_thread
+                        .as_ref()
+                        .map(|thread| thread.id.as_str().to_owned());
+                    if !self
+                        .commit_inherited_background_item(draft, provider_thread)
+                        .await
+                    {
+                        continue;
                     }
                 }
                 Translated::Event(draft) => {
@@ -1917,6 +1948,9 @@ impl Inner {
                         }
                     }
                 }
+            }
+            if let Some((owner, item)) = ended_command {
+                self.command_output.finish(&owner, &item);
             }
             if let Some(command) = pushed
                 && let Err(e) = self.dispatch_value(command).await
@@ -2143,6 +2177,49 @@ impl Inner {
             .await
         {
             eprintln!("conn-engine: could not reserve a turn item position: {e}");
+        }
+    }
+
+    /// Accept a late item for its original run exactly until its first terminal update.
+    async fn commit_inherited_background_item(
+        self: &Arc<Self>,
+        mut draft: Draft,
+        provider_thread: Option<String>,
+    ) -> bool {
+        let Some(provider_thread) = provider_thread else {
+            return false;
+        };
+        let result = self
+            .write(move |tx| {
+                let item = &draft.payload;
+                let Some(id) = item["id"].as_str() else {
+                    return Ok(false);
+                };
+                let Some(previous) = tx.entity(&draft.thread_id, "turnItems", id)? else {
+                    return Ok(false);
+                };
+                if previous["runId"] != item["runId"]
+                    || previous["type"] != item["type"]
+                    || previous["providerThreadId"] != item["providerThreadId"]
+                    || Some(provider_thread.as_str()) != item["providerThreadId"].as_str()
+                    || !matches!(
+                        previous["status"].as_str(),
+                        Some("pending" | "running" | "waiting")
+                    )
+                {
+                    return Ok(false);
+                }
+                draft.run_id = item["runId"].as_str().map(str::to_owned);
+                tx.append(draft)?;
+                Ok(true)
+            })
+            .await;
+        match result {
+            Ok(stored) => stored,
+            Err(error) => {
+                eprintln!("conn-engine: could not record an inherited turn item: {error}");
+                false
+            }
         }
     }
 

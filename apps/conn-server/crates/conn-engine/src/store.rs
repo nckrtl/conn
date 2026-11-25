@@ -120,6 +120,14 @@ pub(crate) const TRANSCRIPT_INTERRUPTS_SQL: &str = "SELECT DISTINCT json_extract
      AND json_extract(body, '$.type') = 'run_interrupt_request'
      AND json_extract(body, '$.runId') IS NOT NULL";
 
+// The next queued run can reserve a provider row before it owns a native conversation.
+fn is_queued_provider_thread_placeholder(row: &Value) -> bool {
+    row["status"] == "not_loaded"
+        && row["firstRunOrdinal"].is_null()
+        && row["nativeThreadRef"].is_null()
+        && row["providerSessionId"].is_null()
+}
+
 /// `inheritedRunFork`: the source thread and run of a run fork that is not a side chat.
 fn inherited_run_fork(thread: &Value) -> Option<(String, String)> {
     let forked = &thread["forkedFrom"];
@@ -485,6 +493,67 @@ impl Store {
         })
     }
 
+    /// Older native subagents had a provider row and a parent link, but no active
+    /// provider pointer. Only restore an unambiguous, untouched native child.
+    fn restore_native_child_threads(&mut self) -> StoreResult<()> {
+        const KEY: &str = "native_child_active_provider_v1";
+        if self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+                [KEY],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(err)?
+        {
+            return Ok(());
+        }
+        let mut tx = self.tx()?;
+        let children = {
+            let mut stmt = tx.tx.prepare(
+                "WITH children AS MATERIALIZED (
+                     SELECT id, json_extract(thread, '$.lineage.parentThreadId') AS parent_id FROM threads
+                     WHERE deleted = 0 AND json_extract(thread, '$.activeProviderThreadId') IS NULL
+                       AND json_extract(thread, '$.lineage.relationshipToParent') = 'subagent'
+                 )
+                 SELECT child.id, provider.id FROM children child
+                 JOIN entities link ON link.thread_id = child.parent_id AND link.kind = 'subagents'
+                     AND json_extract(link.body, '$.childThreadId') = child.id
+                 JOIN entities provider ON provider.thread_id = child.id AND provider.kind = 'providerThreads'
+                     AND provider.id = json_extract(link.body, '$.providerThreadId')
+                 WHERE json_extract(link.body, '$.origin') = 'provider_native'
+                   AND json_extract(provider.body, '$.appThreadId') = child.id
+                   AND json_extract(provider.body, '$.nativeThreadRef.nativeId') IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM entities other WHERE other.thread_id = child.id
+                       AND (other.kind = 'runs' OR (other.kind = 'providerThreads' AND other.id != provider.id
+                           AND json_extract(other.body, '$.appThreadId') = child.id
+                           AND json_extract(other.body, '$.nativeThreadRef.nativeId') IS NOT NULL)))
+                   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.thread_id = child.id AND e.type = 'thread.provider-switched')"
+            ).map_err(err)?;
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(err)?
+        };
+        for (child, provider) in children {
+            if let Some(mut thread) = tx.thread(&child)? {
+                thread["activeProviderThreadId"] = json!(provider);
+                // Existing clients resuming an event cursor must see the repair too.
+                tx.append(
+                    Draft::new(&child, "thread.metadata-updated", thread).payload_instance(),
+                )?;
+            }
+        }
+        tx.tx
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, 1)",
+                [KEY],
+            )
+            .map_err(err)?;
+        tx.commit(None)?;
+        Ok(())
+    }
+
     /// Makes this store's engine the one that may write: a newer epoch fences every engine
     /// that opened the database before. Returns the flag that releases the lease on drop.
     ///
@@ -520,6 +589,8 @@ impl Store {
             epoch,
             released: std::sync::Arc::clone(&released),
         });
+        // Repairs append domain events, so they need the same lease as a user command.
+        self.restore_native_child_threads()?;
         Ok(released)
     }
 
@@ -2299,7 +2370,22 @@ impl Tx<'_> {
             .map_err(err)?;
         // Every other event moves the thread's `updatedAt` to its time, in the row and in the
         // stored thread, as T3's `writeThreadTouches`.
-        if !payload_sets_updated_at {
+        let row = &event["payload"];
+        if event_type == "provider-thread.updated"
+            && row["appThreadId"] == thread_id
+            && !is_queued_provider_thread_placeholder(row)
+        {
+            // Native child threads do not start an app run. Their first provider row
+            // activates their conversation just as it does on an ordinary app thread.
+            self.tx
+                .execute(
+                    "UPDATE threads SET activity_at = ?2,
+                    thread = json_set(thread, '$.updatedAt', ?2, '$.activeProviderThreadId', ?3)
+                 WHERE id = ?1",
+                    params![thread_id, self.now, row["id"].as_str()],
+                )
+                .map_err(err)?;
+        } else if !payload_sets_updated_at {
             self.tx
                 .execute(
                     "UPDATE threads SET activity_at = ?2, thread = json_set(thread, '$.updatedAt', ?2)
@@ -4049,6 +4135,80 @@ mod tests {
         assert_eq!(ordinal(&tx, "next"), 4);
         tx.commit(None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_child_provider_activation_survives_queueing_and_repairs_legacy_projections() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        {
+            let mut tx = store.tx().unwrap();
+            tx.append(Draft::new(
+                "parent",
+                "thread.created",
+                json!({"id":"parent","projectId":"p"}),
+            ))
+            .unwrap();
+            for child in ["child", "switched", "ambiguous"] {
+                let thread = json!({"id":child,"projectId":"p","lineage":{"parentThreadId":"parent","relationshipToParent":"subagent"}});
+                tx.append(Draft::new(child, "thread.created", thread.clone()))
+                    .unwrap();
+                tx.append(Draft::new("parent","subagent.updated",json!({"id":child,"childThreadId":child,"providerThreadId":"native","origin":"provider_native"}))).unwrap();
+                tx.append(Draft::new(child,"provider-thread.updated",json!({"id":"native","appThreadId":child,"status":"idle","nativeThreadRef":{"nativeId":"session"}}))).unwrap();
+                tx.append(Draft::new(child,"provider-thread.updated",json!({"id":"queued","appThreadId":child,"status":"not_loaded","firstRunOrdinal":null,"providerSessionId":null,"nativeThreadRef":null}))).unwrap();
+                tx.append(Draft::new(
+                    child,
+                    "provider-thread.updated",
+                    json!({"id":"unowned","appThreadId":null,"status":"idle"}),
+                ))
+                .unwrap();
+                assert_eq!(
+                    tx.thread(child).unwrap().unwrap()["activeProviderThreadId"],
+                    "native"
+                );
+                if child == "ambiguous" {
+                    tx.append(Draft::new(child, "provider-thread.updated", json!({"id":"other","appThreadId":child,"status":"idle","nativeThreadRef":{"nativeId":"other-session"}}))).unwrap();
+                }
+                if child == "switched" {
+                    tx.append(Draft::new(child, "thread.provider-switched", thread))
+                        .unwrap();
+                }
+            }
+            tx.commit(None).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "DELETE FROM meta WHERE key='native_child_active_provider_v1';
+             UPDATE threads SET thread=json_set(thread,'$.activeProviderThreadId',NULL),
+                 shell=json_set(shell,'$.activeProviderThreadId',NULL);",
+            )
+            .unwrap();
+        let before = store.high_water();
+        let _lease = store.take_ownership(None).unwrap();
+        let updates = store.stored_events_after(before, 5).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["event"]["type"], "thread.metadata-updated");
+        assert_eq!(
+            updates[0]["event"]["payload"]["activeProviderThreadId"],
+            "native"
+        );
+        for (child, expected) in [
+            ("child", json!("native")),
+            ("switched", Value::Null),
+            ("ambiguous", Value::Null),
+        ] {
+            assert_eq!(
+                store.thread_projection(child).unwrap().unwrap()["thread"]["activeProviderThreadId"],
+                expected
+            );
+            assert_eq!(
+                store.stored_shell(child).unwrap().unwrap()["activeProviderThreadId"],
+                expected
+            );
+        }
+        let boundary = store.high_water();
+        store.restore_native_child_threads().unwrap();
+        assert_eq!(store.high_water(), boundary);
     }
 
     #[test]

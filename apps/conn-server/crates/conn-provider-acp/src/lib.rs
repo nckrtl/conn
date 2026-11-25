@@ -153,6 +153,11 @@ pub(crate) async fn initialize_probe(
     }
 }
 
+/// A T3 replay step releases the actual deferred-finalize timer the adapter scheduled.
+#[cfg(feature = "fixture-replay")]
+pub type DeferredFinalizeGate =
+    tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>;
+
 /// One configured ACP agent instance.
 #[derive(Clone, Debug)]
 pub struct AcpConfig {
@@ -172,6 +177,8 @@ pub struct AcpConfig {
     /// this long after the last change. Replays of T3's fixtures shorten it, as T3's test
     /// clock skips it.
     pub finalize_debounce: Duration,
+    #[cfg(feature = "fixture-replay")]
+    pub deferred_finalize_gate: Option<DeferredFinalizeGate>,
     /// The executable an agent starts for the stdio MCP bridge (`<it> acp-mcp-bridge`);
     /// `None`: this process's own executable (T3's `resolveSelfInvocation`).
     pub self_command: Option<String>,
@@ -188,6 +195,8 @@ impl Default for AcpConfig {
             workspace_cwd: None,
             text_flush_interval: Some(session::FLUSH_INTERVAL),
             finalize_debounce: session::FINALIZE_DEBOUNCE,
+            #[cfg(feature = "fixture-replay")]
+            deferred_finalize_gate: None,
             self_command: None,
             attachments_dir: None,
         }
@@ -468,6 +477,8 @@ impl Provider for AcpProvider {
             let config = session::Config {
                 flush_interval: self.config.text_flush_interval,
                 finalize_debounce: self.config.finalize_debounce,
+                #[cfg(feature = "fixture-replay")]
+                deferred_finalize_gate: self.config.deferred_finalize_gate.clone(),
                 flavor: self.flavor,
                 instance_id: self.instance_id.as_str().to_owned(),
                 provider_session_id: input.provider_session_id.as_str().to_owned(),

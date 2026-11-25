@@ -46,7 +46,7 @@ const PREVIEW_TOP_PAD_PX: f32 = 12.0;
 const CRUMB_FADE_PX: f32 = 14.0;
 const TREE_ROW_HEIGHT_PX: f32 = 28.0;
 /// Corner radius of the Files tree hover and selection highlight.
-const TREE_ROW_RADIUS_PX: f32 = 8.0;
+const TREE_ROW_RADIUS_PX: f32 = 5.0;
 /// Standard panel UI text size (`text-ui`: 13px / 20px).
 const UI_TEXT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
@@ -1559,26 +1559,37 @@ impl FilesPanel {
         for row in rows {
             let is_dir = row.kind == ProjectEntryKind::Directory;
             let is_selected = selected == Some(row.path.as_str());
-            let indent_px = 12.0 + (row.depth as f32) * 14.0;
+            let indent_px = 8.0 + (row.depth as f32) * 19.0;
             let row_path = row.path.clone();
             let text_color = if row.ignored && !is_selected {
                 muted
             } else {
                 fg
             };
-            let resolved_icon = crate::file_icons::file_icon(&row.name);
-            let icon_color = resolved_icon
-                .color
-                .map(|c| to_hsla(c.for_appearance(self.tokens.appearance)))
-                .unwrap_or(muted);
+            let (icon, icon_size, icon_color) = if is_dir {
+                let chevron = if row.expanded {
+                    "superhero/chevron-down.svg"
+                } else {
+                    "superhero/chevron-right.svg"
+                };
+                (chevron, 12.0, muted)
+            } else {
+                let icon = crate::file_icons::file_icon(&row.name);
+                let color = icon
+                    .color
+                    .map(|c| to_hsla(c.for_appearance(self.tokens.appearance)))
+                    .unwrap_or(muted);
+                (icon.asset, 16.0, color)
+            };
 
             let item = h_flex()
                 .id(SharedString::from(format!("tree-row-{}", row.path)))
                 .a11y_button(format!("panel.files.row.{}", row.path), row.name.clone())
                 .h(px(TREE_ROW_HEIGHT_PX))
+                .flex_shrink_0()
                 .pl(px(indent_px))
                 .pr(px(8.0))
-                .gap(px(6.0))
+                .gap(px(5.0))
                 .items_center()
                 .rounded(px(TREE_ROW_RADIUS_PX))
                 .cursor_pointer()
@@ -1634,31 +1645,20 @@ impl FilesPanel {
                         }
                     }),
                 )
-                .child(if is_dir {
-                    let chevron = if row.expanded {
-                        "superhero/chevron-down.svg"
-                    } else {
-                        "superhero/chevron-right.svg"
-                    };
+                .child(
                     div()
-                        .w(px(12.0))
+                        .w(px(16.0))
                         .flex()
                         .flex_shrink_0()
                         .items_center()
                         .justify_center()
-                        .child(superhero_icon(chevron, 12.0, muted))
-                } else {
-                    div().w(px(12.0)).flex_shrink_0()
-                })
-                .when(!is_dir, |el| {
-                    el.child(superhero_icon(resolved_icon.asset, 15.0, icon_color))
-                })
+                        .child(superhero_icon(icon, icon_size, icon_color)),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(UI_TEXT_PX))
                         .line_height(px(UI_LINE_HEIGHT_PX))
                         .text_color(text_color)
                         .child(row.name),

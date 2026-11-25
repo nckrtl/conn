@@ -333,13 +333,19 @@ private struct ThreadListV2RowView: View {
                     .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
             }
 
-            // project · branch · agent · 23m, one line that truncates as a whole.
-            Text(metaLine)
-                .font(.system(size: 13))
-                .foregroundStyle(theme.mutedForeground)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(minHeight: 17)
+            // <provider icon> · project · branch · 23m. The icon keeps its size; the text truncates.
+            HStack(alignment: .center, spacing: 4) {
+                if let provider = metaProvider {
+                    ProviderIcon(driver: provider, size: 12)
+                }
+                Text(metaLine)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.mutedForeground)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 17)
                 .padding(.leading, iconSize + titleGap)
                 .opacity(settled ? 0.6 : 1)
         }
@@ -359,15 +365,19 @@ private struct ThreadListV2RowView: View {
         }
     }
 
-    private var metaLine: AttributedString {
-        // The lab's line: ✦ (Claude's orange) · project · branch · age.
-        var line = AttributedString("✦")
-        line.foregroundColor = Color(red: 0xd9 / 255, green: 0x79 / 255, blue: 0x57 / 255)
+    /// The thread's provider driver, or nil when it has none (the line then starts at the project).
+    private var metaProvider: String? {
+        guard let provider = thread.provider?.trimmingCharacters(in: .whitespaces), !provider.isEmpty else { return nil }
+        return provider
+    }
+
+    /// The lab's line after the icon: project · branch · age, with a leading "·" after the icon.
+    private var metaLine: String {
         var parts: [String] = [projectTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "No project"]
         if let branch = thread.branch, !branch.isEmpty { parts.append(branch) }
         if let date = parseISODate(from: thread.updatedAt) { parts.append(wholeMinuteRelativeTime(from: date)) }
-        line += AttributedString(" · " + parts.joined(separator: " · "))
-        return line
+        let line = parts.joined(separator: " · ")
+        return metaProvider == nil ? line : "· " + line
     }
 }
 

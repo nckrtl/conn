@@ -170,7 +170,7 @@ struct TasksTabView: View {
                 LazyVStack(spacing: 0) {
                     content(view)
                 }
-                .padding(.top, barHeight + 4)
+                .padding(.top, barHeight + 8)
             }
             .refreshable { await model.refresh() }
             .background(theme.background)
@@ -212,8 +212,8 @@ struct TasksTabView: View {
             let projects = Dictionary(list.tasks.map { ($0.id, $0.project.name) }, uniquingKeysWith: { first, _ in first })
             if let emptyText = view.emptyText {
                 Text(emptyText)
-                    .font(.system(size: 15))
-                    .foregroundStyle(theme.mutedForeground)
+                    .font(.system(size: 16))
+                    .foregroundStyle(theme.foreground)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 32)
@@ -225,8 +225,6 @@ struct TasksTabView: View {
                         TaskRowView(row: row, project: projects[row.id])
                     }
                     .buttonStyle(.plain)
-                        .padding(.horizontal, 8)
-                        .padding(.bottom, 4)
                 }
             }
         }
@@ -250,7 +248,7 @@ private struct TasksTopBar: View {
                     .frame(height: 20)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 12).monospacedDigit())
+                        .font(.system(size: 12))
                         .foregroundStyle(theme.mutedForeground)
                         .accessibilityIdentifier("tasks.subtitle")
                 }
@@ -286,52 +284,31 @@ struct TaskLaneMenuItems: View {
     }
 }
 
-// MARK: - TaskRowView (1:1 port of TaskRow in TaskRows.tsx)
+// MARK: - TaskRowView (1:1 port of TaskCard in TasksScreen.tsx)
 
-/// A task as a list row: the project tile (status dot on its corner) and the title on line 1;
-/// project, number, subtasks, time, machine and the pull request under the title.
+/// A task as a list row: project, number, subtasks, time, machine and the pull request under the title.
 struct TaskRowView: View {
     let row: FfiPhoneTaskRow
     let project: String?
-    @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 12) {
-                ProjectFaviconView(title: project, size: 20)
-                    .overlay(alignment: .topTrailing) {
-                        StatusBadgeDot(dot: row.dot)
-                            .offset(x: 4, y: -4)
-                    }
-
-                Text(row.title)
-                    .font(.system(size: 16, weight: row.recede ? .regular : .medium))
-                    .foregroundStyle(theme.foreground)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
-            }
-            HStack(spacing: 0) {
-                Text(row.pullRequest == nil ? row.detail : row.detail + " · ")
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.mutedForeground)
-                    .lineLimit(1)
-                    .layoutPriority(-1)
-                if let pr = row.pullRequest {
-                    HStack(spacing: 3) {
-                        ConnIcon(pr.state == .merged ? "arrow.triangle.merge" : "arrow.triangle.pull")
-                            .font(.system(size: 12))
-                        Text("#\(pr.number)")
-                            .font(.system(size: 13).monospacedDigit())
-                    }
-                    .foregroundStyle(pullRequestColor(pr.state))
-                    .fixedSize()
+        ProjectListRow(project: project, status: StatusDotState(row.dot), title: row.title, titleWeight: row.recede ? .regular : .medium) {
+            EmptyView()
+        } meta: {
+            Text(row.pullRequest == nil ? row.detail : row.detail + " · ")
+                .monospacedDigit()
+                .lineLimit(1)
+                .layoutPriority(-1)
+            if let pr = row.pullRequest {
+                HStack(spacing: 3) {
+                    ThreadGlyph(name: pr.state == .merged ? "merge" : "pull-request", size: 12)
+                    Text("#\(pr.number)").monospacedDigit()
                 }
+                .foregroundStyle(pullRequestColor(pr.state))
+                .fixedSize()
             }
-            .padding(.leading, 32)
         }
-        .padding(EdgeInsets(top: 12, leading: 4, bottom: 12, trailing: 8))
-        .contentShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(row.accessibilityLabel)
         .accessibilityIdentifier("tasks.row.\(row.id)")
@@ -344,30 +321,95 @@ struct TaskRowView: View {
         case .open?, nil: AdaptiveColor.emerald700300.color(colorScheme)
         }
     }
+
+    @Environment(\.connTheme) private var theme
 }
 
-/// A 6pt status dot in a 2pt ring of the screen colour (`StatusBadgeDot`).
-struct StatusBadgeDot: View {
-    let dot: FfiTaskDot
+/// The lab's `ProjectListRow`, shared by Tasks and Pull requests: inset 8, padding 12/8/12/4, the
+/// project favicon (status dot on its corner) and title on line 1, 13/17 details under the title.
+struct ProjectListRow<Trailing: View, Meta: View>: View {
+    let project: String?
+    let status: StatusDotState
+    let title: String
+    var titleWeight: Font.Weight = .medium
+    @ViewBuilder let trailing: Trailing
+    @ViewBuilder let meta: Meta
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
+                ProjectFaviconView(title: project, size: 20)
+                    .overlay(alignment: .topTrailing) {
+                        StatusDot(state: status).offset(x: 4, y: -4)
+                    }
+                Text(title)
+                    .font(.system(size: 16, weight: titleWeight))
+                    .foregroundStyle(theme.foreground)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
+                trailing
+            }
+            HStack(spacing: 0) { meta }
+                .font(.system(size: 13))
+                .foregroundStyle(theme.mutedForeground)
+                .frame(height: 17)
+                .padding(.leading, 32)
+        }
+        .padding(EdgeInsets(top: 12, leading: 4, bottom: 12, trailing: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 8)
+        .padding(.bottom, 4)
+    }
+}
+
+/// The lab's `StatusDot` states and colours.
+enum StatusDotState {
+    case working, waiting, done, failed, limited, merged
+
+    init(_ dot: FfiTaskDot) {
+        switch dot {
+        case .working: self = .working
+        case .waiting: self = .waiting
+        case .done: self = .done
+        case .failed: self = .failed
+        }
+    }
+
+    func color(_ theme: ConnTheme, _ scheme: ColorScheme) -> Color {
+        switch self {
+        case .working: AdaptiveColor.sky600400.color(scheme)
+        case .waiting: theme.mutedForeground
+        case .done: AdaptiveColor.emerald600400.color(scheme)
+        case .failed: theme.destructive
+        case .limited: theme.warning
+        case .merged: AdaptiveColor.violet600400.color(scheme)
+        }
+    }
+}
+
+/// A 6pt status dot in a 2pt ring of the screen colour (`StatusDot`).
+struct StatusDot: View {
+    let state: StatusDotState
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Circle()
-            .fill(fill)
+            .fill(state.color(theme, colorScheme))
             .frame(width: 6, height: 6)
             .padding(2)
             .background(Circle().fill(theme.background))
             .allowsHitTesting(false)
     }
+}
 
-    private var fill: Color {
-        switch dot {
-        case .working: AdaptiveColor.sky600400.color(colorScheme)
-        case .waiting: theme.mutedForeground
-        case .done: AdaptiveColor.emerald600400.color(colorScheme)
-        case .failed: theme.destructive
-        }
+/// A task's status dot (`StatusBadgeDot`).
+struct StatusBadgeDot: View {
+    let dot: FfiTaskDot
+
+    var body: some View {
+        StatusDot(state: StatusDotState(dot))
     }
 }
 
@@ -407,11 +449,19 @@ struct TaskRecordView: View {
     enum Section: String, CaseIterable {
         case overview, steps, agents
 
+        var label: String {
+            switch self {
+            case .overview: "Overview"
+            case .steps: "Subtasks"
+            case .agents: "Agents"
+            }
+        }
+
         var icon: String {
             switch self {
-            case .overview: "doc.text"
+            case .overview: "file-text"
             case .steps: "checklist"
-            case .agents: "person.2"
+            case .agents: "users"
             }
         }
     }
@@ -427,11 +477,7 @@ struct TaskRecordView: View {
     @State private var expanded = Set<Int64>()
 
     private var sectionTitle: String {
-        switch section {
-        case .overview: "Task #\(id)"
-        case .steps: "Subtasks"
-        case .agents: "Agents"
-        }
+        section == .overview ? "Task #\(id)" : section.label
     }
 
     private var subtitle: String? {
@@ -447,73 +493,41 @@ struct TaskRecordView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 0) {
                 if let detail {
                     switch section {
                     case .overview:
-                        VStack(alignment: .leading, spacing: 14) {
+                        RecordHeading(title: detail.summary.title) {
                             if let workspace = detail.summary.workspace {
-                                RecordField(icon: "server.rack", label: "Workspace",
+                                RecordField(icon: "server", label: "Workspace",
                                             value: [workspace.name, workspace.nodeName].compactMap { $0 }.joined(separator: " · "))
-                                if let branch = workspace.branch { RecordField(icon: "arrow.triangle.branch", label: "Branch", value: branch) }
+                                if let branch = workspace.branch { RecordField(icon: "branch", label: "Branch", value: branch) }
                             }
                             if let pr = detail.summary.pullRequest, let url = URL(string: pr.url) {
                                 Link(destination: url) {
-                                    RecordField(icon: "arrow.triangle.pull", label: "Pull request", value: "#\(pr.number)" + (pr.state.map { " · " + String(describing: $0).capitalized } ?? ""))
+                                    RecordField(icon: "pull-request", label: "Pull request",
+                                                value: "#\(pr.number)" + (pr.state.map { " · " + String(describing: $0).capitalized } ?? ""),
+                                                link: true)
                                 }.buttonStyle(.plain)
                             }
                             if !detail.usageText.isEmpty { RecordField(icon: "clock", label: "Usage", value: detail.usageText) }
                             if detail.metrics.linesAdded != nil || detail.metrics.linesDeleted != nil {
-                                RecordLineStats(added: detail.metrics.linesAdded, removed: detail.metrics.linesDeleted, withIcon: true)
-                            }
-                        }.padding(.bottom, 14)
-                        Text(detail.summary.title).font(.system(size: 17, weight: .medium))
-                        MarkdownView(source: detail.brief, recordStyle: true)
-                    case .steps:
-                        if detail.subtasks.isEmpty { Text("No subtasks yet.").foregroundStyle(.secondary) }
-                        ForEach(detail.subtasks, id: \.id) { step in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Button {
-                                    if !expanded.insert(step.id).inserted { expanded.remove(step.id) }
-                                } label: {
-                                    HStack(alignment: .top, spacing: 8) {
-                                        RecordStatusIndicator(status: step.status == .completed ? "Passed" : step.status == .running ? "Running" : step.status == .failed ? "Failed" : "Pending")
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(step.title).font(.system(size: 14, weight: .medium))
-                                            Text([step.statusText, step.usageText].compactMap { $0 }.joined(separator: " · "))
-                                                .font(.system(size: 13)).foregroundStyle(.secondary)
-                                        }
-                                        Spacer(minLength: 0)
-                                        if step.status == .completed {
-                                            RecordLineStats(added: step.metrics.linesAdded, removed: step.metrics.linesDeleted)
-                                        }
-                                    }.contentShape(Rectangle())
-                                }.buttonStyle(.plain).accessibilityIdentifier("task.step." + String(step.id))
-                                if expanded.contains(step.id) {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        MarkdownView(source: step.brief)
-                                        if !step.deliverables.isEmpty { Text("Deliverables").fontWeight(.medium) }
-                                        ForEach(step.deliverables, id: \.id) { Text("• " + $0.description) }
-                                    }.padding(.leading, 26)
+                                RecordFieldRow(icon: "trend-up", label: "Changes") {
+                                    RecordLineStats(added: detail.metrics.linesAdded, removed: detail.metrics.linesDeleted)
                                 }
                             }
                         }
+                        MarkdownView(source: detail.brief, recordStyle: true)
+                            .padding(.top, 13)
+                    case .steps:
+                        if detail.subtasks.isEmpty { RecordMutedText("No subtasks yet.") }
+                        ForEach(Array(detail.subtasks.enumerated()), id: \.element.id) { index, step in
+                            subtaskRow(step, first: index == 0)
+                        }
                     case .agents:
-                        if detail.agents.isEmpty { Text("No agents assigned.").foregroundStyle(.secondary) }
-                        ForEach(detail.agents, id: \.id) { agent in
-                            let assignment = detail.subtasks.filter { agent.subtaskIds.contains($0.id) }.map(\.title).joined(separator: ", ")
-                            HStack(alignment: .top, spacing: 8) {
-                                ProviderIcon(driver: agent.driverKind ?? agent.provider, size: 14).frame(width: 18)
-                                    .overlay(alignment: .bottomTrailing) {
-                                        Circle().fill(agent.needsInput ? Color.orange : agent.current ? .green : .secondary)
-                                            .frame(width: 6, height: 6)
-                                    }
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(assignment.isEmpty ? (agent.role == .reviewer ? "Review the pull request" : detail.summary.title) : assignment).font(.system(size: 14, weight: .medium))
-                                    Text([String(describing: agent.role).capitalized, agent.model ?? agent.provider].compactMap { $0 }.joined(separator: " · "))
-                                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                                }
-                            }.accessibilityValue(agent.stateText)
+                        if detail.agents.isEmpty { RecordMutedText("No agents assigned.") }
+                        ForEach(Array(detail.agents.enumerated()), id: \.element.id) { index, agent in
+                            agentRow(agent, in: detail, first: index == 0)
                         }
                     }
                 } else if let failure {
@@ -521,14 +535,16 @@ struct TaskRecordView: View {
                     Button("Try again") { attempt += 1 }
                 } else { ProgressView() }
             }
+            .font(.system(size: 14))
+            .foregroundStyle(theme.foreground)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20).padding(.top, 20)
+            .padding(.horizontal, 20).padding(.top, 28).padding(.bottom, 100)
         }
         .background(theme.background)
         .modifier(RecordChrome(title: sectionTitle, subtitle: subtitle,
-                               tabs: Section.allCases.map { ($0 == .steps ? "Subtasks" : $0.rawValue.capitalized, $0.icon) },
-                               selection: section == .steps ? "Subtasks" : section.rawValue.capitalized) { name in
-            section = name == "Subtasks" ? .steps : Section(rawValue: name.lowercased()) ?? .overview
+                               tabs: Section.allCases.map { ($0.label, $0.icon) },
+                               selection: section.label) { name in
+            section = Section.allCases.first { $0.label == name } ?? .overview
         })
         .task(id: attempt) {
             failure = nil
@@ -536,14 +552,156 @@ struct TaskRecordView: View {
             catch { if !Task.isCancelled { failure = error.localizedDescription } }
         }
     }
+
+    /// `SubtasksList`: indicator, title and line stats on one line, the status under the title;
+    /// a tap shows the brief and deliverables.
+    private func subtaskRow(_ step: FfiTaskSubtask, first: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if !expanded.insert(step.id).inserted { expanded.remove(step.id) }
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    RecordStatusIndicator(status: subtaskStatus(step.status), iconSize: 17)
+                        .frame(width: 18, height: RecordRow.lineHeight)
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(step.title).fontWeight(.medium)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if step.status == .completed {
+                                RecordLineStats(added: step.metrics.linesAdded, removed: step.metrics.linesDeleted)
+                            }
+                        }
+                        .frame(minHeight: RecordRow.lineHeight)
+                        Text([step.statusText, step.usageText].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(.system(size: 13)).foregroundStyle(theme.mutedForeground)
+                            .frame(minHeight: 19.24)
+                    }
+                }
+                .padding(.top, first ? 0 : 8).padding(.bottom, 8)
+                .frame(minHeight: 46, alignment: .top)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityIdentifier("task.step." + String(step.id))
+            if expanded.contains(step.id) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(step.brief)
+                        .lineHeight(.exact(points: RecordRow.lineHeight))
+                        .padding(.top, 3).padding(.bottom, 8)
+                    if !step.deliverables.isEmpty {
+                        Text("Deliverables").fontWeight(.semibold).frame(minHeight: RecordRow.lineHeight)
+                        ForEach(step.deliverables, id: \.id) { item in
+                            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                                Text("•").frame(width: 20, alignment: .center)
+                                Text(item.description)
+                            }.frame(minHeight: RecordRow.lineHeight)
+                        }
+                    }
+                }
+                .padding(.leading, 25).padding(.bottom, 10)
+            }
+        }
+    }
+
+    /// `AgentsList`: the provider icon with its status dot, the assignment, role and model.
+    private func agentRow(_ agent: FfiTaskAgent, in detail: FfiTaskDetail, first: Bool) -> some View {
+        let assignment = detail.subtasks.filter { agent.subtaskIds.contains($0.id) }.map(\.title).joined(separator: ", ")
+        return HStack(alignment: .top, spacing: 8) {
+            ProviderIcon(driver: agent.driverKind ?? agent.provider, size: 14)
+                .overlay(alignment: .topTrailing) {
+                    StatusDot(state: agentDot(agent)).offset(x: 4, y: -4)
+                }
+                .frame(width: 18, height: RecordRow.lineHeight)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(assignment.isEmpty ? (agent.role == .reviewer ? "Review the pull request" : detail.summary.title) : assignment)
+                    .fontWeight(.medium).frame(minHeight: RecordRow.lineHeight)
+                Text([String(describing: agent.role).capitalized, agent.model ?? agent.provider].compactMap { $0 }.joined(separator: " · "))
+                    .font(.system(size: 13)).foregroundStyle(theme.mutedForeground).frame(minHeight: 19.24)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, first ? 0 : 8).padding(.bottom, 8)
+        .frame(minHeight: 46, alignment: .top)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(agent.stateText)
+    }
+
+    private func subtaskStatus(_ status: FfiSubtaskStatus) -> RecordStatus {
+        switch status {
+        case .completed: .passed
+        case .failed: .failed
+        case .running, .reviewing: .running
+        case .todo, .reserved, .cancelled, .unknown: .todo
+        }
+    }
+
+    private func agentDot(_ agent: FfiTaskAgent) -> StatusDotState {
+        switch agent.state {
+        case .working?: .working
+        case .done?: .done
+        case .failed?: .failed
+        case .idle?, .askingForInput?, .unknown?, nil: .waiting
+        }
+    }
 }
 
+/// Line height of `.ios-detail-row` text: 14pt at 1.48.
+enum RecordRow {
+    static let lineHeight: CGFloat = 20.72
+}
+
+/// The lab's filter button: the `filter` glyph at 19pt in a 44pt glass circle.
 struct WorkspaceFilterIcon: View {
     @Environment(\.connTheme) private var theme
     var body: some View {
-        connImage("line.3.horizontal.decrease").resizable().scaledToFit().frame(width: 18, height: 18)
+        ThreadGlyph(name: "filter", size: 19)
             .foregroundStyle(theme.foreground).frame(width: 44, height: 44)
             .glassEffect(.regular.interactive(), in: .circle)
+    }
+}
+
+private struct RecordMutedText: View {
+    let text: String
+    @Environment(\.connTheme) private var theme
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text).foregroundStyle(theme.mutedForeground)
+    }
+}
+
+/// `RecordHeading`: the fields (14pt apart), 28pt, then the record's title at 17/23.4 medium.
+struct RecordHeading<Fields: View>: View {
+    let title: String
+    @ViewBuilder let fields: Fields
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) { fields }
+            .padding(.bottom, 28)
+        Text(title)
+            .font(.system(size: 17, weight: .medium))
+            .lineHeight(.exact(points: 23.375))
+    }
+}
+
+/// `DetailField`: a 15pt muted glyph (2pt down) and a 14/19 value, 10pt apart.
+struct RecordFieldRow<Value: View>: View {
+    let icon: String
+    let label: String
+    @ViewBuilder let value: Value
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            ThreadGlyph(name: icon, size: 15)
+                .foregroundStyle(theme.mutedForeground)
+                .padding(.top, 2)
+            value
+                .frame(maxWidth: .infinity, minHeight: 19, alignment: .topLeading)
+        }
+        .font(.system(size: 14))
+        .foregroundStyle(theme.foreground)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(label)
     }
 }
 
@@ -551,27 +709,32 @@ struct RecordField: View {
     let icon: String
     let label: String
     let value: String
+    /// A link field ends in a 13pt chevron (`ios-detail-link`).
+    var link = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ConnIcon(icon).foregroundStyle(.secondary).frame(width: 15)
-            Text(value)
-        }.font(.system(size: 14)).frame(minHeight: 19, alignment: .top)
-            .accessibilityElement(children: .ignore).accessibilityLabel(label).accessibilityValue(value)
+        RecordFieldRow(icon: icon, label: label) {
+            HStack(spacing: 0) {
+                Text(value)
+                if link { ThreadGlyph(name: "chevron-right", size: 13) }
+            }
+        }
+        .accessibilityValue(value)
     }
 }
 
+/// `ios-detail-diff`: +added in emerald, −removed in the destructive colour, 5pt apart.
 struct RecordLineStats: View {
     let added: Double?
     let removed: Double?
-    var withIcon = false
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 5) {
-            if withIcon { ConnIcon("chart.line.uptrend.xyaxis").foregroundStyle(.secondary).frame(width: 15).padding(.trailing, 5) }
-            if let added { Text("+\(Int(added))").foregroundStyle(.green) }
-            if let removed { Text("−\(Int(removed))").foregroundStyle(.red) }
-        }.font(.system(size: 14)).monospacedDigit()
+            if let added { Text("+\(Int(added))").foregroundStyle(AdaptiveColor.emerald700300.color(colorScheme)) }
+            if let removed { Text("−\(Int(removed))").foregroundStyle(theme.destructive) }
+        }.monospacedDigit()
     }
 }
 
@@ -590,42 +753,87 @@ struct RecordChrome: ViewModifier {
             .toolbar(.hidden, for: .bottomBar)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    VStack(spacing: 1) {
-                        Text(title).font(.system(size: 17, weight: .medium))
-                        if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary) }
+                    VStack(spacing: 0) {
+                        Text(title).font(.system(size: 17, weight: .semibold)).frame(height: 22)
+                        if let subtitle {
+                            Text(subtitle).font(.system(size: 12)).foregroundStyle(theme.mutedForeground).frame(height: 16)
+                        }
                     }
+                    .foregroundStyle(theme.foreground)
+                    .lineLimit(1)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 HStack(spacing: 0) {
                     ForEach(tabs, id: \.0) { name, icon in
                         Button { choose(name) } label: {
-                            connImage(icon).resizable().scaledToFit().frame(width: 22, height: 22)
+                            ThreadGlyph(name: icon, size: 22)
                                 .foregroundStyle(name == selection ? theme.foreground : theme.mutedForeground)
                                 .frame(maxWidth: .infinity).frame(height: 40)
-                                .background { if name == selection { Capsule().fill(.selection.tertiary).tint(.primary) } }
+                                .background { if name == selection { Capsule().fill(theme.foreground.opacity(0.12)) } }
                                 .contentShape(Capsule())
                         }.buttonStyle(.plain).accessibilityLabel(name)
                             .accessibilityAddTraits(name == selection ? .isSelected : [])
                     }
-                }.padding(4).frame(maxWidth: 238).glassEffect(.regular, in: .capsule).padding(.horizontal, 24).offset(y: 4)
+                }.padding(4).frame(width: 256).glassEffect(.regular, in: .capsule).padding(.horizontal, 24).offset(y: 4)
             }
     }
 }
 
+/// The lab's status indicators for subtasks and checks.
+enum RecordStatus {
+    case passed, failed, running, queued, todo
+}
+
+/// `check-circle` / `error-circle` glyphs, or the 18pt `StatusRing` (spinning while running).
 struct RecordStatusIndicator: View {
-    let status: String
+    let status: RecordStatus
+    var iconSize: CGFloat = 18
+    /// A failed check is amber; a failed subtask keeps the text colour.
+    var failedColor: Color?
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Group {
             switch status {
-            case "Passed": ConnIcon("checkmark.circle").foregroundStyle(theme.success)
-            case "Failed": ConnIcon("exclamationmark.circle").foregroundStyle(theme.destructive)
-            default:
-                Circle().strokeBorder(status == "Running" ? theme.info : theme.mutedForeground.opacity(0.55),
-                                      style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [1, 3]))
+            case .passed:
+                ThreadGlyph(name: "check-circle", size: iconSize)
+                    .foregroundStyle(AdaptiveColor.emerald600400.color(colorScheme))
+            case .failed:
+                ThreadGlyph(name: "error-circle", size: iconSize)
+                    .foregroundStyle(failedColor ?? theme.foreground)
+            case .running:
+                StatusRing(spinning: true).foregroundStyle(AdaptiveColor.sky600400.color(colorScheme))
+            case .queued:
+                StatusRing(spinning: false).foregroundStyle(theme.mutedForeground)
+            case .todo:
+                StatusRing(spinning: false).foregroundStyle(theme.mutedForeground).opacity(0.6)
             }
-        }.frame(width: 17, height: 17).accessibilityLabel(status)
+        }
+        .frame(width: 18, height: 18)
+        .accessibilityLabel(String(describing: status).capitalized)
+    }
+}
+
+/// The lab's `StatusRing`: an r 8.75 circle with a 2pt stroke in a 24pt box, drawn at 18pt.
+struct StatusRing: View {
+    let spinning: Bool
+    @State private var turned = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let scale: CGFloat = 18 / 24
+        let circumference = 2 * .pi * 8.75
+        Circle()
+            .inset(by: (12 - 8.75) * scale)
+            .stroke(style: StrokeStyle(lineWidth: 2 * scale, lineCap: .round,
+                                       dash: spinning ? [39 * scale, (circumference - 39) * scale] : []))
+            .frame(width: 18, height: 18)
+            .rotationEffect(.degrees(turned ? 360 : 0))
+            .onAppear {
+                guard spinning, !reduceMotion else { return }
+                withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) { turned = true }
+            }
     }
 }

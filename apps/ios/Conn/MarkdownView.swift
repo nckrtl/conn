@@ -20,7 +20,8 @@ struct MarkdownView: View {
     }
 
     private var messageLineHeight: AttributedString.LineHeight? {
-        messageStyle == nil ? nil : .exact(points: messageSize * 1.6)
+        if recordStyle { return .exact(points: 22.5) }
+        return messageStyle == nil ? nil : .exact(points: messageSize * 1.6)
     }
 
     private var textColor: Color {
@@ -45,12 +46,13 @@ struct MarkdownView: View {
     }
 
     private var markdown: some View {
-        VStack(alignment: .leading, spacing: messageStyle == nil ? Kit.Space.m : messageSize * 10.4 / 16) {
-            ForEach(Array(parseBlocks(source).enumerated()), id: \.offset) { index, block in
+        let blocks = parseBlocks(source)
+        return VStack(alignment: .leading, spacing: recordStyle ? 0 : messageStyle == nil ? Kit.Space.m : messageSize * 10.4 / 16) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 blockView(block, first: index == 0)
+                    .padding(.top, recordStyle ? recordGap(blocks, index) : 0)
             }
         }
-        .lineSpacing(recordStyle ? 4 : 0)
         .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
     }
 
@@ -60,10 +62,10 @@ struct MarkdownView: View {
         case let .heading(level, text):
             inlineMarkdownText(text)
                 .font(headingFont(for: level))
-                .lineHeight(messageLineHeight)
+                .lineHeight(recordStyle ? .exact(points: 24) : messageLineHeight)
                 .foregroundStyle(textColor)
                 .textSelection(.enabled)
-                .padding(.top, messageStyle != nil ? (first ? 0 : messageSize * 9.6 / 16) : recordStyle ? 15 : level <= 2 ? Kit.Space.xs : 0)
+                .padding(.top, messageStyle != nil ? (first ? 0 : messageSize * 9.6 / 16) : recordStyle ? 0 : level <= 2 ? Kit.Space.xs : 0)
 
         case let .paragraph(text):
             inlineMarkdownText(text)
@@ -130,6 +132,17 @@ struct MarkdownView: View {
                     .textSelection(.enabled)
             }
             .lineHeight(messageLineHeight)
+        }
+    }
+
+    /// Record bodies (`ios-detail-body .m-md`): 13pt between paragraphs, 18pt above a heading,
+    /// 6pt under one and between list items.
+    private func recordGap(_ blocks: [MarkdownBlock], _ index: Int) -> CGFloat {
+        guard index > 0 else { return 0 }
+        switch (blocks[index - 1], blocks[index]) {
+        case (_, .heading): return 18
+        case (.heading, _), (.listItem, .listItem): return 6
+        default: return 13
         }
     }
 

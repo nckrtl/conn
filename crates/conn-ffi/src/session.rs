@@ -166,6 +166,10 @@ pub(crate) enum Effect<C> {
     },
 }
 
+/// Failed tries in a row before a reconnect counts as offline. The first try after launch or
+/// resume often fails while the network wakes; the next follows 250 ms later.
+const OFFLINE_AFTER_FAILED_TRIES: u32 = 2;
+
 struct Attempt<C> {
     id: u64,
     target: FfiSessionTarget,
@@ -175,6 +179,8 @@ struct Attempt<C> {
     early_failure: Option<String>,
     /// The connection completed a handshake at least once.
     connected_once: bool,
+    /// Connection tries that failed since the last handshake, fresh try or foreground.
+    failed_tries: u32,
     /// A rejected bearer may re-pair through Orbit. False for a re-pair attempt until it
     /// connects, so a fresh pairing that is rejected too can't loop.
     may_recover: bool,
@@ -243,15 +249,21 @@ impl<C: SessionCore> Machine<C> {
         FfiSessionState {
             revision: self.revision,
             connection_id: self.attempt.as_ref().map_or(0, |a| a.id),
-            shows_offline: matches!(
-                &phase,
+            shows_offline: match &phase {
                 FfiSessionPhase::Failed { .. }
-                    | FfiSessionPhase::Idle { message: Some(_) }
-                    | FfiSessionPhase::Live {
-                        status: FfiConnectionStatus::Reconnecting { .. }
-                            | FfiConnectionStatus::Failed { .. }
-                    }
-            ),
+                | FfiSessionPhase::Idle { message: Some(_) }
+                | FfiSessionPhase::Live {
+                    status: FfiConnectionStatus::Failed { .. },
+                } => true,
+                // A drop, or a reconnect still in its first tries, is connecting, not offline.
+                FfiSessionPhase::Live {
+                    status: FfiConnectionStatus::Reconnecting { .. },
+                } => self
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|a| a.failed_tries >= OFFLINE_AFTER_FAILED_TRIES),
+                _ => false,
+            },
             phase,
             server_url: self.server_url.clone(),
             environment_id: self.environment_id.clone(),
@@ -309,6 +321,7 @@ impl<C: SessionCore> Machine<C> {
             status: FfiConnectionStatus::Connecting,
             early_failure: None,
             connected_once: false,
+            failed_tries: 0,
             may_recover: may_recover == Recover::Allowed,
             identity: None,
             offline_ready: false,
@@ -448,8 +461,12 @@ impl<C: SessionCore> Machine<C> {
 
     /// Try again: repeat a failed attempt's target, or nudge a live connection.
     pub(crate) fn retry(&mut self) -> Effects<C> {
-        match &self.attempt {
-            Some(a) => a.core.clone().map(Effect::Reconnect).into_iter().collect(),
+        match &mut self.attempt {
+            Some(a) => {
+                // The nudge is a fresh try: connecting again until it fails too.
+                a.failed_tries = 0;
+                a.core.clone().map(Effect::Reconnect).into_iter().collect()
+            }
             None => match self.rest.clone() {
                 FfiSessionPhase::Failed { retry, .. } => self.begin(retry, None, Recover::Allowed),
                 _ => Vec::new(),
@@ -595,6 +612,18 @@ impl<C: SessionCore> Machine<C> {
                 return Vec::new();
             }
             return self.failed(id, message);
+        }
+        match status {
+            FfiConnectionStatus::Connected | FfiConnectionStatus::Connecting => {
+                attempt.failed_tries = 0;
+            }
+            // Straight from Connected it is a drop; otherwise the try before it failed.
+            FfiConnectionStatus::Reconnecting { .. }
+                if attempt.status != FfiConnectionStatus::Connected =>
+            {
+                attempt.failed_tries = attempt.failed_tries.saturating_add(1);
+            }
+            _ => {}
         }
         if status == FfiConnectionStatus::Connected {
             attempt.connected_once = true;
@@ -1683,7 +1712,35 @@ mod tests {
         assert!(!m.state().shows_offline);
         let _ = m.attached(1, FakeCore::default(), "http://node/".into(), None);
         assert!(!m.state().shows_offline);
-        let _ = m.status(1, FfiConnectionStatus::Reconnecting { attempt: 1 });
+        let reconnecting = |attempt| FfiConnectionStatus::Reconnecting { attempt };
+        // Cold launch: the first try fails while the network wakes, the second connects.
+        let _ = m.status(1, FfiConnectionStatus::Connecting);
+        let _ = m.status(1, reconnecting(1));
+        assert!(
+            !m.state().shows_offline,
+            "one failed try is still connecting"
+        );
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        assert!(!m.state().shows_offline);
+        // A drop (back from the background, say) reconnects without showing offline.
+        let _ = m.status(1, reconnecting(1));
+        assert!(!m.state().shows_offline, "a drop is not offline");
+        let _ = m.status(1, reconnecting(2));
+        assert!(
+            !m.state().shows_offline,
+            "one failed retry is still connecting"
+        );
+        let _ = m.status(1, reconnecting(3));
+        assert!(
+            m.state().shows_offline,
+            "two failed retries confirm offline"
+        );
+        // Foreground nudges a fresh try: connecting again until it fails twice more.
+        let _ = m.foreground();
+        assert!(!m.state().shows_offline, "a foreground retry is connecting");
+        let _ = m.status(1, reconnecting(1));
+        assert!(!m.state().shows_offline);
+        let _ = m.status(1, reconnecting(2));
         assert!(m.state().shows_offline);
         let _ = m.status(1, FfiConnectionStatus::Connected);
         assert!(!m.state().shows_offline);

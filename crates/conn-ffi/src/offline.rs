@@ -134,7 +134,7 @@ impl OfflineReader {
 
     fn capture_shell(&self, state: &conn_state::ShellState) -> SavedShell {
         SavedShell {
-            snapshot: LinkedShellSnapshot::capture(&self.env, "", state),
+            snapshot: LinkedShellSnapshot::capture_inventory(&self.env, state),
             expires: self
                 .expires
                 .read()

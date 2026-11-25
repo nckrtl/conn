@@ -43,7 +43,7 @@ pub const OLDER_SETTLED_PAGE_SIZE: usize = 25;
 
 /// A place in the settled order, settle time descending and thread id ascending
 /// (`OrchestrationV2OlderSettledCursor`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SettledCursor {
     pub settled_at: String,
     pub thread_id: Option<String>,
@@ -51,7 +51,7 @@ pub struct SettledCursor {
 
 /// Where the last snapshot cut the Settled shelf (`omitOlderSettled`): older settled threads are
 /// left out of the shell and counted per project (`OlderSettled`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OlderSettledCut {
     pub before: String,
     pub before_ms: i64,
@@ -88,15 +88,17 @@ pub enum PageStatus {
 
 /// The older settled pages read below the cut (`OlderSettledPages`). Everything at or above the
 /// frontier is local; a `None` frontier means no more can load.
-#[derive(Clone, Debug, Default)]
-struct OlderSettled {
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OlderSettled {
     cut: Option<OlderSettledCut>,
     threads: Vec<ThreadShell>,
     frontier: Option<SettledCursor>,
+    #[serde(skip)]
     status: PageStatus,
     /// The projects the pages cover (`None`: all); a new scope starts over.
     scope: Option<Vec<String>>,
     /// Counts the snapshots seen, so an answer to an older read is dropped.
+    #[serde(skip)]
     generation: u64,
 }
 
@@ -348,7 +350,7 @@ pub struct ShellState {
     /// True once the server sent `synchronized`.
     pub synchronized: bool,
     /// Where the snapshot cut the Settled shelf, and the older settled threads read since.
-    older: OlderSettled,
+    pub(crate) older: OlderSettled,
     requests: HashMap<String, PendingSubagentRequest>,
     /// The Settled paging of the other environments merged in (`extend_with_environment`).
     foreign: Vec<ForeignOlder>,

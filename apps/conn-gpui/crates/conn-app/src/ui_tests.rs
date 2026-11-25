@@ -2767,7 +2767,12 @@ fn labelled(cx: &mut TestAppContext, window: AnyWindowHandle, label: &str) -> bo
         .unwrap_or(false)
 }
 
-pub(crate) fn click_row(cx: &mut TestAppContext, window: AnyWindowHandle, title: &str, button: MouseButton) {
+pub(crate) fn click_row(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    title: &str,
+    button: MouseButton,
+) {
     let at = match cx.update_window(window, |_, window, cx| center_by_label(window, cx, title)) {
         Ok(at) => at,
         Err(err) => panic!("failed to locate the row `{title}`: {err}"),

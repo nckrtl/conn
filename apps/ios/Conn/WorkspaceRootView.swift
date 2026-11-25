@@ -37,6 +37,7 @@ struct WorkspaceRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
     @State private var isSearching = false
+    @State private var focusOnSearchEntry = false
     @State private var searchQuery = ""
     @State private var selectedProjectFilter: String? = nil
     @State private var environmentFilter: String?
@@ -145,6 +146,7 @@ struct WorkspaceRootView: View {
             navigationPath = [route]
         }
         .onChange(of: navigationPath) { _, path in
+            if isSearching && !path.isEmpty { searchFocused = false }
             guard let environment = restoredEnvironment, environment == store.environmentId else { return }
             let key = "workspace.route." + environment
             guard let route = path.last else { UserDefaults.standard.removeObject(forKey: key); return }
@@ -169,7 +171,10 @@ struct WorkspaceRootView: View {
     private var selection: Binding<WorkspaceSelection> {
         Binding(get: { isSearching ? .search : .section(selectedTab) }, set: { newValue in
             switch newValue {
-            case .search: isSearching = true
+            case .search:
+                guard !isSearching else { return }
+                focusOnSearchEntry = true
+                isSearching = true
             case let .section(tab):
                 searchFocused = false
                 selectedTab = tab
@@ -202,7 +207,11 @@ struct WorkspaceRootView: View {
                             .focused($searchFocused).submitLabel(.search)
                             .accessibilityIdentifier("workspace.searchField")
                             .padding(.horizontal, 16).frame(height: 48).glassEffect(.regular, in: .capsule)
-                            .onAppear { searchFocused = true }
+                            .onAppear {
+                                guard focusOnSearchEntry else { return }
+                                focusOnSearchEntry = false
+                                searchFocused = true
+                            }
                         footerAction("xmark", label: "Cancel search", id: "workspace.cancelSearch") {
                             selection.wrappedValue = .section(selectedTab)
                         }

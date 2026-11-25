@@ -22,8 +22,6 @@ struct ConnComposerPill<Trailing: View>: View {
     @State private var showingFiles = false
     @State private var dictation = DictationController()
     @State private var selection: TextSelection?
-    /// Where dictated text goes, taken when recording starts.
-    @State private var insertionRange: Range<Int>?
     @State private var keyboardUp = false
     @FocusState private var inputFocused: Bool
 
@@ -36,7 +34,7 @@ struct ConnComposerPill<Trailing: View>: View {
 
     var body: some View {
         // Keyboard up: a sheet with 28 pt top corners and none below. Down: the floating pill.
-        let corner: CGFloat = expanded && !dictation.isActive ? 24 : 27
+        let corner: CGFloat = expanded ? 24 : 27
         let top = keyboardUp ? ComposerSheet.topRadius : corner
         let bottom = keyboardUp ? 0 : corner
         let shape = UnevenRoundedRectangle(
@@ -84,47 +82,58 @@ struct ConnComposerPill<Trailing: View>: View {
                         .padding(.top, 8)
                         .accessibilityLabel("Dictation error, \(error)")
                 }
-                if dictation.isActive {
-                    dictationRow
-                } else {
-                    // One layout, one TextField: switching `expanded` only moves the same views, so
-                    // focus survives and the move animates.
-                    ComposerRowLayout(expanded: expanded) {
-                        if allowsAttachments && limits.images {
-                            Menu {
-                                Button("Photos", systemImage: "photo.on.rectangle") { showingPhotos = true }
-                                if limits.maxFileBytes != nil {
-                                    Button("Files", systemImage: "folder") { showingFiles = true }
-                                }
-                            } label: {
-                                ThreadGlyph(name: "add", size: 20)
+                // One layout, one TextField: switching `expanded` or dictating only swaps the
+                // controls around the same field, so focus and the keyboard survive.
+                ComposerRowLayout(expanded: expanded) {
+                    if dictation.isActive {
+                        if dictation.phase != .transcribing {
+                            Button { dictation.cancel() } label: {
+                                ThreadGlyph(name: "close", size: 20)
                                     .frame(width: Self.control, height: Self.control)
                                     .contentShape(Rectangle())
                             }
-                            .disabled(draft.locked || draft.files.count >= 100)
-                            .accessibilityLabel("Add attachment")
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Cancel dictation")
                             .composerSlot(.leading)
                         }
-                        TextField(
-                            placeholder, text: $draft.text, selection: $selection,
-                            prompt: Text(placeholder).foregroundStyle(theme.placeholder),
-                            axis: .vertical
-                        )
-                            .textFieldStyle(.plain)
-                            .font(.system(size: ComposerInputMetrics.fontSize))
-                            .lineSpacing(ComposerInputMetrics.lineSpacing)
-                            .tint(theme.foreground)
-                            .lineLimit(1...maxLines)
-                            .padding(.top, ComposerInputMetrics.topInset(expanded: expanded))
-                            .padding(.bottom, ComposerInputMetrics.bottomInset(expanded: expanded))
-                            .padding(.leading, ComposerInputMetrics.leadingInset(
-                                expanded: expanded, hasLeadingControl: allowsAttachments && limits.images
-                            ))
-                            .padding(.trailing, expanded ? 12 : 0)
-                            .focused($inputFocused)
-                            .disabled(draft.sending)
-                            .composerSlot(.field)
+                    } else if allowsAttachments && limits.images {
+                        Menu {
+                            Button("Photos", systemImage: "photo.on.rectangle") { showingPhotos = true }
+                            if limits.maxFileBytes != nil {
+                                Button("Files", systemImage: "folder") { showingFiles = true }
+                            }
+                        } label: {
+                            ThreadGlyph(name: "add", size: 20)
+                                .frame(width: Self.control, height: Self.control)
+                                .contentShape(Rectangle())
+                        }
+                        .disabled(draft.locked || draft.files.count >= 100)
+                        .accessibilityLabel("Add attachment")
+                        .composerSlot(.leading)
+                    }
+                    TextField(
+                        fieldPlaceholder, text: $draft.text, selection: $selection,
+                        prompt: Text(fieldPlaceholder).foregroundStyle(theme.placeholder),
+                        axis: .vertical
+                    )
+                        .textFieldStyle(.plain)
+                        .font(.system(size: ComposerInputMetrics.fontSize))
+                        .lineSpacing(ComposerInputMetrics.lineSpacing)
+                        .tint(theme.foreground)
+                        .lineLimit(1...maxLines)
+                        .padding(.top, ComposerInputMetrics.topInset(expanded: expanded))
+                        .padding(.bottom, ComposerInputMetrics.bottomInset(expanded: expanded))
+                        .padding(.leading, ComposerInputMetrics.leadingInset(
+                            expanded: expanded, hasLeadingControl: hasLeadingControl
+                        ))
+                        .padding(.trailing, expanded ? 12 : 0)
+                        .focused($inputFocused)
+                        .disabled(draft.sending)
+                        .composerSlot(.field)
 
+                    if dictation.isActive {
+                        dictationControls.composerSlot(.trailing)
+                    } else {
                         HStack(spacing: 0) {
                             trailing().frame(minHeight: Self.control)
                             // Conn mobile keeps the mic beside stop while the agent works, so a follow-up
@@ -211,68 +220,67 @@ struct ConnComposerPill<Trailing: View>: View {
         .accessibilityIdentifier("composer.dictateButton")
     }
 
-    /// Conn mobile's dictation row: cancel, the elapsed time, and a primary circle that stops.
-    private var dictationRow: some View {
+    private var hasLeadingControl: Bool {
+        dictation.isActive ? dictation.phase != .transcribing : allowsAttachments && limits.images
+    }
+
+    private var fieldPlaceholder: String {
+        switch dictation.phase {
+        case .recording: "Listening…"
+        case .transcribing: "Transcribing…"
+        case .idle: placeholder
+        case .starting: "Preparing…"
+        }
+    }
+
+    /// While dictating, the trailing controls become the elapsed time and a primary circle that
+    /// stops (Conn mobile's dictation toolbar). The text field stays, so the keyboard does too.
+    private var dictationControls: some View {
         HStack(spacing: 0) {
-            if dictation.phase != .transcribing {
-                Button { dictation.cancel() } label: {
-                    ThreadGlyph(name: "close", size: 20)
-                        .frame(width: Self.control, height: Self.control)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel dictation")
-            }
-            Group {
-                switch dictation.phase {
-                case let .recording(since):
+            if case let .recording(since) = dictation.phase {
+                HStack(spacing: 6) {
+                    Circle().fill(theme.destructive).frame(width: 6, height: 6)
                     TimelineView(.periodic(from: since, by: 1)) { context in
                         let seconds = max(0, Int(context.date.timeIntervalSince(since)))
                         Text("\(seconds / 60):\(String(format: "%02d", seconds % 60))")
                             .monospacedDigit()
                     }
-                case .transcribing: Text("Transcribing…")
-                default: Text("Preparing…")
                 }
-            }
-            .font(.system(size: 14))
-            .foregroundStyle(theme.mutedForeground)
-            .frame(maxWidth: .infinity, minHeight: Self.control, alignment: dictation.phase == .transcribing ? .leading : .center)
-            .padding(.leading, dictation.phase == .transcribing ? 12 : 0)
-            .accessibilityElement(children: .combine)
-            Group {
-                if case .recording = dictation.phase {
-                    Button { finishDictation() } label: {
-                        ZStack {
-                            Circle().fill(theme.primary).frame(width: 30, height: 30)
-                            ThreadGlyph(name: "stop", size: 12).foregroundStyle(theme.primaryForeground)
-                        }
-                        .frame(width: Self.control, height: Self.control)
-                        .contentShape(Rectangle())
+                .font(.system(size: 14))
+                .foregroundStyle(theme.mutedForeground)
+                .padding(.trailing, 4)
+                .frame(minHeight: Self.control)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Recording")
+                Button { finishDictation() } label: {
+                    ZStack {
+                        Circle().fill(theme.primary).frame(width: 30, height: 30)
+                        ThreadGlyph(name: "stop", size: 12).foregroundStyle(theme.primaryForeground)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Stop dictation")
-                } else {
-                    ProgressView().frame(width: Self.control, height: Self.control)
+                    .frame(width: Self.control, height: Self.control)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop dictation")
+            } else {
+                ProgressView().frame(width: Self.control, height: Self.control)
             }
         }
     }
 
+    /// Recording keeps the text field and its focus: the keyboard stays as it was.
     private func startDictation() {
         guard !draft.locked else { return }
-        insertionRange = ComposerSelection.characterRange(selection, in: draft.text)
-        inputFocused = false
         dictation.start()
     }
 
+    /// The text goes in at the caret as it is when the transcript arrives.
     private func finishDictation() {
-        let range = insertionRange
         dictation.finish { text in
+            let range = ComposerSelection.characterRange(selection, in: draft.text)
             let result = DictationInsertion.insert(text, into: draft.text, at: range)
             draft.text = result.text
             selection = TextSelection(insertionPoint: draft.text.index(draft.text.startIndex, offsetBy: result.cursor))
-            inputFocused = true
         }
     }
 

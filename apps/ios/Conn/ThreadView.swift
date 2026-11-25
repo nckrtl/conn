@@ -788,14 +788,16 @@ struct ThreadView: View {
         let status: String
     }
 
-    /// The subagents of the latest turn, those after the last user message (mobile's
-    /// `useThreadTurnSubagents`).
+    /// The subagents of the latest turn (those after the last user message) plus any still running
+    /// from an earlier turn, so a reply never hides live agents (mobile's `deriveThreadTurnSubagents`).
     private var turnSubagents: [TurnSubagent] {
         guard let snapshot else { return [] }
         let start = snapshot.entries.lastIndex { if case .user = $0 { true } else { false } }
             .map { $0 + 1 } ?? 0
-        return snapshot.entries[start...].compactMap { entry in
-            guard case let .subagent(id, child, title, _, _, label, settled, _, _, _, _, _) = entry else { return nil }
+        return snapshot.entries.indices.compactMap { index in
+            let entry = snapshot.entries[index]
+            guard case let .subagent(id, child, title, _, _, label, settled, _, _, _, _, _) = entry,
+                  index >= start || !settled else { return nil }
             var thread = child
             var environment: String?
             if case let .subagent(_, _, _, env, linked)? = snapshot.feedDetails[id] {

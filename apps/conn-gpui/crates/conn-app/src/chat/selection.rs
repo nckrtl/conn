@@ -550,7 +550,7 @@ mod tests {
                         selection: Some(scope),
                         workspace_root: Some("/ws"),
                         on_open_file: Some(Rc::new(move |location, _, _| {
-                            opened.borrow_mut().push(location.path.clone());
+                            opened.borrow_mut().push(location.path);
                         })),
                         ..MarkdownOptions::default()
                     };

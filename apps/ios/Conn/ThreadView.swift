@@ -630,12 +630,15 @@ struct ThreadView: View {
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
-                    Text(displayTitle).font(.headline)
+                    Text(displayTitle).font(.headline.weight(.medium))
                     if let displaySubtitle {
                         Text(displaySubtitle).font(.caption).foregroundStyle(theme.mutedForeground)
                     }
                 }
                 .lineLimit(1)
+                .containerRelativeFrame(.horizontal) { width, _ in
+                    max(0, width - 2 * (16 + 44 + 8))
+                }
                 .foregroundStyle(theme.foreground)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)

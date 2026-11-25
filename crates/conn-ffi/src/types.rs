@@ -1973,7 +1973,7 @@ mod tests {
                 matches!(&snap.entries[2], FfiTimelineEntry::Assistant{markdown,..} if markdown == &transport)
             );
             assert!(
-                matches!(&snap.feed_details["turn-item:user-0"], crate::FfiFeedDetail::Message{sender:Some(label),..} if label == &format!("{title} · Completed"))
+                matches!(&snap.feed_details["turn-item:user-0"], crate::FfiFeedDetail::Message{sender:Some(label),..} if label == title)
             );
         };
         let mut live = ThreadState::new("thread");

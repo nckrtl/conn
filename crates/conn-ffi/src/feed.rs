@@ -145,11 +145,12 @@ impl<'a> CompletionCards<'a> {
                 format!("{id}/result/{index}")
             };
             self.task_ids.insert(id.clone(), result.task.clone());
-            let sender = format!(
-                "{} · {}",
-                result.title.as_deref().unwrap_or("Delegated task"),
-                result.state
-            );
+            let title = result.title.as_deref().unwrap_or("Delegated task");
+            let sender = if result.state == "Completed" {
+                title.to_owned()
+            } else {
+                format!("{title} · {}", result.state)
+            };
             details.insert(
                 id.clone(),
                 FfiFeedDetail::Message {

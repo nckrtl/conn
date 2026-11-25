@@ -502,6 +502,7 @@ pub struct FfiThreadSnapshot {
     pub history_cursor: Option<String>,
     pub server_page: bool,
     pub thread_id: String,
+    pub project_id: Option<String>,
     pub title: Option<String>,
     pub branch: Option<String>,
     pub model_label: Option<String>,
@@ -1008,6 +1009,9 @@ pub(crate) fn build_thread_snapshot(
             .filter(|_| thread.has_more_history),
         server_page: false,
         thread_id: thread.thread_id.clone(),
+        project_id: thread
+            .thread()
+            .and_then(|record| non_empty_str(&record.project_id)),
         title: meta.and_then(|m| m.title.clone()),
         branch: meta.and_then(|m| m.branch.clone()),
         model_label: meta.and_then(|m| m.model_label.clone()),

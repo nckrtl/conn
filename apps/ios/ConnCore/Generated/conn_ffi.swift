@@ -10759,6 +10759,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
     public var historyCursor: String?
     public var serverPage: Bool
     public var threadId: String
+    public var projectId: String?
     public var title: String?
     public var branch: String?
     public var modelLabel: String?
@@ -10783,7 +10784,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
+    public init(historyCursor: String?, serverPage: Bool, threadId: String, projectId: String?, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -10795,6 +10796,7 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         self.historyCursor = historyCursor
         self.serverPage = serverPage
         self.threadId = threadId
+        self.projectId = projectId
         self.title = title
         self.branch = branch
         self.modelLabel = modelLabel
@@ -10829,6 +10831,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
                 historyCursor: FfiConverterOptionString.read(from: &buf), 
                 serverPage: FfiConverterBool.read(from: &buf), 
                 threadId: FfiConverterString.read(from: &buf), 
+                projectId: FfiConverterOptionString.read(from: &buf), 
                 title: FfiConverterOptionString.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
@@ -10849,6 +10852,7 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.historyCursor, into: &buf)
         FfiConverterBool.write(value.serverPage, into: &buf)
         FfiConverterString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.projectId, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterOptionString.write(value.modelLabel, into: &buf)

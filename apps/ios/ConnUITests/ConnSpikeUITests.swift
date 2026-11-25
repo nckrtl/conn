@@ -1508,8 +1508,9 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["inbox.thread.child"].exists)
         XCTAssertFalse(app.buttons["inbox.settledThread.child"].exists)
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).count, 1)
-        for query in ["Artifact child", "child-only-branch"] {
-            app.buttons["workspace.searchButton"].tap()
+        let searchQueries = env["CONN_ARCHIVED_CHILD"] == "1" ? [] : ["Artifact child", "child-only-branch"]
+        for query in searchQueries {
+            app.tabBars.firstMatch.buttons["Search"].tap()
             let search = app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "Search threads")).firstMatch
             XCTAssertTrue(search.waitForExistence(timeout: 5))
             search.tap()

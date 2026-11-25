@@ -167,6 +167,7 @@ mod tests {
             history_cursor: None,
             server_page: false,
             thread_id: thread_id.to_owned(),
+            project_id: None,
             title: None,
             branch: None,
             model_label: None,

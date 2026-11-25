@@ -100,7 +100,14 @@ struct WorkspaceRootView: View {
                                 }
                             },
                             onTemplate: { prompt in
-                                navigationPath.append(.newThreadDraft(projectId: summary?.projectId, title: projectTitle ?? "General", scope: scope, prompt: prompt))
+                                let opened = owner.openThread
+                                let openedProject = opened?.threadId == threadId ? opened?.projectId : nil
+                                guard let projectId = openedProject ?? summary?.projectId else {
+                                    owner.lastError = "Could not find this thread’s project."
+                                    return
+                                }
+                                let title = owner.shell?.projects.first(where: { $0.id == projectId })?.title
+                                navigationPath.append(.newThreadDraft(projectId: projectId, title: title ?? projectId, scope: scope, prompt: prompt))
                             }
                         )
                     }

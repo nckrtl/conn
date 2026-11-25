@@ -10,7 +10,8 @@ const fixture = read("../../../crates/conn-state/tests/fixtures/sidebar_inventor
 const base = read("../../../crates/conn-state/tests/fixtures/shell_thread_updates.json")[0].thread;
 const marker = { kind: "synchronized" };
 const scenario = process.argv[3] ?? "inventory";
-const childProjectTest = scenario === "child-project";
+const archivedChild = scenario === "archived-child-project";
+const childProjectTest = scenario === "child-project" || archivedChild;
 const sleepingTest = scenario === "sleeping";
 let fleetState = "running";
 const releaseDiscovery = Promise.withResolvers();
@@ -38,7 +39,7 @@ function childProjectRequest(ws, frame) {
         workspaceRoot: "/tmp/" + t.projectId, scripts: [], createdAt: t.createdAt, updatedAt: t.updatedAt,
       }));
       chunk({ kind: "snapshot", snapshot: {
-        schemaVersion: 1, snapshotSequence: 1, projects, threads: [parent, child], archivedThreads: [],
+        schemaVersion: 1, snapshotSequence: 1, projects, threads: archivedChild ? [parent] : [parent, child], archivedThreads: [],
       } });
       return true;
     }
@@ -49,6 +50,7 @@ function childProjectRequest(ws, frame) {
       const projection = snap.projection;
       const thread = id === child.id ? child : parent;
       Object.assign(projection.thread, { id, title: thread.title, projectId: thread.projectId });
+      if (archivedChild && id === child.id) projection.thread.archivedAt = thread.updatedAt;
       const common = { id: "item-" + id, threadId: id, ordinal: 1, updatedAt: thread.updatedAt, status: "completed" };
       const item = id === parent.id ? {
         ...common, type: "subagent", subagentId: "worker", title: child.title, origin: "app_owned",
@@ -280,13 +282,14 @@ const control = Bun.serve({
 const device = process.argv[2];
 if (!device) throw new Error("Pass the task simulator UDID");
 const test = { inventory: "testAtomicThreadInventory", "child-project": "testChildArtifactFollowUpProject",
-  sleeping: "testSavedSleepingMachineInventory" }[scenario];
+  "archived-child-project": "testChildArtifactFollowUpProject", sleeping: "testSavedSleepingMachineInventory" }[scenario];
 if (!test) throw new Error("Unknown inventory scenario " + scenario);
 const child = spawn("xcodebuild", ["test", "-project", "apps/ios/Conn.xcodeproj", "-scheme", "Conn",
   "-destination", "id=" + device, "-derivedDataPath", "apps/ios/build/DerivedData",
   "-parallel-testing-enabled", "NO",
   "-only-testing:ConnUITests/ConnSpikeUITests/" + test,
   "CODE_SIGN_IDENTITY=-"], { cwd: root, stdio: "inherit", env: { ...process.env,
+    TEST_RUNNER_CONN_ARCHIVED_CHILD: archivedChild ? "1" : "0",
     TEST_RUNNER_CONN_INVENTORY_FIXTURE: control.url.href,
     TEST_RUNNER_CONN_PAIRING_URL: primary.url + "#token=test",
     TEST_RUNNER_CONN_LINKED_PAIRING_URL: linked.url + "#token=test",

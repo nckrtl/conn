@@ -32,8 +32,9 @@ use super::format::{TasksSurfaceColors, format_chart_date_label};
 use crate::panels::chrome::{UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
 
-/// Height of a tile's sparkline (`h-7` = 28px).
-const SPARKLINE_HEIGHT_PX: f32 = 28.0;
+/// Height a tile's sparkline had before the cards grew (`h-7` = 28px), and the height the
+/// trend points are laid out for. A card's sparkline is this plus the card's extra height.
+pub(super) const SPARKLINE_BASE_HEIGHT_PX: f32 = 28.0;
 const AXIS_FONT_PX: f32 = 11.0;
 const AXIS_LINE_HEIGHT_PX: f32 = 14.0;
 const CHART_MARGIN_LEFT_PX: f32 = 44.0;
@@ -85,8 +86,13 @@ pub(super) fn x_axis_indices(count: usize) -> Vec<usize> {
     indices
 }
 
-/// Renders a 28px sparkline with a soft translucent area fill and a 1.5px muted polyline.
-pub(super) fn render_sparkline(points: Vec<TrendPoint>, tokens: &Tokens) -> AnyElement {
+/// Renders a `height`px sparkline with a soft translucent area fill and a 1.5px muted polyline.
+pub(super) fn render_sparkline(
+    id: SharedString,
+    points: Vec<TrendPoint>,
+    height: f32,
+    tokens: &Tokens,
+) -> AnyElement {
     let base = to_hsla(tokens.muted_foreground);
     let stroke_color = base.opacity(0.70);
     // Conn's `<Fade opacity={0.22}>`: a vertical 22%→0% gradient under the line.
@@ -106,8 +112,11 @@ pub(super) fn render_sparkline(points: Vec<TrendPoint>, tokens: &Tokens) -> AnyE
     };
 
     div()
+        .id(id)
+        .test_support()
         .w_full()
-        .h(px(SPARKLINE_HEIGHT_PX))
+        .h(px(height))
+        .flex_shrink_0()
         .mt_auto()
         .child(inner)
         .into_any_element()
@@ -129,7 +138,7 @@ fn paint_sparkline(
     if placed.len() < 2 {
         return;
     }
-    let scale_y = height / SPARKLINE_HEIGHT_PX;
+    let scale_y = height / SPARKLINE_BASE_HEIGHT_PX;
     let to_pt = |(x, y): (f64, f64)| {
         point(
             bounds.origin.x + px(x as f32),

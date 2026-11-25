@@ -74,6 +74,60 @@ if [[ ! -t 0 ]]; then
   INTERACTIVE_ARGS+=(--interactive false)
 fi
 
+TEAM_ID="${CONN_APPLE_TEAM_ID:-9SVJ4SYB9B}"
+BUNDLE_ID="${CONN_BUNDLE_ID:-com.nckrtl.conn.dev}"
+DEV_APP_BUNDLE="$ROOT/target/dx/conn-app/debug/macos/ConnApp.app"
+DEV_ENTITLEMENTS="${CONN_DEV_ENTITLEMENTS:-$ROOT/scripts/dev-entitlements.plist}"
+
+pick_signing_identity() {
+  if [[ -n "${CONN_DEV_SIGNING_IDENTITY:-}" ]]; then
+    echo "$CONN_DEV_SIGNING_IDENTITY"
+    return
+  fi
+  local hash
+  hash="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -v team="(${TEAM_ID})" '/Developer ID Application:/ && index($0, team) { print $2; exit }')"
+  if [[ -n "$hash" ]]; then
+    echo "$hash"
+  else
+    echo "-"
+  fi
+}
+
+CODESIGN_ARGS=()
+SIGN_IDENTITY="$(pick_signing_identity)"
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+  # Vault Mac is App-Sandboxed and verifies the parent's code signature on disk, so in live mode
+  # place the signed dev bundle in `/Applications` (matching `scripts/bundle-app.sh --install`)
+  # and point `dx`'s `ConnApp.app` staging path at it.
+  if [[ "$SANDBOX" == "0" ]]; then
+    INSTALL_APP="${CONN_DEV_APP_INSTALL_PATH:-/Applications/Conn GPUI Dev.app}"
+    if [[ -w "$(dirname "$INSTALL_APP")" ]]; then
+      mkdir -p "$(dirname "$DEV_APP_BUNDLE")" "$INSTALL_APP"
+      if [[ -L "$DEV_APP_BUNDLE" ]]; then
+        if [[ "$(readlink "$DEV_APP_BUNDLE")" != "$INSTALL_APP" ]]; then
+          rm -f "$DEV_APP_BUNDLE"
+          ln -s "$INSTALL_APP" "$DEV_APP_BUNDLE"
+        fi
+      else
+        rm -rf "$DEV_APP_BUNDLE"
+        ln -s "$INSTALL_APP" "$DEV_APP_BUNDLE"
+      fi
+    fi
+  fi
+
+  rm -f "$DEV_APP_BUNDLE/index.html"
+  export CONN_DX_SIGN_BUNDLE="$DEV_APP_BUNDLE"
+  export CONN_DX_SIGN_IDENTITY="$SIGN_IDENTITY"
+  export CONN_DX_BUNDLE_ID="$BUNDLE_ID"
+  export PATH="$ROOT/scripts/dx-codesign:$PATH"
+  CODESIGN_ARGS+=(
+    --codesign true
+    --apple-team-id "$SIGN_IDENTITY"
+    --apple-entitlements "$DEV_ENTITLEMENTS"
+  )
+fi
+
 cd "$ROOT"
 exec "$DX_BIN" serve \
   --platform macos \
@@ -82,6 +136,7 @@ exec "$DX_BIN" serve \
   --features "$FEATURES" \
   --hot-patch \
   --open false \
+  ${CODESIGN_ARGS[@]+"${CODESIGN_ARGS[@]}"} \
   "${INTERACTIVE_ARGS[@]}" \
   --addr 127.0.0.1 \
   --port "$DX_PORT"

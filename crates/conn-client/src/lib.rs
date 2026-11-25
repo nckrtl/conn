@@ -925,6 +925,67 @@ impl Connection {
         self.call_json(TAG_DISPATCH_COMMAND, payload).await
     }
 
+    /// Lists test logins stored on the connected environment (`testLogins.list`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn list_test_logins(&self) -> Result<conn_contract::TestLoginList, ClientError> {
+        self.call("testLogins.list", &conn_contract::ServerProbePayload {})
+            .await
+    }
+
+    /// Saves a new test login on the connected environment (`testLogins.save`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn save_test_login(
+        &self,
+        input: &conn_contract::SaveTestLoginInput,
+    ) -> Result<conn_contract::TestLoginSummary, ClientError> {
+        self.call("testLogins.save", input).await
+    }
+
+    /// Updates an existing test login on the connected environment (`testLogins.update`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn update_test_login(
+        &self,
+        input: &conn_contract::UpdateTestLoginInput,
+    ) -> Result<conn_contract::TestLoginSummary, ClientError> {
+        self.call("testLogins.update", input).await
+    }
+
+    /// Removes a test login from the connected environment (`testLogins.remove`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn remove_test_login(&self, id: &str) -> Result<(), ClientError> {
+        self.call_json("testLogins.remove", serde_json::json!({ "id": id }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Reveals the stored password and optional OTP secret of one test login (`testLogins.reveal`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn reveal_test_login(
+        &self,
+        id: &str,
+    ) -> Result<conn_contract::TestLoginSecrets, ClientError> {
+        self.call(
+            "testLogins.reveal",
+            &conn_contract::AuthRevokePairingLinkInput { id: id.to_owned() },
+        )
+        .await
+    }
+
     /// Starts a generic streaming RPC call, returning a [`StreamId`] and a bounded receiver of
     /// raw JSON items.
     ///

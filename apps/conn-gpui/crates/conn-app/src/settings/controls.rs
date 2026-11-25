@@ -7,7 +7,7 @@ use conn_theme::{ShellGeometry, Tokens};
 use gpui_kit::{
     AnyElement, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 
 use crate::a11y::ConnA11yExt as _;
@@ -48,6 +48,24 @@ pub(crate) fn pill_switch(
     tokens: &Tokens,
     on_click: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
 ) -> impl IntoElement {
+    let switch_id = id.into();
+    let raw_slug = match &switch_id {
+        ElementId::Name(name) => name.trim_start_matches("conn-settings-").to_owned(),
+        other => format!("{other:?}"),
+    };
+    let label = humanize_slug(&raw_slug);
+    pill_switch_labeled(switch_id, label, checked, tokens, on_click)
+}
+
+/// Pill switch with an explicit AccessKit label.
+#[must_use]
+pub(crate) fn pill_switch_labeled(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+    tokens: &Tokens,
+    on_click: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
+) -> impl IntoElement {
     let track_bg = if checked {
         hsla(tokens.switch_on)
     } else {
@@ -66,7 +84,6 @@ pub(crate) fn pill_switch(
         other => format!("{other:?}"),
     };
     let ax_id = SharedString::from(format!("settings.switch.{raw_slug}"));
-    let label = humanize_slug(&raw_slug);
     div()
         .id(switch_id)
         .a11y_switch(ax_id, label, checked)
@@ -88,6 +105,56 @@ pub(crate) fn pill_switch(
                 .rounded(px(9999.0))
                 .bg(thumb_bg),
         )
+        .test_support()
+}
+
+/// Non-interactive pill switch (e.g. always-on protection or unavailable server-scoped setting).
+#[must_use]
+pub(crate) fn disabled_pill_switch(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+    tokens: &Tokens,
+) -> impl IntoElement {
+    let track_bg = if checked {
+        hsla(tokens.switch_on)
+    } else {
+        hsla(tokens.input)
+    };
+    let thumb_bg = hsla(tokens.background);
+    let thumb_offset = if checked {
+        SWITCH_TRACK_W_PX - SWITCH_THUMB_PX - SWITCH_INSET_PX * 2.0
+    } else {
+        0.0
+    };
+
+    let switch_id = id.into();
+    let raw_slug = match &switch_id {
+        ElementId::Name(name) => name.trim_start_matches("conn-settings-").to_owned(),
+        other => format!("{other:?}"),
+    };
+    let ax_id = SharedString::from(format!("settings.switch.{raw_slug}"));
+    div()
+        .id(switch_id)
+        .a11y_switch(ax_id, label, checked)
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_shrink_0()
+        .w(px(SWITCH_TRACK_W_PX))
+        .h(px(SWITCH_TRACK_H_PX))
+        .p(px(SWITCH_INSET_PX))
+        .rounded(px(9999.0))
+        .bg(track_bg)
+        .opacity(0.5)
+        .child(
+            div()
+                .ml(px(thumb_offset))
+                .size(px(SWITCH_THUMB_PX))
+                .rounded(px(9999.0))
+                .bg(thumb_bg),
+        )
+        .test_support()
 }
 
 /// Renders a Settings section: normal sentence-case title (`13px` medium,
@@ -97,6 +164,19 @@ pub(crate) fn pill_switch(
 #[must_use]
 pub(crate) fn settings_section(
     title: &str,
+    rows: Vec<AnyElement>,
+    tokens: &Tokens,
+    geometry: &ShellGeometry,
+) -> Stateful<Div> {
+    settings_section_with_header_action(title, None, rows, tokens, geometry)
+}
+
+/// Same as [`settings_section`] with an optional right-aligned header action (such as
+/// `Add test login` beside the `Test logins` heading).
+#[must_use]
+pub(crate) fn settings_section_with_header_action(
+    title: &str,
+    header_action: Option<AnyElement>,
     rows: Vec<AnyElement>,
     tokens: &Tokens,
     geometry: &ShellGeometry,
@@ -125,6 +205,25 @@ pub(crate) fn settings_section(
     }
 
     let slug = title.to_ascii_lowercase().replace(' ', "-");
+    let mut header = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .px(px(4.0))
+        .child(
+            div()
+                .text_size(px(geometry.ui_font_size_px))
+                .line_height(px(geometry.ui_line_height_px))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg)
+                .child(title.to_owned()),
+        );
+    if let Some(action) = header_action {
+        header = header.child(div().flex_shrink_0().child(action));
+    }
+
     div()
         .id(SharedString::from(format!("settings-section-{slug}")))
         .a11y_region(
@@ -135,15 +234,7 @@ pub(crate) fn settings_section(
         .flex_col()
         .gap(px(8.0))
         .w_full()
-        .child(
-            div()
-                .px(px(4.0))
-                .text_size(px(geometry.ui_font_size_px))
-                .line_height(px(geometry.ui_line_height_px))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg)
-                .child(title.to_owned()),
-        )
+        .child(header)
         .child(group)
 }
 

@@ -33,12 +33,19 @@ struct AgentSummary: View {
 struct MessageFooter: View {
     let text: String
     let timestamp: String?
+    var trailingCopy = false
+    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {
-            if !text.isEmpty { CopyTextButton(label: "Copy message", text: text) }
-            if let date = threadDate(timestamp) { Text(date, style: .time).font(.caption.monospacedDigit()) }
-        }.font(.system(size: 13)).foregroundStyle(theme.mutedForeground)
+            if !trailingCopy { copyButton }
+            if let date = threadDate(timestamp) { Text(date, style: .time) }
+            if trailingCopy { copyButton }
+        }.font(.system(size: size)).foregroundStyle(theme.mutedForeground)
+    }
+
+    @ViewBuilder private var copyButton: some View {
+        if !text.isEmpty { CopyTextButton(label: "Copy message", text: text, message: true) }
     }
 }
 
@@ -90,8 +97,10 @@ struct ThreadMessage: View {
                 if let badge { KitBadge(badge) }
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
-                        MarkdownView(source: displayText, fillsWidth: !files.isEmpty || !metadata.reviews.isEmpty).fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 13).padding(.vertical, 7)
+                        MarkdownView(source: displayText, fillsWidth: !files.isEmpty || !metadata.reviews.isEmpty, messageStyle: .user).fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 13)
+                            .padding(.top, 7)
+                            .padding(.bottom, files.isEmpty ? 9 : 7)
                     }
                     ForEach(metadata.reviews, id: \.contextId) { review in
                         if !review.text.isEmpty { Text(review.text).textSelection(.enabled).padding(.horizontal, 11) }
@@ -101,9 +110,10 @@ struct ThreadMessage: View {
                 }
                 .padding(3)
                 .background(theme.messageSurface, in: .rect(cornerRadius: 14))
-                MessageFooter(text: text, timestamp: date)
+                MessageFooter(text: text, timestamp: date, trailingCopy: true)
+                    .padding(.horizontal, 4)
             }
-            .padding(.leading, 48)
+            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.8 }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }

@@ -5,7 +5,7 @@
     @HOME@          the user's home, e.g. /Users/nckrtl
     @URL@           the server's WireGuard URL, e.g. http://10.44.0.9:3773
     @SERVER_LABEL@  the server's launchd job: com.t3tools.t3code.service (mini),
-                    com.nckrtl.conn-server (nick-vm), com.nckrtl.t3-headless (nick headless)
+                    com.nckrtl.conn-server (nick, nick-vm)
     @T3CODE_HOME@   the server's base dir, e.g. @HOME@/.t3 or @HOME@/.t3/headless
   Never put a versioned runtime path (…/runtime/versions/<version>/t3) here; the script reads the
   live binary from the server job at every run. RunAtLoad registers as soon as the job is loaded.

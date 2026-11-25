@@ -1215,8 +1215,7 @@ when launchd does not know the job does it read `ProgramArguments` of
 `env VAR=value` wrapper. The label differs per host:
 
 - mini: `com.t3tools.t3code.service`.
-- nick-vm: `com.nckrtl.conn-server`.
-- nick headless: `com.nckrtl.t3-headless`.
+- nick and nick-vm: `com.nckrtl.conn-server`.
 
 Install the script in `~/.local/bin`. Fill in the placeholders of
 `scripts/orbit/com.nckrtl.t3-orbit-register.plist` and put it in

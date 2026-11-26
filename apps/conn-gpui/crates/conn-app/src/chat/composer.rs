@@ -2756,14 +2756,10 @@ impl Render for Composer {
                 let att_name = chat_attachment_name(att);
                 let is_image = matches!(att, ChatAttachment::Image(_));
                 let leading_icon = if is_image {
-                    icons::icon(icons::IMAGE, 14.0, muted)
+                    icons::icon(icons::IMAGE, 14.0, muted).into_any_element()
                 } else {
-                    let file_icon = crate::file_icons::file_icon(att_name);
-                    let icon_color = file_icon
-                        .color
-                        .map(|c| hsla(c.for_appearance(tokens.appearance)))
-                        .unwrap_or(muted);
-                    icons::icon(file_icon.asset, 14.0, icon_color)
+                    let file_icon = crate::file_icons::file_icon(att_name, tokens.appearance);
+                    crate::file_icons::icon_img(file_icon.asset, 14.0).into_any_element()
                 };
                 strip = strip.child(
                     div()
@@ -2824,11 +2820,7 @@ impl Render for Composer {
                     ));
                     continue;
                 }
-                let file_icon = crate::file_icons::file_icon(&att.name);
-                let icon_color = file_icon
-                    .color
-                    .map(|c| hsla(c.for_appearance(tokens.appearance)))
-                    .unwrap_or(muted);
+                let file_icon = crate::file_icons::file_icon(&att.name, tokens.appearance);
                 let status_label = match &att.status {
                     AttachmentUploadStatus::Uploading => "Uploading…".to_owned(),
                     AttachmentUploadStatus::Ready(_) => format_byte_size(att.size_bytes),
@@ -2854,7 +2846,7 @@ impl Render for Composer {
                         } else {
                             hsla(tokens.shell_inner_border)
                         })
-                        .child(icons::icon(file_icon.asset, 14.0, icon_color))
+                        .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
                         .child(
                             div()
                                 .flex_1()

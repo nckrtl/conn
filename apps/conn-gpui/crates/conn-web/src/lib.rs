@@ -699,6 +699,16 @@ impl BrowserView {
         }
     }
 
+    /// Registers a callback for the page's own icon: the page's address, then the icon as PNG bytes
+    /// (at most 64 KiB). It runs after each navigation that declares an icon, and never for a page
+    /// without one. The browser fetched and decoded the icon, so the bytes are a plain PNG.
+    pub fn on_favicon(&self, callback: impl Fn(&str, Vec<u8>) + Send + Sync + 'static) {
+        #[cfg(target_os = "macos")]
+        self.inner.on_favicon(callback);
+        #[cfg(not(target_os = "macos"))]
+        let _ = callback;
+    }
+
     /// Registers a callback invoked for the detector bridge's console messages. Returning `true`
     /// consumes a message so it stays out of Chromium's log; any message it does not consume
     /// (returns `false`) is left alone, and DevTools' Console shows every message either way.

@@ -1207,6 +1207,18 @@ impl AuthStore {
             .is_some_and(|(_, s)| s.expires_at_ms > now)
     }
 
+    /// Whether a live session carries `label`. `t3-orbit-register` issues one labeled
+    /// "Orbit Gateway", so this says whether Orbit has registered this server.
+    pub fn has_session_labeled(&self, label: &str) -> bool {
+        let now = now_ms();
+        let mut state = self.lock();
+        self.refresh(&mut state);
+        state
+            .sessions
+            .values()
+            .any(|s| s.expires_at_ms > now && s.client.label.as_deref() == Some(label))
+    }
+
     /// Unspent, unexpired pairing links, oldest first. Purpose-bound codes are not listed
     /// (`EnvironmentAuth.listPairingLinks`).
     pub fn pairing_links(&self) -> Vec<AuthPairingLink> {

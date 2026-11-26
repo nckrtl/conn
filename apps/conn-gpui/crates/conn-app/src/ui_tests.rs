@@ -30,7 +30,10 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+mod browser_inline_logins;
 pub(crate) mod details_tasks;
+#[cfg(target_os = "macos")]
+mod selection_perf;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;
@@ -775,15 +778,17 @@ fn composer_popups_model_picker_and_plan_mode_render_cleanly(cx: &mut TestAppCon
     });
 }
 
-/// The launch connection asks for the provider catalog, or the composer's picker stays empty
-/// until the user switches servers.
-#[gpui_kit::test]
-async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_message(
-    cx: &mut TestAppContext,
+/// A loopback `conn-server` that answers `projects.ensureScratch` with `scratch_id`, reports
+/// every request tag, and hands over each `orchestration.launchThread` payload.
+fn spawn_scratch_server(
+    scratch_id: &'static str,
+) -> (
+    url::Url,
+    std::sync::mpsc::Receiver<String>,
+    tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
 ) {
-    cx.executor().allow_parking();
     let (tags_tx, tags_rx) = std::sync::mpsc::channel::<String>();
-    let (launch_tx, mut launch_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (launch_tx, launch_rx) = tokio::sync::mpsc::unbounded_channel();
     let addr = RT.block_on(async {
         let listener = match TcpListener::bind("127.0.0.1:0").await {
             Ok(l) => l,
@@ -808,7 +813,7 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
                                     let reply = conn_wire::FromServer::Exit {
                                         request_id: req.id,
                                         exit: conn_wire::Exit::success(
-                                            json!({"projectId":"primary-scratch"}),
+                                            json!({"projectId": scratch_id}),
                                         ),
                                     };
                                     ws.send(Message::Text(
@@ -818,6 +823,17 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
                                     .expect("send scratch project");
                                 } else if req.tag == "orchestration.launchThread" {
                                     let _ = launch_tx.send(req.payload);
+                                    let reply = conn_wire::FromServer::Exit {
+                                        request_id: req.id,
+                                        exit: conn_wire::Exit::success(
+                                            json!({"threadId": format!("{scratch_id}-thread")}),
+                                        ),
+                                    };
+                                    ws.send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await
+                                    .expect("send launched thread");
                                 }
                                 let _ = tags_tx.send(req.tag);
                             }
@@ -828,10 +844,29 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
         });
         addr
     });
-    let http_base_url = match url::Url::parse(&format!("http://{addr}")) {
-        Ok(url) => url,
+    match url::Url::parse(&format!("http://{addr}")) {
+        Ok(url) => (url, tags_rx, launch_rx),
         Err(err) => panic!("invalid loopback URL: {err}"),
-    };
+    }
+}
+
+fn wait_for_tag(tags: &std::sync::mpsc::Receiver<String>, tag: &str) {
+    while tags
+        .recv_timeout(Duration::from_secs(5))
+        .expect("request from the app")
+        != tag
+    {}
+}
+
+/// The launch connection asks for the provider catalog, or the composer's picker stays empty
+/// until the user switches servers. With no primary agent Node in the fleet (or Orbit off),
+/// General opens on the primary connection.
+#[gpui_kit::test]
+async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_message(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (http_base_url, tags_rx, mut launch_rx) = spawn_scratch_server("primary-scratch");
     let (window, app) = mount_app_with_server(
         cx,
         Some(crate::live::StartupServer {
@@ -844,11 +879,7 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
         }),
     );
 
-    while tags_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("server config subscription")
-        != "subscribeServerConfig"
-    {}
+    wait_for_tag(&tags_rx, "subscribeServerConfig");
 
     cx.update(|cx| {
         app.update(cx, |app, cx| {
@@ -889,6 +920,168 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
     assert_eq!(launch["workspaceStrategy"], json!({"type":"root"}));
     assert_eq!(launch["modelSelection"]["model"], "test-model");
     assert_eq!(launch["initialMessage"]["text"], "Help with Mini");
+}
+
+/// Mounts the app on `nick` as its primary connection, with an Orbit fleet whose primary agent
+/// Node `agent` is linked at `agent_url`.
+fn mount_with_agent_node(
+    cx: &mut TestAppContext,
+    primary_url: url::Url,
+    primary_tags: &std::sync::mpsc::Receiver<String>,
+    agent_url: url::Url,
+) -> (AnyWindowHandle, Entity<ConnApp>) {
+    use conn_desktop::orbit::{OrbitFleet, OrbitServerTarget, OrbitTargetKind, OrbitTargetStatus};
+
+    let node = |id: &str, url: &url::Url, is_primary_agent: bool| OrbitServerTarget {
+        server_id: id.to_owned(),
+        label: id.to_owned(),
+        url: url.to_string(),
+        server_version: None,
+        registered_by: None,
+        status: OrbitTargetStatus::Registered,
+        cleanup_pending: false,
+        kind: OrbitTargetKind::Node {
+            node_name: id.to_owned(),
+            roles: if is_primary_agent {
+                vec!["agent".to_owned()]
+            } else {
+                Vec::new()
+            },
+            is_primary_agent,
+        },
+    };
+    let fleet = OrbitFleet::from_targets(
+        vec![
+            node("nick", &primary_url, false),
+            node("agent", &agent_url, true),
+        ],
+        None,
+    );
+    let (window, app) = mount_app_with_server(
+        cx,
+        Some(crate::live::StartupServer {
+            config: ServerConfig {
+                http_base_url: primary_url,
+                credential: Credential::Bearer("test-token".to_owned()),
+            },
+            label: Some("nick".to_owned()),
+            orbit_server_id: Some("nick".to_owned()),
+        }),
+    );
+    wait_for_tag(primary_tags, "subscribeServerConfig");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_fleet_for_test(fleet);
+            app.connect_linked_for_test(
+                "agent",
+                ServerConfig {
+                    http_base_url: agent_url,
+                    credential: Credential::Bearer("agent-token".to_owned()),
+                },
+                cx,
+            );
+        })
+    });
+    (window, app)
+}
+
+/// The fleet's primary agent Node is connected as a linked environment: New thread opens
+/// General there and the first message launches on its connection, while the primary connection
+/// (another Node) stays the app's own.
+#[gpui_kit::test]
+async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
+    let (agent_url, agent_tags, mut agent_launch) = spawn_scratch_server("agent-scratch");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    wait_for_tag(&agent_tags, "subscribeServerConfig");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read(|cx| app.read(cx).linked_connected_for_test("agent")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let start = cx
+        .update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| app.start_general_draft(Some(window), cx))
+        })
+        .expect("test window");
+    let draft_id = start.await.expect("opened General draft");
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test()),
+        Some((draft_id, "agent-scratch".to_owned()))
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_model("codex", "test-model", None, cx);
+            app.send_prompt("Help with Mini".into(), cx);
+        })
+    });
+    let launch = agent_launch.recv().await.expect("launch on the agent Node");
+    assert_eq!(launch["projectId"], "agent-scratch");
+    assert_eq!(launch["initialMessage"]["text"], "Help with Mini");
+    assert!(primary_launch.try_recv().is_err());
+    assert!(
+        primary_tags
+            .try_iter()
+            .all(|tag| tag != "projects.ensureScratch"),
+        "the primary connection makes no General project"
+    );
+    // Before the agent's shell lists the new thread, follow-ups still go to the agent Node.
+    let mut owner = None;
+    for _ in 0..200 {
+        cx.run_until_parked();
+        owner = cx.read(|cx| {
+            app.read(cx)
+                .linked_environment_of_thread("agent-scratch-thread")
+                .map(str::to_owned)
+        });
+        if owner.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(owner.as_deref(), Some("agent"));
+}
+
+/// An agent Node that is not connected (here, nothing listens on its port) never takes General:
+/// New thread opens it on the primary connection, as it did before agent Nodes.
+#[gpui_kit::test]
+async fn new_thread_falls_back_to_the_primary_while_the_agent_node_is_unreachable(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
+    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .expect("free loopback port");
+    let agent_url = url::Url::parse(&format!("http://127.0.0.1:{closed_port}")).expect("agent URL");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| app.read(cx).linked_connected_for_test("agent")));
+
+    let start = cx
+        .update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| app.start_general_draft(Some(window), cx))
+        })
+        .expect("test window");
+    let draft_id = start.await.expect("opened General draft");
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test()),
+        Some((draft_id, "nick-scratch".to_owned()))
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_model("codex", "test-model", None, cx);
+            app.send_prompt("Help with Mini".into(), cx);
+        })
+    });
+    let launch = primary_launch.recv().await.expect("launch on the primary");
+    assert_eq!(launch["projectId"], "nick-scratch");
 }
 
 #[gpui_kit::test]
@@ -4391,6 +4584,218 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
         Some("select 2"),
         "the query is in the chosen connection's editor"
     );
+}
+
+/// A thread without a project (General) has no Files, MCP or API: the `+` menu and the tab strip
+/// leave them out, Database stays, and a request to open one opens Tasks instead.
+#[gpui_kit::test]
+fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead(
+    cx: &mut TestAppContext,
+) {
+    use conn_state::{PanelSurface, RightPanelTab};
+    let tasks = PanelSurface::Kind(RightPanelTab::Tasks);
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_scratch_project_for_test(Some("proj-other"));
+            app.learn_primary_environment_for_test("env-a", cx);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, window);
+    let project_gated = [RightPanelTab::Files, RightPanelTab::Mcp, RightPanelTab::Api];
+    cx.update(|cx| {
+        let (offered, _) = app.read(cx).offered_and_visible_tabs_for_test();
+        for tab in project_gated {
+            assert!(offered.contains(&tab), "a project thread offers {tab:?}");
+        }
+    });
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let (offered, _) = app.read(cx).offered_and_visible_tabs_for_test();
+        for tab in project_gated {
+            assert!(!offered.contains(&tab), "General does not offer {tab:?}");
+        }
+        assert!(offered.contains(&RightPanelTab::Database));
+        assert!(offered.contains(&RightPanelTab::Tasks));
+    });
+    // Every way in: the menu and its keys, the palette and agent requests (select), the
+    // panel's own events (select) and a file.
+    for open in 0..4 {
+        cx.update(|cx| {
+            app.update(cx, |app, cx| match open {
+                0 => app.add_right_panel_tab(RightPanelTab::Files, cx),
+                1 => app.select_right_panel_tab(RightPanelTab::Mcp, cx),
+                2 => app.select_right_panel_tab(RightPanelTab::Api, cx),
+                _ => app.select_right_panel_surface(PanelSurface::File("a.rs".into()), cx),
+            })
+        });
+        render_frames(cx, window);
+        cx.update(|cx| {
+            let app = app.read(cx);
+            assert_eq!(app.right_panel_tabs().active(), Some(&tasks), "way {open}");
+            assert_eq!(app.layout().right_panel_tab, RightPanelTab::Tasks);
+            assert!(app.layout().right_panel_open);
+            let (_, visible) = app.offered_and_visible_tabs_for_test();
+            assert_eq!(visible, std::slice::from_ref(&tasks));
+        });
+    }
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(RightPanelTab::Database, cx)
+        })
+    });
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.right_panel_tabs().active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Database))
+        );
+    });
+}
+
+/// Tabs a thread's project made available stay open when the thread has none, hidden, and the
+/// panel shows Tasks, so they are back if the thread gets a project again.
+#[gpui_kit::test]
+fn project_tabs_hide_without_a_project_and_come_back_with_one(cx: &mut TestAppContext) {
+    use conn_state::{PanelSurface, RightPanelTab};
+    let files = PanelSurface::Kind(RightPanelTab::Files);
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("env-a", cx);
+            app.select_thread("thread-selected", cx);
+            app.add_right_panel_tab(RightPanelTab::Files, cx);
+            app.add_right_panel_tab(RightPanelTab::Database, cx);
+            app.select_right_panel_tab(RightPanelTab::Files, cx);
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.set_scratch_project_for_test(Some("proj-parity"))
+        })
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        let (_, visible) = app.offered_and_visible_tabs_for_test();
+        assert!(!visible.contains(&files));
+        assert!(app.right_panel_tabs().tabs().contains(&files));
+        assert_eq!(
+            app.right_panel_tabs().active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Tasks))
+        );
+    });
+    cx.update(|cx| app.update(cx, |app, _| app.set_scratch_project_for_test(None)));
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    cx.update(|cx| {
+        let (_, visible) = app.read(cx).offered_and_visible_tabs_for_test();
+        assert!(visible.contains(&files));
+    });
+}
+
+/// A text system and renderer for the `#[ignore]`d screenshot tests. They build their own:
+/// libtest runs a test off the main thread, and `current_platform(true)` needs the main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn headless_shot_context() -> gpui_kit::HeadlessAppContext {
+    gpui_kit::HeadlessAppContext::with_platform(
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+        std::sync::Arc::new(crate::superhero::AppAssets),
+        gpui_kit::platform::current_headless_renderer,
+    )
+}
+
+/// Renders the right panel's header and `+` menu offscreen for a thread with a project and one
+/// without, in Dark Ocean and Light. It opens no window on screen and takes no focus.
+///
+/// `CONN_FILES_SHOTS_DIR=<dir> cargo test -p conn-app render_no_project_panel_screenshots -- --ignored`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "writes PNGs; set CONN_FILES_SHOTS_DIR"]
+fn render_no_project_panel_screenshots() {
+    use conn_state::RightPanelTab;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+    let Some(dir) = std::env::var_os("CONN_FILES_SHOTS_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = headless_shot_context();
+    for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        for (thread, scratch, label) in [
+            ("thread-selected", None, "project"),
+            ("thread-other", Some("proj-other"), "no-project"),
+        ] {
+            let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+            let tokens = conn_theme::Tokens::derive(&theme);
+            let (window, app) = ctx.update(|cx| {
+                gpui_kit::init(cx);
+                crate::fonts::register(cx);
+                crate::theme::apply_kit_theme(&tokens, cx);
+                crate::app::register_keybindings(cx);
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            Point::default(),
+                            size(px(1100.0), px(420.0)),
+                        ))),
+                        focus: false,
+                        show: false,
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| {
+                        let tokens = tokens.clone();
+                        cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                    },
+                )
+                .expect("a window")
+            });
+            ctx.update(|cx| {
+                app.update(cx, |app, cx| {
+                    let mut shell = two_project_shell();
+                    shell.threads.push(make_thread_shell(ThreadSeedSpec {
+                        id: "thread-other",
+                        project_id: "proj-other",
+                        title: "General question",
+                        status: "completed",
+                        activity_run_status: None,
+                        pinned_at: None,
+                        settled_at: None,
+                        pending_kind: None,
+                    }));
+                    shell.synchronized = true;
+                    app.set_shell(shell, cx);
+                    app.set_scratch_project_for_test(scratch);
+                    app.learn_primary_environment_for_test("env-a", cx);
+                    app.select_thread(thread, cx);
+                    // A project thread has Files open next to Database and Tasks.
+                    for tab in [
+                        RightPanelTab::Files,
+                        RightPanelTab::Database,
+                        RightPanelTab::Tasks,
+                    ] {
+                        app.add_right_panel_tab(tab, cx);
+                    }
+                    app.open_right_panel_add_menu_for_test(cx);
+                });
+            });
+            for _ in 0..4 {
+                ctx.update_window(window, |_, w, c| w.render_frame(c))
+                    .expect("a frame");
+                ctx.run_until_parked();
+            }
+            let image = ctx.capture_screenshot(window).expect("a screenshot");
+            image
+                .save(dir.join(format!("menu-{label}-{theme_label}.png")))
+                .expect("a saved PNG");
+        }
+    }
 }
 
 /// Each thread keeps its own right panel: tabs, open state, maximize, terminal drawer and

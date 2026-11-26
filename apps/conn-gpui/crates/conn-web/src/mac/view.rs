@@ -32,6 +32,7 @@ const MAX_FRAME_RATE_FPS: i32 = 60;
 type FrameCallback = Arc<dyn Fn() + Send + Sync>;
 type LoadEndCallback = Arc<dyn Fn(&str, i32) + Send + Sync>;
 type LoadStartCallback = Arc<dyn Fn(&str) + Send + Sync>;
+type DocumentStartCallback = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type ConsoleMessageCallback = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// The page's address and its icon as PNG bytes.
 type FaviconCallback = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
@@ -117,6 +118,8 @@ struct Shared {
     on_frame: Mutex<Option<FrameCallback>>,
     on_load_end: Mutex<Option<LoadEndCallback>>,
     on_load_start: Mutex<Option<LoadStartCallback>>,
+    /// Makes the script that runs in each new main-frame document at once (`on_document_start`).
+    on_document_start: Mutex<Option<DocumentStartCallback>>,
     /// The Laravel Toolbar's response headers (`toolbar_hooks`); shared with the request handler.
     toolbar_response: super::toolbar_hooks::ToolbarResponseSlot,
     on_console_message: Mutex<Option<ConsoleMessageCallback>>,
@@ -329,6 +332,7 @@ impl MacBrowserView {
             on_frame: Mutex::new(None),
             on_load_end: Mutex::new(None),
             on_load_start: Mutex::new(None),
+            on_document_start: Mutex::new(None),
             toolbar_response: Arc::new(Mutex::new(None)),
             on_console_message: Mutex::new(None),
             on_favicon: Mutex::new(None),
@@ -564,6 +568,15 @@ impl MacBrowserView {
 
     pub(crate) fn on_load_start(&self, callback: impl Fn(&str) + Send + Sync + 'static) {
         if let Ok(mut slot) = self.shared.on_load_start.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
+
+    pub(crate) fn on_document_start(
+        &self,
+        callback: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) {
+        if let Ok(mut slot) = self.shared.on_document_start.lock() {
             *slot = Some(Arc::new(callback));
         }
     }
@@ -1835,6 +1848,22 @@ wrap_load_handler! {
             };
             let url = CefString::from(&frame.url()).to_string();
             trace(&format!("on_load_start {url} {}", self.shared.since_load()));
+            // Run in the frame's own callback, the earliest the browser process can, so a script
+            // reaches the new document ahead of the page's.
+            let document_script = self
+                .shared
+                .on_document_start
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .and_then(|make| make(&url));
+            if let Some(script) = document_script {
+                frame.execute_java_script(
+                    Some(&CefString::from(script.as_str())),
+                    Some(&CefString::from("conn://document-start")),
+                    0,
+                );
+            }
             if let Ok(mut error) = self.shared.load_error.lock() {
                 *error = None;
             }

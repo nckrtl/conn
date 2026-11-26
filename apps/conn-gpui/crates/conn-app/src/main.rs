@@ -19,6 +19,7 @@ mod orbit_sync;
 mod palette;
 mod preview_host;
 mod runtime_warmup;
+mod screen_anchor;
 mod settings;
 mod shell;
 mod sidebar;

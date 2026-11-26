@@ -61,6 +61,30 @@ impl RightPanelTabs {
         })
     }
 
+    /// The tabs the strip shows. A thread without a project hides the surfaces that need one,
+    /// but keeps them open, so they come back if the thread gets a project
+    /// (`tabs = openTabs.filter(...)` in the lab's `Panel.tsx`).
+    #[must_use]
+    pub fn visible(&self, has_project: bool) -> Vec<PanelSurface> {
+        self.tabs
+            .iter()
+            .filter(|tab| has_project || !tab.needs_project())
+            .cloned()
+            .collect()
+    }
+
+    /// Moves the active tab off a surface a thread without a project cannot show, to Tasks.
+    /// Returns whether the active tab changed.
+    pub fn settle(&mut self, has_project: bool) -> bool {
+        match &self.active {
+            Some(active) if !has_project && active.needs_project() => {
+                self.activate(PanelSurface::Kind(RightPanelTab::Tasks));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Shows `surface`, appending it when it is not open yet (`upsertSurface`).
     pub fn activate(&mut self, surface: PanelSurface) {
         if let PanelSurface::Browser(id) = surface {
@@ -504,6 +528,75 @@ mod tests {
     }
 
     const FILES: PanelSurface = PanelSurface::Kind(RightPanelTab::Files);
+
+    #[test]
+    fn a_thread_without_a_project_hides_files_mcp_and_api_but_keeps_database() {
+        let mut tabs = RightPanelTabs::default();
+        for tab in [
+            RightPanelTab::Files,
+            RightPanelTab::Mcp,
+            RightPanelTab::Api,
+            RightPanelTab::Database,
+            RightPanelTab::Tasks,
+        ] {
+            tabs.open(tab);
+        }
+        tabs.activate(PanelSurface::File("src/main.rs".to_owned()));
+        let kinds =
+            |tabs: Vec<PanelSurface>| tabs.iter().map(PanelSurface::kind).collect::<Vec<_>>();
+        assert_eq!(
+            kinds(tabs.visible(false)),
+            [RightPanelTab::Database, RightPanelTab::Tasks]
+        );
+        assert_eq!(tabs.visible(true).len(), 6, "a project shows them all");
+        assert_eq!(tabs.tabs().len(), 6, "hidden tabs stay open");
+    }
+
+    #[test]
+    fn settling_without_a_project_moves_a_hidden_active_tab_to_tasks() {
+        let mut tabs = RightPanelTabs::default();
+        tabs.open(RightPanelTab::Files);
+        assert!(!tabs.settle(true));
+        assert_eq!(tabs.active(), Some(&FILES));
+        assert!(tabs.settle(false));
+        assert_eq!(
+            tabs.active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Tasks))
+        );
+        assert!(!tabs.settle(false), "a shown tab stays");
+        // The Files tab stays open for when the thread has a project again.
+        assert!(tabs.tabs().contains(&FILES));
+    }
+
+    #[test]
+    fn project_surfaces_fall_back_to_tasks() {
+        for tab in [
+            RightPanelTab::Files,
+            RightPanelTab::File,
+            RightPanelTab::Mcp,
+            RightPanelTab::Api,
+        ] {
+            assert!(tab.needs_project(), "{tab:?}");
+            assert_eq!(tab.without_project(), RightPanelTab::Tasks);
+        }
+        for tab in [
+            RightPanelTab::Database,
+            RightPanelTab::Browser,
+            RightPanelTab::Terminal,
+            RightPanelTab::Diff,
+        ] {
+            assert!(!tab.needs_project(), "{tab:?}");
+            assert_eq!(tab.without_project(), tab);
+        }
+        assert_eq!(
+            PanelSurface::File("a".to_owned()).without_project(),
+            PanelSurface::Kind(RightPanelTab::Tasks)
+        );
+        assert_eq!(
+            PanelSurface::Browser(1).without_project(),
+            PanelSurface::Browser(1)
+        );
+    }
 
     #[test]
     fn adding_browser_twice_opens_two_tabs() {

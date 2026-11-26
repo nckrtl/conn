@@ -75,6 +75,11 @@ conn-wire.workspace = true
 gpui-kit = { workspace = true, features = ["test-support"] }
 tokio-tungstenite.workspace = true
 
+# The `#[ignore]`d screenshot tests build their own text system: libtest runs a test off the main
+# thread, and `current_platform(true)` needs the main thread on macOS.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui-pre-apple = "0.3.11"
+
 [features]
 default = ["zed-files"]
 zed-files = ["dep:zed_util", "dep:zed_editor", "dep:zed_language", "dep:zed_settings", "dep:zed_theme", "dep:zed_theme_settings", "dep:zed_text", "dep:tree-sitter-php"]

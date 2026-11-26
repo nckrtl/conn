@@ -1659,7 +1659,6 @@ impl DiffPanel {
 
     fn render_file_list(&self, files: &[DiffFile], cx: &mut Context<'_, Self>) -> impl IntoElement {
         let fg = to_hsla(self.tokens.foreground);
-        let muted = to_hsla(self.tokens.muted_foreground);
         let added = to_hsla(self.tokens.diff_added);
         let removed = to_hsla(self.tokens.diff_removed);
         let hover_bg = to_hsla(self.tokens.shell_highlight);
@@ -1677,11 +1676,8 @@ impl DiffPanel {
 
         for (idx, file) in files.iter().enumerate() {
             let selected = idx == self.selected_index;
-            let resolved_icon = crate::file_icons::file_icon(&file.display_path);
-            let icon_color = resolved_icon
-                .color
-                .map(|c| to_hsla(c.for_appearance(self.tokens.appearance)))
-                .unwrap_or(muted);
+            let resolved_icon =
+                crate::file_icons::file_icon(&file.display_path, self.tokens.appearance);
             let row = h_flex()
                 .id(SharedString::from(format!("diff-file-{idx}")))
                 .a11y_button(format!("panel.diff.file.{idx}"), file.display_path.clone())
@@ -1698,7 +1694,7 @@ impl DiffPanel {
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| this.select_file(idx, cx)),
                 )
-                .child(superhero_icon(resolved_icon.asset, 14.0, icon_color))
+                .child(crate::file_icons::icon_img(resolved_icon.asset, 14.0))
                 .child(
                     div()
                         .flex_1()
@@ -1752,11 +1748,7 @@ impl DiffPanel {
             "file-header"
         };
         let viewed_kind = if sticky { "sticky-viewed" } else { "viewed" };
-        let header_icon = crate::file_icons::file_icon(&file.display_path);
-        let header_icon_color = header_icon
-            .color
-            .map(|c| to_hsla(c.for_appearance(self.tokens.appearance)))
-            .unwrap_or(pal.muted);
+        let header_icon = crate::file_icons::file_icon(&file.display_path, self.tokens.appearance);
 
         // A rounded, subdued box; checked it fills with the primary colour and shows a check.
         let viewed = self.is_viewed(index, file);
@@ -1830,7 +1822,7 @@ impl DiffPanel {
                             cx.notify();
                         }),
                     )
-                    .child(superhero_icon(header_icon.asset, 14.0, header_icon_color))
+                    .child(crate::file_icons::icon_img(header_icon.asset, 14.0))
                     .child(
                         div()
                             .flex_1()

@@ -137,24 +137,26 @@ struct TimelineEntryRow: View {
 
         case let .proposedPlan(_, _, title, markdown, display, _, _, streaming, _, _):
             ProposedPlanCard(title: title, markdown: markdown, display: display, streaming: streaming)
-        case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, _, started, ended):
+        case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, created, started, ended):
             let metadata = subagentMetadata
-            ThreadCard {
-                ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
-                    Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
-                        .frame(width: 6, height: 6)
-                }
-                let elapsed = threadElapsed(started, ended)
-                Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
-                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)
-                Spacer(minLength: 0)
-                if let elapsed { Text(elapsed).monospacedDigit().fixedSize() }
-                if let destination = metadata.thread ?? child {
-                    Button { onOpenThread(destination, metadata.environment) } label: {
-                        Image(systemName: "arrow.up.right").padding(6)
-                    }.accessibilityLabel("Open " + title)
-                }
-            } content: { AgentSummary(title: title, text: summary ?? "") }
+            AgentCardEntry(text: summary ?? "", timestamp: created) {
+                ThreadCard {
+                    ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
+                        Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
+                            .frame(width: 6, height: 6)
+                    }
+                    let elapsed = threadElapsed(started, ended)
+                    Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
+                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)
+                    Spacer(minLength: 0)
+                    if let elapsed { Text(elapsed).monospacedDigit().fixedSize() }
+                    if let destination = metadata.thread ?? child {
+                        Button { onOpenThread(destination, metadata.environment) } label: {
+                            Image(systemName: "arrow.up.right").padding(6)
+                        }.accessibilityLabel("Open " + title)
+                    }
+                } content: { AgentSummary(title: title, text: summary ?? "") }
+            }
         case let .turnCheckpoint(_, _, ordinal, fileCount, additions, deletions, files):
             TurnCheckpointCard(fileCount: Int(fileCount), additions: additions, deletions: deletions, files: files,
                                ordinal: ordinal, threadId: threadId, store: store)

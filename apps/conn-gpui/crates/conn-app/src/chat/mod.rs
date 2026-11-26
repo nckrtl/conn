@@ -23,6 +23,8 @@ mod embedded_document;
 mod embedded_mount;
 mod icons;
 mod inline_code;
+#[cfg(test)]
+mod left_align_shots;
 mod link_menu;
 mod link_preview;
 pub(crate) use self::link_menu::LinkedPullRequest;
@@ -31,6 +33,11 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod request_stack;
+pub(crate) mod selection;
+#[cfg(test)]
+mod selection_menu_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod selection_shots;
 mod spinner;
 pub(crate) mod thread_links;
 mod thumb_cache;
@@ -73,6 +80,18 @@ use crate::panels::chrome::ConnTooltipExt as _;
 const CHAT_CONTENT_MAX_WIDTH_PX: f32 = 736.0;
 /// Horizontal lane padding matching `.chat-composer-lane` / `.messages-timeline-scroll` (`3rem`).
 const CHAT_LANE_PADDING_X_PX: f32 = 48.0;
+/// Left and right inset of timeline content from the divider lines. Zero: the header text,
+/// divider, paragraphs, inline code and work-log row icons share one left edge and end at the
+/// dividers' right end, as in the iOS timeline. A row that needs hover room extends its
+/// background with a negative margin instead of indenting its content.
+const TIMELINE_INSET_PX: f32 = 0.0;
+/// Work-log row: minimum height, icon size and icon-to-label gap (`min-h-6`, `size-4`). The
+/// icon box is exactly the icon wide, so the icon sits on the row's left edge.
+const WORK_ROW_MIN_HEIGHT_PX: f32 = 24.0;
+const WORK_ICON_PX: f32 = 16.0;
+const WORK_ICON_GAP_PX: f32 = 10.0;
+/// Where a work-log label starts, from the row's left edge; expanded details line up under it.
+const WORK_LABEL_INDENT_PX: f32 = WORK_ICON_PX + WORK_ICON_GAP_PX;
 /// `expanded_ids` key for the queue's `Show all N queued` toggle.
 const QUEUE_EXPANDED_KEY: &str = "queued-list";
 /// User bubble radius matching Conn's `--radius-bubble: calc(var(--radius) + 6px)` (`8px + 6px`).
@@ -89,6 +108,22 @@ const UI_FONT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
 const MONO_FONT_FAMILY: &str = crate::theme::MONO_FONT;
 
+/// The fixed-size icon column of a work-log row. It is exactly the icon wide, so the icon sits
+/// on the row's left edge rather than centred in a wider box.
+fn work_icon_box(id: SharedString, icon: impl IntoElement) -> AnyElement {
+    let boxed = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .w(px(WORK_ICON_PX))
+        .h(px(WORK_ROW_MIN_HEIGHT_PX))
+        .flex_none()
+        .child(icon);
+    #[cfg(test)]
+    let boxed = gpui_kit::TestSupportExt::test_support(boxed);
+    boxed.into_any_element()
+}
+
 /// View state rendered while composing a brand-new thread before `orchestration.launchThread`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DraftViewInfo {
@@ -104,11 +139,15 @@ struct MessageBody<'a> {
     attachments: &'a [ChatAttachment],
     review_comments: &'a [conn_state::ReviewComment],
     notes: &'a [Option<String>],
+    /// Orders the text among the window's selectable text; `None` leaves it unselectable.
+    selection: Option<&'a selection::SelectionScope>,
 }
 
 /// One human user bubble's render inputs.
 struct UserBubble<'a> {
     id: &'a str,
+    /// The bubble's row in the timeline, which orders its text for selection.
+    row_idx: usize,
     text: &'a str,
     attachments: &'a [ChatAttachment],
     review_comments: &'a [conn_state::ReviewComment],
@@ -1288,6 +1327,8 @@ impl ChatView {
                 });
             })),
             prose: None,
+            // The caller of a row sets its scope: only assistant text takes part in selection.
+            selection: None,
         }
     }
 
@@ -1311,6 +1352,14 @@ impl ChatView {
         self.thread_directory_fingerprint = fingerprint;
         // Cached rows measured their chips with the old titles.
         cx.notify();
+    }
+
+    /// Opens the message menu in this view when a message's text is right-clicked.
+    fn message_menu_hook(cx: &mut Context<'_, Self>) -> selection::MessageMenuHook {
+        let view = cx.entity().downgrade();
+        Rc::new(move |request, window, cx| {
+            let _ = view.update(cx, |view, cx| view.open_message_menu(request, window, cx));
+        })
     }
 
     fn remeasure_for_id(&self, target_id: &str) {
@@ -1922,6 +1971,7 @@ impl ChatView {
                         self.render_user_bubble(
                             UserBubble {
                                 id,
+                                row_idx: *row_idx,
                                 text,
                                 attachments,
                                 review_comments,
@@ -1995,7 +2045,15 @@ impl ChatView {
                 {
                     // Lazily parse & cache Markdown only when this row enters the viewport.
                     let blocks = row.markdown_blocks();
-                    let options = self.markdown_options(cx);
+                    let mut options = self.markdown_options(cx);
+                    let mut scope = selection::SelectionScope::for_row(*row_idx);
+                    if !text.trim().is_empty() {
+                        scope = scope.with_message_menu(
+                            artifact_template::message_copy_text(text),
+                            Self::message_menu_hook(cx),
+                        );
+                    }
+                    options.selection = Some(scope);
                     let group = SharedString::from(format!("assistant-row-{id}"));
                     let body: AnyElement = if text.is_empty() && !*streaming {
                         // Conn: `text || (streaming ? "" : "(empty response)")`.
@@ -2008,7 +2066,13 @@ impl ChatView {
                     } else {
                         markdown::render_blocks(id, &blocks, &self.tokens, &options)
                     };
-                    let mut inner = div().w_full().min_w_0().px(px(4.0)).py(px(2.0)).child(body);
+                    let mut inner = div()
+                        .id(SharedString::from(format!("assistant-text-{id}")))
+                        .w_full()
+                        .min_w_0()
+                        .px(px(TIMELINE_INSET_PX))
+                        .py(px(2.0))
+                        .child(body);
                     if *show_meta {
                         inner = inner.child(self.render_assistant_meta(
                             id,
@@ -2020,8 +2084,10 @@ impl ChatView {
                             cx,
                         ));
                     }
+                    #[cfg(test)]
+                    let inner = gpui_kit::TestSupportExt::test_support(inner);
                     // Conn `AssistantTimelineRow`: `px-1 py-0.5`, row spacing `pb-2` before work or `pb-4`.
-                    div()
+                    let row = div()
                         .id(SharedString::from(format!("chat-assistant-{id}")))
                         .a11y(
                             gpui_kit::Role::Article,
@@ -2032,8 +2098,10 @@ impl ChatView {
                         .w_full()
                         .min_w_0()
                         .pb(px(if *followed_by_work { 8.0 } else { 16.0 }))
-                        .child(inner)
-                        .into_any_element()
+                        .child(inner);
+                    #[cfg(test)]
+                    let row = gpui_kit::TestSupportExt::test_support(row);
+                    row.into_any_element()
                 } else {
                     div().into_any_element()
                 }
@@ -2208,7 +2276,13 @@ impl ChatView {
     }
 
     /// The bubble's 3px frame and the caption's 13px padding align its text with plain messages.
-    fn render_bubble_caption(&self, key: &str, text: &str, bottom_px: f32) -> AnyElement {
+    fn render_bubble_caption(
+        &self,
+        key: &str,
+        text: &str,
+        bottom_px: f32,
+        selection: Option<&selection::SelectionScope>,
+    ) -> AnyElement {
         let caption = SharedString::from(text.to_owned());
         div()
             .min_w_0()
@@ -2224,7 +2298,11 @@ impl ChatView {
                         caption.clone(),
                     )
                     .min_w_0()
-                    .child(caption),
+                    .child(selection::selectable_message_text(
+                        &format!("chat-caption-text-{key}"),
+                        &caption,
+                        selection,
+                    )),
             )
             .into_any_element()
     }
@@ -2350,6 +2428,7 @@ impl ChatView {
             attachments,
             review_comments,
             notes,
+            selection,
         } = body;
         bubble = bubble
             .relative()
@@ -2410,6 +2489,7 @@ impl ChatView {
                     caption_key,
                     text,
                     if gallery_follows { 10.0 } else { 7.0 },
+                    selection,
                 ));
             }
             for (idx, comment) in review_comments.iter().enumerate() {
@@ -2418,6 +2498,7 @@ impl ChatView {
                         &format!("{caption_key}.note.{idx}"),
                         note,
                         7.0,
+                        selection,
                     ));
                 }
                 bubble = bubble.child(self.render_review_comment(attachment_key, idx, comment));
@@ -2432,7 +2513,11 @@ impl ChatView {
                 .pt(px(10.0))
                 .pb(px(12.0));
             if !text.is_empty() {
-                bubble = bubble.child(div().min_w_0().child(text.to_owned()));
+                bubble = bubble.child(div().min_w_0().child(selection::selectable_message_text(
+                    &format!("chat-text-{caption_key}"),
+                    text,
+                    selection,
+                )));
             }
         }
 
@@ -2447,6 +2532,7 @@ impl ChatView {
     ) -> AnyElement {
         let UserBubble {
             id,
+            row_idx,
             text,
             attachments,
             review_comments,
@@ -2490,6 +2576,11 @@ impl ChatView {
         } else {
             text.chars().take(120).collect()
         };
+        let mut selection = selection::SelectionScope::for_row(row_idx);
+        if !copy_text.trim().is_empty() {
+            selection =
+                selection.with_message_menu(copy_text.as_str(), Self::message_menu_hook(cx));
+        }
         // No top highlight: a sent message is one flat surface.
         let bubble = div()
             .id(SharedString::from(format!("chat-user-{id}")))
@@ -2508,6 +2599,7 @@ impl ChatView {
                 attachments,
                 review_comments,
                 notes: &notes,
+                selection: Some(&selection),
             },
             window,
             cx,
@@ -2610,6 +2702,7 @@ impl ChatView {
                 attachments,
                 review_comments: &[],
                 notes: &[],
+                selection: None,
             },
             window,
             cx,
@@ -2891,7 +2984,7 @@ impl ChatView {
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
-                .px(px(4.0))
+                .px(px(TIMELINE_INSET_PX))
                 .rounded(px(6.0))
                 .cursor_pointer()
                 .text_size(px(BODY_FONT_PX))
@@ -2912,7 +3005,10 @@ impl ChatView {
                     hsla(self.tokens.muted_foreground),
                 ));
 
+            #[cfg(test)]
+            let fold_btn = gpui_kit::TestSupportExt::test_support(fold_btn);
             let header = div()
+                .id(SharedString::from(format!("work-header-{group_id}")))
                 .w_full()
                 .min_w_0()
                 .pt(px(4.0))
@@ -2921,6 +3017,8 @@ impl ChatView {
                 .border_color(hsla(self.tokens.shell_divider))
                 .child(div().flex().flex_row().items_center().child(fold_btn));
 
+            #[cfg(test)]
+            let header = gpui_kit::TestSupportExt::test_support(header);
             container = container.child(header);
         } else {
             // Active group explicitly expanded by clicking the live summary: offer a quiet collapse toggle.
@@ -2935,7 +3033,7 @@ impl ChatView {
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
-                .px(px(4.0))
+                .px(px(TIMELINE_INSET_PX))
                 .py(px(2.0))
                 .rounded(px(6.0))
                 .cursor_pointer()
@@ -3044,20 +3142,15 @@ impl ChatView {
                     .flex()
                     .flex_row()
                     .items_start()
-                    .gap(px(6.0))
+                    .gap(px(WORK_ICON_GAP_PX))
                     .w_full()
                     .min_w_0()
-                    .min_h(px(24.0))
-                    .px(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(24.0))
-                            .flex_none()
-                            .child(icons::icon(icons::BRAIN, 16.0, icon_muted)),
-                    )
+                    .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                    .px(px(TIMELINE_INSET_PX))
+                    .child(work_icon_box(
+                        SharedString::from(format!("live-thought-icon-{thought_id}")),
+                        icons::icon(icons::BRAIN, 16.0, icon_muted),
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -3108,20 +3201,15 @@ impl ChatView {
                             .flex()
                             .flex_row()
                             .items_start()
-                            .gap(px(6.0))
+                            .gap(px(WORK_ICON_GAP_PX))
                             .w_full()
                             .min_w_0()
-                            .min_h(px(24.0))
-                            .px(px(2.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(24.0))
-                                    .flex_none()
-                                    .child(icons::icon(icon_path, 16.0, ic_color)),
-                            )
+                            .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                            .px(px(TIMELINE_INSET_PX))
+                            .child(work_icon_box(
+                                SharedString::from(format!("live-tool-icon-{id}")),
+                                icons::icon(icon_path, 16.0, ic_color),
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -3161,20 +3249,15 @@ impl ChatView {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(6.0))
+                                .gap(px(WORK_ICON_GAP_PX))
                                 .w_full()
                                 .min_w_0()
-                                .min_h(px(24.0))
-                                .px(px(2.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size(px(24.0))
-                                        .flex_none()
-                                        .child(icons::icon(icons::BRAIN, 16.0, icon_muted)),
-                                )
+                                .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                                .px(px(TIMELINE_INSET_PX))
+                                .child(work_icon_box(
+                                    SharedString::from(format!("live-status-icon-{id}")),
+                                    icons::icon(icons::BRAIN, 16.0, icon_muted),
+                                ))
                                 .child(
                                     div()
                                         .flex_1()
@@ -3267,11 +3350,11 @@ impl ChatView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(WORK_ICON_GAP_PX))
             .w_full()
             .min_w_0()
-            .min_h(px(24.0))
-            .px(px(2.0))
+            .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+            .px(px(TIMELINE_INSET_PX))
             .rounded(px(6.0))
             .cursor_pointer()
             .text_size(px(BODY_FONT_PX))
@@ -3281,15 +3364,10 @@ impl ChatView {
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.toggle_expanded(&toggle_id, cx);
             }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.0))
-                    .flex_none()
-                    .child(leading),
-            )
+            .child(work_icon_box(
+                SharedString::from(format!("thinking-icon-{id}")),
+                leading,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -3326,6 +3404,8 @@ impl ChatView {
             );
         }
 
+        #[cfg(test)]
+        let line = gpui_kit::TestSupportExt::test_support(line);
         let mut container = div().flex().flex_col().w_full().min_w_0().child(line);
         if expanded && has_body {
             // Conn `WorkLogDetails kind="text"`: `ms-7` (28px), `px-0.5 py-1`.
@@ -3333,8 +3413,8 @@ impl ChatView {
                 div()
                     .id(SharedString::from(format!("thinking-detail-{id}")))
                     .a11y_group(format!("{ax_id}.detail"), "Thought details")
-                    .ml(px(28.0))
-                    .px(px(2.0))
+                    .ml(px(WORK_LABEL_INDENT_PX))
+                    .px(px(TIMELINE_INSET_PX))
                     .py(px(4.0))
                     .text_size(px(BODY_FONT_PX))
                     .line_height(px(BODY_LINE_HEIGHT_PX))
@@ -3404,22 +3484,16 @@ impl ChatView {
             .flex_row()
             // Icon sits at the first line, like web's baseline-aligned `WorkLogLine`.
             .items_start()
-            .gap(px(6.0))
+            .gap(px(WORK_ICON_GAP_PX))
             .w_full()
             .min_w_0()
-            .min_h(px(24.0))
-            .px(px(2.0))
+            .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+            .px(px(TIMELINE_INSET_PX))
             .rounded(px(6.0))
             .text_size(px(BODY_FONT_PX))
             .line_height(px(BODY_LINE_HEIGHT_PX))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.0))
-                    .flex_none()
-                    .child(leading),
+                work_icon_box(SharedString::from(format!("tool-icon-{id}")), leading),
             )
             .child(
                 div()
@@ -3471,6 +3545,8 @@ impl ChatView {
                 );
         }
 
+        #[cfg(test)]
+        let line = gpui_kit::TestSupportExt::test_support(line);
         let mut container = div().flex().flex_col().w_full().min_w_0().child(line);
         if expanded && let Some(detail_text) = detail.filter(|d| !d.trim().is_empty()) {
             // Conn `WorkLogDetails kind="panel"` + `toolCallExpandedBodyClassName`:
@@ -3482,7 +3558,7 @@ impl ChatView {
                         format!("{ax_id}.detail"),
                         format!("Details: {}", ax_snippet(title)),
                     )
-                    .ml(px(30.0))
+                    .ml(px(WORK_LABEL_INDENT_PX))
                     .mt(px(2.0))
                     .mb(px(6.0))
                     .px(px(10.0))
@@ -3521,23 +3597,14 @@ impl ChatView {
                         .flex()
                         .flex_row()
                         .items_start()
-                        .gap(px(6.0))
-                        .min_h(px(24.0))
-                        .px(px(2.0))
+                        .gap(px(WORK_ICON_GAP_PX))
+                        .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                        .px(px(TIMELINE_INSET_PX))
                         .py(px(2.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(24.0))
-                                .flex_none()
-                                .child(icons::icon(
-                                    icons::ERROR_CIRCLE,
-                                    16.0,
-                                    hsla(self.tokens.destructive),
-                                )),
-                        )
+                        .child(work_icon_box(
+                            SharedString::from(format!("notice-icon-{id}")),
+                            icons::icon(icons::ERROR_CIRCLE, 16.0, hsla(self.tokens.destructive)),
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -3653,7 +3720,7 @@ impl ChatView {
                             .flex_row()
                             .items_center()
                             .h(px(24.0))
-                            .px(px(4.0))
+                            .px(px(TIMELINE_INSET_PX))
                             .text_size(px(BODY_FONT_PX))
                             .line_height(px(BODY_LINE_HEIGHT_PX))
                             .text_color(muted)
@@ -3667,22 +3734,17 @@ impl ChatView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(WORK_ICON_GAP_PX))
                     .w_full()
                     .min_w_0()
-                    .min_h(px(24.0))
+                    .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
                     .pt(px(4.0))
                     .pb(px(4.0))
-                    .px(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(24.0))
-                            .flex_none()
-                            .child(icons::icon(icons::BRAIN, 16.0, icon_muted)),
-                    )
+                    .px(px(TIMELINE_INSET_PX))
+                    .child(work_icon_box(
+                        SharedString::from("working-thinking-icon"),
+                        icons::icon(icons::BRAIN, 16.0, icon_muted),
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -4418,5 +4480,110 @@ mod notice_icon_tests {
             "superhero/minimize.svg"
         );
         assert_eq!(notice_icon("Something else"), icons::INFO);
+    }
+}
+
+#[cfg(test)]
+mod left_align_tests {
+    use conn_state::{ItemStatus, ThreadState, TimelineEntry};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    use super::{WORK_ICON_PX, inline_code};
+
+    const GROUP: &str = "work-group-think-1";
+
+    fn thread() -> ThreadState {
+        let mut thread = ThreadState::new("thread-selected");
+        thread.synchronized = true;
+        thread.entries = vec![
+            TimelineEntry::Thinking {
+                id: "think-1".to_owned(),
+                text: "Reading the thread layout first.".to_owned(),
+                streaming: false,
+            },
+            TimelineEntry::Tool {
+                id: "tool-1".to_owned(),
+                kind: "command".to_owned(),
+                title: "cargo test".to_owned(),
+                detail: Some("test result: ok".to_owned()),
+                status: ItemStatus::Completed,
+                output_omitted: false,
+            },
+            TimelineEntry::Assistant {
+                id: "answer-1".to_owned(),
+                markdown: "`inline_code` starts this paragraph, then plain words follow."
+                    .to_owned(),
+                streaming: false,
+                created_at: None,
+                run_id: None,
+                status: ItemStatus::Completed,
+            },
+        ];
+        thread
+    }
+
+    /// The header text, its divider, the assistant paragraph, an inline code chip and the work-log
+    /// row icons all start at one x, and the header divider and row end at one x.
+    #[gpui_kit::test]
+    fn divider_text_chip_and_row_icons_share_one_left_edge(cx: &mut TestAppContext) {
+        let (window, app) = crate::ui_tests::mount_app(cx);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(crate::ui_tests::kitchen_sink_shell(), cx);
+                app.set_thread_for_test("thread-selected".to_owned(), thread(), cx);
+            });
+        });
+        let chat = app.read_with(cx, |app, _| app.chat_for_test());
+        chat.update(cx, |chat, cx| chat.toggle_expanded(GROUP, cx));
+        cx.run_until_parked();
+        inline_code::painted_chips::take();
+        // The first layout measures the lane, the next two lay the rows out with it.
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, window, cx| window.render_frame(cx));
+            cx.run_until_parked();
+        }
+
+        cx.update_window(window, |_, window, _| {
+            let header = window.find(format!("work-header-{GROUP}")).bounds();
+            let fold = window.find(format!("fold-{GROUP}")).bounds();
+            let paragraph = window.find("assistant-text-answer-1").bounds();
+            let thought_icon = window.find("thinking-icon-think-1").bounds();
+            let tool_icon = window.find("tool-icon-tool-1").bounds();
+            let left = header.left();
+            let near = |name: &str, x: gpui_kit::Pixels| {
+                assert!(
+                    f32::from((x - left).abs()) < 0.01,
+                    "{name} starts at {x:?}, the divider at {left:?}"
+                );
+            };
+            near("header text", fold.left());
+            near("assistant paragraph", paragraph.left());
+            near("reasoning row icon", thought_icon.left());
+            near("tool row icon", tool_icon.left());
+            assert_eq!(thought_icon.size.width, gpui_kit::px(WORK_ICON_PX));
+            // The right edges line up with the divider's right end.
+            let thought_row = window.find("thinking-think-1").bounds();
+            let tool_row = window.find("tool-tool-1").bounds();
+            let right = header.right();
+            for (name, edge) in [
+                ("paragraph", paragraph.right()),
+                ("reasoning row", thought_row.right()),
+                ("tool row", tool_row.right()),
+            ] {
+                assert!(
+                    f32::from((edge - right).abs()) < 0.01,
+                    "{name} ends at {edge:?}, the divider at {right:?}"
+                );
+            }
+            let chips = inline_code::painted_chips::take();
+            assert!(
+                !chips.is_empty(),
+                "the paragraph paints an inline code chip"
+            );
+            let (chip_left, ..) = chips[chips.len() - 1];
+            near("inline code chip", chip_left);
+        })
+        .expect("a window");
     }
 }

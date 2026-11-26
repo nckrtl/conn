@@ -167,6 +167,26 @@ fn chip_fragments(
     fragments
 }
 
+/// Where the chips of the last paint went, for layout tests: `(left, top, width)` per fragment.
+#[cfg(test)]
+pub(super) mod painted_chips {
+    use std::cell::RefCell;
+
+    use super::Pixels;
+
+    thread_local! {
+        static PAINTED: RefCell<Vec<(Pixels, Pixels, Pixels)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(in crate::chat) fn record(left: Pixels, top: Pixels, width: Pixels) {
+        PAINTED.with(|painted| painted.borrow_mut().push((left, top, width)));
+    }
+
+    pub(in crate::chat) fn take() -> Vec<(Pixels, Pixels, Pixels)> {
+        PAINTED.with(|painted| std::mem::take(&mut *painted.borrow_mut()))
+    }
+}
+
 impl InlineCodeText {
     /// Paints each chip's rounded background and its code over the reserved spaces.
     fn paint_chips(&self, built: &Built, window: &mut Window, cx: &mut App) {
@@ -213,6 +233,8 @@ impl InlineCodeText {
             let mut cursor = 0;
             for (index, &(x, y, count)) in fragments.iter().enumerate() {
                 let width = count as f32 * chip.space_px;
+                #[cfg(test)]
+                painted_chips::record(x, y, px(width));
                 window.paint_quad(
                     fill(
                         Bounds {

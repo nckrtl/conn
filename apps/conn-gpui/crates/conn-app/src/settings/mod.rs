@@ -12,6 +12,8 @@
 //!   `shell_divider_raised` between square rows, no trailing divider).
 
 pub(crate) mod controls;
+mod editor;
+pub(crate) mod passwords;
 pub(crate) mod projects;
 pub(crate) mod providers;
 pub(crate) mod scheduled_tasks;
@@ -58,19 +60,23 @@ pub(crate) enum SettingsPage {
     General,
     Appearance,
     Terminal,
+    Editor,
     Connections,
     Providers,
+    Passwords,
     Projects,
     ScheduledTasks,
     Keyboard,
 }
 
-const ALL_PAGES: [SettingsPage; 8] = [
+const ALL_PAGES: [SettingsPage; 10] = [
     SettingsPage::General,
     SettingsPage::Appearance,
     SettingsPage::Terminal,
+    SettingsPage::Editor,
     SettingsPage::Connections,
     SettingsPage::Providers,
+    SettingsPage::Passwords,
     SettingsPage::Projects,
     SettingsPage::ScheduledTasks,
     SettingsPage::Keyboard,
@@ -82,24 +88,30 @@ impl SettingsPage {
             Self::General => "General",
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
+            Self::Editor => "Editor",
             Self::Connections => "Connections",
             Self::Providers => "Providers",
+            Self::Passwords => "Passwords",
             Self::Projects => "Projects",
             Self::ScheduledTasks => "Scheduled tasks",
             Self::Keyboard => "Keyboard",
         }
     }
 
-    fn icon(self) -> IconName {
+    fn icon_element(self, color: gpui_kit::Hsla) -> AnyElement {
         match self {
-            Self::General => IconName::SlidersHorizontal,
-            Self::Appearance => IconName::Palette,
-            Self::Terminal => IconName::SquareTerminal,
-            Self::Connections => IconName::Plug,
-            Self::Providers => IconName::Bot,
-            Self::Projects => IconName::Folder,
-            Self::ScheduledTasks => IconName::Clock,
-            Self::Keyboard => IconName::Keyboard,
+            Self::Passwords => {
+                icons::concept("superhero/key.svg", icons::CHROME_ICON_PX, color).into_any_element()
+            }
+            Self::General => icons::chrome(IconName::SlidersHorizontal, color).into_any_element(),
+            Self::Appearance => icons::chrome(IconName::Palette, color).into_any_element(),
+            Self::Terminal => icons::chrome(IconName::SquareTerminal, color).into_any_element(),
+            Self::Editor => icons::chrome(IconName::File, color).into_any_element(),
+            Self::Connections => icons::chrome(IconName::Plug, color).into_any_element(),
+            Self::Providers => icons::chrome(IconName::Bot, color).into_any_element(),
+            Self::Projects => icons::chrome(IconName::Folder, color).into_any_element(),
+            Self::ScheduledTasks => icons::chrome(IconName::Clock, color).into_any_element(),
+            Self::Keyboard => icons::chrome(IconName::Keyboard, color).into_any_element(),
         }
     }
 }
@@ -210,6 +222,8 @@ pub(crate) struct SettingsModal {
     new_profile_input: Entity<InputState>,
     /// Settings → Terminal: the font family text field.
     terminal_family_input: Entity<InputState>,
+    editor_family_input: Entity<InputState>,
+    _editor_family_sub: Subscription,
     _terminal_family_sub: Subscription,
     /// Settings → Terminal: the font weight slider and dropdown (`terminal.rs`).
     terminal_weight: terminal::TerminalWeightUi,
@@ -221,6 +235,7 @@ pub(crate) struct SettingsModal {
     operator_saved_notice: Option<String>,
     scheduled_tasks: Entity<ScheduledTasksView>,
     providers: Entity<providers::ProvidersView>,
+    passwords: Entity<passwords::PasswordsView>,
     projects: Entity<projects::ProjectsView>,
     focus_handle: FocusHandle,
     scroll: ScrollHandle,
@@ -277,6 +292,21 @@ impl SettingsModal {
             }
         });
 
+        let editor_family_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::theme::MONO_FONT)
+                .default_value(crate::editor_settings::current(cx).font_family)
+        });
+        let editor_family_sub = cx.subscribe(
+            &editor_family_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let family = input.read(cx).value().to_string();
+                    crate::editor_settings::update(cx, &this.tokens, |s| s.font_family = family);
+                }
+            },
+        );
+
         let terminal_family = crate::terminal_settings::current(cx).font_family;
         let terminal_family_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -303,6 +333,7 @@ impl SettingsModal {
                 .default_value(operator_url)
         });
         let provider_connection = live_connection.clone();
+        let passwords_connection = live_connection.clone();
         let projects_connection = live_connection.clone();
         let provider_environment = connection
             .server_label
@@ -348,6 +379,11 @@ impl SettingsModal {
             })
         });
 
+        let passwords_tokens = tokens.clone();
+        let passwords = cx.new(|_| {
+            passwords::PasswordsView::new(passwords_tokens, geometry, passwords_connection)
+        });
+
         let projects_tokens = tokens.clone();
         let projects = cx.new(|_| {
             projects::ProjectsView::new(projects_tokens, geometry, projects, projects_connection)
@@ -365,6 +401,8 @@ impl SettingsModal {
             search_input,
             _search_sub: search_sub,
             new_profile_input,
+            editor_family_input,
+            _editor_family_sub: editor_family_sub,
             terminal_family_input,
             _terminal_family_sub: terminal_family_sub,
             terminal_weight: terminal::TerminalWeightUi::new(cx),
@@ -376,6 +414,7 @@ impl SettingsModal {
             operator_saved_notice: None,
             scheduled_tasks,
             providers,
+            passwords,
             projects,
             focus_handle,
             scroll: ScrollHandle::new(),
@@ -389,6 +428,9 @@ impl SettingsModal {
         cx: &mut Context<'_, Self>,
     ) {
         self.projects.update(cx, |view, cx| {
+            view.set_server_config(std::sync::Arc::clone(&config), cx);
+        });
+        self.passwords.update(cx, |view, cx| {
             view.set_server_config(std::sync::Arc::clone(&config), cx);
         });
         self.providers
@@ -429,9 +471,12 @@ impl SettingsModal {
                 .clone()
                 .unwrap_or_else(|| "this environment".to_owned());
             let provider_connection = live_connection.clone();
+            let passwords_connection = provider_connection.clone();
             let projects_connection = provider_connection.clone();
             self.projects
                 .update(cx, |view, cx| view.set_connection(projects_connection, cx));
+            self.passwords
+                .update(cx, |view, cx| view.set_connection(passwords_connection, cx));
             self.providers.update(cx, |view, cx| {
                 view.set_connection(provider_connection, environment, cx);
             });
@@ -464,6 +509,8 @@ impl SettingsModal {
         });
         self.projects
             .update(cx, |view, cx| view.set_tokens(tokens.clone(), cx));
+        self.passwords
+            .update(cx, |view, cx| view.set_tokens(tokens.clone(), cx));
         self.providers
             .update(cx, |view, cx| view.set_tokens(tokens, cx));
         cx.notify();
@@ -473,6 +520,9 @@ impl SettingsModal {
     pub(crate) fn select_page(&mut self, page: SettingsPage, cx: &mut Context<'_, Self>) {
         self.active_page = page;
         self.scroll.scroll_to_item(0);
+        if page == SettingsPage::Passwords {
+            self.passwords.update(cx, |view, cx| view.on_open(cx));
+        }
         cx.notify();
     }
 
@@ -624,7 +674,7 @@ impl SettingsModal {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.select_page(page, cx);
                 }))
-                .child(icons::chrome(page.icon(), icon_color))
+                .child(page.icon_element(icon_color))
                 .child(div().flex_1().truncate().child(page.label()));
 
             if active {
@@ -632,7 +682,7 @@ impl SettingsModal {
             } else {
                 row = row.hover(move |s| s.bg(hover_bg));
             }
-            items.push(row);
+            items.push(row.test_support());
         }
 
         let query = self.search_input.read(cx).value().to_string();
@@ -725,8 +775,10 @@ impl SettingsModal {
                 SettingsPage::General => self.render_general_page(),
                 SettingsPage::Appearance => self.render_appearance_page(cx),
                 SettingsPage::Terminal => self.render_terminal_page(cx),
+                SettingsPage::Editor => self.render_editor_page(cx),
                 SettingsPage::Connections => self.render_connections_page(cx),
                 SettingsPage::Providers => self.providers.clone().into_any_element(),
+                SettingsPage::Passwords => self.passwords.clone().into_any_element(),
                 SettingsPage::Projects => self.projects.clone().into_any_element(),
                 SettingsPage::ScheduledTasks => self.scheduled_tasks.clone().into_any_element(),
                 SettingsPage::Keyboard => self.render_keyboard_page(),
@@ -985,6 +1037,20 @@ impl SettingsModal {
             .contains(needle)
         {
             sections.push(self.scheduled_tasks.clone().into_any_element());
+        }
+
+        if "passwords password manager vault vaultwarden credentials logins sign in autofill connection status test logins test users seed accounts development one-time code agents protection hide passwords block agent scripts after a fill javascript evaluate redact protect leak fill on subdomains of a saved site origin domain host match dedicated conn account"
+            .contains(needle)
+        {
+            sections.push(self.passwords.clone().into_any_element());
+        }
+
+        if "editor font family font size line height syntax theme jetbrains mono".contains(needle)
+            || crate::editor_settings::Palette::ALL
+                .iter()
+                .any(|palette| palette.label().to_lowercase().contains(needle))
+        {
+            sections.push(self.render_editor_page(cx));
         }
 
         if sections.is_empty() {
@@ -2131,9 +2197,14 @@ impl Render for SettingsModal {
             .test_support()
             .a11y(gpui_kit::Role::Dialog, "settings.modal", "Settings")
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    this.close(cx);
+                    if this.passwords.read(cx).has_open_dialog() {
+                        this.passwords
+                            .update(cx, |view, cx| view.close_dialog(window, cx));
+                    } else {
+                        this.close(cx);
+                    }
                     cx.stop_propagation();
                 }
             }))

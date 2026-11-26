@@ -19,6 +19,7 @@ mod drafts;
 pub mod environments;
 mod layout;
 pub mod model_preferences;
+mod orbit_task;
 mod order_keys;
 pub mod project_groups;
 pub mod project_settings;
@@ -26,6 +27,7 @@ pub mod provider_auth;
 pub mod provider_settings;
 pub mod providers;
 mod question;
+mod review_comment;
 mod scheduled;
 mod settled_shelf;
 mod shell;
@@ -81,10 +83,10 @@ pub use crate::drafts::{
 };
 pub use crate::layout::{
     CHAT_BESIDE_PANEL_MIN_WIDTH, LayoutState, MAIN_CONTENT_MIN_WIDTH, PanelSurface,
-    RIGHT_PANEL_DEFAULT_WIDTH, RIGHT_PANEL_MAX_WIDTH, RIGHT_PANEL_MIN_WIDTH, RightPanelTab,
-    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, right_panel_max_width,
-    sidebar_max_width,
+    RIGHT_PANEL_DEFAULT_WIDTH, RIGHT_PANEL_MIN_WIDTH, RightPanelTab, SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, right_panel_max_width, sidebar_max_width,
 };
+pub use crate::orbit_task::{is_orbit_task_create_tool, orbit_task_create_row};
 pub use crate::order_keys::{
     OrderAssignment, order_key_between, plan_reorder, sort_active, sort_pinned, spread_order_keys,
     top_of_pinned_run_key,
@@ -92,6 +94,7 @@ pub use crate::order_keys::{
 pub use crate::question::{
     clamp_context, markdown_preview_text, seed_user_input_drafts, split_recommended_label,
 };
+pub use crate::review_comment::{ReviewComment, text_without_review_comments};
 pub use crate::settled_shelf::{
     MoreState, SETTLED_MORE_ROW, SETTLED_TAIL_INITIAL_COUNT, SETTLED_TAIL_PAGE_COUNT, SettledTail,
     ShelfInput, ShelfView, SidebarPrefs, more_label, shelf_view,
@@ -99,7 +102,8 @@ pub use crate::settled_shelf::{
 pub use crate::shell::{
     ChildApprovalThread, OLDER_SETTLED_PAGE_SIZE, OlderPageRequest, OlderSettledCut,
     OlderSettledView, PageStatus, PendingSubagentRequest, SettledCursor, ShellChange, ShellState,
-    ThreadActivity, is_listed_lineage, is_older_settled,
+    ThreadActivity, is_listed_lineage, is_older_settled, orbit_filing_id, orbit_filing_key,
+    sidebar_project_key,
 };
 pub use crate::sidebar::{
     DRAFT_STATUS_LABEL, DraftRowKey, SidebarDraft, SidebarDraftRow, draft_has_content,
@@ -117,10 +121,10 @@ pub use crate::sidebar_nav::{
     thread_traversal_key, traversal_order, tree_key, tree_step,
 };
 pub use crate::thread::{
-    ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, PendingApproval, PendingRequest,
-    RunStatus, RunTiming, SecretRequestStatus, SubagentModel, ThreadContextWindowSnapshot,
-    ThreadState, TimelineEntry, TurnCheckpointSummary, TurnItemStatus, child_approvals,
-    parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
+    AgentMessageSender, ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, NoticeLevel,
+    PendingApproval, PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
+    ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnCheckpointSummary, TurnItemStatus,
+    child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

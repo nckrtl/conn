@@ -614,6 +614,20 @@ impl BrowserView {
         let _ = callback;
     }
 
+    /// Registers a callback invoked when the main frame starts a new document, with its URL. A
+    /// script it returns runs in that document's main world at once, in the same callback, so it
+    /// is ahead of the page's own scripts as far as the browser process can make it. Runs on a
+    /// CEF thread.
+    pub fn on_document_start(
+        &self,
+        callback: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        self.inner.on_document_start(callback);
+        #[cfg(not(target_os = "macos"))]
+        let _ = callback;
+    }
+
     /// Registers a callback for each document and fetch/XHR response (any thread), with the
     /// Laravel Toolbar headers it carries. Pages with a Content-Security-Policy get no inline
     /// toolbar data, so the host reads the headers instead.
@@ -685,6 +699,16 @@ impl BrowserView {
         {
             false
         }
+    }
+
+    /// Registers a callback for the page's own icon: the page's address, then the icon as PNG bytes
+    /// (at most 64 KiB). It runs after each navigation that declares an icon, and never for a page
+    /// without one. The browser fetched and decoded the icon, so the bytes are a plain PNG.
+    pub fn on_favicon(&self, callback: impl Fn(&str, Vec<u8>) + Send + Sync + 'static) {
+        #[cfg(target_os = "macos")]
+        self.inner.on_favicon(callback);
+        #[cfg(not(target_os = "macos"))]
+        let _ = callback;
     }
 
     /// Registers a callback invoked for the detector bridge's console messages. Returning `true`

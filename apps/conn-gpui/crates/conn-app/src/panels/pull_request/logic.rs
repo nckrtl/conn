@@ -1250,11 +1250,33 @@ pub(super) fn label_chip_colors(tokens: &Tokens, raw_color: Option<&str>) -> (Rg
     (bg, fg)
 }
 
+pub(super) const CLI_MISSING_MESSAGE: &str =
+    "The source-control CLI is not installed on this server.";
+pub(super) const SIGNED_OUT_MESSAGE: &str =
+    "Sign in to your source-control host to view pull requests.";
+
+/// The icon and title of an "unavailable" failure, from its message (`describe_rpc_error`): the
+/// lab's "Not signed in" (lock), "Source-control CLI missing" (terminal) and "Pull requests
+/// unavailable" (unplug).
+#[must_use]
+pub(super) fn unavailable_notice(message: &str) -> (&'static str, &'static str) {
+    match message {
+        CLI_MISSING_MESSAGE => ("superhero/terminal.svg", "Source-control CLI missing"),
+        SIGNED_OUT_MESSAGE => ("superhero/lock.svg", "Not signed in"),
+        _ => ("superhero/unplug.svg", "Pull requests unavailable"),
+    }
+}
+
 /// Extracts a concise human-readable error message from a `conn_client::ClientError`.
 #[must_use]
 pub(super) fn describe_rpc_error(err: &conn_client::ClientError) -> (Option<String>, String) {
     match err {
         conn_client::ClientError::Rpc(val) => {
+            let val = if val.get("_tag").and_then(serde_json::Value::as_str) == Some("Fail") {
+                val.get("error").unwrap_or(val)
+            } else {
+                val
+            };
             let tag = val.get("_tag").and_then(serde_json::Value::as_str);
             let reason = val.get("reason").and_then(serde_json::Value::as_str);
             if tag == Some("PullRequestOperationError") && reason == Some("not-found") {
@@ -1265,12 +1287,8 @@ pub(super) fn describe_rpc_error(err: &conn_client::ClientError) -> (Option<Stri
             }
             if tag == Some("PullRequestUnavailableError") {
                 let msg = match reason {
-                    Some("cli-missing") => {
-                        "The source-control CLI is not installed on this server."
-                    }
-                    Some("cli-unauthenticated") => {
-                        "Sign in to your source-control host to view pull requests."
-                    }
+                    Some("cli-missing") => CLI_MISSING_MESSAGE,
+                    Some("cli-unauthenticated") => SIGNED_OUT_MESSAGE,
                     Some("provider-unsupported") => {
                         "This repository's host does not support pull requests here yet."
                     }
@@ -2259,6 +2277,22 @@ mod tests {
             merge_queue_removal: None,
             maintainer_can_modify: None,
         }
+    }
+
+    #[test]
+    fn reports_the_sign_in_action_from_a_failed_list_rpc() {
+        let error = conn_client::ClientError::Rpc(serde_json::json!({
+            "_tag": "Fail",
+            "error": {
+                "_tag": "PullRequestUnavailableError",
+                "reason": "cli-unauthenticated",
+                "listResult": {"entries": []}
+            }
+        }));
+        assert_eq!(
+            super::describe_rpc_error(&error).1,
+            "Sign in to your source-control host to view pull requests."
+        );
     }
 
     #[test]

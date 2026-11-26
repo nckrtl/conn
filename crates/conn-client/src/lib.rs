@@ -125,7 +125,7 @@ pub enum ClientEvent {
     },
     /// Server→desktop agent panel request (`panels.requests`: `panel_open`, `database_query`,
     /// `mcp_connect`, `mcp_call`). Auto-resubscribed on WebSocket reconnect.
-    PanelRequest(conn_contract::AgentPanelRequest),
+    PanelRequest(conn_contract::source::DesktopPanelRequest),
     /// Live project annotation queue snapshot (`annotations.subscribe`). Auto-resubscribed on
     /// WebSocket reconnect.
     Annotations {
@@ -164,6 +164,12 @@ impl std::fmt::Debug for Connection {
 }
 
 impl Connection {
+    /// Whether both handles send requests to the same connection task.
+    #[must_use]
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.cmd_tx.same_channel(&other.cmd_tx)
+    }
+
     /// Spawns the connection task on `rt` and returns a cloneable [`Connection`] handle plus a
     /// bounded receiver of [`ClientEvent`]s.
     #[must_use]
@@ -258,6 +264,112 @@ impl Connection {
                 .await
             },
             "device hub access",
+        )
+        .await
+    }
+
+    /// Fetches a source-control host's paged pull request patch through the connected server.
+    ///
+    /// # Errors
+    /// Returns an error on an invalid URL, rejected request, or undecodable response.
+    pub async fn pull_request_diff(
+        &self,
+        input: conn_contract::PullRequestDiffInput,
+    ) -> Result<conn_contract::PullRequestDiffResult, ClientError> {
+        let url = self.http_base_url.join("/api/pull-requests/diff")?;
+        let mut request = self.http.post(url).json(&input);
+        if let Some(token) = self.bearer.read().ok().and_then(|token| token.clone()) {
+            request = request.bearer_auth(token);
+        }
+        self.run_on_tokio(
+            async move {
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|error| ClientError::Connection(error.to_string()))?;
+                let status = response.status();
+                let bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|error| ClientError::Connection(error.to_string()))?;
+                if !status.is_success() {
+                    return Err(serde_json::from_slice(&bytes).map_or_else(
+                        |_| ClientError::Connection(format!("pull request diff failed ({status})")),
+                        ClientError::Rpc,
+                    ));
+                }
+                Ok(serde_json::from_slice(&bytes)?)
+            },
+            "pull request diff",
+        )
+        .await
+    }
+
+    /// Looks up a Laravel definition on the server that owns this thread.
+    pub async fn source_definition(
+        &self,
+        query: conn_contract::source::DefinitionRequest,
+    ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
+        self.navigation_request("api/files/definition", query).await
+    }
+
+    pub async fn first_source_definition(
+        &self,
+        query: conn_contract::source::DefinitionRequest,
+        hover: bool,
+    ) -> Result<Vec<conn_contract::source::DefinitionTarget>, ClientError> {
+        let endpoint = if hover {
+            "api/files/definition?mode=hover"
+        } else {
+            "api/files/definition?mode=first"
+        };
+        self.navigation_request(endpoint, query).await
+    }
+
+    pub async fn prepare_php_navigation(
+        &self,
+        doc: conn_contract::source::PreparePhpNavigation,
+    ) -> Result<(), ClientError> {
+        self.navigation_request("api/files/prepare-php", doc).await
+    }
+
+    async fn navigation_request<
+        Q: Serialize + Send + Sync + 'static,
+        R: DeserializeOwned + Send + 'static,
+    >(
+        &self,
+        endpoint: &str,
+        query: Q,
+    ) -> Result<R, ClientError> {
+        let url = self.http_base_url.join(endpoint)?;
+        let token = self
+            .bearer
+            .read()
+            .ok()
+            .and_then(|t| t.clone())
+            .ok_or_else(|| ClientError::Auth("No active connection.".into()))?;
+        let http = self.http.clone();
+        self.run_on_tokio(
+            async move {
+                let res = http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&query)
+                    .send()
+                    .await
+                    .map_err(|e| ClientError::Connection(e.to_string()))?;
+                if !res.status().is_success() {
+                    let status = res.status();
+                    let message = res.text().await.unwrap_or_default();
+                    return Err(ClientError::Connection(format!(
+                        "Definition lookup ({status}): {message}"
+                    )));
+                }
+                res.json()
+                    .await
+                    .map_err(|e| ClientError::Connection(e.to_string()))
+            },
+            "source definition",
         )
         .await
     }
@@ -426,6 +538,55 @@ impl Connection {
         .await
     }
 
+    /// Mints an inline HTML attachment URL with the server's matching sandbox policy.
+    pub async fn attachment_document_url(
+        &self,
+        attachment_id: &str,
+        is_mcp: bool,
+    ) -> Result<url::Url, ClientError> {
+        self.inline_attachment_url(attachment_id, "document.html", "text/html", is_mcp)
+            .await
+    }
+
+    /// Mints the signed media URL used by a sent video's inline player.
+    pub async fn attachment_video_url(
+        &self,
+        attachment_id: &str,
+        name: &str,
+        mime: &str,
+    ) -> Result<url::Url, ClientError> {
+        self.inline_attachment_url(attachment_id, name, mime, false)
+            .await
+    }
+
+    async fn inline_attachment_url(
+        &self,
+        attachment_id: &str,
+        name: &str,
+        mime: &str,
+        is_mcp: bool,
+    ) -> Result<url::Url, ClientError> {
+        let payload = conn_contract::AssetCreateUrlInput {
+            resource: conn_contract::AssetResource::Attachment(
+                conn_contract::AssetResourceAttachment {
+                    tag: lit::Attachment,
+                    attachment_id: attachment_id.to_owned(),
+                    file_name: Some(name.to_owned()),
+                    mime_type: Some(mime.to_owned()),
+                    disposition: Some(conn_contract::AssetResourceAttachmentDisposition::Inline),
+                    render_intent: is_mcp.then_some(lit::McpApp),
+                },
+            ),
+        };
+        let created = self
+            .call::<_, conn_contract::rpc::assets::create_url::Success>(
+                "assets.createUrl",
+                &payload,
+            )
+            .await?;
+        Ok(self.http_base_url.join(&created.relative_url)?)
+    }
+
     /// Asks the server for a signed URL to the workspace file `path` of thread `thread_id`
     /// (`assets.createUrl`, `workspace-file`), as web Conn's file previews do.
     ///
@@ -527,13 +688,34 @@ impl Connection {
             .send(Command::UnsubscribeThread(thread_id.to_owned()));
     }
 
+    /// Ends the thread subscription like [`Self::unsubscribe_thread`] and also forgets the kept
+    /// sequence. The next [`Self::subscribe_thread`] then asks for a snapshot, not a replay, so
+    /// call it only when the caller drops the thread's reducer too.
+    pub fn forget_thread(&self, thread_id: &str) {
+        let _ = self
+            .cmd_tx
+            .send(Command::ForgetThread(thread_id.to_owned()));
+    }
+
     /// Subscribes to `panels.requests` as a first-class auto-resubscribed stream so agent panel
     /// calls (`panel_open`, `database_query`, `mcp_connect`, `mcp_call`) resume immediately on
     /// WebSocket reconnect with zero retry gap.
     pub fn subscribe_panel_requests(&self, device_name: Option<String>) {
-        let _ = self
-            .cmd_tx
-            .send(Command::SubscribePanelRequests(device_name));
+        self.subscribe_files_thread(device_name, None, false);
+    }
+
+    pub fn subscribe_files_thread(
+        &self,
+        device_name: Option<String>,
+        files_thread: Option<String>,
+        files_only: bool,
+    ) {
+        let input = conn_contract::source::DesktopPanelSubscription {
+            panel: conn_contract::AgentPanelSubscribeInput { device_name },
+            files_thread,
+            files_only,
+        };
+        let _ = self.cmd_tx.send(Command::SubscribePanelRequests(input));
     }
 
     /// Stops listening to `panels.requests`.
@@ -608,6 +790,67 @@ impl Connection {
     ) -> Result<Value, ClientError> {
         let payload = serde_json::to_value(&command)?;
         self.call_json(TAG_DISPATCH_COMMAND, payload).await
+    }
+
+    /// Lists test logins stored on the connected environment (`testLogins.list`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn list_test_logins(&self) -> Result<conn_contract::TestLoginList, ClientError> {
+        self.call("testLogins.list", &conn_contract::ServerProbePayload {})
+            .await
+    }
+
+    /// Saves a new test login on the connected environment (`testLogins.save`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn save_test_login(
+        &self,
+        input: &conn_contract::SaveTestLoginInput,
+    ) -> Result<conn_contract::TestLoginSummary, ClientError> {
+        self.call("testLogins.save", input).await
+    }
+
+    /// Updates an existing test login on the connected environment (`testLogins.update`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn update_test_login(
+        &self,
+        input: &conn_contract::UpdateTestLoginInput,
+    ) -> Result<conn_contract::TestLoginSummary, ClientError> {
+        self.call("testLogins.update", input).await
+    }
+
+    /// Removes a test login from the connected environment (`testLogins.remove`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn remove_test_login(&self, id: &str) -> Result<(), ClientError> {
+        self.call_json("testLogins.remove", serde_json::json!({ "id": id }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Reveals the stored password and optional OTP secret of one test login (`testLogins.reveal`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on transport, codec, or server RPC failure.
+    pub async fn reveal_test_login(
+        &self,
+        id: &str,
+    ) -> Result<conn_contract::TestLoginSecrets, ClientError> {
+        self.call(
+            "testLogins.reveal",
+            &conn_contract::AuthRevokePairingLinkInput { id: id.to_owned() },
+        )
+        .await
     }
 
     /// Starts a generic streaming RPC call, returning a [`StreamId`] and a bounded receiver of
@@ -963,6 +1206,20 @@ mod tests {
             second_sub["acceptBoundedSnapshot"],
             json!(true),
             "resubscribe must keep acceptBoundedSnapshot=true"
+        );
+
+        // A second subscribe for a live stream sends nothing (a speculative hover subscription is
+        // reused by the open). Forgetting then drops the cursor: the next request is a snapshot
+        // request, and no duplicate (which would carry afterSequence=42) came before it.
+        conn.subscribe_thread("thread-1");
+        conn.forget_thread("thread-1");
+        conn.subscribe_thread("thread-1");
+        let third_sub = tokio::time::timeout(Duration::from_secs(5), sub_payloads_rx.recv())
+            .await?
+            .ok_or("missing third subscribeThread payload")?;
+        assert!(
+            third_sub.get("afterSequence").is_none(),
+            "a forgotten thread must resubscribe without afterSequence: {third_sub}"
         );
 
         // Typed orchestration.getTurnItem RPC.

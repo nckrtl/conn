@@ -14,7 +14,8 @@ use gpui_kit::component::h_flex;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Background, Bounds, BoxShadow, FontWeight, Hsla, MouseMoveEvent, PathBuilder,
-    Pixels, Point, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, px, size,
+    Pixels, Point, SharedString, TestSupportExt as _, Window, canvas, div, fill,
+    linear_color_stop, linear_gradient, point, px, size,
 };
 
 /// SVG `linearGradient x1=0 x2=0 y1=0 y2=1` from `color` at `opacity` to transparent, as a
@@ -31,11 +32,17 @@ use super::format::{TasksSurfaceColors, format_chart_date_label};
 use crate::panels::chrome::{UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
 
-/// Height of a tile's sparkline (`h-7` = 28px).
-const SPARKLINE_HEIGHT_PX: f32 = 28.0;
+/// Height a tile's sparkline had before the cards grew (`h-7` = 28px), and the height the
+/// trend points are laid out for. A card's sparkline is this plus the card's extra height.
+pub(super) const SPARKLINE_BASE_HEIGHT_PX: f32 = 28.0;
 const AXIS_FONT_PX: f32 = 11.0;
 const AXIS_LINE_HEIGHT_PX: f32 = 14.0;
+const CHART_MARGIN_LEFT_PX: f32 = 44.0;
+const AXIS_LABEL_WIDTH_PX: f32 = 40.0;
 const CHART_MARGIN_TOP_PX: f32 = 6.0;
+/// How far the first y label's text box starts above the chart's top edge: labels are centred on
+/// their gridline, which is `CHART_MARGIN_TOP_PX` below the top.
+pub(super) const AXIS_TOP_OVERHANG_PX: f32 = AXIS_LINE_HEIGHT_PX / 2.0 - CHART_MARGIN_TOP_PX;
 const CHART_MARGIN_RIGHT_PX: f32 = 4.0;
 const CHART_MARGIN_BOTTOM_PX: f32 = 24.0;
 
@@ -79,8 +86,13 @@ pub(super) fn x_axis_indices(count: usize) -> Vec<usize> {
     indices
 }
 
-/// Renders a 28px sparkline with a soft translucent area fill and a 1.5px muted polyline.
-pub(super) fn render_sparkline(points: Vec<TrendPoint>, tokens: &Tokens) -> AnyElement {
+/// Renders a `height`px sparkline with a soft translucent area fill and a 1.5px muted polyline.
+pub(super) fn render_sparkline(
+    id: SharedString,
+    points: Vec<TrendPoint>,
+    height: f32,
+    tokens: &Tokens,
+) -> AnyElement {
     let base = to_hsla(tokens.muted_foreground);
     let stroke_color = base.opacity(0.70);
     // Conn's `<Fade opacity={0.22}>`: a vertical 22%→0% gradient under the line.
@@ -100,9 +112,12 @@ pub(super) fn render_sparkline(points: Vec<TrendPoint>, tokens: &Tokens) -> AnyE
     };
 
     div()
+        .id(id)
+        .test_support()
         .w_full()
-        .h(px(SPARKLINE_HEIGHT_PX))
-        .mt(px(4.0))
+        .h(px(height))
+        .flex_shrink_0()
+        .mt_auto()
         .child(inner)
         .into_any_element()
 }
@@ -123,7 +138,7 @@ fn paint_sparkline(
     if placed.len() < 2 {
         return;
     }
-    let scale_y = height / SPARKLINE_HEIGHT_PX;
+    let scale_y = height / SPARKLINE_BASE_HEIGHT_PX;
     let to_pt = |(x, y): (f64, f64)| {
         point(
             bounds.origin.x + px(x as f32),
@@ -184,14 +199,6 @@ pub(super) fn render_trend_chart(
         .iter()
         .map(|&t| (t, format_insight_value(spec_id, t)))
         .collect();
-    let max_chars = tick_labels
-        .iter()
-        .map(|(_, s)| s.chars().count())
-        .max()
-        .unwrap_or(2);
-    let label_col_w = ((max_chars as f32) * 6.8).ceil().max(24.0);
-    let margin_left = label_col_w + 10.0;
-
     let series_color = to_hsla(tokens.info);
     // Conn's `<Fade opacity={0.18}>` per series.
     let area_color = vertical_fade(series_color, 0.18);
@@ -217,7 +224,7 @@ pub(super) fn render_trend_chart(
                 low,
                 high,
                 &paint_ticks,
-                margin_left,
+                CHART_MARGIN_LEFT_PX,
                 hover_index,
                 series_color,
                 area_color,
@@ -237,9 +244,9 @@ pub(super) fn render_trend_chart(
             .top(px(CHART_MARGIN_TOP_PX))
             .bottom(px(CHART_MARGIN_BOTTOM_PX))
             .left_0()
-            .w(px(label_col_w));
+            .w(px(AXIS_LABEL_WIDTH_PX));
         let span = (high - low).max(f64::EPSILON);
-        for (tick, text) in &tick_labels {
+        for (index, (tick, text)) in tick_labels.iter().enumerate() {
             let frac = 1.0 - ((*tick - low) / span) as f32;
             col = col.child(
                 div()
@@ -247,13 +254,21 @@ pub(super) fn render_trend_chart(
                     .left_0()
                     .right_0()
                     .top(gpui_kit::relative(frac))
-                    .mt(px(-7.0))
+                    .mt(px(-AXIS_LINE_HEIGHT_PX / 2.0))
                     .flex()
-                    .justify_end()
+                    // Left edge of the axis column, so every label starts on the same x.
+                    .justify_start()
+                    .whitespace_nowrap()
                     .text_size(px(AXIS_FONT_PX))
                     .line_height(px(AXIS_LINE_HEIGHT_PX))
                     .text_color(muted)
-                    .child(text.clone()),
+                    .child(
+                        // As wide as its text, so its bounds are where the text starts.
+                        div()
+                            .id(SharedString::from(format!("tasks-insight-axis-{index}")))
+                            .test_support()
+                            .child(text.clone()),
+                    ),
             );
         }
         col
@@ -264,7 +279,7 @@ pub(super) fn render_trend_chart(
         let indices = x_axis_indices(count);
         let mut row = h_flex()
             .absolute()
-            .left(px(margin_left))
+            .left(px(CHART_MARGIN_LEFT_PX))
             .right(px(CHART_MARGIN_RIGHT_PX))
             .bottom(px(2.0))
             .h(px(16.0))
@@ -286,8 +301,9 @@ pub(super) fn render_trend_chart(
         let pt = points.get(idx)?;
         let bounds = bounds_cell.get();
         let width = f32::from(bounds.size.width);
-        let plot_w = (width - margin_left - CHART_MARGIN_RIGHT_PX).max(1.0);
-        let x_pos = margin_left + (idx as f32 / (count.saturating_sub(1).max(1)) as f32) * plot_w;
+        let plot_w = (width - CHART_MARGIN_LEFT_PX - CHART_MARGIN_RIGHT_PX).max(1.0);
+        let x_pos =
+            CHART_MARGIN_LEFT_PX + (idx as f32 / (count.saturating_sub(1).max(1)) as f32) * plot_w;
         let on_left = x_pos > width * 0.5;
         let formatted = format_insight_value(spec_id, pt.value);
         let fg = to_hsla(tokens.foreground);
@@ -369,9 +385,10 @@ pub(super) fn render_trend_chart(
         .min_h_0()
         .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
             let bounds = move_bounds.get();
-            let plot_left = f32::from(bounds.origin.x) + margin_left;
+            let plot_left = f32::from(bounds.origin.x) + CHART_MARGIN_LEFT_PX;
             let plot_w =
-                (f32::from(bounds.size.width) - margin_left - CHART_MARGIN_RIGHT_PX).max(0.0);
+                (f32::from(bounds.size.width) - CHART_MARGIN_LEFT_PX - CHART_MARGIN_RIGHT_PX)
+                    .max(0.0);
             let next = hover_index_from_x(f32::from(event.position.x), plot_left, plot_w, count);
             move_hover(next, window, cx);
         })

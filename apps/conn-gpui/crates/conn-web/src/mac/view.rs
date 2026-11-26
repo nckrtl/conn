@@ -26,7 +26,10 @@ const MAX_FRAME_RATE_FPS: i32 = 60;
 type FrameCallback = Arc<dyn Fn() + Send + Sync>;
 type LoadEndCallback = Arc<dyn Fn(&str, i32) + Send + Sync>;
 type LoadStartCallback = Arc<dyn Fn(&str) + Send + Sync>;
+type DocumentStartCallback = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type ConsoleMessageCallback = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// The page's address and its icon as PNG bytes.
+type FaviconCallback = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
 type ContextMenuCallback = Arc<dyn Fn(ContextMenuEvent) + Send + Sync>;
 
 struct FrameBuffer {
@@ -50,9 +53,12 @@ struct Shared {
     on_frame: Mutex<Option<FrameCallback>>,
     on_load_end: Mutex<Option<LoadEndCallback>>,
     on_load_start: Mutex<Option<LoadStartCallback>>,
+    /// Makes the script that runs in each new main-frame document at once (`on_document_start`).
+    on_document_start: Mutex<Option<DocumentStartCallback>>,
     /// The Laravel Toolbar's response headers (`toolbar_hooks`); shared with the request handler.
     toolbar_response: super::toolbar_hooks::ToolbarResponseSlot,
     on_console_message: Mutex<Option<ConsoleMessageCallback>>,
+    on_favicon: Mutex<Option<FaviconCallback>>,
     on_context_menu: Mutex<Option<ContextMenuCallback>>,
     /// When the last `load_url` was called, and how many paints came since (trace only).
     load_began: Mutex<Option<std::time::Instant>>,
@@ -147,8 +153,10 @@ impl MacBrowserView {
             on_frame: Mutex::new(None),
             on_load_end: Mutex::new(None),
             on_load_start: Mutex::new(None),
+            on_document_start: Mutex::new(None),
             toolbar_response: Arc::new(Mutex::new(None)),
             on_console_message: Mutex::new(None),
+            on_favicon: Mutex::new(None),
             on_context_menu: Mutex::new(None),
             load_began: Mutex::new(None),
             paints_since_load: AtomicU32::new(0),
@@ -354,6 +362,15 @@ impl MacBrowserView {
         }
     }
 
+    pub(crate) fn on_document_start(
+        &self,
+        callback: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) {
+        if let Ok(mut slot) = self.shared.on_document_start.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
+
     pub(crate) fn on_toolbar_response(
         &self,
         callback: impl Fn(crate::ToolbarResponse) + Send + Sync + 'static,
@@ -381,6 +398,12 @@ impl MacBrowserView {
         callback: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) {
         if let Ok(mut slot) = self.shared.on_console_message.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
+
+    pub(crate) fn on_favicon(&self, callback: impl Fn(&str, Vec<u8>) + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.shared.on_favicon.lock() {
             *slot = Some(Arc::new(callback));
         }
     }
@@ -570,6 +593,9 @@ impl MacBrowserView {
             slot.take();
         }
         if let Ok(mut slot) = self.shared.on_console_message.lock() {
+            slot.take();
+        }
+        if let Ok(mut slot) = self.shared.on_favicon.lock() {
             slot.take();
         }
         if let Some(host) = self.browser.host() {
@@ -855,6 +881,52 @@ wrap_download_image_callback! {
             let mut bytes = vec![0_u8; png.size()];
             if png.data(Some(&mut bytes), 0) == bytes.len() && !bytes.is_empty() {
                 copy_png(&bytes);
+            }
+        }
+    }
+}
+
+/// The largest favicon, as PNG bytes, the browser hands to the host.
+const MAX_FAVICON_PNG_BYTES: usize = 64 * 1024;
+
+wrap_download_image_callback! {
+    struct FaviconDownload {
+        shared: Arc<Shared>,
+    }
+
+    impl DownloadImageCallback {
+        // The browser fetched and decoded the page's declared icon; it comes back as PNG, whatever
+        // the source format was. A failed fetch gives no image and nothing is reported.
+        fn on_download_image_finished(
+            &self,
+            _image_url: Option<&CefString>,
+            _http_status_code: c_int,
+            image: Option<&mut Image>,
+        ) {
+            let Some(png) = image.and_then(|image| image.as_png(2.0, 1, None, None)) else {
+                return;
+            };
+            let mut bytes = vec![0_u8; png.size()];
+            if bytes.is_empty()
+                || bytes.len() > MAX_FAVICON_PNG_BYTES
+                || png.data(Some(&mut bytes), 0) != bytes.len()
+            {
+                return;
+            }
+            let page = self
+                .shared
+                .url
+                .lock()
+                .map(|url| url.clone())
+                .unwrap_or_default();
+            let callback = self
+                .shared
+                .on_favicon
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone());
+            if let Some(callback) = callback {
+                callback(&page, bytes);
             }
         }
     }
@@ -1276,6 +1348,22 @@ wrap_load_handler! {
             };
             let url = CefString::from(&frame.url()).to_string();
             trace(&format!("on_load_start {url} {}", self.shared.since_load()));
+            // Run in the frame's own callback, the earliest the browser process can, so a script
+            // reaches the new document ahead of the page's.
+            let document_script = self
+                .shared
+                .on_document_start
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .and_then(|make| make(&url));
+            if let Some(script) = document_script {
+                frame.execute_java_script(
+                    Some(&CefString::from(script.as_str())),
+                    Some(&CefString::from("conn://document-start")),
+                    0,
+                );
+            }
             if let Ok(mut error) = self.shared.load_error.lock() {
                 *error = None;
             }
@@ -1364,6 +1452,36 @@ wrap_display_handler! {
                 *current = title.map(|t| t.to_string()).unwrap_or_default();
             }
             self.shared.notify_frame();
+        }
+
+        // The page declares its icons; the browser fetches the first one over HTTPS (or reads a
+        // `data:` image) and reports it as PNG. Nothing about the page leaves the browser process
+        // but its own icon.
+        fn on_favicon_urlchange(
+            &self,
+            browser: Option<&mut Browser>,
+            icon_urls: Option<&mut CefStringList>,
+        ) {
+            let Some(host) = browser.and_then(|browser| browser.host()) else {
+                return;
+            };
+            let urls: Vec<String> = icon_urls
+                .map(|urls| urls.clone().into_iter().collect())
+                .unwrap_or_default();
+            let Some(url) = urls
+                .into_iter()
+                .find(|url| url.starts_with("https://") || url.starts_with("data:image/"))
+            else {
+                return;
+            };
+            let mut callback = FaviconDownload::new(self.shared.clone());
+            host.download_image(
+                Some(&CefString::from(url.as_str())),
+                1,
+                64,
+                0,
+                Some(&mut callback),
+            );
         }
 
         fn on_address_change(

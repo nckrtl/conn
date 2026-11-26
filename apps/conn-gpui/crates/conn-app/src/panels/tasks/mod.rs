@@ -10,6 +10,7 @@ mod insights;
 
 use crate::a11y::ConnA11yExt as _;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -174,14 +175,39 @@ fn build_client() -> Result<OrbitTasksClient, String> {
     OrbitTasksClient::live().map_err(|err| err.to_string())
 }
 
+/// One Orbit feed for the window, shared by the Tasks views opened by its threads.
+#[derive(Clone)]
+pub(crate) struct TasksRuntime {
+    client: Result<OrbitTasksClient, String>,
+    follower: Option<Arc<TasksFollower>>,
+}
+
+impl TasksRuntime {
+    pub(crate) fn new() -> Self {
+        let client = build_client();
+        let follower = client
+            .as_ref()
+            .ok()
+            .map(|client| Arc::new(follow_orbit_tasks(crate::live::RT.handle(), client.clone())));
+        Self { client, follower }
+    }
+
+    pub(crate) fn subscribe(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<conn_desktop::orbit::OrbitRealtimeEvent>> {
+        self.follower.as_ref().map(|f| f.subscribe_events())
+    }
+}
+
 /// The Tasks panel entity.
 pub(crate) struct TasksPanel {
+    active: bool,
     tokens: Tokens,
     project_key: Option<String>,
     workspace_root: Option<String>,
     client: Option<OrbitTasksClient>,
     unavailable_reason: Option<String>,
-    _follower: Option<TasksFollower>,
+    _follower: Option<Arc<TasksFollower>>,
     live_status: TasksLiveStatus,
     list_state: ListLoadState,
     list_request: u64,
@@ -201,6 +227,7 @@ pub(crate) struct TasksPanel {
     insights_scroll: ScrollHandle,
     lanes_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
+    expanded_subtasks: HashSet<i64>,
     /// Whether the last detail frame had its bottom spacing (see `detail::bottom_padding`).
     detail_padded: Cell<bool>,
     now_ms: i64,
@@ -220,7 +247,12 @@ impl std::fmt::Debug for TasksPanel {
 }
 
 impl TasksPanel {
-    pub(crate) fn new(tokens: Tokens, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+    pub(crate) fn new(
+        tokens: Tokens,
+        runtime: &TasksRuntime,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tasks"));
         let search_sub = cx.subscribe(&search_input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -232,22 +264,19 @@ impl TasksPanel {
             }
         });
 
-        let (client, unavailable_reason) = match build_client() {
+        let (client, unavailable_reason) = match runtime.client.clone() {
             Ok(client) => (Some(client), None),
             Err(reason) => (None, Some(reason)),
         };
 
-        let follower = client
-            .as_ref()
-            .map(|c| follow_orbit_tasks(crate::live::RT.handle(), c.clone()));
-
         let mut panel = Self {
+            active: true,
             tokens,
             project_key: None,
             workspace_root: None,
             client,
             unavailable_reason,
-            _follower: follower,
+            _follower: runtime.follower.clone(),
             live_status: TasksLiveStatus::Connecting,
             list_state: ListLoadState::Loading,
             list_request: 0,
@@ -267,6 +296,7 @@ impl TasksPanel {
             insights_scroll: ScrollHandle::new(),
             lanes_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
+            expanded_subtasks: HashSet::new(),
             detail_padded: Cell::new(false),
             now_ms: now_epoch_ms(),
             _subscriptions: vec![search_sub],
@@ -278,12 +308,18 @@ impl TasksPanel {
         panel
     }
 
-    /// Subscribes to app-wide Orbit Gateway Reverb events (`FleetChanged`, `ProfileChanged`)
-    /// from this panel's shared `private-orbit` WebSocket follower.
-    pub(crate) fn subscribe_orbit_events(
-        &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<conn_desktop::orbit::OrbitRealtimeEvent>> {
-        self._follower.as_ref().map(|f| f.subscribe_events())
+    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<'_, Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            self.reload_tasks(false, cx);
+            self.reload_insights(cx);
+            if let Some(task) = self.navigation().task_id {
+                self.load_task_detail(task, false, cx);
+            }
+        }
     }
 
     pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<'_, Self>) {
@@ -301,6 +337,7 @@ impl TasksPanel {
         if self.project_key == project_key && self.workspace_root == workspace_root {
             return;
         }
+        self.expanded_subtasks.clear();
         self.project_key = project_key;
         self.workspace_root = workspace_root;
         self.settings_open = false;
@@ -374,7 +411,11 @@ impl TasksPanel {
                         Err(RecvError::Closed) => break,
                     };
                     if this
-                        .update(cx, |panel, cx| panel.handle_invalidation(target, cx))
+                        .update(cx, |panel, cx| {
+                            if panel.active {
+                                panel.handle_invalidation(target, cx)
+                            }
+                        })
                         .is_err()
                     {
                         break;
@@ -388,7 +429,11 @@ impl TasksPanel {
                 loop {
                     cx.background_executor().timer(INSIGHTS_POLL_INTERVAL).await;
                     if this
-                        .update(cx, |panel, cx| panel.reload_insights(cx))
+                        .update(cx, |panel, cx| {
+                            if panel.active {
+                                panel.reload_insights(cx)
+                            }
+                        })
                         .is_err()
                     {
                         break;
@@ -404,8 +449,10 @@ impl TasksPanel {
                 cx.background_executor().timer(CLOCK_TICK_INTERVAL).await;
                 if this
                     .update(cx, |panel, cx| {
-                        panel.now_ms = now_epoch_ms();
-                        cx.notify();
+                        if panel.active {
+                            panel.now_ms = now_epoch_ms();
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -544,9 +591,11 @@ impl TasksPanel {
         .detach();
     }
 
-    fn open_task(&mut self, task_id: i64, cx: &mut Context<'_, Self>) {
+    /// Shows one task's detail, from the board or from an Orbit task card in a thread.
+    pub(crate) fn open_task(&mut self, task_id: i64, cx: &mut Context<'_, Self>) {
         let key = self.nav_key().to_owned();
         let now = now_epoch_ms().max(0) as u64;
+        self.expanded_subtasks.clear();
         self.panel_state.open_task(&key, task_id, now);
         self.settings_open = false;
         self.detail_notice = None;
@@ -653,11 +702,12 @@ impl TasksPanel {
 }
 
 impl Render for TasksPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let entity = cx.entity();
 
         let body = if let Some(reason) = &self.unavailable_reason {
             render_notice(
+                window,
                 &self.tokens,
                 "superhero/unplug.svg",
                 "Tasks are unavailable",
@@ -670,6 +720,18 @@ impl Render for TasksPanel {
                 && let Some(task_id) = nav.task_id
             {
                 let callbacks = DetailCallbacks {
+                    expanded: &self.expanded_subtasks,
+                    toggle_expanded: {
+                        let entity = entity.clone();
+                        Rc::new(move |id, _, cx| {
+                            entity.update(cx, |p, cx| {
+                                if !p.expanded_subtasks.remove(&id) {
+                                    p.expanded_subtasks.insert(id);
+                                }
+                                cx.notify();
+                            })
+                        })
+                    },
                     on_show_board: {
                         let entity = entity.clone();
                         Rc::new(move |_, cx| entity.update(cx, |p, cx| p.show_board(cx)))
@@ -732,11 +794,18 @@ impl Render for TasksPanel {
                         .into_any_element(),
                     ListLoadState::Error(error) => {
                         let notice = tasks_error_notice(error.reason);
-                        let icon = match notice.kind {
-                            ErrorNoticeKind::Access => "superhero/lock.svg",
-                            ErrorNoticeKind::Unavailable => "superhero/unplug.svg",
+                        // The lab locks "No access" and "Tasks are turned off in Orbit" alike.
+                        let icon = if notice.kind == ErrorNoticeKind::Access
+                            || matches!(
+                                error.reason,
+                                conn_desktop::orbit::TasksErrorReason::ExtensionDisabled
+                            ) {
+                            "superhero/lock.svg"
+                        } else {
+                            "superhero/unplug.svg"
                         };
                         render_notice(
+                            window,
                             &self.tokens,
                             icon,
                             notice.title,
@@ -747,6 +816,7 @@ impl Render for TasksPanel {
                         )
                     }
                     ListLoadState::Ready(page) if page.tasks.is_empty() => render_notice(
+                        window,
                         &self.tokens,
                         "superhero/checklist.svg",
                         "No tasks",

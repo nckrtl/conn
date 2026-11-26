@@ -33,16 +33,30 @@ use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
+mod hover_prefetch;
 mod linked;
 mod rail_workspaces;
 mod sidebar_keys;
 mod sidebar_more;
+mod thread_links;
+#[cfg(test)]
+mod thread_links_tests;
+mod thread_panels;
+mod thread_reference;
+use thread_panels::{PanelOwner, ThreadPanels};
 
 pub(crate) use self::sidebar_more::PressMode;
 
 actions!(
     conn_app,
-    [ToggleSidebar, ToggleRightPanel, NewThread, ToggleTerminal]
+    [
+        ToggleSidebar,
+        ToggleRightPanel,
+        NewThread,
+        ToggleTerminal,
+        PickerNextField,
+        PickerPreviousField
+    ]
 );
 
 /// Registers global shell keyboard shortcuts (`Cmd+B`, `Cmd+Alt+B` and `Cmd+J`).
@@ -50,6 +64,12 @@ pub(crate) fn register_keybindings(cx: &mut App) {
     crate::palette::register_keybindings(cx);
     crate::settings::register_keybindings(cx);
     cx.bind_keys([
+        KeyBinding::new("tab", PickerNextField, Some("ComposerModelPicker")),
+        KeyBinding::new(
+            "shift-tab",
+            PickerPreviousField,
+            Some("ComposerModelPicker"),
+        ),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, None),
         KeyBinding::new("cmd-n", NewThread, None),
@@ -176,6 +196,11 @@ fn draft_workspace_strategy(draft: &DraftThreadState) -> serde_json::Value {
     }
 }
 
+struct FilesSubscription {
+    thread: String,
+    connection: Connection,
+}
+
 /// Root view of the Conn native desktop shell.
 pub(crate) struct ConnApp {
     tokens: Tokens,
@@ -196,13 +221,16 @@ pub(crate) struct ConnApp {
     /// Timelines of subscribed threads, by thread id.
     threads: HashMap<String, ThreadState>,
     chat: Entity<crate::chat::ChatView>,
-    right_panel: Entity<crate::panels::RightPanel>,
+    right_panel: Option<Entity<crate::panels::RightPanel>>,
+    thread_panels: ThreadPanels,
+    tasks_runtime: crate::panels::TasksRuntime,
+    panel_window: gpui_kit::AnyWindowHandle,
     /// Thread streams the server ended (for example a thread launched a moment before the
     /// server knew it). Resubscribed once the shell lists the thread.
     ended_threads: HashSet<String>,
     /// Active new-thread draft; sent with `orchestration.launchThread` on first message.
     draft: Option<DraftThreadState>,
-    /// `server.getConfig` `scratchWorkspaceRoot`; `None` hides `or start without a project`.
+    /// Scratch workspace reported by the primary server.
     scratch_workspace_root: Option<String>,
     /// Project id returned by `projects.ensureScratch`, before the shell lists it.
     scratch_project_id: Option<String>,
@@ -249,8 +277,7 @@ pub(crate) struct ConnApp {
     responding_approvals: HashSet<String>,
     /// Right panel tabs the user has open, in order (Conn's `RightPanelTabs`).
     right_panel_open_tabs: Vec<PanelSurface>,
-    /// The open file while `layout.right_panel_tab` is [`RightPanelTab::File`].
-    right_panel_file: Option<String>,
+    selected_panel_surface: PanelSurface,
     right_panel_add_menu_open: bool,
     right_panel_maximized: bool,
     /// The terminal drawer under the chat is open, and its height.
@@ -259,12 +286,18 @@ pub(crate) struct ConnApp {
     seam_drag: Option<SeamDrag>,
     command_palette: Option<Entity<crate::palette::CommandPalette>>,
     settings_modal: Option<Entity<crate::settings::SettingsModal>>,
+    /// The full-image viewer of a sent message's attachment (a window-level overlay).
+    image_viewer: Option<Entity<crate::chat::image_viewer::ImageViewer>>,
+    /// Listens to the open viewer; dropped with it, so openings do not pile up subscriptions.
+    image_viewer_subscription: Option<gpui_kit::Subscription>,
     /// The live `subscribeServerConfig` projection: the provider catalog the composer, the model
     /// picker, the status banner and the Providers settings page read.
     server_config: std::sync::Arc<conn_state::providers::ServerConfigState>,
     overlay_subscriptions: Vec<gpui_kit::Subscription>,
     /// What had the keyboard before the palette or Settings opened; it gets it back on close.
     focus_before_overlay: Option<FocusHandle>,
+    panel_sheet_focus: FocusHandle,
+    focus_before_panel_sheet: Option<FocusHandle>,
     /// Live search box at the top of the thread sidebar.
     sidebar_search_input: Entity<gpui_kit::component::input::InputState>,
     _sidebar_search_sub: gpui_kit::Subscription,
@@ -313,6 +346,10 @@ pub(crate) struct ConnApp {
     linked: linked::LinkedEnvironments,
     /// Child threads subscribed for their approvals (`app/child_approvals.rs`).
     child_approvals: child_approvals::ChildApprovals,
+    /// Thread streams started by sidebar hover (`app/hover_prefetch.rs`).
+    speculative: hover_prefetch::SpeculativeThreads<Connection>,
+    /// Threads a draft launch subscribed directly, until they are opened.
+    launched_threads: HashSet<String>,
     /// Live control socket server handle (dropped on app exit).
     _control_server: Option<conn_desktop::control::ControlServerHandle>,
     /// Background task draining `conn://` URLs and Unix control socket requests.
@@ -325,6 +362,7 @@ pub(crate) struct ConnApp {
     perf_open_pending_chat: bool,
     /// Project id currently subscribed to `annotations.subscribe` on `self.connection`.
     subscribed_annotation_project: Option<String>,
+    files_subscription: Option<FilesSubscription>,
     /// Live annotations queue for `subscribed_annotation_project`.
     annotations: Vec<conn_state::AnnotationRecord>,
     /// Threads with automatic annotation Watch enabled.
@@ -427,7 +465,16 @@ impl ConnApp {
                     app.send_prompt("Continue where you left off.".to_owned(), cx);
                 }
                 crate::chat::ChatEvent::ImplementPlanInNewThread { text } => {
-                    app.start_new_thread(None, Some(window), cx);
+                    let Some(project) = app
+                        .layout
+                        .selected_thread_id
+                        .as_deref()
+                        .and_then(|id| app.shell.find_thread(id))
+                        .map(|t| t.project_id.clone())
+                    else {
+                        return;
+                    };
+                    app.open_project_draft(project, Some(window), cx);
                     if let Some(draft) = app.draft.as_mut() {
                         draft.interaction_mode = "default".to_owned();
                     }
@@ -458,12 +505,13 @@ impl ConnApp {
                     app.select_model(instance_id, model, options.as_ref(), cx);
                 }
                 crate::chat::ChatEvent::OpenTurnDiff {
-                    app_run_ordinal, ..
+                    app_run_ordinal,
+                    file_path,
+                    ..
                 } => {
-                    // The Diff panel scopes by checkpoint turn; it has no per-file focus yet.
-                    let turn = *app_run_ordinal;
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.set_turn_count(turn, cx));
+                    let (turn, file) = (*app_run_ordinal, file_path.clone());
+                    app.ensure_right_panel(window, cx)
+                        .update(cx, |panel, cx| panel.open_turn_diff(turn, file, cx));
                     app.select_right_panel_tab(RightPanelTab::Diff, cx);
                 }
                 crate::chat::ChatEvent::OpenThread {
@@ -476,22 +524,20 @@ impl ConnApp {
                         app.select_thread(thread_id.clone(), cx);
                     }
                 }
+                crate::chat::ChatEvent::OpenTask { task_id } => {
+                    app.open_task_in_panel(*task_id, window, cx);
+                }
                 crate::chat::ChatEvent::ForkFromRun { run_id } => {
                     app.fork_selected_from_run(run_id, cx);
                 }
-                crate::chat::ChatEvent::OpenFile(path) => {
-                    // A chat link may end in `:line`; the file opens at that line.
-                    let (file, line) = crate::panels::file_path::split_line_suffix(path);
-                    app.select_right_panel_surface(PanelSurface::File(file.to_owned()), cx);
-                    if let Some(line) = line {
-                        app.right_panel
-                            .update(cx, |panel, cx| panel.reveal_line(line, cx));
-                    }
+                crate::chat::ChatEvent::OpenThreadLink(link) => {
+                    app.open_thread_link(link, cx);
+                }
+                crate::chat::ChatEvent::OpenFile(location) => {
+                    app.show_source_location(location, window, cx)
                 }
                 crate::chat::ChatEvent::OpenInBrowser(url) => {
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.navigate_browser(url.clone(), cx));
-                    app.select_right_panel_tab(RightPanelTab::Browser, cx);
+                    app.browse(url.clone(), window, cx);
                 }
                 crate::chat::ChatEvent::RuntimeModeSelected(mode) => {
                     app.set_runtime_mode(mode, cx);
@@ -502,16 +548,11 @@ impl ConnApp {
                 crate::chat::ChatEvent::Branch(action) => {
                     app.handle_branch_action(action.clone(), cx)
                 }
-                crate::chat::ChatEvent::DraftProjectSelected(project_id) => {
-                    app.set_draft_project(project_id.clone(), cx);
-                }
-                crate::chat::ChatEvent::DraftStartScratch => app.start_draft_scratch(cx),
-                crate::chat::ChatEvent::DraftAddProject => app.add_project_via_picker(window, cx),
                 crate::chat::ChatEvent::OpenProviderSetup(instance_id) => {
                     app.open_provider_setup(instance_id, window, cx);
                 }
                 crate::chat::ChatEvent::StartNewThread => {
-                    app.start_new_thread(None, Some(window), cx);
+                    app.start_general_draft(Some(window), cx).detach();
                 }
                 crate::chat::ChatEvent::OpenConnections => {
                     app.open_settings_page(
@@ -539,42 +580,15 @@ impl ConnApp {
                 } => {
                     app.edit_queued_message(run_id, text, attachments.as_deref(), cx);
                 }
+                crate::chat::ChatEvent::OpenImageViewer { images, index } => {
+                    app.open_image_viewer(images.clone(), *index, window, cx);
+                }
             },
         )
         .detach();
         if let Some(path) = crate::live::theme_file_from_env() {
             Self::watch_theme_file(path, cx);
         }
-        let right_panel = cx.new(|cx| {
-            let mut panel =
-                crate::panels::RightPanel::new(tokens.clone(), connection.clone(), window, cx);
-            panel.set_embedded(true, cx);
-            panel
-        });
-        cx.subscribe_in(
-            &right_panel,
-            window,
-            |app, _, event: &crate::panels::RightPanelEvent, window, cx| match event {
-                crate::panels::RightPanelEvent::OpenFile(path) => {
-                    app.select_right_panel_surface(PanelSurface::File(path.clone()), cx);
-                }
-                crate::panels::RightPanelEvent::OpenTab(tab) => {
-                    app.select_right_panel_tab(*tab, cx);
-                }
-                crate::panels::RightPanelEvent::InsertMention(mention) => {
-                    app.chat
-                        .update(cx, |chat, cx| chat.insert_mention(mention, window, cx));
-                }
-                crate::panels::RightPanelEvent::SendPrompt(prompt) => {
-                    app.send_prompt(prompt.clone(), cx);
-                }
-                crate::panels::RightPanelEvent::Annotation(action) => {
-                    app.handle_annotation_action(action.clone(), cx);
-                }
-            },
-        )
-        .detach();
-
         let sidebar_search_input = cx.new(|cx| {
             gpui_kit::component::input::InputState::new(window, cx).placeholder("Search")
         });
@@ -627,7 +641,10 @@ impl ConnApp {
             env_pinned_server,
             threads: HashMap::new(),
             chat,
-            right_panel,
+            right_panel: None,
+            thread_panels: ThreadPanels::new(),
+            tasks_runtime: crate::panels::TasksRuntime::new(),
+            panel_window: window.window_handle(),
             ended_threads: HashSet::new(),
             draft: None,
             scratch_workspace_root: None,
@@ -654,7 +671,7 @@ impl ConnApp {
             responding_approvals: HashSet::new(),
             // No tab until one is picked: opening the panel shows the surface launcher.
             right_panel_open_tabs: Vec::new(),
-            right_panel_file: None,
+            selected_panel_surface: PanelSurface::Kind(RightPanelTab::Files),
             right_panel_add_menu_open: false,
             right_panel_maximized: false,
             terminal_drawer_open: false,
@@ -662,9 +679,13 @@ impl ConnApp {
             seam_drag: None,
             command_palette: None,
             settings_modal: None,
+            image_viewer: None,
+            image_viewer_subscription: None,
             server_config: std::sync::Arc::default(),
             overlay_subscriptions: Vec::new(),
             focus_before_overlay: None,
+            panel_sheet_focus: cx.focus_handle(),
+            focus_before_panel_sheet: None,
             sidebar_search_input,
             _sidebar_search_sub: sidebar_search_sub,
             renaming_thread_id: None,
@@ -691,6 +712,8 @@ impl ConnApp {
             pending_open_thread: None,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
+            speculative: hover_prefetch::SpeculativeThreads::default(),
+            launched_threads: HashSet::new(),
             _control_server: None,
             _activation_task: None,
             subscribed_thread_id: None,
@@ -698,6 +721,7 @@ impl ConnApp {
             perf_open: None,
             perf_open_pending_chat: false,
             subscribed_annotation_project: None,
+            files_subscription: None,
             annotations: Vec::new(),
             annotation_watching_threads: HashSet::new(),
             annotation_last_sent: HashMap::new(),
@@ -707,7 +731,7 @@ impl ConnApp {
         app.start_sidebar_clock(cx);
         if crate::orbit_sync::orbit_sync_enabled_by_env() {
             app.sync_orbit_profile(crate::orbit_sync::allow_startup_theme_adopt(), cx);
-            if let Some(rx) = app.right_panel.read(cx).subscribe_orbit_events(cx) {
+            if let Some(rx) = app.tasks_runtime.subscribe() {
                 Self::pump_orbit_realtime(rx, cx);
             }
         }
@@ -755,7 +779,7 @@ impl ConnApp {
                         app.set_theme(id, cx);
                     }
                     PaletteEvent::Action(PaletteAction::NewThread) => {
-                        app.start_new_thread(None, Some(window), cx);
+                        app.start_general_draft(Some(window), cx).detach();
                     }
                     PaletteEvent::Action(PaletteAction::ToggleSidebar) => app.toggle_sidebar(cx),
                     PaletteEvent::Action(PaletteAction::ToggleRightPanel) => {
@@ -1058,49 +1082,135 @@ impl ConnApp {
             && self.command_palette.is_none()
             && self.settings_modal.is_none()
             && self.workspace_editor.is_none()
+            && self.image_viewer.is_none()
+    }
+
+    /// Opens the full-image viewer on `items[index]`. It takes the keyboard and gives it back to
+    /// what had it when it closes.
+    fn open_image_viewer(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use crate::chat::image_viewer::{ImageViewer, ImageViewerEvent};
+        if items.is_empty() {
+            return;
+        }
+        let return_focus = window
+            .focused(cx)
+            .or_else(|| Some(self.focus_handle.clone()));
+        let thread_id = self.layout.selected_thread_id.clone();
+        let tokens = self.tokens.clone();
+        let viewer = cx
+            .new(|cx| ImageViewer::new(items, index, thread_id, return_focus, tokens, window, cx));
+        let sub = cx.subscribe_in(
+            &viewer,
+            window,
+            |app, _viewer, event: &ImageViewerEvent, window, cx| match event {
+                ImageViewerEvent::Close => app.close_image_viewer(true, window, cx),
+            },
+        );
+        self.image_viewer_subscription = Some(sub);
+        self.image_viewer = Some(viewer);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Closes the image viewer. `restore` gives the keyboard back to what had it before; a thread
+    /// switch skips that, as the old composer is gone.
+    fn close_image_viewer(
+        &mut self,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(viewer) = self.image_viewer.take() else {
+            return;
+        };
+        self.image_viewer_subscription = None;
+        let focus = viewer.update(cx, |viewer, _| viewer.take_return_focus());
+        let focus = focus
+            .filter(|_| restore)
+            .unwrap_or_else(|| self.focus_handle.clone());
+        window.focus(&focus, cx);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Routes a key to the open image viewer: Escape, arrows and zoom keys. Returns whether it
+    /// was used. The palette and Settings, opened on top of it, keep their own keys.
+    fn handle_image_viewer_key(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.command_palette.is_some() || self.settings_modal.is_some() {
+            return false;
+        }
+        let Some(viewer) = self.image_viewer.clone() else {
+            return false;
+        };
+        viewer.update(cx, |viewer, cx| viewer.handle_key(event, window, cx))
     }
 
     fn sync_browser_visibility(&self, cx: &mut Context<'_, Self>) {
-        let visible = self.right_panel_surface_visible();
-        self.right_panel
-            .update(cx, |panel, cx| panel.set_surface_visible(visible, cx));
+        let visible = self.right_panel_surface_visible() && !self.right_panel_shows_launcher();
+        if let Some(panel) = &self.right_panel {
+            panel.update(cx, |panel, cx| panel.set_surface_visible(visible, cx));
+        }
+    }
+
+    fn sync_files_subscription(&mut self) {
+        let next = self
+            .layout
+            .selected_thread_id
+            .as_ref()
+            .filter(|_| self.draft.is_none())
+            .and_then(|thread| {
+                Some(FilesSubscription {
+                    connection: self.connection_for_thread(thread)?,
+                    thread: thread.clone(),
+                })
+            });
+        if let (Some(old), Some(next)) = (&self.files_subscription, &next)
+            && next.connection.same_connection(&old.connection)
+            && next.thread == old.thread
+        {
+            return;
+        }
+        if let Some(old) = self.files_subscription.take()
+            && !next
+                .as_ref()
+                .is_some_and(|new| new.connection.same_connection(&old.connection))
+        {
+            old.connection
+                .subscribe_panel_requests(Some(self.device_name()));
+        }
+        if let Some(next) = &next {
+            next.connection.subscribe_files_thread(
+                Some(self.device_name()),
+                Some(next.thread.clone()),
+                false,
+            );
+        }
+        self.files_subscription = next;
     }
 
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
+        self.sync_panel_owner(cx);
         self.sync_chat_environment(cx);
+        self.sync_thread_directory(cx);
         let child_approvals = self.sync_child_approvals();
+        self.sync_files_subscription();
         let selected = self.layout.selected_thread_id.as_deref();
         let shell_thread = selected.and_then(|id| self.shell.find_thread(id));
-        let draft_view = self.draft.as_ref().map(|draft| {
-            let project = self.shell.project(&draft.project_id);
-            let projects = self
-                .shell
-                .projects
-                .iter()
-                .filter(|p| p.archived_at.is_none())
-                .map(|p| crate::chat::DraftProjectOption {
-                    id: p.id.clone(),
-                    title: p.title.clone(),
-                    pinned: matches!(p.pinned_at, Some(Some(_))),
-                    is_scratch: self.is_scratch_project(&p.id, Some(&p.workspace_root)),
-                    shell: p.clone(),
-                })
-                .collect();
-            crate::chat::DraftViewInfo {
-                draft_id: draft.draft_id.clone(),
-                project_id: draft.project_id.clone(),
-                project_title: project
-                    .map(|p| p.title.clone())
-                    .unwrap_or_else(|| draft.project_id.clone()),
-                projects,
-                launching: draft.launching,
-                is_scratch: self.is_scratch_project(
-                    &draft.project_id,
-                    project.map(|p| p.workspace_root.as_str()),
-                ),
-                scratch_available: self.scratch_root_for_project(&draft.project_id).is_some(),
-            }
+        let draft_view = self.draft.as_ref().map(|draft| crate::chat::DraftViewInfo {
+            draft_id: draft.draft_id.clone(),
+            launching: draft.launching,
         });
         let title = if self.draft.is_some() {
             Some("New thread".to_owned())
@@ -1129,15 +1239,37 @@ impl ConnApp {
             .or_else(|| self.draft.as_ref().map(|d| d.project_id.clone()));
         let thread_id = selected.map(str::to_owned);
         let surface = self.right_panel_surface();
-        let surface_visible = self.right_panel_surface_visible();
+        let surface_visible =
+            self.right_panel_surface_visible() && !self.right_panel_shows_launcher();
         let panel_root = root.clone();
-        let environment_id = self.environment_id();
-        self.right_panel.update(cx, |panel, cx| {
-            panel.set_environment(environment_id, cx);
-            panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
-            panel.set_surface(&surface, cx);
-            panel.set_surface_visible(surface_visible, cx);
-        });
+        if let Some(panel) = &self.right_panel {
+            let environment = self.context_environment();
+            let environment_id = environment.clone().unwrap_or_else(|| self.environment_id());
+            let project_key = project_id.as_deref().and_then(|id| {
+                let project = self.shell.project(id)?;
+                let config = self.active_server_config();
+                conn_state::project_groups::project_group_key(
+                    project,
+                    config.environment_id(),
+                    self.shell.projects.iter().filter(|candidate| {
+                        self.linked_environment_of_project(&candidate.id) == environment.as_deref()
+                    }),
+                )
+            });
+            let hostname = self
+                .context_server_url(environment.as_deref())
+                .and_then(|raw| url::Url::parse(raw).ok())
+                .and_then(|url| url.host_str().map(str::to_owned));
+            let connection = self.context_connection();
+            panel.update(cx, |panel, cx| {
+                panel.set_connection(connection, cx);
+                panel.set_environment(environment_id, cx);
+                panel.set_browser_history_context(project_key, hostname, cx);
+                panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
+                panel.set_surface(&surface, cx);
+                panel.set_surface_visible(surface_visible, cx);
+            });
+        }
         let (
             model_instance,
             model,
@@ -1221,7 +1353,21 @@ impl ConnApp {
             chat.set_draft(draft_view, cx);
             chat.set_project_id(project_id.clone(), cx);
             chat.set_workspace_root(root, cx);
-            chat.set_thread(thread, title, cx);
+            chat.set_thread(
+                thread,
+                title,
+                |sender_id| {
+                    if self.linked_environment_of_thread(sender_id)
+                        != selected.and_then(|id| self.linked_environment_of_thread(id))
+                    {
+                        return None;
+                    }
+                    self.shell
+                        .find_thread(sender_id)
+                        .map(|shell| shell.title.as_str())
+                },
+                cx,
+            );
             chat.set_linked_pull_requests(linked_pull_requests, cx);
             chat.set_preferred_editor(preferred_editor);
             chat.set_child_approvals(child_approvals, cx);
@@ -1232,6 +1378,7 @@ impl ConnApp {
             }
         });
         self.sync_annotations_state(project_id.as_deref(), cx);
+        self.apply_pending_panel_sql(cx);
     }
 
     /// Moves connection events onto the GPUI thread, one batch per wake.
@@ -1359,10 +1506,11 @@ impl ConnApp {
                     .filter(|(id, _)| *id == thread_id)
                     .map(|(_, opened_at)| (thread_stream_item_kind(&item), *opened_at));
                 let apply_start = std::time::Instant::now();
-                let state = self
-                    .threads
-                    .entry(thread_id.clone())
-                    .or_insert_with(|| ThreadState::new(thread_id.clone()));
+                // Every subscribe creates the reducer first, so a missing one means a late item
+                // of a stream that was dropped with its reducer.
+                let Some(state) = self.threads.get_mut(&thread_id) else {
+                    return;
+                };
                 state.apply(item);
                 if let Some((kind, opened_at)) = perf_kind
                     && kind != "event"
@@ -1377,7 +1525,14 @@ impl ConnApp {
             }
             ClientEvent::ServerConfig(event) => self.apply_server_config_event(*event, cx),
             ClientEvent::PanelRequest(request) => {
-                self.dispatch_agent_panel_request(request, cx);
+                if let Some(conn) = self.connection.clone() {
+                    self.dispatch_agent_panel_request(
+                        self.primary_environment_id(),
+                        conn,
+                        request,
+                        cx,
+                    );
+                }
             }
             ClientEvent::Annotations {
                 project_id,
@@ -1397,7 +1552,11 @@ impl ConnApp {
                         (None, None) => {}
                     }
                 }
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
+                if tag == "orchestration.subscribeThread"
+                    && self.threads.contains_key(&key)
+                    && self.thread_stream_wanted(&key)
+                {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }
@@ -1439,9 +1598,11 @@ impl ConnApp {
         self.chat.update(cx, |chat, cx| {
             chat.set_server_config(std::sync::Arc::clone(&config), cx)
         });
-        self.right_panel.update(cx, |panel, cx| {
-            panel.set_server_config(std::sync::Arc::clone(&config), cx)
-        });
+        if let Some(panel) = &self.right_panel {
+            panel.update(cx, |panel, cx| {
+                panel.set_server_config(std::sync::Arc::clone(&config), cx)
+            });
+        }
         let primary_config = std::sync::Arc::clone(&self.server_config);
         if let Some(modal) = &self.settings_modal {
             let shells = self
@@ -1475,6 +1636,15 @@ impl ConnApp {
 
     /// Resubscribes ended thread streams whose thread the shell now lists.
     fn resubscribe_ended_threads(&mut self) {
+        let released: Vec<String> = self
+            .ended_threads
+            .iter()
+            .filter(|id| !self.thread_stream_wanted(id))
+            .cloned()
+            .collect();
+        for id in released {
+            self.ended_threads.remove(&id);
+        }
         let ready: Vec<String> = self
             .ended_threads
             .iter()
@@ -1581,58 +1751,9 @@ impl ConnApp {
         .detach();
     }
 
-    /// Picks the default project id for a new thread, honoring explicit selection, the active
-    /// workspace filter (Orbit workspace or project id), currently selected project, or first
-    /// non-archived project.
-    fn resolve_new_thread_project(&self, requested: Option<String>) -> Option<String> {
-        if let Some(id) = requested
-            && self.shell.project(&id).is_some()
-        {
-            return Some(id);
-        }
-        if let Some(ws_id) = self.active_workspace.as_deref() {
-            if let Some(orbit_ws) = self.orbit.workspaces.iter().find(|w| w.id == ws_id) {
-                if let Some(sel) = self
-                    .layout
-                    .selected_project_id
-                    .as_deref()
-                    .and_then(|id| self.shell.project(id))
-                    && conn_desktop::orbit::workspace_matches_project(
-                        orbit_ws,
-                        &sel.id,
-                        &sel.title,
-                        &sel.workspace_root,
-                    )
-                {
-                    return Some(sel.id.clone());
-                }
-                if let Some(matched) = self.shell.projects.iter().find(|p| {
-                    p.archived_at.is_none()
-                        && conn_desktop::orbit::workspace_matches_project(
-                            orbit_ws,
-                            &p.id,
-                            &p.title,
-                            &p.workspace_root,
-                        )
-                }) {
-                    return Some(matched.id.clone());
-                }
-            } else if self.shell.project(ws_id).is_some() {
-                return Some(ws_id.to_owned());
-            }
-        }
-        self.layout
-            .selected_project_id
-            .clone()
-            .filter(|id| self.shell.project(id).is_some())
-            .or_else(|| {
-                self.shell
-                    .projects
-                    .iter()
-                    .find(|p| p.archived_at.is_none())
-                    .or_else(|| self.shell.projects.first())
-                    .map(|p| p.id.clone())
-            })
+    #[cfg(feature = "automation")]
+    pub(crate) fn active_draft_id(&self) -> Option<&str> {
+        self.draft.as_ref().map(|d| d.draft_id.as_str())
     }
 
     /// Sets the runtime mode (`approval-required`, `full-access`, ...) for the active draft.
@@ -1649,20 +1770,85 @@ impl ConnApp {
         }
     }
 
-    /// Starts a new thread draft in `project_id` (or the active workspace/project). The
-    /// composer's first send launches it via `orchestration.launchThread`.
-    pub(crate) fn start_new_thread(
+    /// Opens General on the primary server, even when the selected thread lives on a linked server.
+    pub(crate) fn start_general_draft(
         &mut self,
-        project_id: Option<String>,
         window: Option<&mut Window>,
         cx: &mut Context<'_, Self>,
-    ) {
-        let Some(project_id) = self.resolve_new_thread_project(project_id) else {
-            if let Some(window) = window {
-                self.add_project_via_picker(window, cx);
-            }
-            return;
+    ) -> gpui_kit::Task<Option<String>> {
+        if let Some(project) = self.shell.projects.iter().find(|p| {
+            p.archived_at.is_none()
+                && self.linked_environment_of_project(&p.id).is_none()
+                && self.is_scratch_project(&p.id, Some(&p.workspace_root))
+        }) {
+            return gpui_kit::Task::ready(Some(self.open_project_draft(
+                project.id.clone(),
+                window,
+                cx,
+            )));
+        }
+        let Some(connection) = self.connection.clone() else {
+            self.chat.update(cx, |chat, cx| {
+                chat.set_error(
+                    Some("Connect to the agent node to start a thread.".to_owned()),
+                    cx,
+                )
+            });
+            return gpui_kit::Task::ready(None);
         };
+        let generation = self.connection_gen;
+        let previous_thread = self.layout.selected_thread_id.clone();
+        let previous_draft = self.draft.as_ref().map(|d| d.draft_id.clone());
+        let window = window.map(|w| w.window_handle());
+        cx.spawn(async move |this, cx| {
+            use conn_contract::rpc::projects::ensure_scratch;
+            let result = connection
+                .call::<ensure_scratch::Payload, ensure_scratch::Success>(
+                    "projects.ensureScratch",
+                    &conn_contract::ServerProbePayload {},
+                )
+                .await;
+            this.update(cx, |app, cx| {
+                if app.connection_gen != generation
+                    || app.layout.selected_thread_id != previous_thread
+                    || app.draft.as_ref().map(|d| &d.draft_id) != previous_draft.as_ref()
+                {
+                    return None;
+                }
+                match result {
+                    Ok(project) => {
+                        app.scratch_project_id = Some(project.project_id.clone());
+                        let id = app.open_project_draft(project.project_id, None, cx);
+                        if let Some(window) = window {
+                            let chat = app.chat.clone();
+                            let _ = window.update(cx, |_, window, cx| {
+                                chat.update(cx, |chat, cx| chat.focus_composer(window, cx))
+                            });
+                        }
+                        Some(id)
+                    }
+                    Err(err) => {
+                        app.chat.update(cx, |chat, cx| {
+                            chat.set_error(
+                                Some(format!("Could not open a General thread. {err}")),
+                                cx,
+                            )
+                        });
+                        None
+                    }
+                }
+            })
+            .ok()
+            .flatten()
+        })
+    }
+
+    pub(crate) fn open_project_draft(
+        &mut self,
+        project_id: String,
+        window: Option<&mut Window>,
+        cx: &mut Context<'_, Self>,
+    ) -> String {
         let template = self.shell.threads_for_project(&project_id).next();
         let project_model = self
             .shell
@@ -1695,6 +1881,14 @@ impl ConnApp {
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_else(|| "full-access".to_owned());
         let interaction_mode = template
+            .filter(|_| {
+                !self.is_scratch_project(
+                    &project_id,
+                    self.shell
+                        .project(&project_id)
+                        .map(|p| p.workspace_root.as_str()),
+                )
+            })
             .map(|t| conn_contract::to_json(&t.interaction_mode))
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_else(|| "default".to_owned());
@@ -1726,7 +1920,9 @@ impl ConnApp {
                 self.drafts.map(&project_key, &session.draft_id);
                 session
             });
+        let id = session.draft_id.clone();
         self.activate_draft(session, window, cx);
+        id
     }
 
     /// Shows `session` as the open draft: the chat card switches to it and the sidebar row of
@@ -1897,7 +2093,9 @@ impl ConnApp {
         let thread = self.shell.find_thread(&anchor.thread_id)?;
         let state =
             ThreadMenuState::for_thread(&self.shell, thread, self.active_workspace.as_deref());
-        Some(build_thread_action_menu_items(&state))
+        let mut items = build_thread_action_menu_items(&state);
+        self.disable_copy_thread_until_known(&anchor.thread_id, &mut items);
+        Some(items)
     }
 
     /// Opens the menu of a draft row at `position` (window coordinates).
@@ -1968,39 +2166,6 @@ impl ConnApp {
                 self.discard_draft_row(&draft_id, window, cx);
             }
             _ => {}
-        }
-    }
-
-    /// Changes the target project of the open draft, as Conn's picker does
-    /// (`DraftHeroHeadline` `selectProject`). A draft with text or attachments moves to the
-    /// project, and the project's own draft becomes an unmapped draft in the sidebar. An empty
-    /// draft stays behind its own project, and the project's own draft opens.
-    pub(crate) fn set_draft_project(&mut self, project_id: String, cx: &mut Context<'_, Self>) {
-        let Some(draft) = &self.draft else {
-            return;
-        };
-        if draft.launching || draft.project_id == project_id {
-            return;
-        }
-        let has_content = self.chat.read(cx).draft_has_content(cx);
-        let target_key = self.project_draft_key(&project_id);
-        let draft_id = draft.draft_id.clone();
-        match self.drafts.retarget(&draft_id, &target_key, has_content) {
-            conn_state::Retarget::OpenProjectDraft => {
-                self.start_new_thread(Some(project_id), None, cx);
-            }
-            conn_state::Retarget::Move { .. } => {
-                if let Some(draft) = &mut self.draft {
-                    draft.project_id.clone_from(&project_id);
-                    draft.branch = None;
-                    draft.worktree_path = None;
-                }
-                self.drafts.set_frozen_project(&project_id);
-                self.layout.selected_project_id = Some(project_id);
-                self.sync_chat(cx);
-                self.settle_drafts(cx);
-                cx.notify();
-            }
         }
     }
 
@@ -2404,36 +2569,6 @@ impl ConnApp {
         }
     }
 
-    /// `or start without a project`: retargets the draft at `projects.ensureScratch`.
-    fn start_draft_scratch(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(connection) = self.connection.clone() else {
-            return;
-        };
-        if self.draft.as_ref().is_none_or(|d| d.launching) {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let result = connection
-                .call::<conn_contract::rpc::projects::ensure_scratch::Payload, conn_contract::rpc::projects::ensure_scratch::Success>(
-                    "projects.ensureScratch",
-                    &conn_contract::ServerProbePayload {},
-                )
-                .await;
-            let _ = this.update(cx, |app, cx| match result {
-                Ok(project) => {
-                    app.scratch_project_id = Some(project.project_id.clone());
-                    app.set_draft_project(project.project_id, cx);
-                }
-                Err(err) => {
-                    let message = format!("Could not start without a project. {err}");
-                    app.chat
-                        .update(cx, |chat, cx| chat.set_error(Some(message), cx));
-                }
-            });
-        })
-        .detach();
-    }
-
     /// Toggles whether the active new-thread draft launches in a fresh git worktree or local root.
     pub(crate) fn set_draft_workspace_strategy(
         &mut self,
@@ -2573,6 +2708,7 @@ impl ConnApp {
 
         let generation = self.connection_gen;
         let fallback_text = text;
+        let draft_panel_owner = self.thread_panels.owner.clone();
         let launch_window = window.map(|w| w.window_handle());
         cx.spawn(async move |this, cx| {
             let result = connection
@@ -2600,6 +2736,10 @@ impl ConnApp {
                             state.apply_projection(res.projection, res.sequence);
                             app.threads.insert(final_thread_id.clone(), state);
                         }
+                        // The stream's items apply to an existing reducer only.
+                        app.threads
+                            .entry(final_thread_id.clone())
+                            .or_insert_with(|| ThreadState::new(final_thread_id.clone()));
                         // The thread replaces the draft (`finalizePromotedDraftThread`). Someone who
                         // moved on to another thread meanwhile stays there.
                         let was_open = app.draft.as_ref().is_some_and(|d| d.draft_id == draft_id);
@@ -2610,12 +2750,17 @@ impl ConnApp {
                             app.draft = None;
                             app.drafts.set_frozen_active(None);
                         }
+                        if let Some(owner) = &draft_panel_owner {
+                            app.thread_panels
+                                .promote_draft(owner, final_thread_id.clone());
+                        }
                         app.drafts.forget(&draft_id);
                         if was_open {
                             app.layout.selected_project_id = Some(project_id.clone());
                             app.layout.selected_thread_id = Some(final_thread_id.clone());
                         }
                         app.ended_threads.remove(&final_thread_id);
+                        app.claim_launched_stream(&final_thread_id);
                         connection.subscribe_thread(&final_thread_id);
                         app.chat.update(cx, |chat, cx| chat.set_error(None, cx));
                         app.sync_chat(cx);
@@ -2996,7 +3141,8 @@ impl ConnApp {
             .update(cx, |chat, cx| chat.set_error(Some(message), cx));
     }
 
-    /// Answers the approval timeline entry `entry_id` of the selected thread.
+    /// Answers the approval timeline entry `entry_id` of the selected thread. A failure goes back
+    /// to its card, which then answers again.
     pub(crate) fn respond_approval(
         &mut self,
         entry_id: &str,
@@ -3007,6 +3153,7 @@ impl ConnApp {
             self.context_connection(),
             self.layout.selected_thread_id.clone(),
         ) else {
+            self.approval_failed(entry_id, "Not connected. Try again.".to_owned(), cx);
             return;
         };
         let Some(request_id) = self
@@ -3016,26 +3163,49 @@ impl ConnApp {
             .cloned()
         else {
             eprintln!("approval: no request id for entry {entry_id}");
+            self.approval_failed(
+                entry_id,
+                "This approval is no longer waiting.".to_owned(),
+                cx,
+            );
             return;
         };
         let command = match crate::commands::respond_approval(&thread_id, &request_id, decision) {
             Ok(command) => command,
             Err(e) => {
                 eprintln!("approval: could not build runtime-request.respond: {e}");
+                self.approval_failed(entry_id, "Could not answer the approval.".to_owned(), cx);
                 return;
             }
         };
         // A composer send meanwhile must not decline this request too (`respondingRequestIds`).
         if !self.responding_approvals.insert(request_id.clone()) {
+            self.approval_failed(
+                entry_id,
+                "Another answer to this approval is on its way.".to_owned(),
+                cx,
+            );
             return;
         }
+        let entry_id = entry_id.to_owned();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = connection.dispatch_command(command).await {
-                eprintln!("approval: dispatchCommand failed: {e}");
-            }
-            let _ = this.update(cx, |app, _| app.responding_approvals.remove(&request_id));
+            let result = connection.dispatch_command(command).await;
+            let _ = this.update(cx, |app, cx| {
+                app.responding_approvals.remove(&request_id);
+                if let Err(e) = result {
+                    eprintln!("approval: dispatchCommand failed: {e}");
+                    app.approval_failed(&entry_id, crate::commands::format_client_error(&e), cx);
+                }
+            });
         })
         .detach();
+    }
+
+    /// Tells the approval card of `entry_id` that its answer did not go through.
+    fn approval_failed(&mut self, entry_id: &str, message: String, cx: &mut Context<'_, Self>) {
+        self.chat.update(cx, |chat, cx| {
+            chat.approval_response_failed(entry_id, message, cx)
+        });
     }
 
     /// Forks the selected thread at `run_id` into a new thread and opens it
@@ -3254,23 +3424,27 @@ impl ConnApp {
     }
 
     /// Opens the Browser tab and loads `url`.
-    #[cfg(feature = "automation")]
-    pub(crate) fn browse(&mut self, url: String, cx: &mut Context<'_, Self>) {
+    pub(crate) fn browse(&mut self, url: String, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.select_right_panel_tab(RightPanelTab::Browser, cx);
-        self.right_panel
-            .update(cx, |panel, cx| panel.navigate_browser(url, cx));
+        self.ensure_right_panel(window, cx)
+            .update(cx, |panel, cx| panel.navigate_browser(url, window, cx));
     }
 
     /// Diagnostic state of the Browser tab.
     #[cfg(feature = "automation")]
     pub(crate) fn browser_state(&self, cx: &App) -> serde_json::Value {
-        self.right_panel.read(cx).browser_state(cx)
+        self.right_panel
+            .as_ref()
+            .map_or(serde_json::Value::Null, |p| p.read(cx).browser_state(cx))
     }
 
     /// The Browser tab's page title.
     #[cfg(feature = "automation")]
     pub(crate) fn browser_title(&self, cx: &App) -> String {
-        self.right_panel.read(cx).browser_title(cx)
+        self.right_panel
+            .as_ref()
+            .map(|p| p.read(cx).browser_title(cx))
+            .unwrap_or_default()
     }
 
     #[cfg(feature = "automation")]
@@ -3280,6 +3454,8 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
         self.right_panel
+            .as_ref()
+            .ok_or_else(|| "No browser in this thread".to_owned())?
             .update(cx, |panel, cx| panel.browser_preview_eval(expression, cx))
     }
 
@@ -3291,6 +3467,8 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
         self.right_panel
+            .as_ref()
+            .ok_or_else(|| "No browser in this thread".to_owned())?
             .update(cx, |panel, cx| panel.browser_preview_call(op, params, cx))
     }
 
@@ -3300,7 +3478,11 @@ impl ConnApp {
         path: &std::path::Path,
         cx: &App,
     ) -> Result<serde_json::Value, String> {
-        self.right_panel.read(cx).browser_screenshot(path, cx)
+        self.right_panel
+            .as_ref()
+            .ok_or_else(|| "No browser in this thread".to_owned())?
+            .read(cx)
+            .browser_screenshot(path, cx)
     }
 
     /// State read-out for the automation hook.
@@ -3338,6 +3520,7 @@ impl ConnApp {
             "chatMetrics": chat_metrics,
             "palette": self.command_palette.is_some(),
             "settings": self.settings_modal.is_some(),
+            "imageViewer": self.image_viewer.is_some(),
         })
     }
 
@@ -3385,9 +3568,11 @@ impl ConnApp {
                 id: format!("big-u-{turn}"),
                 text: format!("Turn #{turn}: {topic} and verify edge cases."),
                 created_by_agent: false,
+                sender: None,
                 created_at: None,
                 attachments: Vec::new(),
                 is_steer: false,
+                review_comments: Vec::new(),
                 run_id: None,
             });
 
@@ -3583,21 +3768,22 @@ impl ConnApp {
         self.thread_selection.set_anchor(&thread_id);
         // A thread the project filter hides widens the filter to every project, and its row
         // scrolls into view (`routeReveal`).
-        if let Some(project_id) = &project_id
-            && self.active_workspace.is_some()
-            && !crate::sidebar::thread_list::project_in_scope(
+        if self.active_workspace.is_some()
+            && let Some(listed) = self
+                .shell
+                .listed_ancestor(&thread_id)
+                .and_then(|id| self.shell.find_thread(id))
+            && !crate::sidebar::thread_list::thread_in_scope(
                 &self.shell,
                 &self.orbit.workspaces,
                 self.active_workspace.as_deref(),
-                project_id,
+                listed,
             )
         {
             self.active_workspace = None;
             rail_workspaces::save_active_workspace(None);
         }
         self.reveal_open_row = true;
-        // Always reveal the chat column when selecting a thread in the sidebar.
-        self.right_panel_maximized = false;
         self.open_thread(thread_id);
         if project_id.is_some() {
             self.layout.selected_project_id = project_id;
@@ -3619,6 +3805,11 @@ impl ConnApp {
     /// Toggles the right panel slot (`Cmd+Alt+B`).
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<'_, Self>) {
         self.layout.right_panel_open = !self.layout.right_panel_open;
+        if !self.layout.right_panel_open {
+            self.right_panel_add_menu_open = false;
+            self.right_panel_maximized = false;
+        }
+        self.remember_panel_layout();
         self.sync_browser_visibility(cx);
         cx.notify();
     }
@@ -3631,7 +3822,10 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) {
         self.terminal_drawer_open = !self.terminal_drawer_open;
-        let terminal = self.right_panel.read(cx).terminal_entity();
+        let terminal = self
+            .ensure_right_panel(window, cx)
+            .read(cx)
+            .terminal_entity();
         if self.terminal_drawer_open {
             terminal.update(cx, |terminal, cx| {
                 terminal.ensure_started(cx);
@@ -3663,14 +3857,98 @@ impl ConnApp {
     /// The open right panel has no tab, so it lists the surfaces to open.
     fn right_panel_shows_launcher(&self) -> bool {
         self.layout
-            .shows_surface_launcher(self.right_panel_open_tabs.len())
+            .shows_surface_launcher(self.visible_right_panel_tabs().len())
     }
 
-    /// The active right-panel surface.
+    /// The active right-panel surface. A thread without a project shows Tasks in place of a
+    /// surface that needs one (a tab kept from when it had a project, or a saved layout).
     fn right_panel_surface(&self) -> PanelSurface {
-        match (&self.layout.right_panel_tab, &self.right_panel_file) {
-            (RightPanelTab::File, Some(path)) => PanelSurface::File(path.clone()),
-            (tab, _) => PanelSurface::Kind(*tab),
+        if self.shown_thread_has_project() {
+            self.selected_panel_surface.clone()
+        } else {
+            self.selected_panel_surface.clone().without_project()
+        }
+    }
+
+    /// Whether the thread (or draft) in view has a project. A General thread is on the server's
+    /// scratch project and has none (`useHasProject` in the lab). With nothing in view there is no
+    /// project to lack, and the menu offers only Browser and Tasks anyway.
+    fn shown_thread_has_project(&self) -> bool {
+        match (&self.layout.selected_thread_id, &self.draft) {
+            (Some(thread), _) => self.thread_has_project(thread),
+            (None, Some(draft)) => self.project_has_project(&draft.project_id),
+            (None, None) => true,
+        }
+    }
+
+    /// Whether thread `thread` has a project of its own, not General's scratch one.
+    fn thread_has_project(&self, thread: &str) -> bool {
+        self.shell
+            .find_thread(thread)
+            .is_none_or(|t| self.project_has_project(&t.project_id))
+    }
+
+    fn project_has_project(&self, project_id: &str) -> bool {
+        let root = self.shell.project(project_id).map(|p| p.workspace_root.as_str());
+        !self.is_scratch_project(project_id, root)
+    }
+
+    /// `tab`, or Tasks when the shown thread has no project and `tab` needs one.
+    fn tab_for_shown_thread(&self, tab: RightPanelTab) -> RightPanelTab {
+        if self.shown_thread_has_project() {
+            tab
+        } else {
+            tab.without_project()
+        }
+    }
+
+    /// The tabs the strip shows: those the shown thread may have, and the surface it shows now.
+    /// Open tabs that need a project stay open behind them for when the thread has one.
+    fn visible_right_panel_tabs(&self) -> Vec<PanelSurface> {
+        if self.shown_thread_has_project() {
+            return self.right_panel_open_tabs.clone();
+        }
+        let mut tabs: Vec<PanelSurface> = self
+            .right_panel_open_tabs
+            .iter()
+            .filter(|tab| !tab.needs_project())
+            .cloned()
+            .collect();
+        let shown = self.right_panel_surface();
+        if !self.right_panel_open_tabs.is_empty() && !tabs.contains(&shown) {
+            tabs.push(shown);
+        }
+        tabs
+    }
+
+    #[cfg(feature = "automation")]
+    pub(crate) fn spike_files_state(&self, window: &Window, cx: &App) -> serde_json::Value {
+        let Some(panel) = self.right_panel.as_ref() else {
+            return serde_json::Value::Null;
+        };
+        let mut state = panel.read(cx).spike_files_state(window, cx);
+        if let PanelSurface::File(path) = panel.read(cx).displayed_surface(
+            self.right_panel_surface(),
+            &self.right_panel_open_tabs,
+            cx,
+        ) {
+            state["displayedTab"] = path.into();
+        }
+        state["composerFocused"] = self.chat.read(cx).spike_input_focused(window, cx).into();
+        state
+    }
+
+    pub(crate) fn show_source_location(
+        &mut self,
+        location: &conn_contract::source::SourceLocation,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.select_right_panel_surface(PanelSurface::File(location.path.clone()), cx);
+        if let Some(lines) = location.lines {
+            self.ensure_right_panel(window, cx).update(cx, |panel, cx| {
+                panel.reveal_lines(location.path.clone(), lines, None, cx)
+            });
         }
     }
 
@@ -3680,7 +3958,23 @@ impl ConnApp {
         tab: RightPanelTab,
         cx: &mut Context<'_, Self>,
     ) {
-        self.select_right_panel_surface(PanelSurface::Kind(tab), cx);
+        let target = if self.selected_panel_surface.kind() == tab {
+            self.selected_panel_surface.clone()
+        } else {
+            self.right_panel_open_tabs
+                .iter()
+                .find(|surface| surface.kind() == tab)
+                .cloned()
+                .unwrap_or(PanelSurface::Kind(tab))
+        };
+        self.select_right_panel_surface(target, cx);
+    }
+
+    fn add_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<'_, Self>) {
+        self.select_right_panel_surface(
+            PanelSurface::for_add(tab, &self.right_panel_open_tabs),
+            cx,
+        );
     }
 
     /// Shows `surface` (opening its tab) and opens the right panel if it was closed.
@@ -3689,15 +3983,20 @@ impl ConnApp {
         surface: PanelSurface,
         cx: &mut Context<'_, Self>,
     ) {
+        // A thread without a project opens Tasks in place of Files, MCP or API.
+        let surface = if self.shown_thread_has_project() {
+            surface
+        } else {
+            surface.without_project()
+        };
         if !self.right_panel_open_tabs.contains(&surface) {
             self.right_panel_open_tabs.push(surface.clone());
         }
         self.right_panel_add_menu_open = false;
         self.layout.right_panel_tab = surface.kind();
-        if let PanelSurface::File(path) = surface {
-            self.right_panel_file = Some(path);
-        }
+        self.selected_panel_surface = surface;
         self.layout.right_panel_open = true;
+        self.remember_panel_layout();
         self.sync_chat(cx);
         self.sync_browser_visibility(cx);
         cx.notify();
@@ -3705,22 +4004,30 @@ impl ConnApp {
 
     /// Closes a right panel tab; closing the last one closes the panel.
     fn close_right_panel_tab(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
-        // Closing the last surface closes the panel, as in Conn.
-        if self.right_panel_open_tabs.len() <= 1 {
-            self.right_panel_add_menu_open = false;
-            if self.layout.right_panel_open {
-                self.toggle_right_panel(cx);
-            }
-            return;
-        }
         let Some(pos) = self.right_panel_open_tabs.iter().position(|t| t == surface) else {
             return;
         };
         self.right_panel_open_tabs.remove(pos);
+        if let Some(panel) = &self.right_panel {
+            panel.update(cx, |p, cx| p.remove_surface(surface, cx));
+        }
+        if self.right_panel_open_tabs.is_empty() {
+            self.right_panel_add_menu_open = false;
+            self.right_panel_maximized = false;
+            self.selected_panel_surface = PanelSurface::Kind(RightPanelTab::Files);
+            self.layout.right_panel_tab = RightPanelTab::Files;
+            self.layout.right_panel_open = false;
+            self.remember_panel_layout();
+            self.sync_browser_visibility(cx);
+            cx.notify();
+            return;
+        }
         if &self.right_panel_surface() == surface {
-            let next = self.right_panel_open_tabs[pos.saturating_sub(1)].clone();
+            let next =
+                self.right_panel_open_tabs[pos.min(self.right_panel_open_tabs.len() - 1)].clone();
             self.select_right_panel_surface(next, cx);
         } else {
+            self.remember_panel_layout();
             cx.notify();
         }
     }
@@ -3735,6 +4042,7 @@ impl ConnApp {
         if self.layout.right_panel_open && self.layout.right_panel_tab == tab {
             self.layout.right_panel_open = false;
             self.right_panel_maximized = false;
+            self.remember_panel_layout();
             self.sync_chat(cx);
             self.sync_browser_visibility(cx);
             cx.notify();
@@ -3789,6 +4097,25 @@ impl ConnApp {
     #[must_use]
     pub(crate) fn chat_for_test(&self) -> Entity<crate::chat::ChatView> {
         self.chat.clone()
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn image_viewer_for_test(
+        &self,
+    ) -> Option<Entity<crate::chat::image_viewer::ImageViewer>> {
+        self.image_viewer.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_image_viewer_for_test(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_image_viewer(items, index, window, cx);
     }
 
     /// Keeps drafts in `path` for this test, as a run with a config directory does.
@@ -4135,7 +4462,7 @@ impl ConnApp {
             return Ok((project.id, tid));
         }
 
-        self.start_new_thread(Some(project.id.clone()), None, cx);
+        self.open_project_draft(project.id.clone(), None, cx);
         Ok((project.id, String::new()))
     }
 
@@ -4250,7 +4577,11 @@ impl ConnApp {
         match forward {
             ForwardNavigation::Thread(next) => self.select_thread(next, cx),
             ForwardNavigation::NewThread(project_id) => {
-                self.start_new_thread(project_id, None, cx);
+                if let Some(project) = project_id {
+                    self.open_project_draft(project, None, cx);
+                } else {
+                    self.start_general_draft(None, cx).detach();
+                }
             }
         }
     }
@@ -4504,8 +4835,9 @@ impl ConnApp {
                 cx,
             ),
             ThreadMenuAction::FilterByProject => {
-                let next = (self.active_workspace.as_deref() != Some(thread.project_id.as_str()))
-                    .then(|| thread.project_id.clone());
+                let key = conn_state::sidebar_project_key(&thread);
+                let next = (self.active_workspace.as_deref() != Some(key.as_ref()))
+                    .then(|| key.into_owned());
                 self.select_workspace(next, cx);
             }
             ThreadMenuAction::Copy => {}
@@ -4519,8 +4851,12 @@ impl ConnApp {
                     self.copy_to_clipboard(branch, cx);
                 }
             }
-            ThreadMenuAction::CopyThread => self.copy_to_clipboard(thread.title, cx),
+            ThreadMenuAction::CopyThread => self.copy_thread_reference(&thread_id, cx),
             ThreadMenuAction::CopyThreadId => self.copy_to_clipboard(thread.id, cx),
+            ThreadMenuAction::CopyThreadLink => {
+                let link = self.thread_link_for(&thread.id);
+                self.copy_to_clipboard(link, cx);
+            }
             ThreadMenuAction::ProjectSettings => {
                 if self.settings_modal.is_none() {
                     self.open_settings(window, cx);
@@ -4610,12 +4946,22 @@ impl ConnApp {
         // Deleting ends every undo that restores the thread's place (`expireThreadUndos`).
         self.forget_thread_undo(thread_id, &[ThreadUndoKind::Settle, ThreadUndoKind::Pin]);
         // The thread's unsent input goes with it (`clearComposerDraftForThread`).
+        let owner = PanelOwner {
+            environment: self
+                .linked_environment_of_thread(thread_id)
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.primary_environment_id()),
+            id: thread_id.to_owned(),
+        };
         let deleted = thread_id.to_owned();
         self.dispatch_thread_command_then(
             "delete thread",
             crate::commands::delete_thread(thread_id),
             cx,
-            move |app, cx| app.forget_thread_draft(&deleted, cx),
+            move |app, cx| {
+                app.thread_panels.forget(&owner);
+                app.forget_thread_draft(&deleted, cx);
+            },
         );
     }
 
@@ -4708,6 +5054,17 @@ impl ConnApp {
             _ => return,
         }
         self.sidebar.remember_widths(sidebar, panel);
+    }
+
+    pub(crate) fn open_task_in_panel(
+        &mut self,
+        task_id: i64,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.ensure_right_panel(window, cx)
+            .update(cx, |panel, cx| panel.open_task(task_id, cx));
+        self.select_right_panel_tab(RightPanelTab::Tasks, cx);
     }
 
     /// Toggles the top-right Thread Details card and loads its data when it opens.
@@ -5060,56 +5417,6 @@ impl ConnApp {
         }
     }
 
-    /// Opens a native folder picker and registers the selected directory via `projects.mutate`
-    /// (`project.create`).
-    pub(crate) fn add_project_via_picker(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(connection) = self.connection.clone() else {
-            return;
-        };
-        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add project".into()),
-        });
-        cx.spawn_in(window, async move |_this, _cx| {
-            let Ok(Ok(Some(mut chosen))) = paths.await else {
-                return;
-            };
-            let Some(path) = chosen.pop() else {
-                return;
-            };
-            let workspace_root = path.to_string_lossy().trim_end_matches('/').to_owned();
-            if workspace_root.is_empty() {
-                return;
-            }
-            let title = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Project")
-                .to_owned();
-            let Ok(mutation) = crate::commands::create_project_mutation(&workspace_root, &title)
-            else {
-                return;
-            };
-            if let Err(err) = connection
-                .call::<conn_contract::rpc::projects::mutate::Payload, conn_contract::rpc::projects::mutate::Success>(
-                    "projects.mutate",
-                    &mutation,
-                )
-                .await
-            {
-                eprintln!("add project: projects.mutate failed: {err}");
-            }
-        })
-        .detach();
-    }
-
     /// Current layout state.
     #[cfg_attr(
         all(not(feature = "automation"), not(test)),
@@ -5140,7 +5447,12 @@ impl ConnApp {
         &self.tokens
     }
 
-    fn render_chat_column(&self, viewport_h: f32, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render_chat_column(
+        &self,
+        viewport_h: f32,
+        panel_inline: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let header = render_chat_header(
             &ChatHeaderProps {
                 shell: &self.shell,
@@ -5158,7 +5470,7 @@ impl ConnApp {
 
         let join = CardJoin {
             left: self.layout.sidebar_open,
-            right: self.layout.right_panel_open,
+            right: panel_inline,
         };
 
         // Matches real Conn (`ChatView.tsx`): the chat card re-roots `--background` to opaque
@@ -5171,8 +5483,8 @@ impl ConnApp {
         let drawer_visible = self.terminal_drawer_open
             && !(self.layout.right_panel_open
                 && self.layout.right_panel_tab == RightPanelTab::Terminal);
-        let chat_card = if drawer_visible {
-            let terminal = self.right_panel.read(cx).terminal_entity();
+        let chat_card = if drawer_visible && let Some(panel) = &self.right_panel {
+            let terminal = panel.read(cx).terminal_entity();
             chat_card
                 .child(
                     div()
@@ -5223,6 +5535,9 @@ impl ConnApp {
                     shell: &self.shell,
                     thread,
                     state: &self.thread_details,
+                    timeline: self
+                        .selected_timeline()
+                        .map_or(&[], |t| t.entries.as_slice()),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px
@@ -5262,8 +5577,10 @@ impl ConnApp {
     /// items, which render Conn's link/empty states when no PR is attached yet) need a thread.
     fn available_right_panel_tabs(&self) -> Vec<RightPanelTab> {
         let thread = self.layout.selected_thread_id.is_some();
+        let has_project = self.shown_thread_has_project();
         RightPanelTab::MENU_ORDER
             .into_iter()
+            .filter(|tab| has_project || !tab.needs_project())
             .filter(|tab| match tab {
                 RightPanelTab::Browser | RightPanelTab::Tasks => true,
                 _ => thread,
@@ -5308,15 +5625,14 @@ impl ConnApp {
         if modifiers.control || modifiers.platform || modifiers.alt || modifiers.shift {
             return false;
         }
-        if window
-            .focused(cx)
-            .is_some_and(|focused| focused != self.focus_handle)
-        {
+        if window.focused(cx).is_some_and(|focused| {
+            focused != self.focus_handle && focused != self.panel_sheet_focus
+        }) {
             return false;
         }
         match RightPanelTab::from_menu_shortcut(&event.keystroke.key) {
             Some(tab) if self.available_right_panel_tabs().contains(&tab) => {
-                self.select_right_panel_tab(tab, cx);
+                self.add_right_panel_tab(tab, cx);
                 true
             }
             _ => false,
@@ -5347,10 +5663,44 @@ impl ConnApp {
             && self.available_right_panel_tabs().contains(&tab)
         {
             self.right_panel_add_menu_open = false;
-            self.select_right_panel_tab(tab, cx);
+            self.add_right_panel_tab(tab, cx);
             return true;
         }
         false
+    }
+
+    /// Conn web's RightPanelSheet uses a drawer through 980px. At the minimum
+    /// desktop width, the rail, sidebar and an inline panel would squeeze out chat.
+    fn right_panel_sheet_width(&self, viewport: f32) -> Option<f32> {
+        if !self.layout.right_panel_open || self.right_panel_maximized || viewport > 980.0 {
+            return None;
+        }
+        Some(if viewport <= 760.0 {
+            (viewport * 0.88).min(384.0)
+        } else {
+            (viewport * 0.42).clamp(320.0, 448.0)
+        })
+    }
+
+    fn sync_panel_sheet_focus(
+        &mut self,
+        shown: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if shown && self.focus_before_panel_sheet.is_none() {
+            self.focus_before_panel_sheet = Some(
+                window
+                    .focused(cx)
+                    .unwrap_or_else(|| self.focus_handle.clone()),
+            );
+            window.focus(&self.panel_sheet_focus, cx);
+        } else if !shown
+            && let Some(previous) = self.focus_before_panel_sheet.take()
+            && self.panel_sheet_focus.contains_focused(window, cx)
+        {
+            window.focus(&previous, cx);
+        }
     }
 
     fn render_right_panel_column(
@@ -5362,16 +5712,29 @@ impl ConnApp {
         use std::rc::Rc;
         let app = cx.entity();
         let available_tabs = self.available_right_panel_tabs();
-        let active_surface = self.right_panel_surface();
+        let open_tabs = self.visible_right_panel_tabs();
+        let active_surface = self.right_panel.as_ref().map_or_else(
+            || self.right_panel_surface(),
+            |panel| {
+                panel.read(cx).displayed_surface(
+                    self.right_panel_surface(),
+                    &open_tabs,
+                    cx,
+                )
+            },
+        );
+        let sheet_width = self.right_panel_sheet_width(viewport_w);
         let header = render_panel_header(
             PanelHeaderProps {
-                open_tabs: &self.right_panel_open_tabs,
+                open_tabs: &open_tabs,
                 active_tab: &active_surface,
                 maximized: self.right_panel_maximized,
+                show_maximize: sheet_width.is_none(),
                 owns_window_leading_edge: self.right_panel_maximized && !self.layout.sidebar_open,
                 panel_open: self.layout.right_panel_open,
                 add_menu_open: self.right_panel_add_menu_open,
                 available_tabs: &available_tabs,
+                has_project: self.shown_thread_has_project(),
                 tokens: &self.tokens,
             },
             PanelHeaderCallbacks {
@@ -5395,7 +5758,12 @@ impl ConnApp {
                             if this.right_panel_add_menu_open {
                                 // Conn focuses the trigger, so the menu's letter keys and
                                 // Escape reach it whatever had the keyboard before.
-                                window.focus(&this.focus_handle, cx);
+                                let focus = if sheet_width.is_some() {
+                                    &this.panel_sheet_focus
+                                } else {
+                                    &this.focus_handle
+                                };
+                                window.focus(focus, cx);
                             }
                             cx.notify();
                         });
@@ -5404,7 +5772,7 @@ impl ConnApp {
                 on_add_tab: {
                     let app = app.clone();
                     Rc::new(move |tab, _, cx| {
-                        app.update(cx, |this, cx| this.select_right_panel_tab(tab, cx));
+                        app.update(cx, |this, cx| this.add_right_panel_tab(tab, cx));
                     })
                 },
                 on_toggle_maximize: {
@@ -5412,6 +5780,7 @@ impl ConnApp {
                     Rc::new(move |_, cx| {
                         app.update(cx, |this, cx| {
                             this.right_panel_maximized = !this.right_panel_maximized;
+                            this.remember_panel_layout();
                             cx.notify();
                         });
                     })
@@ -5447,6 +5816,7 @@ impl ConnApp {
             card.child(crate::panels::header::render_panel_launcher(
                 &self.tokens,
                 &available_tabs,
+                self.shown_thread_has_project(),
                 Rc::new({
                     let app = cx.entity();
                     move |tab, _, cx| {
@@ -5455,7 +5825,7 @@ impl ConnApp {
                 }),
             ))
         } else {
-            card.child(self.right_panel.clone())
+            card.children(self.right_panel.clone())
         };
 
         let column = div()
@@ -5470,6 +5840,8 @@ impl ConnApp {
             .h_full();
         let column = if self.right_panel_maximized {
             column.flex_1().min_w_0()
+        } else if let Some(width) = sheet_width {
+            column.w(px(width)).flex_shrink_0()
         } else {
             column
                 .w(px(self.right_panel_effective_width(viewport_w)))
@@ -5611,9 +5983,11 @@ impl ConnApp {
             .is_some_and(|id| self.annotation_watching_threads.contains(id));
         let project_ready = project_id.is_some() && self.connection.is_some();
 
-        self.right_panel.update(cx, |panel, cx| {
-            panel.set_annotations(self.annotations.clone(), watching, project_ready, cx);
-        });
+        if let Some(panel) = &self.right_panel {
+            panel.update(cx, |panel, cx| {
+                panel.set_annotations(self.annotations.clone(), watching, project_ready, cx)
+            });
+        }
 
         self.maybe_auto_send_annotations(cx);
     }
@@ -5747,23 +6121,42 @@ impl ConnApp {
     /// replies via `panels.respond`.
     fn dispatch_agent_panel_request(
         &self,
-        request: conn_contract::AgentPanelRequest,
+        environment: String,
+        conn_reply: Connection,
+        request: conn_contract::source::DesktopPanelRequest,
         cx: &mut Context<'_, Self>,
     ) {
         const NOT_ON_THREAD: &str = "The user is looking at another thread, so Conn did not run this. Ask them to open your thread, then try again.";
 
-        let Some(conn_reply) = self.connection.clone() else {
-            return;
-        };
+        let window = self.panel_window;
         let device_name = self.device_name();
         cx.spawn(async move |this, cx| {
-            let response =
-                Self::handle_agent_panel_request(this, request, device_name, NOT_ON_THREAD, cx)
-                    .await;
+            let response = if let Some(action) = request.files_action {
+                Self::handle_files_action(this, request.panel, action, device_name, &conn_reply, cx)
+                    .await
+            } else {
+                let panel = Self::handle_agent_panel_request(
+                    this,
+                    window,
+                    environment,
+                    request.panel,
+                    device_name,
+                    NOT_ON_THREAD,
+                    cx,
+                )
+                .await;
+                conn_contract::source::DesktopPanelResponse {
+                    panel,
+                    selection: None,
+                }
+            };
             let _ = crate::live::RT
                 .spawn(async move {
                     let _ = conn_reply
-                        .call::<conn_contract::AgentPanelResponse, ()>("panels.respond", &response)
+                        .call::<conn_contract::source::DesktopPanelResponse, ()>(
+                            "panels.respond",
+                            &response,
+                        )
                         .await;
                 })
                 .await;
@@ -5771,8 +6164,116 @@ impl ConnApp {
         .detach();
     }
 
+    async fn handle_files_action(
+        this: gpui_kit::WeakEntity<Self>,
+        request: conn_contract::AgentPanelRequest,
+        action: conn_contract::source::FilesAction,
+        device: String,
+        origin: &Connection,
+        cx: &mut gpui_kit::AsyncApp,
+    ) -> conn_contract::source::DesktopPanelResponse {
+        use conn_contract::source::FilesAction;
+        let mut selection = None;
+        let result = async {
+            // A thread without a project shows Tasks in place of Files, so no Files view ever
+            // answers a reveal and the agent would wait out the server's timeout. Say so now.
+            let has_project = this
+                .read_with(cx, |app, _| app.thread_has_project(&request.thread_id))
+                .map_err(|e| e.to_string())?;
+            if !has_project {
+                return Err("Files isn't available on threads without a project.".to_owned());
+            }
+            let valid = |app: &Self| {
+                app.draft.is_none()
+                    && app
+                        .context_connection()
+                        .is_some_and(|c| c.same_connection(origin))
+                    && app.layout.selected_thread_id.as_deref() == Some(request.thread_id.as_str())
+            };
+            match action {
+                FilesAction::Selection => {
+                    selection = this
+                        .read_with(cx, |app, cx| {
+                            if !valid(app) {
+                                return Err("The active thread changed.".to_owned());
+                            }
+                            let selected = app
+                                .right_panel_surface_visible()
+                                .then(|| {
+                                    app.right_panel
+                                        .as_ref()
+                                        .and_then(|panel| panel.read(cx).selected_source(cx))
+                                })
+                                .flatten();
+                            if selected
+                                .as_ref()
+                                .is_some_and(|source| source.text.len() > 64 * 1024)
+                            {
+                                return Err("Select a passage smaller than 64 KiB.".to_owned());
+                            }
+                            Ok(selected)
+                        })
+                        .map_err(|e| e.to_string())??;
+                }
+                FilesAction::Reveal {
+                    path,
+                    lines,
+                    excerpt,
+                } => {
+                    let window = this
+                        .read_with(cx, |app, _| app.panel_window)
+                        .map_err(|e| e.to_string())?;
+                    let result = window
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |app, cx| {
+                                if !valid(app) {
+                                    return Err("The active thread changed.".to_owned());
+                                }
+                                if !conn_contract::source::workspace_relative(&path) {
+                                    return Err("Expected a workspace-relative path.".to_owned());
+                                }
+                                app.select_right_panel_surface(
+                                    PanelSurface::File(path.clone()),
+                                    cx,
+                                );
+                                if !app.right_panel_surface_visible() {
+                                    return Err(
+                                        "Close the overlay to reveal source in Files.".to_owned()
+                                    );
+                                }
+                                Ok(app.ensure_right_panel(window, cx).update(cx, |panel, cx| {
+                                    panel.reveal_lines(path, lines, Some(excerpt), cx)
+                                }))
+                            })
+                            .map_err(|e| e.to_string())?
+                        })
+                        .map_err(|e| e.to_string())??;
+                    result.await.map_err(|_| {
+                        "The file or window changed before Conn could reveal the range.".to_string()
+                    })??;
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        conn_contract::source::DesktopPanelResponse {
+            panel: conn_contract::AgentPanelResponse {
+                request_id: request.request_id,
+                ok: result.is_ok(),
+                device_name: Some(device),
+                error: result.err(),
+                database: None,
+                mcp: None,
+                mcp_call: None,
+            },
+            selection,
+        }
+    }
+
     async fn handle_agent_panel_request(
         this: gpui_kit::WeakEntity<Self>,
+        window: gpui_kit::AnyWindowHandle,
+        environment: String,
         request: conn_contract::AgentPanelRequest,
         device_name: String,
         not_on_thread: &str,
@@ -5790,38 +6291,6 @@ impl ConnApp {
             mcp_call: None,
         };
 
-        let on_thread = this
-            .read_with(cx, |app, _| {
-                app.layout.selected_thread_id.as_deref() == Some(request.thread_id.as_str())
-            })
-            .unwrap_or(false);
-
-        if !on_thread {
-            if request.panel == AgentPanelKind::Database
-                && let Some(sql) = request.sql.clone()
-            {
-                let _ = this.update(cx, |app, cx| {
-                    app.right_panel
-                        .update(cx, |panel, cx| panel.set_database_sql(sql, cx));
-                });
-                if request.run == Some(true) {
-                    resp.ok = false;
-                    resp.error = Some(format!(
-                        "{not_on_thread} The query is in its Database panel."
-                    ));
-                }
-                return resp;
-            }
-            if request.panel == AgentPanelKind::Mcp
-                && (request.mcp_server.is_some() || request.mcp_call.is_some())
-            {
-                resp.ok = false;
-                resp.error = Some(not_on_thread.to_owned());
-                return resp;
-            }
-            return resp;
-        }
-
         let target_tab = match request.panel {
             AgentPanelKind::Browser => RightPanelTab::Browser,
             AgentPanelKind::Database => RightPanelTab::Database,
@@ -5830,87 +6299,114 @@ impl ConnApp {
             AgentPanelKind::Files => RightPanelTab::Files,
         };
 
-        let _ = this.update(cx, |app, cx| {
-            app.select_right_panel_tab(target_tab, cx);
+        let owner = PanelOwner {
+            environment,
+            id: request.thread_id.clone(),
+        };
+        let prepared = window.update(cx, |_, window, cx| {
+            this.update(cx, |app, cx| {
+                app.sync_panel_owner(cx);
+                if app.thread_panels.owner.as_ref() == Some(&owner) {
+                    // A thread without a project opens Tasks in place of Files or MCP, so there
+                    // is no MCP panel to run a server or a call in.
+                    let redirected = target_tab != app.tab_for_shown_thread(target_tab);
+                    app.select_right_panel_tab(target_tab, cx);
+                    if redirected {
+                        if request.mcp_server.is_some() || request.mcp_call.is_some() {
+                            resp.ok = false;
+                            resp.error = Some(
+                                "This thread has no project, so it has no MCP panel. The Tasks panel opened instead."
+                                    .to_owned(),
+                            );
+                        }
+                        return None;
+                    }
+                    return Some(app.ensure_right_panel(window, cx));
+                }
+                if request.panel == AgentPanelKind::Mcp
+                    && (request.mcp_server.is_some() || request.mcp_call.is_some())
+                {
+                    resp.ok = false;
+                    resp.error = Some(not_on_thread.to_owned());
+                } else {
+                    let sql = request
+                        .sql
+                        .clone()
+                        .filter(|_| request.panel == AgentPanelKind::Database);
+                    if sql.is_some() && request.run == Some(true) {
+                        resp.ok = false;
+                        resp.error = Some(format!(
+                            "{not_on_thread} The query is in its Database panel."
+                        ));
+                    }
+                    let target_tab = if app.thread_has_project(&owner.id) {
+                        target_tab
+                    } else {
+                        target_tab.without_project()
+                    };
+                    app.thread_panels.prepare(owner, target_tab, sql);
+                }
+                None
+            })
         });
+        let panel = match prepared {
+            Ok(Ok(Some(panel))) => panel,
+            Ok(Ok(None)) => return resp,
+            _ => {
+                resp.ok = false;
+                resp.error = Some("Conn window closed.".to_owned());
+                return resp;
+            }
+        };
 
         match request.panel {
             AgentPanelKind::Database => {
                 if let Some(sql) = request.sql {
                     if request.run == Some(true) {
-                        let rx = this.update(cx, |app, cx| {
-                            app.right_panel.update(cx, |panel, cx| {
-                                panel.run_agent_database_query(sql, request.connection, cx)
-                            })
+                        let rx = panel.update(cx, |p, cx| {
+                            p.run_agent_database_query(sql, request.connection, cx)
                         });
-                        match rx {
-                            Ok(rx) => match rx.await {
-                                Ok(Ok(db_res)) => resp.database = Some(db_res),
-                                Ok(Err(err)) => {
-                                    resp.ok = false;
-                                    resp.error = Some(err);
-                                }
-                                Err(_) => {
-                                    resp.ok = false;
-                                    resp.error = Some("Database query cancelled.".to_owned());
-                                }
-                            },
+                        match rx.await {
+                            Ok(Ok(db_res)) => resp.database = Some(db_res),
+                            Ok(Err(err)) => {
+                                resp.ok = false;
+                                resp.error = Some(err);
+                            }
                             Err(_) => {
                                 resp.ok = false;
-                                resp.error = Some("Conn window closed.".to_owned());
+                                resp.error = Some("Database query cancelled.".to_owned());
                             }
                         }
                     } else {
-                        let _ = this.update(cx, |app, cx| {
-                            app.right_panel
-                                .update(cx, |panel, cx| panel.set_database_sql(sql, cx));
-                        });
+                        panel.update(cx, |p, cx| p.set_database_sql(sql, cx));
                     }
                 }
             }
             AgentPanelKind::Mcp => {
                 if let Some(call) = request.mcp_call {
-                    let rx = this.update(cx, |app, cx| {
-                        app.right_panel
-                            .update(cx, |panel, cx| panel.run_agent_mcp_call(call, cx))
-                    });
-                    match rx {
-                        Ok(rx) => match rx.await {
-                            Ok(Ok(call_res)) => resp.mcp_call = Some(call_res),
-                            Ok(Err(err)) => {
-                                resp.ok = false;
-                                resp.error = Some(err);
-                            }
-                            Err(_) => {
-                                resp.ok = false;
-                                resp.error = Some("MCP tool call cancelled.".to_owned());
-                            }
-                        },
+                    let rx = panel.update(cx, |p, cx| p.run_agent_mcp_call(call, cx));
+                    match rx.await {
+                        Ok(Ok(call_res)) => resp.mcp_call = Some(call_res),
+                        Ok(Err(err)) => {
+                            resp.ok = false;
+                            resp.error = Some(err);
+                        }
                         Err(_) => {
                             resp.ok = false;
-                            resp.error = Some("Conn window closed.".to_owned());
+                            resp.error = Some("MCP tool call cancelled.".to_owned());
                         }
                     }
                 } else if let Some(spec) = request.mcp_server {
-                    let rx = this.update(cx, |app, cx| {
-                        app.right_panel
-                            .update(cx, |panel, cx| panel.run_agent_mcp_connect(spec, cx))
-                    });
-                    match rx {
-                        Ok(rx) => match rx.await {
-                            Ok(Ok(mcp_res)) => resp.mcp = Some(mcp_res),
-                            Ok(Err(err)) => {
-                                resp.ok = false;
-                                resp.error = Some(err);
-                            }
-                            Err(_) => {
-                                resp.ok = false;
-                                resp.error = Some("MCP connect cancelled.".to_owned());
-                            }
-                        },
+                    let rx = panel.update(cx, |p, cx| p.run_agent_mcp_connect(spec, cx));
+                    match rx.await {
+                        Ok(Ok(mcp_res)) => resp.mcp = Some(mcp_res),
+                        Ok(Err(err)) => {
+                            resp.ok = false;
+                            resp.error = Some(err);
+                        }
                         Err(_) => {
                             resp.ok = false;
-                            resp.error = Some("Conn window closed.".to_owned());
+                            resp.error = Some("MCP connect cancelled.".to_owned());
                         }
                     }
                 }
@@ -6196,13 +6692,18 @@ impl ConnApp {
         self.orbit.notice = None;
 
         self.reset_linked_environments();
+        self.scratch_project_id = None;
+        self.scratch_workspace_root = None;
+        self.files_subscription = None;
         self.shell = ShellState::default();
         self.server_config = std::sync::Arc::default();
         self.threads.clear();
         self.ended_threads.clear();
         self.subscribed_thread_id = None;
         self.reset_child_approvals();
+        self.reset_speculative();
         self.subscribed_annotation_project = None;
+        self.files_subscription = None;
         self.annotations.clear();
         self.annotation_last_sent.clear();
         self.layout.selected_thread_id = None;
@@ -6222,8 +6723,6 @@ impl ConnApp {
             chat.set_connection(Some(connection.clone()), cx);
         });
         self.push_server_config(cx);
-        self.right_panel
-            .update(cx, |panel, cx| panel.set_connection(Some(connection), cx));
         self.sync_chat(cx);
         self.sync_linked_environments(cx);
         self.refresh_settings_orbit_info(cx);
@@ -6606,7 +7105,7 @@ impl ConnApp {
             return;
         }
         let (Some(connection), Some(thread_id)) = (
-            self.connection.clone(),
+            self.context_connection(),
             self.layout.selected_thread_id.clone(),
         ) else {
             return;
@@ -6747,14 +7246,22 @@ impl ConnApp {
         crate::vibrancy::sync_appearance(tokens.appearance);
         self.chat
             .update(cx, |chat, cx| chat.set_tokens(tokens.clone(), cx));
-        self.right_panel
-            .update(cx, |panel, cx| panel.set_tokens(tokens.clone(), cx));
+        for panel in self
+            .right_panel
+            .iter()
+            .chain(self.thread_panels.parked_views())
+        {
+            panel.update(cx, |panel, cx| panel.set_tokens(tokens.clone(), cx));
+        }
         if let Some(modal) = &self.settings_modal {
             let theme_id = self.theme_id.clone();
             modal.update(cx, |m, cx| m.set_tokens(theme_id, tokens.clone(), cx));
         }
         if let Some(palette) = &self.command_palette {
             palette.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        }
+        if let Some(viewer) = &self.image_viewer {
+            viewer.update(cx, |v, cx| v.set_tokens(tokens.clone(), cx));
         }
         if let Some(editor) = &self.workspace_editor {
             editor.update(cx, |e, cx| e.set_tokens(tokens.clone(), cx));
@@ -6796,20 +7303,45 @@ pub(crate) fn start_frame_log(cx: &mut App) {
 
 impl Render for ConnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if self.terminal_drawer_open
+            || (self.layout.right_panel_open && !self.right_panel_shows_launcher())
+        {
+            self.ensure_right_panel(window, cx);
+        }
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Another thread on screen drops the viewer, as web drops its preview.
+        if self.image_viewer.as_ref().is_some_and(|viewer| {
+            viewer.read(cx).thread_id() != self.layout.selected_thread_id.as_deref()
+        }) {
+            self.close_image_viewer(false, window, cx);
+        }
         self.sync_thread_menu_focus(window, cx);
         self.sync_undo_notice_focus(window, cx);
+        #[cfg(feature = "zed-files")]
+        if self.layout.right_panel_open
+            && self.layout.right_panel_tab == RightPanelTab::File
+            && window.focused(cx).is_none()
+        {
+            self.focus_handle.focus(window, cx);
+        }
         let viewport = window.viewport_size();
         let viewport_w = f32::from(viewport.width);
         let viewport_h = f32::from(viewport.height);
+        let panel_sheet = self.right_panel_sheet_width(viewport_w).is_some();
+        self.sync_panel_sheet_focus(panel_sheet, window, cx);
         let mut root = div()
+            .relative()
             .id("conn-shell-root")
             .a11y_group("shell.root", "Conn workspace")
             .track_focus(&self.focus_handle)
             .capture_key_down(
                 cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if std::mem::take(&mut app.keystroke_consumed) {
+                        return;
+                    }
+                    if app.handle_image_viewer_key(event, window, cx) {
+                        cx.stop_propagation();
                         return;
                     }
                     if std::env::var_os("CONN_GPUI_FRAME_LOG").is_some() {
@@ -6835,11 +7367,27 @@ impl Render for ConnApp {
                     }
                     if event.keystroke.key == "escape" && app.escape_shell_popovers(cx) {
                         cx.stop_propagation();
+                        return;
+                    }
+                    // Escape drops a selection in the thread's text, and only then: with none, it
+                    // goes on to whatever else wants it. An open message or link menu has it
+                    // first, and closes without touching the selection.
+                    if event.keystroke.key == "escape" && app.chat.read(cx).has_open_menu() {
+                        return;
+                    }
+                    if crate::chat::selection::clear_on_escape(event, window, cx) {
+                        cx.stop_propagation();
                     }
                 }),
             )
             .on_modifiers_changed(cx.listener(
                 |app, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
+                    #[cfg(feature = "zed-files")]
+                    if let Some(panel) = &app.right_panel {
+                        panel.update(cx, |panel, cx| {
+                            panel.file_modifiers_changed(event.modifiers, window, cx)
+                        });
+                    }
                     app.modifiers_changed(&event.modifiers, window, cx);
                 },
             ))
@@ -6879,7 +7427,7 @@ impl Render for ConnApp {
                 app.toggle_terminal_drawer(window, cx);
             }))
             .on_action(cx.listener(|app, _: &NewThread, window, cx| {
-                app.start_new_thread(None, Some(window), cx);
+                app.start_general_draft(Some(window), cx).detach();
             }))
             .on_action(
                 cx.listener(|app, _: &crate::palette::OpenCommandPalette, window, cx| {
@@ -7057,10 +7605,67 @@ impl Render for ConnApp {
 
         let maximized = self.layout.right_panel_open && self.right_panel_maximized;
         if !maximized {
-            root = root.child(self.render_chat_column(viewport_h, cx));
+            root = root.child(self.render_chat_column(
+                viewport_h,
+                self.layout.right_panel_open && !panel_sheet,
+                cx,
+            ));
         }
 
-        if self.layout.right_panel_open {
+        if panel_sheet {
+            let backdrop = div()
+                .id("right-panel-sheet-backdrop")
+                .a11y_button("shell.panel-sheet.dismiss", "Dismiss workspace panel")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(hsla(self.tokens.background.with_alpha(0.45)))
+                .on_mouse_down(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener(|app, _, _, cx| {
+                        cx.stop_propagation();
+                        app.toggle_right_panel(cx);
+                    }),
+                );
+            let sheet = div()
+                .id("right-panel-sheet")
+                .a11y(
+                    gpui_kit::Role::Dialog,
+                    "shell.panel-sheet",
+                    "Workspace panel",
+                )
+                .track_focus(&self.panel_sheet_focus)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .occlude()
+                .bg(hsla(self.tokens.shell_card))
+                .on_key_down(
+                    cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
+                        match event.keystroke.key.as_str() {
+                            "escape" => {
+                                app.toggle_right_panel(cx);
+                                cx.stop_propagation();
+                            }
+                            "tab" => {
+                                if event.keystroke.modifiers.shift {
+                                    window.focus_prev(cx);
+                                } else {
+                                    window.focus_next(cx);
+                                }
+                                if !app.panel_sheet_focus.contains_focused(window, cx) {
+                                    window.focus(&app.panel_sheet_focus, cx);
+                                }
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }),
+                )
+                .child(self.render_right_panel_column(viewport_w, cx));
+            root = root.child(backdrop).child(sheet);
+        } else if self.layout.right_panel_open {
             if !maximized {
                 root = root.child(self.render_seam(true, viewport_w, cx));
             }
@@ -7185,6 +7790,9 @@ impl Render for ConnApp {
             ));
         }
 
+        if let Some(viewer) = &self.image_viewer {
+            root = root.child(crate::chat::image_viewer::render_overlay(viewer));
+        }
         if let Some(modal) = &self.settings_modal {
             root = root.child(crate::settings::render_overlay(modal));
         }

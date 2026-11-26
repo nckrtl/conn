@@ -713,22 +713,11 @@ pub fn flatten_turn_diff_tree(
 // Durations and timestamps
 // ---------------------------------------------------------------------------------------------
 
-/// Conn's `formatDuration`: `1ms`..`999ms`, `1.5s`/`2s` under 10s, whole seconds under a
-/// minute (unit chosen after rounding), then `Xh Ym Zs` with zero parts omitted.
+/// Conn's duration label: whole seconds under a minute (`1s`..`59s`, at least `1s`; no
+/// milliseconds or tenths), then `Xh Ym Zs` with zero parts omitted.
 #[must_use]
 pub fn format_duration(duration_ms: u64) -> String {
-    if duration_ms < 1_000 {
-        return format!("{}ms", duration_ms.max(1));
-    }
-    if duration_ms < 10_000 {
-        let tenths = (duration_ms + 50) / 100;
-        return if tenths.is_multiple_of(10) {
-            format!("{}s", tenths / 10)
-        } else {
-            format!("{}.{}s", tenths / 10, tenths % 10)
-        };
-    }
-    let total_secs = (duration_ms + 500) / 1_000;
+    let total_secs = ((duration_ms + 500) / 1_000).max(1);
     if total_secs < 60 {
         return format!("{total_secs}s");
     }

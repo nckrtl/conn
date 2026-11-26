@@ -6,15 +6,19 @@ pub(crate) mod annotations;
 mod api;
 mod browser;
 mod browser_context_menu;
+mod browser_inline_logins;
+mod browser_passkeys;
 pub(crate) mod chrome;
 mod color;
 mod database;
 mod device;
 mod diff;
 mod diff_parser;
+pub(crate) mod empty_state;
 mod file_kind;
 pub(crate) mod file_path;
 mod files;
+mod files_definition;
 pub(crate) mod header;
 mod highlight;
 mod laravel_toolbar;
@@ -27,7 +31,10 @@ pub(crate) mod terminal_demo;
 pub(crate) mod terminal_drawer;
 mod terminal_palette;
 mod tree;
+#[cfg(feature = "zed-files")]
+pub(crate) mod zed_preview;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -53,16 +60,21 @@ use self::linked_items::LinkedItemsPanel;
 use self::mcp::McpPanel;
 use self::pull_request::PullRequestPanel;
 use self::tasks::TasksPanel;
+pub(crate) use self::tasks::TasksRuntime;
 use self::terminal::TerminalPanel;
 use crate::a11y::ConnA11yExt as _;
 
 /// What the right panel asks of the shell.
 #[derive(Clone, Debug)]
 pub(crate) enum RightPanelEvent {
+    DisplayedFileChanged,
     /// The Files tree asked to open a file as its own tab.
     OpenFile(String),
+    Definition(conn_contract::source::SourceLocation),
+    AttachSource(conn_contract::source::SourceSelection),
     /// A surface asked to show another surface (e.g. Linked items opening a pull request).
     OpenTab(RightPanelTab),
+    OpenBrowser(String),
     /// The Files panel asked to add a file mention to the composer's draft.
     InsertMention(String),
     /// A surface asked to send an agent prompt to the active thread (e.g. PR agent actions).
@@ -79,6 +91,7 @@ impl gpui_kit::EventEmitter<RightPanelEvent> for RightPanel {}
     reason = "binary crate module; public API for orchestrator wiring"
 )]
 pub struct RightPanel {
+    connection: Option<Connection>,
     tokens: Tokens,
     tab: RightPanelTab,
     open_tabs: Vec<PanelSurface>,
@@ -92,12 +105,23 @@ pub struct RightPanel {
     files: Entity<FilesPanel>,
     diff: Entity<DiffPanel>,
     terminal: Entity<TerminalPanel>,
-    browser: Entity<BrowserPanel>,
+    browsers: HashMap<u64, Entity<BrowserPanel>>,
+    browser_id: u64,
+    history_project: Option<String>,
+    history_hostname: Option<String>,
+    environment: String,
+    annotations: Vec<conn_state::AnnotationRecord>,
+    watching: bool,
+    project_ready: bool,
     api: Entity<ApiPanel>,
     database: Entity<DatabasePanel>,
     mcp: Entity<McpPanel>,
-    tasks: Entity<TasksPanel>,
+    tasks: Option<Entity<TasksPanel>>,
+    /// A task an Orbit task card asked for before the Tasks panel was first shown.
+    pending_task: Option<i64>,
+    tasks_runtime: TasksRuntime,
     pull_request: Entity<PullRequestPanel>,
+    pull_requests: Entity<pull_request::inbox::PullRequestInbox>,
     linked_items: Entity<LinkedItemsPanel>,
     device: Entity<DevicePanel>,
     /// True while the right panel is open and nothing covers it (see `set_surface_visible`).
@@ -129,54 +153,34 @@ impl RightPanel {
     pub fn new(
         tokens: Tokens,
         connection: Option<Connection>,
+        tasks_runtime: TasksRuntime,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let files = cx.new(|cx| FilesPanel::new(tokens.clone(), connection.clone(), window, cx));
-        cx.subscribe(
-            &files,
-            |this, _, event: &files::FilesEvent, cx| match event {
-                files::FilesEvent::OpenFile(path) => {
-                    cx.emit(RightPanelEvent::OpenFile(path.clone()))
-                }
-                files::FilesEvent::RevealFolder => {
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Files))
-                }
-                files::FilesEvent::AddToChat(mention) => {
-                    cx.emit(RightPanelEvent::InsertMention(mention.clone()));
-                }
-                files::FilesEvent::OpenInBrowser(url) => {
-                    this.browser
-                        .update(cx, |browser, cx| browser.navigate(url.clone(), cx));
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Browser));
-                }
-            },
-        )
+        cx.subscribe(&files, |_, _, event: &files::FilesEvent, cx| match event {
+            files::FilesEvent::DisplayedFileChanged => {
+                cx.emit(RightPanelEvent::DisplayedFileChanged);
+                cx.notify();
+            }
+            files::FilesEvent::Definition(location) => {
+                cx.emit(RightPanelEvent::Definition(location.clone()))
+            }
+            files::FilesEvent::Attach(s) => cx.emit(RightPanelEvent::AttachSource(s.clone())),
+            files::FilesEvent::OpenFile(path) => cx.emit(RightPanelEvent::OpenFile(path.clone())),
+            files::FilesEvent::RevealFolder => {
+                cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Files))
+            }
+            files::FilesEvent::AddToChat(mention) => {
+                cx.emit(RightPanelEvent::InsertMention(mention.clone()));
+            }
+            files::FilesEvent::OpenInBrowser(url) => {
+                cx.emit(RightPanelEvent::OpenBrowser(url.clone()));
+            }
+        })
         .detach();
         let diff = cx.new(|_| DiffPanel::new(tokens.clone(), connection.clone()));
         let terminal = cx.new(|cx| TerminalPanel::new(tokens.clone(), cx));
-        let browser =
-            cx.new(|cx| BrowserPanel::new(tokens.clone(), connection.clone(), window, cx));
-        cx.subscribe(
-            &browser,
-            |_, _, action: &annotations::AnnotationAction, cx| {
-                cx.emit(RightPanelEvent::Annotation(action.clone()));
-            },
-        )
-        .detach();
-        // "Open in Database" on a query of the debug bar.
-        let toolbar = browser.read(cx).laravel_toolbar();
-        cx.subscribe(
-            &toolbar,
-            |this, _, event: &LaravelToolbarEvent, cx| match event {
-                LaravelToolbarEvent::OpenQuery(sql) => {
-                    this.database
-                        .update(cx, |panel, cx| panel.set_agent_sql(sql.clone(), cx));
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
-                }
-            },
-        )
-        .detach();
         let api = cx.new(|cx| ApiPanel::new(tokens.clone(), window, cx));
         let api_toolbar = api.read(cx).laravel_toolbar();
         cx.subscribe(
@@ -192,15 +196,45 @@ impl RightPanel {
         .detach();
         let database = cx.new(|cx| DatabasePanel::new(tokens.clone(), window, cx));
         let mcp = cx.new(|cx| McpPanel::new(tokens.clone(), window, cx));
-        let tasks = cx.new(|cx| TasksPanel::new(tokens.clone(), window, cx));
         let pull_request =
             cx.new(|cx| PullRequestPanel::new(tokens.clone(), connection.clone(), window, cx));
         cx.subscribe(
             &pull_request,
-            |_, _, event: &pull_request::PullRequestEvent, cx| match event {
+            |this, _, event: &pull_request::PullRequestEvent, cx| match event {
+                pull_request::PullRequestEvent::OpenInbox => {
+                    this.set_tab(RightPanelTab::PullRequests, cx);
+                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::PullRequests));
+                }
                 pull_request::PullRequestEvent::SendPrompt(prompt) => {
                     cx.emit(RightPanelEvent::SendPrompt(prompt.clone()));
                 }
+            },
+        )
+        .detach();
+        let pull_requests = cx.new(|cx| {
+            pull_request::inbox::PullRequestInbox::new(
+                tokens.clone(),
+                connection.clone(),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &pull_requests,
+            |this, _, target: &pull_request::inbox::OpenRequest, cx| {
+                let entry = &target.0;
+                this.pull_request.update(cx, |panel, cx| {
+                    panel.open_pull_request(
+                        entry.project_id.clone(),
+                        Some(entry.host.clone()),
+                        entry.repository.clone(),
+                        entry.number,
+                        Some(entry.url.clone()),
+                        cx,
+                    )
+                });
+                this.set_tab(RightPanelTab::PullRequest, cx);
+                cx.emit(RightPanelEvent::OpenTab(RightPanelTab::PullRequest));
             },
         )
         .detach();
@@ -218,6 +252,7 @@ impl RightPanel {
             .detach();
 
         Self {
+            connection,
             tokens,
             tab: RightPanelTab::Files,
             open_tabs: vec![PanelSurface::Kind(RightPanelTab::Files)],
@@ -230,12 +265,22 @@ impl RightPanel {
             files,
             diff,
             terminal,
-            browser,
+            browsers: HashMap::new(),
+            browser_id: 1,
+            history_project: None,
+            history_hostname: None,
+            environment: String::new(),
+            annotations: Vec::new(),
+            watching: false,
+            project_ready: false,
             api,
             database,
             mcp,
-            tasks,
+            tasks: None,
+            pending_task: None,
+            tasks_runtime,
             pull_request,
+            pull_requests,
             linked_items,
             device,
             chrome: true,
@@ -249,15 +294,90 @@ impl RightPanel {
         cx.notify();
     }
 
-    /// Loads `url` in the Browser tab (starting the CEF runtime on first use).
-    pub fn navigate_browser(&mut self, url: String, cx: &mut Context<'_, Self>) {
-        self.browser.update(cx, |b, cx| b.navigate(url, cx));
+    fn ensure_browser(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<BrowserPanel> {
+        if let Some(browser) = self.browsers.get(&self.browser_id) {
+            return browser.clone();
+        }
+        let browser = cx.new(|cx| {
+            let mut browser =
+                BrowserPanel::new(self.tokens.clone(), self.connection.clone(), window, cx);
+            browser.set_environment(self.environment.clone(), cx);
+            browser.set_history_context(
+                self.history_project.clone(),
+                self.history_hostname.clone(),
+                cx,
+            );
+            browser.set_project(self.project_id.clone(), cx);
+            browser.set_workspace_root(self.workspace_root.clone(), cx);
+            browser.sync_annotations(
+                self.annotations.clone(),
+                self.watching,
+                self.project_ready,
+                cx,
+            );
+            browser.set_visible(
+                self.surface_visible && self.tab == RightPanelTab::Browser,
+                cx,
+            );
+            browser
+        });
+        cx.subscribe(
+            &browser,
+            |this, source, action: &annotations::AnnotationAction, cx| {
+                if this.browsers.get(&this.browser_id) == Some(&source) {
+                    cx.emit(RightPanelEvent::Annotation(action.clone()));
+                }
+            },
+        )
+        .detach();
+        let toolbar = browser.read(cx).laravel_toolbar();
+        let id = self.browser_id;
+        cx.subscribe(&toolbar, move |this, _, event: &LaravelToolbarEvent, cx| {
+            if this.browser_id == id
+                && let LaravelToolbarEvent::OpenQuery(sql) = event
+            {
+                this.database
+                    .update(cx, |p, cx| p.set_agent_sql(sql.clone(), cx));
+                cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
+            }
+        })
+        .detach();
+        self.browsers.insert(id, browser.clone());
+        browser
+    }
+
+    /// Loads a URL in the selected page, creating its CEF view on first use.
+    pub fn navigate_browser(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.ensure_browser(window, cx)
+            .update(cx, |b, cx| b.navigate(url, cx));
+    }
+
+    pub fn remove_surface(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
+        self.release_closed_file(surface, cx);
+        self.open_tabs.retain(|tab| tab != surface);
+        if let Some(id) = surface.browser_id()
+            && let Some(browser) = self.browsers.remove(&id)
+        {
+            browser.update(cx, |p, cx| p.set_visible(false, cx));
+        }
     }
 
     /// Diagnostic state of the Browser tab.
     #[cfg(feature = "automation")]
     pub fn browser_state(&self, cx: &App) -> serde_json::Value {
-        self.browser.read(cx).automation_state()
+        self.browsers
+            .get(&self.browser_id)
+            .map(|p| p.read(cx).automation_state())
+            .unwrap_or_default()
     }
 
     /// The Browser tab's page title (empty before a page loads).
@@ -266,7 +386,10 @@ impl RightPanel {
         expect(dead_code, reason = "driven by the automation hook")
     )]
     pub fn browser_title(&self, cx: &App) -> String {
-        self.browser.read(cx).title()
+        self.browsers
+            .get(&self.browser_id)
+            .map(|p| p.read(cx).title())
+            .unwrap_or_default()
     }
 
     #[cfg(feature = "automation")]
@@ -275,7 +398,9 @@ impl RightPanel {
         expression: &str,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.browser
+        self.browsers
+            .get(&self.browser_id)
+            .ok_or_else(|| "Browser tab is not open".to_owned())?
             .update(cx, |b, _| b.start_preview_eval(expression))
     }
 
@@ -286,7 +411,9 @@ impl RightPanel {
         params: &serde_json::Value,
         cx: &mut Context<'_, Self>,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-        self.browser
+        self.browsers
+            .get(&self.browser_id)
+            .ok_or_else(|| "Browser tab is not open".to_owned())?
             .update(cx, |b, _| b.start_preview_call(op, params))
     }
 
@@ -296,7 +423,11 @@ impl RightPanel {
         path: &std::path::Path,
         cx: &App,
     ) -> Result<serde_json::Value, String> {
-        self.browser.read(cx).save_browser_screenshot(path)
+        self.browsers
+            .get(&self.browser_id)
+            .ok_or_else(|| "Browser tab is not open".to_owned())?
+            .read(cx)
+            .save_browser_screenshot(path)
     }
 
     /// Places an agent-provided SQL query in the Database editor without executing it.
@@ -338,14 +469,6 @@ impl RightPanel {
             .update(cx, |panel, cx| panel.run_agent_call(call, cx))
     }
 
-    /// Subscribes to app-wide Orbit Gateway Reverb events from the shared Tasks WebSocket.
-    pub fn subscribe_orbit_events(
-        &self,
-        cx: &App,
-    ) -> Option<tokio::sync::broadcast::Receiver<conn_desktop::orbit::OrbitRealtimeEvent>> {
-        self.tasks.read(cx).subscribe_orbit_events()
-    }
-
     /// Syncs the active project's live annotations queue and Watch state into Browser and Device.
     pub fn set_annotations(
         &mut self,
@@ -354,9 +477,14 @@ impl RightPanel {
         project_ready: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        self.browser.update(cx, |p, cx| {
-            p.sync_annotations(annotations.clone(), watching, project_ready, cx);
-        });
+        self.annotations.clone_from(&annotations);
+        self.watching = watching;
+        self.project_ready = project_ready;
+        if let Some(browser) = self.browsers.get(&self.browser_id) {
+            browser.update(cx, |p, cx| {
+                p.sync_annotations(annotations.clone(), watching, project_ready, cx)
+            });
+        }
         self.device.update(cx, |p, cx| {
             p.sync_annotations(annotations, watching, project_ready, cx);
         });
@@ -364,16 +492,25 @@ impl RightPanel {
 
     /// Updates the live `conn-server` connection across every server-backed right-panel surface.
     pub fn set_connection(&mut self, connection: Option<Connection>, cx: &mut Context<'_, Self>) {
+        match (&self.connection, &connection) {
+            (Some(old), Some(new)) if old.same_connection(new) => return,
+            (None, None) => return,
+            _ => {}
+        }
+        self.connection.clone_from(&connection);
         self.files
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         self.diff
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         self.pull_request
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        self.pull_requests
+            .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
         self.linked_items
             .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
-        self.browser
-            .update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        for browser in self.browsers.values() {
+            browser.update(cx, |p, cx| p.set_connection(connection.clone(), cx));
+        }
         self.device
             .update(cx, |p, cx| p.set_connection(connection, cx));
         cx.notify();
@@ -394,6 +531,13 @@ impl RightPanel {
         self.terminal.clone()
     }
 
+    /// A different thread may have edited the project's saved requests or connections.
+    pub fn reload_project_settings(&self, cx: &mut Context<'_, Self>) {
+        self.api.update(cx, |p, _| p.reload_store());
+        self.database.update(cx, |p, _| p.reload_store());
+        self.mcp.update(cx, |p, _| p.reload_store());
+    }
+
     /// Updates theme tokens across the tab strip and every right-panel surface.
     pub fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<'_, Self>) {
         self.tokens = tokens.clone();
@@ -409,15 +553,20 @@ impl RightPanel {
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.mcp
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
-        self.tasks
-            .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        if let Some(tasks) = &self.tasks {
+            tasks.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        }
         self.pull_request
+            .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        self.pull_requests
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.linked_items
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.device
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
-        self.browser.update(cx, |p, cx| p.set_tokens(tokens, cx));
+        for browser in self.browsers.values() {
+            browser.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        }
         cx.notify();
     }
 
@@ -426,9 +575,34 @@ impl RightPanel {
         self.api.update(cx, |api, cx| {
             api.set_environment(environment_id.clone(), cx)
         });
-        self.browser.update(cx, |browser, cx| {
-            browser.set_environment(environment_id, cx)
-        });
+        if self.environment != environment_id {
+            self.environment = environment_id;
+            for browser in self.browsers.values() {
+                browser.update(cx, |p, cx| p.set_environment(self.environment.clone(), cx));
+            }
+        }
+    }
+
+    pub(crate) fn set_browser_history_context(
+        &mut self,
+        project: Option<String>,
+        hostname: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.history_project == project && self.history_hostname == hostname {
+            return;
+        }
+        self.history_project = project;
+        self.history_hostname = hostname;
+        for browser in self.browsers.values() {
+            browser.update(cx, |p, cx| {
+                p.set_history_context(
+                    self.history_project.clone(),
+                    self.history_hostname.clone(),
+                    cx,
+                );
+            });
+        }
     }
 
     /// Updates the active project, workspace root, and thread context.
@@ -456,9 +630,11 @@ impl RightPanel {
                 .update(cx, |p, cx| p.set_workspace_root(workspace_root, cx));
         }
         if self.thread_id != thread_id {
+            self.files
+                .update(cx, |files, cx| files.set_thread(thread_id.clone(), cx));
             self.thread_id = thread_id.clone();
             self.files
-                .update(cx, |p, _| p.set_thread(thread_id.clone()));
+                .update(cx, |p, _| p.set_signing_thread(thread_id.clone()));
             self.diff
                 .update(cx, |p, cx| p.set_thread(thread_id.clone(), cx));
         }
@@ -467,10 +643,33 @@ impl RightPanel {
         cx.notify();
     }
 
-    /// Optional hint for the active thread's completed turn count used by `orchestration.getFullThreadDiff`.
-    pub fn set_turn_count(&mut self, turn_count: Option<i64>, cx: &mut Context<'_, Self>) {
+    /// Points the Diff panel at one turn's checkpoint diff (`Turn n-1 → n`), or every turn when
+    /// the run has no ordinal, and reveals `file_path` once it loads. The caller selects the Diff
+    /// tab; a panel not yet bound to its thread applies the request when it is.
+    pub fn open_turn_diff(
+        &mut self,
+        turn: Option<i64>,
+        file_path: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.diff
-            .update(cx, |p, cx| p.set_turn_count(turn_count, cx));
+            .update(cx, |p, cx| p.open_turn_diff(turn, file_path, cx));
+    }
+
+    /// The Diff panel's scope label and the file still waiting to be revealed, for tests.
+    #[cfg(test)]
+    pub(crate) fn diff_focus_state(&self, cx: &gpui_kit::App) -> (String, Option<String>) {
+        self.diff.read(cx).focus_state()
+    }
+
+    /// Shows one Orbit task's detail in the Tasks panel. The caller selects the Tasks tab; a panel
+    /// not yet created opens the task when it is.
+    pub fn open_task(&mut self, task_id: i64, cx: &mut Context<'_, Self>) {
+        match &self.tasks {
+            Some(tasks) => tasks.update(cx, |panel, cx| panel.open_task(task_id, cx)),
+            None => self.pending_task = Some(task_id),
+        }
+        cx.notify();
     }
 
     /// Whether live surfaces (native CEF browser view, device video/input streams) may run:
@@ -480,7 +679,28 @@ impl RightPanel {
         self.sync_surface_visibility(cx);
     }
 
+    #[cfg(feature = "zed-files")]
+    pub(crate) fn file_modifiers_changed(
+        &self,
+        modifiers: gpui_kit::Modifiers,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.surface_visible && self.tab == RightPanelTab::File {
+            self.files.update(cx, |panel, cx| {
+                if modifiers == gpui_kit::Modifiers::command() {
+                    panel.zed_definition_at(window.mouse_position(), false, window, cx);
+                } else {
+                    panel.cancel_hover();
+                }
+            });
+        }
+    }
+
     fn sync_surface_visibility(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.surface_visible || self.tab != RightPanelTab::File {
+            self.files.update(cx, |files, _| files.cancel_reveal());
+        }
         let shows = |tab: RightPanelTab| self.surface_visible && self.tab == tab;
         let (show_browser, show_device) =
             (shows(RightPanelTab::Browser), shows(RightPanelTab::Device));
@@ -489,16 +709,23 @@ impl RightPanel {
             shows(RightPanelTab::PullRequest),
             shows(RightPanelTab::LinkedItems),
         );
-        self.browser
-            .update(cx, |b, cx| b.set_visible(show_browser, cx));
+        if let Some(browser) = self.browsers.get(&self.browser_id) {
+            browser.update(cx, |b, cx| b.set_visible(show_browser, cx));
+        }
         self.device
             .update(cx, |d, cx| d.set_visible(show_device, cx));
+        if let Some(tasks) = &self.tasks {
+            tasks.update(cx, |p, cx| p.set_active(shows(RightPanelTab::Tasks), cx));
+        }
         // Diff, Pull request and Linked items load only while shown, as in Conn. Before, every
         // thread switch fired their git, GitHub and three full `getThreadProjection` calls
         // whether or not the right panel was open, competing with the thread snapshot.
         self.diff.update(cx, |p, cx| p.set_active(show_diff, cx));
         self.pull_request
             .update(cx, |p, cx| p.set_active(show_pr, cx));
+        self.pull_requests.update(cx, |p, cx| {
+            p.set_active(shows(RightPanelTab::PullRequests), cx)
+        });
         self.linked_items
             .update(cx, |p, cx| p.set_active(show_linked, cx));
     }
@@ -512,12 +739,16 @@ impl RightPanel {
             }
             return;
         }
-        let surface = PanelSurface::Kind(tab);
+        let surface = if tab == RightPanelTab::Browser && self.browser_id > 1 {
+            PanelSurface::Browser(self.browser_id)
+        } else {
+            PanelSurface::Kind(tab)
+        };
         if !self.open_tabs.contains(&surface) {
             self.open_tabs.push(surface);
         }
         self.add_menu_open = false;
-        if tab == RightPanelTab::Files {
+        if self.tab == RightPanelTab::File || tab == RightPanelTab::Files {
             self.files.update(cx, |p, cx| p.show_tree(cx));
         }
         if self.tab == tab {
@@ -537,6 +768,34 @@ impl RightPanel {
         self.files.update(cx, |p, cx| p.reveal_line(line, cx));
     }
 
+    #[cfg(feature = "automation")]
+    pub(crate) fn spike_files_state(
+        &self,
+        window: &Window,
+        cx: &gpui_kit::App,
+    ) -> serde_json::Value {
+        self.files.read(cx).spike_files_state(window, cx)
+    }
+    pub(crate) fn selected_source(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Option<conn_contract::source::SourceSelection> {
+        (self.tab == RightPanelTab::File)
+            .then(|| self.files.read(cx).selected_source(cx))
+            .flatten()
+    }
+
+    pub(crate) fn reveal_lines(
+        &mut self,
+        path: String,
+        lines: conn_contract::source::SourceLines,
+        excerpt: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        self.files
+            .update(cx, |files, cx| files.reveal_lines(path, lines, excerpt, cx))
+    }
+
     /// Shows the file at `path` (project-relative) as its own surface, as Conn's `file` tab.
     pub fn set_file(&mut self, path: String, cx: &mut Context<'_, Self>) {
         let surface = PanelSurface::File(path.clone());
@@ -553,18 +812,54 @@ impl RightPanel {
 
     /// Shows `surface`.
     pub fn set_surface(&mut self, surface: &PanelSurface, cx: &mut Context<'_, Self>) {
+        if let Some(id) = surface.browser_id()
+            && id != self.browser_id
+        {
+            if let Some(old) = self.browsers.get(&self.browser_id) {
+                old.update(cx, |b, cx| b.set_visible(false, cx));
+            }
+            self.browser_id = id;
+            self.sync_surface_visibility(cx);
+        }
         match surface {
+            PanelSurface::Browser(_) => self.set_tab(RightPanelTab::Browser, cx),
             PanelSurface::Kind(tab) => self.set_tab(*tab, cx),
             PanelSurface::File(path) => self.set_file(path.clone(), cx),
         }
+    }
+
+    pub(crate) fn displayed_surface(
+        &self,
+        requested: PanelSurface,
+        tabs: &[PanelSurface],
+        cx: &gpui_kit::App,
+    ) -> PanelSurface {
+        if matches!(requested, PanelSurface::File(_))
+            && let Some(held) = self.files.read(cx).held_file()
+            && let Some(tab) = tabs.iter().find(|tab| matches!(tab, PanelSurface::File(path) if file_path::split_line_suffix(path).0 == held))
+        {
+            return tab.clone();
+        }
+        requested
     }
 
     /// The active surface.
     #[must_use]
     pub fn surface(&self) -> PanelSurface {
         match (&self.tab, &self.file) {
+            (RightPanelTab::Browser, _) if self.browser_id > 1 => {
+                PanelSurface::Browser(self.browser_id)
+            }
             (RightPanelTab::File, Some(path)) => PanelSurface::File(path.clone()),
             (tab, _) => PanelSurface::Kind(*tab),
+        }
+    }
+
+    pub(crate) fn release_closed_file(&mut self, tab: &PanelSurface, cx: &mut Context<'_, Self>) {
+        if let PanelSurface::File(path) = tab {
+            self.files.update(cx, |files, cx| {
+                files.release_closed_file(file_path::split_line_suffix(path).0, cx)
+            });
         }
     }
 
@@ -575,6 +870,7 @@ impl RightPanel {
         }
         if let Some(pos) = self.open_tabs.iter().position(|t| t == surface) {
             self.open_tabs.remove(pos);
+            self.remove_surface(surface, cx);
             if &self.surface() == surface {
                 let next = self
                     .open_tabs
@@ -628,7 +924,9 @@ impl RightPanel {
             on_add_tab: {
                 let entity = entity.clone();
                 Rc::new(move |tab, _, cx| {
-                    entity.update(cx, |this, cx| this.set_tab(tab, cx));
+                    entity.update(cx, |this, cx| {
+                        this.set_surface(&PanelSurface::for_add(tab, &this.open_tabs), cx)
+                    });
                 })
             },
             on_toggle_maximize: {
@@ -649,16 +947,18 @@ impl RightPanel {
             on_open_sidebar: Rc::new(|_, _| {}),
         };
 
-        let active = self.surface();
+        let active = self.displayed_surface(self.surface(), &self.open_tabs, cx);
         render_panel_header(
             PanelHeaderProps {
                 open_tabs: &self.open_tabs,
                 active_tab: &active,
                 maximized: self.maximized,
+                show_maximize: true,
                 owns_window_leading_edge: false,
                 panel_open: true,
                 add_menu_open: self.add_menu_open,
                 available_tabs: &RightPanelTab::MENU_ORDER,
+                has_project: true,
                 tokens: &self.tokens,
             },
             callbacks,
@@ -668,7 +968,7 @@ impl RightPanel {
 }
 
 impl Render for RightPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self.tab == RightPanelTab::Terminal {
             self.terminal.update(cx, |p, cx| p.ensure_started(cx));
         }
@@ -679,11 +979,26 @@ impl Render for RightPanel {
             RightPanelTab::Files | RightPanelTab::File => self.files.clone().into_any_element(),
             RightPanelTab::Diff => self.diff.clone().into_any_element(),
             RightPanelTab::Terminal => self.terminal.clone().into_any_element(),
-            RightPanelTab::Browser => self.browser.clone().into_any_element(),
+            RightPanelTab::Browser => self.ensure_browser(window, cx).into_any_element(),
             RightPanelTab::Api => self.api.clone().into_any_element(),
             RightPanelTab::Database => self.database.clone().into_any_element(),
             RightPanelTab::Mcp => self.mcp.clone().into_any_element(),
-            RightPanelTab::Tasks => self.tasks.clone().into_any_element(),
+            RightPanelTab::Tasks => self
+                .tasks
+                .get_or_insert_with(|| {
+                    cx.new(|cx| {
+                        let mut tasks =
+                            TasksPanel::new(self.tokens.clone(), &self.tasks_runtime, window, cx);
+                        tasks.set_project(self.project_id.clone(), self.workspace_root.clone(), cx);
+                        if let Some(task_id) = self.pending_task.take() {
+                            tasks.open_task(task_id, cx);
+                        }
+                        tasks
+                    })
+                })
+                .clone()
+                .into_any_element(),
+            RightPanelTab::PullRequests => self.pull_requests.clone().into_any_element(),
             RightPanelTab::PullRequest => self.pull_request.clone().into_any_element(),
             RightPanelTab::LinkedItems => self.linked_items.clone().into_any_element(),
             RightPanelTab::Device => self.device.clone().into_any_element(),
@@ -791,14 +1106,16 @@ fn for_each_project_panel(
     panel.mcp.update(cx, |p, cx| {
         p.set_project(project_key.clone(), workspace_root.clone(), cx);
     });
-    panel.browser.update(cx, |p, cx| {
-        p.set_project(project_key.clone(), cx);
-        p.set_workspace_root(workspace_root.clone(), cx);
-    });
+    for browser in panel.browsers.values() {
+        browser.update(cx, |p, cx| {
+            p.set_project(project_key.clone(), cx);
+            p.set_workspace_root(workspace_root.clone(), cx);
+        });
+    }
     panel
         .api
         .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));
-    panel.tasks.update(cx, |p, cx| {
-        p.set_project(project_key, workspace_root, cx);
-    });
+    if let Some(tasks) = &panel.tasks {
+        tasks.update(cx, |p, cx| p.set_project(project_key, workspace_root, cx));
+    }
 }

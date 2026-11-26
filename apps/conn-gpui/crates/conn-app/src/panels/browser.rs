@@ -10,9 +10,13 @@ use std::time::Duration;
 
 use crate::a11y::ConnA11yExt as _;
 use crate::runtime_warmup;
+use crate::screen_anchor;
 use conn_client::Connection;
+#[cfg(not(test))]
+use conn_desktop::vault::VaultClient;
+use conn_desktop::vault::{PasskeyAnchor, PasskeyError};
 use conn_desktop::vault::{
-    VaultClient, VaultLoginField, VaultLoginFillLookup, VaultLoginItem, VaultLoginsStatus,
+    VaultLoginField, VaultLoginFillLookup, VaultLoginItem, VaultLoginsResponse, VaultLoginsStatus,
     https_origin,
 };
 use conn_state::AnnotationRecord;
@@ -23,6 +27,7 @@ use conn_web::{
     WebRuntimeState,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -37,13 +42,24 @@ use gpui_kit::{
 
 use super::annotations::{
     AnnotationAction, AnnotationSubject, AnnotationUiState, QueuePopoverAnchor,
-    QueuePopoverCallbacks, render_queue_popover,
+    QueuePopoverCallbacks, is_annotation_toggle_shortcut, render_queue_popover,
 };
 use super::browser_context_menu::{MenuActions, OpenMenu, render_context_menu};
-use super::chrome::{self, ConnTooltipExt as _};
+use super::browser_inline_logins::{
+    self as inline, InlineEvent, InlineLogins, KeyOutcome, PickerActions, RowAction,
+};
+use super::browser_passkeys::{self as passkeys, PasskeyGate, PasskeyMessage, PasskeyOp};
+use super::chrome::{self, ConnTooltipExt as _, FloatingSurfaceExt as _};
 use super::color::to_hsla;
 use super::header::superhero_icon;
 use super::laravel_toolbar::{LaravelToolbar, host_script};
+
+mod history;
+mod recent_page;
+mod visits;
+
+use self::history::{BrowserHistory, same_page};
+use self::visits::{Visit, VisitTracker, now_ms};
 
 const UI_TEXT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
@@ -97,9 +113,32 @@ enum OverlayBridgeMessage {
         #[serde(default)]
         error: Option<String>,
     },
+    /// The focused sign-in field's kind and rectangle, never a value.
+    CredentialInline {
+        #[serde(default)]
+        event: serde_json::Value,
+    },
+    /// The passkey shim's request or cancel. It holds the page's token and the request options,
+    /// never the page's address.
+    Passkey {
+        token: String,
+        op: String,
+        id: String,
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        options: String,
+    },
 }
 
 enum BrowserOverlayEvent {
+    CredentialInline(InlineEvent),
+    /// The page's own icon as PNG, with the address it was reported for.
+    Favicon {
+        page: String,
+        png: Vec<u8>,
+    },
+    Passkey(PasskeyMessage),
     Rpc {
         request_id: String,
         op: String,
@@ -123,7 +162,10 @@ enum BrowserOverlayEvent {
         value: serde_json::Value,
         error: Option<String>,
     },
-    LoadEnd,
+    LoadEnd {
+        url: String,
+        status: i32,
+    },
     ContextMenu(ContextMenuEvent),
 }
 
@@ -133,6 +175,8 @@ struct VaultLoginUiState {
     loading: bool,
     status: Option<VaultLoginsStatus>,
     items: Vec<VaultLoginItem>,
+    /// Vault's icons for `items`, decoded once.
+    icons: inline::ItemIcons,
     error: Option<String>,
     feedback: Option<String>,
 }
@@ -183,6 +227,15 @@ pub(crate) struct BrowserPanel {
     annotations: AnnotationUiState,
     /// Vault login autofill popover state for HTTPS pages.
     vault_logins: VaultLoginUiState,
+    /// The picker under a focused sign-in field of an HTTPS page.
+    inline_logins: InlineLogins,
+    /// The tab's passkey ceremony, if Vault is being waited for.
+    passkeys: PasskeyGate,
+    /// The token of the page the main frame shows, set by the browser as each document starts.
+    passkey_token: passkeys::SharedToken,
+    /// The window this panel last drew in. A passkey request asks it where the page area is on
+    /// screen, so Vault can open its panel there.
+    window_handle: Option<gpui_kit::AnyWindowHandle>,
     /// The Laravel debug bar under the page (`x-toolbar` headers and `__LARAVEL_TOOLBAR_DATA__`).
     laravel_toolbar: Entity<LaravelToolbar>,
     /// The toolbar's overflow menu (`PreviewMoreMenu`) is open.
@@ -194,6 +247,13 @@ pub(crate) struct BrowserPanel {
     /// The user has asked for a page (typed an address, used back, forward or reload, or clicked
     /// in the page), so a load is theirs and the reload button may spin.
     user_load: bool,
+    /// The project history this panel feeds: the addresses it opens, and their titles.
+    visits: VisitTracker,
+    /// Redraws the new-tab page when any panel changes the app's history. Dropping it stops it.
+    _history_changes: Task<()>,
+    /// The history revision the new-tab page last drew, so a change this panel already shows does
+    /// not draw it twice.
+    shown_history_revision: Cell<u64>,
 }
 
 impl EventEmitter<AnnotationAction> for BrowserPanel {}
@@ -255,6 +315,26 @@ impl BrowserPanel {
         let laravel_toolbar =
             cx.new(|cx| LaravelToolbar::new(tokens.clone(), view.clone(), last_bounds.clone(), cx));
 
+        // The history is shared by every panel and window: a page another panel records, titles
+        // or removes shows here as soon as it changes, with no polling. A panel that does not show
+        // the new-tab page has nothing to redraw.
+        let mut history_changes = BrowserHistory::global().subscribe();
+        let history_task = cx.spawn(async move |this, cx| {
+            while history_changes.changed().await.is_ok() {
+                let alive = this.update(cx, |panel, cx| {
+                    if panel.visible.get()
+                        && panel.recent_page_visible()
+                        && panel.shown_history_revision.get() != BrowserHistory::global().revision()
+                    {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             tokens,
             connection,
@@ -281,11 +361,18 @@ impl BrowserPanel {
             preview_seq: 0,
             annotations,
             vault_logins: VaultLoginUiState::default(),
+            inline_logins: InlineLogins::default(),
+            passkeys: PasskeyGate::default(),
+            passkey_token: passkeys::SharedToken::default(),
+            window_handle: None,
             laravel_toolbar,
             more_menu_open: false,
             polling_runtime: false,
             context_menu: None,
             user_load: false,
+            visits: VisitTracker::default(),
+            _history_changes: history_task,
+            shown_history_revision: Cell::new(0),
         }
     }
 
@@ -324,6 +411,75 @@ impl BrowserPanel {
         }
     }
 
+    /// Names the project whose history this panel reads and feeds, and the host its environment
+    /// runs on (so a page on that host is the page on `localhost`). An absent or empty key means
+    /// the context is still loading: addresses opened meanwhile wait and are recorded once it is
+    /// known. The history is the app's own, so this is also where the new-tab rows come from.
+    pub(crate) fn set_history_context(
+        &mut self,
+        project_key: Option<String>,
+        environment_hostname: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        for visit in self.visits.set_context(project_key, environment_hostname) {
+            self.record_visit(&visit);
+        }
+        self.sync_history_title();
+        cx.notify();
+    }
+
+    fn record_visit(&self, visit: &Visit) {
+        if let Some(key) = self.visits.project_key() {
+            BrowserHistory::global().record_visit(
+                key,
+                &visit.url,
+                visit.at_ms,
+                self.visits.environment_hostname(),
+            );
+        }
+    }
+
+    /// Gives the history the title of the opened page, once Chromium has settled on that address.
+    /// It never adds a page, so a page removed from the history stays out.
+    fn sync_history_title(&mut self) {
+        if !self.visits.is_watching() {
+            return;
+        }
+        let (url, title) = {
+            let guard = self.view.borrow();
+            let Some(view) = guard.as_ref() else {
+                return;
+            };
+            (view.url(), view.title())
+        };
+        if let Some((opened, title)) = self.visits.title_for(&url, &title)
+            && let Some(key) = self.visits.project_key()
+        {
+            BrowserHistory::global().set_title(
+                key,
+                &opened,
+                &title,
+                self.visits.environment_hostname(),
+            );
+        }
+    }
+
+    /// The main frame settled on `url`. This never records a visit: it only lets the title of the
+    /// address the user opened follow, when this is that page and it loaded.
+    fn page_settled(&mut self, url: &str, status: i32) {
+        let failed = self
+            .view
+            .borrow()
+            .as_ref()
+            .is_some_and(|view| view.load_error().is_some());
+        let host = self.visits.environment_hostname().map(str::to_owned);
+        self.visits
+            .load_finished(url, status, failed, |opened, page| {
+                same_page(opened, page, host.as_deref())
+            });
+        self.sync_history_title();
+    }
+
     pub(crate) fn sync_annotations(
         &mut self,
         annotations: Vec<AnnotationRecord>,
@@ -335,6 +491,128 @@ impl BrowserPanel {
         self.notify_overlay_annotations_changed();
         self.maybe_show_existing_pins();
         cx.notify();
+    }
+
+    /// Puts the passkey shim into the main frame of an HTTPS page that has a token. Safe to run
+    /// again: a page that already has it ignores a second copy.
+    fn ensure_passkey_shim(&self) {
+        let token = self.page_passkey_token();
+        let Some(script) = token.as_deref().and_then(passkeys::shim_script) else {
+            return;
+        };
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(&script);
+        }
+    }
+
+    fn page_passkey_token(&self) -> Option<String> {
+        self.passkey_token.lock().ok().and_then(|token| token.clone())
+    }
+
+    /// Answers the page's shim.
+    fn reply_passkey(&self, id: &str, result: &Result<String, PasskeyError>) {
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(&passkeys::reply_script(id, result));
+        }
+    }
+
+    /// Ends the ceremony without an answer: the page that asked is gone.
+    fn cancel_passkey(&mut self, cx: &mut Context<'_, Self>) {
+        if self.passkeys.is_active() {
+            self.passkeys.cancel();
+            cx.notify();
+        }
+    }
+
+    /// Runs one message from the page's passkey shim. The address Vault sees is the browser's
+    /// own, never the message's.
+    fn on_passkey(&mut self, message: PasskeyMessage, cx: &mut Context<'_, Self>) {
+        let page_token = self.page_passkey_token();
+        match message.op {
+            PasskeyOp::Abort { id } => {
+                self.passkeys
+                    .abort(page_token.as_deref(), &message.token, &id);
+                cx.notify();
+            }
+            PasskeyOp::Start { id, mode, options } => {
+                let page_url = self.current_url();
+                let admitted = self.passkeys.admit(
+                    page_token.as_deref(),
+                    &page_url,
+                    &message.token,
+                    &id,
+                    &mode,
+                    &options,
+                );
+                let admitted = match admitted {
+                    Ok(admitted) => admitted,
+                    Err(error) => {
+                        self.reply_passkey(&id, &Err(error));
+                        return;
+                    }
+                };
+                // Read when the page asks, not when it last drew: the window may have moved since.
+                let anchor = self.page_anchor_on_screen(cx);
+                let task = Self::run_vault_passkey(admitted, anchor);
+                self.passkeys.attach(&id, task.abort_handle());
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let outcome = task.await;
+                    let _ = this.update(cx, |panel, cx| panel.on_passkey_done(&id, outcome, cx));
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn on_passkey_done(
+        &mut self,
+        id: &str,
+        outcome: Result<Result<String, PasskeyError>, tokio::task::JoinError>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // A ceremony that was cancelled (a new page, an abort or a closed tab) gets no answer.
+        if !self.passkeys.finish(id) {
+            return;
+        }
+        let result = outcome.unwrap_or(Err(PasskeyError::NotAllowed));
+        self.reply_passkey(id, &result);
+        cx.notify();
+    }
+
+    /// Where the page area is on screen right now, in AppKit screen coordinates. `None` when this
+    /// panel has not drawn, the window is busy or has no native view, or nothing of the page shows:
+    /// Vault then opens its panel where it always did. Placement only.
+    fn page_anchor_on_screen(&self, cx: &mut Context<'_, Self>) -> Option<PasskeyAnchor> {
+        let page = self.last_bounds.get()?;
+        let handle = self.window_handle?;
+        cx.update_window(handle, |_, window, _| {
+            screen_anchor::page_anchor(window, (page.x, page.y, page.width, page.height))
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Runs the ceremony in Vault off the UI thread. Aborting the task closes the pipe.
+    #[cfg(not(test))]
+    fn run_vault_passkey(
+        request: passkeys::Admitted,
+        anchor: Option<PasskeyAnchor>,
+    ) -> tokio::task::JoinHandle<Result<String, PasskeyError>> {
+        crate::live::RT.spawn(async move {
+            VaultClient::new()
+                .passkey(request.mode, &request.url, &request.options, anchor)
+                .await
+        })
+    }
+
+    /// Tests never reach Vault: the options say what the stand-in does.
+    #[cfg(test)]
+    fn run_vault_passkey(
+        request: passkeys::Admitted,
+        _anchor: Option<PasskeyAnchor>,
+    ) -> tokio::task::JoinHandle<Result<String, PasskeyError>> {
+        crate::live::RT.spawn(async move { passkeys::stub_vault(&request).await })
     }
 
     fn current_url(&self) -> String {
@@ -356,7 +634,7 @@ impl BrowserPanel {
         }
         let next = !self.annotations.annotating;
         self.annotations.annotating = next;
-        self.annotations.queue_open = false;
+        // The popover stays open: its Annotate switch shows the mode, also after the shortcut.
         self.annotations.confirming_remove = false;
         if next {
             window.focus(&self.focus_handle, cx);
@@ -498,31 +776,82 @@ impl BrowserPanel {
         self.vault_logins.error = None;
         self.vault_logins.feedback = None;
         self.annotations.queue_open = false;
+        // One Vault card at a time: the picker under a field gives way to the toolbar's.
+        self.inline_logins.close();
         cx.notify();
 
-        let url = self.current_url();
-
-        let task = crate::live::RT
-            .spawn(async move { VaultClient::new().list_logins(&url, allow_unlock).await });
+        let task = Self::lookup_vault_logins(self.current_url(), allow_unlock);
         cx.spawn(async move |this, cx| {
-            let outcome = task.await;
+            let resp = Self::logins_or_error(task.await);
             let _ = this.update(cx, |panel, cx| {
                 panel.vault_logins.loading = false;
-                match outcome {
-                    Ok(resp) => {
-                        panel.vault_logins.status = Some(resp.status);
-                        panel.vault_logins.items = resp.items;
-                        panel.vault_logins.error = resp.error;
-                    }
-                    Err(err) => {
-                        panel.vault_logins.status = Some(VaultLoginsStatus::Error);
-                        panel.vault_logins.error = Some(err.to_string());
-                    }
-                }
+                panel.vault_logins.status = Some(resp.status);
+                panel.vault_logins.icons.update(&resp.items);
+                panel.vault_logins.items = resp.items;
+                panel.vault_logins.error = resp.error;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Lists the Vault logins of `url` off the UI thread. The toolbar popover and the inline
+    /// picker both look up this way.
+    #[cfg(not(test))]
+    fn lookup_vault_logins(
+        url: String,
+        allow_unlock: bool,
+    ) -> tokio::task::JoinHandle<VaultLoginsResponse> {
+        // The client ends the request within its own deadline: short for a passive list,
+        // human-length for an unlock prompt.
+        crate::live::RT
+            .spawn(async move { VaultClient::new().list_logins(&url, allow_unlock).await })
+    }
+
+    /// Tests never reach the real Vault: canned answers by host.
+    #[cfg(test)]
+    fn lookup_vault_logins(
+        url: String,
+        allow_unlock: bool,
+    ) -> tokio::task::JoinHandle<VaultLoginsResponse> {
+        crate::live::RT.spawn(async move { inline::stub_logins(&url, allow_unlock) })
+    }
+
+    /// Reads one field of a Vault login off the UI thread.
+    #[cfg(not(test))]
+    fn lookup_vault_fill(
+        url: String,
+        origin: String,
+        item_id: String,
+        field: VaultLoginField,
+    ) -> tokio::task::JoinHandle<VaultLoginFillLookup> {
+        crate::live::RT.spawn(async move {
+            VaultClient::new()
+                .login_credential(&url, &origin, &item_id, field)
+                .await
+        })
+    }
+
+    /// Tests never reach the real Vault: canned answers by login id.
+    #[cfg(test)]
+    fn lookup_vault_fill(
+        _url: String,
+        _origin: String,
+        item_id: String,
+        _field: VaultLoginField,
+    ) -> tokio::task::JoinHandle<VaultLoginFillLookup> {
+        crate::live::RT.spawn(async move { inline::stub_fill(&item_id) })
+    }
+
+    /// A lookup that could not run reads as a Vault error.
+    fn logins_or_error(
+        outcome: Result<VaultLoginsResponse, tokio::task::JoinError>,
+    ) -> VaultLoginsResponse {
+        outcome.unwrap_or_else(|err| VaultLoginsResponse {
+            status: VaultLoginsStatus::Error,
+            items: Vec::new(),
+            error: Some(err.to_string()),
+        })
     }
 
     fn fill_vault_login(
@@ -531,69 +860,243 @@ impl BrowserPanel {
         field: VaultLoginField,
         cx: &mut Context<'_, Self>,
     ) {
+        self.fill_vault_fields(item_id, vec![field], false, cx);
+    }
+
+    /// Fills `fields` of the page from one Vault login, one field at a time like T3: Vault reads
+    /// each value and the panel inserts it, and a field that cannot fill stops the rest.
+    /// `inline` says the picker under a field asked, so a failure shows there.
+    fn fill_vault_fields(
+        &mut self,
+        item_id: String,
+        fields: Vec<VaultLoginField>,
+        inline: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         let page_url = self.current_url();
 
         let Some(expected_origin) = https_origin(&page_url) else {
-            self.vault_logins.feedback = Some("Autofill requires an HTTPS page.".to_owned());
+            self.report_fill_failure("Autofill requires an HTTPS page.".to_owned(), inline);
             cx.notify();
             return;
         };
-        let expected_origin_after = expected_origin.clone();
-        let task = crate::live::RT.spawn(async move {
-            VaultClient::new()
-                .login_credential(&page_url, &expected_origin, &item_id, field)
-                .await
-        });
         cx.spawn(async move |this, cx| {
-            let outcome = task.await;
-            let _ = this.update(cx, |panel, cx| {
-                match outcome {
-                    Ok(VaultLoginFillLookup::Value(secret)) => {
-                        let live_url = panel.current_url();
-                        if https_origin(&live_url).as_deref()
-                            != Some(expected_origin_after.as_str())
-                        {
-                            panel.vault_logins.feedback =
-                                Some("Page origin changed before fill.".to_owned());
-                        } else {
-                            panel.ensure_bridge_injected();
-                            if let Some(view) = panel.view.borrow().as_ref() {
-                                let field_json = serde_json::to_string(field.as_str())
-                                    .unwrap_or_else(|_| "\"\"".to_owned());
-                                let origin_json = serde_json::to_string(&expected_origin_after)
-                                    .unwrap_or_else(|_| "\"\"".to_owned());
-                                let val_json = serde_json::to_string(&secret)
-                                    .unwrap_or_else(|_| "\"\"".to_owned());
-                                view.execute_javascript(&format!(
-                                    "window.__CONN_GPUI_OVERLAY_BRIDGE__?.fillCredential({field_json}, {origin_json}, {val_json});"
-                                ));
-                                panel.vault_logins.feedback =
-                                    Some(format!("Filled {}.", field.as_str()));
-                                panel.vault_logins.open = false;
-                            }
-                        }
-                    }
-                    Ok(VaultLoginFillLookup::OriginMismatch) => {
-                        panel.vault_logins.feedback = Some("Page origin mismatch.".to_owned());
-                    }
-                    Ok(VaultLoginFillLookup::Denied) => {
-                        panel.vault_logins.feedback = Some("Vault unlock cancelled.".to_owned());
-                    }
-                    Ok(VaultLoginFillLookup::NoValue) => {
-                        panel.vault_logins.feedback =
-                            Some(format!("Login has no {}.", field.as_str()));
-                    }
-                    Ok(VaultLoginFillLookup::ItemNotFound) => {
-                        panel.vault_logins.feedback = Some("Login item not found.".to_owned());
-                    }
-                    Ok(_) | Err(_) => {
-                        panel.vault_logins.feedback = Some("Could not fill from Vault.".to_owned());
-                    }
+            for field in fields {
+                let task = Self::lookup_vault_fill(
+                    page_url.clone(),
+                    expected_origin.clone(),
+                    item_id.clone(),
+                    field,
+                );
+                let outcome = task.await;
+                let origin = expected_origin.clone();
+                let proceed = this.update(cx, |panel, cx| {
+                    let filled = panel.apply_fill_lookup(field, &origin, outcome, inline);
+                    cx.notify();
+                    filled
+                });
+                if !matches!(proceed, Ok(true)) {
+                    break;
                 }
-                cx.notify();
+            }
+        })
+        .detach();
+    }
+
+    /// Acts on one field's Vault lookup. Returns `true` when the value went into the page.
+    fn apply_fill_lookup(
+        &mut self,
+        field: VaultLoginField,
+        expected_origin: &str,
+        outcome: Result<VaultLoginFillLookup, tokio::task::JoinError>,
+        inline: bool,
+    ) -> bool {
+        match outcome {
+            Ok(VaultLoginFillLookup::Value(secret)) => {
+                let live_url = self.current_url();
+                if https_origin(&live_url).as_deref() != Some(expected_origin) {
+                    self.report_fill_failure("Page origin changed before fill.".to_owned(), inline);
+                    return false;
+                }
+                self.ensure_bridge_injected();
+                let guard = self.view.borrow();
+                let Some(view) = guard.as_ref() else {
+                    // No Chromium view to fill, as in tests: the lookup itself succeeded.
+                    return cfg!(test);
+                };
+                let field_json =
+                    serde_json::to_string(field.as_str()).unwrap_or_else(|_| "\"\"".to_owned());
+                let origin_json =
+                    serde_json::to_string(expected_origin).unwrap_or_else(|_| "\"\"".to_owned());
+                let val_json = serde_json::to_string(&secret).unwrap_or_else(|_| "\"\"".to_owned());
+                view.execute_javascript(&format!(
+                    "window.__CONN_GPUI_OVERLAY_BRIDGE__?.fillCredential({field_json}, {origin_json}, {val_json});"
+                ));
+                drop(guard);
+                if !inline {
+                    self.vault_logins.feedback = Some(format!("Filled {}.", field.as_str()));
+                    self.vault_logins.open = false;
+                }
+                return true;
+            }
+            Ok(VaultLoginFillLookup::OriginMismatch) => {
+                self.report_fill_failure("Page origin mismatch.".to_owned(), inline);
+            }
+            Ok(VaultLoginFillLookup::Denied) => {
+                self.report_fill_failure("Vault unlock cancelled.".to_owned(), inline);
+            }
+            Ok(VaultLoginFillLookup::NoValue) => {
+                self.report_fill_failure(format!("Login has no {}.", field.as_str()), inline);
+            }
+            Ok(VaultLoginFillLookup::ItemNotFound) => {
+                self.report_fill_failure("Login item not found.".to_owned(), inline);
+            }
+            Ok(_) | Err(_) => {
+                self.report_fill_failure("Could not fill from Vault.".to_owned(), inline);
+            }
+        }
+        false
+    }
+
+    /// Says why a fill did not happen: in the picker that asked, else in the toolbar popover.
+    fn report_fill_failure(&mut self, message: String, inline: bool) {
+        if inline {
+            self.inline_logins.fail(&message);
+        } else {
+            self.vault_logins.feedback = Some(message);
+        }
+    }
+
+    // ── Inline Vault login suggestions under a focused sign-in field ──────────────────────
+
+    /// The page reported its focused sign-in field (or that none is). Only an HTTPS page on
+    /// screen gets a picker.
+    fn on_inline_event(&mut self, event: InlineEvent, cx: &mut Context<'_, Self>) {
+        if !self.visible.get() || https_origin(&self.current_url()).is_none() {
+            self.inline_logins.reset();
+        } else if self.inline_logins.apply_event(&event) {
+            self.refresh_inline_logins(false, cx);
+        }
+        cx.notify();
+    }
+
+    /// Looks up the page's Vault logins for the picker, unless a lookup is running. An unlock
+    /// asks Vault to prompt.
+    fn refresh_inline_logins(&mut self, allow_unlock: bool, cx: &mut Context<'_, Self>) {
+        let url = self.current_url();
+        if https_origin(&url).is_none() {
+            return;
+        }
+        let Some(generation) = self.inline_logins.begin_lookup(allow_unlock) else {
+            return;
+        };
+        let task = Self::lookup_vault_logins(url, allow_unlock);
+        cx.spawn(async move |this, cx| {
+            let response = Self::logins_or_error(task.await);
+            let _ = this.update(cx, |panel, cx| {
+                if panel.inline_logins.finish_lookup(generation, response) {
+                    cx.notify();
+                }
             });
         })
         .detach();
+    }
+
+    /// Runs what a picker row does. A pick closes the picker and fills the page's sign-in
+    /// fields; Unlock asks Vault again with a prompt.
+    fn run_inline_action(&mut self, action: RowAction, cx: &mut Context<'_, Self>) {
+        match action {
+            RowAction::Fill(item_id) => {
+                let fields = self.inline_logins.fields_to_fill();
+                self.inline_logins.close();
+                self.dismiss_inline_in_page();
+                self.fill_vault_fields(item_id, fields, true, cx);
+            }
+            RowAction::Unlock => self.refresh_inline_logins(true, cx),
+        }
+        cx.notify();
+    }
+
+    /// A plain key while the picker may be up. Returns `true` when the picker took it and the
+    /// page must not see it. Escape closes the picker and still reaches the page, as in T3.
+    fn handle_inline_key(&mut self, key: &str, cx: &mut Context<'_, Self>) -> bool {
+        match self.inline_logins.handle_key(key) {
+            KeyOutcome::Pass => false,
+            KeyOutcome::Handled => {
+                cx.notify();
+                true
+            }
+            KeyOutcome::Run(action) => {
+                self.run_inline_action(action, cx);
+                true
+            }
+            KeyOutcome::Dismissed => {
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// Tells the page's watcher the picker is closed, so it stays closed for this field.
+    fn dismiss_inline_in_page(&self) {
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.execute_javascript(
+                "window.__CONN_GPUI_OVERLAY_BRIDGE__?.dismissCredentialInline?.(false);",
+            );
+        }
+    }
+
+    fn choose_inline_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(action) = self.inline_logins.action(index) {
+            self.run_inline_action(action, cx);
+        }
+    }
+
+    /// A press outside the picker. A press on the field itself reopens it through the page's
+    /// own focus report, so the page is not told.
+    fn dismiss_inline_picker(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.inline_logins.shown() {
+            self.inline_logins.close();
+            cx.notify();
+        }
+    }
+
+    /// The picker under the focused field, when there is one to show.
+    fn render_inline_logins_picker(
+        &self,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if !self.inline_logins.shown()
+            || !self.visible.get()
+            || self.vault_logins.open
+            || self.context_menu.is_some()
+            || self.annotations.annotating
+        {
+            return None;
+        }
+        let view = self.last_bounds.get()?;
+        let field = inline::anchor_rect(self.inline_logins.anchor()?, view);
+        let size = self.inline_logins.size(field, view);
+        let origin = inline::picker_origin(field, size, view);
+        let actions = PickerActions {
+            choose: Self::choose_inline_row,
+            dismiss: Self::dismiss_inline_picker,
+        };
+        let icon = self.inline_logins.icon_for(&self.current_url());
+        Some(inline::render_picker(
+            &self.inline_logins,
+            origin,
+            size,
+            &self.tokens,
+            icon.as_ref(),
+            &actions,
+            cx,
+        ))
     }
 
     fn notify_overlay_annotations_changed(&self) {
@@ -877,6 +1380,7 @@ impl BrowserPanel {
                 self.prewarm_runtime(cx);
             } else {
                 self.context_menu = None;
+                self.inline_logins.reset();
             }
             cx.notify();
         }
@@ -902,6 +1406,12 @@ impl BrowserPanel {
                 "not yet"
             }
         ));
+        // The address bar, a Recently used row and an Open URL route all arrive here: the address
+        // is recorded now, so a dev server that is down is still one click away. Back, forward,
+        // reload and the warm start do not pass through here.
+        if let Some(visit) = self.visits.opened(&target, now_ms()) {
+            self.record_visit(&visit);
+        }
         self.url = target;
         self.user_load = true;
         self.context_menu = None;
@@ -1104,12 +1614,13 @@ impl BrowserPanel {
         let last_scale = self.last_scale.clone();
         let visible = self.visible.clone();
         let applied_hidden = self.applied_hidden.clone();
+        let passkey_token = self.passkey_token.clone();
         let entity = cx.entity().downgrade();
 
         // Defer BrowserView creation until after GPUI finishes the current frame.
         cx.defer(move |cx| {
             creating_flag.set(false);
-            if view_slot.borrow().is_some() {
+            if view_slot.borrow().is_some() || entity.upgrade().is_none() || !visible.get() {
                 return;
             }
             let rect = last_bounds.get().unwrap_or(bounds);
@@ -1126,6 +1637,12 @@ impl BrowserPanel {
                         let _ = wake_tx.try_send(());
                     };
                     browser_view.on_frame(wake_cb);
+
+                    // Each new HTTPS document gets the passkey shim and a token of its own, from
+                    // the browser's own callback, ahead of the page's scripts.
+                    browser_view.on_document_start(move |url| {
+                        passkeys::document_script(url, &passkey_token)
+                    });
 
                     // Console + load-end bridge for Conn's `@t3tools/annotation-overlay`.
                     let (overlay_tx, mut overlay_rx) =
@@ -1166,6 +1683,28 @@ impl BrowserPanel {
                                     value,
                                     error,
                                 },
+                                OverlayBridgeMessage::Passkey {
+                                    token,
+                                    op,
+                                    id,
+                                    mode,
+                                    options,
+                                } => {
+                                    // A malformed request is dropped.
+                                    let Some(message) =
+                                        passkeys::parse_message(token, &op, id, mode, options)
+                                    else {
+                                        return true;
+                                    };
+                                    BrowserOverlayEvent::Passkey(message)
+                                }
+                                OverlayBridgeMessage::CredentialInline { event } => {
+                                    // Malformed or off-page metadata is dropped.
+                                    let Some(event) = inline::parse_inline_event(&event) else {
+                                        return true;
+                                    };
+                                    BrowserOverlayEvent::CredentialInline(event)
+                                }
                             };
                             let _ = console_tx.send(ev);
                         }
@@ -1183,8 +1722,18 @@ impl BrowserPanel {
                     browser_view.on_toolbar_response(move |response| {
                         let _ = response_tx.send(BrowserOverlayEvent::ToolbarResponse(response));
                     });
-                    browser_view.on_load_end(move |_url, _status| {
-                        let _ = overlay_tx.send(BrowserOverlayEvent::LoadEnd);
+                    let favicon_tx = overlay_tx.clone();
+                    browser_view.on_favicon(move |page, png| {
+                        let _ = favicon_tx.send(BrowserOverlayEvent::Favicon {
+                            page: page.to_owned(),
+                            png,
+                        });
+                    });
+                    browser_view.on_load_end(move |url, status| {
+                        let _ = overlay_tx.send(BrowserOverlayEvent::LoadEnd {
+                            url: url.to_owned(),
+                            status,
+                        });
                     });
 
                     let hidden = !visible.get();
@@ -1197,7 +1746,12 @@ impl BrowserPanel {
                             panel.phase = RuntimePhase::Running;
                             panel.wake_task = Some(cx.spawn(async move |this, cx| {
                                 while wake_rx.recv().await.is_some() {
-                                    if this.update(cx, |_panel, cx| cx.notify()).is_err() {
+                                    let alive = this.update(cx, |panel, cx| {
+                                        // A title can arrive after the page settles.
+                                        panel.sync_history_title();
+                                        cx.notify();
+                                    });
+                                    if alive.is_err() {
                                         break;
                                     }
                                 }
@@ -1205,6 +1759,17 @@ impl BrowserPanel {
                             panel.overlay_task = Some(cx.spawn(async move |this, cx| {
                                 while let Some(ev) = overlay_rx.recv().await {
                                     let alive = this.update(cx, |panel, cx| match ev {
+                                        BrowserOverlayEvent::Favicon { page, png } => {
+                                            if panel.inline_logins.set_icon(&page, png) {
+                                                cx.notify();
+                                            }
+                                        }
+                                        BrowserOverlayEvent::CredentialInline(event) => {
+                                            panel.on_inline_event(event, cx);
+                                        }
+                                        BrowserOverlayEvent::Passkey(message) => {
+                                            panel.on_passkey(message, cx);
+                                        }
                                         BrowserOverlayEvent::Rpc {
                                             request_id,
                                             op,
@@ -1249,12 +1814,19 @@ impl BrowserPanel {
                                             });
                                         }
                                         BrowserOverlayEvent::LoadStart => {
+                                            // A new document has no focused field yet; its watcher reports one
+                                            // once the bridge is in.
+                                            panel.inline_logins.reset();
+                                            // The page that asked for a passkey is gone: end its
+                                            // ceremony and close the pipe to Vault.
+                                            panel.cancel_passkey(cx);
                                             if let Some(view) = panel.view.borrow().as_ref() {
                                                 view.execute_javascript(&host_script());
                                             }
                                             panel
                                                 .laravel_toolbar
                                                 .update(cx, |bar, cx| bar.on_load_start(cx));
+                                            panel.visits.load_started();
                                         }
                                         BrowserOverlayEvent::PreviewResult {
                                             request_id,
@@ -1289,12 +1861,16 @@ impl BrowserPanel {
                                                 cx.notify();
                                             }
                                         }
-                                        BrowserOverlayEvent::LoadEnd => {
+                                        BrowserOverlayEvent::LoadEnd { url, status } => {
+                                            // The shim goes in at document start; this is the
+                                            // backstop, and does nothing when it ran.
+                                            panel.ensure_passkey_shim();
                                             panel.overlay_injected_load_count.set(None);
                                             panel.annotations.annotating = false;
                                             panel.vault_logins.open = false;
                                             panel.ensure_bridge_injected();
                                             panel.maybe_show_existing_pins();
+                                            panel.page_settled(&url, status);
                                             cx.notify();
                                         }
                                     });
@@ -1510,6 +2086,27 @@ impl BrowserPanel {
         if self.context_menu.is_some() {
             // The open menu takes the keyboard; nothing reaches the page.
             self.handle_context_menu_key(event.keystroke.key.as_str(), cx);
+            cx.stop_propagation();
+            return;
+        }
+        if is_annotation_toggle_shortcut(&event.keystroke) {
+            // Conn's `isAnnotationToggleShortcut` (`Cmd/Ctrl+Shift+A`): the page never sees it, so
+            // the overlay's own handler cannot toggle a second time.
+            if !event.is_held {
+                self.toggle_annotating_mode(window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        // The picker under a sign-in field takes the arrow keys and Enter on a highlighted row.
+        // Escape closes it and still reaches the page, as in T3.
+        let modifiers = event.keystroke.modifiers;
+        if !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.handle_inline_key(event.keystroke.key.as_str(), cx)
+        {
             cx.stop_propagation();
             return;
         }
@@ -1753,6 +2350,7 @@ impl BrowserPanel {
             .border_1()
             .border_color(border)
             .shadow_lg()
+            .floating_surface()
             .child(
                 h_flex()
                     .items_center()
@@ -1899,14 +2497,12 @@ impl BrowserPanel {
                         .bg(to_hsla(self.tokens.shell_settings_card))
                         .border_1()
                         .border_color(to_hsla(self.tokens.shell_settings_card_border))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg)
-                                .truncate()
-                                .child(item.title.clone()),
-                        )
+                        .child(inline::popover_title(
+                            &item.id,
+                            self.vault_logins.icons.get(&item.id),
+                            item.title.clone(),
+                            fg,
+                        ))
                         .children(item.username.as_ref().map(|u| {
                             div()
                                 .text_size(px(11.0))
@@ -2030,9 +2626,7 @@ impl BrowserPanel {
             .border_1()
             .border_color(to_hsla(tokens.foreground.with_alpha(0.08)))
             .shadow(vec![super::header::dropdown_glass_shadow(tokens)])
-            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
+            .floating_surface()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.more_menu_open = false;
                 cx.notify();
@@ -2062,86 +2656,50 @@ impl BrowserPanel {
 
         let counts = self.annotations.counts();
         let annotating = self.annotations.annotating;
-        let project_ready = self.annotations.project_ready;
         let entity = cx.entity();
 
-        let annotate_btn = div()
-            .id("browser-annotate-toggle")
-            .a11y_button(
-                "browser.annotations.toggle",
-                if annotating {
-                    "Stop annotating page"
-                } else {
-                    "Annotate page"
-                },
-            )
-            .size(px(TOOLBAR_BUTTON_SIZE_PX))
-            .rounded(px(9999.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(annotating, |el| {
-                el.bg(chrome::alpha(self.tokens.primary, 0.22))
-            })
-            .when(project_ready, |el| {
-                el.cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_annotating_mode(window, cx);
-                    }))
-            })
-            .when(!project_ready, |el| el.opacity(0.45))
-            .conn_tooltip(
-                if annotating {
-                    "Stop annotating page"
-                } else {
-                    "Annotate page"
-                },
-                &self.tokens,
-            )
-            .child(superhero_icon(
-                "superhero/comment-text.svg",
-                NAV_ICON_SIZE_PX,
-                if annotating { primary } else { fg },
-            ));
-
-        let queue_btn = div()
+        // One button for everything annotation: it opens the Annotations popover, which holds the
+        // Annotate and Watch switches. The button shows the live state: annotating (primary),
+        // watching (success) and the waiting count.
+        let annotations_open = self.annotations.queue_open;
+        let annotations_label = if counts.waiting > 0 {
+            format!("Annotations ({} waiting)", counts.waiting)
+        } else {
+            "Annotations".to_owned()
+        };
+        let annotations_btn = div()
             .id("browser-annotations-queue")
-            .a11y_button(
-                "browser.annotations.queue",
-                format!("Annotations queue ({} waiting)", counts.waiting),
-            )
+            .test_support()
+            .a11y_button("browser.annotations.queue", annotations_label.clone())
             .h(px(TOOLBAR_BUTTON_SIZE_PX))
-            .px(px(6.0))
+            .min_w(px(TOOLBAR_BUTTON_SIZE_PX))
+            .when(counts.waiting > 0, |el| el.px(px(6.0)))
             .rounded(px(9999.0))
             .flex()
             .flex_row()
             .items_center()
+            .justify_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(self.annotations.queue_open, |el| el.bg(hover_bg))
+            .when(annotations_open, |el| el.bg(hover_bg))
+            .when(annotating, |el| {
+                el.bg(chrome::alpha(self.tokens.primary, 0.22))
+            })
             .hover(move |s| s.bg(hover_bg))
-            .conn_tooltip(
-                if counts.waiting > 0 {
-                    format!("Annotations queue ({} waiting)", counts.waiting)
-                } else {
-                    "Annotations queue".to_owned()
-                },
-                &self.tokens,
-            )
+            .conn_tooltip(annotations_label, &self.tokens)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.annotations.toggle_queue();
                 cx.notify();
             }))
             .child(superhero_icon(
-                "superhero/checklist.svg",
-                13.0,
-                if self.annotations.watching {
+                "superhero/comment-text.svg",
+                NAV_ICON_SIZE_PX,
+                if annotating {
+                    primary
+                } else if self.annotations.watching {
                     to_hsla(self.tokens.success_foreground)
-                } else if counts.waiting > 0 {
-                    fg
                 } else {
-                    muted
+                    fg
                 },
             ))
             .when(counts.waiting > 0, |el| {
@@ -2195,8 +2753,7 @@ impl BrowserPanel {
                 .bg(control_bg)
                 .border_1()
                 .border_color(if annotating { primary } else { border })
-                .child(annotate_btn)
-                .child(queue_btn)
+                .child(annotations_btn)
                 .child(more_btn),
         );
 
@@ -2273,6 +2830,7 @@ impl BrowserPanel {
 
 impl Render for BrowserPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.window_handle = Some(window.window_handle());
         // Keep the address field on the page's URL (navigation, redirects, links).
         let current_url = self
             .view
@@ -2505,7 +3063,12 @@ impl Render for BrowserPanel {
                 );
             }
 
-            if let Some(message) = status_message {
+            if self.recent_page_visible() {
+                // The new-tab page replaces the blank page. Its rows open pages even while
+                // Chromium starts, so the warm-up or a failed start shows as a line under them.
+                let notice = status_message.filter(|_| !matches!(self.phase, RuntimePhase::Idle));
+                container = container.child(self.render_recent_page(notice, cx));
+            } else if let Some(message) = status_message {
                 container = container.child(
                     v_flex()
                         .absolute()
@@ -2563,6 +3126,7 @@ impl Render for BrowserPanel {
         });
 
         let vault_popover = self.render_vault_logins_popover(cx);
+        let inline_picker = self.render_inline_logins_picker(cx);
         let laravel_bar = self
             .laravel_toolbar
             .read(cx)
@@ -2633,6 +3197,14 @@ impl Render for BrowserPanel {
                                         .text_size(px(UI_TEXT_PX)),
                                 ),
                             )
+                            .children(self.passkeys.is_active().then(|| {
+                                div()
+                                    .id("browser-passkey-status")
+                                    .a11y_group("browser.passkey-status", "Waiting for Vault")
+                                    .text_size(px(11.0))
+                                    .text_color(muted)
+                                    .child("Waiting for Vault…")
+                            }))
                             .children(vault_btn),
                     )
                     .child(self.render_annotations_toolbar_group(cx)),
@@ -2641,6 +3213,7 @@ impl Render for BrowserPanel {
             .child(body)
             .children(laravel_bar)
             .children(vault_popover)
+            .children(inline_picker)
             .children(context_menu)
     }
 }

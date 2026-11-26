@@ -1,7 +1,7 @@
 //! Color conversions from `conn_theme::Rgba` to GPUI `Hsla` and theme-derived
 //! syntax highlight colors. No hex literals belong in chat views.
 
-use conn_theme::{Rgba, Tokens, color_mix_oklab};
+use conn_theme::{Appearance, Rgba, Tokens, color_mix_srgb};
 use gpui_kit::{Hsla, Rgba as GpuiRgba};
 
 /// Converts a `conn_theme::Rgba` into a GPUI `Hsla`.
@@ -52,18 +52,38 @@ pub(super) fn chat_page(tokens: &Tokens) -> Rgba {
     tokens.shell_card.with_alpha(1.0)
 }
 
-/// Top-edge highlight of the user's chat bubble matching Conn's `--message-highlight`:
-/// `color-mix(in oklab, var(--message-surface) 90%, var(--foreground))`.
-pub(super) fn message_highlight(tokens: &Tokens) -> Hsla {
-    hsla(color_mix_oklab(
-        tokens.message_surface,
-        0.90,
-        tokens.foreground,
-    ))
+/// The surface of the changed-files card (lab `.m-changes-card`): the inset above in dark, the
+/// page with 6% of the foreground in light.
+pub(super) fn changed_files_surface(tokens: &Tokens) -> Rgba {
+    let page = chat_page(tokens);
+    match tokens.appearance {
+        Appearance::Dark => color_mix_srgb(page, 0.944, tokens.foreground),
+        Appearance::Light => color_mix_srgb(page, 0.94, tokens.foreground),
+    }
 }
 
-/// `ComposerBanner.Root`'s default surface and outline (`--chat-composer-attached-surface`,
-/// `--chat-composer-attached-outline`).
+/// The panel inside the changed-files card that holds its rows: a touch lighter than the card in
+/// dark, white in light.
+pub(super) fn changed_files_panel(tokens: &Tokens) -> Hsla {
+    let white = Rgba::new(1.0, 1.0, 1.0, 1.0);
+    hsla(match tokens.appearance {
+        Appearance::Dark => color_mix_srgb(changed_files_surface(tokens), 0.94, white),
+        Appearance::Light => white,
+    })
+}
+
+/// The inset a sent message holds its file rows and quoted diff in (lab `--thread-card-surface`):
+/// the chat page with 5.6% of the foreground in dark, the page itself in light. It is darker than
+/// the message bubble around it.
+pub(super) fn message_inset_surface(tokens: &Tokens) -> Hsla {
+    let page = chat_page(tokens);
+    hsla(match tokens.appearance {
+        Appearance::Dark => color_mix_srgb(page, 0.944, tokens.foreground),
+        Appearance::Light => page,
+    })
+}
+
+/// The composer's attached banner surface and outline, also used by stashed messages.
 pub(super) fn banner_surface(tokens: &Tokens) -> (Hsla, Hsla) {
     (hsla(tokens.shell_raised), hsla(tokens.shell_inner_border))
 }
@@ -90,13 +110,16 @@ pub(super) enum SyntaxRole {
     Number,
     Constant,
     Operator,
+    /// A variable or parameter. The chat draws it as plain code; the Files preview has a colour
+    /// for it.
+    Variable,
 }
 
 impl SyntaxRole {
     /// Resolves this syntax role to a GPUI color derived from `tokens`.
     pub(super) fn color(self, tokens: &Tokens) -> Hsla {
         match self {
-            Self::Plain => hsla(tokens.code_foreground),
+            Self::Plain | Self::Variable => hsla(tokens.code_foreground),
             Self::Comment => hsla(tokens.muted_foreground),
             Self::String => hsla(tokens.success),
             Self::Keyword => hsla(tokens.primary),

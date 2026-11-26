@@ -2,9 +2,14 @@
 //! database from `.env` and saved manual connections, their tables, a table's columns, and
 //! read-only SQL executed natively via [`conn_desktop::database::DatabaseRunner`].
 
+mod empty;
 mod form;
+mod picker;
 mod store;
 mod views;
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use conn_desktop::database::api::{
     CallOptions, ConnectionSource, DatabaseQueryResult, PanelConnection, browse_table_sql,
@@ -14,40 +19,51 @@ use conn_desktop::database::api::{
 use conn_desktop::database::{DatabaseColumn, DatabaseRunner};
 use conn_desktop::vault::VaultErrorKind;
 use conn_theme::Tokens;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, div, px, relative,
+    AnyElement, Bounds, Context, Entity, FontWeight, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement, Pixels, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
+    canvas, div, px, relative,
 };
 
-use self::form::{ConnectionFormState, outline_sm_button};
+use self::form::ConnectionFormState;
+use self::picker::{PickerRows, menu_placement, step_row};
 use self::store::{
     DatabaseStore, active_connection, filter_tables, finalize_draft, format_result_summary,
     load_env_connection, load_store, project_connections, save_store,
 };
 use self::views::{
-    render_connection_alert, render_connection_menu, render_rows_grid, render_structure_list,
+    ConnectionMenuView, menu_wanted_height, render_connection_alert, render_connection_menu,
+    render_rows_grid, render_structure_list,
 };
 use super::chrome::{
     self, ConnTooltipExt as _, ICON_BUTTON_GLYPH_PX, ROW_PAD_START_PX, SectionTab,
     UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use super::color::to_hsla;
-use super::header::{CONTROL_RADIUS_PX, superhero_icon};
+use super::header::superhero_icon;
 use crate::a11y::ConnA11yExt as _;
 use crate::theme::MONO_FONT;
 
-/// Left table-list column width (`w-52` = 208px).
+/// Maximum width of the responsive table sidebar.
 const TABLE_LIST_WIDTH_PX: f32 = 208.0;
-/// Result tabs bar height (`ApiTabs className="h-11"` = 44px) so the Run toolbar group fits.
+/// Height of the results section switcher.
 const RESULT_TABS_HEIGHT_PX: f32 = 44.0;
-/// Minimum height of the SQL editor (`min-h-24` = 96px).
-const SQL_EDITOR_MIN_HEIGHT_PX: f32 = 96.0;
+/// Height of the SQL editor, including the result duration.
+const SQL_EDITOR_HEIGHT_PX: f32 = 96.0;
+/// Outer left padding of the SQL editor; with the editor's own inset the text sits 16px in.
+const SQL_EDITOR_PAD_START_PX: f32 = 3.0;
+/// Top padding of the SQL editor so its first line centres on the table search text.
+const SQL_EDITOR_PAD_TOP_PX: f32 = 7.0;
 /// Placeholder shown in the SQL editor (`DatabasePanel.tsx`).
 const SQL_PLACEHOLDER: &str = "select * from users limit 100";
 const PILL_RADIUS_PX: f32 = 9999.0;
+/// The remembered connection of a project the user disconnected. It is kept in `database.json`
+/// so the empty state also shows after a restart (`select("")` in the desktop lab).
+const DISCONNECTED: &str = "";
 
 #[derive(Debug, Clone)]
 struct KeyedLoad<T> {
@@ -85,12 +101,20 @@ pub(crate) struct DatabasePanel {
     allow_unlock_next: bool,
     pub(super) editing: Option<ConnectionFormState>,
     menu_open: bool,
+    /// The connection menu's search field, its text, the highlighted row and its list's scroll.
+    menu_input: Entity<InputState>,
+    menu_query: String,
+    menu_highlight: usize,
+    menu_scroll: ScrollHandle,
+    /// Where the menu's trigger was painted: the menu fits itself into the room around it.
+    trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     filter: String,
     clear_filter_pending: bool,
     filter_input: Entity<InputState>,
-    sql_input: Entity<TextareaState>,
+    sql_input: Entity<EditorState>,
     /// `(project_key, connection_id)` currently loaded into `sql_input`.
     synced_sql: Option<(String, String)>,
+    pending_agent_sql: Option<String>,
     tab: &'static str,
     refresh_nonce: u64,
     reconnect_next: bool,
@@ -114,18 +138,40 @@ impl std::fmt::Debug for DatabasePanel {
 }
 
 impl DatabasePanel {
+    pub(super) fn reload_store(&mut self) {
+        self.store = load_store();
+        self.synced_sql = None;
+    }
     pub(crate) fn new(tokens: Tokens, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Tables"));
+        let menu_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search connections…"));
         let sql_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            EditorState::new(window, cx)
                 .placeholder(SQL_PLACEHOLDER)
-                .auto_grow(5, 12)
+                .language("sql")
+                .line_number(false)
+                .folding(false)
+                .auto_close(false)
+                .smart_indent(false)
+                .searchable(false)
         });
 
         let filter_sub = cx.subscribe(&filter_input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.filter = input.read(cx).value().to_string();
                 cx.notify();
+            }
+        });
+        let menu_sub = cx.subscribe(&menu_input, |this, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = input.read(cx).value().to_string();
+                if query != this.menu_query {
+                    this.menu_query = query;
+                    this.menu_highlight = 0;
+                    this.menu_scroll.scroll_to_item(0);
+                    cx.notify();
+                }
             }
         });
         let sql_sub = cx.subscribe(&sql_input, |this, input, event: &InputEvent, cx| {
@@ -159,11 +205,17 @@ impl DatabasePanel {
             allow_unlock_next: false,
             editing: None,
             menu_open: false,
+            menu_input,
+            menu_query: String::new(),
+            menu_highlight: 0,
+            menu_scroll: ScrollHandle::new(),
+            trigger_bounds: Rc::new(Cell::new(None)),
             filter: String::new(),
             clear_filter_pending: false,
             filter_input,
             sql_input,
             synced_sql: None,
+            pending_agent_sql: None,
             tab: "rows",
             refresh_nonce: 0,
             reconnect_next: false,
@@ -172,7 +224,7 @@ impl DatabasePanel {
             picked: None,
             query: None,
             run_id: 0,
-            _subscriptions: vec![filter_sub, sql_sub],
+            _subscriptions: vec![filter_sub, menu_sub, sql_sub],
         }
     }
 
@@ -264,6 +316,10 @@ impl DatabasePanel {
             .project_key
             .as_deref()
             .and_then(|key| self.store.remembered_connection(key));
+        // An empty id is a disconnect: it never falls back to the `.env` or the first one.
+        if remembered == Some(DISCONNECTED) {
+            return None;
+        }
         active_connection(&connections, remembered)
     }
 
@@ -295,6 +351,10 @@ impl DatabasePanel {
         else {
             return;
         };
+        if let Some(sql) = self.pending_agent_sql.take() {
+            self.store.set_sql(&project_key, &connection.id, sql);
+            save_store(&self.store);
+        }
         let target = (project_key.clone(), connection.id.clone());
         if self.synced_sql.as_ref() == Some(&target) {
             return;
@@ -325,6 +385,11 @@ impl DatabasePanel {
             data: None,
             error: None,
         });
+        // A test never reaches a database: its runtime thread would finish the load while the
+        // test scheduler runs something else. The load stays pending, as the Vault load does.
+        if cfg!(test) {
+            return;
+        }
         let runner = self.runner.clone();
         let db_conn = connection.connection;
         let task = crate::live::RT
@@ -443,15 +508,10 @@ impl DatabasePanel {
 
     /// Places an agent-provided SQL query in the editor without running it.
     pub(crate) fn set_agent_sql(&mut self, sql: String, cx: &mut Context<'_, Self>) {
-        if let (Some(project_key), Some(connection)) =
-            (self.project_key.clone(), self.selected_connection())
-        {
-            self.store.set_sql(&project_key, &connection.id, sql);
-            save_store(&self.store);
-            self.synced_sql = None;
-            self.tab = "rows";
-            cx.notify();
-        }
+        self.pending_agent_sql = Some(sql);
+        self.synced_sql = None;
+        self.tab = "rows";
+        cx.notify();
     }
 
     /// Executes an agent's read-only SQL query in the Database panel so the user sees the live
@@ -502,6 +562,7 @@ impl DatabasePanel {
             return rx;
         };
 
+        self.pending_agent_sql = None;
         if let Some(project_key) = self.project_key.clone() {
             self.store.set_connection(&project_key, &connection.id);
             self.store
@@ -683,6 +744,64 @@ impl DatabasePanel {
         self.run_sql(statement, cx);
     }
 
+    /// Opens the connection menu with an empty search that has the keyboard, or closes it.
+    fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.menu_open = !self.menu_open;
+        if self.menu_open {
+            self.reset_menu_search(window, cx);
+            self.menu_input
+                .update(cx, |input, cx| input.focus(window, cx));
+            if self.vault_connections.is_empty() || self.vault_status.is_some() {
+                self.load_vault_databases(false, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn reset_menu_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.menu_query.clear();
+        self.menu_highlight = 0;
+        self.menu_scroll.scroll_to_item(0);
+        self.menu_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// The connections the menu shows for the current search.
+    fn menu_rows(&self) -> PickerRows {
+        PickerRows::new(&self.connections(), &self.menu_query)
+    }
+
+    /// Moves the highlight over the rows the search keeps and scrolls it into view.
+    pub(super) fn move_menu_highlight(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
+        let rows = self.menu_rows();
+        if rows.is_empty() {
+            return;
+        }
+        self.menu_highlight = step_row(self.menu_highlight, delta, rows.len());
+        self.menu_scroll
+            .scroll_to_item(rows.child_index(self.menu_highlight));
+        cx.notify();
+    }
+
+    /// Enter in the search: picks the highlighted row.
+    pub(super) fn confirm_menu_highlight(&mut self, cx: &mut Context<'_, Self>) {
+        let rows = self.menu_rows();
+        let Some(id) = rows.get(self.menu_highlight).map(|c| c.id.clone()) else {
+            return;
+        };
+        self.select_connection(&id, cx);
+    }
+
+    /// Escape in the open menu: it clears the search first, then closes the menu.
+    fn escape_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.menu_query.is_empty() {
+            self.menu_open = false;
+        } else {
+            self.reset_menu_search(window, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn select_connection(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         if let Some(project_key) = self.project_key.clone() {
             self.store.set_connection(&project_key, id);
@@ -692,6 +811,39 @@ impl DatabasePanel {
         self.allow_unlock_next = id.starts_with("vault:");
         self.synced_sql = None;
         self.ensure_tables_loaded(cx);
+        cx.notify();
+    }
+
+    /// Closes the open connection and shows the empty state. The choice is saved, so neither a
+    /// reload nor a refresh brings the `.env` database back.
+    pub(super) fn disconnect(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(project_key) = self.project_key.clone() {
+            self.store.set_connection(&project_key, DISCONNECTED);
+            save_store(&self.store);
+        }
+        self.menu_open = false;
+        self.editing = None;
+        self.picked = None;
+        self.query = None;
+        self.tables_load = None;
+        self.columns_load = None;
+        self.synced_sql = None;
+        self.run_id = self.run_id.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// "Unlock Vault…": lists the Vault databases again and lets Vault ask for its unlock.
+    pub(super) fn unlock_vault(&mut self, cx: &mut Context<'_, Self>) {
+        self.menu_open = false;
+        self.allow_unlock_next = true;
+        self.load_vault_databases(true, cx);
+        cx.notify();
+    }
+
+    /// "Retry Vault" after a Vault error.
+    pub(super) fn retry_vault(&mut self, cx: &mut Context<'_, Self>) {
+        self.menu_open = false;
+        self.load_vault_databases(true, cx);
         cx.notify();
     }
 
@@ -791,9 +943,9 @@ impl DatabasePanel {
 
     fn render_toolbar(
         &self,
-        connections: &[PanelConnection],
         selected: Option<&PanelConnection>,
         tables_loading: bool,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let tokens = &self.tokens;
@@ -802,8 +954,9 @@ impl DatabasePanel {
         let muted = to_hsla(tokens.muted_foreground);
         let hover = to_hsla(tokens.shell_highlight);
 
-        let mut trigger = h_flex()
+        let mut trigger = chrome::toolbar_group(tokens)
             .id("db-connection-trigger")
+            .test_support()
             .a11y_button(
                 "database.connection.trigger",
                 selected.map_or_else(
@@ -813,29 +966,22 @@ impl DatabasePanel {
             )
             .min_w_0()
             .max_w_full()
-            .h(px(24.0))
-            .px(px(7.0))
-            .gap(px(4.0))
+            .px(px(10.0))
+            .gap(px(6.0))
             .items_center()
             .rounded(px(PILL_RADIUS_PX))
+            .aria_expanded(self.menu_open)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .cursor_pointer()
-            .text_size(px(XS_TEXT_PX))
-            .line_height(px(XS_LINE_HEIGHT_PX))
+            .text_size(px(UI_TEXT_PX))
+            .line_height(px(UI_LINE_HEIGHT_PX))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg)
             .hover(move |s| s.bg(hover))
             .on_click({
                 let entity = entity.clone();
-                move |_, _, cx| {
-                    entity.update(cx, |panel, cx| {
-                        panel.menu_open = !panel.menu_open;
-                        if panel.menu_open
-                            && (panel.vault_connections.is_empty() || panel.vault_status.is_some())
-                        {
-                            panel.load_vault_databases(false, cx);
-                        }
-                        cx.notify();
-                    });
+                move |_, window, cx| {
+                    entity.update(cx, |panel, cx| panel.toggle_menu(window, cx));
                 }
             })
             .child(superhero_icon(
@@ -862,20 +1008,43 @@ impl DatabasePanel {
             muted,
         ));
 
-        let mut connection_anchor = div().relative().min_w_0().flex_shrink(1.0).child(
-            chrome::toolbar_group(tokens)
-                .flex_shrink(1.0)
-                .min_w_0()
-                .max_w_full()
-                .child(trigger),
-        );
+        // Records where the trigger is, so the menu can fit the room above or below it.
+        let trigger_bounds = Rc::clone(&self.trigger_bounds);
+        let mut connection_anchor = div()
+            .relative()
+            .min_w_0()
+            .flex_shrink(1.0)
+            .child(
+                canvas(
+                    move |bounds, _, _| trigger_bounds.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(trigger.flex_shrink(1.0));
         if self.menu_open {
+            let total = self.connections().len();
+            let rows = self.menu_rows();
+            let wanted = menu_wanted_height(&rows, total, selected, self.vault_status);
+            let placement = menu_placement(
+                self.trigger_bounds.get(),
+                window.viewport_size().height.as_f32(),
+                wanted,
+            );
             connection_anchor = connection_anchor.child(render_connection_menu(
-                tokens,
-                connections,
-                selected,
-                self.vault_status,
-                self.vault_error.as_deref(),
+                &ConnectionMenuView {
+                    tokens,
+                    total,
+                    rows: &rows,
+                    highlight: self.menu_highlight,
+                    selected,
+                    vault_status: self.vault_status,
+                    vault_error: self.vault_error.as_deref(),
+                    input: &self.menu_input,
+                    scroll: &self.menu_scroll,
+                    placement,
+                },
                 cx,
             ));
         }
@@ -885,61 +1054,85 @@ impl DatabasePanel {
         } else {
             "superhero/refresh.svg"
         };
-        let refresh_group = chrome::toolbar_group(tokens).child(
-            chrome::icon_button(
-                "db-refresh-btn",
-                refresh_icon,
-                tokens,
-                false,
-                move |_, _, cx| entity.update(cx, |panel, cx| panel.refresh(cx)),
-            )
-            .conn_tooltip("Reload .env and tables", tokens),
-        );
-
-        chrome::toolbar_row(tokens)
-            .child(connection_anchor)
-            .child(
-                div()
-                    .ml_auto()
-                    .flex_shrink_0()
-                    .text_size(px(UI_TEXT_PX))
-                    .line_height(px(UI_LINE_HEIGHT_PX))
-                    .text_color(muted)
-                    .child("Read-only"),
-            )
-            .child(refresh_group)
+        // With nothing open there is nothing to reload: the same slot adds a connection.
+        let tool_group = if selected.is_some() {
+            chrome::icon_button("db-refresh-btn", refresh_icon, tokens, false, {
+                let entity = entity.clone();
+                move |_, _, cx| entity.update(cx, |panel, cx| panel.refresh(cx))
+            })
+            .test_support()
+            .ml_auto()
+            .size(px(chrome::CONTROL_HEIGHT_PX))
+            .bg(to_hsla(tokens.shell_control))
+            .border_1()
+            .border_color(to_hsla(tokens.shell_divider_header))
+            .conn_tooltip("Reload .env and tables", tokens)
             .into_any_element()
-    }
-
-    fn render_empty_no_connection(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let tokens = &self.tokens;
-        let entity = cx.entity();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .items_start()
-            .gap(px(12.0))
-            .px(px(ROW_PAD_START_PX))
-            .py(px(12.0))
-            .child(
-                div()
-                    .text_size(px(UI_TEXT_PX))
-                    .line_height(px(UI_LINE_HEIGHT_PX))
-                    .text_color(to_hsla(tokens.muted_foreground))
-                    .child("No database in the project's .env (DB_CONNECTION). Add a connection to browse one."),
-            )
-            .child(outline_sm_button(
-                "db-empty-add",
-                Some("superhero/add.svg"),
+        } else {
+            toolbar_tool(
+                "db-add-btn",
+                "superhero/add.svg",
                 "Add connection",
                 tokens,
-                false,
-                move |_, window, cx| {
-                    entity.update(cx, |panel, cx| panel.begin_add_connection(false, window, cx));
+                {
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |panel, cx| panel.begin_add_connection(true, window, cx));
+                    }
                 },
-            ))
+            )
+            .ml_auto()
             .into_any_element()
+        };
+
+        // `.lab-db-toolbar`: 8px padding and a 32px control make 49px with the border. The
+        // shared `toolbar_row` pads 7.5px and 11.5px; Tasks and the lab use 8px all round.
+        let mut toolbar = chrome::toolbar_row(tokens)
+            .id("db-toolbar")
+            .test_support()
+            .p(px(8.0))
+            .child(connection_anchor)
+            .child(tool_group);
+        if let Some(connection) = selected.filter(|_| self.editing.is_none()) {
+            let running = self
+                .query
+                .as_ref()
+                .is_some_and(|q| q.key == connection_key(connection) && q.running);
+            let disabled = running || self.current_sql(&connection.id).trim().is_empty();
+            let icon = if running {
+                "superhero/spinner.svg"
+            } else {
+                "superhero/play.svg"
+            };
+            let run_entity = entity.clone();
+            let button = chrome::toolbar_group(tokens)
+                .id("db-run-btn")
+                .test_support()
+                .a11y_button("panel.db-run-btn", "Run")
+                .px(px(8.0))
+                .gap(px(6.0))
+                .text_size(px(XS_TEXT_PX))
+                .line_height(px(XS_LINE_HEIGHT_PX))
+                .text_color(fg)
+                .when(disabled, |el| el.opacity(0.4))
+                .when(!disabled, |el| {
+                    el.cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .on_click(move |_, _, cx| {
+                            run_entity.update(cx, |panel, cx| panel.run_current_sql(cx))
+                        })
+                })
+                .child(superhero_icon(icon, ICON_BUTTON_GLYPH_PX, muted))
+                .child("Run");
+            toolbar = toolbar.child(button).child(toolbar_tool(
+                "db-disconnect-btn",
+                "superhero/unplug.svg",
+                "Disconnect",
+                tokens,
+                move |_, _, cx| entity.update(cx, |panel, cx| panel.disconnect(cx)),
+            ));
+        }
+        toolbar.into_any_element()
     }
 
     fn render_workspace(
@@ -979,23 +1172,23 @@ impl DatabasePanel {
         let result = current_query.and_then(|q| q.result.as_ref());
         let running = current_query.is_some_and(|q| q.running);
         let query_error = current_query.and_then(|q| q.error.as_deref());
-        let sql = self.current_sql(&connection.id);
-
         let fg = to_hsla(tokens.foreground);
         let muted = to_hsla(tokens.muted_foreground);
         let divider = to_hsla(tokens.shell_divider);
         let highlight = to_hsla(tokens.shell_highlight);
         let row_hover = chrome::alpha(tokens.foreground, 0.04);
 
-        // ── Left column: Table list (`w-52`) ─────────────────────────────────
+        // Table search and rows share the same left and right edges.
         let filter_field = chrome::soft_input_group(tokens)
-            .pl(px(9.0))
-            .pr(px(12.0))
+            .id("db-table-filter")
+            .a11y_group("panel.database.filter", "Filter tables")
+            .px(px(9.0))
             .gap(px(6.0))
             .child(superhero_icon("superhero/search.svg", 14.0, muted))
             .child(
                 div().flex_1().min_w_0().child(
                     Input::new(&self.filter_input)
+                        .aria_label("Filter tables")
                         .appearance(false)
                         .text_size(px(UI_TEXT_PX)),
                 ),
@@ -1008,7 +1201,8 @@ impl DatabasePanel {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .px(px(6.0))
+            .gap(px(chrome::LIST_ROW_GAP_PX))
+            .px(px(chrome::LIST_INLINE_INSET_PX))
             .pb(px(8.0));
 
         if tables_loading {
@@ -1041,11 +1235,15 @@ impl DatabasePanel {
                         h_flex()
                             .id(SharedString::from(format!("db-table-{name}")))
                             .a11y_button(format!("panel.database.table.{name}"), name.clone())
-                            .h(px(28.0))
+                            .aria_selected(is_selected)
+                            .flex_shrink_0()
+                            .h(px(chrome::LIST_ROW_HEIGHT_PX))
                             .w_full()
                             .items_center()
-                            .rounded(px(CONTROL_RADIUS_PX))
-                            .px(px(10.0))
+                            .rounded(px(chrome::LIST_ROW_RADIUS_PX))
+                            .px(px(chrome::LIST_ROW_INSET_PX))
+                            .pt(px(5.0))
+                            .pb(px(7.0))
                             .cursor_pointer()
                             .text_size(px(UI_TEXT_PX))
                             .line_height(px(UI_LINE_HEIGHT_PX))
@@ -1065,85 +1263,69 @@ impl DatabasePanel {
         }
 
         let left_column = v_flex()
-            .w(px(TABLE_LIST_WIDTH_PX))
+            .w(relative(0.29))
+            .min_w(px(100.0))
+            .max_w(px(TABLE_LIST_WIDTH_PX))
             .flex_shrink_0()
             .min_h_0()
             .border_r_1()
             .border_color(divider)
-            .child(div().flex_shrink_0().p(px(8.0)).child(filter_field))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .pt(px(8.0))
+                    .px(px(chrome::LIST_INLINE_INSET_PX))
+                    .pb(px(chrome::SEARCH_LIST_GAP_PX))
+                    .child(filter_field),
+            )
             .child(table_rows);
 
         // ── Right column: SQL editor + Result tabs + Results ─────────────────
         let sql_editor = v_flex()
             .w_full()
             .flex_shrink_0()
-            .min_h(px(SQL_EDITOR_MIN_HEIGHT_PX))
-            .max_h(relative(0.4))
+            .h(px(SQL_EDITOR_HEIGHT_PX))
             .border_b_1()
             .border_color(divider)
             .child(
                 div()
                     .id("db-sql-scroll")
                     .a11y_group("panel.database.sql", "SQL editor")
+                    .flex_1()
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .px(px(ROW_PAD_START_PX))
-                    .py(px(12.0))
+                    // The editor adds ~13px of its own inner padding: this puts the query text
+                    // 16px from the column edge, and its first line on the table search text's
+                    // vertical centre.
+                    .pl(px(SQL_EDITOR_PAD_START_PX))
+                    .pr(px(ROW_PAD_START_PX))
+                    .pt(px(SQL_EDITOR_PAD_TOP_PX))
+                    .pb(px(12.0))
                     .font_family(SharedString::from(MONO_FONT))
                     .child(
-                        Textarea::new(&self.sql_input)
+                        Editor::new(&self.sql_input)
+                            .h(relative(1.0))
+                            .aria_label("SQL query")
+                            .font_family(SharedString::from(MONO_FONT))
                             .appearance(false)
                             .text_size(px(XS_TEXT_PX)),
                     ),
-            );
-
-        let run_disabled = running || sql.trim().is_empty();
-        let run_icon = if running {
-            "superhero/spinner.svg"
-        } else {
-            "superhero/play.svg"
-        };
-        let run_button = {
-            let entity = entity.clone();
-            let base = h_flex()
-                .id("db-run-btn")
-                .a11y_button("panel.db-run-btn", "Run")
-                .flex_shrink_0()
-                .h(px(24.0))
-                .px(px(7.0))
-                .gap(px(4.0))
-                .items_center()
-                .rounded(px(PILL_RADIUS_PX))
-                .text_size(px(XS_TEXT_PX))
-                .line_height(px(XS_LINE_HEIGHT_PX))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg)
-                .child(superhero_icon(run_icon, ICON_BUTTON_GLYPH_PX, muted))
-                .child("Run");
-            if run_disabled {
-                base.opacity(0.64)
-            } else {
-                base.cursor_pointer()
-                    .hover(move |s| s.bg(highlight))
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |panel, cx| panel.run_current_sql(cx));
-                    })
-            }
-        };
-
-        let mut trailing = h_flex().items_center().gap(px(8.0));
-        if let Some(res) = result {
-            trailing = trailing.child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(UI_TEXT_PX))
-                    .line_height(px(UI_LINE_HEIGHT_PX))
-                    .text_color(muted)
-                    .child(format_result_summary(res)),
-            );
-        }
-        trailing = trailing.child(chrome::toolbar_group(tokens).child(run_button));
+            )
+            .when_some(result, |editor, result| {
+                editor.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_right()
+                        .pr(px(12.0))
+                        .pb(px(4.0))
+                        .font_family(SharedString::from(MONO_FONT))
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .text_color(muted)
+                        .child(format_result_summary(result)),
+                )
+            });
 
         let tabs = [
             SectionTab {
@@ -1162,7 +1344,7 @@ impl DatabasePanel {
             tokens,
             &tabs,
             self.tab,
-            Some(trailing.into_any_element()),
+            None,
             move |next_tab, _, cx| {
                 entity.update(cx, |panel, cx| {
                     panel.tab = next_tab;
@@ -1170,7 +1352,11 @@ impl DatabasePanel {
                 });
             },
         )
-        .h(px(RESULT_TABS_HEIGHT_PX));
+        .h(px(RESULT_TABS_HEIGHT_PX))
+        .gap(px(10.0))
+        // The first tab label starts on the SQL query's left edge too.
+        .pl(px(views::RESULT_FIRST_COLUMN_PAD_START_PX))
+        .pr(px(8.0));
 
         let result_body: AnyElement = if self.tab == "rows" {
             if let Some(err) = query_error {
@@ -1226,7 +1412,12 @@ impl DatabasePanel {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .overflow_scroll()
+                    .when(self.tab == "rows" && result.is_some(), |el| {
+                        el.overflow_x_scroll()
+                    })
+                    .when(self.tab != "rows" || result.is_none(), |el| {
+                        el.overflow_y_scroll()
+                    })
                     .child(result_body),
             );
 
@@ -1240,11 +1431,45 @@ impl DatabasePanel {
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    .items_stretch()
                     .child(left_column)
                     .child(right_column),
             )
             .into_any_element()
     }
+}
+
+/// A round 32px toolbar tool (`.lab-db-toolbar .tool`): a raised pill with a 14px glyph.
+fn toolbar_tool(
+    id: &'static str,
+    icon_path: &'static str,
+    label: &'static str,
+    tokens: &Tokens,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+) -> impl IntoElement + Styled {
+    let hover = to_hsla(tokens.shell_highlight);
+    div()
+        .id(id)
+        .test_support()
+        .a11y_button(format!("panel.{id}"), label)
+        .flex()
+        .flex_shrink_0()
+        .size(px(chrome::CONTROL_HEIGHT_PX))
+        .items_center()
+        .justify_center()
+        .rounded(px(PILL_RADIUS_PX))
+        .bg(to_hsla(tokens.shell_control))
+        .border_1()
+        .border_color(to_hsla(tokens.shell_divider_header))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .on_click(on_click)
+        .child(superhero_icon(
+            icon_path,
+            ICON_BUTTON_GLYPH_PX,
+            to_hsla(tokens.muted_foreground),
+        ))
+        .conn_tooltip(label, tokens)
 }
 
 impl Render for DatabasePanel {
@@ -1258,7 +1483,6 @@ impl Render for DatabasePanel {
             .into_any_element();
         }
 
-        let connections = self.connections();
         let selected = self.selected_connection();
         let tables_loading = selected.as_ref().is_some_and(|conn| {
             let expected = format!("{}:{}", connection_key(conn), self.refresh_nonce);
@@ -1267,24 +1491,32 @@ impl Render for DatabasePanel {
                 .is_some_and(|load| load.key == expected && load.loading)
         });
 
-        let toolbar = self.render_toolbar(&connections, selected.as_ref(), tables_loading, cx);
+        let toolbar = self.render_toolbar(selected.as_ref(), tables_loading, window, cx);
         let body: AnyElement = if let Some(form) = &self.editing {
-            form.render(&self.tokens, cx)
+            form.render(&self.tokens, window, cx)
         } else if let Some(connection) = &selected {
             self.render_workspace(connection, cx)
         } else {
-            self.render_empty_no_connection(cx)
+            self.render_empty_no_connection(window, cx)
         };
 
         v_flex()
             .id("database-panel")
             .a11y_group("panel.database", "Database")
             .size_full()
-            // Capture phase intercepts Cmd+Enter / Ctrl+Enter before TextareaState inserts a newline.
-            .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, _, cx| {
+            // Capture phase intercepts Cmd+Enter / Ctrl+Enter before the SQL editor inserts a newline.
+            .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
                 let k = &event.keystroke;
                 if panel.menu_open && k.key == "escape" {
-                    panel.menu_open = false;
+                    panel.escape_menu(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if k.key == "escape"
+                    && let Some(form) = panel.editing.as_mut()
+                    && form.driver_menu_open
+                {
+                    form.driver_menu_open = false;
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -1304,8 +1536,15 @@ impl Render for DatabasePanel {
                         panel.menu_open = false;
                         cx.notify();
                     }
+                    if let Some(form) = panel.editing.as_mut()
+                        && form.driver_menu_open
+                    {
+                        form.driver_menu_open = false;
+                        cx.notify();
+                    }
                 }),
             )
+            .when(self.menu_open, |el| el.on_mouse_down_out(cx.listener(|panel, _, _, cx| { panel.menu_open = false; cx.notify(); })))
             .child(toolbar)
             .child(body)
             .into_any_element()

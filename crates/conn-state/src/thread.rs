@@ -34,6 +34,7 @@ use conn_contract::{
     OrchestrationV2TurnItemSecretRequest as SecretRequestItem,
     OrchestrationV2TurnItemSubagent as SubagentItem,
     OrchestrationV2TurnItemSystemNotice as SystemNoticeItem,
+    OrchestrationV2TurnItemSystemNoticeLevel as SystemNoticeLevel,
     OrchestrationV2TurnItemThreadCreated as ThreadCreatedItem,
     OrchestrationV2TurnItemTodoList as TodoListItem,
     OrchestrationV2TurnItemUserInputRequest as UserInputRequestItem,
@@ -49,6 +50,7 @@ pub use conn_contract::{
     OrchestrationV2TurnItemStatus as TurnItemStatus,
 };
 
+use crate::review_comment::{ReviewComment, review_comments_for_message};
 use crate::timeline::{
     TurnCheckpointFile, UserInputAnswer, UserInputOption, UserInputQuestion,
     format_subagent_display_title, proposed_plan_title, subagent_detail_markdown,
@@ -63,12 +65,41 @@ fn next_revision() -> u64 {
     NEXT_REVISION.fetch_add(1, Ordering::Relaxed)
 }
 
+/// How loudly a [`TimelineEntry::Notice`] speaks. Decided from the contract's own severity, never
+/// from the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoticeLevel {
+    /// A plain information divider (compaction, handoff, fork).
+    Info,
+    /// A runtime or provider warning, such as an MCP server that failed to start. Web's
+    /// `runtime.warning` row.
+    Warning,
+    /// A failure of the turn.
+    Error,
+}
+
+impl NoticeLevel {
+    /// True for [`NoticeLevel::Error`].
+    #[must_use]
+    pub const fn is_error(self) -> bool {
+        matches!(self, Self::Error)
+    }
+}
+
 /// Status of a tool call or work item row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ItemStatus {
     Running,
     Completed,
     Failed,
+}
+
+/// Attribution carried by a delivered agent message. A local sender's current title is in the
+/// owning environment's shell; a linked sender supplies its own title on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AgentMessageSender {
+    LocalThread(String),
+    LinkedTitle(String),
 }
 
 /// One row in the chat timeline. A flattened, render-ready model of the thread's turn items.
@@ -80,11 +111,14 @@ pub enum TimelineEntry {
         /// True when the message was dispatched by an agent or system rather than the human user
         /// (Conn renders these as a collapsible `"Agent <preview>"` row).
         created_by_agent: bool,
+        sender: Option<AgentMessageSender>,
         /// ISO-8601 creation time (`startedAt`, else `updatedAt`) for the hover timestamp.
         created_at: Option<String>,
         attachments: Vec<ChatAttachment>,
         /// True for `steer` and `promoted_queued_to_steer` messages (Conn's `Steer` marker).
         is_steer: bool,
+        /// Review comments sent with the message (`context.records`), in sent order.
+        review_comments: Vec<ReviewComment>,
         run_id: Option<String>,
     },
     /// A server-backed queued user message waiting to run after the active turn (or while the
@@ -124,6 +158,28 @@ pub enum TimelineEntry {
         /// True when the server compacted the output away; expand fetches it on demand
         /// (`orchestration.getTurnItem`).
         output_omitted: bool,
+    },
+    /// An interactive document backed by a signed attachment from this tool item.
+    EmbeddedDocument {
+        id: String,
+        source_thread_id: String,
+        source_item_id: String,
+        status: ItemStatus,
+        title: String,
+        detail: Option<String>,
+        document: serde_json::Value,
+        is_mcp: bool,
+        input: serde_json::Value,
+        output: serde_json::Value,
+        output_omitted: bool,
+    },
+    /// The task a completed Orbit task-create tool call made (`orbit_task_create_row`): the
+    /// task's list row, cut to the fields its card reads.
+    OrbitTask {
+        id: String,
+        title: String,
+        detail: Option<String>,
+        task: serde_json::Value,
     },
     /// A pending approval the user must answer.
     Approval {
@@ -187,11 +243,11 @@ pub enum TimelineEntry {
         started_at: Option<String>,
         completed_at: Option<String>,
     },
-    /// An error or notice row.
+    /// An error, warning or notice row.
     Notice {
         id: String,
         text: String,
-        is_error: bool,
+        level: NoticeLevel,
     },
 }
 
@@ -205,6 +261,8 @@ impl TimelineEntry {
             | Self::Assistant { id, .. }
             | Self::Thinking { id, .. }
             | Self::Tool { id, .. }
+            | Self::EmbeddedDocument { id, .. }
+            | Self::OrbitTask { id, .. }
             | Self::Approval { id, .. }
             | Self::UserInputRequest { id, .. }
             | Self::SecretRequest { id, .. }
@@ -914,7 +972,7 @@ impl ThreadState {
         self.subagent_of_entry.clear();
         let mut entries = Vec::with_capacity(capacity);
         let mut entry_index: HashMap<String, usize> = HashMap::with_capacity(capacity);
-        let mut ingest = |mut item: ProjectionTurnItem| {
+        let mut ingest = |mut item: ProjectionTurnItem, source: Option<(String, String)>| {
             hydrate_deduped_projection_item(&mut item, &message_texts, &subagent_bodies);
             if let ProjectionTurnItem::Subagent(sub) = &item {
                 self.subagent_of_entry
@@ -935,7 +993,7 @@ impl ThreadState {
             if let Some((id, place)) = place_of_projection_item(&item) {
                 self.places.insert(id, place);
             }
-            if let Some(entry) = map_projection_turn_item(item) {
+            if let Some(entry) = map_projection_turn_item(item, source) {
                 if let Some(&idx) = entry_index.get(entry.id()) {
                     entries[idx] = entry;
                 } else {
@@ -950,11 +1008,11 @@ impl ThreadState {
             let mut rows = projection.visible_turn_items;
             rows.sort_by_key(|row| row.position);
             for row in rows {
-                ingest(row.item);
+                ingest(row.item, Some((row.source_thread_id, row.source_item_id)));
             }
         } else {
             for turn_item in projection.turn_items {
-                ingest(turn_item);
+                ingest(turn_item, None);
             }
         }
         self.entries = entries;
@@ -1010,7 +1068,9 @@ impl ThreadState {
             let timing = extract_projection_timing(&item);
             let place = place_of_projection_item(&item);
 
-            let Some(entry) = map_projection_turn_item(item) else {
+            let Some(entry) =
+                map_projection_turn_item(item, Some((row.source_thread_id, row.source_item_id)))
+            else {
                 continue;
             };
             if existing_ids.contains(entry.id()) {
@@ -1179,7 +1239,7 @@ impl ThreadState {
                 text: msg.text.clone(),
                 attachments: msg.attachments.clone(),
                 created_at: msg.created_at.clone(),
-                created_by_agent: msg.created_by != Actor::User,
+                created_by_agent: is_agent_origin(msg.created_by, msg.creation_source),
                 is_automatic,
             },
         );
@@ -1675,13 +1735,18 @@ fn turn_item_id(item: &TurnItem) -> &str {
 #[must_use]
 pub fn turn_item_detail(item: TurnItem) -> Option<String> {
     match map_turn_item(item)? {
-        TimelineEntry::Tool { detail, .. } => detail,
+        TimelineEntry::Tool { detail, .. } | TimelineEntry::EmbeddedDocument { detail, .. } => {
+            detail
+        }
         TimelineEntry::Thinking { text, .. } => non_empty(Some(text)),
         _ => None,
     }
 }
 
-fn map_projection_turn_item(item: ProjectionTurnItem) -> Option<TimelineEntry> {
+fn map_projection_turn_item(
+    item: ProjectionTurnItem,
+    source: Option<(String, String)>,
+) -> Option<TimelineEntry> {
     match item {
         ProjectionTurnItem::Notification(i) => map_notification(i),
         ProjectionTurnItem::UserMessage(i) => map_user_message(i),
@@ -1707,7 +1772,7 @@ fn map_projection_turn_item(item: ProjectionTurnItem) -> Option<TimelineEntry> {
         ProjectionTurnItem::SecretRequest(i) => map_secret_request(i),
         ProjectionTurnItem::LinkRequest(i) => map_link_request(i),
         ProjectionTurnItem::Subagent(i) => map_subagent(i),
-        ProjectionTurnItem::DynamicTool(i) => map_dynamic_tool(i),
+        ProjectionTurnItem::DynamicTool(i) => map_dynamic_tool(i, source),
         // Unknown items carry only a `type` discriminator and no user-visible text.
         ProjectionTurnItem::Unknown(_) => None,
     }
@@ -1739,8 +1804,20 @@ fn map_turn_item(item: TurnItem) -> Option<TimelineEntry> {
         TurnItem::SecretRequest(i) => map_secret_request(i),
         TurnItem::LinkRequest(i) => map_link_request(i),
         TurnItem::Subagent(i) => map_subagent(i),
-        TurnItem::DynamicTool(i) => map_dynamic_tool(i),
+        TurnItem::DynamicTool(i) => map_dynamic_tool(i, None),
     }
+}
+
+/// Whether another agent sent a user message, so the timeline folds it to one `Agent` row: the
+/// web's `agent` attribution (`resolveUserMessagePresentation`). A message the server wrote for the
+/// agent, and a system message, read as the user's own. Scheduled-task messages fold with the
+/// agent's: the native timeline has no automation row yet.
+fn is_agent_origin(
+    created_by: Actor,
+    creation_source: conn_contract::OrchestrationV2CreationSource,
+) -> bool {
+    created_by == Actor::Agent
+        && creation_source != conn_contract::OrchestrationV2CreationSource::Server
 }
 
 fn map_user_message(item: UserMessageItem) -> Option<TimelineEntry> {
@@ -1754,7 +1831,7 @@ fn map_user_message(item: UserMessageItem) -> Option<TimelineEntry> {
                     text: item.text,
                     attachments: item.attachments,
                     created_at: item.started_at.unwrap_or(item.updated_at),
-                    created_by_agent: item.created_by != Actor::User,
+                    created_by_agent: is_agent_origin(item.created_by, item.creation_source),
                 });
             }
             TurnItemStatus::Cancelled => return None,
@@ -1765,13 +1842,19 @@ fn map_user_message(item: UserMessageItem) -> Option<TimelineEntry> {
         item.input_intent,
         UserMessageIntent::Steer | UserMessageIntent::PromotedQueuedToSteer
     );
+    let review_comments = review_comments_for_message(item.context.as_ref(), &item.text);
     Some(TimelineEntry::User {
         id: item.id,
         text: item.text,
-        created_by_agent: item.created_by != Actor::User,
+        created_by_agent: is_agent_origin(item.created_by, item.creation_source),
+        sender: match item.linked_sender {
+            Some(sender) => Some(AgentMessageSender::LinkedTitle(sender.title)),
+            None => item.sender_thread_id.map(AgentMessageSender::LocalThread),
+        },
         created_at: Some(item.started_at.unwrap_or(item.updated_at)),
         attachments: item.attachments,
         is_steer,
+        review_comments,
         run_id: item.run_id,
     })
 }
@@ -1891,7 +1974,31 @@ fn map_web_search(item: WebSearchItem) -> Option<TimelineEntry> {
     })
 }
 
-fn map_dynamic_tool(item: DynamicToolItem) -> Option<TimelineEntry> {
+fn map_dynamic_tool(
+    item: DynamicToolItem,
+    source: Option<(String, String)>,
+) -> Option<TimelineEntry> {
+    let document = item
+        .tool_name
+        .as_deref()
+        .zip(item.output.as_ref().and_then(Option::as_ref))
+        .and_then(|(name, output)| {
+            use conn_contract::tool_output::{html_render_reference, mcp_app_reference};
+            let html = (item.status == TurnItemStatus::Completed)
+                .then(|| html_render_reference(name, output))
+                .flatten();
+            html.map(|doc| (doc, false))
+                .or_else(|| mcp_app_reference(name, output).map(|doc| (doc, true)))
+        });
+    // The task card is gated on the tool's own name and a completed call, read before the title
+    // takes the name's place.
+    let orbit_task = if let (TurnItemStatus::Completed, Some(name), Some(Some(output))) =
+        (item.status, item.tool_name.as_deref(), item.output.as_ref())
+    {
+        crate::orbit_task::orbit_task_create_row(name, output)
+    } else {
+        None
+    };
     let title = non_empty(item.title)
         .or_else(|| non_empty(item.tool_name))
         .unwrap_or_else(|| "Tool call".to_owned());
@@ -1903,6 +2010,31 @@ fn map_dynamic_tool(item: DynamicToolItem) -> Option<TimelineEntry> {
             .and_then(json_text),
     )
     .or_else(|| non_empty(item.viewed_image_path));
+    if let Some(task) = orbit_task {
+        return Some(TimelineEntry::OrbitTask {
+            id: item.id,
+            title,
+            detail,
+            task,
+        });
+    }
+    if let Some((document, is_mcp)) = document {
+        let (source_thread_id, source_item_id) =
+            source.unwrap_or_else(|| (item.thread_id, item.id.clone()));
+        return Some(TimelineEntry::EmbeddedDocument {
+            source_thread_id,
+            source_item_id,
+            status: map_item_status(item.status),
+            id: item.id,
+            title,
+            detail,
+            document,
+            is_mcp,
+            input: item.input,
+            output: item.output.flatten().unwrap_or_default(),
+            output_omitted,
+        });
+    }
     Some(TimelineEntry::Tool {
         id: item.id,
         kind: "dynamic_tool".to_owned(),
@@ -2134,15 +2266,24 @@ fn map_error(item: ErrorItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.failure.message,
-        is_error: true,
+        level: NoticeLevel::Error,
     })
+}
+
+/// Web's `session-logic` marks every system notice that is not explicitly `info` as a
+/// `runtime.warning`, so a notice with no level (Codex's "MCP server … failed to start") is one too.
+fn system_notice_level(level: Option<SystemNoticeLevel>) -> NoticeLevel {
+    match level {
+        Some(SystemNoticeLevel::Info) => NoticeLevel::Info,
+        Some(SystemNoticeLevel::Warning | SystemNoticeLevel::Error) | None => NoticeLevel::Warning,
+    }
 }
 
 fn map_system_notice(item: SystemNoticeItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.message,
-        is_error: false,
+        level: system_notice_level(item.level),
     })
 }
 
@@ -2150,7 +2291,7 @@ fn map_notification(item: NotificationItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.summary,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2158,7 +2299,7 @@ fn map_run_interrupt_request(item: RunInterruptRequestItem) -> Option<TimelineEn
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.message,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2166,7 +2307,7 @@ fn map_run_interrupt_result(item: RunInterruptResultItem) -> Option<TimelineEntr
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.message,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2177,18 +2318,39 @@ fn map_compaction(item: CompactionItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
 fn map_handoff(item: HandoffItem) -> Option<TimelineEntry> {
-    let text = non_empty(item.summary)
-        .or_else(|| non_empty(item.title))
-        .unwrap_or_else(|| "Context handed off".to_owned());
+    // The summary is the transcript sent to the provider. The divider shows endpoints only.
+    let from = item
+        .from_model_selections
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|selection| selection.model.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let from = if from.is_empty() {
+        item.from_provider_instance_ids.join(", ")
+    } else {
+        from
+    };
+    let to = non_empty(item.to_model).unwrap_or(item.to_provider_instance_id);
+    let text = if from.is_empty() {
+        format!("Context handoff · {to}")
+    } else {
+        format!("Context handoff · {from} → {to}")
+    };
     Some(TimelineEntry::Notice {
         id: item.id,
         text,
-        is_error: false,
+        level: if item.status == TurnItemStatus::Failed {
+            NoticeLevel::Error
+        } else {
+            NoticeLevel::Info
+        },
     })
 }
 
@@ -2197,7 +2359,7 @@ fn map_fork(item: ForkItem) -> Option<TimelineEntry> {
     Some(TimelineEntry::Notice {
         id: item.id,
         text,
-        is_error: false,
+        level: NoticeLevel::Info,
     })
 }
 
@@ -2703,5 +2865,25 @@ mod subagent_model_tests {
             expected
         );
         assert!(model_option_strings(&json!("medium")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod agent_origin_tests {
+    use super::{Actor, is_agent_origin};
+    use conn_contract::OrchestrationV2CreationSource as Source;
+
+    /// Web folds a message to the `Agent` row for an agent's own messages only: a user's, a
+    /// system message, and one the server wrote for the agent read as the user's.
+    #[test]
+    fn only_an_agents_own_messages_fold_to_the_agent_row() {
+        for source in [Source::Mcp, Source::Provider, Source::Web, Source::Mobile] {
+            assert!(is_agent_origin(Actor::Agent, source), "{source:?}");
+        }
+        assert!(!is_agent_origin(Actor::Agent, Source::Server));
+        for source in [Source::Web, Source::Mobile, Source::Mcp, Source::Server] {
+            assert!(!is_agent_origin(Actor::User, source), "{source:?}");
+            assert!(!is_agent_origin(Actor::System, source), "{source:?}");
+        }
     }
 }

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use conn_desktop::database::api::{
-    DatabaseProjectState, DatabaseQueryResult, PanelConnection, connection_from_env,
-    connection_target, default_connection,
+    ConnectionSource, DatabaseProjectState, DatabaseQueryResult, PanelConnection,
+    connection_from_env, connection_target,
 };
 use conn_desktop::database::{DatabaseColumn, DatabaseDriver};
 use serde::{Deserialize, Serialize};
@@ -20,10 +20,8 @@ pub(crate) const MAX_COLUMN_WIDTH_PX: f32 = 288.0;
 pub(crate) const MIN_COLUMN_WIDTH_PX: f32 = 72.0;
 /// Approximate width of one monospace character at `12px` (`text-xs`).
 const MONO_CHAR_WIDTH_PX: f32 = 7.3;
-/// Horizontal padding inside a non-first grid cell (`px-3` = 12px each side).
+/// Combined horizontal padding of a result cell.
 const CELL_PAD_X_PX: f32 = 24.0;
-/// Extra start padding on the first grid column (`first:ps-4` vs `px-3`).
-const FIRST_CELL_EXTRA_PAD_PX: f32 = 4.0;
 /// Number of rows scanned when estimating column widths.
 const WIDTH_SAMPLE_ROWS: usize = 64;
 
@@ -140,12 +138,22 @@ pub(crate) fn project_connections(
     all
 }
 
-/// Resolves the active connection from the combined list and the remembered connection id.
+/// Resolves the active connection from the combined list and the remembered connection id: the
+/// remembered one, else the project's `.env` database, else none. Nothing else opens by itself:
+/// a Vault or saved database is never picked for the user (`DatabasePanel.tsx` in the desktop lab).
 pub(crate) fn active_connection(
     connections: &[PanelConnection],
     remembered: Option<&str>,
 ) -> Option<PanelConnection> {
-    default_connection(connections, remembered).cloned()
+    connections
+        .iter()
+        .find(|connection| Some(connection.id.as_str()) == remembered)
+        .or_else(|| {
+            connections
+                .iter()
+                .find(|connection| connection.source == ConnectionSource::Env)
+        })
+        .cloned()
 }
 
 /// Case-insensitive substring filter over table names, matching Conn's `TableList`.
@@ -179,14 +187,14 @@ pub(crate) const fn default_port_placeholder(driver: DatabaseDriver) -> &'static
     }
 }
 
-/// Placeholder for the Name field (`connectionTarget(draft) || "My database"`).
+/// Placeholder for the Name field: the target once a database is typed, else "My database"
+/// (`draft.database.trim() ? connectionTarget(draft) : "My database"` in the desktop lab). A
+/// blank form has a host but no database, so its target alone would read as `127.0.0.1/`.
 pub(crate) fn name_placeholder(draft: &PanelConnection) -> String {
-    let target = connection_target(&draft.connection, draft.ssh_host.as_deref());
-    if target.is_empty() || target == "/" {
-        "My database".to_owned()
-    } else {
-        target
+    if draft.connection.database.trim().is_empty() {
+        return "My database".to_owned();
     }
+    connection_target(&draft.connection, draft.ssh_host.as_deref())
 }
 
 /// Normalizes a connection draft before saving: trims the name and falls back to `connectionTarget`.
@@ -250,7 +258,7 @@ pub(crate) fn format_column_details(column: &DatabaseColumn) -> String {
     text
 }
 
-/// Formats the trailing summary next to the Run button (`"First 500 rows · 12 ms"` or `"12 ms"`).
+/// Formats the duration line under the editor (`"First 500 rows · 12 ms"` or `"12 ms"`).
 pub(crate) fn format_result_summary(result: &DatabaseQueryResult) -> String {
     let ms = result.duration_ms.round() as i64;
     if result.truncated {
@@ -265,8 +273,7 @@ pub(crate) fn measure_column_widths(result: &DatabaseQueryResult) -> Vec<f32> {
     result
         .columns
         .iter()
-        .enumerate()
-        .map(|(col_index, column)| {
+        .map(|column| {
             let mut max_chars = column.chars().count();
             for row in result.rows.iter().take(WIDTH_SAMPLE_ROWS) {
                 let len = match format_cell_value(row.get(column)) {
@@ -277,13 +284,7 @@ pub(crate) fn measure_column_widths(result: &DatabaseQueryResult) -> Vec<f32> {
                     max_chars = len;
                 }
             }
-            let extra_pad = if col_index == 0 {
-                FIRST_CELL_EXTRA_PAD_PX
-            } else {
-                0.0
-            };
-            let estimated =
-                (max_chars as f32) * MONO_CHAR_WIDTH_PX + CELL_PAD_X_PX + extra_pad + 6.0;
+            let estimated = (max_chars as f32) * MONO_CHAR_WIDTH_PX + CELL_PAD_X_PX + 6.0;
             estimated.clamp(MIN_COLUMN_WIDTH_PX, MAX_COLUMN_WIDTH_PX)
         })
         .collect()

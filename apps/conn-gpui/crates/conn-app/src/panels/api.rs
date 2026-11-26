@@ -22,8 +22,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Context, Entity, Hsla, IntoElement, KeyDownEvent, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, px,
+    AnyElement, Context, Entity, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    Styled, Subscription, Window, div, px,
 };
 
 use super::chrome::{
@@ -84,6 +84,13 @@ fn load_store() -> ApiRequestStore {
 }
 
 impl ApiPanel {
+    pub(super) fn reload_store(&mut self) {
+        self.store = load_store();
+        if let Some(key) = &self.project_key {
+            self.store.ensure_request(key, None);
+        }
+        self.synced_request = None;
+    }
     pub(crate) fn new(tokens: Tokens, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let url_input = cx.new(|cx| InputState::new(window, cx).placeholder(URL_PLACEHOLDER));
         let body_input = cx.new(|cx| {
@@ -340,13 +347,23 @@ impl ApiPanel {
         // Saved requests menu (`RequestsMenu`).
         let entity = cx.entity();
         let mut requests_anchor = div().relative().child(
-            chrome::toolbar_group(tokens).child(
-                chrome::icon_button("api-requests-btn", "superhero/list.svg", tokens, false, {
-                    let entity = entity.clone();
-                    move |_, _, cx| entity.update(cx, |p, cx| p.toggle_menu(OpenMenu::Requests, cx))
-                })
-                .conn_tooltip("Requests", tokens),
-            ),
+            chrome::icon_button("api-requests-btn", "superhero/list.svg", tokens, false, {
+                let entity = entity.clone();
+                move |_, _, cx| entity.update(cx, |p, cx| p.toggle_menu(OpenMenu::Requests, cx))
+            })
+            .size(px(chrome::CONTROL_HEIGHT_PX))
+            .bg(to_hsla(tokens.shell_control))
+            .border_1()
+            .border_color(to_hsla(tokens.shell_divider_header))
+            .aria_label("Saved requests")
+            .aria_expanded(self.menu == Some(OpenMenu::Requests))
+            .when(self.menu == Some(OpenMenu::Requests), |el| {
+                el.bg(to_hsla(tokens.shell_highlight))
+            })
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation()
+            })
+            .conn_tooltip("Saved requests", tokens),
         );
         if self.menu == Some(OpenMenu::Requests) {
             requests_anchor = requests_anchor.child(self.requests_menu(request, cx));
@@ -356,9 +373,14 @@ impl ApiPanel {
         let method_trigger = h_flex()
             .id("api-method-btn")
             .a11y_button("panel.api-method-btn", "HTTP method")
+            .aria_expanded(self.menu == Some(OpenMenu::Method))
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation()
+            })
             .relative()
             .h(px(24.0))
-            .px(px(7.0))
+            .pl(px(8.0))
+            .pr(px(4.0))
             .gap(px(4.0))
             .items_center()
             .rounded(px(9999.0))
@@ -374,23 +396,37 @@ impl ApiPanel {
                 let entity = entity.clone();
                 move |_, _, cx| entity.update(cx, |p, cx| p.toggle_menu(OpenMenu::Method, cx))
             })
-            .child(div().font_family(mono).child(request.method.clone()))
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .font_family(mono.clone())
+                    .child(request.method.clone()),
+            )
             .child(superhero_icon(
                 "superhero/chevron-down.svg",
-                chrome::ICON_BUTTON_GLYPH_PX,
+                11.0,
                 to_hsla(tokens.muted_foreground),
             ));
-        let mut method_anchor = div().relative().pl(px(9.0)).child(method_trigger);
+        let mut method_anchor = div().relative().pl(px(3.0)).child(method_trigger);
         if self.menu == Some(OpenMenu::Method) {
             method_anchor = method_anchor.child(self.method_menu(request, cx));
         }
 
         let url_field = chrome::soft_input_group(tokens).child(method_anchor).child(
-            div().flex_1().min_w_0().pl(px(11.0)).pr(px(14.0)).child(
-                Input::new(&self.url_input)
-                    .appearance(false)
-                    .text_size(px(UI_TEXT_PX)),
-            ),
+            div()
+                .id("api-url-input")
+                .a11y_group("panel.api.url", "Request URL")
+                .flex_1()
+                .min_w_0()
+                .pl(px(4.0))
+                .pr(px(12.0))
+                .child(
+                    Input::new(&self.url_input)
+                        .appearance(false)
+                        .aria_label("Request URL")
+                        .font_family(mono)
+                        .text_size(px(XS_TEXT_PX)),
+                ),
         );
 
         let send_icon = if sending {
@@ -398,18 +434,22 @@ impl ApiPanel {
         } else {
             "superhero/send.svg"
         };
-        let send_group = chrome::toolbar_group(tokens).child(
-            chrome::icon_button(
-                "api-send-btn",
-                send_icon,
-                tokens,
-                sending || !request.can_send(),
-                move |_, _, cx| entity.update(cx, |p, cx| p.send(cx)),
-            )
-            .conn_tooltip("Send (⌘↵)", tokens),
-        );
+        let send_group = chrome::icon_button(
+            "api-send-btn",
+            send_icon,
+            tokens,
+            sending || !request.can_send(),
+            move |_, _, cx| entity.update(cx, |p, cx| p.send(cx)),
+        )
+        .size(px(chrome::CONTROL_HEIGHT_PX))
+        .bg(to_hsla(tokens.shell_control))
+        .border_1()
+        .border_color(to_hsla(tokens.shell_divider_header))
+        .conn_tooltip("Send (⌘↵)", tokens);
 
         chrome::toolbar_row(tokens)
+            .p(px(8.0))
+            .gap(px(6.0))
             .child(requests_anchor)
             .child(url_field)
             .child(send_group)
@@ -577,18 +617,21 @@ impl ApiPanel {
                 let remove_id = row.id.clone();
                 let entity_toggle = entity.clone();
                 let entity_remove = entity.clone();
-                let field = |input: &Entity<InputState>, dim: bool| {
-                    // `py-2 text-xs`: a 16px line in a 32px row.
+                let field = |input: &Entity<InputState>, label: &'static str| {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .h(px(32.0))
+                        .min_h(px(36.0))
                         .flex()
                         .items_center()
                         .font_family(mono.clone())
-                        .when(dim, |el| el.opacity(0.5))
                         .child(
                             Input::new(input)
+                                .aria_label(label)
+                                .when(!row.enabled, |el| {
+                                    el.line_through()
+                                        .text_color(to_hsla(tokens.muted_foreground))
+                                })
                                 .appearance(false)
                                 .text_size(px(XS_TEXT_PX)),
                         )
@@ -606,57 +649,71 @@ impl ApiPanel {
                         .border_b_1()
                         .border_color(divider)
                         .hover(move |s| s.bg(row_hover))
-                        .child(chrome::checkbox(
-                            SharedString::from(format!("api-header-check-{}", row.id)),
-                            row.enabled,
-                            &tokens,
-                            move |_, _, cx| {
-                                let id = toggle_id.clone();
-                                entity_toggle.update(cx, |p, cx| {
-                                    if let Some(r) = p.selected() {
-                                        let headers = r
-                                            .headers
-                                            .iter()
-                                            .map(|h| {
-                                                let mut h = h.clone();
-                                                if h.id == id {
-                                                    h.enabled = !h.enabled;
-                                                }
-                                                h
-                                            })
-                                            .collect();
-                                        p.set_headers(headers, cx);
-                                    }
-                                });
-                            },
-                        ))
-                        .child(field(&name, !row.enabled))
-                        .child(field(&value, false))
                         .child(
-                            div().invisible().group_hover(group, |s| s.visible()).child(
-                                chrome::icon_button(
-                                    SharedString::from(format!("api-header-remove-{}", row.id)),
-                                    "superhero/close.svg",
-                                    &tokens,
-                                    false,
-                                    move |_, _, cx| {
-                                        let id = remove_id.clone();
-                                        entity_remove.update(cx, |p, cx| {
-                                            if let Some(r) = p.selected() {
-                                                let headers = r
-                                                    .headers
-                                                    .iter()
-                                                    .filter(|h| h.id != id)
-                                                    .cloned()
-                                                    .collect();
-                                                p.header_inputs.remove(&id);
-                                                p.set_headers(headers, cx);
-                                            }
-                                        });
-                                    },
-                                )
-                                .conn_tooltip("Remove header", &tokens),
+                            chrome::checkbox(
+                                SharedString::from(format!("api-header-check-{}", row.id)),
+                                row.enabled,
+                                &tokens,
+                                move |_, _, cx| {
+                                    let id = toggle_id.clone();
+                                    entity_toggle.update(cx, |p, cx| {
+                                        if let Some(r) = p.selected() {
+                                            let headers = r
+                                                .headers
+                                                .iter()
+                                                .map(|h| {
+                                                    let mut h = h.clone();
+                                                    if h.id == id {
+                                                        h.enabled = !h.enabled;
+                                                    }
+                                                    h
+                                                })
+                                                .collect();
+                                            p.set_headers(headers, cx);
+                                        }
+                                    });
+                                },
+                            )
+                            .size(px(14.0))
+                            .a11y_switch(
+                                format!("panel.api.header.{}.enabled", row.id),
+                                if row.enabled {
+                                    "Disable header"
+                                } else {
+                                    "Enable header"
+                                },
+                                row.enabled,
                             ),
+                        )
+                        .child(field(&name, "Header name"))
+                        .child(field(&value, "Header value"))
+                        .child(
+                            chrome::icon_button(
+                                SharedString::from(format!("api-header-remove-{}", row.id)),
+                                "superhero/close.svg",
+                                &tokens,
+                                false,
+                                move |_, _, cx| {
+                                    let id = remove_id.clone();
+                                    entity_remove.update(cx, |p, cx| {
+                                        if let Some(r) = p.selected() {
+                                            let headers = r
+                                                .headers
+                                                .iter()
+                                                .filter(|h| h.id != id)
+                                                .cloned()
+                                                .collect();
+                                            p.header_inputs.remove(&id);
+                                            p.set_headers(headers, cx);
+                                        }
+                                    });
+                                },
+                            )
+                            .tab_index(0)
+                            .opacity(0.0)
+                            .group_hover(group, |s| s.opacity(1.0))
+                            .focus_visible(|s| s.opacity(1.0))
+                            .conn_tooltip("Remove header", &tokens),
                         ),
                 );
             }
@@ -694,6 +751,7 @@ impl ApiPanel {
                 .font_family(mono)
                 .child(
                     Textarea::new(&self.body_input)
+                        .aria_label("Request body")
                         .appearance(false)
                         .text_size(px(XS_TEXT_PX)),
                 )
@@ -775,14 +833,29 @@ impl ApiPanel {
             column = column.child(chrome::warning_notice(tokens, notice));
         }
         let content: AnyElement = if self.response_tab == "body" {
+            let body = format_response_body(response);
+            let empty_body = body.is_empty() && response.error.is_none();
+            let content = if empty_body {
+                let status = format!("{} {}", response.status, response.status_text);
+                format!("{}: the response has no body.", status.trim_end())
+            } else {
+                body
+            };
             div()
                 .px(px(chrome::ROW_PAD_START_PX))
                 .py(px(12.0))
-                .font_family(mono)
-                .text_size(px(XS_TEXT_PX))
-                .line_height(px(XS_LINE_HEIGHT_PX))
-                .text_color(to_hsla(tokens.foreground))
-                .child(format_response_body(response))
+                .when(empty_body, |el| {
+                    el.text_size(px(UI_TEXT_PX))
+                        .line_height(px(UI_LINE_HEIGHT_PX))
+                        .text_color(muted)
+                })
+                .when(!empty_body, |el| {
+                    el.font_family(mono)
+                        .text_size(px(XS_TEXT_PX))
+                        .line_height(px(18.0))
+                        .text_color(to_hsla(tokens.foreground))
+                })
+                .child(content)
                 .into_any_element()
         } else {
             let divider = to_hsla(tokens.shell_divider);
@@ -799,7 +872,7 @@ impl ApiPanel {
                         .border_color(divider)
                         .font_family(mono.clone())
                         .text_size(px(XS_TEXT_PX))
-                        .line_height(px(XS_LINE_HEIGHT_PX))
+                        .line_height(px(18.0))
                         .child(
                             div()
                                 .w(gpui_kit::relative(0.4))
@@ -807,7 +880,13 @@ impl ApiPanel {
                                 .text_color(muted)
                                 .child(header.name.clone()),
                         )
-                        .child(div().min_w_0().text_color(fg).child(header.value.clone())),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(fg)
+                                .child(header.value.clone()),
+                        ),
                 );
             }
             rows.into_any_element()
@@ -828,26 +907,23 @@ impl ApiPanel {
 
 /// `StatusBadge`: the status code in a small badge colored by class.
 fn status_badge(tokens: &Tokens, status: u16) -> impl IntoElement {
-    let (fg, bg): (Hsla, Hsla) = match status_variant(status) {
-        BadgeVariant::Success => (to_hsla(tokens.success), chrome::alpha(tokens.success, 0.12)),
-        BadgeVariant::Warning => (to_hsla(tokens.warning), chrome::alpha(tokens.warning, 0.12)),
-        BadgeVariant::Error => (
-            to_hsla(tokens.destructive),
-            chrome::alpha(tokens.destructive, 0.12),
-        ),
-        BadgeVariant::Info => (
-            to_hsla(tokens.muted_foreground),
-            chrome::alpha(tokens.foreground, 0.06),
-        ),
+    let tone = match status_variant(status) {
+        BadgeVariant::Success => tokens.success,
+        BadgeVariant::Warning => tokens.warning,
+        BadgeVariant::Error => tokens.destructive,
+        BadgeVariant::Info => tokens.info,
     };
     div()
+        .flex_shrink_0()
+        .h(px(18.0))
         .px(px(6.0))
-        .rounded(px(4.0))
-        .bg(bg)
-        .text_color(fg)
-        .text_size(px(XS_TEXT_PX))
-        .line_height(px(XS_LINE_HEIGHT_PX))
-        .font_weight(gpui_kit::FontWeight::MEDIUM)
+        .rounded_full()
+        .bg(chrome::alpha(tone, 0.14))
+        .text_color(to_hsla(tone))
+        .font_family(SharedString::from(MONO_FONT))
+        .text_size(px(11.0))
+        .line_height(px(18.0))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .child(status.to_string())
 }
 
@@ -875,8 +951,13 @@ impl Render for ApiPanel {
             .relative()
             .a11y_group("panel.api", "API")
             .size_full()
-            .on_key_down(cx.listener(|p, event: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|p, event: &KeyDownEvent, _, cx| {
                 let k = &event.keystroke;
+                if k.key == "escape" && p.menu.take().is_some() {
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if k.key == "enter" && (k.modifiers.platform || k.modifiers.control) {
                     p.send(cx);
                     cx.stop_propagation();
@@ -890,6 +971,7 @@ impl Render for ApiPanel {
                     }
                 }),
             )
+            .when(self.menu.is_some(), |el| el.on_mouse_down_out(cx.listener(|panel, _, _, cx| { panel.menu = None; cx.notify(); })))
             .child(toolbar)
             .child(editor)
             .child(response)

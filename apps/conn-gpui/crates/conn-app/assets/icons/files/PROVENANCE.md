@@ -1,30 +1,29 @@
 # File-type icon provenance
 
-Standalone SVGs for the file-type icons Conn displays in the Files tree, file
-tabs, and file chips (`crates/conn-app/src/file_icons.rs`).
+Solid SVGs for the file-type and folder icons Conn shows in the Files tree, header file tabs, the
+breadcrumb menu, and the code-card and attachment labels (`crates/conn-app/src/file_icons.rs`).
 
-## Sources
+## Source
 
-1. **`@pierre/trees` `1.0.0-beta.6`** (Apache-2.0)
-   - Extracted from `getBuiltInSpriteSheet("complete")` in
-     `@pierre/trees/dist/builtInIcons.js`.
-   - 52 `file-tree-builtin-*.svg` files (every built-in symbol reachable through
-     Conn's resolver; `file-tree-builtin-table` is excluded because Conn maps
-     all table extensions to `t3-file-icon-spreadsheet`).
-   - Preserves each symbol's `viewBox`, `currentColor` fills, opacity layers,
-     and gradient definitions (`nextjs`).
+**Pierre Icons** for Zed, the "Complete" theme, dark and light
+(<https://github.com/pierrecomputer/vscode-icons>, `zed/`; MIT, see `LICENSE.md`).
 
-2. **Conn `apps/web/src/pierre-icons.ts`** (`T3_FILE_ICON_SPRITE`)
-   - 22 `t3-file-icon-*.svg` files:
-     - `video`, `diff`, `xml`, `pdf`, `word`, `spreadsheet`, `slides`, `epub`:
-       Lucide icons (ISC license).
-     - `csharp`, `dart`, `elixir`, `haskell`, `java`, `kotlin`, `lua`, `php`,
-       `powershell`, `r`, `scala`, `toml`: Simple Icons (CC0).
-     - `agents`, `pnpm`: Conn custom symbols.
-   - Preserves each symbol's `viewBox` and hard-coded fixed fills/strokes
-     (`#a631be` on `video`, `#f9ad00` + `currentColor` on `pnpm`).
-   - CSS `style="fill: light-dark(a, b)"`, `style="stroke: light-dark(a, b)"`,
-     and `style="stroke: var(--document-icon-stroke, light-dark(a, b))"` rules
-     are normalized to `fill="currentColor"` / `stroke="currentColor"` so
-     `usvg`/GPUI rasterizes them cleanly; the exact light/dark color pairs live
-     in `crates/conn-app/src/file_icons.rs` (`IconColor`).
+- The SVGs are copied unchanged from the design lab's `pierre-icons/` folder. Do not regenerate them.
+- Solid only: every duo icon is a single-tone solid SVG, and brand icons have no translucent layers.
+  The one exception is Pierre's own Next.js mark, which fades a diagonal with a gradient stop.
+- Each icon has a dark file (`<name>.svg`) and a light file (`<name>-light.svg`). The app picks one
+  by appearance.
+- Only icons the lookup can return are shipped. A test fails if one is orphaned.
+- The lookup tables (`src/file_icons/tables.rs`) come from the lab's `pierreIcons.ts`, which took them
+  from `zed/icon_themes/pierre-icons-complete.json`. The lookup follows Zed's
+  `FileIcons::get_icon`: whole name, dotted suffixes, stem, default.
+
+## Nick's own icons
+
+Pierre has no PHP or Blade icon. `php-conn*.svg` (an elephant, `#7B67FD`) and `blade-conn*.svg` (the
+Laravel mark, `#FF585B`) are Nick's own SVGs (2026-11-25), bare and centred in the 16px box.
+
+## Replaces
+
+The earlier `@pierre/trees` `file-tree-builtin-*` and Conn `t3-file-icon-*` sets were removed. Nothing
+else referenced them.

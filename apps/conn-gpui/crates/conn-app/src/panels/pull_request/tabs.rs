@@ -64,6 +64,7 @@ pub(super) enum FileDiffState {
 pub(super) struct CodeFileEntry {
     pub(super) path: String,
     pub(super) old_path: String,
+    pub(super) change_type: conn_contract::ReviewDiffChangeType,
     pub(super) additions: Option<usize>,
     pub(super) deletions: Option<usize>,
 }
@@ -730,6 +731,7 @@ pub(super) fn render_description_tab(
 pub(super) fn render_checks_tab(
     tokens: &Tokens,
     detail: &PullRequestDetail,
+    filter: Option<&str>,
     cb: &TabCallbacks,
 ) -> AnyElement {
     let fg = to_hsla(tokens.foreground);
@@ -752,6 +754,9 @@ pub(super) fn render_checks_tab(
     }
 
     for (idx, check) in detail.checks.iter().enumerate() {
+        if filter.is_some_and(|value| value != check_status_label(check)) {
+            continue;
+        }
         let status_color = to_hsla(check_status_color(tokens, check.status));
         let icon = check_status_icon(check.status);
         let status_label = check_status_label(check);
@@ -1963,7 +1968,7 @@ pub(super) fn render_code_tab(
                     .text_center()
                     .child(if detail.changed_files > 0 {
                         format!(
-                            "{} changed files reported by host (diff index requires HTTP /api/pull-requests/diff).",
+                            "The host reports {} changed files. Open the diff on the host to view them.",
                             format_grouped_count(detail.changed_files)
                         )
                     } else {

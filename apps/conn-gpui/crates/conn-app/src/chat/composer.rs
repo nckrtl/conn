@@ -17,6 +17,7 @@ mod drafts;
 mod footer;
 mod menus;
 mod model_picker;
+mod picker_settings;
 mod popovers;
 mod stash;
 
@@ -53,8 +54,7 @@ use gpui_kit::{
 use self::actions::{PrimaryActionInput, resolve_dispatch_mode, resolve_primary_action};
 use self::footer::{
     FOOTER_CONTROL_HEIGHT_PX, compatible_runtime_modes, footer_permissions_visible,
-    render_interaction_mode_toggle, render_permissions_chip, render_permissions_section,
-    runtime_mode_option,
+    render_interaction_mode_toggle, render_permissions_chip,
 };
 use self::menus::{
     ComposerTrigger, ComposerTriggerKind, FileMentionEntry, SkillEntry, detect_trigger,
@@ -249,15 +249,11 @@ pub(crate) struct Composer {
     meter: context_meter::MeterHover,
     meter_timer: Option<gpui_kit::Task<()>>,
     footer_permissions_open: bool,
-    picker_permissions_open: bool,
-    strip_permissions_open: bool,
     permission_preview: Option<&'static str>,
     implement_menu_open: bool,
     /// Popovers open at the last render, to tell which opened since (`popovers.rs`).
     seen_popovers: Vec<popovers::Popover>,
     stash: PromptStash,
-    /// The host draws the stash badge in its own banner dock.
-    stash_docked: bool,
     branch: branch_picker::BranchUi,
     textarea: Entity<TextareaState>,
     model_search_input: Entity<InputState>,
@@ -274,8 +270,14 @@ pub(crate) struct Composer {
     selected_model: String,
     selected_options: Option<serde_json::Map<String, serde_json::Value>>,
     model_picker_open: bool,
+    /// Menu, cursor and focus of the picker's settings column.
+    picker_settings: picker_settings::SettingsState,
+    /// The pointer is on the trigger, so an outside press must not close the picker first.
+    model_trigger_hovered: bool,
     picker_provider_filter: Option<String>,
     picker_highlighted_index: usize,
+    /// Composer width and distance from the top of the window to its picker anchor.
+    picker_room_px: std::rc::Rc<std::cell::Cell<Option<(f32, f32)>>>,
     active_trigger: Option<ComposerTrigger>,
     dismissed_trigger_text: Option<String>,
     menu_highlighted_index: usize,
@@ -414,13 +416,10 @@ impl Composer {
             meter: context_meter::MeterHover::default(),
             meter_timer: None,
             footer_permissions_open: false,
-            picker_permissions_open: false,
-            strip_permissions_open: false,
             permission_preview: None,
             implement_menu_open: false,
             seen_popovers: Vec::new(),
             stash: PromptStash::default(),
-            stash_docked: false,
             branch,
             textarea,
             model_search_input,
@@ -433,8 +432,11 @@ impl Composer {
             selected_model: "Default model".to_owned(),
             selected_options: None,
             model_picker_open: false,
+            picker_settings: picker_settings::SettingsState::new(cx),
+            model_trigger_hovered: false,
             picker_provider_filter: None,
             picker_highlighted_index: 0,
+            picker_room_px: std::rc::Rc::default(),
             active_trigger: None,
             dismissed_trigger_text: None,
             menu_highlighted_index: 0,
@@ -636,9 +638,18 @@ impl Composer {
         if self.is_draft == is_draft && self.submitting == submitting {
             return;
         }
+        if self.is_draft != is_draft {
+            self.close_overlays(cx);
+        }
         self.is_draft = is_draft;
         self.submitting = submitting;
         cx.notify();
+    }
+
+    #[cfg(feature = "automation")]
+    pub(super) fn spike_input_focused(&self, window: &Window, cx: &App) -> bool {
+        use gpui_kit::Focusable as _;
+        self.textarea.read(cx).focus_handle(cx).is_focused(window)
     }
 
     /// Moves keyboard focus into the composer textarea.
@@ -673,6 +684,23 @@ impl Composer {
         let current = self.textarea.read(cx).value().to_string();
         let next = crate::panels::file_path::append_mention(&current, mention);
         self.set_draft_text(next, window, cx);
+    }
+
+    /// Adds an artifact template's prompt at the end of the draft ("Use template") and focuses
+    /// the composer. It never sends. A draft that already ends with the prompt only gains focus.
+    pub(crate) fn use_artifact_template(
+        &mut self,
+        template: &super::artifact_template::ArtifactTemplate,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let current = self.textarea.read(cx).value().to_string();
+        let next = super::artifact_template::append_use_prompt(&current, template);
+        if next == current {
+            self.focus_input(window, cx);
+        } else {
+            self.set_draft_text(next, window, cx);
+        }
     }
 
     /// Shows the draft for `key` (a thread or the new-thread draft), parking the current one.
@@ -1012,12 +1040,11 @@ impl Composer {
     /// Toggles the floating model picker popup.
     pub(crate) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.model_picker_open = !self.model_picker_open;
-        self.picker_permissions_open = false;
+        self.picker_settings.reset();
         self.permission_preview = None;
         if self.model_picker_open {
             self.active_trigger = None;
             self.footer_permissions_open = false;
-            self.strip_permissions_open = false;
             self.stash.menu_open = false;
             self.picker_provider_filter = self
                 .catalog
@@ -1041,8 +1068,6 @@ impl Composer {
         }
         for open in [
             &mut self.footer_permissions_open,
-            &mut self.picker_permissions_open,
-            &mut self.strip_permissions_open,
             &mut self.implement_menu_open,
             &mut self.context_meter_open,
             &mut self.stash.menu_open,
@@ -1055,6 +1080,7 @@ impl Composer {
             }
         }
         self.permission_preview = None;
+        self.picker_settings.reset();
         if self.active_trigger.take().is_some() {
             let text = self.textarea.read(cx).value().to_string();
             self.dismissed_trigger_text = Some(text);
@@ -1074,8 +1100,6 @@ impl Composer {
     fn any_overlay_open(&self) -> bool {
         self.model_picker_open
             || self.footer_permissions_open
-            || self.picker_permissions_open
-            || self.strip_permissions_open
             || self.implement_menu_open
             || self.context_meter_open
             || self.stash.menu_open
@@ -1148,7 +1172,7 @@ impl Composer {
 
     /// Stages in-memory bytes (such as a pasted clipboard image) and uploads via
     /// `attachments.createUploadUrl`.
-    fn stage_and_upload_bytes(
+    pub(super) fn stage_and_upload_bytes(
         &mut self,
         name: String,
         mime_type: String,
@@ -1702,22 +1726,6 @@ impl Composer {
         }
     }
 
-    /// Hands the stash badge to the host's banner dock (`ComposerBanner.Dock`), or takes it back.
-    pub(crate) fn set_stash_docked(&mut self, docked: bool, cx: &mut Context<'_, Self>) {
-        if self.stash_docked != docked {
-            self.stash_docked = docked;
-            cx.notify();
-        }
-    }
-
-    /// The stash badge's tab for a host dock; none while the drawer is open.
-    pub(crate) fn dock_stash_badge(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
-        if self.stash.menu_open {
-            return None;
-        }
-        stash::render_stash_badge_tab(&self.stash, &self.tokens, cx)
-    }
-
     /// The live draft, to compare with the one an approval send held.
     pub(crate) fn held_draft(&self, cx: &App) -> HeldDraft {
         HeldDraft {
@@ -1780,23 +1788,6 @@ impl Composer {
         self.permission_preview = None;
         if self.footer_permissions_open {
             self.model_picker_open = false;
-            self.strip_permissions_open = false;
-        }
-        cx.notify();
-    }
-
-    pub(super) fn toggle_picker_permissions_menu(&mut self, cx: &mut Context<'_, Self>) {
-        self.picker_permissions_open = !self.picker_permissions_open;
-        self.permission_preview = None;
-        cx.notify();
-    }
-
-    fn toggle_strip_permissions_menu(&mut self, cx: &mut Context<'_, Self>) {
-        self.strip_permissions_open = !self.strip_permissions_open;
-        self.permission_preview = None;
-        if self.strip_permissions_open {
-            self.model_picker_open = false;
-            self.footer_permissions_open = false;
         }
         cx.notify();
     }
@@ -1824,8 +1815,6 @@ impl Composer {
     /// Picks a permission mode; the radio item closes its menu (`closeOnClick`).
     pub(super) fn pick_runtime_mode(&mut self, mode: &'static str, cx: &mut Context<'_, Self>) {
         self.footer_permissions_open = false;
-        self.picker_permissions_open = false;
-        self.strip_permissions_open = false;
         self.permission_preview = None;
         if self.runtime_mode != mode {
             self.runtime_mode = mode.to_owned();
@@ -2282,14 +2271,8 @@ impl Composer {
         (self.selected_model.clone(), self.selected_driver.as_deref())
     }
 
-    /// Renders Conn's `BranchToolbar` / `ComposerSurface.ContextStrip` under the composer card:
-    /// worktree/local indicator + branch name on the left; on new-thread drafts, the trailing
-    /// permissions control (`ComposerContextPermissions`).
     fn render_context_strip(&self, tokens: &Tokens, cx: &mut Context<'_, Self>) -> AnyElement {
-        let fg = hsla(tokens.foreground);
         let muted = hsla(tokens.muted_foreground);
-        let hover_bg = hsla(tokens.shell_highlight);
-
         let mut left = div()
             .flex()
             .flex_row()
@@ -2301,64 +2284,6 @@ impl Composer {
 
         left = left.child(self.render_workspace_control(tokens, cx));
         let branch_control = self.render_branch_control(tokens, cx);
-
-        // New-thread drafts name the permissions at the strip's trailing end
-        // (`ComposerContextPermissions`); started threads keep them in the footer and picker.
-        let trailing: Option<AnyElement> = self.is_draft.then(|| {
-            let option = runtime_mode_option(&self.runtime_mode);
-            let open = self.strip_permissions_open;
-            let mut slot = div().relative().child(
-                div()
-                    .id("composer-context-permissions")
-                    .a11y_button(
-                        "composer.context-permissions",
-                        format!("Permissions: {}", option.label),
-                    )
-                    .aria_expanded(open)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .h(px(22.0))
-                    .px(px(6.0))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_color(if open { fg } else { muted })
-                    .when(open, |el| el.bg(hover_bg))
-                    .hover(move |s| s.bg(hover_bg).text_color(fg))
-                    .on_click(cx.listener(|composer, _, _, cx| {
-                        composer.toggle_strip_permissions_menu(cx);
-                    }))
-                    .conn_tooltip("Permissions · ⌘⇧A", tokens)
-                    .child(icons::icon(
-                        option.icon,
-                        12.0,
-                        if open { fg } else { muted },
-                    ))
-                    .child(option.label),
-            );
-            if open {
-                let options = self.runtime_mode_options();
-                let section = render_permissions_section(
-                    &self.runtime_mode,
-                    &options,
-                    self.permission_preview,
-                    "strip",
-                    tokens,
-                    cx,
-                );
-                slot = slot.child(
-                    deferred(
-                        div().absolute().bottom_full().right_0().mb(px(4.0)).child(
-                            footer::popover_surface("composer-strip-permissions-popup", tokens)
-                                .child(section),
-                        ),
-                    )
-                    .with_priority(3),
-                );
-            }
-            slot.into_any_element()
-        });
 
         div()
             .id("composer-context-strip")
@@ -2388,10 +2313,7 @@ impl Composer {
                     .items_center()
                     .gap(px(4.0))
                     .min_w_0()
-                    .child(branch_control)
-                    .when_some(trailing, |el, trailing| {
-                        el.child(div().flex_none().child(trailing))
-                    }),
+                    .child(branch_control),
             )
             .into_any_element()
     }
@@ -2582,6 +2504,9 @@ impl Render for Composer {
             })
             .when(picker_open, |s| s.bg(highlight_bg))
             .hover(move |s| s.bg(highlight_bg).text_color(fg))
+            .on_hover(cx.listener(|composer, hovered: &bool, _, _| {
+                composer.model_trigger_hovered = *hovered;
+            }))
             .on_click(cx.listener(|composer, _, window, cx| {
                 composer.toggle_model_picker(window, cx);
             }))
@@ -2664,6 +2589,7 @@ impl Render for Composer {
 
         let attach_btn = div()
             .id("chat-composer-attach")
+            .test_support()
             .a11y_button("composer.attach", "Attach files")
             .flex()
             .items_center()
@@ -2833,14 +2759,10 @@ impl Render for Composer {
                 let att_name = chat_attachment_name(att);
                 let is_image = matches!(att, ChatAttachment::Image(_));
                 let leading_icon = if is_image {
-                    icons::icon(icons::IMAGE, 14.0, muted)
+                    icons::icon(icons::IMAGE, 14.0, muted).into_any_element()
                 } else {
-                    let file_icon = crate::file_icons::file_icon(att_name);
-                    let icon_color = file_icon
-                        .color
-                        .map(|c| hsla(c.for_appearance(tokens.appearance)))
-                        .unwrap_or(muted);
-                    icons::icon(file_icon.asset, 14.0, icon_color)
+                    let file_icon = crate::file_icons::file_icon(att_name, tokens.appearance);
+                    crate::file_icons::icon_img(file_icon.asset, 14.0).into_any_element()
                 };
                 strip = strip.child(
                     div()
@@ -2901,11 +2823,7 @@ impl Render for Composer {
                     ));
                     continue;
                 }
-                let file_icon = crate::file_icons::file_icon(&att.name);
-                let icon_color = file_icon
-                    .color
-                    .map(|c| hsla(c.for_appearance(tokens.appearance)))
-                    .unwrap_or(muted);
+                let file_icon = crate::file_icons::file_icon(&att.name, tokens.appearance);
                 let status_label = match &att.status {
                     AttachmentUploadStatus::Uploading => "Uploading…".to_owned(),
                     AttachmentUploadStatus::Ready(_) => format_byte_size(att.size_bytes),
@@ -2931,7 +2849,7 @@ impl Render for Composer {
                         } else {
                             hsla(tokens.shell_inner_border)
                         })
-                        .child(icons::icon(file_icon.asset, 14.0, icon_color))
+                        .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
                         .child(
                             div()
                                 .flex_1()
@@ -3131,6 +3049,12 @@ impl Render for Composer {
             ))
             .capture_key_down(cx.listener(
                 |composer, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    // The picker's settings column takes its keys first (`Tab` in, arrows, `Escape`).
+                    if composer.model_picker_open && composer.handle_settings_key(event, window, cx)
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     let keystroke = &event.keystroke;
                     let m = keystroke.modifiers;
                     // `⌘S` (`composer.stash`).
@@ -3165,7 +3089,7 @@ impl Render for Composer {
                         cx.stop_propagation();
                     }
                     // `⌘⇧G` branch picker, `⌘⇧X` workspace menu, `⌘⇧L` previous worktree.
-                    if m.platform && m.shift && !m.alt && !m.control {
+                    if !composer.is_draft && m.platform && m.shift && !m.alt && !m.control {
                         match keystroke.key.as_str() {
                             "g" => composer.toggle_branch_picker(window, cx),
                             "x" => composer.toggle_workspace_menu(cx),
@@ -3179,23 +3103,19 @@ impl Render for Composer {
             .when_some(
                 if self.stash.menu_open {
                     Some(render_stash_menu(&self.stash, &tokens, cx))
-                } else if self.stash_docked {
-                    None
                 } else {
                     render_stash_badge(&self.stash, &tokens, cx)
                 },
                 |el, surface| el.child(surface),
             )
             .child(card);
-        let show_context_strip = self.is_draft || self.persist_context_strip;
-        // Conn `BranchToolbar.logic.ts:shouldShowComposerContextStrip`: shown on drafts and when
-        // `persistComposerContextStrip` is enabled (with symmetric 9px vertical margins); when
-        // hidden on active threads, keep Conn's 20px (`h-[1.25rem]`) bottom spacer below the card.
-        root = if show_context_strip {
-            root.child(self.render_context_strip(&tokens, cx))
-        } else {
-            root.pb(px(COMPOSER_BOTTOM_SPACER_PX))
-        };
+        if !self.is_draft {
+            root = if self.persist_context_strip {
+                root.child(self.render_context_strip(&tokens, cx))
+            } else {
+                root.pb(px(COMPOSER_BOTTOM_SPACER_PX))
+            };
+        }
 
         if let Some(trigger) = self.active_trigger.clone() {
             let menu = render_command_menu(
@@ -3221,6 +3141,35 @@ impl Render for Composer {
             );
         } else if self.model_picker_open {
             let query = self.model_search_input.read(cx).value().to_string();
+            let viewport = window.viewport_size();
+            let measured = std::rc::Rc::clone(&self.picker_room_px);
+            root = root.child(
+                gpui_kit::canvas(
+                    move |bounds, window, _| {
+                        let width = f32::from(bounds.size.width);
+                        let top = f32::from(bounds.origin.y);
+                        if measured.get() != Some((width, top)) {
+                            measured.set(Some((width, top)));
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+            let room = self.picker_room_px.get();
+            let mut geometry = model_picker::PickerGeometry::measure(
+                f32::from(viewport.width),
+                f32::from(viewport.height),
+                room.map_or(0.0, |(width, _)| width),
+            );
+            if let Some((_, top)) = room {
+                // The new-thread composer is centered. Reserve the popup gap and top margin.
+                geometry.shell_height = geometry.shell_height.min((top - 8.0).max(0.0));
+            }
+            self.picker_settings
+                .set_layout(f32::from(viewport.height), geometry.compact);
             let popup = render_model_picker(
                 &ModelPickerView {
                     catalog: &self.catalog,
@@ -3236,9 +3185,9 @@ impl Render for Composer {
                     selected_options: self.selected_options.as_ref(),
                     runtime_mode: &self.runtime_mode,
                     runtime_options: &runtime_options,
-                    permissions_open: self.picker_permissions_open,
-                    permission_preview: self.permission_preview,
                     follow_up: self.effective_follow_up(),
+                    settings: &self.picker_settings,
+                    geometry,
                 },
                 cx,
             );
@@ -3248,7 +3197,12 @@ impl Render for Composer {
                         .absolute()
                         .bottom_full()
                         .right_0()
-                        .mb(px(6.0))
+                        .mb(px(4.0))
+                        // A press outside the popup closes it; the settings menus hang below
+                        // their fields, so a press on an open menu counts as inside.
+                        .on_mouse_down_out(cx.listener(|composer, _, window, cx| {
+                            composer.dismiss_picker_outside(window, cx);
+                        }))
                         .child(popup),
                 )
                 .with_priority(2),

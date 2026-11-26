@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Post-build codesign wrapper used by `scripts/dev-hot.sh` via `PATH` when `dx serve --codesign`
+# signs the macOS dev `.app` bundle before launching it.
+#
+# Why wrap `dx`'s `codesign` invocation instead of calling `/usr/bin/codesign` directly?
+# 1. `dx` 0.7.10 hot-patching (`build/link.rs`) writes a stray `index.html` into the `.app` root
+#    and `lib*-patch-*.dylib` into `Contents/MacOS/`. On subsequent full rebuilds (`r` or restart),
+#    `codesign` fails with "unsealed contents present in the bundle root" unless those are cleared.
+# 2. `dx` omits `--timestamp=none`, which causes Developer ID signing to fail offline or stall on
+#    Apple's timestamp service.
+# 3. Signing the inner Mach-O binary and then the bundle with explicit `--identifier` and without
+#    hardened runtime matches `scripts/bundle-app.sh`, so Vault's `--conn-bridge` trusts the dev
+#    app while CEF's on-demand framework `dlopen` and Subsecond hot-patch `dlopen` keep working.
+set -euo pipefail
+
+TARGET=""
+if [[ $# -gt 0 ]]; then
+  TARGET="${@: -1}"
+fi
+TARGET_NORM="${TARGET%/}"
+EXPECTED_BUNDLE="${CONN_DX_SIGN_BUNDLE:-}"
+EXPECTED_NORM="${EXPECTED_BUNDLE%/}"
+SIGN_IDENTITY="${CONN_DX_SIGN_IDENTITY:-}"
+BUNDLE_ID="${CONN_DX_BUNDLE_ID:-com.nckrtl.conn.dev}"
+
+HAS_EXPECTED_SIGN=0
+PREV=""
+for arg in "$@"; do
+  if [[ "$PREV" == "--sign" || "$PREV" == "-s" ]]; then
+    if [[ -n "$SIGN_IDENTITY" && "$arg" == "$SIGN_IDENTITY" ]]; then
+      HAS_EXPECTED_SIGN=1
+    fi
+  fi
+  PREV="$arg"
+done
+
+if [[ "$HAS_EXPECTED_SIGN" == "1" && -n "$EXPECTED_NORM" && "$TARGET_NORM" == "$EXPECTED_NORM" && -d "$TARGET_NORM" ]]; then
+  TARGET_REAL="$(cd -P "$TARGET_NORM" && pwd)"
+
+  # Remove stray hot-patch artifacts before sealing the bundle.
+  rm -f "$TARGET_REAL/index.html"
+  rm -f "$TARGET_REAL/Contents/MacOS/stub.o"
+  rm -f "$TARGET_REAL/Contents/MacOS"/lib*-patch-*.dylib
+
+  # Ensure Info.plist CFBundleIdentifier matches the signed identifier.
+  PLIST="$TARGET_REAL/Contents/Info.plist"
+  if [[ -f "$PLIST" ]]; then
+    /usr/bin/plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$PLIST"
+  fi
+
+  ENTITLEMENT_ARGS=()
+  if [[ -n "${CONN_DEV_ENTITLEMENTS:-}" && -f "${CONN_DEV_ENTITLEMENTS}" ]]; then
+    ENTITLEMENT_ARGS+=(--entitlements "$CONN_DEV_ENTITLEMENTS")
+  fi
+
+  BIN="$TARGET_REAL/Contents/MacOS/conn-app"
+  if [[ -f "$BIN" ]]; then
+    /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "${ENTITLEMENT_ARGS[@]}" "$BIN"
+  fi
+  exec /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "${ENTITLEMENT_ARGS[@]}" "$TARGET_REAL"
+fi
+
+exec /usr/bin/codesign "$@"

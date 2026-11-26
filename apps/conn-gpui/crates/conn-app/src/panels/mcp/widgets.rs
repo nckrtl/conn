@@ -1,6 +1,7 @@
 //! Shared Conn-styled UI widgets for the MCP panel: badges, glass menus with trailing detail
 //! text and group labels, syntax-highlighted JSON, and safe Markdown rendering for tool output.
 
+use crate::a11y::ConnA11yExt as _;
 use std::ops::Range;
 
 use conn_theme::{Appearance, Tokens};
@@ -13,7 +14,9 @@ use gpui_kit::{
 };
 use markdown::mdast::Node;
 
-use crate::panels::chrome::{UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX};
+use crate::panels::chrome::{
+    FloatingSurfaceExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
+};
 use crate::panels::color::to_hsla;
 use crate::panels::highlight::highlight_lines;
 use crate::theme::MONO_FONT;
@@ -23,7 +26,6 @@ use crate::theme::MONO_FONT;
 pub(super) enum McpBadgeVariant {
     Error,
     Info,
-    Success,
     Outline,
 }
 
@@ -45,11 +47,6 @@ pub(super) fn badge(
         McpBadgeVariant::Info => (
             to_hsla(tokens.info.with_alpha(tint)),
             to_hsla(tokens.info_foreground),
-            None,
-        ),
-        McpBadgeVariant::Success => (
-            to_hsla(tokens.success.with_alpha(tint)),
-            to_hsla(tokens.success_foreground),
             None,
         ),
         McpBadgeVariant::Outline => (
@@ -137,7 +134,7 @@ pub(super) fn dropdown_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     for entry in entries {
         match entry {
@@ -158,12 +155,16 @@ pub(super) fn dropdown_menu(
             }
             McpMenuEntry::Row(row) => {
                 let on_select = row.on_select;
+                let ax_id = format!("panel.menu.item.{}", row.id);
+                let ax_label = row.label.clone();
                 let mut label_el = div().min_w_0().flex_1().truncate().child(row.label);
                 if row.mono_label {
                     label_el = label_el.font_family(mono.clone());
                 }
                 let mut item = h_flex()
                     .id(row.id)
+                    .a11y(gpui_kit::Role::MenuItem, ax_id, ax_label)
+                    .tab_index(0)
                     .w_full()
                     .min_h(px(28.0))
                     .px(px(8.0))
@@ -177,7 +178,8 @@ pub(super) fn dropdown_menu(
                     .text_color(fg)
                     .when(row.checked, |el| el.bg(checked_bg))
                     .hover(move |s| s.bg(highlight))
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         on_select(window, cx);
                     })
@@ -213,7 +215,7 @@ pub(super) fn dropdown_menu(
 }
 
 /// Bordered mono input container matching Conn's `fieldClass`:
-/// `w-full min-w-0 rounded-(--control-radius) border border-(--shell-divider)! bg-transparent px-2.5 py-1.5 font-mono text-xs text-foreground`.
+/// `w-full min-w-0 rounded-(--control-radius) border border-(--shell-divider)! bg-transparent px-2 py-[5px] font-mono text-xs text-foreground`.
 pub(super) fn field_box(tokens: &Tokens) -> Div {
     div()
         .w_full()
@@ -221,8 +223,8 @@ pub(super) fn field_box(tokens: &Tokens) -> Div {
         .rounded(px(6.0))
         .border_1()
         .border_color(to_hsla(tokens.shell_divider))
-        .px(px(10.0))
-        .py(px(6.0))
+        .px(px(8.0))
+        .py(px(5.0))
         .font_family(SharedString::from(MONO_FONT))
         .text_size(px(XS_TEXT_PX))
         .line_height(px(XS_LINE_HEIGHT_PX))

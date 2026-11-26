@@ -954,6 +954,7 @@ pub(crate) fn map_timeline_entry_with_context(
             attachments,
             is_steer,
             run_id,
+            ..
         } => FfiTimelineEntry::User {
             id: id.clone(),
             text: text.clone(),
@@ -1005,6 +1006,41 @@ pub(crate) fn map_timeline_entry_with_context(
                 id: id.clone(),
                 text: text.clone(),
                 streaming: *streaming,
+                run_id: timing.and_then(|t| t.run_id.clone()),
+                duration_ms: entry_duration_ms(timing),
+            }
+        }
+        TimelineEntry::EmbeddedDocument {
+            id,
+            title,
+            detail,
+            status,
+            output_omitted,
+            ..
+        } => {
+            let timing = entry_timings.get(id);
+            FfiTimelineEntry::Tool {
+                id: id.clone(),
+                title: title.clone(),
+                kind: "dynamic_tool".to_owned(),
+                detail: detail.clone(),
+                status: (*status).into(),
+                output_omitted: *output_omitted,
+                run_id: timing.and_then(|t| t.run_id.clone()),
+                duration_ms: entry_duration_ms(timing),
+            }
+        }
+        TimelineEntry::OrbitTask {
+            id, title, detail, ..
+        } => {
+            let timing = entry_timings.get(id);
+            FfiTimelineEntry::Tool {
+                id: id.clone(),
+                title: title.clone(),
+                kind: "dynamic_tool".to_owned(),
+                detail: detail.clone(),
+                status: FfiItemStatus::Completed,
+                output_omitted: false,
                 run_id: timing.and_then(|t| t.run_id.clone()),
                 duration_ms: entry_duration_ms(timing),
             }
@@ -1139,10 +1175,10 @@ pub(crate) fn map_timeline_entry_with_context(
                 completed_at: completed_at.clone(),
             }
         }
-        TimelineEntry::Notice { id, text, is_error } => FfiTimelineEntry::Notice {
+        TimelineEntry::Notice { id, text, level } => FfiTimelineEntry::Notice {
             id: id.clone(),
             text: text.clone(),
-            is_error: *is_error,
+            is_error: level.is_error(),
         },
     }
 }
@@ -1188,6 +1224,7 @@ mod tests {
             id: "u1".to_owned(),
             text: "Hello".to_owned(),
             created_by_agent: true,
+            sender: None,
             created_at: Some("2026-11-22T10:00:00Z".to_owned()),
             attachments: vec![ChatAttachment::Image(ChatImageAttachment {
                 r#type: lit::Image,
@@ -1198,6 +1235,7 @@ mod tests {
                 source: None,
             })],
             is_steer: true,
+            review_comments: Vec::new(),
             run_id: Some("r1".to_owned()),
         };
         assert_eq!(
@@ -1533,7 +1571,7 @@ mod tests {
         let error_notice = TimelineEntry::Notice {
             id: "n1".to_owned(),
             text: "Timed out".to_owned(),
-            is_error: true,
+            level: conn_state::NoticeLevel::Error,
         };
         assert_eq!(
             map_timeline_entry_with_context(&error_notice, &approvals, &timings),
@@ -1548,7 +1586,7 @@ mod tests {
         let plain_notice = TimelineEntry::Notice {
             id: "n2".to_owned(),
             text: "Context compacted".to_owned(),
-            is_error: false,
+            level: conn_state::NoticeLevel::Info,
         };
         assert_eq!(
             map_timeline_entry_with_context(&plain_notice, &approvals, &timings),
@@ -1571,9 +1609,11 @@ mod tests {
                 id: "u1".to_owned(),
                 text: "Fix build".to_owned(),
                 created_by_agent: false,
+                sender: None,
                 created_at: Some("2026-11-22T10:00:00Z".to_owned()),
                 attachments: Vec::new(),
                 is_steer: false,
+                review_comments: Vec::new(),
                 run_id: Some("r1".to_owned()),
             },
             TimelineEntry::Thinking {
@@ -1601,9 +1641,11 @@ mod tests {
                 id: "u2".to_owned(),
                 text: "Also run clippy".to_owned(),
                 created_by_agent: false,
+                sender: None,
                 created_at: Some("2026-11-22T10:00:09Z".to_owned()),
                 attachments: Vec::new(),
                 is_steer: true,
+                review_comments: Vec::new(),
                 run_id: Some("r2".to_owned()),
             },
             TimelineEntry::Tool {

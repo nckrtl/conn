@@ -65,6 +65,13 @@ impl ThreadHoverState {
         self.open_for.as_deref()
     }
 
+    /// Changes whenever the pointer enters another row, leaves, or the card is dismissed: a timer
+    /// that read it earlier knows its hover is over.
+    #[must_use]
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Where the open row was last painted; cleared whenever the open row changes.
     #[must_use]
     pub(crate) fn row_rect(&self) -> &RowRectCell {
@@ -339,6 +346,25 @@ mod tests {
         assert_eq!(state.open_for(), None);
         assert!(state.elapse(generation));
         assert_eq!(state.open_for(), Some("a"));
+    }
+
+    #[test]
+    fn leaving_and_entering_the_same_row_starts_a_new_hover_generation() {
+        let base = Instant::now();
+        let mut state = ThreadHoverState::default();
+        let Entered::Wait(generation) = state.enter("a", base) else {
+            panic!("first hover must wait for the open delay");
+        };
+        assert!(state.elapse(generation));
+        assert!(state.leave("a", t(100, base)));
+        // Back on the row inside the instant window: the card opens at once, as a new hover.
+        assert_eq!(state.enter("a", t(200, base)), Entered::Shown);
+        assert_eq!(state.open_for(), Some("a"));
+        assert_ne!(
+            state.generation(),
+            generation,
+            "a dwell timer from the first hover must not count for this one"
+        );
     }
 
     #[test]

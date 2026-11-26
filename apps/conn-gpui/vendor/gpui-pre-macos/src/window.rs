@@ -647,6 +647,19 @@ enum FrameSource {
     DisplayLink(Option<WindowFrameSource>),
 }
 
+/// A window move that `start_window_move` asked macOS for. It becomes `active` when macOS
+/// refuses the drag while the press is still held; GPUI then moves the window itself until
+/// the left button goes up.
+struct ManualWindowMove {
+    /// `eventNumber` of the left mouse-down that requested the move.
+    press_number: NSInteger,
+    /// Pointer position at the press, in screen coordinates.
+    start_mouse: NSPoint,
+    /// Window frame origin at the press, in screen coordinates.
+    start_origin: NSPoint,
+    active: bool,
+}
+
 struct MacWindowState {
     handle: AnyWindowHandle,
     foreground_executor: ForegroundExecutor,
@@ -675,6 +688,9 @@ struct MacWindowState {
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
     last_left_mouse_down_event: Option<Retained<AnyObject>>,
+    // A window move requested by `start_window_move`, which GPUI performs itself when macOS
+    // refuses the native drag.
+    manual_window_move: Option<ManualWindowMove>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
     traffic_light_frames: Option<TrafficLightFrames>,
@@ -893,7 +909,7 @@ impl MacWindowState {
         let screen_frame = self
             .native_window()
             .screen()
-            .map_or_default(|screen| screen.visibleFrame());
+            .map_or_else(Default::default, |screen| screen.visibleFrame());
         bounds.size == rect_to_size(screen_frame)
     }
 
@@ -954,7 +970,7 @@ impl MacWindowState {
         let NSSize { width, height } = self
             .native_window()
             .contentView()
-            .map_or_default(|view| view.frame().size);
+            .map_or_else(Default::default, |view| view.frame().size);
         size(px(width as f32), px(height as f32))
     }
 
@@ -1065,7 +1081,7 @@ impl MacWindow {
             let target_screen = target_screen.or_else(|| NSScreen::mainScreen(marker));
             let screen_frame = target_screen
                 .as_ref()
-                .map_or_default(|screen| screen.frame());
+                .map_or_else(Default::default, |screen| screen.frame());
 
             let window_rect = NSRect::new(
                 NSPoint::new(
@@ -1144,6 +1160,7 @@ impl MacWindow {
                 input_handler: None,
                 last_key_equivalent: None,
                 last_left_mouse_down_event: None,
+                manual_window_move: None,
                 synthetic_drag_counter: 0,
                 traffic_light_position: titlebar
                     .as_ref()
@@ -2264,15 +2281,53 @@ impl PlatformWindow for MacWindow {
 
     fn start_window_move(&self) {
         let this = self.0.lock();
-        if this.simple_fullscreen_state.is_some() {
+        let window = this.native_window;
+        let simple_fullscreen = this.simple_fullscreen_state.is_some();
+        drop(this);
+
+        // Neither full-screen mode has a movable window: no native drag, no manual takeover.
+        if !may_manually_move_window(unsafe { window_style_mask(window) }, simple_fullscreen) {
             return;
         }
-        let window = this.native_window;
 
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let event: *mut AnyObject = msg_send![app, currentEvent];
-            let _: () = msg_send![window, performWindowDragWithEvent: event];
+
+            // macOS 27.2 can refuse the window server's drag ("Window move completed without
+            // beginning"). Ask for it with a completion handler: a real drag or a click completes
+            // at mouse-up, a refused drag completes while the same press is still held. In that
+            // case `manual_window_move_on_native_completion` takes over and GPUI moves the window
+            // on the following left-mouse-dragged events.
+            let event_is_left_down = !event.is_null() && {
+                let ty: NSEventType = msg_send![event, type];
+                ty == NSEventType::LeftMouseDown
+            };
+            let completion_sel = sel!(performWindowDragWithEvent:completionHandler:);
+            let has_completion: Bool = msg_send![window, respondsToSelector: completion_sel];
+            if event_is_left_down && has_completion.as_bool() {
+                let press_number: NSInteger = msg_send![event, eventNumber];
+                let location: NSPoint = msg_send![event, locationInWindow];
+                let start_mouse: NSPoint = msg_send![window, convertPointToScreen: location];
+                let frame: NSRect = msg_send![window, frame];
+                self.0.lock().manual_window_move = Some(ManualWindowMove {
+                    press_number,
+                    start_mouse,
+                    start_origin: frame.origin,
+                    active: false,
+                });
+                let weak_state = Rc::downgrade(&self.0);
+                let block = RcBlock::new(move |_completed: Bool| {
+                    manual_window_move_on_native_completion(&weak_state, press_number);
+                });
+                let _: () = msg_send![
+                    window,
+                    performWindowDragWithEvent: event,
+                    completionHandler: &*block
+                ];
+            } else {
+                let _: () = msg_send![window, performWindowDragWithEvent: event];
+            }
         }
     }
 
@@ -2911,9 +2966,23 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
             // AppKit owns `native_event` for the callback; retain it so the drag session can still
             // be started later, once the pointer leaves the window.
             lock.last_left_mouse_down_event = unsafe { Retained::retain(native_event) };
+            // A new press ends any earlier window move.
+            lock.manual_window_move = None;
         }
         NSEventType::LeftMouseUp => {
             lock.last_left_mouse_down_event = None;
+            lock.manual_window_move = None;
+        }
+        NSEventType::LeftMouseDragged
+            if lock
+                .manual_window_move
+                .as_ref()
+                .is_some_and(|window_move| window_move.active) =>
+        {
+            // GPUI owns this press as a window move: it never reaches the element tree.
+            drop(lock);
+            manual_window_move_step(&window_state);
+            return;
         }
         _ => {}
     }
@@ -3056,6 +3125,149 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
             callback(event);
             window_state.lock().event_callback = Some(callback);
         }
+    }
+}
+
+/// Completion handler of `performWindowDragWithEvent:completionHandler:`. A real drag or a
+/// click completes at mouse-up. A refused drag ("Window move completed without beginning")
+/// completes while the press that asked for it is still held: then GPUI takes the move over.
+/// The `completed` flag is true in both cases, so it can't decide.
+fn manual_window_move_on_native_completion(
+    weak_state: &Weak<Mutex<MacWindowState>>,
+    press_number: NSInteger,
+) {
+    let is_main: Bool = unsafe { msg_send![class!(NSThread), isMainThread] };
+    if !is_main.as_bool() {
+        return;
+    }
+    let Some(window_state) = weak_state.upgrade() else {
+        return;
+    };
+    let pressed: NSUInteger = unsafe { msg_send![class!(NSEvent), pressedMouseButtons] };
+    let mut lock = window_state.lock();
+    let latest_press = lock.last_left_mouse_down_event.as_ref().map(|event| {
+        let number: NSInteger = unsafe { msg_send![&**event, eventNumber] };
+        number
+    });
+    // The window may have entered full screen since the press: a full-screen window can't move,
+    // so the refused drag is expected there and must not be taken over.
+    let may_move = may_manually_move_window(
+        unsafe { window_style_mask(lock.native_window) },
+        lock.simple_fullscreen_state.is_some(),
+    );
+    let press_held = may_move && pressed & 1 != 0 && latest_press == Some(press_number);
+    let takeover = match lock.manual_window_move.as_mut() {
+        Some(window_move) if window_move.press_number == press_number => {
+            if press_held {
+                window_move.active = true;
+            } else {
+                lock.manual_window_move = None;
+            }
+            press_held
+        }
+        _ => false,
+    };
+    drop(lock);
+    if takeover {
+        manual_window_move_step(&window_state);
+    }
+}
+
+/// While a manual window move is active, places the window so the pressed point stays under
+/// the pointer.
+fn manual_window_move_step(window_state: &Rc<Mutex<MacWindowState>>) {
+    let (window, origin, mouse) = {
+        let mut lock = window_state.lock();
+        if !lock
+            .manual_window_move
+            .as_ref()
+            .is_some_and(|window_move| window_move.active)
+        {
+            return;
+        }
+        // Checked on every step: the window can enter full screen during a drag.
+        let may_move = may_manually_move_window(
+            unsafe { window_style_mask(lock.native_window) },
+            lock.simple_fullscreen_state.is_some(),
+        );
+        if !may_move {
+            lock.manual_window_move = None;
+            return;
+        }
+        let Some(window_move) = lock.manual_window_move.as_ref() else {
+            return;
+        };
+        let mouse: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
+        (
+            lock.native_window,
+            NSPoint::new(
+                window_move.start_origin.x + mouse.x - window_move.start_mouse.x,
+                window_move.start_origin.y + mouse.y - window_move.start_mouse.y,
+            ),
+            mouse,
+        )
+    };
+    // SAFETY: main thread; `window` is the live NSWindow owned by this state. The state lock
+    // is released first because `setFrameOrigin:` calls `windowDidMove:`, which takes it.
+    let moved = unsafe { place_window_manually(window, origin, mouse) };
+    if !moved {
+        window_state.lock().manual_window_move = None;
+    }
+}
+
+/// Whether GPUI may move the window itself. Native full screen and simple full screen both pin
+/// the window to its screen, so a manual move there would shift it off its frame.
+fn may_manually_move_window(style_mask: NSWindowStyleMask, simple_fullscreen: bool) -> bool {
+    !simple_fullscreen && !style_mask.contains(NSWindowStyleMask::FullScreen)
+}
+
+/// # Safety
+/// `window` must be a live `NSWindow`, and this must run on the main thread.
+unsafe fn window_style_mask(window: *mut AnyObject) -> NSWindowStyleMask {
+    unsafe { msg_send![window, styleMask] }
+}
+
+/// Moves `window` so its origin is `origin`, with the top kept below the menu bar of the display
+/// under `mouse`. Does nothing, and returns false, when the window is in native full screen.
+///
+/// # Safety
+/// `window` must be a live `NSWindow`, and this must run on the main thread.
+unsafe fn place_window_manually(
+    window: *mut AnyObject,
+    mut origin: NSPoint,
+    mouse: NSPoint,
+) -> bool {
+    unsafe {
+        if !may_manually_move_window(window_style_mask(window), false) {
+            return false;
+        }
+        // Keep the window's top below the menu bar of the display under the pointer, as the
+        // native drag does.
+        let frame: NSRect = msg_send![window, frame];
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let count: NSUInteger = if screens.is_null() {
+            0
+        } else {
+            msg_send![screens, count]
+        };
+        for index in 0..count {
+            let screen: *mut AnyObject = msg_send![screens, objectAtIndex: index];
+            let screen_frame: NSRect = msg_send![screen, frame];
+            let contains_mouse = mouse.x >= screen_frame.origin.x
+                && mouse.x < screen_frame.origin.x + screen_frame.size.width
+                && mouse.y >= screen_frame.origin.y
+                && mouse.y <= screen_frame.origin.y + screen_frame.size.height;
+            if contains_mouse {
+                let visible: NSRect = msg_send![screen, visibleFrame];
+                let top = visible.origin.y + visible.size.height;
+                if origin.y + frame.size.height > top {
+                    origin.y = top - frame.size.height;
+                }
+                break;
+            }
+        }
+        let _: () = msg_send![window, setFrameOrigin: origin];
+        true
     }
 }
 

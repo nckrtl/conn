@@ -21,10 +21,11 @@ use gpui_kit::{
 };
 
 use super::super::chrome::{
-    self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
+    self, ConnTooltipExt as _, FloatingSurfaceExt as _, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
     actor_tooltip_label,
 };
 use super::super::color::to_hsla;
+use super::super::empty_state::{self, EmptyAction, EmptyState, render_empty_state};
 use super::super::header::superhero_icon;
 use super::logic::{
     ChecksState, DetailTab, PrimaryControl, ReviewOutcome, allowed_merge_methods, auto_merge_label,
@@ -603,7 +604,7 @@ fn render_actions_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     let sep = |d: Hsla| div().mx(px(8.0)).my(px(4.0)).h(px(1.0)).bg(d);
 
@@ -1814,9 +1815,12 @@ pub(super) fn render_detail_ghost(tokens: &Tokens, number: Option<i64>) -> AnyEl
         .into_any_element()
 }
 
-/// Centered unavailable / empty state matching `PullRequestsUnavailableState.tsx` + `ui/empty.tsx`.
+/// The panel's unavailable and empty states (`PullRequestsUnavailableState.tsx`), in the shared
+/// empty-state design. A `retry` adds "Try again"; a `host_link` adds the host's "Open on …".
 pub(super) fn render_unavailable_state(
+    window: &Window,
     tokens: &Tokens,
+    icon: &'static str,
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
     on_retry: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
@@ -1826,78 +1830,38 @@ pub(super) fn render_unavailable_state(
         Rc<dyn Fn(String, &mut Window, &mut App)>,
     )>,
 ) -> AnyElement {
-    let fg = to_hsla(tokens.foreground);
-    let muted = to_hsla(tokens.muted_foreground);
-
-    let media = div()
-        .flex()
-        .size(px(36.0))
-        .items_center()
-        .justify_center()
-        .rounded(px(8.0))
-        .bg(to_hsla(tokens.shell_tile))
-        .border_1()
-        .border_color(to_hsla(tokens.shell_tile_border))
-        .child(superhero_icon("superhero/pull-request.svg", 18.0, fg));
-
-    let mut actions = h_flex().flex_wrap().justify_center().gap(px(8.0));
-    let mut has_actions = false;
-    if let Some(retry) = on_retry {
-        has_actions = true;
-        actions = actions.child(small_outline_button(
-            "pr-unavailable-retry",
-            Some("superhero/refresh.svg"),
-            "Retry",
-            tokens,
-            false,
-            move |window, cx| retry(window, cx),
-        ));
+    let mut actions = Vec::new();
+    if let Some(on_click) = on_retry {
+        actions.push(EmptyAction {
+            id: SharedString::from("pr-unavailable-retry"),
+            ax_id: SharedString::from("panel.pull-request.unavailable.retry"),
+            label: SharedString::from("Try again"),
+            icon: Some("superhero/refresh.svg"),
+            on_click,
+        });
     }
     if let Some((url, label, on_open)) = host_link {
-        has_actions = true;
-        actions = actions.child(small_outline_button(
-            "pr-unavailable-open-host",
-            Some("superhero/external-link.svg"),
-            label,
-            tokens,
-            false,
-            move |window, cx| on_open(url.clone(), window, cx),
-        ));
+        actions.push(EmptyAction {
+            id: SharedString::from("pr-unavailable-open-host"),
+            ax_id: SharedString::from("panel.pull-request.unavailable.open-host"),
+            label: SharedString::from(label),
+            icon: Some("superhero/external-link.svg"),
+            on_click: Rc::new(move |window, cx| on_open(url.clone(), window, cx)),
+        });
     }
-
-    v_flex()
-        .flex_1()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .p(px(24.0))
-        .gap(px(16.0))
-        .child(media)
-        .child(
-            v_flex()
-                .max_w(px(384.0))
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .text_size(px(18.0))
-                        .line_height(px(24.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg)
-                        .text_center()
-                        .child(title.into()),
-                )
-                .child(
-                    div()
-                        .text_size(px(UI_TEXT_PX))
-                        .line_height(px(UI_LINE_HEIGHT_PX))
-                        .text_color(muted)
-                        .text_center()
-                        .child(description.into()),
-                ),
-        )
-        .when(has_actions, |el| el.child(actions))
-        .into_any_element()
+    render_empty_state(
+        window,
+        tokens,
+        EmptyState {
+            id: "pr-unavailable",
+            ax_id: "panel.pull-request.unavailable",
+            label: "Pull request",
+            icon,
+            title: title.into(),
+            description: empty_state::plain(&description.into()),
+            actions,
+        },
+    )
 }
 
 /// Primary pill button (`Button size="xs" variant="default"` inside `[--control-radius:9999px]`).

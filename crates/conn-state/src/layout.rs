@@ -7,13 +7,11 @@ pub const SIDEBAR_DEFAULT_WIDTH: f32 = 233.0;
 
 /// Minimum right-panel width in CSS pixels (Conn `PREVIEW_PANEL_MIN_WIDTH`).
 pub const RIGHT_PANEL_MIN_WIDTH: f32 = 360.0;
-/// Maximum right-panel width in CSS pixels.
-pub const RIGHT_PANEL_MAX_WIDTH: f32 = 1200.0;
 /// Default right-panel width in CSS pixels (Conn `PREVIEW_PANEL_DEFAULT_WIDTH`).
 pub const RIGHT_PANEL_DEFAULT_WIDTH: f32 = 600.0;
 
 /// Top-level right-panel surfaces matching Conn desktop (`RightPanelTabs.tsx`, `rightPanelStore.ts`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RightPanelTab {
     Files,
     Diff,
@@ -24,6 +22,8 @@ pub enum RightPanelTab {
     Mcp,
     Tasks,
     PullRequest,
+    /// Environment-wide pull requests opened from the project rail.
+    PullRequests,
     LinkedItems,
     Device,
     /// A file opened from the Files tree (Conn's `file` surface); its path lives in
@@ -32,27 +32,66 @@ pub enum RightPanelTab {
 }
 
 /// One open right-panel tab: a surface kind, or a file with its project-relative path.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PanelSurface {
     Kind(RightPanelTab),
     File(String),
+    /// Additional browser page in this thread. The original Browser surface is page one.
+    Browser(u64),
 }
 
 impl PanelSurface {
+    /// Whether a thread without a project may not show it (see [`RightPanelTab::needs_project`]).
+    #[must_use]
+    pub fn needs_project(&self) -> bool {
+        self.kind().needs_project()
+    }
+
+    /// The surface a thread without a project shows in place of this one: itself, or Tasks.
+    #[must_use]
+    pub fn without_project(self) -> Self {
+        if self.needs_project() {
+            Self::Kind(RightPanelTab::Tasks)
+        } else {
+            self
+        }
+    }
+
     /// The surface kind ([`RightPanelTab::File`] for a file).
     #[must_use]
     pub fn kind(&self) -> RightPanelTab {
         match self {
             Self::Kind(tab) => *tab,
             Self::File(_) => RightPanelTab::File,
+            Self::Browser(_) => RightPanelTab::Browser,
         }
+    }
+
+    #[must_use]
+    pub fn browser_id(&self) -> Option<u64> {
+        match self {
+            Self::Kind(RightPanelTab::Browser) => Some(1),
+            Self::Browser(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The add menu opens a fresh browser page. All other panel kinds are singletons.
+    #[must_use]
+    pub fn for_add(tab: RightPanelTab, open: &[Self]) -> Self {
+        if tab == RightPanelTab::Browser
+            && let Some(last) = open.iter().filter_map(Self::browser_id).max()
+        {
+            return Self::Browser(last + 1);
+        }
+        Self::Kind(tab)
     }
 
     /// The file path of a file surface.
     #[must_use]
     pub fn file_path(&self) -> Option<&str> {
         match self {
-            Self::Kind(_) => None,
+            Self::Kind(_) | Self::Browser(_) => None,
             Self::File(path) => Some(path),
         }
     }
@@ -80,6 +119,23 @@ impl RightPanelTab {
         Self::Device,
     ];
 
+    /// Whether the surface belongs to a project, so a thread without one never offers it
+    /// (`needsProject` in the lab's `Panel.tsx`): Files (and the files it opens), MCP and API.
+    #[must_use]
+    pub const fn needs_project(self) -> bool {
+        matches!(self, Self::Files | Self::File | Self::Mcp | Self::Api)
+    }
+
+    /// The kind that shows in place of this one on a thread without a project: Tasks.
+    #[must_use]
+    pub const fn without_project(self) -> Self {
+        if self.needs_project() {
+            Self::Tasks
+        } else {
+            self
+        }
+    }
+
     /// The surface's single-key shortcut in the add-surface menu.
     #[must_use]
     pub const fn menu_shortcut(self) -> &'static str {
@@ -95,7 +151,7 @@ impl RightPanelTab {
             Self::PullRequest => "P",
             Self::LinkedItems => "L",
             Self::Device => "M",
-            Self::File => "",
+            Self::PullRequests | Self::File => "",
         }
     }
 
@@ -176,27 +232,23 @@ impl LayoutState {
         }
     }
 
-    /// Sets `right_panel_width`, clamping to `RIGHT_PANEL_MIN_WIDTH..=RIGHT_PANEL_MAX_WIDTH`. Non-finite inputs are ignored.
+    /// Restores a preferred width. The window limits the displayed width during layout.
     pub fn set_right_panel_width(&mut self, width: f32) {
         if width.is_finite() {
-            self.right_panel_width = width.clamp(RIGHT_PANEL_MIN_WIDTH, RIGHT_PANEL_MAX_WIDTH);
+            self.right_panel_width = width.max(RIGHT_PANEL_MIN_WIDTH);
         }
     }
 
     /// Clamps both `sidebar_width` and `right_panel_width` to their valid ranges.
     pub fn clamp_widths(&mut self) {
-        self.sidebar_width = clamp_or_default(
-            self.sidebar_width,
-            SIDEBAR_MIN_WIDTH,
-            SIDEBAR_MAX_WIDTH,
-            SIDEBAR_DEFAULT_WIDTH,
-        );
-        self.right_panel_width = clamp_or_default(
-            self.right_panel_width,
-            RIGHT_PANEL_MIN_WIDTH,
-            RIGHT_PANEL_MAX_WIDTH,
-            RIGHT_PANEL_DEFAULT_WIDTH,
-        );
+        if !self.sidebar_width.is_finite() {
+            self.sidebar_width = SIDEBAR_DEFAULT_WIDTH;
+        }
+        self.set_sidebar_width(self.sidebar_width);
+        if !self.right_panel_width.is_finite() {
+            self.right_panel_width = RIGHT_PANEL_DEFAULT_WIDTH;
+        }
+        self.set_right_panel_width(self.right_panel_width);
     }
 }
 
@@ -205,8 +257,6 @@ impl LayoutState {
 pub const MAIN_CONTENT_MIN_WIDTH: f32 = 640.0;
 /// The chat column's least width beside an open right panel (`SIBLING_COLUMN_MIN_WIDTH`).
 pub const CHAT_BESIDE_PANEL_MIN_WIDTH: f32 = 360.0;
-/// The right panel's widest share of the window (`PREVIEW_PANEL_MAX_WIDTH_FRACTION`).
-const RIGHT_PANEL_MAX_WINDOW_FRACTION: f32 = 0.7;
 
 /// How wide the thread sidebar may be in a window `viewport_w` wide with the rail `rail_w` wide:
 /// the rest must keep `MAIN_CONTENT_MIN_WIDTH` (`resolveThreadSidebarMaximumWidth`). The right
@@ -216,16 +266,10 @@ pub fn sidebar_max_width(viewport_w: f32, rail_w: f32) -> f32 {
     (viewport_w - rail_w - MAIN_CONTENT_MIN_WIDTH).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
 }
 
-/// How wide the right panel may be with `left_w` of rail and sidebar beside it
-/// (`getPreviewPanelMaxWidth`): at most 70% of the window and leaving the chat
-/// `CHAT_BESIDE_PANEL_MIN_WIDTH`, never under its own minimum.
+/// The available panel width after reserving the visible sidebar, rail, and chat minimum.
 #[must_use]
 pub fn right_panel_max_width(viewport_w: f32, left_w: f32) -> f32 {
-    let by_fraction = (viewport_w * RIGHT_PANEL_MAX_WINDOW_FRACTION).floor();
-    let by_chat = (viewport_w - left_w).floor() - CHAT_BESIDE_PANEL_MIN_WIDTH;
-    by_fraction
-        .min(by_chat)
-        .clamp(RIGHT_PANEL_MIN_WIDTH, RIGHT_PANEL_MAX_WIDTH)
+    ((viewport_w - left_w).floor() - CHAT_BESIDE_PANEL_MIN_WIDTH).max(RIGHT_PANEL_MIN_WIDTH)
 }
 
 impl LayoutState {
@@ -251,14 +295,6 @@ impl LayoutState {
             let max = right_panel_max_width(viewport_w, left);
             self.right_panel_width = wanted.clamp(RIGHT_PANEL_MIN_WIDTH, max);
         }
-    }
-}
-
-fn clamp_or_default(value: f32, min: f32, max: f32, default: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        default
     }
 }
 
@@ -340,14 +376,14 @@ mod width_tests {
     }
 
     #[test]
-    fn the_right_panel_may_grow_until_the_chat_has_360_or_it_takes_70_percent() {
-        // 1440 - 287 - 360 = 793, under 70% of 1440 (1008).
+    fn the_right_panel_may_use_all_space_beside_the_chat() {
+        // 1440 - 287 - 360 = 793.
         assert_eq!(right_panel_max_width(1440.0, 287.0), 793.0);
-        // A wide window: the 70% cap binds.
-        assert_eq!(right_panel_max_width(1600.0, 100.0), 1120.0);
+        // A wide window leaves more than 70% available.
+        assert_eq!(right_panel_max_width(1600.0, 100.0), 1140.0);
         // No room: the panel keeps its minimum.
         assert_eq!(right_panel_max_width(700.0, 287.0), RIGHT_PANEL_MIN_WIDTH);
-        assert!(right_panel_max_width(4000.0, 100.0) <= RIGHT_PANEL_MAX_WIDTH);
+        assert_eq!(right_panel_max_width(4000.0, 100.0), 3540.0);
     }
 
     #[test]
@@ -372,6 +408,6 @@ mod width_tests {
             ..LayoutState::default()
         };
         layout.drag_right_panel_width(2000.0, 1440.0, RAIL);
-        assert_eq!(layout.right_panel_width, 1008.0);
+        assert_eq!(layout.right_panel_width, 1080.0);
     }
 }

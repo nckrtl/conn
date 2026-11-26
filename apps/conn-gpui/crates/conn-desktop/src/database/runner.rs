@@ -210,6 +210,11 @@ fn names<C: sqlx::Column>(columns: &[C]) -> Vec<String> {
 
 const MYSQL_TIMEOUT_MESSAGE: &str = "Query inactivity timeout";
 
+// MySQL 8 declares the `information_schema` text columns with a `_bin` collation, which sqlx
+// reports as binary. `convert(… using utf8mb4)` returns plain text columns on MySQL and MariaDB.
+const MYSQL_TABLES_SQL: &str = "select convert(table_name using utf8mb4) as name from information_schema.tables where table_schema = database() order by table_name";
+const MYSQL_COLUMNS_SQL: &str = "select convert(column_name using utf8mb4) as name, convert(column_type using utf8mb4) as type, convert(is_nullable using utf8mb4) as nullable, convert(column_default using utf8mb4) as dflt, convert(column_key using utf8mb4) as ckey from information_schema.columns where table_schema = database() and table_name = ? order by ordinal_position";
+
 async fn open_mysql(
     host: &str,
     port: u16,
@@ -285,12 +290,7 @@ async fn run_mysql(
     let work = async {
         match request.operation {
             DatabaseOperation::Tables => {
-                let result = mysql_rows(
-                    client,
-                    "select table_name as name from information_schema.tables where table_schema = database() order by table_name",
-                    &[],
-                )
-                .await?;
+                let result = mysql_rows(client, MYSQL_TABLES_SQL, &[]).await?;
                 // Older servers name the column in capitals.
                 let column = result.columns.first().cloned().unwrap_or_default();
                 Ok(DatabaseResponse {
@@ -301,7 +301,7 @@ async fn run_mysql(
             DatabaseOperation::Describe => {
                 let result = mysql_rows(
                     client,
-                    "select column_name as name, column_type as type, is_nullable as nullable, column_default as dflt, column_key as ckey from information_schema.columns where table_schema = database() and table_name = ? order by ordinal_position",
+                    MYSQL_COLUMNS_SQL,
                     &[request.table.as_deref().unwrap_or("")],
                 )
                 .await?;
@@ -971,6 +971,34 @@ mod tests {
         ] {
             assert!(!lost_text(message), "{message} is not a lost connection");
         }
+    }
+
+    #[test]
+    fn mysql_schema_text_columns_are_converted_to_utf8mb4() {
+        for (sql, columns) in [
+            (MYSQL_TABLES_SQL, &["table_name"][..]),
+            (
+                MYSQL_COLUMNS_SQL,
+                &[
+                    "column_name",
+                    "column_type",
+                    "is_nullable",
+                    "column_default",
+                    "column_key",
+                ][..],
+            ),
+        ] {
+            for column in columns {
+                assert!(
+                    sql.contains(&format!("convert({column} using utf8mb4)")),
+                    "{column} is converted in: {sql}"
+                );
+            }
+            // Only the filters read the raw columns, never the selected values.
+            assert!(!sql.contains("select table_name") && !sql.contains("select column_name"));
+        }
+        assert!(MYSQL_COLUMNS_SQL.contains("table_name = ?"));
+        assert!(MYSQL_TABLES_SQL.contains("as name"));
     }
 
     #[test]

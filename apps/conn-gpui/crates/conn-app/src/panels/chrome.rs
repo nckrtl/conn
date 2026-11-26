@@ -24,6 +24,25 @@ use super::header::superhero_icon;
 use crate::a11y::ConnA11yExt as _;
 use crate::theme::MONO_FONT;
 
+/// The root of every floating popup that takes the mouse: menus, popovers, cards and modal
+/// panels drawn through `deferred`.
+///
+/// GPUI delivers hover to every element under the pointer unless a hitbox above it blocks the
+/// mouse. A popup without one lets the rows *behind* it light up while its own rows are
+/// hovered. `floating_surface` blocks the mouse for the whole popup (`occlude`) and keeps a
+/// left press from reaching the elements below it. Put it on the visible card, not on a
+/// transparent positioning wrapper. Tooltips and the thread hover card stay out of this: they
+/// have no hitbox on purpose, so the pointer passes through them.
+pub(crate) trait FloatingSurfaceExt: InteractiveElement + Sized {
+    /// Blocks hover and left presses from reaching the elements behind this popup.
+    fn floating_surface(self) -> Self {
+        self.occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
+}
+
+impl<T: InteractiveElement + Sized> FloatingSurfaceExt for T {}
+
 /// Default tooltip show delay matching Conn's Base UI `TooltipProvider` (`600ms`).
 pub(crate) const TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(600);
 /// Shorter tooltip delay used inside Pull request detail views (`delay={150}`).
@@ -254,6 +273,13 @@ pub(crate) const ICON_BUTTON_GLYPH_PX: f32 = 14.0;
 pub(crate) const SECTION_TABS_HEIGHT_PX: f32 = 36.0;
 /// Row inset used by panel lists (`ps-4`, `px-4`).
 pub(crate) const ROW_PAD_START_PX: f32 = 16.0;
+/// Sidebar geometry shared by search controls and their selectable list rows.
+pub(crate) const LIST_INLINE_INSET_PX: f32 = 8.0;
+pub(crate) const SEARCH_LIST_GAP_PX: f32 = 6.0;
+pub(crate) const LIST_ROW_HEIGHT_PX: f32 = 32.0;
+pub(crate) const LIST_ROW_GAP_PX: f32 = 2.0;
+pub(crate) const LIST_ROW_INSET_PX: f32 = 14.0;
+pub(crate) const LIST_ROW_RADIUS_PX: f32 = 8.0;
 /// Conn `StatusDotBadge` (`apps/web/src/components/StatusDotBadge.tsx`) geometry:
 /// `6px` solid status dot (`size-1.5`) with a `2px` opaque cutout ring (`10px` outer disc)
 /// centered right on the icon's corner (`top: -5px, right: -5px`, half-width / half-height).
@@ -261,7 +287,9 @@ pub(crate) const STATUS_DOT_INNER_PX: f32 = 6.0;
 pub(crate) const STATUS_DOT_RING_PX: f32 = 2.0;
 pub(crate) const STATUS_DOT_OUTER_PX: f32 = STATUS_DOT_INNER_PX + 2.0 * STATUS_DOT_RING_PX;
 pub(crate) const STATUS_DOT_OFFSET_PX: f32 = -(STATUS_DOT_OUTER_PX / 2.0);
-const PILL_RADIUS_PX: f32 = 9999.0;
+/// `--toolbar-radius` / `--toolbar-control-radius`: the toolbar pill. GPUI clamps it to half
+/// the element's shorter side.
+pub(crate) const PILL_RADIUS_PX: f32 = 9999.0;
 
 /// Alpha-composites a translucent `overlay` over an opaque `backdrop` (`a = 1.0`).
 #[must_use]
@@ -658,7 +686,7 @@ pub(crate) fn dropdown_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
     for entry in entries {
         match entry {
             MenuEntry::Separator => {

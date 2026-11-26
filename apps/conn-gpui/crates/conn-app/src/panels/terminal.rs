@@ -43,7 +43,10 @@ use super::terminal_palette::{
 };
 
 const TERMINAL_PAD_START_PX: f32 = 16.0;
-const TERMINAL_PAD_TOP_PX: f32 = 16.0;
+/// Smallest top padding above the first terminal row (very tall cells).
+const TERMINAL_PAD_TOP_MIN_PX: f32 = 4.0;
+/// Offset of the floating toolbar from the panel's top edge.
+const TOOLBAR_TOP_PX: f32 = 8.0;
 const TERMINAL_PAD_END_PX: f32 = 12.0;
 const TERMINAL_PAD_BOTTOM_PX: f32 = 12.0;
 const TOOLBAR_HEIGHT_PX: f32 = 32.0;
@@ -729,10 +732,17 @@ impl Render for TerminalPanel {
             })
         });
 
+        // The first terminal row centres on the floating toolbar: its top padding is the toolbar's
+        // centre line minus half a cell, so it follows the font size and line height.
+        let cell_height =
+            measure_font(window, cx, &crate::terminal_settings::current(cx)).cell_height;
+        let pad_top = (TOOLBAR_TOP_PX + TOOLBAR_HEIGHT_PX / 2.0 - cell_height / 2.0)
+            .max(TERMINAL_PAD_TOP_MIN_PX);
+
         // Floating top-right ToolbarGroup matching `ThreadTerminalDrawer.tsx` (`absolute right-2 top-2`).
         let action_group = h_flex()
             .absolute()
-            .top(px(8.0))
+            .top(px(TOOLBAR_TOP_PX))
             .right(px(8.0))
             .h(px(TOOLBAR_HEIGHT_PX))
             .px(px(TOOLBAR_INNER_PAD_PX))
@@ -802,7 +812,7 @@ impl Render for TerminalPanel {
                     .flex_1()
                     .size_full()
                     .pl(px(TERMINAL_PAD_START_PX))
-                    .pt(px(TERMINAL_PAD_TOP_PX))
+                    .pt(px(pad_top))
                     .pr(px(TERMINAL_PAD_END_PX))
                     .pb(px(TERMINAL_PAD_BOTTOM_PX))
                     .child(TerminalElement {

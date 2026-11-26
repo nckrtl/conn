@@ -25,7 +25,9 @@ pub mod attention;
 mod generated;
 pub mod ids;
 pub mod outline;
+pub mod source;
 pub mod support;
+pub mod tool_output;
 mod upstream;
 
 pub use generated::*;

@@ -18,6 +18,9 @@ use crate::a11y::ConnA11yExt as _;
 use crate::app::ConnApp;
 use crate::icons;
 use crate::panels::header::dropdown_glass_shadow;
+use crate::sidebar::submenu_placement::{
+    MENU_SURFACE_INSET_PX, SUBMENU_VIEWPORT_MARGIN_PX, placed_submenu,
+};
 use crate::theme::{hsla, hsla_alpha};
 
 /// `menu.tsx` popup geometry (`rounded-xl`, `p-1`, `min-w-[10rem]`), rows
@@ -74,6 +77,8 @@ pub(crate) enum ThreadMenuAction {
     CopyBranch,
     CopyThread,
     CopyThreadId,
+    /// `conn://thread/<environmentId>/<threadId>`.
+    CopyThreadLink,
     ProjectSettings,
     Delete,
     /// `Discard draft` on a new-thread draft row.
@@ -98,6 +103,7 @@ impl ThreadMenuAction {
             Self::CopyBranch => "thread-menu.copy.branch",
             Self::CopyThread => "thread-menu.copy.thread",
             Self::CopyThreadId => "thread-menu.copy.thread-id",
+            Self::CopyThreadLink => "thread-menu.copy.thread-link",
             Self::ProjectSettings => "thread-menu.project-settings",
             Self::Delete => "thread-menu.delete",
             Self::DiscardDraft => "thread-menu.discard-draft",
@@ -162,13 +168,21 @@ impl ThreadMenuState {
         thread: &ThreadShell,
         active_scope: Option<&str>,
     ) -> Self {
-        let project_filter = shell
-            .project(&thread.project_id)
-            .filter(|p| p.archived_at.as_ref().is_none_or(Option::is_none))
-            .map(|p| ProjectFilterState {
-                label: p.title.clone(),
-                is_active: active_scope == Some(p.id.as_str()),
+        let label = thread
+            .orbit_project
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(|p| &p.slug)
+            .or_else(|| {
+                shell
+                    .project(&thread.project_id)
+                    .filter(|p| p.archived_at.as_ref().is_none_or(Option::is_none))
+                    .map(|p| &p.title)
             });
+        let project_filter = label.map(|label| ProjectFilterState {
+            label: label.clone(),
+            is_active: active_scope == Some(conn_state::sidebar_project_key(thread).as_ref()),
+        });
         Self {
             branch: thread.branch.clone().filter(|b| !b.is_empty()),
             project_filter,
@@ -251,6 +265,11 @@ pub(crate) fn build_thread_action_menu_items(state: &ThreadMenuState) -> Vec<Thr
         A::CopyThreadId,
         "Thread ID",
         "superhero/hash.svg",
+    ));
+    copy.children.push(ThreadMenuItem::new(
+        A::CopyThreadLink,
+        "Thread link",
+        "superhero/link.svg",
     ));
     items.push(copy);
     items.push(ThreadMenuItem::new(
@@ -394,19 +413,17 @@ fn submenu_hover_intent(level: MenuLevel, has_children: bool) -> SubmenuHoverInt
     }
 }
 
-/// Opens the submenu to the left of the parent menu when opening to the right would clip
-/// past the window's right edge.
+/// Height of a menu list: its rows, separators (1px plus `my-1`), and the `p-1` and border.
 #[must_use]
-fn submenu_opens_left(anchor_x: Pixels, viewport_w: Pixels) -> bool {
-    anchor_x + px(MENU_MIN_WIDTH_PX * 2.0 + 16.0) > viewport_w
-}
-
-/// Aligns the submenu's bottom edge to the `Copy` row when opening downward would clip
-/// past the bottom of the window.
-#[must_use]
-fn submenu_opens_upward(anchor_y: Pixels, item_count: usize, viewport_h: Pixels) -> bool {
-    let submenu_h = item_count as f32 * MENU_ROW_HEIGHT_PX + 16.0;
-    anchor_y + px(submenu_h) > viewport_h
+fn menu_list_height(items: &[ThreadMenuItem]) -> Pixels {
+    let rows = items.len() as f32 * MENU_ROW_HEIGHT_PX;
+    let separators = items
+        .iter()
+        .enumerate()
+        .filter(|(idx, item)| item.separator_before && *idx > 0)
+        .count() as f32
+        * 9.0;
+    px(rows + separators + 2.0 * MENU_SURFACE_INSET_PX)
 }
 
 /// Renders the anchored `dropdown-glass` Thread Actions menu.
@@ -488,6 +505,11 @@ fn render_menu_list(
     // The menu takes the keyboard; its keys come from the app (`intercept_keystroke`).
     if let Some(focus) = focus {
         list = list.track_focus(focus);
+    }
+    // A submenu taller than the window scrolls, so its last action stays reachable.
+    let room = viewport.height - px(2.0 * SUBMENU_VIEWPORT_MARGIN_PX);
+    if level == MenuLevel::Submenu && menu_list_height(items) > room {
+        list = list.max_h(room).overflow_y_scroll();
     }
     let highlighted_row = match level {
         MenuLevel::Root => anchor.cursor.root,
@@ -606,30 +628,18 @@ fn render_menu_list(
                 tokens,
                 cx,
             );
-            let mut bridge = div()
-                .id("thread-menu-copy-bridge")
-                .occlude()
+            // Drawn in the window layer and placed from this row's real bounds and the real
+            // viewport at prepaint, so no window edge clips it (`submenu_placement`).
+            let popup = div()
+                .id("thread-menu-copy-popup")
                 .absolute()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
                     if *hovered {
                         app.keep_thread_menu_copy_open(cx);
                     }
                 }))
                 .child(submenu);
-            bridge =
-                if submenu_opens_upward(anchor.position.y, item.children.len(), viewport.height) {
-                    bridge.bottom(px(-4.0))
-                } else {
-                    bridge.top(px(-4.0))
-                };
-            bridge = if submenu_opens_left(anchor.position.x, viewport.width) {
-                bridge.right_full().pr(px(6.0))
-            } else {
-                bridge.left_full().pl(px(6.0))
-            };
-            row = row.child(bridge);
+            row = row.child(placed_submenu(popup).with_priority(6));
         }
         list = list.child(row);
     }
@@ -675,7 +685,7 @@ mod tests {
             .expect("copy submenu");
         assert_eq!(
             labels(&copy.children),
-            vec!["Path", "Branch", "Thread", "Thread ID"]
+            vec!["Path", "Branch", "Thread", "Thread ID", "Thread link"]
         );
         let separated: Vec<&str> = items
             .iter()
@@ -713,7 +723,10 @@ mod tests {
             .iter()
             .find(|i| i.action == ThreadMenuAction::Copy)
             .expect("copy submenu");
-        assert_eq!(labels(&copy.children), vec!["Path", "Thread", "Thread ID"]);
+        assert_eq!(
+            labels(&copy.children),
+            vec!["Path", "Thread", "Thread ID", "Thread link"]
+        );
     }
 
     #[test]
@@ -788,22 +801,13 @@ mod tests {
     }
 
     #[test]
-    fn submenu_flips_left_only_near_right_window_edge() {
-        assert!(
-            !submenu_opens_left(px(180.0), px(1200.0)),
-            "sidebar context menu opens submenu to the right"
-        );
-        assert!(
-            submenu_opens_left(px(950.0), px(1200.0)),
-            "right-edge context menu flips submenu to the left to stay inside viewport"
-        );
-        assert!(
-            !submenu_opens_upward(px(200.0), 4, px(800.0)),
-            "mid-window context menu opens submenu downward"
-        );
-        assert!(
-            submenu_opens_upward(px(740.0), 4, px(800.0)),
-            "bottom-edge context menu aligns submenu upward to stay inside viewport"
-        );
+    fn menu_list_height_counts_rows_separators_and_frame() {
+        let items = build_draft_action_menu_items(DraftMenuState {
+            has_path: true,
+            has_branch: true,
+            has_project: true,
+        });
+        // Three rows, one separator before `Discard draft`, `p-1` and the border.
+        assert_eq!(menu_list_height(&items), px(3.0 * 28.0 + 9.0 + 10.0));
     }
 }

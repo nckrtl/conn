@@ -353,6 +353,17 @@ impl ConnApp {
         }
     }
 
+    /// The config a linked environment's server reported, once its connection has loaded it.
+    pub(super) fn linked_server_config(
+        &self,
+        environment: &str,
+    ) -> Option<&conn_state::providers::ServerConfigState> {
+        self.linked
+            .configs
+            .get(environment)
+            .map(|config| config.as_ref())
+    }
+
     /// The scratch workspace root of the environment `project_id` lives on.
     pub(crate) fn scratch_root_for_project(&self, project_id: &str) -> Option<String> {
         match self.linked_environment_of_project(project_id) {
@@ -419,7 +430,15 @@ impl ConnApp {
             .map(str::to_owned)
     }
 
-    /// Points the chat and the right panel at the connection of what is open, when that moved to
+    /// The base URL of the server that owns the current thread or draft.
+    pub(super) fn context_server_url(&self, environment: Option<&str>) -> Option<&str> {
+        match environment {
+            Some(id) => self.linked.urls.get(id).map(String::as_str),
+            None => self.server_url.as_deref(),
+        }
+    }
+
+    /// Points the chat at the connection of what is open, when that moved to
     /// another environment since the last call.
     pub(super) fn sync_chat_environment(&mut self, cx: &mut Context<'_, Self>) {
         let environment = self.context_environment();
@@ -429,18 +448,15 @@ impl ConnApp {
         let Some(connection) = self.context_connection() else {
             return;
         };
-        let url = match &environment {
-            Some(id) => self.linked.urls.get(id).cloned(),
-            None => self.server_url.clone(),
-        };
+        let url = self
+            .context_server_url(environment.as_deref())
+            .map(str::to_owned);
         self.linked.chat_env = environment;
         self.push_server_config(cx);
         self.chat.update(cx, |chat, cx| {
             chat.set_environment_key(url);
-            chat.set_connection(Some(connection.clone()), cx);
+            chat.set_connection(Some(connection), cx);
         });
-        self.right_panel
-            .update(cx, |panel, cx| panel.set_connection(Some(connection), cx));
     }
 
     /// Subscribes the open thread's timeline on its environment's connection, after ending the
@@ -456,6 +472,10 @@ impl ConnApp {
         self.threads
             .entry(thread_id.to_owned())
             .or_insert_with(|| ThreadState::new(thread_id.to_owned()));
+        // A hover prefetch of this thread becomes the open stream: the client holds it already, so
+        // this subscribe sends nothing again.
+        self.speculative.promote(thread_id);
+        self.launched_threads.remove(thread_id);
         connection.subscribe_thread(thread_id);
         self.subscribed_thread_id = Some(thread_id.to_owned());
         self.linked.subscribed_env = environment;
@@ -834,7 +854,8 @@ impl ConnApp {
             let environment_scope: Option<Vec<String>> = scope.as_ref().map(|ids| {
                 ids.iter()
                     .filter(|id| {
-                        self.linked_environment_of_project(id) == Some(environment.as_str())
+                        conn_state::orbit_filing_id(id).is_some()
+                            || self.linked_environment_of_project(id) == Some(environment.as_str())
                     })
                     .cloned()
                     .collect()
@@ -881,14 +902,7 @@ impl ConnApp {
             self.linked
                 .shells
                 .older_page_started(&environment, &request);
-            let payload = serde_json::json!({
-                "before": {
-                    "settledAt": request.before.settled_at,
-                    "threadId": request.before.thread_id,
-                },
-                "projectIds": request.project_ids,
-                "limit": conn_state::OLDER_SETTLED_PAGE_SIZE,
-            });
+            let payload = request.payload();
             cx.spawn(async move |this, cx| {
                 let result = connection
                     .call::<_, conn_contract::OrchestrationV2OlderSettledThreadsPage>(
@@ -1154,12 +1168,14 @@ impl ConnApp {
             .urls
             .insert(environment_id.clone(), config.http_base_url.to_string());
         self.linked.shells.ensure(&environment_id, &label);
+        let device_name = self.device_name();
         if let Some(set) = self.linked.set.as_mut() {
             set.connect(EnvironmentTarget {
                 environment_id,
                 label,
                 config,
-            });
+            })
+            .subscribe_panel_requests(Some(device_name));
         }
     }
 
@@ -1270,14 +1286,18 @@ impl ConnApp {
                 changed
             }
             ClientEvent::Thread { thread_id, item } => {
-                self.threads
-                    .entry(thread_id.clone())
-                    .or_insert_with(|| ThreadState::new(thread_id))
-                    .apply(item);
+                // Every subscribe creates the reducer first; a missing one means a late item of a
+                // stream dropped with its reducer.
+                if let Some(state) = self.threads.get_mut(&thread_id) {
+                    state.apply(item);
+                }
                 false
             }
             ClientEvent::StreamEnded { tag, key, error } => {
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                if tag == "orchestration.subscribeThread"
+                    && self.threads.contains_key(&key)
+                    && self.thread_stream_wanted(&key)
+                {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }
@@ -1318,8 +1338,13 @@ impl ConnApp {
                 cx.notify();
                 false
             }
-            // A linked environment's panel requests and annotations are not shown here.
-            ClientEvent::PanelRequest(_) | ClientEvent::Annotations { .. } => false,
+            ClientEvent::PanelRequest(request) => {
+                if let Some(conn) = self.linked_connection(&environment_id) {
+                    self.dispatch_agent_panel_request(environment_id, conn, request, cx);
+                }
+                false
+            }
+            ClientEvent::Annotations { .. } => false,
         }
     }
 }

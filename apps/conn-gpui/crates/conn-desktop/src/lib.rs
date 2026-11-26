@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_request;
+pub mod child_reaper;
 pub mod control;
 pub mod database;
 pub mod laravel_toolbar;
@@ -15,3 +16,4 @@ pub mod operator;
 pub mod orbit;
 pub mod server_store;
 pub mod vault;
+pub mod vaultwarden;

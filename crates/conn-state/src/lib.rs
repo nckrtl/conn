@@ -130,8 +130,8 @@ pub use crate::sidebar_nav::{
     thread_traversal_key, traversal_order, tree_key, tree_step,
 };
 pub use crate::thread::{
-    AgentMessageSender, ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, PendingApproval,
-    PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
+    AgentMessageSender, ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, NoticeLevel,
+    PendingApproval, PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
     ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnCheckpointSummary, TurnItemStatus,
     child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
 };

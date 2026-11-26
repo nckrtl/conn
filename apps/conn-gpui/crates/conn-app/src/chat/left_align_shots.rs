@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use conn_state::{EntryTiming, ItemStatus, ThreadState, TimelineEntry};
+use conn_state::{EntryTiming, ItemStatus, NoticeLevel, ThreadState, TimelineEntry};
 use conn_theme::Tokens;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
@@ -10,7 +10,7 @@ use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, 
 use crate::app::{ConnApp, register_keybindings};
 
 const WIDTH_PX: f32 = 1100.0;
-const HEIGHT_PX: f32 = 520.0;
+const HEIGHT_PX: f32 = 720.0;
 const GROUP: &str = "work-group-think-1";
 
 fn thread() -> ThreadState {
@@ -72,19 +72,15 @@ fn thread() -> ThreadState {
     thread
 }
 
-/// Renders the timeline offscreen to PNG in Dark Ocean and Light. It opens no window on screen and
-/// takes no focus: GPUI's headless renderer draws into a texture.
-///
-/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=after cargo test -p conn-app
-/// render_thread_align_screenshots -- --ignored`
-#[test]
-#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
-fn render_thread_align_screenshots() {
-    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
-        return;
-    };
-    let prefix = std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "shot".to_owned());
-    let dir = Path::new(&dir);
+/// Renders `thread` offscreen to `<prefix>-dark.png` and `<prefix>-light.png` in `dir`, after
+/// calling `setup` on the chat view. It opens no window on screen and takes no focus: GPUI's
+/// headless renderer draws into a texture.
+fn render_pngs(
+    dir: &Path,
+    prefix: &str,
+    thread: &dyn Fn() -> ThreadState,
+    setup: &dyn Fn(&mut crate::chat::ChatView, &mut gpui_kit::Context<'_, crate::chat::ChatView>),
+) {
     std::fs::create_dir_all(dir).expect("an output folder");
     // `current_platform(true)` needs the main thread, which libtest does not give a test.
     let mut ctx = gpui_kit::HeadlessAppContext::with_platform(
@@ -123,7 +119,7 @@ fn render_thread_align_screenshots() {
                 app.set_shell(crate::ui_tests::kitchen_sink_shell(), cx);
                 app.set_thread_for_test("thread-selected".to_owned(), thread(), cx);
                 let chat = app.chat_for_test();
-                chat.update(cx, |chat, cx| chat.toggle_expanded(GROUP, cx));
+                chat.update(cx, |chat, cx| setup(chat, cx));
             });
         });
         for _ in 0..4 {
@@ -136,4 +132,116 @@ fn render_thread_align_screenshots() {
             .save(dir.join(format!("{prefix}-{label}.png")))
             .expect("a saved PNG");
     }
+}
+
+/// A turn with three MCP warnings, then a work log with a Conn MCP tool row that the provider
+/// reported as a `command`.
+fn warnings_thread() -> ThreadState {
+    let mut thread = ThreadState::new("thread-selected");
+    thread.synchronized = true;
+    let warning = |id: &str, text: &str| TimelineEntry::Notice {
+        id: id.to_owned(),
+        text: text.to_owned(),
+        level: NoticeLevel::Warning,
+    };
+    thread.entries = vec![
+        TimelineEntry::User {
+            id: "u-1".to_owned(),
+            text: "Read the Conn thread and summarise it.".to_owned(),
+            created_by_agent: false,
+            sender: None,
+            created_at: None,
+            attachments: Vec::new(),
+            is_steer: false,
+            review_comments: Vec::new(),
+            run_id: Some("run-1".to_owned()),
+        },
+        warning(
+            "warn-1",
+            "MCP client for `computer-use` failed to start: MCP startup failed: handshaking with MCP server failed: connection closed: initialize response",
+        ),
+        warning(
+            "warn-2",
+            "The linear MCP server requires OAuth reauthentication. Run `codex mcp login linear`.",
+        ),
+        warning(
+            "warn-3",
+            "MCP client for `solo` failed to start: MCP startup failed: the server process exited",
+        ),
+        TimelineEntry::Notice {
+            id: "info-1".to_owned(),
+            text: "Context compacted 120k → 40k tokens".to_owned(),
+            level: NoticeLevel::Info,
+        },
+        TimelineEntry::Tool {
+            id: "tool-1".to_owned(),
+            kind: "command".to_owned(),
+            title: "mcp_conn_conn_thread_read".to_owned(),
+            detail: None,
+            status: ItemStatus::Completed,
+            output_omitted: false,
+        },
+        TimelineEntry::Tool {
+            id: "tool-2".to_owned(),
+            kind: "command".to_owned(),
+            title: "cargo test -p conn-app".to_owned(),
+            detail: None,
+            status: ItemStatus::Completed,
+            output_omitted: false,
+        },
+        TimelineEntry::Assistant {
+            id: "answer-1".to_owned(),
+            markdown: "The thread is about the timeline warnings.".to_owned(),
+            streaming: false,
+            created_at: None,
+            run_id: Some("run-1".to_owned()),
+            status: ItemStatus::Completed,
+        },
+    ];
+    for (id, start) in [("tool-1", 0), ("tool-2", 6_000)] {
+        thread.entry_timings.insert(
+            id.to_owned(),
+            EntryTiming {
+                run_id: Some("run-1".to_owned()),
+                started_at_ms: Some(start),
+                completed_at_ms: Some(start + 3_000),
+            },
+        );
+    }
+    thread
+}
+
+/// Renders the thread timeline offscreen to PNG in Dark Ocean and Light.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=after cargo test -p conn-app
+/// render_thread_align_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_thread_align_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    let prefix = std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "shot".to_owned());
+    render_pngs(Path::new(&dir), &prefix, &thread, &|chat, cx| {
+        chat.toggle_expanded(GROUP, cx);
+    });
+}
+
+/// Renders a timeline with three warnings (the first one expanded), an info pill and a Conn tool
+/// row.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=warnings cargo test -p conn-app
+/// render_timeline_warning_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_timeline_warning_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    let prefix =
+        std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "warnings".to_owned());
+    render_pngs(Path::new(&dir), &prefix, &warnings_thread, &|chat, cx| {
+        chat.toggle_expanded("warn-1", cx);
+        chat.toggle_expanded("work-group-tool-1", cx);
+    });
 }

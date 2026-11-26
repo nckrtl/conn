@@ -7,6 +7,8 @@ mod header;
 mod host_diff;
 pub(super) mod inbox;
 mod logic;
+#[cfg(test)]
+mod notice_tests;
 mod pickers;
 mod tabs;
 
@@ -58,7 +60,7 @@ use self::logic::{
     build_unified_diff_from_contents, can_submit_review, classify_checks, describe_rpc_error,
     has_actionable_findings, is_request_changes_summary_required, latest_review_outcomes,
     next_header_condensed, now_epoch_ms, open_on_host_label, parse_pull_request_url,
-    resolve_thread_pr_target,
+    resolve_thread_pr_target, unavailable_notice,
 };
 use self::tabs::{
     ReactionState, TabCallbacks, render_checks_tab, render_checks_tab_trailing, render_code_tab,
@@ -1795,7 +1797,7 @@ async fn resolve_pr_for_thread(
 }
 
 impl Render for PullRequestPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let entity = cx.entity();
 
         // Update scroll-driven condensed state for the active tab (unless manually overridden).
@@ -1815,14 +1817,18 @@ impl Render for PullRequestPanel {
 
         let content: AnyElement = match &self.state {
             PanelState::NoConnection => render_unavailable_state(
+                window,
                 &self.tokens,
+                "superhero/unplug.svg",
                 "Pull requests unavailable",
                 "Connect to a Conn server to browse pull requests.",
                 None,
                 None,
             ),
             PanelState::NoThread => render_unavailable_state(
+                window,
                 &self.tokens,
+                "superhero/pull-request.svg",
                 "No pull request",
                 "Select a thread to view its pull request.",
                 None,
@@ -1833,7 +1839,9 @@ impl Render for PullRequestPanel {
                 render_detail_ghost(&self.tokens, Some(target.reference.number))
             }
             PanelState::NoPullRequest => render_unavailable_state(
+                window,
                 &self.tokens,
+                "superhero/pull-request.svg",
                 "No pull request",
                 "No pull request is linked to this thread or its current branch.",
                 Some(Rc::new(move |_, cx| {
@@ -1846,18 +1854,24 @@ impl Render for PullRequestPanel {
                 code,
                 message,
             } => {
-                let (title, desc) = if code.as_deref() == Some("not-found")
+                let (icon, title, desc) = if code.as_deref() == Some("not-found")
                     && let Some(t) = target
                 {
                     (
+                        "superhero/pull-request.svg",
                         format!("Pull request #{} not found", t.reference.number),
                         "It may be an issue rather than a pull request, or this account can't see it."
                             .to_owned(),
                     )
                 } else if code.as_deref() == Some("unavailable") {
-                    ("Pull requests unavailable".to_owned(), message.clone())
+                    let (icon, title) = unavailable_notice(message);
+                    (icon, title.to_owned(), message.clone())
                 } else {
-                    ("Could not load pull requests".to_owned(), message.clone())
+                    (
+                        "superhero/unplug.svg",
+                        "Could not load pull requests".to_owned(),
+                        message.clone(),
+                    )
                 };
                 let host_link = target.as_ref().and_then(|t| t.url.clone()).map(|url| {
                     let entity = entity.clone();
@@ -1873,7 +1887,9 @@ impl Render for PullRequestPanel {
                 });
                 let retry_target = target.clone();
                 render_unavailable_state(
+                    window,
                     &self.tokens,
+                    icon,
                     title,
                     desc,
                     Some(Rc::new({

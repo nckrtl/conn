@@ -165,6 +165,8 @@ struct VaultLoginUiState {
     loading: bool,
     status: Option<VaultLoginsStatus>,
     items: Vec<VaultLoginItem>,
+    /// Vault's icons for `items`, decoded once.
+    icons: inline::ItemIcons,
     error: Option<String>,
     feedback: Option<String>,
 }
@@ -852,6 +854,7 @@ impl BrowserPanel {
             let _ = this.update(cx, |panel, cx| {
                 panel.vault_logins.loading = false;
                 panel.vault_logins.status = Some(resp.status);
+                panel.vault_logins.icons.update(&resp.items);
                 panel.vault_logins.items = resp.items;
                 panel.vault_logins.error = resp.error;
                 cx.notify();
@@ -2551,14 +2554,12 @@ impl BrowserPanel {
                         .bg(to_hsla(self.tokens.shell_settings_card))
                         .border_1()
                         .border_color(to_hsla(self.tokens.shell_settings_card_border))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg)
-                                .truncate()
-                                .child(item.title.clone()),
-                        )
+                        .child(inline::popover_title(
+                            &item.id,
+                            self.vault_logins.icons.get(&item.id),
+                            item.title.clone(),
+                            fg,
+                        ))
                         .children(item.username.as_ref().map(|u| {
                             div()
                                 .text_size(px(11.0))

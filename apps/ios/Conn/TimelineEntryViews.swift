@@ -337,19 +337,18 @@ struct TimelineEntryRow: View {
         case let .queuedUser(_, _, _, text, date, agent, files):
             ThreadMessage(text: text, date: date, agent: agent, files: files,
                           detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
-        case let .assistant(_, markdown, streaming, _, _, status):
-            // The copy and time row sits a paragraph gap under the text, less its own 24 pt row's
-            // inset above the time glyphs.
-            VStack(alignment: .leading, spacing: 6) {
-                MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
-                if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
-                if !streaming, status == .failed {
-                    Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption)
-                        .foregroundStyle(theme.mutedForeground)
+        case let .assistant(_, markdown, streaming, timestamp, _, status):
+            // A tap shows the copy button and time below the message (MessageReveal).
+            MessageReveal(text: markdown, timestamp: timestamp, enabled: !streaming) {
+                VStack(alignment: .leading, spacing: 6) {
+                    MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
+                    if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
+                    if !streaming, status == .failed {
+                        Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption)
+                            .foregroundStyle(theme.mutedForeground)
+                    }
                 }
-
             }
-            .copyOnTap(streaming ? "" : markdown)
 
         case let .thinking(_, text, streaming, _, _):
             ThinkingRow(text: text, streaming: streaming)

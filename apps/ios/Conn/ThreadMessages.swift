@@ -55,63 +55,64 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    // The time at the thread text size; one point smaller (`trailingCopy`, both message kinds
-    // use it now). Copying is a tap on the message (CopyOnTap).
+    var showsCopy = false
+    /// The copy button after the time (user bubbles, right-aligned) or before it (agent messages).
+    var copyAfter = true
+    // Message times sit two points below the thread text: 13 pt on Polar (thread text 15).
     @ScaledMetric(relativeTo: .body) private var fullSize: CGFloat = ThreadText.size
-    // Two points below the thread text: 13 pt on Polar (thread text 15).
     private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 2) / ThreadText.size : fullSize }
     @Environment(\.connTheme) private var theme
     var body: some View {
-        if let date = threadDate(timestamp) {
-            Text(date, style: .time)
-                .lineHeight(.exact(points: size * 16 / 13))
-                .font(.system(size: size))
-                .foregroundStyle(theme.mutedForeground)
+        HStack(spacing: 4) {
+            // Under an agent message the icon's left edge is the text's: the 16 pt glyph sits 4 pt
+            // inside its 24 pt tap target; under a user bubble it ends on the bubble's right edge.
+            if showsCopy && !copyAfter { copyButton.padding(.leading, -4) }
+            if let date = threadDate(timestamp) {
+                Text(date, style: .time).lineHeight(.exact(points: size * 16 / 13))
+            }
+            if showsCopy && copyAfter { copyButton.padding(.trailing, -4) }
+        }
+        .font(.system(size: size))
+        .foregroundStyle(theme.mutedForeground)
+    }
+
+    @ViewBuilder private var copyButton: some View {
+        if !text.isEmpty { CopyTextButton(label: "Copy message", text: text, message: true, glyphSize: 16) }
+    }
+}
+
+/// A tap on a message shows its copy button and time below it; another tap hides them.
+/// Simultaneous, so links, code-card buttons and the feed's keyboard dismissal still get the tap.
+struct MessageReveal<Content: View>: View {
+    let text: String
+    let timestamp: String?
+    /// User bubbles: footer on the right, time then copy.
+    var trailing = false
+    var enabled = true
+    @ViewBuilder let content: Content
+    @State private var revealed = false
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
+
+    var body: some View {
+        VStack(alignment: trailing ? .trailing : .leading, spacing: (messageSize * 0.85 - 1) / 2) {
+            content
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded {
+                    guard enabled else { return }
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    withAnimation(.easeOut(duration: 0.18)) { revealed.toggle() }
+                })
+                .accessibilityAction(named: revealed ? "Hide details" : "Show time and copy") {
+                    withAnimation { revealed.toggle() }
+                }
+            if revealed {
+                MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: true, copyAfter: trailing)
+                    .environment(\.layoutDirection, .leftToRight)
+                    .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
     }
-}
-
-/// One tap on a message copies it: a light haptic and a brief "Copied" label at its top right.
-/// Simultaneous, so links, code-card buttons and the feed's keyboard dismissal still get the tap.
-struct CopyOnTap: ViewModifier {
-    let text: String
-    @State private var copied = false
-    @Environment(\.connTheme) private var theme
-
-    func body(content: Content) -> some View {
-        content
-            .contentShape(Rectangle())
-            .simultaneousGesture(TapGesture().onEnded {
-                guard !text.isEmpty else { return }
-                UIPasteboard.general.string = text
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                withAnimation(.easeOut(duration: 0.15)) { copied = true }
-            })
-            .overlay(alignment: .topTrailing) {
-                if copied {
-                    Text("Copied")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(theme.foreground)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .glassEffect(.regular, in: .capsule)
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                }
-            }
-            .task(id: copied) {
-                guard copied else { return }
-                try? await Task.sleep(for: .milliseconds(1100))
-                if !Task.isCancelled { withAnimation(.easeIn(duration: 0.2)) { copied = false } }
-            }
-            .accessibilityAction(named: "Copy message") {
-                UIPasteboard.general.string = text
-            }
-    }
-}
-
-extension View {
-    func copyOnTap(_ text: String) -> some View { modifier(CopyOnTap(text: text)) }
 }
 
 struct ThreadMessage: View {
@@ -161,7 +162,8 @@ struct ThreadMessage: View {
             }
         } else {
             // The copy and time row sits close under the bubble: half the agent footer's gap.
-            VStack(alignment: .trailing, spacing: (messageSize * 0.85 - 1) / 2) {
+            // A tap on the bubble shows its time and copy button below it.
+            MessageReveal(text: text, timestamp: date, trailing: true) {
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
                         ViewThatFits(in: .horizontal) {
@@ -189,10 +191,6 @@ struct ThreadMessage: View {
                 .background(theme.messageSurface, in: UnevenRoundedRectangle(
                     topLeadingRadius: 20, bottomLeadingRadius: 20, bottomTrailingRadius: 10, topTrailingRadius: 20,
                     style: .continuous))
-                .copyOnTap(text)
-                // The time, a little in from the bubble's right edge; a tap on the bubble copies.
-                MessageFooter(text: text, timestamp: date, trailingCopy: true)
-                    .padding(.horizontal, 4)
             }
             .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
             .frame(maxWidth: .infinity, alignment: .trailing)

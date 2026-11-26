@@ -696,6 +696,27 @@ impl ChatView {
         self.error_banner.clone()
     }
 
+    /// Bounds of the first queued message's list row, and the kind of the row right above it.
+    #[cfg(test)]
+    pub(crate) fn first_queued_row_for_test(
+        &self,
+    ) -> Option<(gpui_kit::Bounds<gpui_kit::Pixels>, &'static str)> {
+        let items = self.cache.items();
+        let ix = items
+            .iter()
+            .position(|item| matches!(item, VirtualItem::QueuedUser { .. }))?;
+        let above = match ix.checked_sub(1).and_then(|prev| items.get(prev)) {
+            Some(VirtualItem::Working) => "working",
+            Some(VirtualItem::WorkGroup {
+                has_active: true, ..
+            }) => "live-work-group",
+            Some(VirtualItem::WorkGroup { .. }) => "work-group",
+            Some(_) => "other",
+            None => "none",
+        };
+        Some((self.list_state.bounds_for_item(ix)?, above))
+    }
+
     #[cfg(test)]
     pub(crate) fn composer_for_test(&self) -> Entity<Composer> {
         self.composer.clone()
@@ -2018,6 +2039,21 @@ impl ChatView {
                         *position + 1 == *total
                     };
                     let above_toggle = last_shown && *total > cache::QUEUE_VISIBLE_ROWS;
+                    // Only the first queued message needs room above it: later ones sit under
+                    // the 12px bottom pad of the queued message before them.
+                    let top_pad = if *position == 0 {
+                        let items = self.cache.items();
+                        let first = items
+                            .iter()
+                            .position(|item| matches!(item, VirtualItem::QueuedUser { .. }));
+                        queued_first_row_top_pad(
+                            first
+                                .and_then(|ix| ix.checked_sub(1))
+                                .and_then(|ix| items.get(ix)),
+                        )
+                    } else {
+                        0.0
+                    };
                     self.render_queued_user_row(
                         id,
                         run_id,
@@ -2025,6 +2061,7 @@ impl ChatView {
                         attachments,
                         created_at,
                         above_toggle,
+                        top_pad,
                         window,
                         cx,
                     )
@@ -2673,6 +2710,7 @@ impl ChatView {
         attachments: &[ChatAttachment],
         created_at: &str,
         above_toggle: bool,
+        top_pad: f32,
         window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
@@ -2681,11 +2719,7 @@ impl ChatView {
         let fg = hsla(self.tokens.foreground);
         let muted = hsla(self.tokens.muted_foreground);
         let hover_bg = hsla(self.tokens.shell_highlight);
-        let bubble_border = if is_editing {
-            hsla_alpha(self.tokens.primary, 0.60)
-        } else {
-            hsla_alpha(self.tokens.muted_foreground, 0.40)
-        };
+        let bubble_border = queued_bubble_border(&self.tokens, is_editing);
         let preview: String = text.chars().take(120).collect();
 
         let bubble = div()
@@ -2699,7 +2733,6 @@ impl ChatView {
             // message reads as not yet sent.
             .bg(hsla_alpha(self.tokens.shell_raised, QUEUED_BUBBLE_FILL_ALPHA))
             .border_1()
-            .border_dashed()
             .border_color(bubble_border);
         let key = format!("queued-{id}");
         let bubble = self.render_message_body(
@@ -2721,6 +2754,9 @@ impl ChatView {
             self.tokens.message_foreground,
             QUEUED_TEXT_ALPHA,
         ));
+
+        #[cfg(test)]
+        let bubble = gpui_kit::TestSupportExt::test_support(bubble);
 
         let mut actions = div()
             .flex()
@@ -2881,8 +2917,18 @@ impl ChatView {
             .items_end()
             .gap(px(4.0))
             .w_full()
+            .pt(px(top_pad))
             .pb(px(if above_toggle { 8.0 } else { 12.0 }))
-            .child(bubble)
+            // The `Queued` label sits right-aligned above the bubble, like a steer's `Steer`.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .w_full()
+                    .child(self.render_queued_marker(id))
+                    .child(bubble),
+            )
             .child(actions)
             .into_any_element()
     }
@@ -3841,8 +3887,8 @@ impl ChatView {
                     .pb(px(8.0))
                     .border_b_1()
                     .border_color(hsla(self.tokens.shell_divider))
-                    .child(
-                        div()
+                    .child({
+                        let working_label = div()
                             .id("timeline-working")
                             .a11y_group("timeline.working", label.clone())
                             .flex()
@@ -3853,8 +3899,11 @@ impl ChatView {
                             .text_size(px(BODY_FONT_PX))
                             .line_height(px(BODY_LINE_HEIGHT_PX))
                             .text_color(muted)
-                            .child(label),
-                    ),
+                            .child(label);
+                        #[cfg(test)]
+                        let working_label = gpui_kit::TestSupportExt::test_support(working_label);
+                        working_label
+                    }),
             );
 
         if !has_live_work_group {
@@ -4823,6 +4872,35 @@ mod notice_icon_tests {
     }
 }
 
+/// Colour of a queued bubble's solid 1px border: the opaque raised surface colour, a step lighter
+/// than the half-transparent fill. A message being edited keeps the primary tint.
+pub(crate) fn queued_bubble_border(tokens: &Tokens, is_editing: bool) -> gpui_kit::Hsla {
+    if is_editing {
+        hsla_alpha(tokens.primary, 0.60)
+    } else {
+        hsla(tokens.shell_raised)
+    }
+}
+
+/// The timeline's normal gap between items, which the first queued message keeps from whatever
+/// sits above it.
+pub(crate) const QUEUED_FIRST_GAP_PX: f32 = 16.0;
+
+/// Top padding for the first queued message, so it sits `QUEUED_FIRST_GAP_PX` under the item
+/// above. The live `Working for …` row and a work group end with a small bottom pad of their
+/// own, which this tops up; messages and notices already end with the full gap.
+fn queued_first_row_top_pad(previous: Option<&VirtualItem>) -> f32 {
+    match previous {
+        // `render_working_row` ends with a 4px bottom pad.
+        Some(VirtualItem::Working) => QUEUED_FIRST_GAP_PX - 4.0,
+        // A work group ends with 6px while live and 12px once done.
+        Some(VirtualItem::WorkGroup { has_active, .. }) => {
+            QUEUED_FIRST_GAP_PX - if *has_active { 6.0 } else { 12.0 }
+        }
+        _ => 0.0,
+    }
+}
+
 /// Fill opacity of a queued message's bubble over the timeline (a sent bubble is opaque).
 const QUEUED_BUBBLE_FILL_ALPHA: f32 = 0.45;
 /// Text opacity of a queued message, so it reads as not yet sent.
@@ -4930,5 +5008,22 @@ mod left_align_tests {
             near("inline code chip", chip_left);
         })
         .expect("a window");
+    }
+}
+
+#[cfg(test)]
+mod queued_gap_tests {
+    use super::cache::VirtualItem;
+    use super::{QUEUED_FIRST_GAP_PX, queued_first_row_top_pad};
+
+    #[test]
+    fn the_first_queued_row_tops_up_the_pad_of_the_item_above_to_one_gap() {
+        // The working row ends with 4px, a live work group with 6px, a settled one with 12px.
+        assert_eq!(
+            queued_first_row_top_pad(Some(&VirtualItem::Working)) + 4.0,
+            QUEUED_FIRST_GAP_PX
+        );
+        assert_eq!(queued_first_row_top_pad(None), 0.0);
+        assert!((QUEUED_FIRST_GAP_PX - 16.0).abs() < f32::EPSILON);
     }
 }

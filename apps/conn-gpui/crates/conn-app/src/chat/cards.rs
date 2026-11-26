@@ -763,10 +763,39 @@ impl ChatView {
 
     /// Conn `UserMessageIntentMarker`: `Redo2` + `Steer` above a steering bubble.
     pub(super) fn render_steer_marker(&self, id: &str) -> AnyElement {
+        self.render_intent_marker(
+            format!("steer-{id}"),
+            format!("chat.steer.{id}"),
+            icons::REDO,
+            "Steer",
+            "Steered the active turn",
+        )
+    }
+
+    /// The same marker for a queued message: `Clock` + `Queued`, right-aligned above its bubble.
+    pub(super) fn render_queued_marker(&self, id: &str) -> AnyElement {
+        self.render_intent_marker(
+            format!("queued-marker-{id}"),
+            format!("chat.queued.marker.{id}"),
+            icons::CLOCK,
+            "Queued",
+            "Waiting in the queue until the agent is free",
+        )
+    }
+
+    /// A small muted icon + label right-aligned above a user bubble (`Steer`, `Queued`).
+    fn render_intent_marker(
+        &self,
+        element_id: String,
+        a11y_id: String,
+        icon: &'static str,
+        label: &'static str,
+        tooltip: &'static str,
+    ) -> AnyElement {
         let muted = hsla(self.tokens.muted_foreground);
-        div()
-            .id(SharedString::from(format!("steer-{id}")))
-            .a11y_group(format!("chat.steer.{id}"), "Steered the active turn")
+        let marker = div()
+            .id(SharedString::from(element_id))
+            .a11y_group(a11y_id, tooltip)
             .mr(px(4.0))
             .mb(px(4.0))
             .flex()
@@ -777,10 +806,12 @@ impl ChatView {
             .text_size(px(12.0))
             .line_height(px(12.0))
             .text_color(muted)
-            .conn_tooltip("Steered the active turn", &self.tokens)
-            .child(icons::icon(icons::REDO, 12.0, muted))
-            .child("Steer")
-            .into_any_element()
+            .conn_tooltip(tooltip, &self.tokens)
+            .child(icons::icon(icon, 12.0, muted))
+            .child(label);
+        #[cfg(test)]
+        let marker = gpui_kit::TestSupportExt::test_support(marker);
+        marker.into_any_element()
     }
 
     /// Conn `messageActions` under a user bubble: timestamp + Copy, revealed on row hover.

@@ -27,8 +27,8 @@ struct WorkGroupCard: View {
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
     private var title: String {
-        if let label = group.durationLabel, !label.isEmpty {
-            return "Worked for \(label)"
+        if let ms = group.durationMs, ms > 0 {
+            return "Worked for \(durationText(ms))"
         }
         let count = entries.count
         return count == 1 ? "1 step" : "\(count) steps"
@@ -166,7 +166,7 @@ struct WorkingFoldLabel: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let seconds = max(0, Int(context.date.timeIntervalSince(since)))
-            Text("Working for \(seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s")")
+            Text("Working for \(durationText(UInt64(seconds) * 1000))")
                 .font(.system(size: size))
                 .monospacedDigit()
                 .foregroundStyle(theme.mutedForeground)
@@ -476,8 +476,7 @@ struct ToolRow: View {
 
     private var durationLabel: String? {
         guard let ms = durationMs, ms > 0 else { return nil }
-        if ms < 1000 { return "\(ms)ms" }
-        return String(format: "%.1fs", Double(ms) / 1000.0)
+        return durationText(ms)
     }
 
     var body: some View {
@@ -701,7 +700,20 @@ extension FfiTimelineEntry {
 
 private func workDurationLabel(_ ms: UInt64?) -> String? {
     guard let ms, ms > 0 else { return nil }
-    return ms < 1000 ? "\(ms)ms" : String(format: "%.1fs", Double(ms) / 1000)
+    return durationText(ms)
+}
+
+/// One notation for every duration (Nick): whole seconds under a minute ("21s", at least 1s), then
+/// minutes and seconds ("3m 24s"), then hours and minutes ("1h 5m").
+func durationText(_ ms: UInt64) -> String {
+    let seconds = max(1, Int((Double(ms) / 1000).rounded()))
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 {
+        let (m, s) = (seconds / 60, seconds % 60)
+        return s == 0 ? "\(m)m" : "\(m)m \(s)s"
+    }
+    let (h, m) = (seconds / 3600, (seconds % 3600) / 60)
+    return m == 0 ? "\(h)h" : "\(h)h \(m)m"
 }
 
 /// One step of an expanded "Worked for" log (lab `.m-work-log li`): status glyph, title, duration and a

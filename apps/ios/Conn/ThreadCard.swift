@@ -323,6 +323,5 @@ func threadDate(_ text: String?) -> Date? {
 
 func threadElapsed(_ start: String?, _ end: String?) -> String? {
     guard let a = threadDate(start), let b = threadDate(end), b >= a else { return nil }
-    let seconds = Int(b.timeIntervalSince(a))
-    return seconds >= 60 ? "\(seconds / 60)m \(seconds % 60)s" : "\(seconds)s"
+    return durationText(UInt64(b.timeIntervalSince(a) * 1000))
 }

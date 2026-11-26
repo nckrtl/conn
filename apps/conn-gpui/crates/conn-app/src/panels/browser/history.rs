@@ -237,25 +237,26 @@ impl BrowserHistory {
 
 // ----- URLs -----------------------------------------------------------------------------------
 
-/// Query parameters that carry a credential, compared case-insensitively. A name that ends in
-/// `_token` or `_secret`, and the `X-Amz-*` signing parameters, are secret too
-/// (see [`is_secret_query_name`]).
+/// Query parameters that carry a credential, in their normalized form: lowercase, without `-` and
+/// `_` (so `access_token`, `accessToken` and `Access-Token` are all `accesstoken`). A normalized
+/// name that ends in `token`, `secret` or `signature`, or starts with `xamz` or `xgoog` (the AWS
+/// and Google signing parameters), is secret too (see [`is_secret_query_name`]). Names are matched
+/// whole or by those affixes only, so `keyword`, `codec` and `token_type` stay.
 const SECRET_QUERY_NAMES: &[&str] = &[
     "token",
-    "access_token",
-    "id_token",
-    "refresh_token",
+    "accesstoken",
+    "idtoken",
+    "refreshtoken",
     "code",
     "state",
     "signature",
     "sig",
     "key",
-    "api_key",
     "apikey",
     "password",
     "pass",
     "secret",
-    "client_secret",
+    "clientsecret",
     "auth",
     "session",
     "jwt",
@@ -267,11 +268,103 @@ fn is_secret_query_name(name: &str) -> bool {
     let decoded = url::form_urlencoded::parse(name.as_bytes())
         .next()
         .map_or_else(String::new, |(name, _)| name.into_owned());
-    let name = decoded.to_ascii_lowercase();
+    let name: String = decoded
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
     SECRET_QUERY_NAMES.contains(&name.as_str())
-        || name.ends_with("_token")
-        || name.ends_with("_secret")
-        || name.starts_with("x-amz-")
+        || name.ends_with("token")
+        || name.ends_with("secret")
+        || name.ends_with("signature")
+        || name.starts_with("xamz")
+        || name.starts_with("xgoog")
+}
+
+/// What a secret path segment becomes. The history keeps the URL's shape and drops only the
+/// secret, so `/reset/abc123` is stored as `/reset/:redacted`. (We redact in place instead of
+/// truncating, so pages with a secret in the middle of the path keep what follows it.)
+const REDACTED_SEGMENT: &str = ":redacted";
+
+/// Path segments that name a credential in the segment after them, in normalized form (lowercase,
+/// no `-` or `_`): `/reset/<token>`, `/invite/<token>`.
+const SECRET_PATH_KEYS: &[&str] = &[
+    "token",
+    "tokens",
+    "reset",
+    "resetpassword",
+    "passwordreset",
+    "verify",
+    "invite",
+    "magic",
+    "magiclink",
+    "auth",
+    "activate",
+    "confirm",
+];
+
+fn is_base64url(text: &str) -> bool {
+    text.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Three base64url parts joined by dots: `header.payload.signature`. A JWT header always starts
+/// with `eyJ` (`{"`), so that form is enough with short parts (and an empty signature); any other
+/// three long parts count too. `jquery.min.js` and `app.v2.css` do not.
+fn is_jwt_shaped(segment: &str) -> bool {
+    let parts: Vec<&str> = segment.split('.').collect();
+    let [header, payload, signature] = parts[..] else {
+        return false;
+    };
+    if !is_base64url(header) || !is_base64url(payload) || !is_base64url(signature) {
+        return false;
+    }
+    if header.starts_with("eyJ") {
+        return !payload.is_empty();
+    }
+    [header, payload, signature]
+        .iter()
+        .all(|part| part.len() >= 16)
+}
+
+/// A plain route word such as `callback`, `login` or `google`. It follows a path key without being
+/// a credential, so `/auth/callback` stays.
+fn is_plain_route_word(segment: &str) -> bool {
+    segment.len() <= 16
+        && !segment.starts_with('-')
+        && segment.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+}
+
+fn normalize_path_key(segment: &str) -> String {
+    segment
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The path with its secret segments replaced by [`REDACTED_SEGMENT`]: JWT-shaped segments and
+/// the segment right after a [`SECRET_PATH_KEYS`] key (unless it is a plain route word). Long ids
+/// stay: UUIDs, commit hashes, Google Docs and Notion document ids are page addresses, and
+/// redacting them would merge distinct pages into one entry that no longer opens.
+fn redact_secret_path(path: &str) -> String {
+    let mut previous = String::new();
+    let segments: Vec<String> = path
+        .split('/')
+        .map(|segment| {
+            let key = normalize_path_key(segment);
+            let after_secret_key = SECRET_PATH_KEYS.contains(&previous.as_str());
+            let secret = !segment.is_empty()
+                && (is_jwt_shaped(segment) || (after_secret_key && !is_plain_route_word(segment)));
+            previous = key;
+            if secret {
+                REDACTED_SEGMENT.to_owned()
+            } else {
+                segment.to_owned()
+            }
+        })
+        .collect();
+    segments.join("/")
 }
 
 /// The query without its secret parameters. The other parameters keep their exact text and order,
@@ -287,8 +380,10 @@ fn strip_secret_query(query: &str) -> Option<String> {
 
 /// The canonical form of an absolute http(s) URL, without credentials; none for anything else
 /// and for a URL over 2048 bytes. The history file and the new-tab page show this form, so it
-/// carries no secret: no userinfo, no fragment (an implicit-flow `#access_token=`) and none of
-/// the [`SECRET_QUERY_NAMES`] query parameters. It does not read typed text: the address bar has
+/// carries no secret: no userinfo, no fragment (an implicit-flow `#access_token=`), none of
+/// the [`SECRET_QUERY_NAMES`] query parameters and no secret path segment (see
+/// [`redact_secret_path`]). Record, rename, remove and load all go through it, so a file written
+/// by an older build is cleaned when it loads. It does not read typed text: the address bar has
 /// already turned that into an address (`panels/address.rs`), so a bare `localhost:3000` is
 /// refused here.
 pub(crate) fn normalize_history_url(raw: &str) -> Option<String> {
@@ -299,6 +394,12 @@ pub(crate) fn normalize_history_url(raw: &str) -> Option<String> {
     let _ = parsed.set_username("");
     let _ = parsed.set_password(None);
     parsed.set_fragment(None);
+    // Redaction shortens a URL, so the limit applies to the URL as given.
+    if parsed.as_str().len() > MAX_URL_LENGTH {
+        return None;
+    }
+    let path = redact_secret_path(parsed.path());
+    parsed.set_path(&path);
     let query = parsed.query().and_then(strip_secret_query);
     parsed.set_query(query.as_deref());
     (parsed.as_str().len() <= MAX_URL_LENGTH).then(|| parsed.into())
@@ -720,7 +821,22 @@ mod tests {
             "xsrf_token",
             "app_secret",
             "webhook_secret",
-            // AWS-style signing parameters.
+            // camelCase and dashed spellings of the same names.
+            "accessToken",
+            "idToken",
+            "refreshToken",
+            "clientSecret",
+            "apiKey",
+            "api-key",
+            "Access-Token",
+            "csrfToken",
+            "appSecret",
+            "requestSignature",
+            // Vendor signing parameters.
+            "X-Goog-Signature",
+            "X-Goog-Credential",
+            "X-Goog-Date",
+            "X-Goog-Expires",
             "X-Amz-Signature",
             "X-Amz-Credential",
             "X-Amz-Security-Token",
@@ -763,10 +879,10 @@ mod tests {
                 "https://app.test/auth/callback?code=c&state=s#access_token=t",
                 "https://app.test/auth/callback",
             ),
-            // A signed Laravel link keeps its other parameters.
+            // A signed Laravel link keeps its other parameters; the id after `/verify/` goes.
             (
                 "http://app.test/verify/1?expires=1700000000&signature=abc",
-                "http://app.test/verify/1?expires=1700000000",
+                "http://app.test/verify/:redacted?expires=1700000000",
             ),
             // The secret is the name: a secret-looking value under a plain name is kept.
             ("https://app.test/p?q=token", "https://app.test/p?q=token"),
@@ -791,10 +907,102 @@ mod tests {
             "https://app.test/p?tab=1",
             "https://app.test/p?page=3&q=a%20b",
             "https://app.test/p?keyword=rust&passage=1&coder=x&states=2&authors=3",
+            "https://app.test/p?keywords=a&codec=h264&keyCount=2&passthrough=1&stateless=1",
+            "https://app.test/p?unsigned=1&signed=1&sessionId=9&tokenType=bearer",
+            "https://app.test/p?xamazing=1&xgo=1&xyz=2&secretary=1&tokenizer=1",
             "https://app.test/p?tokens=1&session_id=9&token_type=bearer",
             "https://app.test/p?x-amazing=1",
         ] {
             assert_eq!(normalize_history_url(raw).as_deref(), Some(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn redacts_secret_path_segments() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let b64 = "q83vK2lO0pXz9RtYw1uHn7BcDe4FgJa5MsVx6Zi_8T-A";
+        let cases = [
+            // JWT-shaped segments.
+            (format!("https://app.test/s/{jwt}/view"), "https://app.test/s/:redacted/view"),
+            // Long secrets after a secret path key.
+            (format!("https://app.test/reset/{hex}"), "https://app.test/reset/:redacted"),
+            (format!("https://app.test/token/{b64}?a=1"), "https://app.test/token/:redacted?a=1"),
+            ("https://app.test/s/aaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccc".to_owned(), "https://app.test/s/:redacted"),
+            // The segment after a known path key, in any case and spelling.
+            ("https://app.test/token/abc123".to_owned(), "https://app.test/token/:redacted"),
+            ("https://app.test/password/reset/Xk29aZ".to_owned(), "https://app.test/password/reset/:redacted"),
+            ("https://app.test/Reset_Password/987654".to_owned(), "https://app.test/Reset_Password/:redacted"),
+            ("https://app.test/verify/1".to_owned(), "https://app.test/verify/:redacted"),
+            ("https://app.test/invite/Zm9vYmFy/accept".to_owned(), "https://app.test/invite/:redacted/accept"),
+            ("https://app.test/magic/a1B2c3".to_owned(), "https://app.test/magic/:redacted"),
+            ("https://app.test/auth/x7Yq2".to_owned(), "https://app.test/auth/:redacted"),
+            ("https://app.test/email/verify/7/da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned(), "https://app.test/email/verify/:redacted/da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                normalize_history_url(&raw).as_deref(),
+                Some(expected),
+                "{raw}"
+            );
+            // Redacting twice changes nothing.
+            assert_eq!(
+                normalize_history_url(expected).as_deref(),
+                Some(expected),
+                "{expected}"
+            );
+        }
+        for (key, secret) in [("s", jwt), ("reset", hex), ("token", b64)] {
+            let url = normalize_history_url(&format!("https://app.test/{key}/{secret}"))
+                .unwrap_or_default();
+            assert!(!url.contains(secret), "{url}");
+        }
+    }
+
+    #[test]
+    fn keeps_slugs_ids_and_short_hashes_in_paths() {
+        let sha40 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let sha64 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let mut kept = vec![
+            "https://app.test/".to_owned(),
+            "https://app.test/items/42".to_owned(),
+            "https://app.test/users/7/posts/1234567890".to_owned(),
+            "https://app.test/blog/how-to-build-a-rust-web-app-in-2024-step-by-step".to_owned(),
+            "https://app.test/docs/a_long_snake_case_page_name_for_the_guide_section".to_owned(),
+            "https://app.test/assets/jquery.min.js".to_owned(),
+            "https://app.test/assets/app.v2.css".to_owned(),
+            "https://app.test/repo/commit/a1b2c3d".to_owned(),
+            "https://app.test/repo/commit/a1b2c3d4e5f6".to_owned(),
+            "https://app.test/projects/3f2a9c1e".to_owned(),
+            "https://app.test/auth/callback".to_owned(),
+            "https://app.test/auth/google/callback".to_owned(),
+            "https://app.test/verify".to_owned(),
+            "https://app.test/tokens".to_owned(),
+            "https://app.test/keyword/codec".to_owned(),
+            "https://app.test/a//b/".to_owned(),
+        ];
+        // Long resource ids are page addresses, not secrets: commit ids anywhere, canonical
+        // UUIDs, Google Docs and Notion document ids, and long base64url ids.
+        for sha in [sha40, sha64] {
+            for key in ["commit", "tree", "blob", "dl", "files"] {
+                kept.push(format!("https://github.test/o/r/{key}/{sha}"));
+            }
+        }
+        kept.extend([
+            "https://app.test/projects/3f2a9c1e-7b4d-4e8a-9c21-5d6f0a1b2c3d".to_owned(),
+            "https://app.test/projects/3F2A9C1E-7B4D-4E8A-9C21-5D6F0A1B2C3D/settings".to_owned(),
+            "https://docs.google.com/document/d/1aBcD3fGhIjK4lMnOpQr5StUvWxYz6AbCdEfGhIjKlMn/edit"
+                .to_owned(),
+            "https://www.notion.so/acme/Roadmap-8f6a2b1c9d0e4f7a8b3c5d2e1f0a9b8c".to_owned(),
+            "https://www.notion.so/8f6a2b1c9d0e4f7a8b3c5d2e1f0a9b8c".to_owned(),
+            "https://app.test/d/q83vK2lO0pXz9RtYw1uHn7BcDe4FgJa5MsVx6Zi_8T-A".to_owned(),
+        ]);
+        for raw in &kept {
+            assert_eq!(
+                normalize_history_url(raw).as_deref(),
+                Some(raw.as_str()),
+                "{raw}"
+            );
         }
     }
 
@@ -851,6 +1059,8 @@ mod tests {
                     { "url": "https://app.test/spa#access_token=OLD-FRAGMENT", "lastVisitedAt": 3 },
                     { "url": "https://app.test/p?tab=1&jwt=OLD-JWT#frag", "lastVisitedAt": 2, "title": "P" },
                     { "url": "https://app.test/x?client_secret=OLD-SECRET&id=7", "lastVisitedAt": 1 },
+                    { "url": "https://app.test/y?accessToken=OLD-CAMEL&X-Goog-Signature=OLD-GOOG&n=1", "lastVisitedAt": 0 },
+                    { "url": "https://app.test/reset/OLD-RESET-PATH", "lastVisitedAt": -1 },
                 ]
             }
         });
@@ -867,6 +1077,8 @@ mod tests {
                     ..entry("https://app.test/p?tab=1", 2)
                 },
                 entry("https://app.test/x?id=7", 1),
+                entry("https://app.test/y?n=1", 0),
+                entry("https://app.test/reset/:redacted", -1),
             ],
             "cleaned, and the two callbacks are one page"
         );
@@ -883,6 +1095,9 @@ mod tests {
             "OLD-FRAGMENT",
             "OLD-JWT",
             "OLD-SECRET",
+            "OLD-CAMEL",
+            "OLD-GOOG",
+            "OLD-RESET-PATH",
         ] {
             assert!(!text.contains(secret), "{secret} kept: {text}");
         }

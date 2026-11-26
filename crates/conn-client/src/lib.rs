@@ -827,6 +827,15 @@ impl Connection {
             .send(Command::UnsubscribeThread(thread_id.to_owned()));
     }
 
+    /// Ends the thread subscription like [`Self::unsubscribe_thread`] and also forgets the kept
+    /// sequence. The next [`Self::subscribe_thread`] then asks for a snapshot, not a replay, so
+    /// call it only when the caller drops the thread's reducer too.
+    pub fn forget_thread(&self, thread_id: &str) {
+        let _ = self
+            .cmd_tx
+            .send(Command::ForgetThread(thread_id.to_owned()));
+    }
+
     /// Subscribes to `panels.requests` as a first-class auto-resubscribed stream so agent panel
     /// calls (`panel_open`, `database_query`, `mcp_connect`, `mcp_call`) resume immediately on
     /// WebSocket reconnect with zero retry gap.
@@ -1344,6 +1353,20 @@ mod tests {
             second_sub["acceptBoundedSnapshot"],
             json!(true),
             "resubscribe must keep acceptBoundedSnapshot=true"
+        );
+
+        // A second subscribe for a live stream sends nothing (a speculative hover subscription is
+        // reused by the open). Forgetting then drops the cursor: the next request is a snapshot
+        // request, and no duplicate (which would carry afterSequence=42) came before it.
+        conn.subscribe_thread("thread-1");
+        conn.forget_thread("thread-1");
+        conn.subscribe_thread("thread-1");
+        let third_sub = tokio::time::timeout(Duration::from_secs(5), sub_payloads_rx.recv())
+            .await?
+            .ok_or("missing third subscribeThread payload")?;
+        assert!(
+            third_sub.get("afterSequence").is_none(),
+            "a forgotten thread must resubscribe without afterSequence: {third_sub}"
         );
 
         conn.refresh_thread("thread-1");

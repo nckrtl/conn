@@ -1913,8 +1913,8 @@ impl ServerConfigState {
         self.scratch_workspace_root.as_deref()
     }
 
-    /// `ServerConfig.environment.environmentId`: the id the server itself uses, in `/mcp` links
-    /// and in every other client. An Orbit target id can differ from it.
+    /// `ServerConfig.environment.environmentId`: the id the server itself uses, in the thread
+    /// links it writes. An Orbit target id can differ from it.
     #[must_use]
     pub fn environment_id(&self) -> Option<&str> {
         self.environment_id.as_deref().filter(|id| !id.is_empty())
@@ -2120,7 +2120,7 @@ mod live_tests {
         assert_eq!(
             state.environment_id(),
             Some("1a28c0a2-29b1-414d-9e2d-be55ecd752fd"),
-            "the descriptor's own id, which `/mcp` links carry"
+            "the descriptor's own id, which the server's thread links carry"
         );
     }
 

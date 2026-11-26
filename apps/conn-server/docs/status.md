@@ -1468,6 +1468,7 @@ builder with a test that fails without the fix.
 - **Release `conn-server-v0.5.1`**: existing peer links extend themselves to until-revoked, with no re-pair (#338); the version bump is its own PR.
 - **Release `conn-server-v0.5.2`**: filing General threads under Orbit projects (#351), native thread-card server support (#352), Zed PHP navigation (#343), and upload and recording fixes (#331, #346); the version bump is its own PR.
 - **Release `conn-server-v0.5.3`**: Claude Code, Codex, Grok and Antigravity aligned with upstream T3, including the Codex MCP sign-in fixes (#358); the version bump is its own PR.
+- **Release `conn-server-v0.5.4`**: the desktop preview relay for agent browser tabs (#380), `conn://thread/…` thread links (#395), and the Gateway thread outbox (#383); the version bump is its own PR.
 
 ## Partly followed to Conn `444f032be7` (the 2026-11-18 sync)
 

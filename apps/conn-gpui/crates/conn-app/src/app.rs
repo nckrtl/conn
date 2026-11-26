@@ -37,6 +37,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
 pub(crate) mod details_tasks;
+mod hover_prefetch;
 mod linked;
 mod offline;
 mod preview;
@@ -404,6 +405,10 @@ pub(crate) struct ConnApp {
     linked: linked::LinkedEnvironments,
     /// Child threads subscribed for their approvals (`app/child_approvals.rs`).
     child_approvals: child_approvals::ChildApprovals,
+    /// Thread stream started by sidebar hover (`app/hover_prefetch.rs`).
+    speculative: hover_prefetch::SpeculativeThreads<Connection>,
+    /// Threads a draft launch subscribed directly, until they are opened.
+    launched_threads: HashSet<String>,
     /// Live control socket server handle (dropped on app exit).
     _control_server: Option<conn_desktop::control::ControlServerHandle>,
     /// Background task draining `conn://` URLs and Unix control socket requests.
@@ -834,6 +839,8 @@ impl ConnApp {
             offline,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
+            speculative: hover_prefetch::SpeculativeThreads::default(),
+            launched_threads: HashSet::new(),
             _control_server: None,
             _activation_task: None,
             subscribed_thread_id: None,
@@ -1623,6 +1630,9 @@ impl ConnApp {
                     }
                 }
             }
+            // A late item of a stream dropped with its reducer finds nobody to apply to.
+            ClientEvent::Thread { thread_id, .. }
+                if self.thread_item_is_orphaned(self.server_url.as_deref(), &thread_id) => {}
             ClientEvent::Thread { thread_id, item } => {
                 let perf_kind = self
                     .perf_open
@@ -1678,7 +1688,11 @@ impl ConnApp {
                         (None, None) => {}
                     }
                 }
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
+                if tag == "orchestration.subscribeThread"
+                    && self.threads.contains_key(&key)
+                    && self.thread_stream_wanted(&key)
+                {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }
@@ -1765,6 +1779,15 @@ impl ConnApp {
 
     /// Resubscribes ended thread streams whose thread the shell now lists.
     fn resubscribe_ended_threads(&mut self) {
+        let released: Vec<String> = self
+            .ended_threads
+            .iter()
+            .filter(|id| !self.thread_stream_wanted(id))
+            .cloned()
+            .collect();
+        for id in released {
+            self.ended_threads.remove(&id);
+        }
         let ready: Vec<String> = self
             .ended_threads
             .iter()
@@ -2920,6 +2943,7 @@ impl ConnApp {
                         }
                         app.record_launched_thread(&final_thread_id, &project_id);
                         app.ended_threads.remove(&final_thread_id);
+                        app.claim_launched_stream(&final_thread_id);
                         connection.subscribe_thread(&final_thread_id);
                         app.chat.update(cx, |chat, cx| chat.set_error(None, cx));
                         app.sync_chat(cx);
@@ -4809,6 +4833,17 @@ impl ConnApp {
         self.thread_menu.is_some() || self.renaming_thread_id.is_some() || self.pointer_captured()
     }
 
+    /// Test helper: the provider catalog this machine reports.
+    #[cfg(test)]
+    pub(crate) fn set_server_config_for_test(
+        &mut self,
+        config: std::sync::Arc<conn_state::providers::ServerConfigState>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.server_config = config;
+        self.push_server_config(cx);
+    }
+
     #[cfg(test)]
     pub(crate) fn open_thread_hover_for_test(
         &mut self,
@@ -6056,6 +6091,8 @@ impl ConnApp {
                     thread,
                     state: &self.thread_details,
                     task_links: self.selected_timeline().map(|t| &t.task_links),
+                    timeline: self.selected_timeline(),
+                    catalog: self.server_config.catalog(),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px
@@ -7151,6 +7188,7 @@ impl ConnApp {
         self.ended_threads.clear();
         self.subscribed_thread_id = None;
         self.reset_child_approvals();
+        self.reset_speculative();
         self.subscribed_annotation_project = None;
         self.files_subscription = None;
         self.annotations.clear();
@@ -7982,6 +8020,7 @@ impl Render for ConnApp {
             .open_for()
             .filter(|_| !self.thread_hover_suppressed());
         let hover_environment_label = self.hover_environment_label(hover_open_for);
+        let hover_server_config = self.active_server_config();
         let machine_icons = self.linked.machine_icons();
         let scratch_projects = self.scratch_project_ids();
         if self.layout.sidebar_open {
@@ -8048,6 +8087,7 @@ impl Render for ConnApp {
                     &ThreadHoverView {
                         open_for: hover_open_for,
                         environment_label: hover_environment_label.as_deref(),
+                        catalog: hover_server_config.catalog(),
                         origins: Some(self.linked.origins()),
                         machine_icons: &machine_icons,
                         scratch_projects: &scratch_projects,

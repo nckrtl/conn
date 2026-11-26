@@ -153,13 +153,58 @@ pub(crate) fn right_panel_tab_icon(tab: RightPanelTab) -> IconName {
     }
 }
 
+/// A provider brand that has a mark of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderBrand {
+    Claude,
+    Antigravity,
+    OpenAi,
+    Grok,
+}
+
+impl ProviderBrand {
+    /// The brand's name, for an accessibility label.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Antigravity => "Antigravity",
+            Self::OpenAi => "OpenAI",
+            Self::Grok => "Grok",
+        }
+    }
+}
+
+/// The brand a provider id (driver or instance id such as `claudeAgent`, `codex`, `antigravity`)
+/// or a model slug names, or `None` when it names none Conn has a mark for.
+#[must_use]
+pub(crate) fn provider_brand(provider: &str) -> Option<ProviderBrand> {
+    let lower = provider.to_ascii_lowercase();
+    if lower.contains("antigravity") || lower.contains("gemini") {
+        Some(ProviderBrand::Antigravity)
+    } else if lower.contains("claude")
+        || lower.contains("anthropic")
+        || lower.contains("haiku")
+        || lower.contains("sonnet")
+        || lower.contains("opus")
+    {
+        Some(ProviderBrand::Claude)
+    } else if lower.contains("codex") || lower.contains("openai") || lower.contains("gpt") {
+        Some(ProviderBrand::OpenAi)
+    } else if lower.contains("grok") {
+        Some(ProviderBrand::Grok)
+    } else {
+        None
+    }
+}
+
 /// The brand mark Conn shows for a provider (driver or instance id such as `claudeAgent`,
 /// `codex`, `antigravity`): the Claude starburst in Claude orange, the Antigravity mark, the
 /// OpenAI knot in `fallback` color, else a generic superheroicons agent glyph.
 #[must_use]
 pub(crate) fn provider_mark(provider: &str, size_px: f32, fallback: Hsla) -> AnyElement {
-    let lower = provider.to_ascii_lowercase();
-    if (lower.contains("antigravity") || lower.contains("gemini"))
+    let brand = provider_brand(provider);
+    if brand == Some(ProviderBrand::Antigravity)
         && let Some(logo) = ANTIGRAVITY_BRAND_IMAGE.as_ref()
     {
         return img(ImageSource::Render(Arc::clone(logo)))
@@ -168,22 +213,14 @@ pub(crate) fn provider_mark(provider: &str, size_px: f32, fallback: Hsla) -> Any
             .flex_none()
             .into_any_element();
     }
-    let (path, color): (&'static str, Hsla) = if lower.contains("claude")
-        || lower.contains("anthropic")
-        || lower.contains("haiku")
-        || lower.contains("sonnet")
-        || lower.contains("opus")
-    {
-        (
+    let (path, color): (&'static str, Hsla) = match brand {
+        Some(ProviderBrand::Claude) => (
             "brand/claude.svg",
             crate::theme::hsla(conn_theme::CLAUDE_BRAND),
-        )
-    } else if lower.contains("codex") || lower.contains("openai") || lower.contains("gpt") {
-        ("brand/openai.svg", fallback)
-    } else if lower.contains("grok") {
-        ("brand/grok.svg", fallback)
-    } else {
-        ("superhero/agent.svg", fallback)
+        ),
+        Some(ProviderBrand::OpenAi) => ("brand/openai.svg", fallback),
+        Some(ProviderBrand::Grok) => ("brand/grok.svg", fallback),
+        Some(ProviderBrand::Antigravity) | None => ("superhero/agent.svg", fallback),
     };
     svg()
         .path(path)

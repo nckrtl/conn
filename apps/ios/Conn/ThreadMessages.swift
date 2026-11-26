@@ -55,8 +55,10 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    // The time at the thread text size, like "Worked for" (15 pt on Polar).
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    // The time at the thread text size, like "Worked for" (15 pt on Polar); one point smaller
+    // under the user's own bubble (`trailingCopy`).
+    @ScaledMetric(relativeTo: .body) private var fullSize: CGFloat = ThreadText.size
+    private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 1) / ThreadText.size : fullSize }
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {
@@ -119,9 +121,8 @@ struct ThreadMessage: View {
                 }
             }
         } else {
-            // The copy and time row sits as far under the bubble as an agent message's row sits
-            // under its rule (TimelineEntryRow `.assistant`).
-            VStack(alignment: .trailing, spacing: messageSize * 0.85 - 1) {
+            // The copy and time row sits close under the bubble: half the agent footer's gap.
+            VStack(alignment: .trailing, spacing: (messageSize * 0.85 - 1) / 2) {
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
                         ViewThatFits(in: .horizontal) {

@@ -2,7 +2,7 @@
 //! tab's record, as T3's `PreviewManager` does for `runtime: "desktop"`, and relays agent
 //! calls to the desktop that registered it (`crate::relay`).
 use super::{Error, Inner, Preview, State, base36, lock, normalize_url, now};
-use crate::relay::{DesktopFeed, DesktopTab, RelayCall, RelayFailure, Relayed};
+use crate::relay::{DesktopFeed, DesktopTab, RelayCall, RelayFailure, Relayed, SecretAccess};
 use serde_json::{Value, json};
 
 /// Desktop tab records on one server. T3 has no bound; an open over it fails.
@@ -226,12 +226,14 @@ impl Preview {
 
     /// T3's `DesktopTabRelay.register`: the binding must name this environment and a desktop
     /// tab record that matches it (restored when missing). Errors are the
-    /// `DesktopTabRelayError` reason.
+    /// `DesktopTabRelayError` reason. `secrets` says whether the registering session may
+    /// receive saved secrets (see `crate::relay`).
     pub fn desktop_register(
         &self,
         session_id: &str,
         environment_id: &str,
         binding: &Value,
+        secrets: SecretAccess,
     ) -> Result<String, &'static str> {
         let text =
             |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
@@ -250,7 +252,7 @@ impl Preview {
         let device = text(binding, "deviceName").unwrap_or_default();
         self.0
             .relay
-            .register(session_id, environment_id, &thread, &tab, &device)
+            .register(session_id, environment_id, &thread, &tab, &device, secrets)
     }
 
     pub fn desktop_requests(
@@ -267,6 +269,11 @@ impl Preview {
 
     pub fn desktop_tabs(&self, environment_id: &str, thread: &str) -> Vec<DesktopTab> {
         self.0.relay.tabs(environment_id, thread)
+    }
+
+    /// The registered desktop tab `tab` of `thread`, if a desktop hosts it.
+    pub fn desktop_tab(&self, environment_id: &str, thread: &str, tab: &str) -> Option<DesktopTab> {
+        self.0.relay.tab(environment_id, thread, tab)
     }
 
     /// The desktop tab an agent's call without a tab goes to, if a desktop hosts one for the

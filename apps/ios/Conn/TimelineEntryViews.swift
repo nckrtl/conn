@@ -197,10 +197,9 @@ struct LiveWorkRow: View {
     }
 }
 
-/// Conn's `live-tool-shine`: a 72 pt highlight band sweeps the label in 12 steps over 1.35 s, then
-/// rests 1.45 s (mobile `work-shimmer-steps.ts`). The band is a gradient mask moved by a timeline
-/// that fires 12 times per 2.8 s cycle, so the text never repaints at frame rate. Reduce Motion
-/// shows plain muted text.
+/// Conn's `live-tool-shine`: a 72 pt highlight band sweeps the label over 1.35 s, then rests
+/// 1.45 s. The sweep is smooth (a keyframe animation of the band's mask); Reduce Motion shows
+/// plain muted text.
 struct ShimmerText: View {
     let text: String
     let size: CGFloat
@@ -220,14 +219,19 @@ struct ShimmerText: View {
             .foregroundStyle(theme.mutedForeground)
             .overlay {
                 if !reduceMotion {
-                    TimelineView(ShimmerSchedule()) { context in
-                        Text(text)
-                            .font(font)
-                            .lineLimit(1)
-                            .foregroundStyle(theme.foreground)
-                            .mask { ShimmerBand(progress: ShimmerSchedule.progress(at: context.date)) }
-                    }
-                    .accessibilityHidden(true)
+                    // A smooth sweep at the display's frame rate (Nick: the stepped one looked
+                    // low-FPS). Only this label's band moves; the rest pause matches the old timing.
+                    Text(text)
+                        .font(font)
+                        .lineLimit(1)
+                        .foregroundStyle(theme.foreground)
+                        .keyframeAnimator(initialValue: 0.0, repeating: true) { content, progress in
+                            content.mask { ShimmerBand(progress: progress) }
+                        } keyframes: { _ in
+                            LinearKeyframe(1.0, duration: ShimmerSchedule.sweep)
+                            LinearKeyframe(1.0, duration: ShimmerSchedule.pause)
+                        }
+                        .accessibilityHidden(true)
                 }
             }
     }

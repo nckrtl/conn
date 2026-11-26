@@ -137,9 +137,12 @@ pub(super) fn primary_sm_button(
     let id: ElementId = id.into();
     let label: SharedString = label.into();
     let ax_id = ax_id_for(&id);
-    let bg = to_hsla(tokens.primary);
+    let (bg, fg) = if disabled {
+        crate::theme::disabled_primary(tokens)
+    } else {
+        (to_hsla(tokens.primary), to_hsla(tokens.primary_foreground))
+    };
     let hover = chrome::alpha(tokens.primary, 0.90);
-    let fg = to_hsla(tokens.primary_foreground);
     let mut button = h_flex()
         .id(id)
         .a11y_button(ax_id, label.clone())
@@ -162,7 +165,7 @@ pub(super) fn primary_sm_button(
     }
     button = button.child(label);
     if disabled {
-        button.opacity(0.64)
+        button
     } else {
         button
             .cursor_pointer()

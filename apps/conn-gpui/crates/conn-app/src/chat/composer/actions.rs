@@ -344,7 +344,11 @@ fn message_action_pill(
     disabled: bool,
     tokens: &Tokens,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let bg = hsla(tokens.primary);
+    let (bg, fg) = if disabled {
+        crate::theme::disabled_primary(tokens)
+    } else {
+        (hsla(tokens.primary), hsla(tokens.primary_foreground))
+    };
     let hover_bg = hsla_alpha(tokens.primary, 0.88);
     div()
         .id(id)
@@ -356,9 +360,8 @@ fn message_action_pill(
         .text_size(px(13.0))
         .line_height(px(20.0))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(hsla(tokens.primary_foreground))
+        .text_color(fg)
         .bg(bg)
-        .when(disabled, |el| el.opacity(0.64))
         .when(!disabled, |el| {
             el.cursor_pointer().hover(move |s| s.bg(hover_bg))
         })
@@ -371,7 +374,11 @@ fn render_implement_split(
     tokens: &Tokens,
     cx: &mut Context<'_, Composer>,
 ) -> AnyElement {
-    let primary_fg = hsla(tokens.primary_foreground);
+    let primary_fg = if disabled {
+        crate::theme::disabled_primary(tokens).1
+    } else {
+        hsla(tokens.primary_foreground)
+    };
     let left = message_action_pill("chat-composer-implement", disabled, tokens)
         .a11y_button("composer.implement", label)
         .child(label)
@@ -451,12 +458,9 @@ fn render_send_button(
     tokens: &Tokens,
     cx: &mut Context<'_, Composer>,
 ) -> AnyElement {
-    // Conn: `disabled:bg-foreground/12 disabled:text-muted-foreground`.
+    // A disabled primary button keeps its primary look, muted (`theme::disabled_primary`).
     let (bg, fg) = if state.disabled {
-        (
-            hsla_alpha(tokens.foreground, 0.12),
-            hsla(tokens.muted_foreground),
-        )
+        crate::theme::disabled_primary(tokens)
     } else {
         (hsla(tokens.primary), hsla(tokens.primary_foreground))
     };

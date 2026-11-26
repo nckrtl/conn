@@ -5138,6 +5138,115 @@ fn render_hover_card_orbit_project_screenshots() {
     }
 }
 
+/// Renders the pending secret request card offscreen with Save disabled (empty field) and enabled
+/// (a value typed), in Dark Ocean and Light. In each shot the disabled Save keeps a visible,
+/// non-transparent primary-tinted fill that differs from both the card and the enabled fill. It
+/// opens no window on screen and takes no focus.
+///
+/// `CONN_DISABLED_PRIMARY_SHOTS_DIR=<dir> cargo test -p conn-app render_disabled_primary_secret_card_screenshots -- --ignored`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "writes PNGs; set CONN_DISABLED_PRIMARY_SHOTS_DIR"]
+fn render_disabled_primary_secret_card_screenshots() {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+    let Some(dir) = std::env::var_os("CONN_DISABLED_PRIMARY_SHOTS_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = headless_shot_context();
+    for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        let mut save_pixels = Vec::new();
+        for (typed, state_label) in [("", "disabled"), ("sk-live-1234", "enabled")] {
+            let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+            let tokens = conn_theme::Tokens::derive(&theme);
+            let (window, app) = ctx.update(|cx| {
+                gpui_kit::init(cx);
+                crate::fonts::register(cx);
+                crate::theme::apply_kit_theme(&tokens, cx);
+                crate::app::register_keybindings(cx);
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            Point::default(),
+                            size(px(900.0), px(640.0)),
+                        ))),
+                        focus: false,
+                        show: false,
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| {
+                        let tokens = tokens.clone();
+                        cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                    },
+                )
+                .expect("a window")
+            });
+            let chat = ctx.update(|cx| app.read(cx).chat_for_test());
+            let mut thread = kitchen_sink_thread();
+            thread
+                .entries
+                .retain(|entry| !matches!(entry, TimelineEntry::UserInputRequest { .. }));
+            for entry in &mut thread.entries {
+                if let TimelineEntry::SecretRequest { url, .. } = entry {
+                    *url = Some("https://example.com/sign-in".to_owned());
+                }
+            }
+            ctx.update(|cx| {
+                app.update(cx, |app, cx| {
+                    app.set_shell(kitchen_sink_shell(), cx);
+                    app.set_thread_for_test("thread-selected".to_owned(), thread, cx);
+                });
+            });
+            for _ in 0..3 {
+                ctx.update_window(window, |_, w, c| w.render_frame(c))
+                    .expect("a frame");
+                ctx.run_until_parked();
+            }
+            if !typed.is_empty() {
+                ctx.update_window(window, |_, w, c| {
+                    chat.update(c, |chat, cx| {
+                        chat.set_secret_input_for_test("secret-1", typed, w, cx);
+                    });
+                })
+                .expect("typed");
+                for _ in 0..3 {
+                    ctx.update_window(window, |_, w, c| w.render_frame(c))
+                        .expect("a frame");
+                    ctx.run_until_parked();
+                }
+            }
+            let (save, gap, scale) = ctx
+                .update_window(window, |_, w, _| {
+                    let save = w.find_by_label("Save").bounds();
+                    let decline = w.find_by_label("Decline").bounds();
+                    (save, decline.right(), w.scale_factor())
+                })
+                .expect("bounds");
+            let image = ctx.capture_screenshot(window).expect("a screenshot");
+            let at = |x: f32, y: f32| *image.get_pixel((x * scale) as u32, (y * scale) as u32);
+            let y = f32::from(save.center().y);
+            // Inside the pill's left end, and in the card between Decline and Save.
+            let in_save = at(f32::from(save.left()) + 8.0, y);
+            let between = at((f32::from(gap) + f32::from(save.left())) / 2.0, y);
+            assert_ne!(
+                in_save, between,
+                "{theme_label} {state_label}: Save has a fill of its own"
+            );
+            save_pixels.push(in_save);
+            image
+                .save(dir.join(format!("secret-card-{state_label}-{theme_label}.png")))
+                .expect("a saved PNG");
+        }
+        assert_ne!(
+            save_pixels[0], save_pixels[1],
+            "{theme_label}: disabled Save is muted against the enabled one"
+        );
+    }
+}
+
 /// Each thread keeps its own right panel: tabs, open state, maximize, terminal drawer and
 /// width. They survive switching threads, and a restart through the saved file.
 #[gpui_kit::test]

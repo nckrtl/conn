@@ -178,9 +178,14 @@ impl PanelMenuItem {
 /// The surface list in Conn's order (`RightPanelTab::MENU_ORDER`), the single source for the `+`
 /// menu and the launcher.
 #[must_use]
-pub(crate) fn panel_menu_items(available_tabs: &[RightPanelTab]) -> Vec<PanelMenuItem> {
+pub(crate) fn panel_menu_items(
+    available_tabs: &[RightPanelTab],
+    has_project: bool,
+) -> Vec<PanelMenuItem> {
     RightPanelTab::MENU_ORDER
         .into_iter()
+        // A thread without a project leaves Files, MCP and API out of the list.
+        .filter(|tab| has_project || !tab.needs_project())
         .map(|tab| PanelMenuItem {
             tab,
             label: panel_tab_label(tab),
@@ -207,6 +212,9 @@ pub(crate) struct PanelHeaderProps<'a> {
     pub(crate) add_menu_open: bool,
     /// Surfaces the add menu offers as enabled; the rest show dimmed, as in Conn.
     pub(crate) available_tabs: &'a [RightPanelTab],
+    /// The thread has a project. Without one the add menu and launcher leave out the surfaces
+    /// that need one (Files, MCP, API) instead of dimming them.
+    pub(crate) has_project: bool,
     pub(crate) tokens: &'a Tokens,
 }
 
@@ -385,6 +393,7 @@ pub(crate) fn render_panel_header(
         add_anchor = add_anchor.child(render_add_panel_menu(
             props.tokens,
             props.available_tabs,
+            props.has_project,
             callbacks.on_add_tab,
         ));
     }
@@ -552,6 +561,7 @@ pub(crate) fn dropdown_glass_shadow(tokens: &Tokens) -> gpui_kit::BoxShadow {
 pub(crate) fn render_add_panel_menu(
     tokens: &Tokens,
     available_tabs: &[RightPanelTab],
+    has_project: bool,
     on_add_tab: Rc<dyn Fn(RightPanelTab, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     // GPUI cannot blur what lies behind a popup, so use `dropdown-glass`'s own fallback for
@@ -579,7 +589,7 @@ pub(crate) fn render_add_panel_menu(
         .shadow(vec![shadow])
         .floating_surface();
 
-    for item in panel_menu_items(available_tabs) {
+    for item in panel_menu_items(available_tabs, has_project) {
         let PanelMenuItem {
             tab,
             label,
@@ -656,6 +666,7 @@ pub(crate) fn render_add_panel_menu(
 pub(crate) fn render_panel_launcher(
     tokens: &Tokens,
     available_tabs: &[RightPanelTab],
+    has_project: bool,
     on_add_tab: Rc<dyn Fn(RightPanelTab, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     let fg = to_hsla(tokens.foreground);
@@ -664,7 +675,7 @@ pub(crate) fn render_panel_launcher(
     let hover_bg = to_hsla(tokens.shell_highlight);
 
     let mut rows = div().flex().flex_col().gap(px(2.0));
-    for item in panel_menu_items(available_tabs) {
+    for item in panel_menu_items(available_tabs, has_project) {
         let on_add = on_add_tab.clone();
         let tab = item.tab;
         let mut row = h_flex()
@@ -769,7 +780,7 @@ mod tests {
 
     #[test]
     fn menu_and_launcher_share_one_item_list() {
-        let items = panel_menu_items(&[RightPanelTab::Browser, RightPanelTab::Tasks]);
+        let items = panel_menu_items(&[RightPanelTab::Browser, RightPanelTab::Tasks], true);
         let order: Vec<RightPanelTab> = items.iter().map(|item| item.tab).collect();
         assert_eq!(order, RightPanelTab::MENU_ORDER.to_vec());
         let available: Vec<&str> = items
@@ -780,6 +791,25 @@ mod tests {
         assert_eq!(available, ["Browser", "Tasks"]);
         assert_eq!(items[8].slug(), "pull-request");
         assert_eq!(items[0].icon, panel_tab_icon_path(RightPanelTab::Browser));
+    }
+
+    #[test]
+    fn menu_leaves_out_files_mcp_and_api_without_a_project() {
+        let all = RightPanelTab::MENU_ORDER;
+        let labels = |has_project| -> Vec<&'static str> {
+            panel_menu_items(&all, has_project)
+                .iter()
+                .map(|item| item.label)
+                .collect()
+        };
+        let with = labels(true);
+        let without = labels(false);
+        for label in ["Files", "MCP", "API"] {
+            assert!(with.contains(&label), "{label}");
+            assert!(!without.contains(&label), "{label}");
+        }
+        assert!(without.contains(&"Database"));
+        assert_eq!(without.len(), with.len() - 3);
     }
 
     #[test]

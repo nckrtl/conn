@@ -64,6 +64,11 @@ const TOOLBAR_PAD_PX: f32 = 8.0;
 const TOOLBAR_HEIGHT_PX: f32 = 32.0;
 const TOOLBAR_INNER_PAD_PX: f32 = 3.0;
 const TOOLBAR_BTN_SIZE_PX: f32 = 25.0;
+/// Inset of the breadcrumb trail on the panel, which has no path pill around it.
+const PATH_INSET_PX: f32 = 4.0;
+/// Left padding of a tree status line: where a top-level row's name starts
+/// (indent 8 + 16px icon slot + 5px gap).
+const TREE_STATUS_INDENT_PX: f32 = 8.0 + 16.0 + TREE_LABEL_GAP_PX;
 
 #[derive(Clone, Debug)]
 enum PreviewState {
@@ -1162,7 +1167,13 @@ impl FilesPanel {
             .child(superhero_icon(icon, 14.0, color))
     }
 
-    fn render_tree_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    /// The explorer's search toolbar. `beside_file` is the narrow column next to an open file,
+    /// whose toolbar has no divider under it.
+    fn render_tree_toolbar(
+        &self,
+        beside_file: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let field_bg = to_hsla(self.tokens.shell_field);
         let control_bg = to_hsla(self.tokens.shell_control);
         let control_border = to_hsla(self.tokens.shell_divider_header);
@@ -1268,6 +1279,7 @@ impl FilesPanel {
 
         super::chrome::toolbar_row(&self.tokens)
             .p(px(TOOLBAR_PAD_PX))
+            .when(beside_file, |row| row.border_b_0())
             .child(
                 // Soft search field (`InputGroup variant="soft"`): h-8, pill radius, --shell-field fill.
                 h_flex()
@@ -1315,33 +1327,15 @@ impl FilesPanel {
         let control_border = to_hsla(self.tokens.shell_divider_header);
         let mut row = super::chrome::toolbar_row(&self.tokens).p(px(TOOLBAR_PAD_PX));
         if let Some(path) = self.preview.path() {
+            // The path sits straight on the panel: no back button and no pill, a 4px inset.
             row = row
-                .child(
-                    self.toolbar_button(
-                        "files-back-to-tree",
-                        "panel.files.back",
-                        "Back to files",
-                        "superhero/chevron-left.svg",
-                        false,
-                        cx.listener(|_, _, _, cx| cx.emit(FilesEvent::RevealFolder)),
-                    )
-                    .size(px(TOOLBAR_HEIGHT_PX))
-                    .flex_shrink_0()
-                    .border_1()
-                    .border_color(control_border)
-                    .bg(to_hsla(self.tokens.shell_control)),
-                )
                 .child(
                     h_flex()
                         .flex_1()
                         .min_w_0()
                         .h(px(TOOLBAR_HEIGHT_PX))
                         .items_center()
-                        .px(px(9.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(control_border)
-                        .bg(to_hsla(self.tokens.shell_field))
+                        .px(px(PATH_INSET_PX))
                         .child(self.render_breadcrumbs(path, fg, muted, cx)),
                 )
                 .children(self.render_crumb_menu(path, cx))
@@ -1427,7 +1421,13 @@ impl FilesPanel {
         (buttons > 0).then_some(group)
     }
 
-    fn render_tree_column(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    /// The file tree. `beside_file` is the explorer column next to an open file: no top padding,
+    /// since its toolbar has no divider.
+    fn render_tree_column(
+        &self,
+        beside_file: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let muted = to_hsla(self.tokens.muted_foreground);
         let fg = to_hsla(self.tokens.foreground);
         // Pierre tree theme (`pierre-tree-theme.ts`):
@@ -1444,24 +1444,25 @@ impl FilesPanel {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .p(px(8.0));
+            .px(px(8.0))
+            .pb(px(8.0))
+            .pt(px(if beside_file { 0.0 } else { 8.0 }));
 
+        // Status lines sit where a top-level row's name sits.
         if self.workspace_root.is_none() {
-            return col.child(muted_message("Open a project to browse files.", muted));
+            return col.child(tree_status("Open a project to browse files.", muted));
         }
         if self.tree.is_root_loading() && !self.tree.has_loaded("") {
-            return col.child(tree_status("Loading files\u{2026}", 4.0, muted));
+            return col.child(tree_status("Loading files\u{2026}", muted));
         }
         if let Some(err) = self.tree_error.as_ref().or(self.search_error.as_ref()) {
-            // `FileBrowserPanel`: `p-4 text-left text-xs text-destructive`, click to retry.
+            // Click to retry.
             return col.child(
-                div()
+                tree_status_row()
                     .id("files-tree-error")
+                    .test_support()
                     .a11y_button("panel.files.retry", "Retry loading files")
-                    .p(px(16.0))
                     .cursor_pointer()
-                    .text_size(px(STATUS_TEXT_PX))
-                    .line_height(px(STATUS_LINE_HEIGHT_PX))
                     .text_color(to_hsla(self.tokens.destructive_foreground))
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_files(cx)))
                     .child(format!("{err} Click to retry.")),
@@ -1471,11 +1472,11 @@ impl FilesPanel {
         let rows = self.tree.visible_rows();
         if rows.is_empty() {
             return col.child(if self.tree.query().trim().is_empty() {
-                muted_message("This folder is empty.", muted).into_any_element()
+                tree_status("This folder is empty.", muted).into_any_element()
             } else if self.search_pending {
-                tree_status("Loading files\u{2026}", 4.0, muted).into_any_element()
+                tree_status("Loading files\u{2026}", muted).into_any_element()
             } else {
-                tree_status("No matching files.", 16.0, muted).into_any_element()
+                tree_status("No matching files.", muted).into_any_element()
             });
         }
         let selected = self.tree.selected();
@@ -2238,8 +2239,8 @@ impl Render for FilesPanel {
         }
         v_flex()
             .size_full()
-            .child(self.render_tree_toolbar(cx))
-            .child(self.render_tree_column(cx))
+            .child(self.render_tree_toolbar(false, cx))
+            .child(self.render_tree_column(false, cx))
             .children(self.render_row_menu(cx))
             .into_any_element()
     }
@@ -2261,6 +2262,7 @@ impl FilesPanel {
         let last = crumbs.len().saturating_sub(1);
         let mut row = h_flex()
             .id("files-breadcrumbs")
+            .test_support()
             .a11y_group("panel.files.breadcrumbs", "File path")
             .w_full()
             .items_center()
@@ -2351,7 +2353,8 @@ impl FilesPanel {
         // Fades at the edges that have more crumbs beyond them (`FileBreadcrumbs` mask).
         let offset = f32::from(self.crumb_scroll.offset().x);
         let reach = f32::from(self.crumb_scroll.max_offset().x);
-        let card = to_hsla(self.tokens.shell_card).blend(to_hsla(self.tokens.shell_field));
+        // The trail sits on the panel, so the edges fade into the card.
+        let card = to_hsla(self.tokens.shell_card);
         let fade = |left: bool| {
             let (from, to) = (card, card.opacity(0.0));
             let el = div().absolute().top_0().bottom_0().w(px(CRUMB_FADE_PX));
@@ -2548,12 +2551,24 @@ const STATUS_LINE_HEIGHT_PX: f32 = 16.0;
 
 /// A tree status line: `px-3 text-xs text-muted-foreground`, `py-1` while loading and `py-4`
 /// when nothing matches.
-fn tree_status(text: &str, pad_y: f32, color: gpui_kit::Hsla) -> impl IntoElement {
-    div()
-        .px(px(12.0))
-        .py(px(pad_y))
-        .text_size(px(STATUS_TEXT_PX))
-        .line_height(px(STATUS_LINE_HEIGHT_PX))
+/// A tree status line's row: as tall as a tree row, its text where a top-level row's name
+/// starts and the size of the rows' text. A long message wraps and grows the row.
+fn tree_status_row() -> gpui_kit::Div {
+    h_flex()
+        .w_full()
+        .flex_shrink_0()
+        .min_h(px(TREE_ROW_HEIGHT_PX))
+        .items_center()
+        .pl(px(TREE_STATUS_INDENT_PX))
+        .pr(px(8.0))
+        .text_size(px(UI_TEXT_PX))
+        .line_height(px(UI_LINE_HEIGHT_PX))
+}
+
+fn tree_status(text: &str, color: gpui_kit::Hsla) -> impl IntoElement {
+    tree_status_row()
+        .id("files-tree-status")
+        .test_support()
         .text_color(color)
         .child(text.to_owned())
 }
@@ -2683,6 +2698,299 @@ mod tests {
             assert_eq!(window.find("files-tree-scroll").bounds().left(), px(0.));
         })
         .unwrap();
+    }
+
+    /// Opens a Files panel in the tree view on `root`, with `setup` run on it first.
+    fn tree_panel(
+        cx: &mut TestAppContext,
+        beside_file: bool,
+        setup: impl FnOnce(&mut FilesPanel) + 'static,
+    ) -> gpui_kit::AnyWindowHandle {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut files = FilesPanel::new(tokens, None, window, cx);
+                    files.workspace_root = Some("/project".into());
+                    setup(&mut files);
+                    if beside_file {
+                        files.show_preview("open.txt".into(), cx);
+                    }
+                    files
+                })
+            })
+            .unwrap()
+            .0
+        })
+    }
+
+    fn file_entry(path: &str) -> conn_contract::ProjectEntry {
+        conn_contract::ProjectEntry {
+            path: path.into(),
+            kind: ProjectEntryKind::File,
+            ignored: None,
+        }
+    }
+
+    /// Every tree status line is a 28px row at the left edge of a top-level row, with the text
+    /// at 29px: indent 8 + 16px slot + 5px gap.
+    #[gpui_kit::test]
+    fn tree_status_lines_sit_where_a_top_level_file_name_sits(cx: &mut TestAppContext) {
+        assert_eq!(TREE_STATUS_INDENT_PX, 29.0);
+        // A file row, for the alignment to compare against.
+        let window = tree_panel(cx, false, |files| {
+            files
+                .tree
+                .set_directory_entries("", vec![file_entry("a.txt")]);
+        });
+        let row = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.find("tree-row-a.txt").bounds()
+            })
+            .unwrap();
+        assert_eq!(row.size.height, px(TREE_ROW_HEIGHT_PX));
+
+        type Setup = Box<dyn FnOnce(&mut FilesPanel)>;
+        let states: Vec<(&str, &str, Setup)> = vec![
+            (
+                "files-tree-status",
+                "loading",
+                Box::new(|f| f.tree.mark_loading("")),
+            ),
+            (
+                "files-tree-status",
+                "empty",
+                Box::new(|f| f.tree.set_directory_entries("", vec![])),
+            ),
+            (
+                "files-tree-status",
+                "no matches",
+                Box::new(|f| {
+                    f.tree.set_directory_entries("", vec![file_entry("a.txt")]);
+                    f.tree.set_query("zzz".into());
+                    f.tree.set_search_results(&[]);
+                }),
+            ),
+            (
+                "files-tree-error",
+                "error",
+                Box::new(|f| f.tree_error = Some("Could not read the folder.".into())),
+            ),
+        ];
+        for (id, name, setup) in states {
+            let window = tree_panel(cx, false, setup);
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let status = window.find(id).bounds();
+                assert_eq!(status.size.height, px(TREE_ROW_HEIGHT_PX), "{name}");
+                assert_eq!(status.origin, row.origin, "{name}");
+                assert_eq!(status.size.width, row.size.width, "{name}");
+            })
+            .unwrap();
+        }
+    }
+
+    /// The explorer column beside an open file has no divider under its toolbar and no padding
+    /// above its tree, so its first row sits right under the toolbar. The tree view keeps both.
+    #[gpui_kit::test]
+    fn the_explorer_beside_a_file_has_no_toolbar_divider_and_no_tree_top_padding(
+        cx: &mut TestAppContext,
+    ) {
+        let setup = |files: &mut FilesPanel| {
+            files
+                .tree
+                .set_directory_entries("", vec![file_entry("a.txt")]);
+        };
+        let first_row_gap = |cx: &mut TestAppContext, beside_file: bool| {
+            let window = tree_panel(cx, beside_file, setup);
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let scroll = window.find("files-tree-scroll").bounds();
+                let row = window.find("tree-row-a.txt").bounds();
+                row.top() - scroll.top()
+            })
+            .unwrap()
+        };
+        assert_eq!(first_row_gap(cx, true), px(0.));
+        assert_eq!(first_row_gap(cx, false), px(TOOLBAR_PAD_PX));
+    }
+
+    /// The path sits straight on the panel: no "Back to files" button, no pill around the
+    /// trail, and a 4px inset.
+    #[gpui_kit::test]
+    fn the_path_subheader_has_no_back_button_or_pill(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let window = tree_panel(cx, true, |files| {
+            files
+                .tree
+                .set_directory_entries("", vec![file_entry("a.txt")]);
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find_by_label("Back to files").is_none());
+            let crumbs = window.find("files-breadcrumbs").bounds();
+            // 8px toolbar padding + the 4px inset.
+            assert_eq!(crumbs.left(), px(TOOLBAR_PAD_PX + PATH_INSET_PX));
+        })
+        .unwrap();
+    }
+
+    /// What one panel of a screenshot shows.
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy)]
+    enum Shot {
+        Rows,
+        Loading,
+        Empty,
+        NoMatches,
+        Error,
+        OpenFile,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Shot {
+        fn set_up(self, files: &mut FilesPanel) {
+            files.workspace_root = Some("/Users/nckrtl/apps/conn".into());
+            let entries = || {
+                vec![
+                    conn_contract::ProjectEntry {
+                        path: "crates".into(),
+                        kind: ProjectEntryKind::Directory,
+                        ignored: None,
+                    },
+                    file_entry("Cargo.toml"),
+                    file_entry("README.md"),
+                ]
+            };
+            match self {
+                Self::Rows | Self::OpenFile => files.tree.set_directory_entries("", entries()),
+                Self::Loading => files.tree.mark_loading(""),
+                Self::Empty => files.tree.set_directory_entries("", vec![]),
+                Self::NoMatches => {
+                    files.tree.set_directory_entries("", entries());
+                    files.tree.set_query("zzz".into());
+                    files.tree.set_search_results(&[]);
+                }
+                Self::Error => files.tree_error = Some("Could not read the folder.".into()),
+            }
+            if matches!(self, Self::OpenFile) {
+                files.showing_preview = true;
+                files.preview = PreviewState::Loaded {
+                    path: "crates/conn-app/src/panels/README.md".into(),
+                    raw_contents: "# Panels\n\nThe Files panel lives here.\n".into(),
+                    truncated: false,
+                };
+            }
+        }
+    }
+
+    /// Panels side by side on the card colour, for a screenshot.
+    #[cfg(target_os = "macos")]
+    struct ShotRow {
+        panels: Vec<Entity<FilesPanel>>,
+        bg: gpui_kit::Hsla,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl gpui_kit::Render for ShotRow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+            h_flex()
+                .size_full()
+                .bg(self.bg)
+                .children(self.panels.iter().map(|panel| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .border_r_1()
+                        .border_color(gpui_kit::black().opacity(0.25))
+                        .child(panel.clone())
+                }))
+        }
+    }
+
+    /// Renders the Files panel offscreen in Dark Ocean and Light: the tree status lines next to
+    /// a file row, and the explorer and path subheader beside an open file. It opens no window
+    /// on screen and takes no focus.
+    ///
+    /// `CONN_FILES_SHOTS_DIR=<dir> cargo test -p conn-app render_files_tweaks_screenshots -- --ignored`
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes PNGs; set CONN_FILES_SHOTS_DIR"]
+    fn render_files_tweaks_screenshots() {
+        use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, size};
+        let Some(dir) = std::env::var_os("CONN_FILES_SHOTS_DIR") else {
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).expect("an output folder");
+        let mut ctx = crate::ui_tests::headless_shot_context();
+        let scenes: [(&str, f32, f32, &[Shot]); 3] = [
+            (
+                "status",
+                1500.0,
+                120.0,
+                &[
+                    Shot::Rows,
+                    Shot::Loading,
+                    Shot::Empty,
+                    Shot::NoMatches,
+                    Shot::Error,
+                ],
+            ),
+            ("explorer", 760.0, 360.0, &[Shot::OpenFile]),
+            ("breadcrumb", 420.0, 140.0, &[Shot::OpenFile]),
+        ];
+        for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+            for (name, width, height, shots) in scenes {
+                let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+                let tokens = Tokens::derive(&theme);
+                let (window, _root) = ctx.update(|cx| {
+                    gpui_kit::init(cx);
+                    crate::fonts::register(cx);
+                    crate::theme::apply_kit_theme(&tokens, cx);
+                    gpui_kit::open_window(
+                        WindowOptions {
+                            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                                Point::default(),
+                                size(px(width), px(height)),
+                            ))),
+                            focus: false,
+                            show: false,
+                            ..Default::default()
+                        },
+                        cx,
+                        |window, cx| {
+                            let panels = shots
+                                .iter()
+                                .map(|shot| {
+                                    cx.new(|cx| {
+                                        let mut files =
+                                            FilesPanel::new(tokens.clone(), None, window, cx);
+                                        shot.set_up(&mut files);
+                                        files
+                                    })
+                                })
+                                .collect();
+                            let bg = to_hsla(tokens.shell_card);
+                            cx.new(|_| ShotRow { panels, bg })
+                        },
+                    )
+                    .expect("a window")
+                });
+                for _ in 0..4 {
+                    ctx.update_window(window, |_, w, c| w.render_frame(c))
+                        .expect("a frame");
+                    ctx.run_until_parked();
+                }
+                let image = ctx.capture_screenshot(window).expect("a screenshot");
+                image
+                    .save(dir.join(format!("{name}-{theme_label}.png")))
+                    .expect("a saved PNG");
+            }
+        }
     }
 
     fn open_panel(

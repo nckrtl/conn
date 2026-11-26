@@ -195,6 +195,11 @@ fn draft_workspace_strategy(draft: &DraftThreadState) -> serde_json::Value {
 pub(crate) const PRIMARY_NOT_READY: &str =
     "Conn is still connecting to this server, so it did not open the panel. Try again in a moment.";
 
+/// Why an agent's MCP request did not run on a thread without a project: that thread has no MCP
+/// panel, so Tasks opened instead.
+const NO_PROJECT_MCP: &str =
+    "This thread has no project, so it has no MCP panel. The Tasks panel opened instead.";
+
 /// The connection an agent's panel request came from.
 pub(super) enum PanelOrigin {
     Primary,
@@ -1192,7 +1197,7 @@ impl ConnApp {
     /// The right panel is open and no GPUI overlay covers it.
     fn right_panel_surface_visible(&self) -> bool {
         self.layout.right_panel_open
-            && !self.right_panel_tabs.tabs().is_empty()
+            && !self.visible_right_panel_tabs().is_empty()
             && self.command_palette.is_none()
             && self.settings_modal.is_none()
             && self.workspace_editor.is_none()
@@ -1246,6 +1251,14 @@ impl ConnApp {
             self.save_thread_panels(cx);
         }
         self.sync_preview_host(cx);
+        if self
+            .right_panel_tabs
+            .settle(self.shown_thread_has_project())
+        {
+            // The active tab needed a project this thread lacks, so Tasks shows instead.
+            self.layout.right_panel_tab = self.right_panel_surface().kind();
+            self.save_thread_panels(cx);
+        }
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         let child_approvals = self.sync_child_approvals();
@@ -3968,7 +3981,7 @@ impl ConnApp {
     /// The open right panel has no tab, so it lists the surfaces to open.
     fn right_panel_shows_launcher(&self) -> bool {
         self.layout
-            .shows_surface_launcher(self.right_panel_tabs.tabs().len())
+            .shows_surface_launcher(self.visible_right_panel_tabs().len())
     }
 
     /// Puts the shown thread's (or draft's) right panel in place. Panels are keyed by environment
@@ -4042,11 +4055,14 @@ impl ConnApp {
                 ));
             }
         }
-        self.thread_panels.prepare(
-            owner,
-            agent_panel_tab(request.panel),
-            &mut self.right_panel_tabs,
-        );
+        let tab = agent_panel_tab(request.panel);
+        let tab = if self.thread_has_project(&owner.thread) {
+            tab
+        } else {
+            tab.without_project()
+        };
+        self.thread_panels
+            .prepare(owner, tab, &mut self.right_panel_tabs);
         self.save_thread_panels(cx);
         error
     }
@@ -4189,6 +4205,30 @@ impl ConnApp {
         &self.right_panel_tabs
     }
 
+    /// Test helper: marks `project_id` as the server's scratch (General) project, or none.
+    #[cfg(test)]
+    pub(crate) fn set_scratch_project_for_test(&mut self, project_id: Option<&str>) {
+        self.scratch_project_id = project_id.map(str::to_owned);
+    }
+
+    /// Test helper: opens the right panel's `+` menu.
+    #[cfg(test)]
+    pub(crate) fn open_right_panel_add_menu_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        self.right_panel_add_menu_open = true;
+        cx.notify();
+    }
+
+    /// Test helper: the surfaces the `+` menu offers, and the tabs the strip shows.
+    #[cfg(test)]
+    pub(crate) fn offered_and_visible_tabs_for_test(
+        &self,
+    ) -> (Vec<RightPanelTab>, Vec<PanelSurface>) {
+        (
+            self.available_right_panel_tabs(),
+            self.visible_right_panel_tabs(),
+        )
+    }
+
     /// Maximized, terminal drawer open, and the panel's width.
     #[cfg(test)]
     pub(crate) fn right_panel_state_for_test(&self) -> (bool, bool, f32) {
@@ -4273,6 +4313,7 @@ impl ConnApp {
         tab: RightPanelTab,
         cx: &mut Context<'_, Self>,
     ) {
+        let tab = self.tab_for_shown_thread(tab);
         self.right_panel_tabs.open(tab);
         self.show_right_panel_surface(cx);
     }
@@ -4280,6 +4321,7 @@ impl ConnApp {
     /// The add menu's choice (`+`, its letter keys, the launcher): Browser always adds a new
     /// tab (`createBrowserSurface`); other kinds show their one tab.
     pub(crate) fn add_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<'_, Self>) {
+        let tab = self.tab_for_shown_thread(tab);
         self.right_panel_tabs.add(tab);
         self.show_right_panel_surface(cx);
     }
@@ -4290,8 +4332,55 @@ impl ConnApp {
         surface: PanelSurface,
         cx: &mut Context<'_, Self>,
     ) {
+        let surface = if self.shown_thread_has_project() {
+            surface
+        } else {
+            surface.without_project()
+        };
         self.right_panel_tabs.activate(surface);
         self.show_right_panel_surface(cx);
+    }
+
+    /// Whether the thread (or draft) in view has a project. A General thread is on the server's
+    /// scratch project and has none (`useHasProject` in the lab). With nothing in view there is no
+    /// project to lack, and the menu offers only Browser and Tasks anyway.
+    fn shown_thread_has_project(&self) -> bool {
+        match (&self.layout.selected_thread_id, &self.draft) {
+            (Some(thread), _) => self.thread_has_project(thread),
+            (None, Some(draft)) => self.project_has_project(&draft.project_id),
+            (None, None) => true,
+        }
+    }
+
+    /// Whether thread `thread` has a project of its own, not General's scratch one.
+    fn thread_has_project(&self, thread: &str) -> bool {
+        self.shell
+            .find_thread(thread)
+            .is_none_or(|t| self.project_has_project(&t.project_id))
+    }
+
+    fn project_has_project(&self, project_id: &str) -> bool {
+        let root = self
+            .shell
+            .project(project_id)
+            .map(|p| p.workspace_root.as_str());
+        !self.is_scratch_project(project_id, root)
+    }
+
+    /// `tab`, or Tasks when the shown thread has no project and `tab` needs one.
+    fn tab_for_shown_thread(&self, tab: RightPanelTab) -> RightPanelTab {
+        if self.shown_thread_has_project() {
+            tab
+        } else {
+            tab.without_project()
+        }
+    }
+
+    /// The tabs the strip shows: those the shown thread may have. Open tabs that need a project
+    /// stay open behind them for when the thread has one.
+    fn visible_right_panel_tabs(&self) -> Vec<PanelSurface> {
+        self.right_panel_tabs
+            .visible(self.shown_thread_has_project())
     }
 
     /// Opens the right panel on the active tab.
@@ -5871,10 +5960,13 @@ impl ConnApp {
     /// Surfaces the add menu enables, by Conn's rules (`SURFACE_DISABLED_REASONS`): Browser and
     /// Tasks are always available; project/thread surfaces (including Pull request and Linked
     /// items, which render Conn's link/empty states when no PR is attached yet) need a thread.
+    /// A thread without a project also lacks Files, MCP and API.
     fn available_right_panel_tabs(&self) -> Vec<RightPanelTab> {
         let thread = self.layout.selected_thread_id.is_some();
+        let has_project = self.shown_thread_has_project();
         RightPanelTab::MENU_ORDER
             .into_iter()
+            .filter(|tab| has_project || !tab.needs_project())
             .filter(|tab| match tab {
                 RightPanelTab::Browser | RightPanelTab::Tasks => true,
                 _ => thread,
@@ -5973,18 +6065,18 @@ impl ConnApp {
         use std::rc::Rc;
         let app = cx.entity();
         let available_tabs = self.available_right_panel_tabs();
-        let active_surface = self.right_panel.read(cx).displayed_surface(
-            self.right_panel_surface(),
-            self.right_panel_tabs.tabs(),
-            cx,
-        );
+        let open_tabs = self.visible_right_panel_tabs();
+        let active_surface =
+            self.right_panel
+                .read(cx)
+                .displayed_surface(self.right_panel_surface(), &open_tabs, cx);
         let browser_titles = self
             .right_panel
             .read(cx)
             .browser_titles(self.right_panel_tabs.browser_ids(), cx);
         let header = render_panel_header(
             PanelHeaderProps {
-                open_tabs: self.right_panel_tabs.tabs(),
+                open_tabs: &open_tabs,
                 browser_titles: &browser_titles,
                 active_tab: &active_surface,
                 maximized: self.right_panel_maximized,
@@ -5992,6 +6084,7 @@ impl ConnApp {
                 panel_open: self.layout.right_panel_open,
                 add_menu_open: self.right_panel_add_menu_open,
                 available_tabs: &available_tabs,
+                has_project: self.shown_thread_has_project(),
                 tokens: &self.tokens,
             },
             PanelHeaderCallbacks {
@@ -6064,6 +6157,7 @@ impl ConnApp {
             card.child(crate::panels::header::render_panel_launcher(
                 &self.tokens,
                 &available_tabs,
+                self.shown_thread_has_project(),
                 Rc::new({
                     let app = cx.entity();
                     move |tab, _, cx| {
@@ -6539,9 +6633,22 @@ impl ConnApp {
 
         let target_tab = agent_panel_tab(request.panel);
 
-        let _ = this.update(cx, |app, cx| {
-            app.select_right_panel_tab(target_tab, cx);
-        });
+        // A thread without a project opens Tasks in place of Files or MCP, so there is no MCP
+        // panel to run a server or a call in.
+        let redirected = this
+            .update(cx, |app, cx| {
+                let redirected = target_tab != app.tab_for_shown_thread(target_tab);
+                app.select_right_panel_tab(target_tab, cx);
+                redirected
+            })
+            .unwrap_or(false);
+        if redirected {
+            if request.mcp_server.is_some() || request.mcp_call.is_some() {
+                resp.ok = false;
+                resp.error = Some(NO_PROJECT_MCP.to_owned());
+            }
+            return resp;
+        }
 
         match request.panel {
             AgentPanelKind::Database => {
@@ -7577,6 +7684,16 @@ impl Render for ConnApp {
                         return;
                     }
                     if event.keystroke.key == "escape" && app.escape_shell_popovers(cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Escape drops a selection in the thread's text, and only then: with none, it
+                    // goes on to whatever else wants it. An open message or link menu has it
+                    // first, and closes without touching the selection.
+                    if event.keystroke.key == "escape" && app.chat.read(cx).has_open_menu() {
+                        return;
+                    }
+                    if crate::chat::selection::clear_on_escape(event, window, cx) {
                         cx.stop_propagation();
                     }
                 }),

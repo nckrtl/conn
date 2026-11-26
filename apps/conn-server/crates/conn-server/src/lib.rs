@@ -32,6 +32,7 @@ pub mod settlement;
 pub mod t3_carry;
 pub mod table;
 pub mod text_generation;
+pub mod thread_push;
 pub mod trace_diagnostics;
 mod workflow_script;
 pub mod worktree_cleanup;

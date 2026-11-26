@@ -98,6 +98,7 @@ impl Render for Harness {
                     .child(render_add_panel_menu(
                         &self.tokens,
                         &RightPanelTab::MENU_ORDER,
+                        true,
                         on_add_tab,
                     ))
                     .into_any_element()

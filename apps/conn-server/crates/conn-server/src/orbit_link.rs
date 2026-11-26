@@ -74,37 +74,76 @@ pub fn curl_transport(gateway_url: &str) -> Transport {
     Arc::new(move |method, path| {
         let url = format!("{base}/api/v1/conn{path}");
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || curl(method, &url))
-                .await
-                .map_err(|e| e.to_string())?
+            tokio::task::spawn_blocking(move || {
+                curl(
+                    method,
+                    &url,
+                    None,
+                    Duration::from_secs(REQUEST_TIMEOUT_SECONDS),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())?
         })
     })
 }
 
-fn curl(method: &str, url: &str) -> Result<(u16, String), String> {
+/// One JSON request through the system curl, for a caller that sends a body and wants its own
+/// time limit. Returns the status and the answer, as [`curl_transport`] does.
+pub fn curl_json(
+    method: &str,
+    url: &str,
+    body: &str,
+    max_time: Duration,
+) -> Result<(u16, String), String> {
+    curl(method, url, Some(body), max_time)
+}
+
+fn curl(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    max_time: Duration,
+) -> Result<(u16, String), String> {
     // A shell PATH can put another curl (e.g. Homebrew's) first.
     let binary = if std::path::Path::new("/usr/bin/curl").exists() {
         "/usr/bin/curl"
     } else {
         "curl"
     };
-    let output = std::process::Command::new(binary)
-        // `-q` first: no `.curlrc`, so no configured trace file ever holds a pairing link.
-        .args([
-            "-q",
-            "-sS",
-            "--max-time",
-            &REQUEST_TIMEOUT_SECONDS.to_string(),
-            "-X",
-            method,
+    let mut command = std::process::Command::new(binary);
+    // `-q` first: no `.curlrc`, so no configured trace file ever holds a pairing link.
+    command
+        .args(["-q", "-sS", "--max-time"])
+        .arg(max_time.as_secs_f64().to_string())
+        .args(["-X", method, "-H", "accept: application/json"]);
+    if body.is_some() {
+        // The body comes on stdin, so it never shows in the process list.
+        command.args([
             "-H",
-            "accept: application/json",
-            "-w",
-            "\n%{http_code}",
-            url,
-        ])
-        .stdin(std::process::Stdio::null())
-        .output()
+            "content-type: application/json",
+            "--data-binary",
+            "@-",
+        ]);
+    }
+    let mut child = command
+        .args(["-w", "\n%{http_code}", url])
+        .stdin(if body.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not run curl: {e}"))?;
+    if let (Some(body), Some(mut stdin)) = (body, child.stdin.take()) {
+        use std::io::Write;
+        // A short write error shows in curl's own exit status below.
+        let _ = stdin.write_all(body.as_bytes());
+    }
+    let output = child
+        .wait_with_output()
         .map_err(|e| format!("Could not run curl: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -485,6 +524,8 @@ pub fn run_cli(
     ));
     match linked {
         Ok(link) => {
+            // The thread push follows the Gateway this link proved to work.
+            crate::thread_push::remember_gateway(state_dir, gateway_url);
             println!(
                 "Linked {} ({}) with {} access, until {}.\n",
                 link["label"].as_str().unwrap_or_default(),

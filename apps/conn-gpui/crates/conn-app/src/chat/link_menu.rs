@@ -17,6 +17,7 @@ use gpui_kit::{
     Window, anchored, deferred, div, px,
 };
 
+use super::selection::MessageMenuRequest;
 use super::{ChatEvent, ChatView};
 use crate::a11y::ConnA11yExt as _;
 use crate::header::details_card::EditorTarget;
@@ -48,11 +49,22 @@ pub(crate) enum LinkMenuAction {
     CopyRelativePath,
     /// File link: `Copy full path` (`copy-full`).
     CopyFullPath,
+    /// Selected message text: `Copy`, what Cmd+C copies.
+    CopySelection,
+    /// Message text with no selection: `Copy message`, what the message's copy button copies.
+    CopyMessage,
 }
 
 impl LinkMenuAction {
+    /// The key that does the same as the row, shown at its right end.
+    fn shortcut(self) -> Option<&'static str> {
+        matches!(self, Self::CopySelection).then_some("⌘C")
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::CopySelection => "Copy",
+            Self::CopyMessage => "Copy message",
             Self::LinkToThread => "Link to thread",
             Self::UnlinkFromThread => "Unlink from thread",
             Self::OpenInPreview | Self::OpenFileInBrowser => "Open in integrated browser",
@@ -83,6 +95,8 @@ impl LinkMenuAction {
             Self::RevealInFinder => "chat.file-menu.reveal",
             Self::CopyRelativePath => "chat.file-menu.copy-relative",
             Self::CopyFullPath => "chat.file-menu.copy-full",
+            Self::CopySelection => "chat.message-menu.copy",
+            Self::CopyMessage => "chat.message-menu.copy-message",
         }
     }
 }
@@ -274,7 +288,7 @@ fn step_cursor(cursor: Option<usize>, len: usize, forward: bool) -> Option<usize
     })
 }
 
-/// The open link menu.
+/// The open link menu, or the menu of a message's text (`href` is then empty).
 pub(super) struct LinkMenu {
     href: String,
     position: Point<Pixels>,
@@ -282,6 +296,19 @@ pub(super) struct LinkMenu {
     cursor: Option<usize>,
     /// What had the keyboard when the menu opened; it gets it back when the menu closes.
     return_focus: Option<gpui_kit::FocusHandle>,
+    /// What Cmd+C copied when the menu opened. A press on a row clears the selection before the
+    /// row acts, so the row copies this.
+    selection_text: Option<String>,
+    /// The message `Copy message` copies.
+    message_text: Option<String>,
+}
+
+/// What Cmd+C copies now, if there is a selection.
+fn selected_text(window: &mut Window, cx: &mut gpui_kit::App) -> Option<String> {
+    if !gpui_kit::base::TextSelection::has_selection(window, cx) {
+        return None;
+    }
+    Some(gpui_kit::base::TextSelection::selected_text(window, cx)).filter(|text| !text.is_empty())
 }
 
 impl ChatView {
@@ -332,26 +359,76 @@ impl ChatView {
         self.show_menu(path.to_owned(), items, position, window, cx);
     }
 
-    /// Shows `items` for `href` (a URL or a file path) at `position`, taking the keyboard.
+    /// Opens the menu for a right-click on a message's text: `Copy` (⌘C) for the selection the
+    /// message holds, else `Copy message`.
+    pub(super) fn open_message_menu(
+        &mut self,
+        request: MessageMenuRequest,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (items, selection_text, message_text) = match request.selection_text {
+            Some(selection) => (vec![LinkMenuAction::CopySelection], Some(selection), None),
+            None => (
+                vec![LinkMenuAction::CopyMessage],
+                None,
+                Some(request.message_text),
+            ),
+        };
+        let return_focus = window.focused(cx);
+        self.install_menu(
+            LinkMenu {
+                href: String::new(),
+                position: request.position,
+                items,
+                cursor: None,
+                return_focus,
+                selection_text,
+                message_text,
+            },
+            cx,
+        );
+    }
+
+    /// Shows `items` for `href` (a URL or a file path) at `position`, taking the keyboard. A
+    /// selection adds `Copy` above them.
     fn show_menu(
         &mut self,
         href: String,
-        items: Vec<LinkMenuAction>,
+        mut items: Vec<LinkMenuAction>,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.dismiss_link_preview(cx);
+        let selection_text = selected_text(window, cx);
+        if selection_text.is_some() {
+            items.insert(0, LinkMenuAction::CopySelection);
+        }
         let return_focus = window.focused(cx);
-        self.link_menu = Some(LinkMenu {
-            href,
-            position,
-            items,
-            cursor: None,
-            return_focus,
-        });
+        self.install_menu(
+            LinkMenu {
+                href,
+                position,
+                items,
+                cursor: None,
+                return_focus,
+                selection_text,
+                message_text: None,
+            },
+            cx,
+        );
+    }
+
+    fn install_menu(&mut self, menu: LinkMenu, cx: &mut Context<'_, Self>) {
+        self.dismiss_link_preview(cx);
+        self.link_menu = Some(menu);
         self.link_menu_focus_pending = true;
         cx.notify();
+    }
+
+    /// Whether a link or message menu is open.
+    pub(crate) fn has_open_menu(&self) -> bool {
+        self.link_menu.is_some()
     }
 
     /// Closes the menu and hands the keyboard back.
@@ -406,11 +483,27 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(href) = self.link_menu.as_ref().map(|menu| menu.href.clone()) else {
+        let Some((href, selection_text, message_text)) = self.link_menu.as_ref().map(|menu| {
+            (
+                menu.href.clone(),
+                menu.selection_text.clone(),
+                menu.message_text.clone(),
+            )
+        }) else {
             return;
         };
         self.close_link_menu(window, cx);
         match action {
+            LinkMenuAction::CopySelection => {
+                if let Some(text) = selection_text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            LinkMenuAction::CopyMessage => {
+                if let Some(text) = message_text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
             LinkMenuAction::OpenInPreview => cx.emit(ChatEvent::OpenInBrowser(href)),
             LinkMenuAction::OpenExternal => cx.open_url(&href),
             LinkMenuAction::CopyLink => cx.write_to_clipboard(ClipboardItem::new_string(href)),
@@ -571,8 +664,14 @@ impl ChatView {
         }
         let highlight = MenuHighlight::new(tokens);
         let fg = hsla(tokens.popover_foreground);
+        let muted = hsla(tokens.muted_foreground);
+        let (menu_id, menu_label) = if menu.href.is_empty() {
+            ("chat.message-menu", "Message menu")
+        } else {
+            ("chat.link-menu", "Link menu")
+        };
         let mut list = menu_surface(SharedString::from("chat-link-menu"), tokens)
-            .a11y(gpui_kit::Role::Menu, "chat.link-menu", "Link menu")
+            .a11y(gpui_kit::Role::Menu, menu_id, menu_label)
             .track_focus(&self.link_menu_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.link_menu_key(event, window, cx);
@@ -580,35 +679,46 @@ impl ChatView {
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_link_menu(window, cx)));
         for (index, action) in menu.items.iter().copied().enumerate() {
             let highlighted = menu.cursor == Some(index);
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("chat-link-menu-{index}")))
-                    .a11y(gpui_kit::Role::MenuItem, action.ax_id(), action.label())
-                    .aria_selected(highlighted)
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .min_h(px(MENU_ROW_HEIGHT_PX))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(MENU_ROW_RADIUS_PX))
-                    .text_size(px(MENU_FONT_PX))
-                    .line_height(px(MENU_LINE_PX))
-                    .text_color(if highlighted { highlight.fg } else { fg })
-                    .when(highlighted, |row| row.bg(highlight.bg))
-                    .cursor_pointer()
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.highlight_link_menu_row(index, cx);
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.run_link_menu_action(action, window, cx);
-                    }))
-                    .child(div().flex_1().min_w_0().truncate().child(action.label())),
-            );
+            let row = div()
+                .id(SharedString::from(format!("chat-link-menu-{index}")))
+                .a11y(gpui_kit::Role::MenuItem, action.ax_id(), action.label())
+                .aria_selected(highlighted)
+                .flex()
+                .items_center()
+                .w_full()
+                .min_h(px(MENU_ROW_HEIGHT_PX))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(MENU_ROW_RADIUS_PX))
+                .text_size(px(MENU_FONT_PX))
+                .line_height(px(MENU_LINE_PX))
+                .text_color(if highlighted { highlight.fg } else { fg })
+                .when(highlighted, |row| row.bg(highlight.bg))
+                .cursor_pointer()
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.highlight_link_menu_row(index, cx);
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.run_link_menu_action(action, window, cx);
+                }))
+                .child(div().flex_1().min_w_0().truncate().child(action.label()))
+                .when_some(action.shortcut(), |row, shortcut| {
+                    row.child(
+                        div()
+                            .ml(px(24.0))
+                            .text_color(if highlighted { highlight.fg } else { muted })
+                            .child(shortcut),
+                    )
+                });
+            #[cfg(test)]
+            let row = gpui_kit::TestSupportExt::test_support(row);
+            list = list.child(row);
         }
+        #[cfg(test)]
+        let list = gpui_kit::TestSupportExt::test_support(list);
         Some(
             deferred(
                 anchored()
@@ -867,6 +977,20 @@ mod tests {
         assert!(!is_media_path("a.png/readme"));
         assert!(is_browser_preview_path("A.HTML"));
         assert!(!is_browser_preview_path("a.htmlx"));
+    }
+
+    #[test]
+    fn only_copy_of_a_selection_shows_the_key_that_does_the_same() {
+        assert_eq!(LinkMenuAction::CopySelection.label(), "Copy");
+        assert_eq!(LinkMenuAction::CopySelection.shortcut(), Some("⌘C"));
+        assert_eq!(LinkMenuAction::CopyMessage.label(), "Copy message");
+        for other in [
+            LinkMenuAction::CopyMessage,
+            LinkMenuAction::CopyLink,
+            LinkMenuAction::OpenExternal,
+        ] {
+            assert_eq!(other.shortcut(), None, "{other:?}");
+        }
     }
 
     #[test]

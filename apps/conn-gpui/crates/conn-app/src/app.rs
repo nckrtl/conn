@@ -372,6 +372,9 @@ pub(crate) struct ConnApp {
     rail_menu: Option<crate::sidebar::rail::RailMenuAnchor>,
     /// The workspace editor (`WorkspaceDialog`), open from the rail's `+` or a tile's `Edit…`.
     workspace_editor: Option<Entity<crate::workspace_editor::WorkspaceEditor>>,
+    /// The full-image viewer, open from a sent message's thumbnail.
+    image_viewer: Option<Entity<crate::chat::image_viewer::ImageViewer>>,
+    image_viewer_subscription: Option<gpui_kit::Subscription>,
     /// The workspace the editor edits; none while it creates one.
     workspace_editor_target: Option<String>,
     /// Each workspace's badge image, decoded once from its data URL.
@@ -591,6 +594,9 @@ impl ConnApp {
                 }
                 crate::chat::ChatEvent::OpenThreadLink(link) => {
                     app.open_thread_link(link, cx);
+                }
+                crate::chat::ChatEvent::OpenImageViewer { images, index } => {
+                    app.open_image_viewer(images.clone(), *index, window, cx);
                 }
                 crate::chat::ChatEvent::OpenFile(location) => {
                     app.show_source_location(location, cx)
@@ -821,6 +827,8 @@ impl ConnApp {
             thread_menu: None,
             rail_menu: None,
             workspace_editor: None,
+            image_viewer: None,
+            image_viewer_subscription: None,
             workspace_editor_target: None,
             workspace_images: HashMap::new(),
             rail_gesture: crate::sidebar::rail::RailGesture::default(),
@@ -1224,6 +1232,92 @@ impl ConnApp {
             && self.command_palette.is_none()
             && self.settings_modal.is_none()
             && self.workspace_editor.is_none()
+            && self.image_viewer.is_none()
+    }
+
+    /// Opens the full-image viewer on `items[index]`. It takes the keyboard and gives it back to
+    /// what had it when it closes.
+    fn open_image_viewer(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use crate::chat::image_viewer::{ImageViewer, ImageViewerEvent, ViewerOpen};
+        if items.is_empty() {
+            return;
+        }
+        // One viewer at a time: a second open (a double click) replaces the first.
+        self.close_image_viewer(false, window, cx);
+        let return_focus = window
+            .focused(cx)
+            .or_else(|| Some(self.focus_handle.clone()));
+        let thread_id = self.layout.selected_thread_id.clone();
+        // The thread's own connection: a linked environment's attachments live on that
+        // environment, not on the primary connection. Stepping through the gallery reuses it.
+        let connection = self.context_connection();
+        let tokens = self.tokens.clone();
+        let open = ViewerOpen {
+            items,
+            index,
+            connection,
+            thread_id,
+            return_focus,
+        };
+        let viewer = cx.new(|cx| ImageViewer::new(open, tokens, window, cx));
+        let sub = cx.subscribe_in(
+            &viewer,
+            window,
+            |app, _viewer, event: &ImageViewerEvent, window, cx| match event {
+                ImageViewerEvent::Close => app.close_image_viewer(true, window, cx),
+            },
+        );
+        self.image_viewer_subscription = Some(sub);
+        self.image_viewer = Some(viewer);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Closes the image viewer. `restore` gives the keyboard back to what had it before; a thread
+    /// switch skips that, as the old composer is gone.
+    fn close_image_viewer(
+        &mut self,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(viewer) = self.image_viewer.take() else {
+            return;
+        };
+        self.image_viewer_subscription = None;
+        let focus = viewer.update(cx, |viewer, cx| {
+            viewer.release_images(cx);
+            viewer.take_return_focus()
+        });
+        let focus = focus
+            .filter(|_| restore)
+            .unwrap_or_else(|| self.focus_handle.clone());
+        window.focus(&focus, cx);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Routes a key to the open image viewer: Escape, arrows and zoom keys. Returns whether it
+    /// was used. The palette and Settings, opened on top of it, keep their own keys.
+    fn handle_image_viewer_key(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.command_palette.is_some() || self.settings_modal.is_some() {
+            return false;
+        }
+        let Some(viewer) = self.image_viewer.clone() else {
+            return false;
+        };
+        viewer.update(cx, |viewer, cx| viewer.handle_key(event, window, cx))
     }
 
     fn sync_browser_visibility(&self, cx: &mut Context<'_, Self>) {
@@ -3741,6 +3835,7 @@ impl ConnApp {
             "chatMetrics": chat_metrics,
             "palette": self.command_palette.is_some(),
             "settings": self.settings_modal.is_some(),
+            "imageViewer": self.image_viewer.is_some(),
         })
     }
 
@@ -4509,6 +4604,7 @@ impl ConnApp {
         self.settings_modal.is_some()
             || self.command_palette.is_some()
             || self.workspace_editor.is_some()
+            || self.image_viewer.is_some()
             || self.thread_menu.is_some()
             || self.rail_menu.is_some()
             || self.sidebar_filter_menu_open
@@ -4619,6 +4715,26 @@ impl ConnApp {
         }
         self.sync_chat(cx);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn image_viewer_for_test(
+        &self,
+    ) -> Option<Entity<crate::chat::image_viewer::ImageViewer>> {
+        self.image_viewer.clone()
+    }
+
+    /// Test helper: opens the viewer on `items[index]` without a thumbnail click.
+    #[cfg(test)]
+    pub(crate) fn open_image_viewer_for_test(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_image_viewer(items, index, window, cx);
     }
 
     #[cfg(test)]
@@ -7721,6 +7837,9 @@ impl ConnApp {
         if let Some(palette) = &self.command_palette {
             palette.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         }
+        if let Some(viewer) = &self.image_viewer {
+            viewer.update(cx, |v, cx| v.set_tokens(tokens.clone(), cx));
+        }
         if let Some(editor) = &self.workspace_editor {
             editor.update(cx, |e, cx| e.set_tokens(tokens.clone(), cx));
         }
@@ -7776,6 +7895,12 @@ impl Render for ConnApp {
         self.sync_details_task_history(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Another thread on screen drops the viewer, as web drops its preview.
+        if self.image_viewer.as_ref().is_some_and(|viewer| {
+            viewer.read(cx).thread_id() != self.layout.selected_thread_id.as_deref()
+        }) {
+            self.close_image_viewer(false, window, cx);
+        }
         self.sync_thread_menu_focus(window, cx);
         self.sync_undo_notice_focus(window, cx);
         #[cfg(feature = "zed-files")]
@@ -7795,6 +7920,10 @@ impl Render for ConnApp {
             .capture_key_down(
                 cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if std::mem::take(&mut app.keystroke_consumed) {
+                        return;
+                    }
+                    if app.handle_image_viewer_key(event, window, cx) {
+                        cx.stop_propagation();
                         return;
                     }
                     if std::env::var_os("CONN_GPUI_FRAME_LOG").is_some() {
@@ -8190,6 +8319,9 @@ impl Render for ConnApp {
             ));
         }
 
+        if let Some(viewer) = &self.image_viewer {
+            root = root.child(crate::chat::image_viewer::render_overlay(viewer));
+        }
         if let Some(modal) = &self.settings_modal {
             root = root.child(crate::settings::render_overlay(modal));
         }

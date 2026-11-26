@@ -377,6 +377,10 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         use super::attachment_thumb::{AttachmentKind, attachment_kind, gallery_columns, runs_by};
+        // Every image of the message, in attach order: a tile opens the viewer on its own place.
+        let gallery: std::rc::Rc<[super::image_viewer::ViewerItem]> =
+            super::image_viewer::gallery_items(attachments).into();
+        let mut images_before = 0;
         // One column count for the whole message, so every run's tiles are the same size.
         let columns = gallery_columns(
             attachments
@@ -391,7 +395,16 @@ impl ChatView {
                 let run = &attachments[range];
                 match kind {
                     AttachmentKind::Image => {
-                        self.render_image_gallery(key, start, run, columns, cx)
+                        let first_image = images_before;
+                        images_before += run.len();
+                        self.render_image_gallery(
+                            key,
+                            (start, first_image),
+                            run,
+                            columns,
+                            &gallery,
+                            cx,
+                        )
                     }
                     AttachmentKind::Video => self.render_video_run(key, start, run),
                     AttachmentKind::File => self.render_file_rows(key, start, run, cx),
@@ -410,14 +423,20 @@ impl ChatView {
     /// is still being fitted to its caption, so it reserved tile heights for the cap width and
     /// left a blank band under tiles that then painted narrower. A flex cell gets its width first
     /// and its 4:3 height from that width.
+    ///
+    /// `place` is where the run starts: its index among the message's attachments, and among
+    /// its images. A tile is a button that opens the full-image viewer on its own image of
+    /// `viewer_items`.
     fn render_image_gallery(
         &self,
         key: &str,
-        start: usize,
+        place: (usize, usize),
         run: &[conn_contract::ChatAttachment],
         columns: usize,
+        viewer_items: &std::rc::Rc<[super::image_viewer::ViewerItem]>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let (start, first_image) = place;
         use super::attachment_thumb::{
             GALLERY_INSET_PX, gallery_cell, gallery_tile, gallery_tile_target, tile_radii,
         };
@@ -438,10 +457,30 @@ impl ChatView {
                 let idx = start + offset;
                 let loaded = self.attachment_image(image, target, cx);
                 let radii = tile_radii(offset, run.len(), columns);
+                let (open_gallery, ordinal) = (viewer_items.clone(), first_image + offset);
+                // Focusable, so Tab reaches it and Enter or Space opens it (a keyboard click).
+                let open = div()
+                    .id((SharedString::from(format!("att-open-{key}")), idx))
+                    .a11y_button(
+                        format!("chat.attachment.{key}.{idx}.open"),
+                        format!("Preview {}", image.name),
+                    )
+                    .tab_index(0)
+                    .absolute()
+                    .inset_0()
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _: &gpui_kit::ClickEvent, _window, cx| {
+                            this.open_image_viewer(&open_gallery, ordinal, cx);
+                        }),
+                    );
+                #[cfg(test)]
+                let open = gpui_kit::TestSupportExt::test_support(open);
                 let cell = gallery_cell((SharedString::from(format!("att-{key}")), idx))
                     .flex_1()
                     .conn_tooltip(image.name.clone(), &self.tokens)
-                    .child(gallery_tile(loaded, &self.tokens, radii));
+                    .child(gallery_tile(loaded, &self.tokens, radii))
+                    .child(open);
                 let cell = cell.a11y_group(
                     format!("chat.attachment.{key}.{idx}"),
                     format!("Attachment {}", image.name),

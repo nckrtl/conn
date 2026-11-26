@@ -87,16 +87,7 @@ pub(super) fn load_sent_image(
     cancel: &AtomicBool,
 ) -> (SentImage, usize) {
     let thumb = thumbnail_for(mime_type, bytes, target, cancel, |bytes| {
-        let format = image_format_for_mime(mime_type)?;
-        let decoded = Image::from_bytes(format, bytes)
-            .to_image_data(svg_renderer)
-            .ok()?;
-        let size = decoded.size(0);
-        image::RgbaImage::from_raw(
-            u32::try_from(size.width.0).ok()?,
-            u32::try_from(size.height.0).ok()?,
-            decoded.as_bytes(0)?.to_vec(),
-        )
+        gpui_first_frame(mime_type, bytes, svg_renderer)
     });
     match thumb {
         Some(thumb) => {
@@ -106,6 +97,44 @@ pub(super) fn load_sent_image(
         }
         None => (SentImage::Failed, 0),
     }
+}
+
+/// The first frame of `bytes` through GPUI's own decoder, in GPUI's pixel order (BGRA). Only SVG,
+/// BMP and TIFF need it: the `image` build here reads the other formats itself.
+pub(super) fn gpui_first_frame(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    svg_renderer: SvgRenderer,
+) -> Option<image::RgbaImage> {
+    let format = image_format_for_mime(mime_type)?;
+    let decoded = Image::from_bytes(format, bytes)
+        .to_image_data(svg_renderer)
+        .ok()?;
+    let size = decoded.size(0);
+    image::RgbaImage::from_raw(
+        u32::try_from(size.width.0).ok()?,
+        u32::try_from(size.height.0).ok()?,
+        decoded.as_bytes(0)?.to_vec(),
+    )
+}
+
+/// Decodes the whole picture of a downloaded attachment for the full-image viewer, within
+/// `max_bytes` of pixels. The result is `Ready` with its pixel size, or `Failed`.
+pub(super) fn load_viewer_image(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    svg_renderer: SvgRenderer,
+    cancel: &AtomicBool,
+) -> Option<(Arc<RenderImage>, (u32, u32), usize)> {
+    let picture =
+        super::thumb_cache::viewer_picture_for(mime_type, bytes, max_bytes, cancel, |bytes| {
+            gpui_first_frame(mime_type, bytes, svg_renderer)
+        })?;
+    let size = (picture.pixels.width(), picture.pixels.height());
+    let cost = picture.byte_len();
+    let image = RenderImage::new(vec![image::Frame::new(picture.pixels)]);
+    Some((Arc::new(image), size, cost))
 }
 
 /// The widest a sent bubble gets: 80% of the capped chat column. Thumbnails decode for this

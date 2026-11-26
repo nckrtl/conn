@@ -61,9 +61,10 @@ struct WorkGroupCard: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                // The label stands in for a paragraph: a paragraph gap to its message, or to the
-                // expanded log's opening rule.
-                .padding(.bottom, FoldRow.leading(size))
+                // Collapsed, the label stands in for a paragraph above its message. Expanded, the
+                // opening rule sits as far under the label as the first row's text sits under the
+                // rule: the 44 pt row centres its line, which leaves the plain gap.
+                .padding(.bottom, expanded ? 0 : FoldRow.leading(size))
             }
 
             if expanded && !group.hasActive {

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use conn_cache::{Message, MessageCache, fetch_history_prefix};
 use conn_client::Connection;
@@ -73,8 +73,17 @@ pub(super) struct Offline {
     serial: u64,
     backfilling: bool,
     shell_dirty: bool,
+    /// When the shell snapshot was last captured for a write.
+    shell_saved_at: Option<Instant>,
+    /// A timer waits to save the dirty shell once [`SHELL_SAVE_INTERVAL`] has passed.
+    shell_save_armed: bool,
     saving: bool,
 }
+
+/// How often the whole shell snapshot (thousands of threads, megabytes of JSON) may be written.
+/// A running thread changes the shell every few seconds; the snapshot only seeds the next launch,
+/// and quitting writes the latest one.
+const SHELL_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 fn key(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -190,6 +199,13 @@ impl Offline {
     pub(super) fn shell_changed(&mut self) {
         self.shell_dirty = true;
     }
+
+    /// How long the dirty shell must still wait before it may be written; zero when it may now.
+    fn shell_save_wait(&self, now: Instant) -> Duration {
+        self.shell_saved_at.map_or(Duration::ZERO, |at| {
+            SHELL_SAVE_INTERVAL.saturating_sub(now.saturating_duration_since(at))
+        })
+    }
 }
 
 enum Commit {
@@ -213,9 +229,14 @@ enum Save {
 fn write_json(path: &Path, value: &impl serde::Serialize) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     std::fs::create_dir_all(dir)?;
-    let mut file = tempfile::NamedTempFile::new_in(dir)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.flush()?;
+    // Unbuffered, serde_json makes one write(2) per token: millions for a large shell.
+    let mut writer =
+        io::BufWriter::with_capacity(256 * 1024, tempfile::NamedTempFile::new_in(dir)?);
+    serde_json::to_writer(&mut writer, value)?;
+    writer.flush()?;
+    let file = writer
+        .into_inner()
+        .map_err(io::IntoInnerError::into_error)?;
     file.persist(path)?;
     Ok(())
 }
@@ -1069,18 +1090,27 @@ impl ConnApp {
         })
         .detach();
     }
-    fn pending_saves(&mut self) -> Vec<Save> {
+    /// The writes due now. The shell snapshot is due at most every [`SHELL_SAVE_INTERVAL`], or
+    /// right away with `flush`.
+    fn pending_saves(&mut self, flush: bool) -> Vec<Save> {
         let mut writes: Vec<_> = self
             .offline
             .outline_writes
             .drain()
             .map(|((env, id), raw)| Save::Outline(env, id, raw))
             .collect();
-        if std::mem::take(&mut self.offline.shell_dirty)
+        let now = Instant::now();
+        let shell_due =
+            self.offline.shell_dirty && (flush || self.offline.shell_save_wait(now).is_zero());
+        if shell_due {
+            self.offline.shell_dirty = false;
+        }
+        if shell_due
             && self.shell.synchronized
             && let Some(env) = &self.server_url
             && let Some(path) = self.offline.path(env, None)
         {
+            self.offline.shell_saved_at = Some(now);
             let mut primary = LinkedShellSnapshot::capture(env, env, &self.shell);
             let origins = self.linked.origins();
             primary
@@ -1133,10 +1163,64 @@ impl ConnApp {
         }
         writes
     }
+    /// Comes back to write the dirty shell once [`SHELL_SAVE_INTERVAL`] has passed.
+    fn arm_shell_save(&mut self, cx: &mut Context<'_, Self>) {
+        if self.offline.dir.is_none() || !self.offline.shell_dirty || self.offline.shell_save_armed
+        {
+            return;
+        }
+        let wait = self.offline.shell_save_wait(Instant::now());
+        if wait.is_zero() {
+            return;
+        }
+        self.offline.shell_save_armed = true;
+        let lifetime = Arc::downgrade(&self.offline.lifetime);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |app, cx| {
+                // A server switch replaced the cache: its own timer, if any, is armed.
+                if lifetime.strong_count() == 0 {
+                    return;
+                }
+                app.offline.shell_save_armed = false;
+                app.schedule_offline_save(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Writes what the quit would otherwise lose: every pending write, the shell included.
+    pub(super) fn offline_on_quit(&mut self) -> impl std::future::Future<Output = ()> + use<> {
+        let dir = self.offline.dir.clone();
+        let db = self.offline.db.clone();
+        let writes = if dir.is_some() {
+            self.pending_saves(true)
+        } else {
+            Vec::new()
+        };
+        async move {
+            let Some(dir) = dir else {
+                return;
+            };
+            // Waits for a save in flight, so this one lands last.
+            let _guard = CACHE_WRITER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for value in writes {
+                if let Err(e) = save(&dir, db.as_ref(), value) {
+                    eprintln!("offline thread cache: {e}");
+                }
+            }
+        }
+    }
+
     pub(super) fn schedule_offline_save(&mut self, cx: &mut Context<'_, Self>) {
+        self.arm_shell_save(cx);
+        let shell_due =
+            self.offline.shell_dirty && self.offline.shell_save_wait(Instant::now()).is_zero();
         if self.offline.dir.is_none()
             || self.offline.saving
-            || (!self.offline.shell_dirty
+            || (!shell_due
                 && !self.offline.deadlines_dirty
                 && self.offline.dirty.is_empty()
                 && self.offline.task_links_dirty.is_empty()
@@ -1156,13 +1240,14 @@ impl ConnApp {
                 cx.background_executor()
                     .timer(Duration::from_millis(300))
                     .await;
-                let Ok(writes) = this.update(cx, |app, _| {
+                let Ok(writes) = this.update(cx, |app, cx| {
                     if app.connection_gen != generation {
                         return Vec::new();
                     }
-                    let writes = app.pending_saves();
+                    let writes = app.pending_saves(false);
                     if writes.is_empty() {
                         app.offline.saving = false;
+                        app.arm_shell_save(cx);
                     }
                     writes
                 }) else {
@@ -1220,6 +1305,88 @@ impl ConnApp {
 mod tests {
     use super::*;
 
+    fn shell_writes(writes: &[Save]) -> usize {
+        writes
+            .iter()
+            .filter(|write| matches!(write, Save::Shell(..)))
+            .count()
+    }
+
+    /// A busy shell is written at most every 30 seconds, and the quit writes the latest one.
+    #[gpui_kit::test]
+    fn the_shell_snapshot_is_written_at_most_every_thirty_seconds(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::ui_tests::{kitchen_sink_shell, mount_app};
+
+        let dir = tempfile::tempdir().expect("cache directory");
+        let (_, app) = mount_app(cx);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.offline.dir = Some(dir.path().to_owned());
+                app.server_url = Some("http://test.local".into());
+                let mut shell = kitchen_sink_shell();
+                shell.synchronized = true;
+                app.set_shell(shell, cx);
+
+                app.offline.shell_changed();
+                assert_eq!(shell_writes(&app.pending_saves(false)), 1, "first change");
+                app.offline.shell_changed();
+                assert_eq!(
+                    shell_writes(&app.pending_saves(false)),
+                    0,
+                    "a change seconds later waits"
+                );
+                assert!(app.offline.shell_dirty, "the change is kept for later");
+                app.offline.shell_saved_at =
+                    Instant::now().checked_sub(SHELL_SAVE_INTERVAL + Duration::from_secs(1));
+                assert_eq!(
+                    shell_writes(&app.pending_saves(false)),
+                    1,
+                    "written once the interval passed"
+                );
+                app.offline.shell_changed();
+                let writes = app.pending_saves(true);
+                assert_eq!(shell_writes(&writes), 1, "the quit writes it at once");
+                for write in writes {
+                    save(dir.path(), None, write).expect("write the shell");
+                }
+            });
+        });
+        let written = std::fs::read(dir.path().join(key("http://test.local")).join("shell"))
+            .expect("shell file");
+        let snapshot = LinkedShellSnapshot::from_json(&written).expect("valid snapshot JSON");
+        assert_eq!(
+            snapshot.threads.len(),
+            kitchen_sink_shell().threads.len(),
+            "the buffered write holds the whole shell"
+        );
+    }
+
+    /// Items of a background cache stream do not redraw the window; the open thread's do.
+    #[gpui_kit::test]
+    fn only_items_of_a_thread_on_screen_redraw(cx: &mut gpui_kit::TestAppContext) {
+        use crate::ui_tests::{kitchen_sink_shell, mount_app};
+
+        let (_, app) = mount_app(cx);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(kitchen_sink_shell(), cx);
+                app.select_thread("thread-selected", cx);
+                let item = |thread_id: &str| conn_client::ClientEvent::Thread {
+                    thread_id: thread_id.to_owned(),
+                    item: conn_contract::from_json(serde_json::json!({ "kind": "synchronized" }))
+                        .expect("synchronized item"),
+                };
+                assert!(app.event_shows(&item("thread-selected")));
+                assert!(!app.event_shows(&item("thread-in-the-background")));
+                assert!(app.event_shows(&conn_client::ClientEvent::Status(
+                    conn_client::ConnectionStatus::Connected
+                )));
+            });
+        });
+    }
+
     #[gpui_kit::test]
     fn cached_task_opens_from_details_before_reconnect(cx: &mut gpui_kit::TestAppContext) {
         use crate::ui_tests::{
@@ -1249,7 +1416,7 @@ mod tests {
                         conn_contract::from_json(view).expect("snapshot"),
                     );
                 }
-                for write in app.pending_saves() {
+                for write in app.pending_saves(true) {
                     save(dir.path(), Some(&db), write).expect("save observed links");
                 }
             })

@@ -1407,6 +1407,7 @@ impl ConnApp {
                 }
                 let alive = this.update(cx, |app, cx| {
                     let mut shells_changed = false;
+                    let shows = batch.iter().any(|event| app.event_shows(&event.event));
                     for event in batch {
                         shells_changed |= app.apply_linked_event(event, cx);
                     }
@@ -1425,8 +1426,10 @@ impl ConnApp {
                     }
                     app.schedule_offline_save(cx);
                     app.schedule_linked_shell_save(cx);
-                    app.sync_chat(cx);
-                    cx.notify();
+                    if shows || shells_changed {
+                        app.sync_chat(cx);
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     break;

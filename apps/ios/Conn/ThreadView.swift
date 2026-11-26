@@ -414,6 +414,11 @@ struct ThreadView: View {
                         let afterFold = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
                             if case .workGroup = pair.0 { return pair.1.id } else { return nil }
                         })
+                        // The user's messages sent one after another, with nothing between, sit
+                        // close together (`ThreadFeed.userRunSpacing`) and read as one group.
+                        let inUserRun = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
+                            Self.isUserMessage(pair.0) && Self.isUserMessage(pair.1) ? pair.1.id : nil
+                        })
                         ForEach(items) { item in
                             Group {
                                 switch item {
@@ -445,7 +450,8 @@ struct ThreadView: View {
                                     }
                                 }
                             }
-                            .padding(.top, afterFold.contains(item.id) ? foldGap : 0)
+                            .padding(.top, afterFold.contains(item.id) ? foldGap
+                                     : inUserRun.contains(item.id) ? ThreadFeed.userRunSpacing - ThreadFeed.spacing : 0)
                             .id(item.id)
                         }
                     }
@@ -748,6 +754,16 @@ struct ThreadView: View {
                     scrollProxy.scrollTo("timeline-bottom", anchor: .bottom)
                 }
             }
+        }
+    }
+
+    /// A message the user wrote (not an agent-authored row such as a delegated result).
+    private static func isUserMessage(_ item: RenderItem) -> Bool {
+        guard case let .entry(entry) = item else { return false }
+        switch entry {
+        case let .user(_, _, _, byAgent, _, _, _): return !byAgent
+        case let .queuedUser(_, _, _, _, _, byAgent, _): return !byAgent
+        default: return false
         }
     }
 

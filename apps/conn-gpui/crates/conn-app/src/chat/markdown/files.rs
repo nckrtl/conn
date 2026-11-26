@@ -170,7 +170,9 @@ pub(super) fn render_blocks(
                 .w_full()
                 .min_w_0()
                 .mt(px(top_margin(previous, block)))
-                .child(render_shared_block(&block_id, block, true, tokens, options)),
+                .child(render_shared_block(
+                    &block_id, block, true, false, tokens, options,
+                )),
         );
     }
     container.into_any_element()
@@ -232,7 +234,9 @@ fn render_item_blocks(
                 .w_full()
                 .min_w_0()
                 .mt(px(top))
-                .child(render_shared_block(&inner_id, inner, true, tokens, options)),
+                .child(render_shared_block(
+                    &inner_id, inner, true, true, tokens, options,
+                )),
         );
     }
     body.into_any_element()
@@ -386,7 +390,9 @@ fn render_quote(
                 .w_full()
                 .min_w_0()
                 .mt(px(top_margin(previous, block)))
-                .child(render_shared_block(&inner_id, block, true, tokens, &quoted)),
+                .child(render_shared_block(
+                    &inner_id, block, true, false, tokens, &quoted,
+                )),
         );
     }
     quote.into_any_element()
@@ -492,6 +498,7 @@ fn render_table(
                         cell,
                         tokens,
                         &cell_options(options, color),
+                        true,
                     )),
             );
         }

@@ -6,6 +6,7 @@ pub(crate) mod annotations;
 mod api;
 mod browser;
 mod browser_context_menu;
+mod browser_inline_logins;
 pub(crate) mod chrome;
 mod color;
 mod database;
@@ -1198,6 +1199,7 @@ impl RightPanel {
                 panel_open: true,
                 add_menu_open: self.add_menu_open,
                 available_tabs: &RightPanelTab::MENU_ORDER,
+                has_project: true,
                 tokens: &self.tokens,
             },
             callbacks,

@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use conn_state::providers::ServerConfigState;
 use conn_state::ThreadState;
+use conn_state::providers::ServerConfigState;
 use conn_theme::Tokens;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
@@ -106,6 +106,12 @@ fn render_model_picker_settings_screenshots() {
         return;
     };
     let dir = Path::new(&dir);
-    render_pngs(dir, "claude", "claudeAgent", "claudeAgent", "claude-opus-5-5");
+    render_pngs(
+        dir,
+        "claude",
+        "claudeAgent",
+        "claudeAgent",
+        "claude-opus-5-5",
+    );
     render_pngs(dir, "codex", "codex", "codex", "gpt-6.1-sol");
 }

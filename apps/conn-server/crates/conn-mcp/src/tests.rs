@@ -6493,6 +6493,7 @@ async fn browser_calls_default_to_the_desktop_and_leave_it_only_for_a_named_serv
                 "s1",
                 &environment,
                 &desktop_binding(&environment, &thread, "desk-1"),
+                conn_preview::relay::SecretAccess::Allowed,
             )
             .unwrap();
         serve_desktop_tab(
@@ -6554,6 +6555,7 @@ async fn browser_calls_default_to_the_desktop_and_leave_it_only_for_a_named_serv
             "s2",
             &environment,
             &desktop_binding(&environment, &thread, "desk-2"),
+            conn_preview::relay::SecretAccess::Allowed,
         )
         .unwrap();
     serve_desktop_tab(
@@ -6654,12 +6656,23 @@ impl DesktopRig {
 
     /// Registers a desktop tab and serves its requests into the log.
     fn host(&self, session: &'static str, tab: &'static str) {
+        self.host_with(session, tab, conn_preview::relay::SecretAccess::Allowed);
+    }
+
+    /// [`Self::host`] for a desktop whose session may or may not read test logins.
+    fn host_with(
+        &self,
+        session: &'static str,
+        tab: &'static str,
+        secrets: conn_preview::relay::SecretAccess,
+    ) {
         let registered = self
             .preview
             .desktop_register(
                 session,
                 &self.environment,
                 &desktop_binding(&self.environment, &self.thread, tab),
+                secrets,
             )
             .unwrap();
         serve_desktop_tab(
@@ -6925,6 +6938,50 @@ async fn fill_credential_fills_the_threads_desktop_tab() {
         input.get("tabId").is_none(),
         "the tab travels apart: {input}"
     );
+}
+
+/// A desktop whose session holds `preview:operate` but not `settings:write` drives the thread's
+/// tab as any other, but never receives a test login: `fill_credential` fails with a clear
+/// error before the secret is read, and no fill reaches that desktop.
+#[tokio::test]
+async fn fill_credential_never_sends_a_test_login_to_a_desktop_without_settings_write() {
+    let rig = desktop_rig("desktop-fill-withheld").await;
+    let mut agent = rig.agent().await;
+    rig.host_with("s1", "desk-1", conn_preview::relay::SecretAccess::Withheld);
+    let saved = agent
+        .ok(
+            "save_test_login",
+            json!({"url": "http://desktop", "username": "tester", "password": "fixture-only",
+                "otpSecret": "JBSWY3DPEHPK3PXP"}),
+        )
+        .await;
+    // The desktop still drives the tab.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    for field in ["password", "otp", "username"] {
+        let reply = agent
+            .request(
+                "tools/call",
+                json!({"name":"fill_credential","arguments":{"itemId": saved["id"], "field": field}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["isError"], true, "{field}: {reply}");
+        let message = error_text(&reply);
+        assert!(message.contains("settings:write"), "{field}: {message}");
+        assert!(message.contains("Nothing was filled"), "{field}: {message}");
+        assert!(!reply.to_string().contains("fixture-only"), "{reply}");
+    }
+    let log = rig.log.lock().unwrap();
+    assert!(
+        log.iter().all(|entry| entry.1 != "credentialFill"),
+        "a fill reached the desktop: {log:?}"
+    );
+    assert!(!format!("{log:?}").contains("fixture-only"), "{log:?}");
 }
 
 /// A desktop that hosts tabs but has none for the thread yet is asked to open its Browser panel;

@@ -657,8 +657,12 @@ itself, so nothing new is advertised.
 - **Known differences:** a call that names a server tab stays on the server's browser while
   a desktop tab is current (T3 sends it to the desktop, which refuses it). A desktop cannot
   restore an unknown tab id from this server's own allocator. `preview.list` gives no
-  `host`/`hostedHere` (as T3's `preview.list`); `fill_credential` reads the server browser
-  only. Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
+  `host`/`hostedHere` (as T3's `preview.list`). A fill (`credentialFill`, from
+  `fill_credential`) goes only to a desktop whose session holds `settings:write`, the scope
+  that reads test logins; T3 sends it to any `preview:operate` host. Other hosts still serve
+  every other call, and `fill_credential` refuses with `capability_denied` before it reads the
+  secret (2026-11-26; tests in `relay/tests.rs`, `conn-mcp` and `methods/preview/tests.rs`).
+  Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
   records, 256 pending requests, 256 agent assignments, 64 queued requests per desktop (a
   full queue answers `RequestQueueClosedError`). `preview_status` reads the desktop tabs one
   after another (T3: four at a time). `preview_act` input is not decoded per action before it

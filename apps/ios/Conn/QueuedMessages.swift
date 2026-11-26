@@ -170,7 +170,7 @@ struct QueuedMessageRow: View {
             bubble
         }
         .opacity(busy ? 0.6 : 1)
-        .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
+        .modifier(UserBubbleWidth())
         .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("queued.row.\(message.runId)")

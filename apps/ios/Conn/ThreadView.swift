@@ -374,8 +374,12 @@ struct ThreadView: View {
             onOpenThread(link.threadId, link.environmentId)
             return .handled
         }
-        func add(_ id: String, extra: CGFloat = 0, @ViewBuilder _ content: @escaping @MainActor () -> some View) {
-            rows.append(FeedRow(id: id, gap: ThreadFeed.spacing + extra) {
+        // What a row draws from, beyond its id: the feed re-measures and redraws a row only when
+        // this changes, so updates elsewhere (a clock tick, another row streaming) leave it alone.
+        let shellStamp = feedSignature(store.shell?.threads.count, store.identityEpoch, store.status == .connected)
+        func add(_ id: String, extra: CGFloat = 0, key: Int = 0,
+                 @ViewBuilder _ content: @escaping @MainActor () -> some View) {
+            rows.append(FeedRow(id: id, gap: ThreadFeed.spacing + extra, signature: key) {
                 AnyView(
                     content()
                         // Card edges line up with the composer's 12-point inset.
@@ -388,7 +392,7 @@ struct ThreadView: View {
         }
 
         if let error = store.lastError, !error.isEmpty {
-            add("notice:error") { KitNotice(error, icon: .warning, tone: .error) }
+            add("notice:error", key: error.hashValue) { KitNotice(error, icon: .warning, tone: .error) }
         }
         guard let snapshot else {
             add("loading") { [theme] in
@@ -405,18 +409,18 @@ struct ThreadView: View {
         }
         if canReadEarlier {
             let paging = paging
-            add("earlier") {
+            add("earlier", key: paging.hashValue) {
                 Button("Earlier messages") { readHistory() }
                     .disabled(paging)
                     .font(.kitDetail)
             }
         }
         if let setup, setup.threadId == threadId, readingWindow == nil {
-            add("worktree") { ThreadWorktreeCard(setup: setup) }
+            add("worktree", key: setup.hashValue) { ThreadWorktreeCard(setup: setup) }
         }
         if snapshot.entries.isEmpty {
             let text = store.status == .connected ? "No messages in this thread yet." : "No saved messages for this thread."
-            add("empty") { [theme] in
+            add("empty", key: text.hashValue) { [theme] in
                 Text(text)
                     .font(.kitDetail)
                     .foregroundStyle(theme.mutedForeground)
@@ -447,13 +451,14 @@ struct ThreadView: View {
                 case let .workGroup(group, entries):
                     let start = snapshot.activeWorkStartedAtMs
                     let offset = snapshot.serverClockOffsetMs
-                    add(item.id, extra: extra) {
+                    add(item.id, extra: extra, key: feedSignature(group, entries, start, offset)) {
                         WorkGroupCard(group: group, entries: entries, workStartedAtMs: start, clockOffsetMs: offset)
                             .equatable()
                     }
                 case let .entry(entry):
                     let detail = snapshot.feedDetails[entry.entryId]
-                    add(item.id, extra: extra) { [store, threadId, onOpenThread, onTemplate] in
+                    add(item.id, extra: extra, key: feedSignature(entry, detail, interactive, shellStamp)) {
+                        [store, threadId, onOpenThread, onTemplate] in
                         TimelineEntryRow(
                             threadId: threadId,
                             entry: entry,
@@ -477,7 +482,7 @@ struct ThreadView: View {
             let offset = snapshot.serverClockOffsetMs
             let live = liveWork
             // Under a running group's "Working for" row: the paragraph gap, as above.
-            add("live", extra: running ? foldGap : 0) {
+            add("live", extra: running ? foldGap : 0, key: feedSignature(live.label, live.icon, running, start, offset)) {
                 VStack(alignment: .leading, spacing: 0) {
                     if !running { WorkingFold(startedAtMs: start, offsetMs: offset) }
                     LiveWorkRow(label: live.label, glyph: live.icon)
@@ -488,7 +493,8 @@ struct ThreadView: View {
         let queued = snapshot.entries.compactMap(QueuedMessage.init)
         if !queued.isEmpty {
             let editBlocked = pendingQuestion != nil || !pendingApprovals.isEmpty
-            add("queued-messages") { [store, threadId] in
+            let queuedEntries = snapshot.entries.filter { QueuedMessage($0) != nil }
+            add("queued-messages", key: feedSignature(queuedEntries, editBlocked, shellStamp)) { [store, threadId] in
                 QueuedMessagesSection(threadId: threadId, messages: queued, store: store, editBlocked: editBlocked)
             }
         }
@@ -824,4 +830,11 @@ struct FeedFloatingControl: View {
         .buttonStyle(.plain)
         .accessibilityIdentifier("thread.agents")
     }
+}
+
+/// A row's content signature for the feed (`FeedRow.signature`).
+func feedSignature(_ parts: AnyHashable?...) -> Int {
+    var hasher = Hasher()
+    for part in parts { hasher.combine(part) }
+    return hasher.finalize()
 }

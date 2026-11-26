@@ -5,6 +5,8 @@ import UIKit
 struct FeedRow {
     let id: String
     let gap: CGFloat
+    /// What the row draws from (`feedSignature`): it is measured and redrawn only when this changes.
+    var signature: Int = 0
     let content: @MainActor () -> AnyView
 }
 
@@ -33,14 +35,33 @@ final class FeedChrome {
 @MainActor @Observable
 final class FeedExpansion {
     private var open: Set<String> = []
+    /// A row's height changes with it: the feed measures the rows in view again.
+    @ObservationIgnored var onToggle: () -> Void = {}
     func isOpen(_ key: String) -> Bool { open.contains(key) }
     func toggle(_ key: String) {
         if open.remove(key) == nil { open.insert(key) }
+        onToggle()
     }
 }
 
 extension EnvironmentValues {
     @Entry var feedExpansion: FeedExpansion?
+    /// The feed's width, so rows can size from it before any container is laid out.
+    @Entry var feedWidth: CGFloat?
+}
+
+/// A user bubble's column: 90% of the feed's width less 32 pt, at the trailing edge. From the
+/// feed's width when it has one, so off-screen measuring gets the same wrap as the cell.
+struct UserBubbleWidth: ViewModifier {
+    @Environment(\.feedWidth) private var feedWidth
+
+    func body(content: Content) -> some View {
+        if let feedWidth {
+            content.frame(width: (feedWidth - 32) * 0.9, alignment: .trailing)
+        } else {
+            content.containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
+        }
+    }
 }
 
 /// The thread feed: a UICollectionView of SwiftUI rows, with the composer as its bottom bar.
@@ -84,6 +105,13 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
     private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private var rows: [String: FeedRow] = [:]
     private var order: [String] = []
+    /// Each row's height at `measuredWidth`, for the signature it was measured with. Rows are
+    /// measured off screen before they show, so scrolling never corrects a guessed height.
+    private var measured: [String: (signature: Int, height: CGFloat)] = [:]
+    private var measuredWidth: CGFloat = 0
+    /// Lays rows out off screen at the feed's width, inside the window so it has its text size.
+    private let sizer = UIHostingController(rootView: AnyView(EmptyView()))
+    private var measuringScheduled = false
     private let composerHost = UIHostingController(rootView: AnyView(EmptyView()))
     private let floatingHost = UIHostingController(rootView: AnyView(EmptyView()))
     private let floatingContainer = PassthroughView()
@@ -113,6 +141,7 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         self.chrome = chrome
         super.init(nibName: nil, bundle: nil)
         chrome.reportFloatingFrame = { [weak self] in self?.floatingContainer.interactiveFrame = $0 }
+        expansion.onToggle = { [weak self] in self?.remeasureLiveRows() }
     }
 
     @available(*, unavailable)
@@ -137,7 +166,18 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         cv.followsEnd = { [unowned self] in self.followsEnd }
         cv.didLayout = { [unowned self] in self.updateChrome() }
         layout.followsEnd = { [unowned self] in self.followsEnd }
+        layout.height = { [unowned self] id in self.measured[id]?.height }
+        layout.selfSized = { [unowned self] id, height in
+            if let entry = self.measured[id] { self.measured[id] = (entry.signature, height) }
+        }
         view.addSubview(cv)
+
+        addChild(sizer)
+        sizer.view.isHidden = true
+        sizer.view.isUserInteractionEnabled = false
+        sizer.safeAreaRegions = []
+        view.addSubview(sizer.view)
+        sizer.didMove(toParent: self)
 
         let registration = UICollectionView.CellRegistration<FeedCell, String> { [unowned self] cell, _, id in
             self.configure(cell, id: id)
@@ -218,7 +258,8 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         guard !first else { return }
         pinned = true
         programmatic = false
-        layout.forgetHeights()
+        measured.removeAll()
+        layout.invalidateLayout()
     }
 
     func setBars(composer: AnyView, floating: AnyView, capsuleInset: CGFloat) {
@@ -238,6 +279,8 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         loadViewIfNeeded()
         var seen = Set<String>()
         let unique = newRows.filter { seen.insert($0.id).inserted }
+        // Only rows whose content changed are redrawn; the others keep their cells as they are.
+        let changed = Set(unique.filter { rows[$0.id]?.signature != $0.signature }.map(\.id))
         rows = Dictionary(unique.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let ids = unique.map(\.id)
         let items = unique.map { FeedLayout.Item(id: $0.id, gap: $0.gap) }
@@ -245,21 +288,21 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         let paddingChanged = layout.bottomPadding != bottomPadding
         layout.bottomPadding = bottomPadding
 
-        if ids != order {
-            // The cells' ids under the old order, before it changes.
-            let live = liveIds().filter { seen.contains($0) }
-            order = ids
-            layout.items = items
+        let orderChanged = ids != order
+        // The cells' ids under the old order, before it changes.
+        let live = liveIds().filter { changed.contains($0) }
+        order = ids
+        let gapsChanged = layout.items != items
+        layout.items = items
+        measureNow(changed: changed)
+        if orderChanged {
             var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
             snapshot.appendSections([0])
             snapshot.appendItems(ids)
             snapshot.reconfigureItems(live)
             dataSource.apply(snapshot, animatingDifferences: false)
         } else {
-            let gapsChanged = layout.items != items
-            layout.items = items
-            if gapsChanged || paddingChanged { layout.invalidateLayout() }
-            let live = liveIds()
+            if gapsChanged || paddingChanged || !changed.isEmpty { layout.invalidateLayout() }
             if !live.isEmpty {
                 var snapshot = dataSource.snapshot()
                 snapshot.reconfigureItems(live)
@@ -290,23 +333,141 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         }
     }
 
+    // MARK: - Measuring
+
+    private func content(_ row: FeedRow) -> some View {
+        row.content()
+            .environment(\.connTheme, theme)
+            .environment(\.feedExpansion, expansion)
+            .environment(\.feedWidth, measuredWidth > 0 ? measuredWidth : nil)
+    }
+
+    /// The row's height at the feed's width, laid out by SwiftUI as its cell will lay it out.
+    private func measure(_ row: FeedRow) -> CGFloat {
+        sizer.rootView = AnyView(content(row))
+        let size = sizer.sizeThatFits(in: CGSize(width: measuredWidth, height: .greatestFiniteMagnitude))
+        let scale = view.window?.screen.scale ?? 3
+        return (size.height * scale).rounded(.up) / scale
+    }
+
+    private func needsMeasure(_ id: String) -> Bool {
+        guard let row = rows[id] else { return false }
+        return measured[id]?.signature != row.signature
+    }
+
+    /// Measures, before the next layout, what the reader sees or is about to: changed rows in or
+    /// near view, and the rows around the viewport (from the end when pinned). The rest follow in
+    /// small batches (`measureMore`).
+    private func measureNow(changed: Set<String>) {
+        let width = collectionView.bounds.width
+        guard width > 0 else { return }
+        if width != measuredWidth {
+            measuredWidth = width
+            measured.removeAll()
+        }
+        let cv = collectionView
+        let screen = max(cv.bounds.height, 400)
+        var wanted = Set<String>()
+        if pinned || layout.frames.isEmpty {
+            var covered: CGFloat = 0
+            for id in order.reversed() {
+                wanted.insert(id)
+                covered += measured[id]?.height ?? FeedLayout.estimate
+                if covered > screen * 2 { break }
+            }
+        } else {
+            let top = cv.contentOffset.y - screen
+            let bottom = cv.contentOffset.y + cv.bounds.height + screen
+            for (index, id) in order.enumerated() where index < layout.frames.count {
+                let frame = layout.frames[index]
+                if frame.maxY >= top && frame.minY <= bottom { wanted.insert(id) }
+            }
+        }
+        for id in changed where wanted.contains(id) || measured[id] != nil { wanted.insert(id) }
+        var deltaAbove: CGFloat = 0
+        let readTop = cv.contentOffset.y + cv.adjustedContentInset.top
+        for (index, id) in order.enumerated() where wanted.contains(id) && needsMeasure(id) {
+            guard let row = rows[id] else { continue }
+            let old = measured[id]?.height ?? FeedLayout.estimate
+            let height = measure(row)
+            measured[id] = (row.signature, height)
+            if index < layout.frames.count, layout.frames[index].maxY <= readTop { deltaAbove += height - old }
+        }
+        if !pinned && deltaAbove != 0 {
+            layout.invalidateLayout()
+            cv.layoutIfNeeded()
+            cv.contentOffset.y += deltaAbove
+        }
+        scheduleMeasuring()
+    }
+
+    private func scheduleMeasuring() {
+        guard !measuringScheduled, order.contains(where: needsMeasure) else { return }
+        measuringScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.measuringScheduled = false
+            self?.measureMore()
+        }
+    }
+
+    /// A few more rows per run-loop turn, nearest the reader first. A row above the reader moves
+    /// the offset by its change, so nothing in view shifts.
+    private func measureMore() {
+        guard measuredWidth > 0 else { return }
+        let cv = collectionView
+        let readTop = cv.contentOffset.y + cv.adjustedContentInset.top
+        let center = cv.contentOffset.y + cv.bounds.height / 2
+        let pending = order.enumerated().filter { needsMeasure($0.element) }
+        guard !pending.isEmpty else { return }
+        let nearest = pending.sorted { a, b in
+            let fa = a.offset < layout.frames.count ? abs(layout.frames[a.offset].midY - center) : .greatestFiniteMagnitude
+            let fb = b.offset < layout.frames.count ? abs(layout.frames[b.offset].midY - center) : .greatestFiniteMagnitude
+            return fa < fb
+        }.prefix(8)
+        var deltaAbove: CGFloat = 0
+        for (index, id) in nearest {
+            guard let row = rows[id] else { continue }
+            let old = measured[id]?.height ?? FeedLayout.estimate
+            let height = measure(row)
+            measured[id] = (row.signature, height)
+            if index < layout.frames.count, layout.frames[index].maxY <= readTop { deltaAbove += height - old }
+        }
+        layout.invalidateLayout()
+        if !followsEnd && deltaAbove != 0 {
+            cv.layoutIfNeeded()
+            cv.contentOffset.y += deltaAbove
+        } else {
+            cv.setNeedsLayout()
+        }
+        scheduleMeasuring()
+    }
+
+    /// Expanding a row in view changes its height: measure the rows in view again, keeping the
+    /// first one where it is on screen.
+    private func remeasureLiveRows() {
+        let anchor = pinned ? nil : captureAnchor()
+        for id in liveIds() { measured[id] = nil }
+        measureNow(changed: [])
+        layout.invalidateLayout()
+        if let anchor { restore(anchor) } else { collectionView.setNeedsLayout() }
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        if previous?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+            measured.removeAll()
+            layout.invalidateLayout()
+        }
+    }
+
     // MARK: - Cells
 
     private func configure(_ cell: FeedCell, id: String) {
         guard let row = rows[id] else {
-            cell.contentConfiguration = nil
+            cell.show(AnyView(EmptyView()))
             return
         }
-        let theme = theme
-        let expansion = expansion
-        cell.contentConfiguration = UIHostingConfiguration {
-            row.content()
-                .environment(\.connTheme, theme)
-                .environment(\.feedExpansion, expansion)
-                .id(id)
-        }
-        .margins(.all, 0)
-        .minSize(width: 0, height: 0)
+        cell.show(AnyView(content(row).id(id)))
     }
 
     /// Rows whose cells exist now; only they need their content refreshed.
@@ -476,11 +637,39 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        measureAhead()
         let y = scrollView.contentOffset.y
         if scrollView.isDragging, y < lastOffset, y + scrollView.adjustedContentInset.top < 160 {
             reachTopArmed = true
         }
         lastOffset = y
+    }
+
+    /// Rows within a screen and a half above or below the reader are measured before they come
+    /// into view; the change of those above moves the offset, so what is read stays put.
+    private func measureAhead() {
+        let cv = collectionView
+        let screen = cv.bounds.height
+        let top = cv.contentOffset.y - screen * 1.5
+        let bottom = cv.contentOffset.y + screen * 2.5
+        let readTop = cv.contentOffset.y + cv.adjustedContentInset.top
+        var deltaAbove: CGFloat = 0
+        var any = false
+        for (index, id) in order.enumerated() where index < layout.frames.count {
+            let frame = layout.frames[index]
+            guard frame.maxY >= top && frame.minY <= bottom, needsMeasure(id), let row = rows[id] else { continue }
+            let old = measured[id]?.height ?? FeedLayout.estimate
+            let height = measure(row)
+            measured[id] = (row.signature, height)
+            if frame.maxY <= readTop { deltaAbove += height - old }
+            any = true
+        }
+        guard any else { return }
+        layout.invalidateLayout()
+        if !followsEnd && deltaAbove != 0 {
+            cv.layoutIfNeeded()
+            cv.contentOffset.y += deltaAbove
+        }
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -544,30 +733,25 @@ final class FeedLayout: UICollectionViewLayout {
     let topPadding: CGFloat = 12
     var bottomPadding: CGFloat = 38
     var followsEnd: () -> Bool = { false }
+    /// The controller's measured height for a row, nil until it has one.
+    var height: (String) -> CGFloat? = { _ in nil }
+    /// A cell reported a different height (its own state changed, such as a card expanding).
+    var selfSized: (String, CGFloat) -> Void = { _, _ in }
     private(set) var frames: [CGRect] = []
-    private var heights: [String: CGFloat] = [:]
     private var width: CGFloat = 0
     private var contentHeight: CGFloat = 0
-    private static let estimate: CGFloat = 120
-
-    func forgetHeights() {
-        heights.removeAll()
-        invalidateLayout()
-    }
+    static let estimate: CGFloat = 120
 
     override func prepare() {
         super.prepare()
         guard let cv = collectionView else { return }
-        if cv.bounds.width != width {
-            if width != 0 { heights.removeAll() }
-            width = cv.bounds.width
-        }
+        width = cv.bounds.width
         let count = cv.numberOfSections > 0 ? cv.numberOfItems(inSection: 0) : 0
         frames.removeAll(keepingCapacity: true)
         var y = topPadding
         for (index, item) in items.prefix(count).enumerated() {
             if index > 0 { y += item.gap }
-            let height = heights[item.id] ?? Self.estimate
+            let height = height(item.id) ?? Self.estimate
             frames.append(CGRect(x: 0, y: y, width: width, height: height))
             y += height
         }
@@ -617,13 +801,8 @@ final class FeedLayout: UICollectionViewLayout {
         forPreferredLayoutAttributes preferred: UICollectionViewLayoutAttributes,
         withOriginalAttributes original: UICollectionViewLayoutAttributes
     ) -> Bool {
-        let index = original.indexPath.item
-        guard index < items.count else { return false }
-        if abs(preferred.size.height - original.size.height) <= 0.5 {
-            if heights[items[index].id] == nil { heights[items[index].id] = original.size.height }
-            return false
-        }
-        return true
+        // Rows arrive measured; only a real change inside a cell (more than a point) counts.
+        abs(preferred.size.height - original.size.height) > 1
     }
 
     override func invalidationContext(
@@ -636,14 +815,11 @@ final class FeedLayout: UICollectionViewLayout {
         let id = items[index].id
         let old = frames[index]
         let delta = preferred.size.height - old.height
-        let firstMeasure = heights[id] == nil
-        heights[id] = preferred.size.height
+        selfSized(id, preferred.size.height)
         let top = cv.contentOffset.y + cv.adjustedContentInset.top
-        // A row wholly above the reader, or one measured for the first time as it comes in at the
-        // top edge, moves the offset with it. Growth in view (streaming) or below never does; the
-        // end-follow keeps the end in place while pinned.
-        let above = old.maxY <= top + 0.5 || (firstMeasure && old.minY < top)
-        if !followsEnd() && above {
+        // A row wholly above the reader moves the offset with it. Growth in view or below never
+        // does; the end-follow keeps the end in place while pinned.
+        if !followsEnd() && old.maxY <= top + 0.5 {
             context.contentOffsetAdjustment = CGPoint(x: 0, y: delta)
         }
         context.contentSizeAdjustment = CGSize(width: 0, height: delta)
@@ -651,18 +827,42 @@ final class FeedLayout: UICollectionViewLayout {
     }
 }
 
-/// Sizes itself to its SwiftUI content at the layout's width.
+/// Hosts one SwiftUI row. A hosting controller with no safe-area regions, like the composer's:
+/// `UIHostingConfiguration` padded rows for the navigation bar and composer areas they scrolled
+/// under, so they grew and shrank as they moved. The off-screen sizer uses the same setup.
 final class FeedCell: UICollectionViewCell {
+    private let host = UIHostingController(rootView: AnyView(EmptyView()))
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        host.safeAreaRegions = []
+        host.view.backgroundColor = .clear
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: contentView.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            host.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ content: AnyView) {
+        host.rootView = content
+    }
+
+    /// The row's own size at the cell's width; differs from the layout only when the row's state
+    /// changed inside the cell.
     override func preferredLayoutAttributesFitting(
         _ layoutAttributes: UICollectionViewLayoutAttributes
     ) -> UICollectionViewLayoutAttributes {
         let attributes = layoutAttributes.copy() as! UICollectionViewLayoutAttributes
-        let size = contentView.systemLayoutSizeFitting(
-            CGSize(width: layoutAttributes.size.width, height: UIView.layoutFittingCompressedSize.height),
-            withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel
-        )
-        attributes.size = CGSize(width: layoutAttributes.size.width, height: size.height)
+        let size = host.sizeThatFits(in: CGSize(width: layoutAttributes.size.width, height: .greatestFiniteMagnitude))
+        let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 3
+        attributes.size = CGSize(width: layoutAttributes.size.width, height: (size.height * scale).rounded(.up) / scale)
         return attributes
     }
 }

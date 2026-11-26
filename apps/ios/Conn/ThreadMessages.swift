@@ -285,7 +285,7 @@ struct ThreadMessage: View {
                     topLeadingRadius: 20, bottomLeadingRadius: 20, bottomTrailingRadius: 20, topTrailingRadius: 20,
                     style: .continuous))
             }
-            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
+            .modifier(UserBubbleWidth())
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }

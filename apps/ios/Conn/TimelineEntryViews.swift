@@ -61,9 +61,9 @@ struct WorkGroupCard: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                // Collapsed, the label stands in for a paragraph above its message. Expanded, the
-                // log's rule follows at the plain gap, the same gap as under the closing rule.
-                .padding(.bottom, expanded ? 0 : FoldRow.leading(size))
+                // The label stands in for a paragraph: a paragraph gap to its message, or to the
+                // expanded log's opening rule.
+                .padding(.bottom, FoldRow.leading(size))
             }
 
             if expanded && !group.hasActive {
@@ -105,6 +105,8 @@ struct WorkGroupCard: View {
                     }
                     Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                 }
+                // The closing rule to the message reads as a paragraph gap, as above the log.
+                .padding(.bottom, FoldRow.leading(size))
             }
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).

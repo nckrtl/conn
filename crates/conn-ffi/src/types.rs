@@ -1846,7 +1846,7 @@ mod tests {
         assert!(!snap.work_groups[0].has_active);
         assert!(!snap.work_groups[0].continues_steer);
         assert_eq!(snap.work_groups[0].duration_ms, Some(7_500));
-        assert_eq!(snap.work_groups[0].duration_label.as_deref(), Some("7.5s"));
+        assert_eq!(snap.work_groups[0].duration_label.as_deref(), Some("8s"));
 
         assert_eq!(snap.work_groups[1].id, "work-group-tool2");
         assert_eq!(snap.work_groups[1].entry_ids, vec!["tool2"]);

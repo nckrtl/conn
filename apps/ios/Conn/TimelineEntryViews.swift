@@ -41,7 +41,9 @@ struct WorkGroupCard: View {
         VStack(alignment: .leading, spacing: gap) {
             if group.hasActive {
                 // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
+                // As far above its rule as the live row sits below it.
                 WorkingFoldLabel(since: startedAt, size: size)
+                    .padding(.bottom, FoldRow.leading(size))
             } else {
                 Button {
                     withAnimation(Kit.Motion.fast) {
@@ -133,7 +135,9 @@ struct WorkingFold: View {
         let gap = size * 0.85
         // The same rule as under "Worked for", then the live row a paragraph gap below it.
         VStack(alignment: .leading, spacing: gap) {
+            // As far above the rule as the live row sits below it.
             WorkingFoldLabel(since: since, size: size)
+                .padding(.bottom, FoldRow.leading(size))
             Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
         }
         .padding(.bottom, gap + FoldRow.leading(size))

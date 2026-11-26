@@ -199,6 +199,10 @@ pub(crate) const PRIMARY_NOT_READY: &str =
 const NO_PROJECT_MCP: &str =
     "This thread has no project, so it has no MCP panel. The Tasks panel opened instead.";
 
+/// Why an agent's Files request (`files_reveal`, `files_selection`) did not run on a thread
+/// without a project: that thread has no Files panel to reveal in or read a selection from.
+const NO_PROJECT_FILES: &str = "Files isn't available on threads without a project.";
+
 /// The connection an agent's panel request came from.
 pub(super) enum PanelOrigin {
     Primary,
@@ -4154,12 +4158,24 @@ impl ConnApp {
         environment: Option<&str>,
         cx: &mut Context<'_, Self>,
     ) -> tokio::sync::oneshot::Receiver<conn_contract::source::DesktopPanelResponse> {
+        self.dispatch_files_action_for_test(request, None, environment, cx)
+    }
+
+    /// As `dispatch_agent_panel_request_for_test`, for an agent's Files tool (`files_action`).
+    #[cfg(test)]
+    pub(crate) fn dispatch_files_action_for_test(
+        &self,
+        request: conn_contract::AgentPanelRequest,
+        files_action: Option<conn_contract::source::FilesAction>,
+        environment: Option<&str>,
+        cx: &mut Context<'_, Self>,
+    ) -> tokio::sync::oneshot::Receiver<conn_contract::source::DesktopPanelResponse> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let origin =
             environment.map_or(PanelOrigin::Primary, |e| PanelOrigin::Linked(e.to_owned()));
         let request = conn_contract::source::DesktopPanelRequest {
             panel: request,
-            files_action: None,
+            files_action,
         };
         self.dispatch_agent_panel_request(request, origin, PanelReply::Test(tx), cx);
         rx
@@ -6506,6 +6522,14 @@ impl ConnApp {
         use conn_contract::source::FilesAction;
         let mut selection = None;
         let result = async {
+            // A thread without a project shows Tasks in place of Files, so no Files view ever
+            // answers a reveal and the agent would wait out the server's timeout. Say so now.
+            let has_project = this
+                .read_with(cx, |app, _| app.thread_has_project(&owner.thread))
+                .map_err(|e| e.to_string())?;
+            if !has_project {
+                return Err(NO_PROJECT_FILES.to_owned());
+            }
             let valid = |app: &Self| app.thread_panels.owner() == Some(&owner);
             match action {
                 FilesAction::Selection => {

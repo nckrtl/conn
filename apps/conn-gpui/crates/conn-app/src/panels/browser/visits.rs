@@ -90,6 +90,14 @@ impl VisitTracker {
         }
     }
 
+    /// The panel loads an address it was not asked to open: a tab restored at startup or made
+    /// again after eviction. Nothing is recorded, and no title follows: there is no opened
+    /// address for one to belong to.
+    pub(super) fn restored(&mut self) {
+        self.opened = None;
+        self.watched = None;
+    }
+
     /// The main frame began a new document: the last title no longer belongs to the page.
     pub(super) fn load_started(&mut self) {
         self.watched = None;
@@ -209,6 +217,29 @@ mod tests {
         // A redirect, a callback page, a back or a reload: the history is not told.
         tracker.load_finished("https://auth.example.com/callback?code=1", 200, false, same);
         assert!(!tracker.is_watching());
+    }
+
+    #[test]
+    fn a_restored_address_follows_no_title() {
+        let mut tracker = ready();
+        tracker.opened(OPENED, 1);
+        tracker.load_finished(PAGE, 200, false, same);
+        assert!(tracker.is_watching());
+
+        // The tab comes back on where its page ended up: nothing is opened, nothing is watched.
+        tracker.restored();
+        assert!(!tracker.is_watching());
+        tracker.load_finished(PAGE, 200, false, same);
+        assert!(!tracker.is_watching());
+        assert_eq!(tracker.title_for(PAGE, "Dev"), None);
+
+        // The user opening an address afterwards is recorded and follows a title as usual.
+        assert!(tracker.opened(OPENED, 2).is_some());
+        tracker.load_finished(PAGE, 200, false, same);
+        assert_eq!(
+            tracker.title_for(PAGE, "Dev"),
+            Some((OPENED.to_owned(), "Dev".to_owned()))
+        );
     }
 
     #[test]

@@ -263,3 +263,87 @@ fn a_blank_tab_with_no_history_shows_the_empty_page(cx: &mut TestAppContext) {
     assert!(exists(cx, window, "browser-recent-page"));
     assert!(!exists(cx, window, "browser-recent-list"));
 }
+
+#[gpui_kit::test]
+fn a_restored_load_records_nothing_and_a_user_navigation_does(cx: &mut TestAppContext) {
+    const KEY: &str = "history-test/restore-live";
+    const OPENED: &str = "https://opened.restore-live.test/";
+    const FINAL: &str = "https://final.restore-live.test/auth/callback";
+    const TYPED: &str = "https://typed.restore-live.test/";
+    let (window, app) = mount_cloned_app(cx, KEY);
+    let page = open_page(cx, window, &app, "thread-selected", OPENED);
+    assert_eq!(urls(KEY), [OPENED]);
+
+    // A tab that comes back on where its page ended up: not a visit, so the order stays.
+    with_page(cx, &page, |panel, cx| panel.restore(FINAL, cx));
+    assert_eq!(
+        with_page(cx, &page, |panel, _| panel.target_url().to_owned()),
+        FINAL,
+        "the restored address still loads"
+    );
+    assert_eq!(urls(KEY), [OPENED]);
+
+    with_page(cx, &page, |panel, cx| panel.navigate(TYPED, cx));
+    assert_eq!(urls(KEY), [TYPED, OPENED]);
+}
+
+/// Tabs restored at startup (and, through the same pending load, tabs made again after their
+/// browser was closed) load their saved address without touching Recently used.
+#[gpui_kit::test]
+fn restored_tabs_do_not_move_up_recently_used_at_startup(cx: &mut TestAppContext) {
+    const KEY: &str = "history-test/restore-startup";
+    const FIRST: &str = "https://first.restore-startup.test/";
+    const SECOND: &str = "https://second.restore-startup.test/auth/callback";
+    const TYPED: &str = "https://typed.restore-startup.test/";
+    let dir = std::env::temp_dir().join(format!(
+        "conn-restore-history-{}",
+        crate::commands::new_thread_id()
+    ));
+    let path = dir.join("thread-panels.json");
+
+    let (window, app) = mount_cloned_app(cx, KEY);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.learn_primary_environment_for_test("env-a", cx);
+        })
+    });
+    open_page(cx, window, &app, "thread-selected", FIRST);
+    open_page(cx, window, &app, "thread-selected", SECOND);
+    assert_eq!(urls(KEY), [SECOND, FIRST]);
+    cx.update(|cx| app.update(cx, |app, cx| app.save_thread_panels_for_test(cx)));
+    cx.run_until_parked();
+    assert!(path.exists());
+
+    // A restart: a new window reads the saved tabs and shows them.
+    let (window, restarted) = mount_cloned_app(cx, KEY);
+    cx.update(|cx| {
+        restarted.update(cx, |app, cx| {
+            app.set_thread_panels_path_for_test(path.clone(), cx);
+            app.learn_primary_environment_for_test("env-a", cx);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, window);
+    let id = cx
+        .update(|cx| restarted.read(cx).right_panel_tabs().browser_ids().last())
+        .expect("the saved tab came back");
+    let page = cx
+        .update(|cx| restarted.read(cx).browser_weak_for_test(id, cx))
+        .expect("the shown tab has a browser");
+    assert_eq!(
+        with_page(cx, &page, |panel, _| panel.target_url().to_owned()),
+        SECOND,
+        "the saved address loads"
+    );
+    assert_eq!(
+        urls(KEY),
+        [SECOND, FIRST],
+        "restoring recorded nothing and moved nothing"
+    );
+
+    // The user then opens something: that is recorded.
+    with_page(cx, &page, |panel, cx| panel.navigate(TYPED, cx));
+    assert_eq!(urls(KEY), [TYPED, SECOND, FIRST]);
+    let _ = std::fs::remove_dir_all(dir);
+}

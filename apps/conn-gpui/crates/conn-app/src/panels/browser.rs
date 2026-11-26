@@ -173,6 +173,17 @@ enum BrowserOverlayEvent {
     OpenTab(NewTabRequest),
 }
 
+/// Why a browser is told to load an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Navigation {
+    /// The user opened it: the address bar, a link in chat, a Recently used row, an Open URL route.
+    /// It goes into the history.
+    User,
+    /// A tab came back with the address it had: restored at startup, or made again after its
+    /// browser was closed. It never goes into the history.
+    Restore,
+}
+
 /// What a browser tab tells its host.
 #[derive(Clone, Debug)]
 pub(crate) enum BrowserTabEvent {
@@ -1834,9 +1845,19 @@ impl BrowserPanel {
     /// Navigates the embedded browser to `url`, lazily installing and starting
     /// the CEF runtime on first use.
     pub(crate) fn navigate(&mut self, url: impl Into<String>, cx: &mut Context<'_, Self>) {
+        self.load(url, Navigation::User, cx);
+    }
+
+    /// Loads the address of a tab that comes back: restored at startup, or made again after its
+    /// browser was closed. The user opened nothing, so this records no visit and follows no title.
+    pub(crate) fn restore(&mut self, url: impl Into<String>, cx: &mut Context<'_, Self>) {
+        self.load(url, Navigation::Restore, cx);
+    }
+
+    fn load(&mut self, url: impl Into<String>, source: Navigation, cx: &mut Context<'_, Self>) {
         let target = normalize_url(&url.into());
         trace_browser(&format!(
-            "navigate to {target} (runtime {:?}, view {})",
+            "navigate to {target} ({source:?}, runtime {:?}, view {})",
             WebRuntime::global().state(),
             if self.view.borrow().is_some() {
                 "ready"
@@ -1844,11 +1865,18 @@ impl BrowserPanel {
                 "not yet"
             }
         ));
-        // The address bar, a Recently used row and an Open URL route all arrive here: the address
-        // is recorded now, so a dev server that is down is still one click away. Back, forward,
-        // reload and the warm start do not pass through here.
-        if let Some(visit) = self.visits.opened(&target, now_ms()) {
-            self.record_visit(&visit);
+        match source {
+            // The address bar, a Recently used row and an Open URL route all arrive here: the
+            // address is recorded now, so a dev server that is down is still one click away.
+            // Back, forward, reload and the warm start do not pass through here.
+            Navigation::User => {
+                if let Some(visit) = self.visits.opened(&target, now_ms()) {
+                    self.record_visit(&visit);
+                }
+            }
+            // A restored tab's address is Chromium's final URL (a redirect, an auth callback), so
+            // it is neither a visit nor an address whose title follows.
+            Navigation::Restore => self.visits.restored(),
         }
         self.url = target;
         self.user_load = true;

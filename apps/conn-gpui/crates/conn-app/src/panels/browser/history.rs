@@ -237,9 +237,60 @@ impl BrowserHistory {
 
 // ----- URLs -----------------------------------------------------------------------------------
 
+/// Query parameters that carry a credential, compared case-insensitively. A name that ends in
+/// `_token` or `_secret`, and the `X-Amz-*` signing parameters, are secret too
+/// (see [`is_secret_query_name`]).
+const SECRET_QUERY_NAMES: &[&str] = &[
+    "token",
+    "access_token",
+    "id_token",
+    "refresh_token",
+    "code",
+    "state",
+    "signature",
+    "sig",
+    "key",
+    "api_key",
+    "apikey",
+    "password",
+    "pass",
+    "secret",
+    "client_secret",
+    "auth",
+    "session",
+    "jwt",
+    "otp",
+];
+
+fn is_secret_query_name(name: &str) -> bool {
+    // Decode first, so `%74oken` cannot hide a name.
+    let decoded = url::form_urlencoded::parse(name.as_bytes())
+        .next()
+        .map_or_else(String::new, |(name, _)| name.into_owned());
+    let name = decoded.to_ascii_lowercase();
+    SECRET_QUERY_NAMES.contains(&name.as_str())
+        || name.ends_with("_token")
+        || name.ends_with("_secret")
+        || name.starts_with("x-amz-")
+}
+
+/// The query without its secret parameters. The other parameters keep their exact text and order,
+/// so normal page URLs stay distinct. None when nothing is left.
+fn strip_secret_query(query: &str) -> Option<String> {
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| !is_secret_query_name(pair.split_once('=').map_or(*pair, |(name, _)| name)))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("&"))
+}
+
 /// The canonical form of an absolute http(s) URL, without credentials; none for anything else
-/// and for a URL over 2048 bytes. It does not read typed text: the address bar has already turned
-/// that into an address (`panels/address.rs`), so a bare `localhost:3000` is refused here.
+/// and for a URL over 2048 bytes. The history file and the new-tab page show this form, so it
+/// carries no secret: no userinfo, no fragment (an implicit-flow `#access_token=`) and none of
+/// the [`SECRET_QUERY_NAMES`] query parameters. It does not read typed text: the address bar has
+/// already turned that into an address (`panels/address.rs`), so a bare `localhost:3000` is
+/// refused here.
 pub(crate) fn normalize_history_url(raw: &str) -> Option<String> {
     let mut parsed = Url::parse(raw.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
@@ -247,6 +298,9 @@ pub(crate) fn normalize_history_url(raw: &str) -> Option<String> {
     }
     let _ = parsed.set_username("");
     let _ = parsed.set_password(None);
+    parsed.set_fragment(None);
+    let query = parsed.query().and_then(strip_secret_query);
+    parsed.set_query(query.as_deref());
     (parsed.as_str().len() <= MAX_URL_LENGTH).then(|| parsed.into())
 }
 
@@ -577,15 +631,15 @@ mod tests {
     }
 
     #[test]
-    fn keeps_absolute_http_urls_with_path_query_and_hash_routes() {
+    fn keeps_absolute_http_urls_with_path_and_benign_query() {
         let cases = [
             (
                 "http://localhost:3000/admin?tab=1",
                 "http://localhost:3000/admin?tab=1",
             ),
             (
-                "http://localhost:3000/app#/route",
-                "http://localhost:3000/app#/route",
+                "http://localhost:3000/search?q=rust&page=2&tab=1",
+                "http://localhost:3000/search?q=rust&page=2&tab=1",
             ),
             ("http://127.1:3000", "http://127.0.0.1:3000/"),
             ("http://[::1]:8080/x", "http://[::1]:8080/x"),
@@ -614,6 +668,225 @@ mod tests {
                 "{raw}"
             );
         }
+    }
+
+    #[test]
+    fn drops_the_fragment() {
+        let cases = [
+            (
+                "http://localhost:3000/app#/route",
+                "http://localhost:3000/app",
+            ),
+            (
+                "https://app.test/cb#access_token=abc&token_type=bearer",
+                "https://app.test/cb",
+            ),
+            ("https://app.test/x?tab=1#top", "https://app.test/x?tab=1"),
+            ("https://app.test/#", "https://app.test/"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                normalize_history_url(raw).as_deref(),
+                Some(expected),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn drops_each_secret_query_parameter() {
+        let names = [
+            "token",
+            "access_token",
+            "id_token",
+            "refresh_token",
+            "code",
+            "state",
+            "signature",
+            "sig",
+            "key",
+            "api_key",
+            "apikey",
+            "password",
+            "pass",
+            "secret",
+            "client_secret",
+            "auth",
+            "session",
+            "jwt",
+            "otp",
+            // Any name that ends in `_token` or `_secret`.
+            "csrf_token",
+            "xsrf_token",
+            "app_secret",
+            "webhook_secret",
+            // AWS-style signing parameters.
+            "X-Amz-Signature",
+            "X-Amz-Credential",
+            "X-Amz-Security-Token",
+            "X-Amz-Date",
+            "X-Amz-Expires",
+            "X-Amz-SignedHeaders",
+            "X-Amz-Algorithm",
+        ];
+        for name in names {
+            for spelled in [
+                name.to_owned(),
+                name.to_ascii_uppercase(),
+                name.to_ascii_lowercase(),
+            ] {
+                let alone = format!("https://app.test/p?{spelled}=s3cr3t");
+                assert_eq!(
+                    normalize_history_url(&alone).as_deref(),
+                    Some("https://app.test/p"),
+                    "{alone}"
+                );
+                let among = format!("https://app.test/p?a=1&{spelled}=s3cr3t&b=2");
+                assert_eq!(
+                    normalize_history_url(&among).as_deref(),
+                    Some("https://app.test/p?a=1&b=2"),
+                    "{among}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drops_secret_names_however_they_are_written() {
+        let cases = [
+            // A value-less secret parameter.
+            ("https://app.test/p?token&a=1", "https://app.test/p?a=1"),
+            // A percent-encoded name.
+            ("https://app.test/p?%74oken=s&a=1", "https://app.test/p?a=1"),
+            // The OAuth callback and the implicit flow together.
+            (
+                "https://app.test/auth/callback?code=c&state=s#access_token=t",
+                "https://app.test/auth/callback",
+            ),
+            // A signed Laravel link keeps its other parameters.
+            (
+                "http://app.test/verify/1?expires=1700000000&signature=abc",
+                "http://app.test/verify/1?expires=1700000000",
+            ),
+            // The secret is the name: a secret-looking value under a plain name is kept.
+            ("https://app.test/p?q=token", "https://app.test/p?q=token"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                normalize_history_url(raw).as_deref(),
+                Some(expected),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_benign_parameters_so_pages_stay_distinct() {
+        let a = normalize_history_url("https://app.test/items?id=1&sort=name");
+        let b = normalize_history_url("https://app.test/items?id=2&sort=name");
+        assert_eq!(a.as_deref(), Some("https://app.test/items?id=1&sort=name"));
+        assert_eq!(b.as_deref(), Some("https://app.test/items?id=2&sort=name"));
+        assert_ne!(a, b);
+        for raw in [
+            "https://app.test/p?tab=1",
+            "https://app.test/p?page=3&q=a%20b",
+            "https://app.test/p?keyword=rust&passage=1&coder=x&states=2&authors=3",
+            "https://app.test/p?tokens=1&session_id=9&token_type=bearer",
+            "https://app.test/p?x-amazing=1",
+        ] {
+            assert_eq!(normalize_history_url(raw).as_deref(), Some(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_secret_never_reaches_the_store_or_the_file() {
+        let path = temp_file("no-secrets.json");
+        let _ = std::fs::remove_file(&path);
+        let history = BrowserHistory::open(Some(path.clone()));
+        for (at, url) in [
+            "https://app.test/login/magic?token=TOKEN-SECRET",
+            "https://app.test/auth/callback?code=CODE-SECRET&state=STATE-SECRET",
+            "https://app.test/signed?signature=SIGNATURE-SECRET&id=7",
+            "https://app.test/spa#access_token=FRAGMENT-SECRET",
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(url, at)| (at, url))
+        {
+            history.record_visit(KEY, url, at, None);
+        }
+        history.flush();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        for secret in [
+            "TOKEN-SECRET",
+            "CODE-SECRET",
+            "STATE-SECRET",
+            "SIGNATURE-SECRET",
+            "FRAGMENT-SECRET",
+        ] {
+            assert!(!text.contains(secret), "{secret} saved: {text}");
+        }
+        assert_eq!(
+            urls(&history, KEY),
+            [
+                "https://app.test/spa",
+                "https://app.test/signed?id=7",
+                "https://app.test/auth/callback",
+                "https://app.test/login/magic",
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_existing_file_is_cleaned_when_it_loads() {
+        let path = temp_file("dirty.json");
+        let _ = std::fs::remove_file(&path);
+        let dirty = serde_json::json!({
+            "version": 1,
+            "byProjectKey": {
+                KEY: [
+                    { "url": "https://app.test/cb?code=OLD-CODE&state=OLD-STATE", "lastVisitedAt": 5 },
+                    { "url": "https://app.test/cb?code=OTHER-CODE", "lastVisitedAt": 4 },
+                    { "url": "https://app.test/spa#access_token=OLD-FRAGMENT", "lastVisitedAt": 3 },
+                    { "url": "https://app.test/p?tab=1&jwt=OLD-JWT#frag", "lastVisitedAt": 2, "title": "P" },
+                    { "url": "https://app.test/x?client_secret=OLD-SECRET&id=7", "lastVisitedAt": 1 },
+                ]
+            }
+        });
+        std::fs::write(&path, dirty.to_string()).expect("the file is written");
+
+        let history = BrowserHistory::open(Some(path.clone()));
+        assert_eq!(
+            history.recent(KEY, 10),
+            [
+                entry("https://app.test/cb", 5),
+                entry("https://app.test/spa", 3),
+                HistoryEntry {
+                    title: Some("P".to_owned()),
+                    ..entry("https://app.test/p?tab=1", 2)
+                },
+                entry("https://app.test/x?id=7", 1),
+            ],
+            "cleaned, and the two callbacks are one page"
+        );
+
+        // The next save rewrites the file without a trace of them.
+        history.record_visit(KEY, "https://app.test/new", 6, None);
+        history.flush();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(text.contains("https://app.test/new"), "saved: {text}");
+        for secret in [
+            "OLD-CODE",
+            "OLD-STATE",
+            "OTHER-CODE",
+            "OLD-FRAGMENT",
+            "OLD-JWT",
+            "OLD-SECRET",
+        ] {
+            assert!(!text.contains(secret), "{secret} kept: {text}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -761,10 +1034,10 @@ mod tests {
         );
         assert_eq!(history.revision(), 0);
 
-        history.record_visit(KEY, "http://a.test/#/settings", 1, None);
-        history.set_title(KEY, "http://a.test/#/settings", "  My App  ", None);
+        history.record_visit(KEY, "http://a.test/?page=settings", 1, None);
+        history.set_title(KEY, "http://a.test/?page=settings", "  My App  ", None);
         assert_eq!(history.recent(KEY, 1)[0].title.as_deref(), Some("My App"));
-        history.set_title(KEY, "http://a.test/#/settings", "   ", None);
+        history.set_title(KEY, "http://a.test/?page=settings", "   ", None);
         assert_eq!(history.recent(KEY, 1)[0].title.as_deref(), Some("My App"));
     }
 
@@ -957,7 +1230,7 @@ mod tests {
             history.record_visit(KEY, "http://a.test/", 1, None);
             history.record_visit(KEY, "http://localhost:5173/", 2, None);
             history.set_title(KEY, "http://a.test/", "A", None);
-            history.record_visit("other", "https://b.test/x?y=1#z", 3, None);
+            history.record_visit("other", "https://b.test/x?y=1", 3, None);
             history.remove("other", "https://nope.test/");
             history.flush();
         }
@@ -972,7 +1245,7 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(urls(&restarted, "other"), ["https://b.test/x?y=1#z"]);
+        assert_eq!(urls(&restarted, "other"), ["https://b.test/x?y=1"]);
         restarted.remove(KEY, "http://a.test/");
         restarted.flush();
         assert_eq!(

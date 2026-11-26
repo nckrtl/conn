@@ -4,8 +4,12 @@ import SwiftUI
 struct AgentSummary: View {
     let title: String
     let text: String
-    @State private var expanded = false
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localExpanded = false
     @Environment(\.connTheme) private var theme
+
+    private var key: String { "summary:\(title.hashValue):\(text.hashValue)" }
+    private var expanded: Bool { expansion?.isOpen(key) ?? localExpanded }
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
@@ -25,7 +29,9 @@ struct AgentSummary: View {
             if text.isEmpty {
                 Text(title).fontWeight(.medium)
             } else {
-                Button { expanded.toggle() } label: {
+                Button {
+                    if let expansion { expansion.toggle(key) } else { localExpanded.toggle() }
+                } label: {
                     // The preview sits where the expanded text starts (the outer 6 pt), so
                     // expanding doesn't shift it.
                     VStack(alignment: .leading, spacing: 6) {
@@ -149,8 +155,6 @@ struct MessageReveal<Content: View, Actions: View, Accessory: View>: View {
                             Section(messageSentLabel(timestamp)) { copyItems }
                         }
                     }
-                    .onAppear { MessageMenu.isOpen = true }
-                    .onDisappear { MessageMenu.isOpen = false }
                 }
                 .padding(-previewInset)
                 .sheet(isPresented: $selecting) { SelectTextSheet(text: text) }
@@ -194,13 +198,6 @@ extension MessageReveal where Actions == EmptyView, Accessory == EmptyView {
         self.init(text: text, timestamp: timestamp, trailing: trailing, enabled: enabled,
                   actions: { EmptyView() }, accessory: { EmptyView() }, content: content)
     }
-}
-
-/// Whether a message's long-press menu is open. The menu holds the feed still while the keyboard
-/// goes down, so the feed must not pin itself or move the jump circle until it closes.
-@MainActor
-enum MessageMenu {
-    static var isOpen = false
 }
 
 /// "Today, 8:45", "Yesterday, 21:10" or "26 Nov, 08:45": the long-press menu's header.

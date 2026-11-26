@@ -37,6 +37,7 @@ mod browser_passkeys;
 mod details_agents;
 mod details_schedules;
 pub(crate) mod details_tasks;
+mod details_wakeups;
 mod floating_surfaces;
 mod hover_prefetch;
 mod image_viewer;

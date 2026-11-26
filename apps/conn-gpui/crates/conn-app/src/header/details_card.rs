@@ -18,7 +18,8 @@
 use conn_contract::{ScheduledTaskRunStatus, VcsStatusResult};
 use conn_state::providers::ModelCatalog;
 use conn_state::{
-    ScheduledTask, ShellState, ThreadShell, ThreadState, TimelineEntry, schedule_label,
+    AgentWakeup, ScheduledTask, ShellState, ThreadShell, ThreadState, TimelineEntry, WakeupContext,
+    WakeupKind, schedule_label,
 };
 use conn_theme::Tokens;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -808,6 +809,12 @@ pub(crate) fn render_thread_details_card(
     let bound = bound_tasks(&props.state.tasks, &thread.id);
     if !bound.is_empty() || props.state.tasks_error.is_some() {
         body = body.child(render_automations_section(props, &bound, cx));
+    }
+
+    // Agent wakeups: what the agent set to wake itself, which no Conn scheduled task lists.
+    let wakeups = thread_wakeups(props, current_unix_secs());
+    if !wakeups.is_empty() {
+        body = body.child(render_agent_wakeups_section(&wakeups, tokens));
     }
 
     // Lineage section.
@@ -1637,6 +1644,145 @@ fn render_automations_section(
         );
     }
     s.into_any_element()
+}
+
+/// The wakeups the agent set for itself on this thread: from its own timeline and the shell's
+/// background roster, so a linked-environment thread reads its own environment's.
+#[must_use]
+pub(crate) fn thread_wakeups(props: &DetailsCardProps<'_>, now_secs: i64) -> Vec<AgentWakeup> {
+    let Some(timeline) = props.timeline else {
+        return Vec::new();
+    };
+    let pending = props
+        .thread
+        .pending_background_tasks
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map_or(&[][..], Vec::as_slice);
+    timeline.agent_wakeups(&WakeupContext {
+        now_ms: now_secs.saturating_mul(1_000),
+        pending,
+        provider: &props.thread.provider_instance_id,
+    })
+}
+
+/// `Wakeup`, `Loop`, `Cron` or `Timer`.
+fn wakeup_kind_label(kind: WakeupKind) -> &'static str {
+    match kind {
+        WakeupKind::Wakeup => "Wakeup",
+        WakeupKind::Loop => "Loop",
+        WakeupKind::Cron => "Cron",
+        WakeupKind::Timer => "Timer",
+    }
+}
+
+/// When the next wake is: `next in 12m`, `next in 3h (est.)`, `due now`, else the cron schedule.
+fn wakeup_when(wakeup: &AgentWakeup, now_secs: i64) -> String {
+    let Some(due_ms) = wakeup.due_ms else {
+        return wakeup
+            .schedule
+            .clone()
+            .unwrap_or_else(|| "time unknown".to_owned());
+    };
+    let diff = due_ms.div_euclid(1_000) - now_secs;
+    let mut when = if diff <= 0 {
+        "due now".to_owned()
+    } else {
+        format!("next {}", relative_label(diff))
+    };
+    if wakeup.estimated {
+        when.push_str(" (est.)");
+    }
+    when
+}
+
+/// The second line of a wakeup row: what it is, whether it recurs, and when it wakes:
+/// `Wakeup · one-off · next in 12m (est.)`, `Cron · recurring · Every 5 minutes`.
+#[must_use]
+pub(crate) fn wakeup_line(wakeup: &AgentWakeup, now_secs: i64) -> String {
+    let repeats = if wakeup.recurring {
+        "recurring"
+    } else {
+        "one-off"
+    };
+    format!(
+        "{} · {repeats} · {}",
+        wakeup_kind_label(wakeup.kind),
+        wakeup_when(wakeup, now_secs)
+    )
+}
+
+/// The `Agent wakeups` section. The rows are read-only: the server cannot cancel a wakeup the
+/// agent's own tools set.
+fn render_agent_wakeups_section(wakeups: &[AgentWakeup], tokens: &Tokens) -> AnyElement {
+    let muted = hsla(tokens.muted_foreground);
+    let highlight = hsla(tokens.shell_highlight);
+    let now = current_unix_secs();
+    let mut list = div().flex().flex_col();
+    for wakeup in wakeups {
+        let line = wakeup_line(wakeup, now);
+        let note = if wakeup.estimated {
+            "\nThe time is an estimate. Conn cannot cancel this wakeup."
+        } else {
+            "\nConn cannot cancel this wakeup."
+        };
+        list = list.child(
+            div()
+                .id(SharedString::from(format!(
+                    "thread-details-wakeup-{}",
+                    wakeup.key
+                )))
+                .a11y_group(
+                    format!("thread-details.agent-wakeup.{}", wakeup.key),
+                    format!("Agent wakeup {}, {line}", wakeup.title),
+                )
+                .test_support()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(ROW_GAP_PX))
+                .w_full()
+                .px(px(ROW_PAD_X_PX))
+                .py(px(6.0))
+                .rounded(px(ROW_RADIUS_PX))
+                .hover(move |s| s.bg(highlight))
+                .conn_tooltip(format!("{}\n{line}{note}", wakeup.title), tokens)
+                .child(icons::concept("superhero/scheduled.svg", ICON_PX, muted))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(14.0))
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .text_color(hsla_alpha(tokens.foreground, 0.80))
+                                .child(wakeup.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .child(line),
+                        ),
+                ),
+        );
+    }
+    section(
+        "thread-details.agent-wakeups",
+        "Agent wakeups",
+        Some("Agent wakeups".to_owned()),
+        true,
+        None,
+        tokens,
+    )
+    .test_support()
+    .child(div().max_h(px(216.0)).child(list))
+    .into_any_element()
 }
 
 fn lineage_row(

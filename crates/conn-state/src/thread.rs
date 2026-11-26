@@ -50,6 +50,7 @@ pub use conn_contract::{
     OrchestrationV2TurnItemStatus as TurnItemStatus,
 };
 
+use crate::agent_wakeups::ScheduleCall;
 use crate::review_comment::{ReviewComment, review_comments_for_message};
 use crate::timeline::{
     TurnCheckpointFile, UserInputAnswer, UserInputOption, UserInputQuestion,
@@ -596,6 +597,9 @@ pub struct ThreadState {
     pub subagent_models: HashMap<String, SubagentModel>,
     /// The subagent id behind each `subagent` timeline entry, by entry id.
     pub subagent_of_entry: HashMap<String, String>,
+    /// The agent's scheduling tool calls (`ScheduleWakeup`, `CronCreate`, `CronDelete`), by item
+    /// id. A timeline row drops the call's input; [`Self::agent_wakeups`] needs it.
+    pub(crate) schedule_calls: HashMap<String, ScheduleCall>,
     /// Changes whenever [`Self::apply`], [`Self::apply_projection`], or
     /// [`Self::prepend_history_page`] runs, and is unique across all thread states,
     /// so views can skip re-syncing a timeline that did not change.
@@ -984,6 +988,7 @@ impl ThreadState {
         self.approval_requests.clear();
         self.approval_details.clear();
         self.feed_details.clear();
+        self.schedule_calls.clear();
         self.pending_requests = projection
             .runtime_requests
             .iter()
@@ -1024,6 +1029,11 @@ impl ThreadState {
             hydrate_deduped_projection_item(&mut item, &message_texts, &subagent_bodies);
             if let Some((id, detail)) = projection_feed_detail(&item) {
                 self.feed_details.insert(id, detail);
+            }
+            if let ProjectionTurnItem::DynamicTool(tool) = &item
+                && let Some(call) = ScheduleCall::from_item(tool)
+            {
+                self.schedule_calls.insert(tool.id.clone(), call);
             }
             if let ProjectionTurnItem::Subagent(sub) = &item {
                 self.subagent_of_entry
@@ -1116,6 +1126,12 @@ impl ThreadState {
         for row in rows {
             let item = row.item;
             let feed_detail = projection_feed_detail(&item);
+            let schedule_call = match &item {
+                ProjectionTurnItem::DynamicTool(tool) => {
+                    ScheduleCall::from_item(tool).map(|call| (tool.id.clone(), call))
+                }
+                _ => None,
+            };
             let approval_pair = match &item {
                 ProjectionTurnItem::ApprovalRequest(i) => Some((
                     i.id.clone(),
@@ -1138,6 +1154,9 @@ impl ThreadState {
             }
             if let Some((id, detail)) = feed_detail {
                 self.feed_details.entry(id).or_insert(detail);
+            }
+            if let Some((id, call)) = schedule_call {
+                self.schedule_calls.entry(id).or_insert(call);
             }
             if let Some((id, request_id, details)) = approval_pair {
                 self.approval_details.entry(id.clone()).or_insert(details);
@@ -1505,6 +1524,16 @@ impl ThreadState {
                 if let TurnItem::Subagent(i) = &ev.payload {
                     self.subagent_of_entry
                         .insert(i.id.clone(), i.subagent_id.clone());
+                }
+                if let TurnItem::DynamicTool(tool) = &ev.payload {
+                    match ScheduleCall::from_item(tool) {
+                        Some(call) => {
+                            self.schedule_calls.insert(tool.id.clone(), call);
+                        }
+                        None => {
+                            self.schedule_calls.remove(&tool.id);
+                        }
+                    }
                 }
                 let timing = extract_turn_item_timing(&ev.payload);
                 self.entry_timings.insert(item_id.clone(), timing);

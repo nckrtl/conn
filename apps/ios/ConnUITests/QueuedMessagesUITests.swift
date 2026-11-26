@@ -110,7 +110,7 @@ final class QueuedMessagesUITests: XCTestCase {
     }
 
     /// A long press shows Send now, Edit and Remove under the sent time, then Copy and Select text.
-    /// It doesn't reveal the copy button; a tap still does.
+    /// Neither the long press nor a tap reveals a copy button: the menu has Copy.
     func test2LongPressMenu() throws {
         openThread("qbusy")
         openMenu("run:qbusy:q0")
@@ -128,7 +128,8 @@ final class QueuedMessagesUITests: XCTestCase {
         let row = app.descendants(matching: .any)["queued.row.run:qbusy:q0"]
         XCTAssertFalse(row.buttons["Copy message"].exists, "the long press didn't reveal the copy button")
         bubble("run:qbusy:q0").tap()
-        XCTAssertTrue(row.buttons["Copy message"].waitForExistence(timeout: 2), "a tap reveals the copy button")
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertFalse(row.buttons["Copy message"].exists, "a tap reveals nothing")
         XCTAssertTrue(try commands().isEmpty, "nothing was sent")
     }
 

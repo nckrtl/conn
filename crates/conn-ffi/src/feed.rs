@@ -22,6 +22,9 @@ pub enum FfiFeedDetail {
         thread: Option<String>,
         environment: Option<String>,
         reviews: Vec<FfiReviewExcerpt>,
+        /// The sending agent's model and effort when the feed knows them (delegated results).
+        model: Option<String>,
+        effort: Option<String>,
     },
     Html {
         attachment: String,
@@ -55,6 +58,8 @@ impl FfiFeedDetail {
                 environment,
                 reviews,
             } => Self::Message {
+                model: None,
+                effort: None,
                 sender: sender.clone(),
                 thread: thread.clone(),
                 environment: environment.clone(),
@@ -158,6 +163,8 @@ impl<'a> CompletionCards<'a> {
                     thread: None,
                     environment: None,
                     reviews: vec![],
+                    model: None,
+                    effort: None,
                 },
             );
             entries.push(crate::FfiTimelineEntry::User {

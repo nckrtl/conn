@@ -96,10 +96,8 @@ struct MessageFooter: View {
     }
 }
 
-/// A tap on a message shows its copy button and time below it; another tap hides them.
-/// Simultaneous, so links, code-card buttons and the feed's keyboard dismissal still get the tap.
-/// A queued message adds its own actions to the one long-press menu and keeps its time in view
-/// (desktop's queued row), with an accessory after it.
+/// A message's long-press menu: the sent time, Copy and Select text. A queued message adds its
+/// own actions to the menu and keeps its time in view (desktop's queued row), with an accessory.
 struct MessageReveal<Content: View, Actions: View, Accessory: View>: View {
     let text: String
     let timestamp: String?
@@ -112,7 +110,6 @@ struct MessageReveal<Content: View, Actions: View, Accessory: View>: View {
     private let actions: Actions
     private let accessory: Accessory
     private let content: Content
-    @State private var revealed = false
     @State private var selecting = false
 
     init(text: String, timestamp: String?, trailing: Bool = false, enabled: Bool = true, pinnedFooter: Bool = false,
@@ -155,17 +152,11 @@ struct MessageReveal<Content: View, Actions: View, Accessory: View>: View {
                 .padding(-previewInset)
                 .sheet(isPresented: $selecting) { SelectTextSheet(text: text) }
                 .contentShape(Rectangle())
-                .simultaneousGesture(TapGesture().onEnded {
-                    guard enabled else { return }
-                    UISelectionFeedbackGenerator().selectionChanged()
-                    withAnimation(.easeOut(duration: 0.18)) { revealed.toggle() }
-                })
-                .accessibilityAction(named: revealed ? "Hide details" : "Show time and copy") {
-                    withAnimation { revealed.toggle() }
-                }
-            if revealed || pinnedFooter {
+            // The long-press menu carries the time and Copy, so a tap reveals nothing. Only a
+            // queued message keeps its time in view.
+            if pinnedFooter {
                 HStack(spacing: 4) {
-                    MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: revealed, copyAfter: trailing)
+                    MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: false, copyAfter: trailing)
                     accessory
                 }
                 .environment(\.layoutDirection, .leftToRight)
@@ -226,10 +217,13 @@ struct ThreadMessage: View {
     @Environment(\.connTheme) private var theme
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
 
-    private var metadata: (sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt]) {
-        guard case let .message(sender, thread, env, reviews) = detail else { return (nil, nil, nil, []) }
-        let localName = env == nil || env == store.environmentId ? store.shell?.threads.first(where: { $0.id == thread })?.title : nil
-        return (sender ?? localName, thread, env, reviews)
+    private var metadata: (sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt], model: String?) {
+        guard case let .message(sender, thread, env, reviews, model, effort) = detail else { return (nil, nil, nil, [], nil) }
+        let local = env == nil || env == store.environmentId ? store.shell?.threads.first(where: { $0.id == thread }) : nil
+        // `<model> · <effort>` as on subagent cards: the delegate's, else the sending thread's.
+        let label = model.map { [$0, effort] } ?? local?.model.map { [$0, local?.effort] }
+        let modelLine = label?.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        return (sender ?? local?.title, thread, env, reviews, modelLine)
     }
 
     private var displayText: String {
@@ -251,8 +245,9 @@ struct ThreadMessage: View {
                     ThreadCardHeaderLink(open: metadata.thread.map { id in
                         { onOpenThread(id, metadata.environment) }
                     }, label: "Open sender thread") {
-                        ThreadGlyph(name: "agent", size: 15)
-                        Text("Agent")
+                        // GPUI's solid 16 pt `comment-text`: a message, not a running agent.
+                        ThreadGlyph(name: "message-16", size: 15)
+                        Text(metadata.model ?? "Agent").lineLimit(1)
                         Spacer()
                     }
                 } content: {

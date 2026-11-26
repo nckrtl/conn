@@ -499,6 +499,31 @@ pub struct SubagentModel {
 }
 
 impl SubagentModel {
+    /// A thread's model from its selection, for labels like a subagent card's.
+    #[must_use]
+    pub fn from_selection(
+        selection: &conn_contract::ModelSelection,
+        fallback_instance: &str,
+    ) -> Self {
+        let instance = selection
+            .instance_id
+            .clone()
+            .flatten()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| fallback_instance.to_owned());
+        Self {
+            model: non_empty(selection.model.as_str().map(str::to_owned)),
+            instance_id: non_empty(Some(instance)),
+            options: selection
+                .options
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(model_option_strings)
+                .unwrap_or_default(),
+        }
+    }
+
     fn from_subagent(subagent: &conn_contract::OrchestrationV2Subagent) -> Self {
         let selection = subagent.model_selection.as_ref();
         let model = non_empty(subagent.model.clone()).or_else(|| {

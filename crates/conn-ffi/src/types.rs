@@ -179,6 +179,9 @@ pub struct FfiThreadSummary {
     /// The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
     /// the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
     pub provider: Option<String>,
+    /// The thread's model and effort labels (`Opus 5.5`, `high`), for agent message cards.
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Point-in-time shell snapshot emitted to [`crate::CoreListener::on_shell`].
@@ -819,6 +822,12 @@ fn map_thread_summary(shell: &ShellState, thread: &ThreadShell, settled: bool) -
     };
 
     let order = conn_state::SidebarOrder::for_thread(thread, settled);
+    // The shell has no catalog: the label falls back to the prettified slug and raw effort.
+    let model_label = conn_state::SubagentModel::from_selection(
+        &thread.model_selection,
+        &thread.provider_instance_id,
+    )
+    .label(&conn_state::providers::ModelCatalog::default());
     FfiThreadSummary {
         order_group: order.group,
         order_key: order.key.to_owned(),
@@ -841,6 +850,8 @@ fn map_thread_summary(shell: &ShellState, thread: &ThreadShell, settled: bool) -
         failure_message: failure_message(thread),
         usage_limited: is_usage_limited(thread),
         provider: thread_provider(thread),
+        model: model_label.as_ref().map(|l| l.model.clone()),
+        effort: model_label.and_then(|l| l.effort),
     }
 }
 
@@ -1093,6 +1104,18 @@ pub(crate) fn build_thread_snapshot(
                     thread: remote_child.as_ref().map(|r| r.thread_id.clone()),
                 },
             );
+        }
+    }
+    // A delegated result's card names the subagent's model, as the subagent card does.
+    for (id, task) in &completions.task_ids {
+        if let Some(crate::FfiFeedDetail::Message { model, effort, .. }) = feed_details.get_mut(id)
+            && let Some(label) = thread
+                .subagent_models
+                .get(task)
+                .and_then(|m| m.label(catalog))
+        {
+            *model = Some(label.model);
+            *effort = label.effort;
         }
     }
     let work_groups = build_work_groups(thread);

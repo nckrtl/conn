@@ -11190,6 +11190,11 @@ public struct FfiThreadSummary: Equatable, Hashable {
      * the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
      */
     public var provider: String?
+    /**
+     * The thread's model and effort labels (`Opus 5.5`, `high`), for agent message cards.
+     */
+    public var model: String?
+    public var effort: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11205,7 +11210,10 @@ public struct FfiThreadSummary: Equatable, Hashable {
         /**
          * The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
          * the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
-         */provider: String?) {
+         */provider: String?, 
+        /**
+         * The thread's model and effort labels (`Opus 5.5`, `high`), for agent message cards.
+         */model: String?, effort: String?) {
         self.orderGroup = orderGroup
         self.orderKey = orderKey
         self.orderTimeMs = orderTimeMs
@@ -11223,6 +11231,8 @@ public struct FfiThreadSummary: Equatable, Hashable {
         self.failureMessage = failureMessage
         self.usageLimited = usageLimited
         self.provider = provider
+        self.model = model
+        self.effort = effort
     }
 
     
@@ -11257,7 +11267,9 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
                 unread: FfiConverterBool.read(from: &buf), 
                 failureMessage: FfiConverterOptionString.read(from: &buf), 
                 usageLimited: FfiConverterBool.read(from: &buf), 
-                provider: FfiConverterOptionString.read(from: &buf)
+                provider: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                effort: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -11279,6 +11291,8 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.failureMessage, into: &buf)
         FfiConverterBool.write(value.usageLimited, into: &buf)
         FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.effort, into: &buf)
     }
 }
 
@@ -13064,7 +13078,10 @@ public func FfiConverterTypeFfiError_lower(_ value: FfiError) -> RustBuffer {
 
 public enum FfiFeedDetail: Equatable, Hashable {
     
-    case message(sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt]
+    case message(sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt], 
+        /**
+         * The sending agent's model and effort when the feed knows them (delegated results).
+         */model: String?, effort: String?
     )
     case html(attachment: String, title: String, height: UInt32
     )
@@ -13095,7 +13112,7 @@ public struct FfiConverterTypeFfiFeedDetail: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .message(sender: try FfiConverterOptionString.read(from: &buf), thread: try FfiConverterOptionString.read(from: &buf), environment: try FfiConverterOptionString.read(from: &buf), reviews: try FfiConverterSequenceTypeFfiReviewExcerpt.read(from: &buf)
+        case 1: return .message(sender: try FfiConverterOptionString.read(from: &buf), thread: try FfiConverterOptionString.read(from: &buf), environment: try FfiConverterOptionString.read(from: &buf), reviews: try FfiConverterSequenceTypeFfiReviewExcerpt.read(from: &buf), model: try FfiConverterOptionString.read(from: &buf), effort: try FfiConverterOptionString.read(from: &buf)
         )
         
         case 2: return .html(attachment: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), height: try FfiConverterUInt32.read(from: &buf)
@@ -13118,12 +13135,14 @@ public struct FfiConverterTypeFfiFeedDetail: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .message(sender,thread,environment,reviews):
+        case let .message(sender,thread,environment,reviews,model,effort):
             writeInt(&buf, Int32(1))
             FfiConverterOptionString.write(sender, into: &buf)
             FfiConverterOptionString.write(thread, into: &buf)
             FfiConverterOptionString.write(environment, into: &buf)
             FfiConverterSequenceTypeFfiReviewExcerpt.write(reviews, into: &buf)
+            FfiConverterOptionString.write(model, into: &buf)
+            FfiConverterOptionString.write(effort, into: &buf)
             
         
         case let .html(attachment,title,height):

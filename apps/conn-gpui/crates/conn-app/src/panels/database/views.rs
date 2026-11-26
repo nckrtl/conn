@@ -457,6 +457,8 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
         let width = widths.get(index).copied().unwrap_or(120.0);
         let mut cell = div()
             .px(px(12.0))
+            // The first column starts on the SQL query's left edge.
+            .when(index == 0, |cell| cell.pl(px(RESULT_FIRST_COLUMN_PAD_START_PX)))
             .py(px(10.0))
             .overflow_hidden()
             .whitespace_nowrap()
@@ -500,6 +502,9 @@ pub(crate) fn render_rows_grid(tokens: &Tokens, result: &DatabaseQueryResult) ->
             let width = widths.get(col_index).copied().unwrap_or(120.0);
             let mut cell = div()
                 .px(px(12.0))
+                .when(col_index == 0, |cell| {
+                    cell.pl(px(RESULT_FIRST_COLUMN_PAD_START_PX))
+                })
                 .py(px(10.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -580,3 +585,7 @@ pub(crate) fn render_structure_list(tokens: &Tokens, columns: &[DatabaseColumn])
     }
     list.into_any_element()
 }
+
+/// Left padding of a result table's first column (header and rows), so its text starts where the
+/// SQL query above does (16px in from the column edge).
+pub(super) const RESULT_FIRST_COLUMN_PAD_START_PX: f32 = 16.0;

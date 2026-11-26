@@ -414,6 +414,9 @@ struct ThreadView: View {
                         let afterFold = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
                             if case .workGroup = pair.0 { return pair.1.id } else { return nil }
                         })
+                        // A question or approval row is a work-log row: it hangs straight off the
+                        // fold's divider, its own padding the same above as below.
+                        let logRows = Set(items.compactMap { Self.isLogRow($0) ? $0.id : nil })
                         // The user's messages sent one after another, with nothing between, sit
                         // close together (`ThreadFeed.userRunSpacing`) and read as one group.
                         let inUserRun = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
@@ -450,7 +453,8 @@ struct ThreadView: View {
                                     }
                                 }
                             }
-                            .padding(.top, afterFold.contains(item.id) ? foldGap
+                            .padding(.top, afterFold.contains(item.id) && logRows.contains(item.id) ? -ThreadFeed.spacing
+                                     : afterFold.contains(item.id) ? foldGap
                                      : inUserRun.contains(item.id) ? ThreadFeed.userRunSpacing - ThreadFeed.spacing : 0)
                             .id(item.id)
                         }
@@ -768,6 +772,14 @@ struct ThreadView: View {
     }
 
     /// A message the user wrote (not an agent-authored row such as a delegated result).
+    private static func isLogRow(_ item: RenderItem) -> Bool {
+        guard case let .entry(entry) = item else { return false }
+        switch entry {
+        case .userInputRequest, .approval: return true
+        default: return false
+        }
+    }
+
     private static func isUserMessage(_ item: RenderItem) -> Bool {
         guard case let .entry(entry) = item else { return false }
         switch entry {

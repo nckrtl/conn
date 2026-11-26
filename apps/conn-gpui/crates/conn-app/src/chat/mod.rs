@@ -1274,6 +1274,7 @@ impl ChatView {
         let entity_hover = cx.entity().downgrade();
         let entity_template = cx.entity().downgrade();
         markdown::MarkdownOptions {
+            surface: markdown::MarkdownSurface::Chat,
             heading_style: markdown::HeadingStyle::Scale,
             copied_code_blocks: Some(&self.copied_code_blocks),
             on_copy_code: Some(Rc::new(move |key, _window, cx| {

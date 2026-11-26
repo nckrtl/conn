@@ -110,13 +110,16 @@ pub(super) enum SyntaxRole {
     Number,
     Constant,
     Operator,
+    /// A variable or parameter. The chat draws it as plain code; the Files preview has a colour
+    /// for it.
+    Variable,
 }
 
 impl SyntaxRole {
     /// Resolves this syntax role to a GPUI color derived from `tokens`.
     pub(super) fn color(self, tokens: &Tokens) -> Hsla {
         match self {
-            Self::Plain => hsla(tokens.code_foreground),
+            Self::Plain | Self::Variable => hsla(tokens.code_foreground),
             Self::Comment => hsla(tokens.muted_foreground),
             Self::String => hsla(tokens.success),
             Self::Keyword => hsla(tokens.primary),

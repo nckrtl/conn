@@ -134,6 +134,8 @@ enum PumpControl {
         changes: std::collections::HashMap<String, String>,
         reply: oneshot::Sender<SaveDecision>,
     },
+    #[cfg(test)]
+    Stats(oneshot::Sender<PumpStats>),
     PlanWorkspaceScan {
         thread_id: String,
         now_ms: i64,
@@ -1214,7 +1216,16 @@ struct SessionIdentity {
     reused_session: Option<FfiSavedSession>,
 }
 
+/// What the pump did, for the burst benchmark (`pump_bench`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PumpStats {
+    pub events: u64,
+    /// `build_thread_snapshot` calls.
+    pub projections: u64,
+}
+
 struct PumpState {
+    stats: PumpStats,
     offline: Option<crate::offline::SyncState>,
     seed_offline_threads: bool,
     identity: SessionIdentity,
@@ -1474,6 +1485,7 @@ impl PumpState {
                     .map(|state| {
                         build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
                     });
+                self.stats.projections += u64::from(cached_snapshot.is_some());
                 self.threads
                     .entry(thread_id.clone())
                     .or_insert_with(|| ThreadState::new(thread_id.clone()));
@@ -1620,11 +1632,17 @@ impl PumpState {
                 let _ = reply.send(self.finish_workspace_scan(&scan, after.as_deref(), now_ms));
                 true
             }
+            #[cfg(test)]
+            PumpControl::Stats(reply) => {
+                let _ = reply.send(self.stats);
+                true
+            }
             PumpControl::Shutdown => false,
         }
     }
 
     fn handle_event(&mut self, event: ClientEvent) {
+        self.stats.events += 1;
         match event {
             ClientEvent::Status(status) => {
                 // The driver resumes from its last received sequence, even mid-replay. Keep
@@ -1674,6 +1692,7 @@ impl PumpState {
                             meta.as_ref(),
                             self.server_config.catalog(),
                         );
+                        self.stats.projections += 1;
                         self.emit_or_buffer_thread(thread_snapshot);
                     }
                 }
@@ -1714,6 +1733,7 @@ impl PumpState {
                 } else {
                     None
                 };
+                self.stats.projections += u64::from(snapshot.is_some());
                 if snapshot_sequence.is_some() || force_emit {
                     conn_client::perf_log!(
                         "ffi.thread_applied thread={thread_id} apply_ms={apply_ms:.1} build_ms={:.1} entries={} emitted={}",
@@ -2017,6 +2037,7 @@ async fn run_pump(
         listener.on_bearer_issued(session);
     }
     let mut state = PumpState {
+        stats: PumpStats::default(),
         offline: None,
         seed_offline_threads: false,
         identity,
@@ -2088,6 +2109,10 @@ async fn run_pump(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pump_bench.rs"]
+mod pump_bench;
 
 #[cfg(test)]
 mod tests {

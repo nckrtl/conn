@@ -651,7 +651,9 @@ struct ThreadView: View {
                 stickToBottom = false
             }
             if phase == .idle {
-                if userScrolling { stickToBottom = TimelineEdges(context.geometry).nearEnd }
+                // Re-pin only when the scroll settles at the very end, not merely near it: a short
+                // drag up used to land within the 80 pt "near end" and re-pin at release.
+                if userScrolling { stickToBottom = TimelineEdges(context.geometry).atEnd }
                 userScrolling = false
                 if requestedByScroll {
                     requestedByScroll = false
@@ -661,7 +663,8 @@ struct ThreadView: View {
         }
         .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
             if userScrolling {
-                stickToBottom = edges.nearEnd
+                // Mid-gesture the pin can only be dropped, never taken back.
+                if !edges.atEnd { stickToBottom = false }
                 if edges.top < previous.top && !paging { requestedByScroll = true }
             }
         }
@@ -933,7 +936,8 @@ struct ThreadView: View {
         let mode: FfiSendMode = store.followUpSteers(threadId) ? .steer : .queue
         Task {
             let sent = await store.submit(draft, for: .thread(threadId), to: .reply(threadId: threadId, mode: mode))
-            if sent != nil, store.openThreadId == threadId {
+            // Only if the reader hasn't scrolled away while the send was in flight.
+            if sent != nil, store.openThreadId == threadId, stickToBottom, !userScrolling {
                 withAnimation(Kit.Motion.fast) {
                     scrollProxy.scrollTo("timeline-bottom", anchor: .bottom)
                 }
@@ -1039,10 +1043,13 @@ private struct TimelineFrames: PreferenceKey {
 private struct TimelineEdges: Equatable {
     let top: Int
     let nearEnd: Bool
+    /// Settled at the very end (8 pt of slack), the only place that re-pins to the tail.
+    let atEnd: Bool
 
     init(_ geometry: ScrollGeometry) {
         top = Int(min(160, geometry.contentOffset.y + geometry.contentInsets.top))
         nearEnd = geometry.visibleRect.maxY >= geometry.contentSize.height - 80
+        atEnd = geometry.visibleRect.maxY >= geometry.contentSize.height - 8
     }
 }
 

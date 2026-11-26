@@ -11469,13 +11469,22 @@ public struct FfiWorkGroupTiming: Equatable, Hashable {
     public var continuesSteer: Bool
     public var durationMs: UInt64?
     public var durationLabel: String?
+    /**
+     * When the group started (Unix ms). `duration_ms` is the span of its finished steps, not
+     * the time since it started, so a running group's clock counts from here.
+     */
+    public var startedAtMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Stable group id matching desktop (`work-group-<first_entry_id>`).
-         */id: String, firstEntryId: String, entryIds: [String], runId: String?, hasActive: Bool, continuesSteer: Bool, durationMs: UInt64?, durationLabel: String?) {
+         */id: String, firstEntryId: String, entryIds: [String], runId: String?, hasActive: Bool, continuesSteer: Bool, durationMs: UInt64?, durationLabel: String?, 
+        /**
+         * When the group started (Unix ms). `duration_ms` is the span of its finished steps, not
+         * the time since it started, so a running group's clock counts from here.
+         */startedAtMs: Int64?) {
         self.id = id
         self.firstEntryId = firstEntryId
         self.entryIds = entryIds
@@ -11484,6 +11493,7 @@ public struct FfiWorkGroupTiming: Equatable, Hashable {
         self.continuesSteer = continuesSteer
         self.durationMs = durationMs
         self.durationLabel = durationLabel
+        self.startedAtMs = startedAtMs
     }
 
     
@@ -11509,7 +11519,8 @@ public struct FfiConverterTypeFfiWorkGroupTiming: FfiConverterRustBuffer {
                 hasActive: FfiConverterBool.read(from: &buf), 
                 continuesSteer: FfiConverterBool.read(from: &buf), 
                 durationMs: FfiConverterOptionUInt64.read(from: &buf), 
-                durationLabel: FfiConverterOptionString.read(from: &buf)
+                durationLabel: FfiConverterOptionString.read(from: &buf), 
+                startedAtMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -11522,6 +11533,7 @@ public struct FfiConverterTypeFfiWorkGroupTiming: FfiConverterRustBuffer {
         FfiConverterBool.write(value.continuesSteer, into: &buf)
         FfiConverterOptionUInt64.write(value.durationMs, into: &buf)
         FfiConverterOptionString.write(value.durationLabel, into: &buf)
+        FfiConverterOptionInt64.write(value.startedAtMs, into: &buf)
     }
 }
 

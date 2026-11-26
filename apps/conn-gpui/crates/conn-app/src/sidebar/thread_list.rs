@@ -51,7 +51,7 @@ use crate::sidebar::drafts::{DraftSidebar, render_draft_block, render_draft_undo
 use crate::sidebar::hover_card::render_thread_hover_card;
 use crate::sidebar::hover_card_state::RowRectCell;
 use crate::sidebar::tree::{RowFocus, SidebarTree, focus_ring};
-use crate::sidebar::{render_project_favicon, render_project_monogram};
+use crate::sidebar::{ThreadProject, render_project_favicon};
 use crate::theme::{hsla, hsla_alpha};
 
 /// `--sidebar-content-inset: 0.5rem` (`8px`).
@@ -488,6 +488,7 @@ pub(crate) fn render_thread_sidebar(
             hover_open: hover.open_for == Some(thread.id.as_str()),
             hover_rect: hover.rect,
             environment_label: hover.environment_label,
+            catalog: hover.catalog,
             scratch_machine: hover
                 .origins
                 .filter(|o| {
@@ -546,6 +547,7 @@ pub(crate) fn render_thread_sidebar(
                 hover_open: hover.open_for == Some(thread.id.as_str()),
                 hover_rect: hover.rect,
                 environment_label: hover.environment_label,
+                catalog: hover.catalog,
                 environment_icon: hover.environment_icon_of(&thread.id),
                 // Only a thread listed for its messages shows the message (`searchMatch`).
                 excerpt: message_ids
@@ -1211,6 +1213,7 @@ struct RowCtx<'a> {
     /// This thread's hover flyout is open.
     hover_open: bool,
     environment_label: Option<&'a str>,
+    catalog: &'a conn_state::providers::ModelCatalog,
     /// The machine icon of the environment the thread lives on, for its hover card.
     environment_icon: &'static str,
     /// Set on a scratch-project thread without a branch while the list spans environments: its
@@ -1258,6 +1261,8 @@ pub(crate) struct ThreadHoverView<'a> {
     pub(crate) rect: &'a RowRectCell,
     pub(crate) open_for: Option<&'a str>,
     pub(crate) environment_label: Option<&'a str>,
+    /// The provider catalog, for the model's name on the card.
+    pub(crate) catalog: &'a conn_state::providers::ModelCatalog,
     /// Where each project and thread of the list lives, when it spans linked environments.
     pub(crate) origins: Option<&'a conn_state::environments::Origins>,
     /// The machine icon of each linked environment, by environment id.
@@ -1381,6 +1386,7 @@ fn attach_row_interactions(
                 ctx.project,
                 ctx.environment_label,
                 ctx.environment_icon,
+                ctx.catalog,
                 ctx.hover_rect,
                 cx.entity().downgrade(),
                 ctx.tokens,
@@ -2296,6 +2302,7 @@ struct SearchResultRow<'a> {
     hover_rect: &'a RowRectCell,
     environment_label: Option<&'a str>,
     environment_icon: &'static str,
+    catalog: &'a conn_state::providers::ModelCatalog,
     /// The message that put the thread in the results, for a thread listed for its messages.
     excerpt: Option<&'a Excerpt>,
     /// The query `excerpt` was found for, which lags the box while a search runs.
@@ -2477,6 +2484,7 @@ fn render_search_result_row(
             row.project,
             row.environment_label,
             row.environment_icon,
+            row.catalog,
             row.hover_rect,
             cx.entity().downgrade(),
             tokens,
@@ -2617,16 +2625,10 @@ fn thread_project_favicon(
     project: Option<&ProjectShell>,
     tokens: &Tokens,
 ) -> gpui_kit::Div {
-    if let Some(project) = filing(thread) {
-        return render_project_monogram(&project.slug, ROW_FAVICON_PX, tokens);
-    }
-    project.map_or_else(
-        || render_project_monogram("No project", ROW_FAVICON_PX, tokens),
-        |p| render_project_favicon(p, ROW_FAVICON_PX, tokens),
-    )
+    ThreadProject::of(thread, project).favicon(ROW_FAVICON_PX, tokens)
 }
 
-fn filing(thread: &ThreadShell) -> Option<&conn_contract::OrbitProjectRef> {
+pub(crate) fn filing(thread: &ThreadShell) -> Option<&conn_contract::OrbitProjectRef> {
     thread.orbit_project.as_ref().and_then(Option::as_ref)
 }
 

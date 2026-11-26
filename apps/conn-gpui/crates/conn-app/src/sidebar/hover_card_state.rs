@@ -2,8 +2,7 @@
 //! show. No gpui types, so it can move to `conn-state::sidebar` unchanged.
 //!
 //! Not shown, because the client has no data for it: running terminal count, the
-//! branch-mismatch warning (needs the live checkout branch), the model's display name (the
-//! catalog lives in the composer, so the slug shows) and PR stack chains.
+//! branch-mismatch warning (needs the live checkout branch) and PR stack chains.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -12,7 +11,10 @@ use std::time::{Duration, Instant};
 use conn_contract::{
     OrchestrationV2ProviderFailureClass, PullRequestState, ThreadPullRequestLinkSource,
 };
+use conn_state::providers::{ModelCatalog, ModelOption};
 use conn_state::{ProjectShell, ThreadShell};
+
+use crate::sidebar::ThreadProject;
 
 /// `TooltipProvider delay={150}`.
 pub(crate) const OPEN_DELAY: Duration = Duration::from_millis(150);
@@ -153,7 +155,8 @@ pub(crate) struct HoverPullRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HoverCardModel {
     pub(crate) title: String,
-    pub(crate) project: Option<String>,
+    /// The row's own project name, or `No project` ([`ThreadProject`]).
+    pub(crate) project: String,
     pub(crate) environment: Option<String>,
     pub(crate) branch: Option<String>,
     /// The linked issues (`issueBadge`), listed here instead of on the row.
@@ -198,12 +201,21 @@ fn non_empty(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The model's name as the composer shows it (`Opus 5.5`); a model the catalog lacks keeps its slug.
+fn model_label(catalog: &ModelCatalog, thread: &ThreadShell) -> String {
+    let slug = thread.model_selection.model.as_str().unwrap_or_default();
+    catalog
+        .find_model(Some(&thread.provider_instance_id), slug)
+        .map_or_else(|| slug.to_owned(), ModelOption::trigger_label)
+}
+
 /// Builds the rows to show; `None` fields hide their row.
 #[must_use]
 pub(crate) fn hover_card_model(
     thread: &ThreadShell,
     project: Option<&ProjectShell>,
     environment_label: Option<&str>,
+    catalog: &ModelCatalog,
 ) -> HoverCardModel {
     let previous: Vec<String> = thread
         .provider_instance_history
@@ -258,17 +270,12 @@ pub(crate) fn hover_card_model(
 
     HoverCardModel {
         title: thread.title.clone(),
-        project: project.and_then(|p| non_empty(Some(&p.title))),
+        project: ThreadProject::of(thread, project).name().to_owned(),
         environment: non_empty(environment_label),
         branch: non_empty(thread.branch.as_deref()),
         issues: conn_state::sidebar_rows::issue_badge(thread),
         provider: provider_label(&thread.provider_instance_id),
-        model: thread
-            .model_selection
-            .model
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
+        model: model_label(catalog, thread),
         subagents: thread.subagent_count.filter(|n| *n > 0),
         handed_off_from: (!previous.is_empty()).then(|| previous.join(", ")),
         error,
@@ -278,8 +285,7 @@ pub(crate) fn hover_card_model(
 
 /// Rows between the title and the footer.
 fn detail_row_count(model: &HoverCardModel) -> usize {
-    usize::from(model.project.is_some())
-        + usize::from(model.environment.is_some())
+    1 + usize::from(model.environment.is_some())
         + usize::from(model.branch.is_some())
         + usize::from(model.issues.is_some())
         + 1
@@ -437,7 +443,7 @@ mod tests {
     fn model(prs: usize) -> HoverCardModel {
         HoverCardModel {
             title: "t".to_owned(),
-            project: Some("p".to_owned()),
+            project: "p".to_owned(),
             environment: None,
             branch: Some("b".to_owned()),
             issues: None,

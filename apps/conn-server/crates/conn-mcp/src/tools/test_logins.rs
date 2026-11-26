@@ -3,7 +3,9 @@
 use super::{Args, Cx, ToolError, ToolResult, internal, str_arg};
 use conn_contract::{SaveTestLoginInput, TestLoginSummaryCreatedBy, from_json, to_json};
 use conn_features::test_logins::TestLogins;
-use conn_preview::relay::RelayCall;
+use conn_preview::relay::{
+    RelayCall, RelayFailure, SECRETS_WITHHELD, SecretAccess, secrets_withheld_message,
+};
 use serde_json::{Value, json};
 
 fn store<'a>(cx: &'a Cx<'_>) -> Result<&'a TestLogins, ToolError> {
@@ -157,6 +159,17 @@ pub(super) async fn fill(cx: &Cx<'_>, args: &Args) -> ToolResult {
     if page["available"] != true {
         return Ok(fill_result("tab_unavailable"));
     }
+    // A desktop gets the value only when its own session may read test logins; refuse before
+    // the secret is read. The relay checks again when it sends the fill.
+    if on_desktop
+        && let Some(host) = preview.desktop_tab(&environment, &caller.thread_id, tab)
+        && host.secrets == SecretAccess::Withheld
+    {
+        return Err(super::fail(
+            "capability_denied",
+            secrets_withheld_message(&host.device),
+        ));
+    }
     let saved = vec![login.url.clone()];
     let Some(origin) = conn_features::test_logins::origin::matching_origin(&saved, url) else {
         let hosts = conn_features::test_logins::origin::parse_saved_url(&login.url)
@@ -195,6 +208,9 @@ pub(super) async fn fill(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let filled = if on_desktop {
         match relay("credentialFill", input, Some(tab.to_owned())).await {
             Some(Ok(relayed)) => relayed.value,
+            Some(Err(RelayFailure { tag, message })) if tag == SECRETS_WITHHELD => {
+                return Err(super::fail("capability_denied", message));
+            }
             Some(Err(_)) | None => return Ok(fill_result("tab_unavailable")),
         }
     } else {

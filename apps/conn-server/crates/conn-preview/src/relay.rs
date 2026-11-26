@@ -16,6 +16,14 @@
 //! hosts). Callers that want a page when no desktop tab exists yet open one first (see
 //! `conn-mcp`'s preview tool); recordings and CDP endpoints never default to a desktop
 //! (`desktop_default`).
+//!
+//! # Saved secrets go only to hosts that may read them
+//!
+//! Hosting a tab takes only `preview:operate`, but reading test logins takes `settings:write`
+//! (`testLogins.reveal`). A fill (`credentialFill`) carries the saved value to the host, so the
+//! relay sends one only to a host whose own session holds that scope ([`SecretAccess`]). Other
+//! hosts still serve every other call; a fill to them fails with [`SECRETS_WITHHELD`] and the
+//! value never leaves the server.
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex, MutexGuard, Weak},
@@ -33,6 +41,35 @@ const MAX_ASSIGNMENTS: usize = 256;
 const QUEUE: usize = 64;
 /// A registration without its request stream is released after this (as in T3).
 const REGISTRATION_GRACE: Duration = Duration::from_secs(30);
+/// The relay failure tag of a fill refused because the host may not receive saved secrets.
+pub const SECRETS_WITHHELD: &str = "PreviewAutomationSecretsWithheldError";
+
+/// Operations whose input carries a saved secret (a test-login password, code or username).
+fn carries_secret(operation: &str) -> bool {
+    operation == "credentialFill"
+}
+
+/// Why a fill did not reach the desktop that shows the tab.
+pub fn secrets_withheld_message(device: &str) -> String {
+    let desktop = if device.is_empty() {
+        "the Conn desktop that shows this tab".to_owned()
+    } else {
+        format!("the Conn desktop \"{device}\" that shows this tab")
+    };
+    format!(
+        "Nothing was filled. Conn does not send saved test logins to {desktop}: its session lacks the settings:write permission that reading test logins needs. Ask the user to fill the field, or to connect that desktop with settings access."
+    )
+}
+
+/// Whether a host's session may receive saved secrets (see the module documentation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretAccess {
+    /// The session holds `settings:write`.
+    Allowed,
+    /// The session lacks it: fills are refused, every other call is served.
+    Withheld,
+}
+
 /// The desktop's own timer starts on delivery; allow its timeout answer first.
 const HOST_RESPONSE_GRACE_MS: u64 = 1_000;
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
@@ -75,6 +112,7 @@ pub struct DesktopTab {
     pub tab: String,
     pub device: String,
     pub session_id: String,
+    pub secrets: SecretAccess,
 }
 
 #[derive(Debug)]
@@ -93,6 +131,7 @@ struct Host {
     thread: String,
     tab: String,
     device: String,
+    secrets: SecretAccess,
     sender: mpsc::Sender<Value>,
     receiver: Option<mpsc::Receiver<Value>>,
     subscribed: bool,
@@ -164,13 +203,24 @@ fn disconnect(state: &mut State, connection_id: &str) {
     state.pending = kept;
 }
 
+impl Host {
+    fn listing(&self) -> DesktopTab {
+        DesktopTab {
+            tab: self.tab.clone(),
+            device: self.device.clone(),
+            session_id: self.session_id.clone(),
+            secrets: self.secrets,
+        }
+    }
+}
+
 fn agent_key(environment_id: &str, agent: &str, thread: &str) -> String {
     format!("{environment_id}\u{0}{agent}\u{0}{thread}")
 }
 
 impl Relay {
     /// T3's `registerDesktop`, after the binding checks. Returns the connection id or the
-    /// `DesktopTabRelayError` reason.
+    /// `DesktopTabRelayError` reason. `secrets` is what the registering session may read.
     pub(crate) fn register(
         &self,
         session_id: &str,
@@ -178,6 +228,7 @@ impl Relay {
         thread: &str,
         tab: &str,
         device: &str,
+        secrets: SecretAccess,
     ) -> Result<String, &'static str> {
         let mut state = lock(&self.0);
         if state
@@ -201,6 +252,7 @@ impl Relay {
             thread: thread.into(),
             tab: tab.into(),
             device: device.into(),
+            secrets,
             sender,
             receiver: Some(receiver),
             subscribed: false,
@@ -280,12 +332,17 @@ impl Relay {
             .hosts
             .iter()
             .filter(|h| h.environment_id == environment_id && h.thread == thread)
-            .map(|h| DesktopTab {
-                tab: h.tab.clone(),
-                device: h.device.clone(),
-                session_id: h.session_id.clone(),
-            })
+            .map(Host::listing)
             .collect()
+    }
+
+    /// The registered desktop tab `tab` of `thread`, if a desktop hosts it.
+    pub(crate) fn tab(&self, environment_id: &str, thread: &str, tab: &str) -> Option<DesktopTab> {
+        lock(&self.0)
+            .hosts
+            .iter()
+            .find(|h| h.environment_id == environment_id && h.thread == thread && h.tab == tab)
+            .map(Host::listing)
     }
 
     /// The device and session hosting `tab` of `thread`, if a desktop does.
@@ -391,6 +448,13 @@ impl Relay {
                 }
                 return None;
             };
+            // Checked on the receiving host's session, whatever the calling agent may do.
+            if carries_secret(call.operation) && host.secrets == SecretAccess::Withheld {
+                return Some(Err(RelayFailure {
+                    tag: SECRETS_WITHHELD,
+                    message: secrets_withheld_message(&host.device),
+                }));
+            }
             let (client_id, connection_id, sender, host_tab) = (
                 host.client_id.clone(),
                 host.connection_id.clone(),

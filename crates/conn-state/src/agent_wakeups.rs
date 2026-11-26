@@ -57,6 +57,8 @@ const MAX_SLEEP_SECS: f64 = 366.0 * 86_400.0;
 const RETIRED_CAP: usize = 32;
 /// How many `CronDelete` calls the ledger keeps for a job in history not loaded yet.
 const DELETE_CAP: usize = 128;
+/// How many cron jobs the ledger holds. The oldest go first.
+const CRON_CAP: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScheduleTool {
@@ -109,6 +111,10 @@ impl ScheduleCall {
             self.status,
             Status::Failed | Status::Cancelled | Status::Interrupted
         )
+    }
+
+    fn completed(&self) -> bool {
+        self.status == Status::Completed
     }
 
     /// Whether a `ScheduleWakeup` call schedules nothing: it failed, it asked to `stop`, or the
@@ -270,6 +276,9 @@ impl PendingWakeup {
 struct WakeupSlot {
     order: i64,
     id: String,
+    /// When the held call started (Unix ms), else when it was last updated. A call of another id
+    /// that is older than this never takes the slot, whatever `order` or the retired ids say.
+    at_ms: Option<i64>,
     pending: Option<PendingWakeup>,
 }
 
@@ -304,6 +313,10 @@ struct CronDelete {
 /// expired or fired, and the `CronDelete` calls that a history page not loaded yet may need. A
 /// stopped, deleted, passed or replaced call is dropped, so it does not grow with the thread.
 /// Calls have an `order`: the position in the timeline, with history before it counted down.
+///
+/// Only a completed `CronDelete` removes a job. When the ledger drops a delete it keeps a
+/// watermark (the highest order and time of what it dropped): a `CronCreate` older than that is
+/// ignored, since the dropped delete may have removed it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ScheduleLedger {
     /// The next order of a call that arrives.
@@ -315,6 +328,10 @@ pub(crate) struct ScheduleLedger {
     wakeup: Option<WakeupSlot>,
     crons: Vec<CronJob>,
     deletes: Vec<CronDelete>,
+    /// The highest order of a `CronDelete` the ledger dropped.
+    dropped_delete_order: Option<i64>,
+    /// The newest time (Unix ms) of a `CronDelete` the ledger dropped.
+    dropped_delete_ms: Option<i64>,
     /// Ids that were dropped, so a late update of one is ignored.
     retired: VecDeque<String>,
 }
@@ -421,16 +438,63 @@ impl ScheduleLedger {
         for id in gone {
             self.retire(id);
         }
+        self.enforce_cron_cap();
+        let mut dropped = Vec::new();
         if keep_deletes {
-            self.deletes.retain(|delete| !expired(delete.at_ms));
+            self.deletes.retain(|delete| {
+                let keep = !expired(delete.at_ms);
+                if !keep {
+                    dropped.push((delete.order, delete.at_ms));
+                }
+                keep
+            });
             if self.deletes.len() > DELETE_CAP {
                 self.deletes.sort_by_key(|delete| delete.order);
                 let extra = self.deletes.len() - DELETE_CAP;
-                self.deletes.drain(..extra);
+                dropped.extend(
+                    self.deletes
+                        .drain(..extra)
+                        .map(|delete| (delete.order, delete.at_ms)),
+                );
             }
         } else {
-            self.deletes.clear();
+            dropped.extend(
+                self.deletes
+                    .drain(..)
+                    .map(|delete| (delete.order, delete.at_ms)),
+            );
         }
+        for (order, at_ms) in dropped {
+            self.dropped_delete_order =
+                Some(self.dropped_delete_order.map_or(order, |o| o.max(order)));
+            if let Some(at) = at_ms {
+                self.dropped_delete_ms = Some(self.dropped_delete_ms.map_or(at, |m| m.max(at)));
+            }
+        }
+    }
+
+    /// Keeps the newest [`CRON_CAP`] cron jobs by order. An evicted job is retired.
+    fn enforce_cron_cap(&mut self) {
+        if self.crons.len() <= CRON_CAP {
+            return;
+        }
+        self.crons.sort_by_key(|job| job.order);
+        let extra = self.crons.len() - CRON_CAP;
+        let evicted: Vec<String> = self.crons.drain(..extra).map(|job| job.item_id).collect();
+        for id in evicted {
+            self.retire(id);
+        }
+    }
+
+    /// Whether a `CronCreate` at `order` and `at_ms` is older than a `CronDelete` the ledger
+    /// dropped, so that delete may have removed it.
+    fn older_than_dropped_delete(&self, order: i64, at_ms: Option<i64>) -> bool {
+        self.dropped_delete_order
+            .is_some_and(|dropped| order < dropped)
+            || self
+                .dropped_delete_ms
+                .zip(at_ms)
+                .is_some_and(|(dropped, at)| at < dropped)
     }
 
     fn is_retired(&self, id: &str) -> bool {
@@ -482,6 +546,16 @@ impl ScheduleLedger {
                 // An older call than the one held: only the latest matters.
                 return;
             }
+            if slot.id != id
+                && slot
+                    .at_ms
+                    .zip(call.at_ms)
+                    .is_some_and(|(held, at)| at < held)
+            {
+                // A late update of a call that started before the held one. Its id may have
+                // left the retired list, so the order alone cannot tell.
+                return;
+            }
             if slot.id != id {
                 let replaced = slot.id.clone();
                 self.retire(replaced);
@@ -490,22 +564,26 @@ impl ScheduleLedger {
         self.wakeup = Some(WakeupSlot {
             order,
             id: id.to_owned(),
+            at_ms: call.at_ms,
             pending: PendingWakeup::from_call(call),
         });
     }
 
     fn place_cron_create(&mut self, id: &str, call: &ScheduleCall, order: i64) {
+        let held = self.crons.iter().any(|job| job.item_id == id);
         self.crons.retain(|job| job.item_id != id);
         if call.failed() {
             return;
         }
         let job_id = call.output.as_ref().and_then(cron_id);
         let deleted = job_id.as_deref().is_some_and(|job| {
-            self.deletes
-                .iter()
-                .any(|delete| delete.job_id == job && delete.order > order)
+            self.deletes.iter().any(|delete| {
+                delete.job_id == job
+                    && (delete.order > order
+                        || delete.at_ms.zip(call.at_ms).is_some_and(|(d, at)| d > at))
+            })
         });
-        if deleted {
+        if deleted || (!held && self.older_than_dropped_delete(order, call.at_ms)) {
             self.retire(id.to_owned());
             return;
         }
@@ -525,11 +603,14 @@ impl ScheduleLedger {
             at_ms: call.at_ms,
             run_id: call.run_id.clone(),
         });
+        self.enforce_cron_cap();
     }
 
+    /// Only a completed `CronDelete` removes a job. One still pending leaves the job listed, and
+    /// one that failed or was interrupted never removed it.
     fn place_cron_delete(&mut self, id: &str, call: &ScheduleCall, order: i64) {
         self.deletes.retain(|delete| delete.item_id != id);
-        let Some(job) = call.input["id"].as_str().filter(|_| !call.failed()) else {
+        let Some(job) = call.input["id"].as_str().filter(|_| call.completed()) else {
             return;
         };
         let mut removed = Vec::new();
@@ -1101,6 +1182,158 @@ mod tests {
         // A recurring job expires after a week.
         ledger.prune(&runs(&[("run-2", NOW + CRON_EXPIRY_MS + 10)]), true);
         assert_eq!(ledger.len(), 0);
+    }
+
+    fn with_status(mut call: ScheduleCall, status: Status) -> ScheduleCall {
+        call.status = status;
+        call
+    }
+
+    #[test]
+    fn only_a_completed_delete_removes_a_job() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("create", Some(cron(NOW, true, "job")));
+        // A delete in progress hides nothing, and one that ends badly never did.
+        ledger.observe(
+            "delete",
+            Some(with_status(
+                cron_delete(NOW + 1_000, "job"),
+                Status::Running,
+            )),
+        );
+        assert_eq!(ledger.cron_len(), 1);
+        assert_eq!(ledger.delete_len(), 0);
+        for status in [Status::Failed, Status::Cancelled, Status::Interrupted] {
+            ledger.observe(
+                "delete",
+                Some(with_status(cron_delete(NOW + 1_000, "job"), status)),
+            );
+            assert_eq!(ledger.cron_len(), 1, "{status:?}");
+            assert_eq!(ledger.delete_len(), 0, "{status:?}");
+            // A late update of the create does not drop it either.
+            ledger.observe("create", Some(cron(NOW, true, "job")));
+            assert_eq!(ledger.cron_len(), 1, "{status:?}");
+        }
+        let mut state = ThreadState::new("t");
+        state.schedule_calls = ledger.clone();
+        assert_eq!(state.agent_wakeups(&context(NOW + 2_000)).len(), 1);
+        // The same item completing is the delete that counts.
+        ledger.observe("delete", Some(cron_delete(NOW + 1_000, "job")));
+        assert_eq!(ledger.cron_len(), 0);
+        assert_eq!(ledger.delete_len(), 1);
+    }
+
+    #[test]
+    fn a_pending_delete_in_history_does_not_hide_a_job_when_its_page_loads() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe(
+            "delete",
+            Some(with_status(cron_delete(NOW, "job-a"), Status::Running)),
+        );
+        ledger.observe_older(vec![(
+            "create-a".to_owned(),
+            cron(NOW - 1_000, true, "job-a"),
+        )]);
+        assert_eq!(ledger.cron_len(), 1);
+    }
+
+    #[test]
+    fn the_cron_jobs_are_capped_and_the_oldest_go_first() {
+        let mut ledger = ScheduleLedger::default();
+        let total = i64::try_from(CRON_CAP).unwrap() + 40;
+        for n in 0..total {
+            ledger.observe(
+                &format!("c{n}"),
+                Some(cron(NOW + n, true, &format!("j{n}"))),
+            );
+            assert!(ledger.cron_len() <= CRON_CAP);
+        }
+        assert_eq!(ledger.cron_len(), CRON_CAP);
+        let oldest = ledger.crons.iter().map(|job| job.order).min();
+        assert_eq!(oldest, Some(40));
+        assert!(ledger.crons.iter().all(|job| job.item_id != "c0"));
+        assert!(
+            ledger
+                .crons
+                .iter()
+                .any(|job| job.item_id == format!("c{}", total - 1))
+        );
+        // A history page cannot push the newest out: its own jobs are the oldest.
+        let page: Vec<_> = (0..10)
+            .map(|n| {
+                (
+                    format!("h{n}"),
+                    cron(NOW - 10_000 + n, true, &format!("hj{n}")),
+                )
+            })
+            .collect();
+        ledger.observe_older(page);
+        assert_eq!(ledger.cron_len(), CRON_CAP);
+        assert!(ledger.crons.iter().all(|job| !job.item_id.starts_with('h')));
+        // A job whose time never parsed does not escape the cap.
+        for n in 0..(CRON_CAP * 2) {
+            let mut untimed = cron(NOW, true, &format!("u{n}"));
+            untimed.at_ms = None;
+            ledger.observe(&format!("u{n}"), Some(untimed));
+        }
+        assert_eq!(ledger.cron_len(), CRON_CAP);
+    }
+
+    #[test]
+    fn a_late_update_of_an_old_wakeup_never_takes_the_slot() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("old", Some(wake(NOW, "old")));
+        // More replacements than the retired list holds: `old` is no longer remembered.
+        let total = i64::try_from(RETIRED_CAP).unwrap() + 8;
+        for step in 1..=total {
+            ledger.observe(&format!("w{step}"), Some(wake(NOW + step * 1_000, "step")));
+        }
+        assert!(!ledger.is_retired("old"));
+        let latest = format!("w{total}");
+        ledger.observe("old", Some(wake(NOW, "old, done")));
+        assert_eq!(
+            ledger.wakeup.as_ref().map(|s| s.id.as_str()),
+            Some(latest.as_str())
+        );
+        // The live call still updates itself.
+        ledger.observe(&latest, Some(wake(NOW + total * 1_000, "still latest")));
+        let pending = ledger.wakeup.as_ref().and_then(|s| s.pending.as_ref());
+        assert_eq!(pending.map(|p| p.title.as_str()), Some("still latest"));
+        // A newer call still replaces it.
+        ledger.observe("next", Some(wake(NOW + (total + 1) * 1_000, "next")));
+        assert_eq!(ledger.wakeup.as_ref().map(|s| s.id.as_str()), Some("next"));
+    }
+
+    #[test]
+    fn trimming_the_deletes_does_not_bring_back_a_deleted_job() {
+        let mut ledger = ScheduleLedger::default();
+        let total = i64::try_from(DELETE_CAP).unwrap() + 12;
+        for n in 0..total {
+            ledger.observe(
+                &format!("delete-{n}"),
+                Some(cron_delete(NOW + n, &format!("job-{n}"))),
+            );
+            ledger.prune(&HashMap::new(), true);
+        }
+        assert_eq!(ledger.delete_len(), DELETE_CAP);
+        // `job-0`'s delete was trimmed. Its create is in a page that loads now.
+        ledger.observe_older(vec![
+            ("create-0".to_owned(), cron(NOW - 5_000, true, "job-0")),
+            ("create-1".to_owned(), cron(NOW - 4_000, true, "job-1")),
+        ]);
+        assert_eq!(ledger.cron_len(), 0);
+        // A late update of such a create (its id was never retired) does not bring it back.
+        ledger.observe("create-2", Some(cron(NOW + 2, true, "job-2")));
+        assert_eq!(ledger.cron_len(), 0);
+        // A job created after every dropped delete stays.
+        ledger.observe("fresh", Some(cron(NOW + 10_000, true, "fresh-job")));
+        assert_eq!(ledger.cron_len(), 1);
+        // The same holds once the deletes are all dropped (nothing older left to load).
+        ledger.prune(&HashMap::new(), false);
+        assert_eq!(ledger.delete_len(), 0);
+        ledger.observe("create-3", Some(cron(NOW + 3, true, "job-3")));
+        assert_eq!(ledger.cron_len(), 1);
+        assert_eq!(ledger.crons[0].item_id, "fresh");
     }
 
     #[test]

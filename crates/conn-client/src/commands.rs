@@ -80,6 +80,59 @@ pub fn send_message(
     working: bool,
     steer_target_run_id: Option<&str>,
 ) -> Result<OrchestrationV2Command, serde_json::Error> {
+    send_message_with_ids(
+        thread_id,
+        text,
+        attachments,
+        working,
+        steer_target_run_id,
+        &MessageIds::new(),
+    )
+}
+
+/// The ids of one `message.dispatch`. Sending the same message again with the same ids is safe:
+/// the server keeps a receipt for each `commandId` and answers a repeat from it, so the message
+/// lands once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageIds {
+    /// `commandId`, the key of the server's receipt.
+    pub command_id: String,
+    /// `messageId`, the id the message gets in the thread.
+    pub message_id: String,
+}
+
+impl MessageIds {
+    /// Fresh ids for a new message.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            command_id: new_id("cmd"),
+            message_id: new_id("msg"),
+        }
+    }
+}
+
+impl Default for MessageIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`send_message`] with the given `ids`, for a resend of a message whose first send may have
+/// landed.
+///
+/// # Errors
+///
+/// Returns [`serde_json::Error`] if the command payload cannot be decoded as
+/// [`OrchestrationV2Command`].
+pub fn send_message_with_ids(
+    thread_id: &str,
+    text: &str,
+    attachments: &[ChatAttachment],
+    working: bool,
+    steer_target_run_id: Option<&str>,
+    ids: &MessageIds,
+) -> Result<OrchestrationV2Command, serde_json::Error> {
     let dispatch_mode = match steer_target_run_id {
         Some(target) if working => json!({ "type": "steer_active", "targetRunId": target }),
         _ if working => json!({ "type": "queue_after_active" }),
@@ -91,9 +144,9 @@ pub fn send_message(
         "type": "message.dispatch",
         "createdBy": "user",
         "creationSource": "web",
-        "commandId": new_id("cmd"),
+        "commandId": ids.command_id,
         "threadId": thread_id,
-        "messageId": new_id("msg"),
+        "messageId": ids.message_id,
         "text": text,
         "attachments": attachments_json,
         "dispatchMode": dispatch_mode,
@@ -945,6 +998,27 @@ mod tests {
             create_project_mutation("/tmp/demo", "demo").is_ok(),
             "project.create mutation decodes"
         );
+    }
+
+    #[test]
+    fn a_resend_with_the_same_ids_is_the_same_command() {
+        let ids = MessageIds::new();
+        let first = send_message_with_ids("t-1", "hi", &[], false, None, &ids).expect("command");
+        let again = send_message_with_ids("t-1", "hi", &[], false, None, &ids).expect("command");
+        assert_eq!(
+            conn_contract::to_json(&first),
+            conn_contract::to_json(&again)
+        );
+        let json = conn_contract::to_json(&first);
+        assert_eq!(json["commandId"], json!(ids.command_id));
+        assert_eq!(json["messageId"], json!(ids.message_id));
+
+        let fresh = send_message("t-1", "hi", &[], false, None).expect("command");
+        assert_ne!(
+            conn_contract::to_json(&fresh)["commandId"],
+            json["commandId"]
+        );
+        assert_ne!(MessageIds::new(), MessageIds::new());
     }
 
     #[test]

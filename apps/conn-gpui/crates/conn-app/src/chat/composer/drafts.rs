@@ -25,6 +25,16 @@ fn saved_content(text: &str, attachments: &[PendingAttachment]) -> DraftContent 
     }
 }
 
+/// The name and size an uploaded attachment shows with in the composer.
+fn attachment_name_and_size(attachment: &conn_contract::ChatAttachment) -> (String, usize) {
+    let (name, size) = match attachment {
+        conn_contract::ChatAttachment::Image(image) => (&image.name, image.size_bytes),
+        conn_contract::ChatAttachment::File(file) => (&file.name, file.size_bytes),
+        conn_contract::ChatAttachment::Unknown(other) => (&other.name, other.size_bytes),
+    };
+    (name.clone(), usize::try_from(size).unwrap_or(0))
+}
+
 impl Composer {
     /// Calls `visit(key, text, attachment count)` for every draft the composer holds: each
     /// parked one, then the live one under the active key.
@@ -81,6 +91,58 @@ impl Composer {
                 attachments,
             },
         );
+    }
+
+    /// Puts a message whose send failed back under `key`: in the composer when `key` shows,
+    /// else parked for that thread. Its text replaces the shown draft's text, as before; its
+    /// attachments go before any the user added since. A parked draft keeps what was typed
+    /// since, after the message.
+    pub(crate) fn return_unsent(
+        &mut self,
+        key: &str,
+        text: String,
+        attachments: Vec<conn_contract::ChatAttachment>,
+        window: Option<&mut gpui_kit::Window>,
+        cx: &mut gpui_kit::Context<'_, Self>,
+    ) {
+        let mut returned: Vec<PendingAttachment> = attachments
+            .into_iter()
+            .map(|attachment| {
+                let local_id = self.next_attachment_id;
+                self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
+                let (name, size_bytes) = attachment_name_and_size(&attachment);
+                PendingAttachment {
+                    local_id,
+                    name,
+                    size_bytes,
+                    status: AttachmentUploadStatus::Ready(attachment),
+                }
+            })
+            .collect();
+        if self.drafts.active_key() == Some(key) {
+            let Some(window) = window else {
+                return;
+            };
+            returned.append(&mut self.attachments);
+            self.attachments = returned;
+            self.set_draft_text(text, window, cx);
+            return;
+        }
+        let parked = self.drafts.discard(key).unwrap_or_default();
+        let text = if parked.text.trim().is_empty() {
+            text
+        } else {
+            format!("{text}\n\n{}", parked.text)
+        };
+        returned.extend(parked.attachments);
+        self.drafts.park(
+            key,
+            ComposerDraft {
+                text,
+                attachments: returned,
+            },
+        );
+        cx.notify();
     }
 
     /// Drops `key`'s draft once it is sent or discarded (`clearDraftThread`) and returns what

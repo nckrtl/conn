@@ -20,7 +20,7 @@ use super::ConnApp;
 use crate::live::RT;
 use crate::ui_tests::mount_app_with_server;
 
-const OPEN: &str = "thread-open";
+pub(super) const OPEN: &str = "thread-open";
 const WATCHED: [&str; 3] = [OPEN, "thread-a", "thread-b"];
 
 /// One request the fake server saw, and the session (1 = before the restart) it came on.
@@ -77,7 +77,7 @@ fn thread_json(id: &str) -> Value {
     })
 }
 
-fn shell_snapshot() -> Value {
+pub(super) fn shell_snapshot() -> Value {
     json!({
         "kind": "snapshot",
         "snapshot": {
@@ -95,7 +95,7 @@ fn shell_snapshot() -> Value {
 }
 
 /// A thread snapshot at `sequence` with `turns` user turns.
-fn thread_snapshot(id: &str, sequence: i64, turns: usize) -> Value {
+pub(super) fn thread_snapshot(id: &str, sequence: i64, turns: usize) -> Value {
     let mut snapshot: Value =
         serde_json::from_str(&synthetic_thread_snapshot_json(SyntheticThread {
             turns,

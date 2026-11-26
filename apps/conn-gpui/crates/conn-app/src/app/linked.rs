@@ -247,6 +247,29 @@ impl ConnApp {
             .and_then(|config| config.environment_id())
     }
 
+    /// The Orbit target id of every linked environment the app holds anything of: a shell, a
+    /// server config or a connection. Sorted, without repeats.
+    pub(super) fn linked_target_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .linked
+            .shells
+            .environments()
+            .into_iter()
+            .map(|environment| environment.id)
+            .chain(self.linked.configs.keys().cloned())
+            .chain(
+                self.linked
+                    .set
+                    .as_ref()
+                    .map(|set| set.environment_ids())
+                    .unwrap_or_default(),
+            )
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// The environment a thread of the merged list lives on; `None` is the primary one.
     pub(crate) fn linked_environment_of_thread(&self, thread_id: &str) -> Option<&str> {
         let origins = self.linked.origins();

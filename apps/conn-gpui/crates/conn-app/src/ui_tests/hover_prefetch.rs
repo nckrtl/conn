@@ -385,3 +385,76 @@ fn no_prefetch_while_a_thread_menu_is_open(cx: &mut TestAppContext) {
             .is_empty()
     );
 }
+
+/// The same thread id on two environments: a prefetch of one drops nothing of the other's offline
+/// cache, and an item of a stream nobody holds on its own environment is still dropped.
+#[gpui_kit::test]
+fn a_prefetch_compares_environment_and_thread_id_not_the_thread_id_alone(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (server, _requests) = thread_subscribe_server();
+    let (_window, app) = mount_app_with_server(cx, Some(server));
+    wait_until_connected(cx, &app);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| app.set_shell(kitchen_sink_shell(), cx));
+    });
+    // `thread-pinned` lives on the primary environment; `other` is a second one with a thread of
+    // the same id.
+    let primary = cx
+        .read(|cx| app.read(cx).cache_env_for_test("thread-pinned"))
+        .expect("the primary environment has an id");
+    let other = "other-env";
+    let orphaned = |cx: &mut TestAppContext, env: &str| {
+        cx.read(|cx| {
+            app.read(cx)
+                .thread_item_is_orphaned_for_test(Some(env), "thread-pinned")
+        })
+    };
+    let cached = |cx: &mut TestAppContext| {
+        cx.read(|cx| app.read(cx).thread_cached_for_test("thread-pinned"))
+    };
+
+    // Prefetching the primary's thread keeps the primary's items, not a stray stream of the
+    // other environment that nothing holds there.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.prefetch_hovered_thread("thread-pinned", cx)
+        });
+    });
+    assert!(cached(cx));
+    assert!(
+        !orphaned(cx, &primary),
+        "the prefetched thread's own items stay"
+    );
+    assert!(
+        orphaned(cx, other),
+        "the prefetch of the primary's thread is not the other environment's stream"
+    );
+
+    // The other environment's offline cache watches its own copy: its items are kept.
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.watch_cache_stream_for_test(other, "thread-pinned")
+        });
+    });
+    assert!(
+        !orphaned(cx, other),
+        "the other environment's cache items stay"
+    );
+
+    // Moving the prefetch to another row drops the primary's reducer, and with it the primary's
+    // late items. The other environment's cached copy stays.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.prefetch_hovered_thread("thread-failed", cx)
+        });
+    });
+    assert!(!cached(cx), "the reducer the prefetch created is gone");
+    assert!(
+        orphaned(cx, &primary),
+        "a late item of the dropped stream is dropped"
+    );
+    assert!(
+        !orphaned(cx, other),
+        "dropping the primary's prefetch keeps the other environment's cache items"
+    );
+}

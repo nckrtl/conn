@@ -147,6 +147,11 @@ impl Offline {
                 .contains_key(&(env.to_owned(), id.to_owned()))
         })
     }
+    #[cfg(test)]
+    pub(super) fn watch_for_test(&mut self, env: &str, id: &str, connection: Connection) {
+        self.subscriptions
+            .insert((env.to_owned(), id.to_owned()), connection);
+    }
     /// Whether a reducer for `id` on `env` waits in the shadow, because another environment owns
     /// the thread's visible reducer.
     pub(super) fn shadows(&self, env: &str, id: &str) -> bool {

@@ -26,6 +26,9 @@ struct ThreadCard<Header: View, Content: View>: View {
         }
         .padding(3)
         .background(outer, in: .rect(cornerRadius: 14))
+        // The outer ring sits outside the text column: the inner card's edges line up with the
+        // feed's text, so cards don't read slimmer than the messages around them.
+        .padding(.horizontal, -3)
     }
 }
 

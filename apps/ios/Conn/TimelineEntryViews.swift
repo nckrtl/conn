@@ -112,25 +112,27 @@ struct WorkGroupCard: View {
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
-        .onAppear { anchor(fresh: false) }
-        .onChange(of: group.durationMs) { anchor(fresh: true) }
+        .onAppear { anchor() }
+        .onChange(of: group.startedAtMs) { anchor() }
     }
 
-    /// The feed is lazy: a row scrolled away and back is rebuilt, and the last snapshot's elapsed
-    /// time is old by then. Only a new elapsed value moves the start; a rebuild reuses the known one.
-    private func anchor(fresh: Bool) {
-        guard group.hasActive, let ms = group.durationMs else { return }
-        if !fresh, let known = WorkGroupClock.starts[group.id] {
+    /// A running group counts from its real start (the core's `started_at_ms`). `duration_ms` is
+    /// only the span of its finished steps, so "now minus duration" jumped back whenever a step
+    /// finished or the lazy feed rebuilt the row. Without a start, the first time this group was
+    /// seen is kept across rebuilds.
+    private func anchor() {
+        guard group.hasActive else { return }
+        if let ms = group.startedAtMs {
+            startedAt = Date(timeIntervalSince1970: Double(ms) / 1000)
+        } else if let known = WorkGroupClock.starts[group.id] {
             startedAt = known
-            return
+        } else {
+            WorkGroupClock.starts[group.id] = startedAt
         }
-        let start = Date(timeIntervalSinceNow: -Double(ms) / 1000)
-        WorkGroupClock.starts[group.id] = start
-        startedAt = start
     }
 }
 
-/// When each running work group started, kept across the lazy feed's rebuilds of its row.
+/// When each running work group was first seen, for groups the core gives no start for.
 @MainActor
 enum WorkGroupClock {
     static var starts: [String: Date] = [:]

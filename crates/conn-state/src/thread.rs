@@ -658,6 +658,25 @@ impl ThreadState {
         })
     }
 
+    /// When a group of work entries started: the earliest `started_at_ms` among them, else the
+    /// owning run's start. A running group's clock counts from here.
+    #[must_use]
+    pub fn work_group_started_at_ms(&self, entry_ids: &[&str]) -> Option<i64> {
+        let earliest = entry_ids
+            .iter()
+            .filter_map(|id| self.entry_timings.get(*id))
+            .filter_map(|timing| timing.started_at_ms)
+            .min();
+        earliest.or_else(|| {
+            entry_ids
+                .iter()
+                .filter_map(|id| self.entry_timings.get(*id))
+                .find_map(|timing| timing.run_id.as_deref())
+                .and_then(|run| self.run_timings.get(run))
+                .and_then(|run| run.started_at_ms)
+        })
+    }
+
     /// Computes the elapsed duration in milliseconds for a contiguous group of work entries.
     ///
     /// Uses the earliest `started_at_ms` to latest `completed_at_ms` across `entry_ids`, falling
@@ -2763,6 +2782,11 @@ mod timing_tests {
             Some(7_500),
             "duration spans earliest start to latest end"
         );
+        assert_eq!(
+            state.work_group_started_at_ms(&["e1", "e2"]),
+            Some(1_000),
+            "a running group's clock starts at its earliest step, not now minus the span"
+        );
 
         // Fallback to run timing when entries lack started_at_ms.
         state.entry_timings.insert(
@@ -2784,6 +2808,11 @@ mod timing_tests {
             state.work_group_duration_ms(&["e3"]),
             Some(12_400),
             "falls back to owning run elapsed duration"
+        );
+        assert_eq!(
+            state.work_group_started_at_ms(&["e3"]),
+            Some(10_000),
+            "without step starts, the owning run's start"
         );
     }
 

@@ -375,6 +375,9 @@ pub struct FfiWorkGroupTiming {
     pub continues_steer: bool,
     pub duration_ms: Option<u64>,
     pub duration_label: Option<String>,
+    /// When the group started (Unix ms). `duration_ms` is the span of its finished steps, not
+    /// the time since it started, so a running group's clock counts from here.
+    pub started_at_ms: Option<i64>,
 }
 
 /// One flattened timeline row emitted in [`FfiThreadSnapshot`].
@@ -916,6 +919,7 @@ fn build_work_groups(thread: &ThreadState) -> Vec<FfiWorkGroupTiming> {
             .map(str::to_owned);
         let duration_ms = thread.work_group_duration_ms(&id_refs);
         let duration_label = duration_ms.map(format_duration);
+        let started_at_ms = thread.work_group_started_at_ms(&id_refs);
 
         groups.push(FfiWorkGroupTiming {
             id: format!("work-group-{first_entry_id}"),
@@ -926,6 +930,7 @@ fn build_work_groups(thread: &ThreadState) -> Vec<FfiWorkGroupTiming> {
             continues_steer,
             duration_ms,
             duration_label,
+            started_at_ms,
         });
     }
     groups

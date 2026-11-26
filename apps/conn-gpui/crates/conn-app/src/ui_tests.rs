@@ -31,6 +31,8 @@ use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
 pub(crate) mod details_tasks;
+#[cfg(target_os = "macos")]
+mod selection_perf;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;

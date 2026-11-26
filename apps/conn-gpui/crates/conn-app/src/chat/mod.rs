@@ -33,6 +33,11 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod request_stack;
+pub(crate) mod selection;
+#[cfg(test)]
+mod selection_menu_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod selection_shots;
 mod spinner;
 mod thumb_cache;
 
@@ -133,11 +138,15 @@ struct MessageBody<'a> {
     attachments: &'a [ChatAttachment],
     review_comments: &'a [conn_state::ReviewComment],
     notes: &'a [Option<String>],
+    /// Orders the text among the window's selectable text; `None` leaves it unselectable.
+    selection: Option<&'a selection::SelectionScope>,
 }
 
 /// One human user bubble's render inputs.
 struct UserBubble<'a> {
     id: &'a str,
+    /// The bubble's row in the timeline, which orders its text for selection.
+    row_idx: usize,
     text: &'a str,
     attachments: &'a [ChatAttachment],
     review_comments: &'a [conn_state::ReviewComment],
@@ -1299,7 +1308,17 @@ impl ChatView {
                 });
             })),
             prose: None,
+            // The caller of a row sets its scope: only assistant text takes part in selection.
+            selection: None,
         }
+    }
+
+    /// Opens the message menu in this view when a message's text is right-clicked.
+    fn message_menu_hook(cx: &mut Context<'_, Self>) -> selection::MessageMenuHook {
+        let view = cx.entity().downgrade();
+        Rc::new(move |request, window, cx| {
+            let _ = view.update(cx, |view, cx| view.open_message_menu(request, window, cx));
+        })
     }
 
     fn remeasure_for_id(&self, target_id: &str) {
@@ -1911,6 +1930,7 @@ impl ChatView {
                         self.render_user_bubble(
                             UserBubble {
                                 id,
+                                row_idx: *row_idx,
                                 text,
                                 attachments,
                                 review_comments,
@@ -1984,7 +2004,15 @@ impl ChatView {
                 {
                     // Lazily parse & cache Markdown only when this row enters the viewport.
                     let blocks = row.markdown_blocks();
-                    let options = self.markdown_options(cx);
+                    let mut options = self.markdown_options(cx);
+                    let mut scope = selection::SelectionScope::for_row(*row_idx);
+                    if !text.trim().is_empty() {
+                        scope = scope.with_message_menu(
+                            artifact_template::message_copy_text(text),
+                            Self::message_menu_hook(cx),
+                        );
+                    }
+                    options.selection = Some(scope);
                     let group = SharedString::from(format!("assistant-row-{id}"));
                     let body: AnyElement = if text.is_empty() && !*streaming {
                         // Conn: `text || (streaming ? "" : "(empty response)")`.
@@ -2018,7 +2046,7 @@ impl ChatView {
                     #[cfg(test)]
                     let inner = gpui_kit::TestSupportExt::test_support(inner);
                     // Conn `AssistantTimelineRow`: `px-1 py-0.5`, row spacing `pb-2` before work or `pb-4`.
-                    div()
+                    let row = div()
                         .id(SharedString::from(format!("chat-assistant-{id}")))
                         .a11y(
                             gpui_kit::Role::Article,
@@ -2029,8 +2057,10 @@ impl ChatView {
                         .w_full()
                         .min_w_0()
                         .pb(px(if *followed_by_work { 8.0 } else { 16.0 }))
-                        .child(inner)
-                        .into_any_element()
+                        .child(inner);
+                    #[cfg(test)]
+                    let row = gpui_kit::TestSupportExt::test_support(row);
+                    row.into_any_element()
                 } else {
                     div().into_any_element()
                 }
@@ -2205,7 +2235,13 @@ impl ChatView {
     }
 
     /// The bubble's 3px frame and the caption's 13px padding align its text with plain messages.
-    fn render_bubble_caption(&self, key: &str, text: &str, bottom_px: f32) -> AnyElement {
+    fn render_bubble_caption(
+        &self,
+        key: &str,
+        text: &str,
+        bottom_px: f32,
+        selection: Option<&selection::SelectionScope>,
+    ) -> AnyElement {
         let caption = SharedString::from(text.to_owned());
         div()
             .min_w_0()
@@ -2221,7 +2257,11 @@ impl ChatView {
                         caption.clone(),
                     )
                     .min_w_0()
-                    .child(caption),
+                    .child(selection::selectable_message_text(
+                        &format!("chat-caption-text-{key}"),
+                        &caption,
+                        selection,
+                    )),
             )
             .into_any_element()
     }
@@ -2347,6 +2387,7 @@ impl ChatView {
             attachments,
             review_comments,
             notes,
+            selection,
         } = body;
         bubble = bubble
             .relative()
@@ -2407,6 +2448,7 @@ impl ChatView {
                     caption_key,
                     text,
                     if gallery_follows { 10.0 } else { 7.0 },
+                    selection,
                 ));
             }
             for (idx, comment) in review_comments.iter().enumerate() {
@@ -2415,6 +2457,7 @@ impl ChatView {
                         &format!("{caption_key}.note.{idx}"),
                         note,
                         7.0,
+                        selection,
                     ));
                 }
                 bubble = bubble.child(self.render_review_comment(attachment_key, idx, comment));
@@ -2429,7 +2472,11 @@ impl ChatView {
                 .pt(px(10.0))
                 .pb(px(12.0));
             if !text.is_empty() {
-                bubble = bubble.child(div().min_w_0().child(text.to_owned()));
+                bubble = bubble.child(div().min_w_0().child(selection::selectable_message_text(
+                    &format!("chat-text-{caption_key}"),
+                    text,
+                    selection,
+                )));
             }
         }
 
@@ -2444,6 +2491,7 @@ impl ChatView {
     ) -> AnyElement {
         let UserBubble {
             id,
+            row_idx,
             text,
             attachments,
             review_comments,
@@ -2487,6 +2535,11 @@ impl ChatView {
         } else {
             text.chars().take(120).collect()
         };
+        let mut selection = selection::SelectionScope::for_row(row_idx);
+        if !copy_text.trim().is_empty() {
+            selection =
+                selection.with_message_menu(copy_text.as_str(), Self::message_menu_hook(cx));
+        }
         // No top highlight: a sent message is one flat surface.
         let bubble = div()
             .id(SharedString::from(format!("chat-user-{id}")))
@@ -2505,6 +2558,7 @@ impl ChatView {
                 attachments,
                 review_comments,
                 notes: &notes,
+                selection: Some(&selection),
             },
             window,
             cx,
@@ -2607,6 +2661,7 @@ impl ChatView {
                 attachments,
                 review_comments: &[],
                 notes: &[],
+                selection: None,
             },
             window,
             cx,

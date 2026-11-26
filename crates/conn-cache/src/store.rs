@@ -50,6 +50,9 @@ impl MessageCache {
             CREATE TABLE IF NOT EXISTS thread_outlines (
                 environment TEXT NOT NULL, thread TEXT NOT NULL, markers TEXT NOT NULL,
                 PRIMARY KEY(environment, thread)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS thread_views (
+                environment TEXT NOT NULL, thread TEXT NOT NULL, view TEXT NOT NULL,
+                PRIMARY KEY(environment, thread)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS attachment_images (
                 position INTEGER PRIMARY KEY, environment TEXT NOT NULL, thread TEXT NOT NULL,
                 version TEXT NOT NULL, bytes BLOB NOT NULL, UNIQUE(environment,thread,version))",
@@ -230,6 +233,32 @@ impl MessageCache {
         .bind(markers)
         .execute(&self.0)
         .await?;
+        Ok(())
+    }
+
+    /// The thread's last rendered state, as the client saved it.
+    ///
+    /// # Errors
+    /// Returns the database read error.
+    pub async fn view(&self, env: &str, thread: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT view FROM thread_views WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .fetch_optional(&self.0)
+            .await
+    }
+
+    /// Replaces the thread's last rendered state.
+    ///
+    /// # Errors
+    /// Returns the database write error.
+    pub async fn save_view(&self, env: &str, thread: &str, view: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT OR REPLACE INTO thread_views(environment,thread,view) VALUES(?,?,?)")
+            .bind(env)
+            .bind(thread)
+            .bind(view)
+            .execute(&self.0)
+            .await?;
         Ok(())
     }
 
@@ -427,6 +456,11 @@ impl MessageCache {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM thread_outlines WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM thread_views WHERE environment=? AND thread=?")
             .bind(env)
             .bind(thread)
             .execute(&mut *tx)

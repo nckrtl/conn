@@ -379,6 +379,28 @@ impl OfflineReader {
             .map_err(read_error)
     }
 
+    async fn save_view(&self, thread: &str, snapshot: &FfiThreadSnapshot) -> Result<(), FfiError> {
+        if !self.may_read(thread) {
+            return Ok(());
+        }
+        let json = serde_json::to_string(snapshot).map_err(read_error)?;
+        self.db
+            .save_view(&self.env, thread, &json)
+            .await
+            .map_err(read_error)
+    }
+
+    /// The thread's last saved rendered state, marked not synchronized until the live
+    /// projection replaces it.
+    async fn saved_view(&self, thread: &str) -> Option<FfiThreadSnapshot> {
+        let json = self.db.view(&self.env, thread).await.ok()??;
+        let mut snapshot: FfiThreadSnapshot = serde_json::from_str(&json).ok()?;
+        (snapshot.thread_id == thread).then_some(())?;
+        snapshot.synchronized = false;
+        snapshot.server_page = false;
+        Some(snapshot)
+    }
+
     fn snapshot(&self, thread: &str, bodies: Vec<String>) -> Result<FfiThreadSnapshot, FfiError> {
         let mut state = ThreadState::new(thread);
         for body in bodies {
@@ -459,9 +481,14 @@ impl OfflineReader {
         read_saved_shell(&self.dir, &self.env).await
     }
 
+    /// The thread as last seen: its saved rendered state (run state, work groups, subagents,
+    /// requests), else its latest saved messages.
     pub async fn recent(&self, thread: String) -> Result<FfiThreadSnapshot, FfiError> {
         if !self.may_read(&thread) {
             return self.snapshot(&thread, Vec::new());
+        }
+        if let Some(view) = self.saved_view(&thread).await {
+            return Ok(view);
         }
         self.snapshot(
             &thread,
@@ -624,6 +651,34 @@ fn recent_images(prefix: &[Message], update: &Update) -> Vec<crate::FfiAttachmen
     batch
 }
 
+/// What a thread's cache writer has written so far.
+#[derive(Default)]
+struct WriterProgress {
+    previous: Option<HistoryStamp>,
+    applied_generation: Option<u64>,
+    warm_prefix: Vec<Message>,
+    outline: FetchedOutline,
+}
+
+/// The outline a cache writer fetched last: a streaming turn changes only the tail, so the
+/// outline is fetched again when a prompt is added or after [`OUTLINE_REFRESH`].
+#[derive(Default)]
+struct FetchedOutline {
+    outline: Option<ThreadOutline>,
+    prompts: Vec<String>,
+    at: Option<std::time::Instant>,
+}
+
+const OUTLINE_REFRESH: Duration = Duration::from_secs(60);
+
+fn prompt_ids(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| matches!(message, Message::User { .. }))
+        .map(|message| message.id().to_owned())
+        .collect()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedOutline {
     outline: ThreadOutline,
@@ -651,11 +706,15 @@ impl OfflineReader {
         &self,
         thread: &str,
         update: &Update,
-        previous: &mut Option<HistoryStamp>,
-        applied_generation: &mut Option<u64>,
+        progress: &mut WriterProgress,
         warming: &watch::Sender<Vec<crate::FfiAttachment>>,
-        warm_prefix: &mut Vec<Message>,
     ) -> Result<(), FfiError> {
+        let WriterProgress {
+            previous,
+            applied_generation,
+            warm_prefix,
+            outline: fetched,
+        } = progress;
         let warm = |prefix: &[Message]| {
             let images = recent_images(prefix, update);
             warming.send_if_modified(|current| {
@@ -716,7 +775,21 @@ impl OfflineReader {
         {
             self.save_thread(thread, &update.messages).await?;
             warm(warm_prefix);
-            let outline = self.online()?.fetch_thread_outline(thread).await?;
+            let prompts = prompt_ids(&update.messages);
+            let outline = match fetched.outline.take() {
+                Some(outline)
+                    if fetched.prompts == prompts
+                        && fetched.at.is_some_and(|at| at.elapsed() < OUTLINE_REFRESH) =>
+                {
+                    outline
+                }
+                _ => {
+                    fetched.at = Some(std::time::Instant::now());
+                    self.online()?.fetch_thread_outline(thread).await?
+                }
+            };
+            fetched.prompts = prompts;
+            fetched.outline = Some(outline.clone());
             self.save_index(thread, outline, &key).await?;
             *previous = Some(key);
             return Ok(());
@@ -733,6 +806,11 @@ impl OfflineReader {
             Vec::new()
         };
         let outline = self.online()?.fetch_thread_outline(thread).await?;
+        *fetched = FetchedOutline {
+            outline: Some(outline.clone()),
+            prompts: prompt_ids(&update.messages),
+            at: Some(std::time::Instant::now()),
+        };
         replace_history(&self.db, &self.env, thread, &prefix, &update.messages).await?;
         *warm_prefix = prefix.into_iter().rev().take(100).collect();
         warm_prefix.reverse();
@@ -780,6 +858,9 @@ async fn replace_history(
 struct Subscription {
     generation: u64,
     updates: watch::Sender<Option<Update>>,
+    /// The thread's latest rendered state to save. Its writer is not aborted on drop, so the
+    /// last state sent before the thread stops being live still reaches the disk.
+    view: watch::Sender<Option<FfiThreadSnapshot>>,
     worker: tokio::task::JoinHandle<()>,
     warmer: tokio::task::JoinHandle<()>,
     sequence: Option<i64>,
@@ -794,6 +875,8 @@ impl Drop for Subscription {
 pub(crate) struct SyncState {
     reader: Arc<OfflineReader>,
     subscriptions: std::collections::HashMap<String, Subscription>,
+    /// The threads [`Self::retained`] held at the last shell.
+    retained: std::collections::HashSet<String>,
     pruning: HashMap<String, (u64, tokio::task::JoinHandle<()>)>,
     shell_updates: watch::Sender<Option<SavedShell>>,
 }
@@ -815,6 +898,7 @@ impl SyncState {
             pruning: HashMap::new(),
             reader,
             subscriptions: Default::default(),
+            retained: Default::default(),
             shell_updates,
         };
         sync.prune();
@@ -855,21 +939,24 @@ impl SyncState {
         self.reader.may_read(id)
     }
 
-    pub(crate) fn subscribed(&self, thread: &str) -> bool {
-        self.subscriptions.contains_key(thread)
-    }
-
-    pub(crate) fn shell(
-        &mut self,
-        state: &conn_state::ShellState,
-        open: &std::collections::HashSet<String>,
-    ) {
-        let desired: std::collections::HashSet<_> = state
+    /// Threads whose saved history is kept: unsettled and not deleted.
+    fn retained(state: &conn_state::ShellState) -> std::collections::HashSet<String> {
+        state
             .threads
             .iter()
             .filter(|t| t.deleted_at.is_none() && !conn_state::ShellState::is_settled(t))
             .map(|t| t.id.clone())
-            .collect();
+            .collect()
+    }
+
+    /// Records the shell: retention deadlines, the saved shell, and the cache writers of the
+    /// `live` threads (open or warm; the pump subscribes them).
+    pub(crate) fn shell(
+        &mut self,
+        state: &conn_state::ShellState,
+        live: &std::collections::HashSet<String>,
+    ) {
+        let desired = Self::retained(state);
         if let Ok(mut expires) = self.reader.expires.write() {
             for id in &desired {
                 expires.remove(id);
@@ -877,33 +964,42 @@ impl SyncState {
             expires.extend(deadlines(
                 state.threads.iter().chain(&state.archived_threads),
             ));
-            for id in self.subscriptions.keys() {
+            for id in self.retained.iter().chain(self.subscriptions.keys()) {
                 if !desired.contains(id) {
                     expires.entry(id.clone()).or_insert(0);
                 }
             }
         }
-        self.subscriptions.retain(|id, _| {
-            if desired.contains(id) {
-                return true;
-            }
-            if !open.contains(id)
-                && let Some(connection) = &self.reader.connection
-            {
-                connection.unsubscribe_thread(id);
-            }
-            false
-        });
+        self.retained = desired;
         self.prune();
-        for thread in desired {
-            if self.subscribed(&thread) {
-                continue;
-            }
-            if !open.contains(&thread)
-                && let Some(connection) = &self.reader.connection
-            {
-                connection.subscribe_thread(&thread);
-            }
+        self.write_live(live);
+        self.shell_updates
+            .send_replace(Some(self.reader.capture_shell(state)));
+    }
+
+    /// Follows a change of the live threads without a new shell.
+    pub(crate) fn follow(
+        &mut self,
+        state: &conn_state::ShellState,
+        live: &std::collections::HashSet<String>,
+    ) {
+        if self.retained.is_empty() {
+            self.retained = Self::retained(state);
+        }
+        self.write_live(live);
+    }
+
+    /// Runs one cache writer per live, retained thread.
+    fn write_live(&mut self, live: &std::collections::HashSet<String>) {
+        let retained = &self.retained;
+        self.subscriptions
+            .retain(|id, _| live.contains(id) && retained.contains(id));
+        let wanted: Vec<String> = live
+            .iter()
+            .filter(|id| self.retained.contains(*id) && !self.subscriptions.contains_key(*id))
+            .cloned()
+            .collect();
+        for thread in wanted {
             let reader = self.reader.clone();
             let (updates, mut rx) = watch::channel(None::<Update>);
             let (warming, mut images) = watch::channel(Vec::<crate::FfiAttachment>::new());
@@ -928,20 +1024,11 @@ impl SyncState {
             });
             let id = thread.clone();
             let worker = tokio::spawn(async move {
-                let mut previous = None;
-                let mut applied_generation = None;
-                let mut warm_prefix = Vec::new();
+                let mut progress = WriterProgress::default();
                 while rx.changed().await.is_ok() {
                     let mut next = rx.borrow_and_update().clone();
                     while let Some(update) = next.take() {
-                        let reconcile = reader.reconcile(
-                            &id,
-                            &update,
-                            &mut previous,
-                            &mut applied_generation,
-                            &warming,
-                            &mut warm_prefix,
-                        );
+                        let reconcile = reader.reconcile(&id, &update, &mut progress, &warming);
                         tokio::pin!(reconcile);
                         loop {
                             tokio::select! {
@@ -969,19 +1056,38 @@ impl SyncState {
                     }
                 }
             });
+            let (view, mut views) = watch::channel(None::<FfiThreadSnapshot>);
+            let saver = self.reader.clone();
+            let view_thread = thread.clone();
+            tokio::spawn(async move {
+                while views.changed().await.is_ok() {
+                    let Some(snapshot) = views.borrow_and_update().clone() else {
+                        continue;
+                    };
+                    if let Err(error) = saver.save_view(&view_thread, &snapshot).await {
+                        tracing::warn!(%error, "thread view write failed");
+                    }
+                }
+            });
             self.subscriptions.insert(
                 thread,
                 Subscription {
                     generation: 0,
                     updates,
+                    view,
                     worker,
                     warmer,
                     sequence: None,
                 },
             );
         }
-        self.shell_updates
-            .send_replace(Some(self.reader.capture_shell(state)));
+    }
+
+    /// Saves a live thread's rendered state, so a cold start shows it before the server answers.
+    pub(crate) fn save_view(&self, snapshot: FfiThreadSnapshot) {
+        if let Some(sub) = self.subscriptions.get(&snapshot.thread_id) {
+            sub.view.send_replace(Some(snapshot));
+        }
     }
 
     pub(crate) fn thread(&mut self, state: &ThreadState, snapshot: Option<i64>) {
@@ -1380,6 +1486,148 @@ mod tests {
         if !db.recent("env", "thread").await?.is_empty() {
             return Err("rolled-back messages remain".into());
         }
+        Ok(())
+    }
+    fn unsettled_shell(thread: &str) -> Result<conn_state::ShellState, serde_json::Error> {
+        let item: conn_contract::OrchestrationV2ShellStreamItem = conn_contract::from_json(
+            serde_json::json!({
+                "kind": "snapshot",
+                "snapshot": {
+                    "schemaVersion": 1,
+                    "snapshotSequence": 1,
+                    "projects": [],
+                    "threads": [{
+                        "createdBy": "user", "creationSource": "web", "id": thread,
+                        "projectId": "p", "title": "Working", "providerInstanceId": "claudeAgent",
+                        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-haiku-5-5" },
+                        "runtimeMode": "full-access", "interactionMode": "default",
+                        "branch": null, "worktreePath": null,
+                        "lineage": { "rootThreadId": thread, "parentThreadId": null, "relationshipToParent": null },
+                        "forkedFrom": null, "activeProviderThreadId": null, "latestRunId": "r1",
+                        "activeRunId": "r1", "status": "running", "pendingRuntimeRequest": null,
+                        "latestVisibleMessage": null, "latestUserMessageAt": null,
+                        "hasActionableProposedPlan": false, "itemCount": 4, "visibleItemCount": 4,
+                        "createdAt": "2026-11-26T09:00:00.000Z", "updatedAt": "2026-11-26T09:00:00.000Z",
+                        "archivedAt": null, "settledOverride": null, "settledAt": null, "deletedAt": null
+                    }],
+                    "archivedThreads": []
+                }
+            }),
+        )?;
+        let mut shell = conn_state::ShellState::default();
+        shell.apply(item);
+        Ok(shell)
+    }
+
+    fn running_subagent(id: &str) -> conn_state::TimelineEntry {
+        conn_state::TimelineEntry::Subagent {
+            id: id.into(),
+            child_thread_id: Some(format!("child-{id}")),
+            title: format!("Agent {id}"),
+            role: "claudeAgent".into(),
+            status: conn_state::TurnItemStatus::Running,
+            summary: None,
+            remote_child: None,
+            created_at: Some("2026-11-26T09:00:05Z".into()),
+            started_at: Some("2026-11-26T09:00:05Z".into()),
+            completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn a_killed_app_restores_a_working_threads_run_group_and_subagents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let reader = OfflineReader::open(dir.path().into(), "env".into(), None).await?;
+        let mut sync = SyncState::new(reader.clone());
+        let live: std::collections::HashSet<String> = ["t1".to_owned()].into();
+        sync.shell(&unsettled_shell("t1")?, &live);
+
+        let mut state = ThreadState::new("t1");
+        state.synchronized = true;
+        state.working = true;
+        state.entries = vec![
+            conn_state::TimelineEntry::User {
+                id: "u1".into(),
+                text: "Review the change".into(),
+                created_by_agent: false,
+                sender: None,
+                created_at: Some("2026-11-26T09:00:00Z".into()),
+                attachments: Vec::new(),
+                is_steer: false,
+                review_comments: Vec::new(),
+                run_id: Some("r1".into()),
+            },
+            conn_state::TimelineEntry::Tool {
+                id: "tool1".into(),
+                kind: "command".into(),
+                title: "cargo test".into(),
+                detail: None,
+                status: conn_state::ItemStatus::Running,
+                output_omitted: false,
+            },
+            running_subagent("sa1"),
+            running_subagent("sa2"),
+        ];
+        state.entry_timings.insert(
+            "tool1".into(),
+            conn_state::EntryTiming {
+                run_id: Some("r1".into()),
+                started_at_ms: Some(1_795_000_001_000),
+                completed_at_ms: None,
+            },
+        );
+        state.run_timings.insert(
+            "r1".into(),
+            conn_state::RunTiming {
+                started_at_ms: Some(1_795_000_000_000),
+                completed_at_ms: None,
+            },
+        );
+        let shown = build_thread_snapshot(&state, None, &Default::default());
+        sync.save_view(shown.clone());
+        // The app dies: the pump and its cache writers go away.
+        drop(sync);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while reader.db.view("env", "t1").await?.is_none() {
+            if std::time::Instant::now() > deadline {
+                return Err("the view was never written".into());
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(reader);
+
+        let restored = OfflineReader::open(dir.path().into(), "env".into(), None)
+            .await?
+            .recent("t1".into())
+            .await?;
+        assert!(restored.working, "the run is still working");
+        assert!(
+            !restored.synchronized,
+            "not synchronized until the live projection"
+        );
+        let group = restored
+            .work_groups
+            .first()
+            .ok_or("the active work group is gone")?;
+        assert!(group.has_active);
+        assert_eq!(group.started_at_ms, Some(1_795_000_001_000));
+        let agents = restored
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, crate::FfiTimelineEntry::Subagent { .. }))
+            .count();
+        assert_eq!(agents, 2, "both subagents survive");
+        let mut expected = shown;
+        expected.synchronized = false;
+        assert_eq!(
+            restored, expected,
+            "the first frame equals the last live state"
+        );
         Ok(())
     }
 }

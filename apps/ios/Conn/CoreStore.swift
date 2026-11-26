@@ -413,6 +413,8 @@ final class CoreStore {
 
     func openThread(_ threadId: String) {
         if openThreadId != threadId { openThread = nil }
+        Self.openLog.info("open thread=\(threadId, privacy: .public)")
+        firstSnapshotLog = threadId
         openThreadId = threadId
         // The session closes the scope's other thread, and subscribes this one now or as soon as
         // a connection attaches.
@@ -645,6 +647,7 @@ final class CoreStore {
             guard let cached = try? await reader.recent(thread: id),
                   offlineReader === reader, openThreadId == id,
                   openThread == nil, !cached.entries.isEmpty else { return }
+            logFirstSnapshot(cached, source: "disk")
             openThread = cached
         }
     }
@@ -666,8 +669,12 @@ final class CoreStore {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
-        guard phase == .active else { return }
-        session?.foreground()
+        switch phase {
+        case .active: session?.foreground()
+        // The core stops its warm thread streams until the app is active again.
+        case .background: session?.background()
+        default: return
+        }
         for child in linked.values { child.handleScenePhase(phase) }
     }
 
@@ -712,6 +719,17 @@ final class CoreStore {
     // MARK: - Session events
 
     private static let sessionLog = Logger(subsystem: "com.nckrtl.conn.ios", category: "session")
+    /// Thread-open timing: the open, its first snapshot and its first frame.
+    static let openLog = Logger(subsystem: "com.nckrtl.conn.ios", category: "open")
+    /// The opened thread whose first snapshot is not logged yet.
+    @ObservationIgnored private var firstSnapshotLog: String?
+
+    private func logFirstSnapshot(_ snapshot: FfiThreadSnapshot, source: String) {
+        guard firstSnapshotLog == snapshot.threadId else { return }
+        firstSnapshotLog = nil
+        let agents = snapshot.entries.filter { if case .subagent = $0 { true } else { false } }.count
+        Self.openLog.info("snapshot thread=\(snapshot.threadId, privacy: .public) source=\(source, privacy: .public) entries=\(snapshot.entries.count) subagents=\(agents) synchronized=\(snapshot.synchronized)")
+    }
 
     /// One `.info` line per published state, so a cold start can be read back from the device log.
     /// It names the host only, and strips URLs in error text down to theirs.
@@ -835,6 +853,7 @@ final class CoreStore {
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
         if openThreadId == snapshot.threadId {
+            logFirstSnapshot(snapshot, source: "core")
             openThread = snapshot
         }
     }

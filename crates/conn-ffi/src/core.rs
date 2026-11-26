@@ -39,6 +39,8 @@ const TAG_SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
 const TAG_LAUNCH_THREAD: &str = "orchestration.launchThread";
 const TAG_ENSURE_SCRATCH: &str = "projects.ensureScratch";
 const TAG_REFRESH_PROVIDERS: &str = "server.refreshProviders";
+/// How long a live thread's changes wait before its rendered state is saved for a cold start.
+const VIEW_SAVE_DEBOUNCE: Duration = Duration::from_millis(1000);
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -106,6 +108,8 @@ enum PumpControl {
     EnableOffline(Arc<crate::OfflineReader>),
     OpenThread(String),
     CloseThread(String),
+    /// The app came to the foreground (`true`) or went to the background (`false`).
+    SetForeground(bool),
     ResolveLaunchDefaults {
         project_id: String,
         reply: oneshot::Sender<LaunchDefaults>,
@@ -1174,6 +1178,12 @@ impl ConnCore {
         self.connection.reconnect();
     }
 
+    /// Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
+    /// opening one shows its latest state at once; `false` drops them until the next `true`.
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self.ctrl_tx.send(PumpControl::SetForeground(foreground));
+    }
+
     /// Closes the connection and stops the background event pump. Safe to call more than once.
     pub fn disconnect(&self) {
         if self.disconnected.swap(true, Ordering::AcqRel) {
@@ -1216,6 +1226,15 @@ struct PumpState {
     workspace_scans: HashMap<(String, String), WorkspaceScanState>,
     threads: HashMap<String, ThreadState>,
     open_threads: HashSet<String>,
+    /// Threads kept subscribed in the background ([`conn_state::warm`]). Open threads may be
+    /// warm too; a thread's stream runs while it is open or warm.
+    warm_threads: HashSet<String>,
+    foreground: bool,
+    /// When the warm set picks again after a shell change.
+    warm_due: Option<Instant>,
+    /// Live threads whose rendered state changed since it was last saved, and when to save.
+    views_dirty: HashSet<String>,
+    views_due: Option<Instant>,
     ended_threads: HashSet<String>,
     shell_snapshot_required: bool,
     pending_older_page: Option<oneshot::Sender<Option<conn_state::OlderPageRequest>>>,
@@ -1431,6 +1450,9 @@ impl PumpState {
             PumpControl::EnableOffline(reader) => {
                 self.offline = Some(crate::offline::SyncState::new(reader));
                 self.seed_offline_threads = true;
+                for thread_id in self.live_threads() {
+                    self.view_changed(&thread_id);
+                }
                 if self.shell.synchronized && !self.coalescer.has_pending_shell() {
                     self.sync_offline_shell();
                 }
@@ -1455,13 +1477,16 @@ impl PumpState {
                 self.threads
                     .entry(thread_id.clone())
                     .or_insert_with(|| ThreadState::new(thread_id.clone()));
-                if is_newly_opened
-                    && !self
-                        .offline
-                        .as_ref()
-                        .is_some_and(|s| s.subscribed(&thread_id))
-                {
-                    self.connection.subscribe_thread(&thread_id);
+                conn_client::perf_log!(
+                    "ffi.open thread={thread_id} warm={} cached={}",
+                    self.warm_threads.contains(&thread_id),
+                    cached_snapshot.is_some()
+                );
+                if is_newly_opened {
+                    self.follow_live_threads();
+                    if !self.warm_threads.contains(&thread_id) {
+                        self.connection.subscribe_thread(&thread_id);
+                    }
                 }
                 if let Some(snapshot) = cached_snapshot {
                     self.emit_or_buffer_thread(snapshot);
@@ -1472,13 +1497,19 @@ impl PumpState {
                 let was_open = self.open_threads.remove(&thread_id);
                 self.ended_threads.remove(&thread_id);
                 self.coalescer.cancel_thread(&thread_id);
-                if was_open
-                    && !self
-                        .offline
-                        .as_ref()
-                        .is_some_and(|s| s.subscribed(&thread_id))
-                {
+                if was_open && !self.warm_threads.contains(&thread_id) {
+                    self.save_views();
                     self.connection.unsubscribe_thread(&thread_id);
+                    self.follow_live_threads();
+                }
+                true
+            }
+            PumpControl::SetForeground(foreground) => {
+                if self.foreground != foreground {
+                    self.foreground = foreground;
+                    // The app may be killed in the background: save what it shows first.
+                    self.save_views();
+                    self.rewarm();
                 }
                 true
             }
@@ -1507,6 +1538,7 @@ impl PumpState {
                     });
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
+                    self.follow_live_threads();
                     self.connection.subscribe_thread(&thread_id);
                     if let Some(snapshot) = snapshot {
                         self.emit_or_buffer_thread(snapshot);
@@ -1517,6 +1549,7 @@ impl PumpState {
                         .or_insert_with(|| ThreadState::new(thread_id.clone()));
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
+                    self.follow_live_threads();
                     self.connection.subscribe_thread(&thread_id);
                 }
                 let _ = reply.send(());
@@ -1618,6 +1651,7 @@ impl PumpState {
                 if self.shell.synchronized {
                     self.sync_shell_run_meta();
                     self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                    self.schedule_rewarm();
                 }
                 if !change.threads_changed.is_empty() {
                     self.resubscribe_ended_threads();
@@ -1660,7 +1694,9 @@ impl PumpState {
                     _ => None,
                 };
                 let was_deleted = state.deleted;
+                let applying = Instant::now();
                 let changed = state.apply(item);
+                let apply_ms = conn_client::perf::ms_since(applying);
                 let deleted_now = state.deleted && !was_deleted;
                 if changed && let Some(sync) = &mut self.offline {
                     sync.thread(state, snapshot_sequence);
@@ -1670,6 +1706,7 @@ impl PumpState {
                 // A thread-level event (model, title, ...) changes the header, not the timeline.
                 let meta = self.resolve_thread_meta(&thread_id);
                 let emit = changed || force_emit || meta != meta_before;
+                let building = Instant::now();
                 let snapshot = if self.open_threads.contains(&thread_id) && emit {
                     self.threads.get(&thread_id).map(|state| {
                         build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
@@ -1677,6 +1714,14 @@ impl PumpState {
                 } else {
                     None
                 };
+                if snapshot_sequence.is_some() || force_emit {
+                    conn_client::perf_log!(
+                        "ffi.thread_applied thread={thread_id} apply_ms={apply_ms:.1} build_ms={:.1} entries={} emitted={}",
+                        conn_client::perf::ms_since(building),
+                        snapshot.as_ref().map_or(0, |s| s.entries.len()),
+                        snapshot.is_some()
+                    );
+                }
                 if let Ok(mut guard) = self.thread_runs.write() {
                     guard.insert(
                         thread_id.clone(),
@@ -1685,6 +1730,9 @@ impl PumpState {
                             active_run_id,
                         },
                     );
+                }
+                if emit {
+                    self.view_changed(&thread_id);
                 }
                 if let Some(snapshot) = snapshot {
                     self.emit_or_buffer_thread(snapshot);
@@ -1735,7 +1783,149 @@ impl PumpState {
     }
 
     fn subscribed(&self, id: &str) -> bool {
-        self.open_threads.contains(id) || self.offline.as_ref().is_some_and(|s| s.subscribed(id))
+        self.open_threads.contains(id) || self.warm_threads.contains(id)
+    }
+
+    /// Threads whose stream runs: the open ones and the warm ones.
+    fn live_threads(&self) -> HashSet<String> {
+        self.open_threads
+            .union(&self.warm_threads)
+            .cloned()
+            .collect()
+    }
+
+    /// Lets the offline cache follow the live threads' streams.
+    fn follow_live_threads(&mut self) {
+        let live = self.live_threads();
+        if let Some(sync) = &mut self.offline {
+            sync.follow(&self.shell, &live);
+        }
+    }
+
+    /// Picks the warm set again soon: the first pick at once, later ones after a short pause
+    /// so a burst of shell events picks once.
+    fn schedule_rewarm(&mut self) {
+        if !self.foreground {
+            return;
+        }
+        if self.warm_threads.is_empty() && self.warm_due.is_none() {
+            self.rewarm();
+        } else if self.warm_due.is_none() {
+            self.warm_due = Some(
+                Instant::now() + Duration::from_millis(conn_state::warm::WARM_REPICK_DEBOUNCE_MS),
+            );
+        }
+    }
+
+    /// Subscribes the threads [`conn_state::warm::pick_warm_threads`] picks and drops the
+    /// others. In the background, or before the shell is known, no thread is warm. A thread
+    /// that leaves the set keeps its state, as a closed thread does.
+    fn rewarm(&mut self) {
+        self.warm_due = None;
+        let picked = if self.foreground && self.shell.synchronized {
+            conn_state::warm::pick_warm_threads(
+                &self.shell,
+                now_epoch_ms(),
+                conn_state::warm::WARM_THREAD_CAP,
+            )
+        } else {
+            Vec::new()
+        };
+        let target: HashSet<String> = picked.iter().cloned().collect();
+        if target == self.warm_threads {
+            return;
+        }
+        let dropped: Vec<String> = self.warm_threads.difference(&target).cloned().collect();
+        // Best first: the server answers subscriptions in order, so a thread that needs the
+        // user or works streams its snapshot before quieter ones.
+        let added: Vec<String> = picked
+            .into_iter()
+            .filter(|id| !self.warm_threads.contains(id))
+            .collect();
+        self.warm_threads = target;
+        for id in &dropped {
+            if !self.open_threads.contains(id) {
+                self.ended_threads.remove(id);
+                self.connection.unsubscribe_thread(id);
+            }
+        }
+        // The cache writers follow first, so a warm stream's first snapshot is written.
+        self.follow_live_threads();
+        for id in &added {
+            self.threads
+                .entry(id.clone())
+                .or_insert_with(|| ThreadState::new(id.clone()));
+            if !self.open_threads.contains(id) {
+                self.connection.subscribe_thread(id);
+            }
+        }
+        conn_client::perf_log!(
+            "ffi.warm added={} dropped={} warm={}",
+            added.len(),
+            dropped.len(),
+            self.warm_threads.len()
+        );
+    }
+
+    fn rewarm_due(&mut self) {
+        if self.warm_due.is_some_and(|due| due <= Instant::now()) {
+            self.rewarm();
+        }
+    }
+
+    /// The pump's next timer: a coalesced snapshot, a warm-set pick or a view save.
+    fn next_deadline(&self) -> Option<Instant> {
+        [
+            self.coalescer.next_deadline(),
+            self.warm_due,
+            self.views_due,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Marks a live thread's rendered state for saving ([`VIEW_SAVE_DEBOUNCE`]).
+    fn view_changed(&mut self, thread_id: &str) {
+        if self.offline.is_none() || !self.subscribed(thread_id) {
+            return;
+        }
+        self.views_dirty.insert(thread_id.to_owned());
+        self.views_due
+            .get_or_insert_with(|| Instant::now() + VIEW_SAVE_DEBOUNCE);
+    }
+
+    /// Saves the changed live threads' rendered state: the run, work groups and their
+    /// timings, subagents, queued messages and requests, as the app would show them.
+    fn save_views(&mut self) {
+        self.views_due = None;
+        let dirty = std::mem::take(&mut self.views_dirty);
+        let Some(sync) = &self.offline else {
+            return;
+        };
+        for thread_id in dirty {
+            let Some(state) = self
+                .threads
+                .get(&thread_id)
+                .filter(|state| state.synchronized && !state.deleted)
+            else {
+                continue;
+            };
+            let meta = self.resolve_thread_meta(&thread_id);
+            sync.save_view(build_thread_snapshot(
+                state,
+                meta.as_ref(),
+                self.server_config.catalog(),
+            ));
+        }
+    }
+
+    /// Runs the timers that are due.
+    fn timers_due(&mut self) {
+        self.rewarm_due();
+        if self.views_due.is_some_and(|due| due <= Instant::now()) {
+            self.save_views();
+        }
     }
 
     fn resubscribe_ended_threads(&mut self) {
@@ -1767,8 +1957,9 @@ impl PumpState {
     }
 
     fn sync_offline_shell(&mut self) {
+        let live = self.live_threads();
         if let Some(sync) = &mut self.offline {
-            sync.shell(&self.shell, &self.open_threads);
+            sync.shell(&self.shell, &live);
             if std::mem::take(&mut self.seed_offline_threads) {
                 for state in self.threads.values() {
                     sync.thread(state, state.sequence);
@@ -1836,6 +2027,11 @@ async fn run_pump(
         workspace_scans: HashMap::new(),
         threads: HashMap::new(),
         open_threads: HashSet::new(),
+        warm_threads: HashSet::new(),
+        foreground: true,
+        warm_due: None,
+        views_dirty: HashSet::new(),
+        views_due: None,
         ended_threads: HashSet::new(),
         shell_snapshot_required: false,
         pending_older_page: None,
@@ -1847,7 +2043,7 @@ async fn run_pump(
     };
 
     loop {
-        if let Some(deadline) = state.coalescer.next_deadline() {
+        if let Some(deadline) = state.next_deadline() {
             let sleep_until = tokio::time::Instant::from_std(deadline);
             tokio::select! {
                 biased;
@@ -1864,9 +2060,12 @@ async fn run_pump(
                         state.handle_event(more);
                     }
                     state.flush_due();
+                    // A steady event stream can keep the timer branch from ever running.
+                    state.timers_due();
                 }
                 () = tokio::time::sleep_until(sleep_until) => {
                     state.flush_due();
+                    state.timers_due();
                 }
             }
         } else {
@@ -2940,6 +3139,288 @@ mod tests {
             dispatched.payload["modelSelection"]["model"].as_str(),
             Some("model-a"),
             "the switch back to A is sent"
+        );
+
+        core.disconnect();
+        let _ = stop_tx.send(());
+        let _ = server_thread.join();
+        Ok(())
+    }
+
+    fn warm_shell_thread(
+        id: &str,
+        minute: u32,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> serde_json::Value {
+        let mut thread = json!({
+            "createdBy": "user",
+            "creationSource": "web",
+            "id": id,
+            "projectId": "p1",
+            "title": format!("Thread {id}"),
+            "providerInstanceId": "claudeAgent",
+            "modelSelection": { "instanceId": "claudeAgent", "model": "claude-haiku-5-5" },
+            "runtimeMode": "full-access",
+            "interactionMode": "default",
+            "branch": null,
+            "worktreePath": null,
+            "lineage": { "rootThreadId": id, "parentThreadId": null, "relationshipToParent": null },
+            "forkedFrom": null,
+            "activeProviderThreadId": null,
+            "latestRunId": null,
+            "activeRunId": null,
+            "status": "idle",
+            "pendingRuntimeRequest": null,
+            "latestVisibleMessage": null,
+            "latestUserMessageAt": null,
+            "hasActionableProposedPlan": false,
+            "itemCount": 0,
+            "visibleItemCount": 0,
+            "createdAt": "2026-11-13T09:00:00.000Z",
+            "updatedAt": format!("2026-11-13T09:{minute:02}:00.000Z"),
+            "archivedAt": null,
+            "settledOverride": null,
+            "settledAt": null,
+            "deletedAt": null
+        });
+        edit(&mut thread);
+        thread
+    }
+
+    /// What the mock server saw: `sub <thread>` per subscribeThread, `stop <thread>` per interrupt.
+    type WireLog = Arc<Mutex<Vec<String>>>;
+
+    fn count(log: &WireLog, line: &str) -> usize {
+        log.lock()
+            .expect("log")
+            .iter()
+            .filter(|l| *l == line)
+            .count()
+    }
+
+    fn wait_log(log: &WireLog, pred: impl Fn(&[String]) -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if pred(&log.lock().expect("log")) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pred(&log.lock().expect("log"))
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    fn warm_threads_follow_the_shell_open_close_and_foreground()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use conn_state::warm::WARM_THREAD_CAP;
+        // 14 unsettled threads (w00 oldest .. w13 newest), one settled, one subagent child.
+        let mut threads: Vec<serde_json::Value> = (0..14)
+            .map(|i| warm_shell_thread(&format!("w{i:02}"), i, |_| {}))
+            .collect();
+        threads.push(warm_shell_thread("settled", 50, |t| {
+            t["settledAt"] = json!("2026-11-13T09:50:00.000Z");
+        }));
+        threads.push(warm_shell_thread("child", 51, |t| {
+            t["lineage"]["parentThreadId"] = json!("w13");
+            t["lineage"]["relationshipToParent"] = json!("subagent");
+        }));
+        let shell = json!({ "kind": "snapshot", "snapshot": {
+            "schemaVersion": 1,
+            "snapshotSequence": 1,
+            "projects": [],
+            "threads": threads,
+            "archivedThreads": []
+        }});
+        let thread_snapshot: serde_json::Value =
+            serde_json::from_str(&conn_state::testkit::synthetic_thread_snapshot_json(
+                conn_state::testkit::SyntheticThread {
+                    turns: 2,
+                    commands_per_turn: 1,
+                    command_output_bytes: 8,
+                    assistant_bytes: 8,
+                },
+            ))?;
+
+        let server_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let log: WireLog = Arc::default();
+        let server_log = log.clone();
+        let addr = server_rt.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            tokio::spawn(async move {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                let mut streams: HashMap<String, String> = HashMap::new();
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let Ok(frames) = conn_wire::decode_client_message(&text) else {
+                        continue;
+                    };
+                    for frame in frames {
+                        let mut send = Vec::new();
+                        match frame {
+                            FromClient::Request(req)
+                                if req.tag == "orchestration.subscribeShell" =>
+                            {
+                                send.push(FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![shell.clone(), json!({ "kind": "synchronized" })],
+                                });
+                            }
+                            FromClient::Request(req)
+                                if req.tag == "orchestration.subscribeThread" =>
+                            {
+                                let thread_id = req.payload["threadId"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                server_log
+                                    .lock()
+                                    .expect("log")
+                                    .push(format!("sub {thread_id}"));
+                                streams.insert(format!("{:?}", req.id), thread_id.clone());
+                                let mut snap = thread_snapshot.clone();
+                                snap["projection"]["thread"]["id"] = json!(thread_id);
+                                send.push(FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![snap, json!({ "kind": "synchronized" })],
+                                });
+                            }
+                            FromClient::Interrupt { request_id } => {
+                                if let Some(thread_id) = streams.remove(&format!("{request_id:?}"))
+                                {
+                                    server_log
+                                        .lock()
+                                        .expect("log")
+                                        .push(format!("stop {thread_id}"));
+                                }
+                            }
+                            _ => {}
+                        }
+                        for frame in send {
+                            let _ = ws
+                                .send(Message::Text(encode_server_frame(&frame).into()))
+                                .await;
+                        }
+                    }
+                }
+            });
+            Ok::<_, std::io::Error>(addr)
+        })?;
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_thread = std::thread::spawn(move || {
+            server_rt.block_on(async {
+                let _ = stop_rx.await;
+            });
+        });
+
+        let listener = Arc::new(RecordingListener::default());
+        let core = ConnCore::connect(
+            format!("http://{addr}"),
+            FfiCredential::Bearer {
+                token: "test-bearer".to_owned(),
+            },
+            listener.clone(),
+        )?;
+        let cache = tempfile::tempdir()?;
+        let reader = futures::executor::block_on(core.prepare_offline(
+            cache.path().to_string_lossy().into_owned(),
+            "env".to_owned(),
+        ))?;
+        let warm: Vec<String> = (14 - WARM_THREAD_CAP..14)
+            .map(|i| format!("w{i:02}"))
+            .collect();
+        assert!(
+            wait_log(&log, |l| l.len() >= WARM_THREAD_CAP),
+            "the newest threads are subscribed once the shell is known"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        let mut subscribed: Vec<String> = log.lock().expect("log").clone();
+        subscribed.sort();
+        let expected: Vec<String> = warm.iter().map(|id| format!("sub {id}")).collect();
+        assert_eq!(
+            subscribed, expected,
+            "only the capped warm set; no settled or child thread"
+        );
+        assert!(
+            listener.inner.lock().expect("listener").threads.is_empty(),
+            "warm threads that are not open send no snapshot to the app"
+        );
+
+        // A warm thread opens from memory, synchronized, without a new subscription, and stays
+        // subscribed when it closes.
+        let hot = warm[WARM_THREAD_CAP - 1].clone();
+        core.open_thread(hot.clone());
+        assert!(
+            listener.wait_for(Duration::from_secs(2), |s| s.threads.iter().any(|t| t
+                .thread_id
+                == hot
+                && t.synchronized
+                && !t.entries.is_empty())),
+            "a warm thread shows its live state on open"
+        );
+        core.close_thread(hot.clone());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            count(&log, &format!("sub {hot}")),
+            1,
+            "no second subscription"
+        );
+        assert_eq!(
+            count(&log, &format!("stop {hot}")),
+            0,
+            "closing keeps a warm thread"
+        );
+
+        // A cold thread subscribes on open and stops on close.
+        core.open_thread("w00".to_owned());
+        assert!(wait_log(&log, |l| l.iter().any(|x| x == "sub w00")));
+        core.close_thread("w00".to_owned());
+        assert!(wait_log(&log, |l| l.iter().any(|x| x == "stop w00")));
+
+        // The background stops every warm stream; the foreground starts them again.
+        core.set_foreground(false);
+        assert!(
+            wait_log(&log, |l| warm
+                .iter()
+                .all(|id| l.contains(&format!("stop {id}")))),
+            "the background stops the warm threads"
+        );
+        // Before they stop, the background saves what each warm thread shows.
+        let check = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let saved = check.block_on(async {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut all = true;
+                for id in &warm {
+                    all &= reader.db.view("env", id).await.ok().flatten().is_some();
+                }
+                if all || Instant::now() > deadline {
+                    return all;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        assert!(saved, "every warm thread's view is saved for a cold start");
+        core.set_foreground(true);
+        assert!(
+            wait_log(&log, |l| warm.iter().all(|id| l
+                .iter()
+                .filter(|x| **x == format!("sub {id}"))
+                .count()
+                == 2)),
+            "the foreground subscribes them again"
         );
 
         core.disconnect();

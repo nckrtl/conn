@@ -219,7 +219,9 @@ impl From<OrbitTargetStatus> for FfiOrbitTargetStatus {
 }
 
 /// Container power state for an Orbit Instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiOrbitPowerState {
     Running,
     Stopped,
@@ -819,7 +821,9 @@ pub struct FfiStartedOrbitThread {
 // Tasks Board, Detail, Insights & Realtime FFI types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiTaskStatus {
     Backlog,
     Todo,
@@ -877,7 +881,9 @@ impl From<SubtaskStatus> for FfiSubtaskStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiTaskLane {
     Backlog,
     Todo,
@@ -907,7 +913,9 @@ impl From<FfiTaskLane> for TaskLane {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiTaskLabelTone {
     Info,
     Warning,
@@ -947,7 +955,9 @@ impl From<StatusTone> for FfiStatusTone {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiAttentionKind {
     Question,
     Failure,
@@ -968,7 +978,9 @@ impl From<AttentionKind> for FfiAttentionKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiPullRequestState {
     Open,
     Merged,
@@ -1042,7 +1054,7 @@ impl From<ImplementerMode> for FfiImplementerMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum FfiTaskEnvironmentState {
     NotStarted,
     Disposed,
@@ -1151,7 +1163,7 @@ impl From<TasksLiveStatus> for FfiTasksLiveStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiTaskAttention {
     pub kind: FfiAttentionKind,
     pub question: Option<String>,
@@ -1168,7 +1180,7 @@ impl From<&TaskAttention> for FfiTaskAttention {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiTaskProject {
     pub id: i64,
     pub slug: String,
@@ -1187,7 +1199,7 @@ impl From<&TaskProject> for FfiTaskProject {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiTaskWorkspace {
     pub instance_id: i64,
     pub name: String,
@@ -1214,7 +1226,7 @@ impl From<&TaskWorkspace> for FfiTaskWorkspace {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiTaskPullRequest {
     pub number: i64,
     pub url: String,
@@ -1231,7 +1243,9 @@ impl From<&TaskPullRequest> for FfiTaskPullRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize,
+)]
 pub struct FfiSubtaskCounts {
     pub total: i64,
     pub todo: i64,
@@ -1255,7 +1269,7 @@ impl From<SubtaskCounts> for FfiSubtaskCounts {
 }
 
 /// One Orbit Task card summary for the board and detail header.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiTaskSummary {
     pub id: i64,
     pub title: String,

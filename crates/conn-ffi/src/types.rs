@@ -507,6 +507,7 @@ pub enum FfiTimelineEntry {
     Notice {
         id: String,
         text: String,
+        /// A warning or an error: drawn as desktop's warning row, not the info divider.
         is_error: bool,
     },
     /// Fallback for future timeline entry kinds not yet mapped to a dedicated variant.
@@ -1455,7 +1456,7 @@ pub(crate) fn map_timeline_entry_with_context(
         TimelineEntry::Notice { id, text, level } => FfiTimelineEntry::Notice {
             id: id.clone(),
             text: text.clone(),
-            is_error: level.is_error(),
+            is_error: !matches!(level, conn_state::NoticeLevel::Info),
         },
     }
 }

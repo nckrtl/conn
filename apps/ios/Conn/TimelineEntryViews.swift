@@ -418,7 +418,7 @@ struct TimelineEntryRow: View, Equatable {
                                ordinal: ordinal, threadId: threadId, store: store)
 
         case let .notice(_, text, isError):
-            KitNotice(text, icon: isError ? .warning : .info, tone: isError ? .error : .info)
+            ThreadNotice(text: text, isError: isError)
 
         case let .other(_, label):
             KitBadge(label)
@@ -896,5 +896,43 @@ enum WorkLogIcon {
         if starts(["web ", "fetch "]) { return "work-globe" }
         if starts(["subagent", "delegate"]) { return "work-agent" }
         return nil
+    }
+}
+
+
+/// A feed notice, as Conn mobile draws a system notice: a work-log row with the glyph and the
+/// text at the thread size. Info ("Command … finished", "Context compacted") is muted; a warning
+/// or error is desktop's `runtime.warning` row in the warning colour, one line until tapped.
+struct ThreadNotice: View {
+    let text: String
+    let isError: Bool
+    @Environment(\.connTheme) private var theme
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @State private var expanded = false
+
+    private var glyph: String {
+        if isError { return "notice-warning" }
+        return text.lowercased().contains("compact") ? "notice-compact" : "notice-info"
+    }
+
+    var body: some View {
+        let row = HStack(alignment: .firstTextBaseline, spacing: 8) {
+            ThreadGlyph(name: glyph, size: size)
+                .alignmentGuide(.firstTextBaseline) { $0[.bottom] - size * 0.12 }
+            Text(text)
+                .fontWeight(isError ? .medium : .regular)
+                .lineLimit(isError && !expanded ? 1 : nil)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.system(size: size))
+        .foregroundStyle(isError ? theme.warning : theme.mutedForeground)
+        .contentShape(Rectangle())
+        if isError {
+            Button { withAnimation(Kit.Motion.fast) { expanded.toggle() } } label: { row }
+                .buttonStyle(.plain)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+        } else {
+            row.accessibilityElement(children: .combine)
+        }
     }
 }

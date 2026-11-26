@@ -6314,7 +6314,7 @@ fn threads_of_a_linked_environment_are_listed_and_name_their_environment_in_the_
     });
 }
 
-fn linked_mini_shell(project_root: &str, thread_title: &str) -> ShellState {
+pub(crate) fn linked_mini_shell(project_root: &str, thread_title: &str) -> ShellState {
     let project: ProjectShell = match from_json(json!({
         "id": "proj-mini",
         "title": "No project",

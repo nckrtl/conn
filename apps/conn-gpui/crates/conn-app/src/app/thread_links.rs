@@ -60,12 +60,21 @@ impl ConnApp {
 
     /// The link "Copy thread link" writes for `thread_id`: `conn://thread/<environmentId>/<threadId>`,
     /// with the environment the thread lives on, so the link opens it on any machine.
+    ///
+    /// A linked thread names its environment by the id its own server reports, as the links that
+    /// server writes do. An Orbit target id can differ from it, so the target id stands in only
+    /// until that environment's config has loaded.
     pub(crate) fn thread_link_for(&self, thread_id: &str) -> String {
-        let environment = self
-            .linked_environment_of_thread(thread_id)
-            .map(str::to_owned)
-            .or_else(|| self.primary_environment.clone())
-            .unwrap_or_else(|| self.primary_environment_id());
+        let environment = match self.linked_environment_of_thread(thread_id) {
+            Some(linked) => self
+                .linked_server_environment_id(linked)
+                .unwrap_or(linked)
+                .to_owned(),
+            None => self
+                .primary_environment
+                .clone()
+                .unwrap_or_else(|| self.primary_environment_id()),
+        };
         format_thread_link(&environment, thread_id)
     }
 

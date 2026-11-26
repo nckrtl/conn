@@ -89,6 +89,8 @@ struct MessageReveal<Content: View>: View {
     /// User bubbles: footer on the right, time then copy.
     var trailing = false
     var enabled = true
+    /// The time always shows (user bubbles); a tap adds the copy button beside it.
+    var alwaysShowsTime = false
     @ViewBuilder let content: Content
     @State private var revealed = false
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
@@ -105,8 +107,8 @@ struct MessageReveal<Content: View>: View {
                 .accessibilityAction(named: revealed ? "Hide details" : "Show time and copy") {
                     withAnimation { revealed.toggle() }
                 }
-            if revealed {
-                MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: true, copyAfter: trailing)
+            if revealed || alwaysShowsTime {
+                MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: revealed, copyAfter: trailing)
                     .environment(\.layoutDirection, .leftToRight)
                     .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -163,7 +165,7 @@ struct ThreadMessage: View {
         } else {
             // The copy and time row sits close under the bubble: half the agent footer's gap.
             // A tap on the bubble shows its time and copy button below it.
-            MessageReveal(text: text, timestamp: date, trailing: true) {
+            MessageReveal(text: text, timestamp: date, trailing: true, alwaysShowsTime: true) {
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
                         ViewThatFits(in: .horizontal) {

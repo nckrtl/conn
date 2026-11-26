@@ -722,8 +722,7 @@ struct ThreadView: View {
         // the jump circle never blends into the prompt box's glass, also as the box grows.
         GlassEffectContainer(spacing: 8) {
           VStack(alignment: .leading, spacing: 0) {
-            // The 38.5pt circle sits 2.75pt inside its 44pt frame: 9.25 more makes a 12pt gap.
-            floatingControl().padding(.bottom, 9.25)
+            floatingControl()
           VStack(alignment: .leading, spacing: 10.5) {
             if let historyNotice {
                 Text(historyNotice).font(.kitDetail)
@@ -914,34 +913,40 @@ struct ThreadView: View {
         // A cached or restored feed the live projection hasn't replaced yet, while connected or
         // connecting (never while the offline pill shows).
         let syncing = snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
-        if showsJump || !agents.isEmpty || syncing {
-            HStack(spacing: 16) {
-                if syncing { syncingCapsule }
-                if !agents.isEmpty { agentsCapsule(agents) }
-                if showsJump {
-                    Button {
-                        UISelectionFeedbackGenerator().selectionChanged()
-                        latest()
-                    } label: {
-                        ThreadGlyph(name: "chevron-down", size: 16)
-                            .foregroundStyle(theme.foreground)
-                            .frame(width: 38.5, height: 38.5)
-                            .glassEffect(.regular.interactive(), in: .circle)
-                            // Grows out of, and dissolves back into, the agents capsule beside it.
-                            .glassEffectID("jump", in: floatingGlass)
-                            .glassEffectTransition(.matchedGeometry)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Jump to latest")
-                    .accessibilityIdentifier("thread.scrollToEnd")
+        let visible = showsJump || !agents.isEmpty || syncing
+        // The row stays in place, so the jump circle can fade and shrink out, the reverse of how
+        // it appears; removing the row with it used to cut the exit short.
+        HStack(spacing: 16) {
+            if syncing { syncingCapsule }
+            if !agents.isEmpty { agentsCapsule(agents) }
+            if showsJump {
+                Button {
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    latest()
+                } label: {
+                    ThreadGlyph(name: "chevron-down", size: 16)
+                        .foregroundStyle(theme.foreground)
+                        .frame(width: 38.5, height: 38.5)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        // Beside the agents capsule it grows out of and dissolves back into it;
+                        // alone it materializes and fades.
+                        .glassEffectID("jump", in: floatingGlass)
+                        .glassEffectTransition(agents.isEmpty ? .materialize : .matchedGeometry)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                .accessibilityLabel("Jump to latest")
+                .accessibilityIdentifier("thread.scrollToEnd")
             }
-            .frame(maxWidth: .infinity)
-            // The capsule re-centres as the jump circle morphs in or out.
-            .animation(.smooth(duration: 0.35), value: showsJump)
         }
+        .frame(maxWidth: .infinity)
+        // The 38.5 pt circle sits 2.75 pt inside its 44 pt frame: 9.25 more makes a 12 pt gap.
+        .padding(.bottom, visible ? 9.25 : 0)
+        // The capsule re-centres as the jump circle morphs in or out, both ways.
+        .animation(.smooth(duration: 0.35), value: showsJump)
+        .animation(.smooth(duration: 0.35), value: visible)
     }
 
     /// "Syncing" while the feed still shows cached state, in the agents capsule's style.

@@ -110,6 +110,9 @@ struct MessageReveal<Content: View>: View {
             if revealed || alwaysShowsTime {
                 MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: revealed, copyAfter: trailing)
                     .environment(\.layoutDirection, .leftToRight)
+                    // Under a user bubble, the time ends where the 10 pt bottom-right corner
+                    // starts to curve.
+                    .padding(.trailing, trailing ? 10 : 0)
                     .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }

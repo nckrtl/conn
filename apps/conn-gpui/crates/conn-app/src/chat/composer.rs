@@ -1801,16 +1801,6 @@ impl Composer {
         cx.notify();
     }
 
-    fn toggle_strip_permissions_menu(&mut self, cx: &mut Context<'_, Self>) {
-        self.strip_permissions_open = !self.strip_permissions_open;
-        self.permission_preview = None;
-        if self.strip_permissions_open {
-            self.model_picker_open = false;
-            self.footer_permissions_open = false;
-        }
-        cx.notify();
-    }
-
     /// Hover preview inside `ComposerPermissionsSection`.
     pub(super) fn preview_permission(
         &mut self,

@@ -570,11 +570,15 @@ private struct SecretRequestCard: View {
 
     var body: some View {
         ThreadCard {
-            Label("Secret request", systemImage: "key")
+            // Solid glyphs only (desktop's 16 pt set): a lock, not the outline key.
+            HStack(spacing: 6) {
+                ThreadGlyph(name: "work-lock", size: 14)
+                Text("Secret request")
+            }
             Spacer()
             if pending && interactive {
                 let canSave = !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !submitting
-                HStack(spacing: 6) {
+                HStack(spacing: 14) {
                     Button("Decline", role: .destructive) { answer(nil) }
                         .foregroundStyle(theme.destructive)
                         .disabled(submitting)
@@ -589,7 +593,10 @@ private struct SecretRequestCard: View {
                     .disabled(!canSave)
                 }
                 .buttonStyle(.plain)
-            } else { Text(statusLabel) }
+            } else {
+                // The header's trailing inset is sized for icon buttons; text needs the leading 11.
+                Text(statusLabel).padding(.trailing, 6)
+            }
         } content: {
             VStack(alignment: .leading, spacing: 8) {
                 if !label.isEmpty { Text(label).font(.system(size: 14, weight: .medium)) }

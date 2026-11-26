@@ -19,6 +19,7 @@ mod model_picker;
 pub use mcp_app::{FfiMcpToolInfo, ThreadMcpApp};
 mod offline;
 mod orbit;
+mod outbox;
 mod phone_tasks;
 mod questions;
 mod session;
@@ -74,9 +75,9 @@ pub use crate::types::{
     FfiApprovalDecision, FfiAttachment, FfiConnectionStatus, FfiCredential, FfiError,
     FfiItemStatus, FfiOrbitErrorReason, FfiProject, FfiSavedSession, FfiSecretRequestStatus,
     FfiSendMode, FfiShellSnapshot, FfiThreadActivity, FfiThreadSnapshot, FfiThreadSummary,
-    FfiTimelineEntry, FfiTurnCheckpointFile, FfiTurnItemStatus, FfiUserInputAnswer,
-    FfiUserInputAnswerValue, FfiUserInputOption, FfiUserInputQuestion, FfiUserInputSubmission,
-    FfiWorkGroupTiming,
+    FfiTimelineEntry, FfiTurnAgent, FfiTurnAgents, FfiTurnCheckpointFile, FfiTurnItemStatus,
+    FfiUserInputAnswer, FfiUserInputAnswerValue, FfiUserInputOption, FfiUserInputQuestion,
+    FfiUserInputSubmission, FfiWorkGroupTiming,
 };
 
 const _: () = {

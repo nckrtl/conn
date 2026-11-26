@@ -534,6 +534,54 @@ pub struct FfiThreadSnapshot {
     /// The question the panel above the composer asks; `entries` leaves its row out, since the
     /// panel shows it (Conn mobile's `feedWithoutOpenQuestionRow`).
     pub pending_question: Option<FfiPendingQuestion>,
+    /// When the running turn's work started (Unix ms, server clock): one start for the whole run,
+    /// which every "Working for" row counts from (Conn mobile's `activeWorkStartedAt`).
+    #[serde(default)]
+    pub active_work_started_at_ms: Option<i64>,
+    /// The server's clock minus this device's (ms), from the server config's `serverTime`
+    /// (Conn mobile's `toServerClock`). 0 when unknown.
+    #[serde(default)]
+    pub server_clock_offset_ms: i64,
+    /// The latest turn's agents for the agents capsule, from the projection's subagents and runs
+    /// (Conn mobile's `deriveThreadTurnSubagents`); `None` when the capsule hides.
+    #[serde(default)]
+    pub turn_agents: Option<FfiTurnAgents>,
+}
+
+/// The agents capsule above the composer and its sheet.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
+pub struct FfiTurnAgents {
+    pub run_id: Option<String>,
+    pub turn_active: bool,
+    /// In start order.
+    pub agents: Vec<FfiTurnAgent>,
+    /// Pending, running or waiting.
+    pub live_count: u32,
+    /// Completed, failed, cancelled or interrupted.
+    pub settled_count: u32,
+}
+
+/// One agent in [`FfiTurnAgents`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
+pub struct FfiTurnAgent {
+    pub id: String,
+    pub title: String,
+    /// Provider instance that runs it.
+    pub provider: Option<String>,
+    /// Model name then version, no vendor (`SubagentModel::label`).
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub status: FfiTurnItemStatus,
+    pub status_label: String,
+    pub live: bool,
+    pub settled: bool,
+    /// The thread to open: the remote child's on its machine, else the local child's.
+    pub child_thread_id: Option<String>,
+    /// The machine a remote child runs on.
+    pub environment_id: Option<String>,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
 }
 
 /// Categorized reason for an [`FfiError::Orbit`] failure (mirrors [`conn_orbit::OrbitErrorReason`]).
@@ -1048,6 +1096,7 @@ pub(crate) fn build_thread_snapshot(
         }
     }
     let work_groups = build_work_groups(thread);
+    let turn_agents = build_turn_agents(thread, catalog);
 
     FfiThreadSnapshot {
         history_cursor: thread
@@ -1072,7 +1121,56 @@ pub(crate) fn build_thread_snapshot(
         synchronized: thread.synchronized,
         pending_approvals: crate::approvals::pending_approvals(thread),
         pending_question,
+        active_work_started_at_ms: thread.active_work_started_at_ms(),
+        server_clock_offset_ms: 0,
+        turn_agents,
     }
+}
+
+fn build_turn_agents(
+    thread: &ThreadState,
+    catalog: &conn_state::providers::ModelCatalog,
+) -> Option<FfiTurnAgents> {
+    let turn = thread
+        .turn_agents()
+        .filter(conn_state::TurnAgents::shows_pill)?;
+    let agents = turn
+        .agents
+        .iter()
+        .map(|agent| {
+            let model = thread.subagent_models.get(&agent.id);
+            let label = model.and_then(|m| m.label(catalog));
+            let (_, status_label) = conn_state::subagent_status_visual(agent.status);
+            let remote = agent.remote_child.as_ref();
+            FfiTurnAgent {
+                id: agent.id.clone(),
+                title: agent.title.clone(),
+                provider: model
+                    .and_then(|m| m.instance_id.clone())
+                    .or_else(|| non_empty_str(&agent.provider_instance_id)),
+                model: label.as_ref().map(|l| l.model.clone()),
+                effort: label.and_then(|l| l.effort),
+                status: agent.status.into(),
+                status_label: status_label.to_owned(),
+                live: agent.live(),
+                settled: agent.settled(),
+                child_thread_id: remote
+                    .map(|(_, thread)| thread.clone())
+                    .or_else(|| agent.child_thread_id.clone()),
+                environment_id: remote.map(|(environment, _)| environment.clone()),
+                started_at: agent.started_at.clone(),
+                updated_at: agent.updated_at.clone(),
+                completed_at: agent.completed_at.clone(),
+            }
+        })
+        .collect();
+    Some(FfiTurnAgents {
+        run_id: turn.run_id.map(str::to_owned),
+        turn_active: turn.turn_active,
+        agents,
+        live_count: u32::try_from(turn.live_count).unwrap_or(u32::MAX),
+        settled_count: u32::try_from(turn.settled_count).unwrap_or(u32::MAX),
+    })
 }
 
 /// Maps one provider question; an option without a provider value answers with its trimmed
@@ -2109,6 +2207,201 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A one-turn thread whose run is still working, its work started at `work_started`.
+    fn running_turn(work_started: &str) -> (ThreadState, serde_json::Value, String) {
+        let raw = conn_state::testkit::synthetic_thread_snapshot_json(
+            conn_state::testkit::SyntheticThread {
+                turns: 1,
+                commands_per_turn: 1,
+                command_output_bytes: 16,
+                assistant_bytes: 16,
+            },
+        );
+        let mut snapshot: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let run = &mut snapshot["projection"]["runs"][0];
+        run["status"] = json!("running");
+        run["completedAt"] = serde_json::Value::Null;
+        run["workStartedAt"] = json!(work_started);
+        let run_id = run["id"].as_str().unwrap().to_owned();
+        let templates = snapshot["projection"]["visibleTurnItems"].clone();
+        // Only the user's message: the turn's work arrives as events.
+        snapshot["projection"]["visibleTurnItems"] = json!([templates[0]]);
+        let mut state = ThreadState::new("thread");
+        state.apply(serde_json::from_value(snapshot).unwrap());
+        (state, templates, run_id)
+    }
+
+    fn item_event(state: &ThreadState, item: serde_json::Value) -> OrchestrationV2ThreadStreamItem {
+        serde_json::from_value(
+            json!({"kind":"event","sequence":state.sequence.unwrap_or(0)+1,"event":{
+                "type":"turn-item.updated","id":format!("event:{}", item["id"].as_str().unwrap()),
+                "threadId":item["threadId"],"occurredAt":item["updatedAt"],"payload":item
+            }}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn working_for_counts_from_one_run_start_across_tool_text_tool() {
+        let (mut state, templates, run_id) = running_turn("2026-11-26T10:00:00.000Z");
+        let start = conn_state::parse_iso8601_epoch_ms("2026-11-26T10:00:00.000Z");
+        let tool = |id: &str, at: &str| {
+            let mut item = templates[1]["item"].clone();
+            item["id"] = json!(id);
+            item["runId"] = json!(run_id);
+            item["status"] = json!("running");
+            item["startedAt"] = json!(at);
+            item["updatedAt"] = json!(at);
+            item["completedAt"] = serde_json::Value::Null;
+            item["ordinal"] = json!(5_000_000 + at.len() as i64 + id.len() as i64);
+            item
+        };
+        let mut steps = vec![tool("tool-a", "2026-11-26T10:00:05.000Z")];
+        let mut text = templates[2]["item"].clone();
+        text["id"] = json!("text-b");
+        text["runId"] = json!(run_id);
+        text["text"] = json!("Looking at the feed now.");
+        text["startedAt"] = json!("2026-11-26T10:00:20.000Z");
+        text["updatedAt"] = json!("2026-11-26T10:00:20.000Z");
+        text["ordinal"] = json!(6_000_000);
+        if let Some(object) = text.as_object_mut() {
+            object.remove("textOmitted");
+        }
+        steps.push(text);
+        let mut second = tool("tool-c", "2026-11-26T10:00:40.000Z");
+        second["ordinal"] = json!(7_000_000);
+        steps.push(second);
+
+        let mut group_starts = Vec::new();
+        for step in steps {
+            let event = item_event(&state, step);
+            assert!(state.apply(event));
+            let snap = build_thread_snapshot(&state, None, &Default::default());
+            assert_eq!(
+                snap.active_work_started_at_ms, start,
+                "every step of the run counts from the run's work start"
+            );
+            let saved: FfiThreadSnapshot =
+                serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+            assert_eq!(
+                saved.active_work_started_at_ms, start,
+                "a cold start keeps the clock"
+            );
+            if let Some(group) = snap.work_groups.iter().rev().find(|g| g.has_active) {
+                group_starts.push(group.started_at_ms);
+            }
+        }
+        // The old per-group clock restarted with the second tool batch.
+        group_starts.dedup();
+        assert_eq!(group_starts.len(), 2);
+        assert!(group_starts[1] > group_starts[0]);
+    }
+
+    fn subagent_json(id: &str, run: &str, status: &str, started: &str) -> serde_json::Value {
+        json!({
+            "id": id, "threadId": "thread", "runId": run, "parentNodeId": "node:parent",
+            "origin": "app_owned", "createdBy": "agent", "driver": "codex",
+            "providerInstanceId": "codex", "providerThreadId": null, "childThreadId": format!("child-{id}"),
+            "remoteChild": null, "nativeTaskRef": null, "prompt": "Check the feed",
+            "title": format!("Agent {id}"), "model": "gpt-5.5", "modelSelection": null,
+            "executedModel": null, "completionWake": null, "completionDelivery": null,
+            "cancelledRunId": null, "status": status, "progress": null, "workflow": null,
+            "result": null, "startedAt": started, "completedAt": null, "updatedAt": started
+        })
+    }
+
+    #[test]
+    fn the_agents_capsule_comes_from_the_projection_and_a_completion_is_not_a_new_turn() {
+        let raw = conn_state::testkit::synthetic_thread_snapshot_json(
+            conn_state::testkit::SyntheticThread {
+                turns: 1,
+                commands_per_turn: 0,
+                command_output_bytes: 0,
+                assistant_bytes: 10,
+            },
+        );
+        let mut snapshot: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let projection = &mut snapshot["projection"];
+        let run = projection["runs"][0]["id"].as_str().unwrap().to_owned();
+        projection["runs"][0]["status"] = json!("running");
+        projection["runs"][0]["completedAt"] = serde_json::Value::Null;
+        // The records arrive with the first projection; no subagent turn item is loaded.
+        projection["subagents"] = json!([
+            subagent_json("a1", &run, "running", "2026-11-26T10:00:01.000Z"),
+            subagent_json("a2", &run, "completed", "2026-11-26T10:00:02.000Z"),
+        ]);
+        let wake_template = projection["visibleTurnItems"][0]["item"].clone();
+        let mut state = ThreadState::new("thread");
+        state.apply(serde_json::from_value(snapshot).unwrap());
+
+        let first = build_thread_snapshot(&state, None, &Default::default());
+        // Saved views (`thread_views`) restore the summary on a cold start.
+        let saved: FfiThreadSnapshot =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(saved, first);
+        let agents = first
+            .turn_agents
+            .expect("the capsule shows with the first projection");
+        assert_eq!(
+            agents
+                .agents
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a1", "a2"]
+        );
+        assert_eq!((agents.live_count, agents.settled_count), (1, 1));
+        assert_eq!(
+            agents.agents[0].child_thread_id.as_deref(),
+            Some("child-a1")
+        );
+        assert_eq!(agents.agents[0].status_label, "Running");
+
+        // a1 finishes; its delegated completion lands as an agent-authored user row.
+        let done = {
+            let mut done = subagent_json("a1", &run, "completed", "2026-11-26T10:00:01.000Z");
+            done["completedAt"] = json!("2026-11-26T10:01:00.000Z");
+            done["updatedAt"] = json!("2026-11-26T10:01:00.000Z");
+            done
+        };
+        let sequence = state.sequence.unwrap_or(0);
+        state.apply(
+            serde_json::from_value(json!({"kind":"event","sequence":sequence+1,"event":{
+                "type":"subagent.updated","id":"event:a1-done","threadId":"thread","runId":run,
+                "nodeId":null,"driver":null,"providerInstanceId":null,"rawEventId":null,
+                "occurredAt":"2026-11-26T10:01:00.000Z","payload":done
+            }}))
+            .unwrap(),
+        );
+        let mut wake = wake_template;
+        wake["id"] = json!("turn-item:completion");
+        wake["createdBy"] = json!("agent");
+        wake["creationSource"] = json!("server");
+        // The server's delegated-completion wake, as `delegated_completion_feed_...` sends it.
+        wake["text"] = json!(
+            "Delegated task node:delegated-task:command:mcp:7f11fed1:remote-delegate:90d87fe0 (Agent a1) [completed]:\nAll good."
+        );
+        wake["ordinal"] = json!(9_000_000);
+        if let Some(object) = wake.as_object_mut() {
+            object.remove("textOmitted");
+        }
+        let event = item_event(&state, wake);
+        state.apply(event);
+        let snap = build_thread_snapshot(&state, None, &Default::default());
+        assert!(snap.entries.iter().any(|e| matches!(
+            e,
+            FfiTimelineEntry::User {
+                created_by_agent: true,
+                ..
+            }
+        )));
+        let agents = snap
+            .turn_agents
+            .expect("a completion does not end the turn's agents");
+        assert_eq!(agents.agents.len(), 2, "both agents of the turn stay");
+        assert_eq!((agents.live_count, agents.settled_count), (0, 2));
     }
 
     #[expect(

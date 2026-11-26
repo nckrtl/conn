@@ -41,6 +41,9 @@ const TAG_ENSURE_SCRATCH: &str = "projects.ensureScratch";
 const TAG_REFRESH_PROVIDERS: &str = "server.refreshProviders";
 /// How long a live thread's changes wait before its rendered state is saved for a cold start.
 const VIEW_SAVE_DEBOUNCE: Duration = Duration::from_millis(1000);
+/// Events the pump handles before it looks at controls again, so an `OpenThread` or a send never
+/// waits for a whole backlog to drain.
+const MAX_EVENTS_PER_DRAIN: usize = 64;
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -108,6 +111,17 @@ enum PumpControl {
     EnableOffline(Arc<crate::OfflineReader>),
     OpenThread(String),
     CloseThread(String),
+    /// A reply leaves: its pending row shows until the server's row for it arrives.
+    QueueSend {
+        thread_id: String,
+        send: crate::outbox::PendingSend,
+    },
+    /// The server accepted (`true`) or refused the reply with this key.
+    SendSettled {
+        thread_id: String,
+        key: String,
+        accepted: bool,
+    },
     /// The app came to the foreground (`true`) or went to the background (`false`).
     SetForeground(bool),
     ResolveLaunchDefaults {
@@ -776,6 +790,24 @@ impl ConnCore {
             FfiComposerTarget::Reply { thread_id, .. } => thread_id.clone(),
         };
         let item = format!("turn-item:message-{key}");
+        // A reply shows in its thread at once, with its files, while they upload.
+        let pending_reply = match &target {
+            FfiComposerTarget::Reply { thread_id, .. } => {
+                let _ = self.ctrl_tx.send(PumpControl::QueueSend {
+                    thread_id: thread_id.clone(),
+                    send: crate::outbox::PendingSend {
+                        key: key.clone(),
+                        text: text.clone(),
+                        attachments: crate::outbox::pending_attachments(&key, &files),
+                        created_at: crate::outbox::iso_from_epoch_ms(now_epoch_ms()),
+                        acked: false,
+                        superseded: false,
+                    },
+                });
+                Some(thread_id.clone())
+            }
+            FfiComposerTarget::New { .. } => None,
+        };
         let result = async {
             self.composer_limits()
                 .upload(
@@ -804,6 +836,13 @@ impl ConnCore {
             }
         }
         .await;
+        if let Some(thread_id) = pending_reply {
+            let _ = self.ctrl_tx.send(PumpControl::SendSettled {
+                thread_id,
+                key,
+                accepted: result.is_ok(),
+            });
+        }
         if !attachments.is_empty() {
             let connection = self.connection.clone();
             self.runtime_handle.spawn(async move {
@@ -1220,8 +1259,12 @@ struct SessionIdentity {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PumpStats {
     pub events: u64,
-    /// `build_thread_snapshot` calls.
+    /// `build_thread_snapshot` calls for the app (saved views not counted).
     pub projections: u64,
+    /// Thread snapshots handed to the listener.
+    pub published: u64,
+    /// Thread snapshots built but not handed over, being equal to the last one.
+    pub skipped_equal: u64,
 }
 
 struct PumpState {
@@ -1250,6 +1293,14 @@ struct PumpState {
     shell_snapshot_required: bool,
     pending_older_page: Option<oneshot::Sender<Option<conn_state::OlderPageRequest>>>,
     coalescer: SnapshotCoalescer,
+    /// The last thread snapshot handed to the listener, per open thread.
+    published: HashMap<String, FfiThreadSnapshot>,
+    /// Replies on their way, per thread.
+    outbox: HashMap<String, Vec<crate::outbox::PendingSend>>,
+    /// The server's clock minus ours (ms), from the config's `serverTime`.
+    server_clock_offset_ms: i64,
+    /// When this connection last changed status: the config request goes out after it.
+    status_changed_at_ms: i64,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
     status_watch: watch::Sender<FfiConnectionStatus>,
@@ -1257,6 +1308,49 @@ struct PumpState {
 }
 
 impl PumpState {
+    fn new(
+        connection: Connection,
+        listener: Arc<dyn CoreListener>,
+        thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
+        (shell_watch, status_watch, limits): (
+            watch::Sender<Option<FfiShellSnapshot>>,
+            watch::Sender<FfiConnectionStatus>,
+            watch::Sender<FfiComposerLimits>,
+        ),
+        identity: SessionIdentity,
+    ) -> Self {
+        Self {
+            stats: PumpStats::default(),
+            offline: None,
+            seed_offline_threads: false,
+            identity,
+            connection,
+            listener,
+            shell: ShellState::default(),
+            server_config: ServerConfigState::new(),
+            workspace_scans: HashMap::new(),
+            threads: HashMap::new(),
+            open_threads: HashSet::new(),
+            warm_threads: HashSet::new(),
+            foreground: true,
+            warm_due: None,
+            views_dirty: HashSet::new(),
+            views_due: None,
+            ended_threads: HashSet::new(),
+            shell_snapshot_required: false,
+            pending_older_page: None,
+            coalescer: SnapshotCoalescer::default(),
+            published: HashMap::new(),
+            outbox: HashMap::new(),
+            server_clock_offset_ms: 0,
+            status_changed_at_ms: now_epoch_ms(),
+            thread_runs,
+            shell_watch,
+            status_watch,
+            limits,
+        }
+    }
+
     fn resolve_thread_meta(&self, thread_id: &str) -> Option<ThreadSnapshotMeta> {
         self.shell
             .find_thread(thread_id)
@@ -1472,8 +1566,7 @@ impl PumpState {
             PumpControl::OpenThread(thread_id) => {
                 let is_newly_opened = self.open_threads.insert(thread_id.clone());
                 self.ended_threads.remove(&thread_id);
-                let meta = self.resolve_thread_meta(&thread_id);
-                let cached_snapshot = self
+                let cached = self
                     .threads
                     .get(&thread_id)
                     .filter(|_| {
@@ -1481,18 +1574,16 @@ impl PumpState {
                             .as_ref()
                             .is_none_or(|sync| sync.may_read(&thread_id))
                     })
-                    .filter(|state| state.synchronized || !state.entries.is_empty())
-                    .map(|state| {
-                        build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
-                    });
-                self.stats.projections += u64::from(cached_snapshot.is_some());
+                    .is_some_and(|state| state.synchronized || !state.entries.is_empty());
+                // The app shows nothing for this thread yet: the first snapshot always goes out.
+                self.published.remove(&thread_id);
                 self.threads
                     .entry(thread_id.clone())
                     .or_insert_with(|| ThreadState::new(thread_id.clone()));
                 conn_client::perf_log!(
                     "ffi.open thread={thread_id} warm={} cached={}",
                     self.warm_threads.contains(&thread_id),
-                    cached_snapshot.is_some()
+                    cached
                 );
                 if is_newly_opened {
                     self.follow_live_threads();
@@ -1500,8 +1591,8 @@ impl PumpState {
                         self.connection.subscribe_thread(&thread_id);
                     }
                 }
-                if let Some(snapshot) = cached_snapshot {
-                    self.emit_or_buffer_thread(snapshot);
+                if cached {
+                    self.coalescer.force_thread(&thread_id);
                 }
                 true
             }
@@ -1509,6 +1600,7 @@ impl PumpState {
                 let was_open = self.open_threads.remove(&thread_id);
                 self.ended_threads.remove(&thread_id);
                 self.coalescer.cancel_thread(&thread_id);
+                self.published.remove(&thread_id);
                 if was_open && !self.warm_threads.contains(&thread_id) {
                     self.save_views();
                     self.connection.unsubscribe_thread(&thread_id);
@@ -1522,6 +1614,28 @@ impl PumpState {
                     // The app may be killed in the background: save what it shows first.
                     self.save_views();
                     self.rewarm();
+                }
+                true
+            }
+            PumpControl::QueueSend { thread_id, send } => {
+                self.outbox.entry(thread_id.clone()).or_default().push(send);
+                self.coalescer.force_thread(&thread_id);
+                true
+            }
+            PumpControl::SendSettled {
+                thread_id,
+                key,
+                accepted,
+            } => {
+                if let Some(sends) = self.outbox.get_mut(&thread_id) {
+                    if accepted {
+                        if let Some(send) = sends.iter_mut().find(|send| send.key == key) {
+                            send.acked = true;
+                        }
+                    } else {
+                        sends.retain(|send| send.key != key);
+                        self.coalescer.force_thread(&thread_id);
+                    }
                 }
                 true
             }
@@ -1544,17 +1658,12 @@ impl PumpState {
                     }
                     self.update_thread_run_meta(&thread_id, &state);
                     self.threads.insert(thread_id.clone(), state);
-                    let meta = self.resolve_thread_meta(&thread_id);
-                    let snapshot = self.threads.get(&thread_id).map(|state| {
-                        build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
-                    });
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
                     self.follow_live_threads();
                     self.connection.subscribe_thread(&thread_id);
-                    if let Some(snapshot) = snapshot {
-                        self.emit_or_buffer_thread(snapshot);
-                    }
+                    self.published.remove(&thread_id);
+                    self.coalescer.force_thread(&thread_id);
                 } else {
                     self.threads
                         .entry(thread_id.clone())
@@ -1649,6 +1758,7 @@ impl PumpState {
                 // reducing into this shell, but publish only after this subscription's marker.
                 self.invalidate_shell();
                 self.shell_snapshot_required = false;
+                self.status_changed_at_ms = now_epoch_ms();
                 let ffi_status: FfiConnectionStatus = status.into();
                 self.status_watch.send_replace(ffi_status.clone());
                 self.listener.on_status(ffi_status);
@@ -1680,20 +1790,16 @@ impl PumpState {
                     self.connection.subscribe_shell_with_idle_subagents();
                 }
 
-                // Refresh header metadata (title/branch/model) on open threads updated by shell.
+                // Header metadata (title/branch/model) of open threads may have changed; a row
+                // change that leaves the snapshot equal publishes nothing.
                 for thread_id in change.threads_changed {
                     if self.open_threads.contains(&thread_id)
-                        && let Some(state) = self.threads.get(&thread_id)
-                        && (state.synchronized || !state.entries.is_empty())
+                        && self
+                            .threads
+                            .get(&thread_id)
+                            .is_some_and(|state| state.synchronized || !state.entries.is_empty())
                     {
-                        let meta = self.resolve_thread_meta(&thread_id);
-                        let thread_snapshot = build_thread_snapshot(
-                            state,
-                            meta.as_ref(),
-                            self.server_config.catalog(),
-                        );
-                        self.stats.projections += 1;
-                        self.emit_or_buffer_thread(thread_snapshot);
+                        self.coalescer.mark_thread(&thread_id);
                     }
                 }
             }
@@ -1703,6 +1809,13 @@ impl PumpState {
                     OrchestrationV2ThreadStreamItem::Snapshot(_)
                         | OrchestrationV2ThreadStreamItem::Synchronized(_)
                 );
+                if matches!(item, OrchestrationV2ThreadStreamItem::Snapshot(_))
+                    && let Some(sends) = self.outbox.get_mut(&thread_id)
+                {
+                    for send in sends.iter_mut().filter(|send| send.acked) {
+                        send.superseded = true;
+                    }
+                }
                 let meta_before = self.resolve_thread_meta(&thread_id);
                 let state = self
                     .threads
@@ -1725,21 +1838,14 @@ impl PumpState {
                 // A thread-level event (model, title, ...) changes the header, not the timeline.
                 let meta = self.resolve_thread_meta(&thread_id);
                 let emit = changed || force_emit || meta != meta_before;
-                let building = Instant::now();
-                let snapshot = if self.open_threads.contains(&thread_id) && emit {
-                    self.threads.get(&thread_id).map(|state| {
-                        build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog())
-                    })
-                } else {
-                    None
-                };
-                self.stats.projections += u64::from(snapshot.is_some());
+                let open = self.open_threads.contains(&thread_id);
+                if open && emit {
+                    self.coalescer.mark_thread(&thread_id);
+                }
                 if snapshot_sequence.is_some() || force_emit {
                     conn_client::perf_log!(
-                        "ffi.thread_applied thread={thread_id} apply_ms={apply_ms:.1} build_ms={:.1} entries={} emitted={}",
-                        conn_client::perf::ms_since(building),
-                        snapshot.as_ref().map_or(0, |s| s.entries.len()),
-                        snapshot.is_some()
+                        "ffi.thread_applied thread={thread_id} apply_ms={apply_ms:.1} marked={}",
+                        open && emit
                     );
                 }
                 if let Ok(mut guard) = self.thread_runs.write() {
@@ -1753,9 +1859,6 @@ impl PumpState {
                 }
                 if emit {
                     self.view_changed(&thread_id);
-                }
-                if let Some(snapshot) = snapshot {
-                    self.emit_or_buffer_thread(snapshot);
                 }
                 if deleted_now {
                     self.listener.on_thread_deleted(thread_id);
@@ -1780,6 +1883,9 @@ impl PumpState {
                 }
             }
             ClientEvent::ServerConfig(event) => {
+                if let conn_contract::ServerConfigStreamEvent::Snapshot(s) = event.as_ref() {
+                    self.record_server_clock(s.config.server_time.as_deref());
+                }
                 let limits_changed =
                     if let conn_contract::ServerConfigStreamEvent::Snapshot(s) = event.as_ref() {
                         let caps = &s.config.environment.capabilities;
@@ -2003,19 +2109,78 @@ impl PumpState {
         }
     }
 
-    fn emit_or_buffer_thread(&mut self, snapshot: FfiThreadSnapshot) {
-        if let Some(ready) = self.coalescer.push_thread(snapshot, Instant::now()) {
-            self.listener.on_thread(ready);
+    /// Builds an open thread's snapshot, with its pending replies, and hands it over unless it
+    /// equals the last one.
+    fn publish_thread(&mut self, thread_id: &str) {
+        if !self.open_threads.contains(thread_id) {
+            return;
         }
+        let Some(state) = self.threads.get(thread_id) else {
+            return;
+        };
+        let meta = self.resolve_thread_meta(thread_id);
+        let mut snapshot =
+            build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog());
+        self.stats.projections += 1;
+        snapshot.server_clock_offset_ms = self.server_clock_offset_ms;
+        if let Some(sends) = self.outbox.get_mut(thread_id) {
+            crate::outbox::apply(&mut snapshot, sends);
+            if sends.is_empty() {
+                self.outbox.remove(thread_id);
+            }
+        }
+        if self.published.get(thread_id) == Some(&snapshot) {
+            self.stats.skipped_equal += 1;
+            return;
+        }
+        self.published
+            .insert(thread_id.to_owned(), snapshot.clone());
+        self.stats.published += 1;
+        self.listener.on_thread(snapshot);
     }
 
     fn flush_due(&mut self) {
-        let (shell, threads) = self.coalescer.drain_due(Instant::now());
-        if let Some(snapshot) = shell {
+        self.flush_due_at(Instant::now());
+    }
+
+    fn flush_due_at(&mut self, now: Instant) {
+        if let Some(snapshot) = self.coalescer.drain_due_shell(now) {
             self.publish_shell(snapshot);
         }
-        for snapshot in threads {
-            self.listener.on_thread(snapshot);
+        for thread_id in self.coalescer.drain_due_threads(now) {
+            self.publish_thread(&thread_id);
+        }
+    }
+
+    /// The offset nearest 0 that the config's `serverTime` allows: the server stamped it between
+    /// the request (at the last status change) and now (`recordServerClock`).
+    fn record_server_clock(&mut self, server_time: Option<&str>) {
+        let received = now_epoch_ms();
+        let offset = server_time
+            .and_then(conn_state::parse_iso8601_epoch_ms)
+            .map_or(0, |server| {
+                if server > received {
+                    server - received
+                } else if server < self.status_changed_at_ms {
+                    server - self.status_changed_at_ms
+                } else {
+                    0
+                }
+            });
+        if offset != self.server_clock_offset_ms {
+            self.server_clock_offset_ms = offset;
+            for thread_id in &self.open_threads {
+                self.coalescer.mark_thread(thread_id);
+            }
+        }
+    }
+
+    /// Handles `first` and what else is queued, up to [`MAX_EVENTS_PER_DRAIN`].
+    fn drain_events(&mut self, first: ClientEvent, events: &mut mpsc::Receiver<ClientEvent>) {
+        self.handle_event(first);
+        for _ in 1..MAX_EVENTS_PER_DRAIN {
+            let Ok(more) = events.try_recv() else { break };
+            self.handle_event(more);
         }
     }
 }
@@ -2036,32 +2201,13 @@ async fn run_pump(
     if let Some(session) = identity.reused_session.take() {
         listener.on_bearer_issued(session);
     }
-    let mut state = PumpState {
-        stats: PumpStats::default(),
-        offline: None,
-        seed_offline_threads: false,
-        identity,
+    let mut state = PumpState::new(
         connection,
         listener,
-        shell: ShellState::default(),
-        server_config: ServerConfigState::new(),
-        workspace_scans: HashMap::new(),
-        threads: HashMap::new(),
-        open_threads: HashSet::new(),
-        warm_threads: HashSet::new(),
-        foreground: true,
-        warm_due: None,
-        views_dirty: HashSet::new(),
-        views_due: None,
-        ended_threads: HashSet::new(),
-        shell_snapshot_required: false,
-        pending_older_page: None,
-        coalescer: SnapshotCoalescer::default(),
         thread_runs,
-        shell_watch,
-        status_watch,
-        limits,
-    };
+        (shell_watch, status_watch, limits),
+        identity,
+    );
 
     loop {
         if let Some(deadline) = state.next_deadline() {
@@ -2073,13 +2219,11 @@ async fn run_pump(
                     if !state.handle_control(ctrl) {
                         break;
                     }
+                    state.flush_due();
                 }
                 maybe_event = events_rx.recv() => {
                     let Some(first) = maybe_event else { break };
-                    state.handle_event(first);
-                    while let Ok(more) = events_rx.try_recv() {
-                        state.handle_event(more);
-                    }
+                    state.drain_events(first, &mut events_rx);
                     state.flush_due();
                     // A steady event stream can keep the timer branch from ever running.
                     state.timers_due();
@@ -2097,13 +2241,13 @@ async fn run_pump(
                     if !state.handle_control(ctrl) {
                         break;
                     }
+                    state.flush_due();
                 }
                 maybe_event = events_rx.recv() => {
                     let Some(first) = maybe_event else { break };
-                    state.handle_event(first);
-                    while let Ok(more) = events_rx.try_recv() {
-                        state.handle_event(more);
-                    }
+                    state.drain_events(first, &mut events_rx);
+                    state.flush_due();
+                    state.timers_due();
                 }
             }
         }

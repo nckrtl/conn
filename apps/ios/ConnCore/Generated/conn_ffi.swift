@@ -10915,6 +10915,21 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
      * panel shows it (Conn mobile's `feedWithoutOpenQuestionRow`).
      */
     public var pendingQuestion: FfiPendingQuestion?
+    /**
+     * When the running turn's work started (Unix ms, server clock): one start for the whole run,
+     * which every "Working for" row counts from (Conn mobile's `activeWorkStartedAt`).
+     */
+    public var activeWorkStartedAtMs: Int64?
+    /**
+     * The server's clock minus this device's (ms), from the server config's `serverTime`
+     * (Conn mobile's `toServerClock`). 0 when unknown.
+     */
+    public var serverClockOffsetMs: Int64
+    /**
+     * The latest turn's agents for the agents capsule, from the projection's subagents and runs
+     * (Conn mobile's `deriveThreadTurnSubagents`); `None` when the capsule hides.
+     */
+    public var turnAgents: FfiTurnAgents?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10926,7 +10941,19 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         /**
          * The question the panel above the composer asks; `entries` leaves its row out, since the
          * panel shows it (Conn mobile's `feedWithoutOpenQuestionRow`).
-         */pendingQuestion: FfiPendingQuestion?) {
+         */pendingQuestion: FfiPendingQuestion?, 
+        /**
+         * When the running turn's work started (Unix ms, server clock): one start for the whole run,
+         * which every "Working for" row counts from (Conn mobile's `activeWorkStartedAt`).
+         */activeWorkStartedAtMs: Int64?, 
+        /**
+         * The server's clock minus this device's (ms), from the server config's `serverTime`
+         * (Conn mobile's `toServerClock`). 0 when unknown.
+         */serverClockOffsetMs: Int64, 
+        /**
+         * The latest turn's agents for the agents capsule, from the projection's subagents and runs
+         * (Conn mobile's `deriveThreadTurnSubagents`); `None` when the capsule hides.
+         */turnAgents: FfiTurnAgents?) {
         self.historyCursor = historyCursor
         self.serverPage = serverPage
         self.threadId = threadId
@@ -10944,6 +10971,9 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         self.synchronized = synchronized
         self.pendingApprovals = pendingApprovals
         self.pendingQuestion = pendingQuestion
+        self.activeWorkStartedAtMs = activeWorkStartedAtMs
+        self.serverClockOffsetMs = serverClockOffsetMs
+        self.turnAgents = turnAgents
     }
 
     
@@ -10978,7 +11008,10 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
                 queuedCount: FfiConverterUInt32.read(from: &buf), 
                 synchronized: FfiConverterBool.read(from: &buf), 
                 pendingApprovals: FfiConverterSequenceTypeFfiPendingApproval.read(from: &buf), 
-                pendingQuestion: FfiConverterOptionTypeFfiPendingQuestion.read(from: &buf)
+                pendingQuestion: FfiConverterOptionTypeFfiPendingQuestion.read(from: &buf), 
+                activeWorkStartedAtMs: FfiConverterOptionInt64.read(from: &buf), 
+                serverClockOffsetMs: FfiConverterInt64.read(from: &buf), 
+                turnAgents: FfiConverterOptionTypeFfiTurnAgents.read(from: &buf)
         )
     }
 
@@ -11000,6 +11033,9 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         FfiConverterBool.write(value.synchronized, into: &buf)
         FfiConverterSequenceTypeFfiPendingApproval.write(value.pendingApprovals, into: &buf)
         FfiConverterOptionTypeFfiPendingQuestion.write(value.pendingQuestion, into: &buf)
+        FfiConverterOptionInt64.write(value.activeWorkStartedAtMs, into: &buf)
+        FfiConverterInt64.write(value.serverClockOffsetMs, into: &buf)
+        FfiConverterOptionTypeFfiTurnAgents.write(value.turnAgents, into: &buf)
     }
 }
 
@@ -11157,6 +11193,222 @@ public func FfiConverterTypeFfiThreadSummary_lift(_ buf: RustBuffer) throws -> F
 #endif
 public func FfiConverterTypeFfiThreadSummary_lower(_ value: FfiThreadSummary) -> RustBuffer {
     return FfiConverterTypeFfiThreadSummary.lower(value)
+}
+
+
+/**
+ * One agent in [`FfiTurnAgents`].
+ */
+public struct FfiTurnAgent: Equatable, Hashable {
+    public var id: String
+    public var title: String
+    /**
+     * Provider instance that runs it.
+     */
+    public var provider: String?
+    /**
+     * Model name then version, no vendor (`SubagentModel::label`).
+     */
+    public var model: String?
+    public var effort: String?
+    public var status: FfiTurnItemStatus
+    public var statusLabel: String
+    public var live: Bool
+    public var settled: Bool
+    /**
+     * The thread to open: the remote child's on its machine, else the local child's.
+     */
+    public var childThreadId: String?
+    /**
+     * The machine a remote child runs on.
+     */
+    public var environmentId: String?
+    public var startedAt: String?
+    public var updatedAt: String
+    public var completedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, title: String, 
+        /**
+         * Provider instance that runs it.
+         */provider: String?, 
+        /**
+         * Model name then version, no vendor (`SubagentModel::label`).
+         */model: String?, effort: String?, status: FfiTurnItemStatus, statusLabel: String, live: Bool, settled: Bool, 
+        /**
+         * The thread to open: the remote child's on its machine, else the local child's.
+         */childThreadId: String?, 
+        /**
+         * The machine a remote child runs on.
+         */environmentId: String?, startedAt: String?, updatedAt: String, completedAt: String?) {
+        self.id = id
+        self.title = title
+        self.provider = provider
+        self.model = model
+        self.effort = effort
+        self.status = status
+        self.statusLabel = statusLabel
+        self.live = live
+        self.settled = settled
+        self.childThreadId = childThreadId
+        self.environmentId = environmentId
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.completedAt = completedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTurnAgent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTurnAgent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTurnAgent {
+        return
+            try FfiTurnAgent(
+                id: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                effort: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterTypeFfiTurnItemStatus.read(from: &buf), 
+                statusLabel: FfiConverterString.read(from: &buf), 
+                live: FfiConverterBool.read(from: &buf), 
+                settled: FfiConverterBool.read(from: &buf), 
+                childThreadId: FfiConverterOptionString.read(from: &buf), 
+                environmentId: FfiConverterOptionString.read(from: &buf), 
+                startedAt: FfiConverterOptionString.read(from: &buf), 
+                updatedAt: FfiConverterString.read(from: &buf), 
+                completedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTurnAgent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.effort, into: &buf)
+        FfiConverterTypeFfiTurnItemStatus.write(value.status, into: &buf)
+        FfiConverterString.write(value.statusLabel, into: &buf)
+        FfiConverterBool.write(value.live, into: &buf)
+        FfiConverterBool.write(value.settled, into: &buf)
+        FfiConverterOptionString.write(value.childThreadId, into: &buf)
+        FfiConverterOptionString.write(value.environmentId, into: &buf)
+        FfiConverterOptionString.write(value.startedAt, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+        FfiConverterOptionString.write(value.completedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgent_lift(_ buf: RustBuffer) throws -> FfiTurnAgent {
+    return try FfiConverterTypeFfiTurnAgent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgent_lower(_ value: FfiTurnAgent) -> RustBuffer {
+    return FfiConverterTypeFfiTurnAgent.lower(value)
+}
+
+
+/**
+ * The agents capsule above the composer and its sheet.
+ */
+public struct FfiTurnAgents: Equatable, Hashable {
+    public var runId: String?
+    public var turnActive: Bool
+    /**
+     * In start order.
+     */
+    public var agents: [FfiTurnAgent]
+    /**
+     * Pending, running or waiting.
+     */
+    public var liveCount: UInt32
+    /**
+     * Completed, failed, cancelled or interrupted.
+     */
+    public var settledCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(runId: String?, turnActive: Bool, 
+        /**
+         * In start order.
+         */agents: [FfiTurnAgent], 
+        /**
+         * Pending, running or waiting.
+         */liveCount: UInt32, 
+        /**
+         * Completed, failed, cancelled or interrupted.
+         */settledCount: UInt32) {
+        self.runId = runId
+        self.turnActive = turnActive
+        self.agents = agents
+        self.liveCount = liveCount
+        self.settledCount = settledCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTurnAgents: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTurnAgents: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTurnAgents {
+        return
+            try FfiTurnAgents(
+                runId: FfiConverterOptionString.read(from: &buf), 
+                turnActive: FfiConverterBool.read(from: &buf), 
+                agents: FfiConverterSequenceTypeFfiTurnAgent.read(from: &buf), 
+                liveCount: FfiConverterUInt32.read(from: &buf), 
+                settledCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTurnAgents, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.runId, into: &buf)
+        FfiConverterBool.write(value.turnActive, into: &buf)
+        FfiConverterSequenceTypeFfiTurnAgent.write(value.agents, into: &buf)
+        FfiConverterUInt32.write(value.liveCount, into: &buf)
+        FfiConverterUInt32.write(value.settledCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgents_lift(_ buf: RustBuffer) throws -> FfiTurnAgents {
+    return try FfiConverterTypeFfiTurnAgents.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgents_lower(_ value: FfiTurnAgents) -> RustBuffer {
+    return FfiConverterTypeFfiTurnAgents.lower(value)
 }
 
 
@@ -16813,6 +17065,30 @@ fileprivate struct FfiConverterOptionTypeFfiThemeTokens: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiTurnAgents: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTurnAgents?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTurnAgents.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTurnAgents.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiWorktreeSetup: FfiConverterRustBuffer {
     typealias SwiftType = FfiWorktreeSetup?
 
@@ -17945,6 +18221,31 @@ fileprivate struct FfiConverterSequenceTypeFfiThreadSummary: FfiConverterRustBuf
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiThreadSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiTurnAgent: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTurnAgent]
+
+    public static func write(_ value: [FfiTurnAgent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTurnAgent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTurnAgent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTurnAgent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTurnAgent.read(from: &buf))
         }
         return seq
     }

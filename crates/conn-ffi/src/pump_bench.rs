@@ -175,14 +175,17 @@ fn delta(run: &str, sequence: i64, len: usize) -> Value {
 struct Report {
     events: u64,
     projections: u64,
+    skipped_equal: u64,
     publications: u64,
     bytes: u64,
     drain_ms: f64,
     open_latency_ms: Option<f64>,
 }
 
-/// `pace` is the gap between events; `None` floods the channel at once.
-fn run_burst(turns: usize, burst: usize, pace: Option<Duration>) -> Report {
+/// `pace` is the gap between events; `None` floods the channel at once. Every `shell_every`th
+/// event is a shell row change for the open thread that leaves its header as it was; the others
+/// are streamed text.
+fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: usize) -> Report {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -248,7 +251,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>) -> Report {
     rt.block_on(async {
         for i in 0..burst {
             let sequence = long_seq + 1 + i as i64;
-            let event = if i % 10 == 9 {
+            let event = if i % shell_every == shell_every - 1 {
                 // A shell row change for the open thread: header metadata does not change.
                 shell(json!({"kind": "thread.updated", "sequence": 2 + i as i64,
                     "location": "active", "thread": thread_shell(LONG, i as u32)}))
@@ -292,6 +295,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>) -> Report {
     let report = Report {
         events: after.events - before.events,
         projections: after.projections - before.projections,
+        skipped_equal: after.skipped_equal - before.skipped_equal,
         publications: seen.long - published_before.0,
         bytes: seen.bytes - published_before.1,
         drain_ms,
@@ -315,15 +319,22 @@ fn stats(rt: &tokio::runtime::Runtime, ctrl: &mpsc::UnboundedSender<PumpControl>
 #[test]
 #[ignore = "benchmark: run with --ignored --nocapture"]
 fn pump_bench() {
-    for (label, pace) in [
-        ("flood", None),
-        ("paced 2ms", Some(Duration::from_millis(2))),
+    for (label, pace, burst, shell_every) in [
+        ("flood", None, 2000, 10),
+        ("paced 2ms", Some(Duration::from_millis(2)), 2000, 10),
+        (
+            "shell-only paced 2ms",
+            Some(Duration::from_millis(2)),
+            500,
+            1,
+        ),
     ] {
-        let report = run_burst(300, 2000, pace);
+        let report = run_burst(300, burst, pace, shell_every);
         println!(
-            "pump_bench {label}: events={} projections={} publications={} ffi_bytes={} ({:.1} MB) drain_ms={:.0} open_latency_ms={}",
+            "pump_bench {label}: events={} projections={} skipped_equal={} publications={} ffi_bytes={} ({:.1} MB) drain_ms={:.0} open_latency_ms={}",
             report.events,
             report.projections,
+            report.skipped_equal,
             report.publications,
             report.bytes,
             report.bytes as f64 / 1_048_576.0,
@@ -333,4 +344,212 @@ fn pump_bench() {
                 .map_or_else(|| "n/a".to_owned(), |ms| format!("{ms:.1}")),
         );
     }
+}
+
+/// A pump fed by hand, on a dead connection.
+fn bare_pump(rt: &tokio::runtime::Runtime) -> (super::PumpState, std::sync::Arc<Recorder>) {
+    let config = ServerConfig {
+        http_base_url: "http://127.0.0.1:9/".parse().expect("url"),
+        credential: Credential::Bearer("test".into()),
+    };
+    let (connection, _ignored) = Connection::start(config, rt.handle());
+    let recorder = std::sync::Arc::new(Recorder::default());
+    let state = super::PumpState::new(
+        connection,
+        recorder.clone(),
+        std::sync::Arc::default(),
+        (
+            watch::channel(None).0,
+            watch::channel(FfiConnectionStatus::Connecting).0,
+            watch::channel(FfiComposerLimits::default()).0,
+        ),
+        SessionIdentity {
+            server_url: "http://127.0.0.1:9/".into(),
+            orbit_server_id: None,
+            reused_session: None,
+        },
+    );
+    (state, recorder)
+}
+
+/// Opens `LONG` with a short synchronized timeline and publishes it once at `at`.
+fn open_long(state: &mut super::PumpState, at: Instant) -> (Value, String, i64) {
+    let (long, run, sequence) = snapshot(LONG, 3);
+    state.handle_event(shell(json!({"kind": "snapshot", "snapshot": {
+        "schemaVersion": 1, "snapshotSequence": 1, "projects": [],
+        "threads": [thread_shell(LONG, 0)], "archivedThreads": []
+    }})));
+    state.handle_event(shell(json!({"kind": "synchronized"})));
+    let _ = state.handle_control(PumpControl::OpenThread(LONG.into()));
+    state.handle_event(thread(LONG, long.clone()));
+    state.handle_event(thread(LONG, json!({"kind": "synchronized"})));
+    state.flush_due_at(at);
+    (long, run, sequence)
+}
+
+#[test]
+fn a_burst_builds_one_snapshot_per_publication_and_shell_only_changes_publish_nothing() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut state, recorder) = bare_pump(&rt);
+    let t0 = Instant::now();
+    let (_, run, sequence) = open_long(&mut state, t0);
+    let published = |r: &Recorder| r.0.lock().map(|s| s.long).unwrap_or_default();
+    assert_eq!(published(&recorder), 1);
+    let base = state.stats;
+
+    for minute in 1..=10 {
+        state.handle_event(shell(
+            json!({"kind": "thread.updated", "sequence": 1 + minute,
+            "location": "active", "thread": thread_shell(LONG, minute as u32)}),
+        ));
+    }
+    state.flush_due_at(t0 + Duration::from_secs(1));
+    assert_eq!(
+        state.stats.projections - base.projections,
+        1,
+        "ten row changes, one build"
+    );
+    assert_eq!(state.stats.skipped_equal - base.skipped_equal, 1);
+    assert_eq!(
+        published(&recorder),
+        1,
+        "the header did not change: nothing to publish"
+    );
+
+    for i in 0..200 {
+        state.handle_event(thread(LONG, delta(&run, sequence + 1 + i, 40 + i as usize)));
+    }
+    state.flush_due_at(t0 + Duration::from_secs(2));
+    assert_eq!(state.stats.events - base.events, 210);
+    assert_eq!(
+        state.stats.projections - base.projections,
+        2,
+        "200 deltas, one build"
+    );
+    assert_eq!(published(&recorder), 2);
+    assert_eq!(
+        recorder
+            .0
+            .lock()
+            .map(|s| s.last_text_len)
+            .unwrap_or_default(),
+        40 + 199,
+        "the publication carries the latest text"
+    );
+}
+
+#[test]
+fn a_drain_stops_at_its_bound_so_controls_are_serviced() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut state, _) = bare_pump(&rt);
+    let (tx, mut rx) = mpsc::channel(512);
+    for _ in 0..200 {
+        tx.try_send(shell(json!({"kind": "synchronized"})))
+            .expect("queued");
+    }
+    let first = rx.try_recv().expect("first");
+    state.drain_events(first, &mut rx);
+    assert_eq!(state.stats.events, super::MAX_EVENTS_PER_DRAIN as u64);
+    assert_eq!(rx.len(), 200 - super::MAX_EVENTS_PER_DRAIN);
+}
+
+/// The server's row for the reply with idempotency `key`.
+fn echo(long: &Value, sequence: i64, key: &str) -> Value {
+    let mut item = long["projection"]["visibleTurnItems"][0]["item"].clone();
+    item["id"] = json!(format!("turn-item:message-{key}"));
+    item["messageId"] = json!(format!("message-{key}"));
+    item["text"] = json!("hello from the phone");
+    item["ordinal"] = json!(9_500_000);
+    if let Some(object) = item.as_object_mut() {
+        object.remove("textOmitted");
+    }
+    json!({"kind": "event", "sequence": sequence, "event": {
+        "type": "turn-item.updated", "id": format!("event:echo:{sequence}"),
+        "threadId": LONG, "occurredAt": item["updatedAt"], "payload": item
+    }})
+}
+
+fn rows_for(snapshot: &FfiThreadSnapshot, key: &str) -> usize {
+    let item = format!("turn-item:message-{key}");
+    snapshot
+        .entries
+        .iter()
+        .filter(|entry| match entry {
+            FfiTimelineEntry::User { id, .. } | FfiTimelineEntry::QueuedUser { id, .. } => {
+                *id == item
+            }
+            _ => false,
+        })
+        .count()
+}
+
+#[test]
+fn a_reply_shows_at_once_and_its_echo_leaves_exactly_one_row_before_or_after_the_ack() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let (mut state, _) = bare_pump(&rt);
+    let t0 = Instant::now();
+    let (long, _, sequence) = open_long(&mut state, t0);
+    let send = |key: &str| PumpControl::QueueSend {
+        thread_id: LONG.into(),
+        send: crate::outbox::PendingSend {
+            key: key.into(),
+            text: "hello from the phone".into(),
+            attachments: Vec::new(),
+            created_at: "2026-11-26T10:00:00.000Z".into(),
+            acked: false,
+            superseded: false,
+        },
+    };
+    let settle = |key: &str, accepted: bool| PumpControl::SendSettled {
+        thread_id: LONG.into(),
+        key: key.into(),
+        accepted,
+    };
+    let last = |state: &super::PumpState| state.published.get(LONG).cloned().expect("published");
+
+    // Echo first, then the acknowledgement.
+    let _ = state.handle_control(send("k1"));
+    state.flush_due_at(t0 + Duration::from_millis(1));
+    assert_eq!(
+        rows_for(&last(&state), "k1"),
+        1,
+        "the reply shows before the server answers"
+    );
+    assert!(matches!(
+        last(&state).entries.last(),
+        Some(FfiTimelineEntry::QueuedUser { .. })
+    ));
+    state.handle_event(thread(LONG, echo(&long, sequence + 1, "k1")));
+    state.flush_due_at(t0 + Duration::from_secs(1));
+    assert_eq!(
+        rows_for(&last(&state), "k1"),
+        1,
+        "the echo replaces the pending row"
+    );
+    assert!(matches!(
+        last(&state).entries.last(),
+        Some(FfiTimelineEntry::User { .. })
+    ));
+    let _ = state.handle_control(settle("k1", true));
+    state.flush_due_at(t0 + Duration::from_secs(2));
+    assert_eq!(rows_for(&last(&state), "k1"), 1);
+    assert!(state.outbox.is_empty());
+
+    // The acknowledgement first, then the echo.
+    let _ = state.handle_control(send("k2"));
+    let _ = state.handle_control(settle("k2", true));
+    state.flush_due_at(t0 + Duration::from_secs(3));
+    assert_eq!(rows_for(&last(&state), "k2"), 1);
+    state.handle_event(thread(LONG, echo(&long, sequence + 2, "k2")));
+    state.flush_due_at(t0 + Duration::from_secs(4));
+    assert_eq!(rows_for(&last(&state), "k2"), 1);
+    assert!(state.outbox.is_empty());
+
+    // A refused reply loses its row; the app restores the draft.
+    let _ = state.handle_control(send("k3"));
+    state.flush_due_at(t0 + Duration::from_secs(5));
+    assert_eq!(rows_for(&last(&state), "k3"), 1);
+    let _ = state.handle_control(settle("k3", false));
+    state.flush_due_at(t0 + Duration::from_secs(6));
+    assert_eq!(rows_for(&last(&state), "k3"), 0);
 }

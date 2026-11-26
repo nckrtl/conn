@@ -16,23 +16,22 @@ struct AgentSummary: View {
         return (parsed.map { String($0.characters) } ?? excerpt).split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
+    /// The exact line height puts its extra room under each line, not around it.
+    private var lineExtra: CGFloat { size * 1.625 - UIFont.systemFont(ofSize: size).lineHeight }
+    private var lineHeight: CGFloat { size * 1.625 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if text.isEmpty {
                 Text(title).fontWeight(.medium)
             } else {
                 Button { expanded.toggle() } label: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(title).fontWeight(.medium)
-                            Spacer(minLength: 6)
-                            ThreadGlyph(name: "chevron-down", size: 14)
-                                .rotationEffect(.degrees(expanded ? 180 : 0))
-                                .foregroundStyle(theme.mutedForeground)
-                        }
-                        if !expanded {
-                            Text(verbatim: preview).foregroundStyle(theme.mutedForeground).lineLimit(2)
-                        }
+                    // The title's glyphs sit as far above the preview's as below the card's top
+                    // edge: the title line's own extra room and descent already make that gap.
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(title).fontWeight(.medium)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if !expanded { previewText }
                     }.contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -42,12 +41,28 @@ struct AgentSummary: View {
             }
         }
         .font(.system(size: size))
-        .lineHeight(.exact(points: size * 1.625))
+        .lineHeight(.exact(points: lineHeight))
         .padding(.horizontal, 11)
         .padding(.top, 10)
-        // The exact line height puts all its extra room under the last line, not around it, so the
-        // bottom gives that back and the text sits as far from the bottom edge as from the top.
-        .padding(.bottom, max(0, 10 - (size * 1.625 - UIFont.systemFont(ofSize: size).lineHeight)))
+        // The bottom gives the last line's extra room back, so the text sits as far from the
+        // bottom edge as from the top.
+        .padding(.bottom, max(0, 10 - lineExtra))
+    }
+
+    /// Two lines of the message. Longer text fades out over the second line instead of an ellipsis.
+    private var previewText: some View {
+        let text = Text(verbatim: preview).foregroundStyle(theme.mutedForeground)
+        return ViewThatFits(in: .vertical) {
+            text.fixedSize(horizontal: false, vertical: true)
+            // Laid out in full, then cut at two lines, so no ellipsis.
+            text
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(height: lineHeight * 2, alignment: .top)
+                .clipped()
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0.45), .init(color: .clear, location: 1)],
+                                     startPoint: .top, endPoint: .bottom))
+        }
+        .frame(maxHeight: lineHeight * 2, alignment: .top)
     }
 }
 

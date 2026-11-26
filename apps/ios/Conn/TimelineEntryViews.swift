@@ -41,9 +41,8 @@ struct WorkGroupCard: View {
         VStack(alignment: .leading, spacing: gap) {
             if group.hasActive {
                 // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
-                // As far above its rule as the live row sits below it.
+                // The plain gap to its rule, like "Worked for"; the live row the same gap below.
                 WorkingFoldLabel(since: startedAt, size: size)
-                    .padding(.bottom, FoldRow.leading(size))
             } else {
                 Button {
                     withAnimation(Kit.Motion.fast) {
@@ -107,8 +106,9 @@ struct WorkGroupCard: View {
                     Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                     }
                 }
-                // The last rule to the message reads as a paragraph gap.
-                .padding(.bottom, FoldRow.leading(size))
+                // The last rule to the message reads as a paragraph gap; under "Working for" the
+                // live row follows at the plain gap instead.
+                .padding(.bottom, group.hasActive ? 0 : FoldRow.leading(size))
             }
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
@@ -134,13 +134,12 @@ struct WorkingFold: View {
     var body: some View {
         let gap = size * 0.85
         // The same rule as under "Worked for", then the live row a paragraph gap below it.
+        // The plain gap above and below the rule, like "Worked for" to its rule.
         VStack(alignment: .leading, spacing: gap) {
-            // As far above the rule as the live row sits below it.
             WorkingFoldLabel(since: since, size: size)
-                .padding(.bottom, FoldRow.leading(size))
             Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
         }
-        .padding(.bottom, gap + FoldRow.leading(size))
+        .padding(.bottom, gap)
     }
 }
 

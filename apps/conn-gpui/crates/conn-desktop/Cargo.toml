@@ -41,3 +41,8 @@ tokio = { workspace = true, features = ["process", "io-util", "rt-multi-thread",
 
 [lints]
 workspace = true
+
+# Blocks SIGCHLD in `main` before any thread starts, so it needs its own process.
+[[test]]
+name = "missed_sigchld"
+harness = false

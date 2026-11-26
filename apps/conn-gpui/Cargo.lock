@@ -1724,6 +1724,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-apple",
  "image",
  "language",
  "libc",

@@ -29,17 +29,32 @@ pub(crate) fn hsla_alpha(color: ThemeRgba, alpha: f32) -> Hsla {
     hsla(color.with_alpha(alpha))
 }
 
-/// Synchronizes `gpui-kit`'s global theme with Conn's active [`Tokens`] so
-/// default kit colors and radii never leak into Conn surfaces.
 /// The app's monospace family: JetBrains Mono (embedded and registered by `crate::fonts`).
 pub(crate) const MONO_FONT: &str = "JetBrains Mono";
 
+/// The selected-text highlight: the theme's own focus colour (`focus`, the `ring` token), thin
+/// enough that the text on it reads as well as on the page. A light page takes less of it, as
+/// the focus colour of a light theme is dark.
+#[must_use]
+pub(crate) fn selection_highlight(tokens: &Tokens) -> Hsla {
+    let alpha = match tokens.appearance {
+        Appearance::Dark => 0.38,
+        Appearance::Light => 0.2,
+    };
+    hsla_alpha(tokens.ring, alpha)
+}
+
+/// Synchronizes `gpui-kit`'s global theme with Conn's active [`Tokens`] so
+/// default kit colors and radii never leak into Conn surfaces.
 pub(crate) fn apply_kit_theme(tokens: &Tokens, cx: &mut App) {
+    // The appearance goes first, in an update of its own: a mode change loads the kit's own theme
+    // for that mode once the update's closure has run, over every color the closure set.
+    let mode = match tokens.appearance {
+        Appearance::Light => gpui_kit::component::ThemeMode::Light,
+        Appearance::Dark => gpui_kit::component::ThemeMode::Dark,
+    };
+    gpui_kit::component::Theme::update(cx, |theme| theme.mode = mode);
     gpui_kit::component::Theme::update(cx, |theme| {
-        theme.mode = match tokens.appearance {
-            Appearance::Light => gpui_kit::component::ThemeMode::Light,
-            Appearance::Dark => gpui_kit::component::ThemeMode::Dark,
-        };
         theme.font_size = px(13.0);
         theme.mono_font_family = MONO_FONT.into();
         theme.radius = px(8.0);
@@ -80,6 +95,7 @@ pub(crate) fn apply_kit_theme(tokens: &Tokens, cx: &mut App) {
         c.ring = hsla(tokens.ring);
         c.input = hsla(tokens.shell_divider_header);
         c.caret = hsla(tokens.foreground);
+        c.selection = selection_highlight(tokens);
     });
     crate::editor_settings::apply(tokens, cx);
 }

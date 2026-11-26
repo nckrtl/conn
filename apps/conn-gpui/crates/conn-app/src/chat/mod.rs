@@ -32,6 +32,8 @@ mod question_logic;
 mod question_panel;
 mod request_stack;
 pub(crate) mod selection;
+#[cfg(all(test, target_os = "macos"))]
+mod selection_shots;
 mod spinner;
 mod thumb_cache;
 

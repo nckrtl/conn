@@ -14,17 +14,22 @@
 //!   block that is not part of a tight list ends in a newline when the selection reaches its end,
 //!   so the join between blocks reads as a blank line;
 //! - orders itself among the other flows with [`SelectionScope`], so a drag across blocks (and
-//!   across messages) copies them in reading order.
+//!   across messages) copies them in reading order;
+//! - redraws its view when its part of the selection changes. A drag that stays inside one
+//!   paragraph changes nothing GPUI hit-tests, so nothing else asks for that frame, and the
+//!   highlight would wait for an unrelated one (the composer caret blinks every 500ms).
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui_kit::base::{TextSelectionHandle, TextSelectionRegistration, TextSelectionRun};
+use gpui_kit::base::{
+    TextSelectionEvent, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun,
+};
 use gpui_kit::{
     AnyElement, App, BorderStyle, Bounds, Corners, Edges, Element, ElementId, GlobalElementId,
     HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point,
-    SharedString, TextLayout, Window, transparent_black,
+    SharedString, StyledText, Subscription, TextLayout, Window, transparent_black,
 };
 
 /// Bits of a document order that number the flows inside one row.
@@ -75,20 +80,33 @@ pub(crate) fn clear_on_escape(
     true
 }
 
-/// Plain message text (a user's words) that takes part in the window's selection, laid out and
-/// painted by `gpui-base`'s own `SelectableText`. Without a scope it is plain text, as before.
+/// Plain message text (a user's words) that takes part in the window's selection, as a
+/// [`SelectableFlow`] like the rest of the message. It copies as written, with no closing
+/// newline. Without a scope it is plain text, as before.
 pub(super) fn selectable_message_text(
     id: &str,
     text: &str,
     scope: Option<&SelectionScope>,
 ) -> AnyElement {
     let text = SharedString::from(text.to_owned());
-    match scope {
-        Some(scope) => gpui_kit::base::SelectableText::new(SharedString::from(id.to_owned()), text)
-            .document_order(scope.next_order())
-            .into_any_element(),
-        None => text.into_any_element(),
-    }
+    let Some(scope) = scope else {
+        return text.into_any_element();
+    };
+    let styled = StyledText::new(text.clone());
+    let probe = FlowProbe::with(FlowInfo {
+        text,
+        layout: styled.layout().clone(),
+        chips: Vec::new(),
+    });
+    SelectableFlow::new(
+        SharedString::from(id.to_owned()),
+        scope.next_order(),
+        probe,
+        PressSlot::default(),
+        true,
+        styled.into_any_element(),
+    )
+    .into_any_element()
 }
 
 /// What a flow tells the selection about its text, known once it is laid out.
@@ -234,6 +252,8 @@ pub(super) struct FlowState {
     handle: TextSelectionHandle,
     copy: Rc<RefCell<FlowCopy>>,
     press: Rc<LinkPress>,
+    /// Redraws the view that draws the flow when the flow's selection changes.
+    _redraw: Rc<Subscription>,
 }
 
 /// Makes the text of `child` selectable: the window's selection reaches it, and it paints what
@@ -297,12 +317,12 @@ impl Element for SelectableFlow {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = match global_id {
             Some(global_id) => {
-                window.with_element_state(global_id, |retained: Option<FlowState>, _| {
-                    let state = retained.unwrap_or_else(|| new_flow_state(cx));
+                window.with_element_state(global_id, |retained: Option<FlowState>, window| {
+                    let state = retained.unwrap_or_else(|| new_flow_state(window, cx));
                     (state.clone(), state)
                 })
             }
-            None => new_flow_state(cx),
+            None => new_flow_state(window, cx),
         };
         // The links in `child` read their press from the flow's retained state.
         self.press.bind(state.press.clone());
@@ -346,15 +366,9 @@ impl Element for SelectableFlow {
             let range = projection.ranges().first().cloned().flatten();
             {
                 let mut copy = state.copy.borrow_mut();
-                let changed = copy.range != range;
                 copy.tight = self.tight;
                 copy.range = range.clone();
                 copy.info = Some(info.clone());
-                if changed {
-                    // The copy text follows the projection: draw once more so a copy that races
-                    // the change reads what is on screen.
-                    window.refresh();
-                }
             }
             if let Some(range) = range {
                 let color = selection_color(cx);
@@ -365,15 +379,29 @@ impl Element for SelectableFlow {
     }
 }
 
-fn new_flow_state(cx: &mut App) -> FlowState {
+/// A flow's state, made on its first layout in the view `window` is drawing.
+fn new_flow_state(window: &Window, cx: &mut App) -> FlowState {
     let handle = TextSelectionHandle::new(String::new(), cx);
     let copy = Rc::new(RefCell::new(FlowCopy::default()));
     let reader = copy.clone();
     handle.copy_with(move |_| reader.borrow().selected_text(), cx);
+    // The selection tells its participants, not GPUI, that it changed; nothing redraws a flow
+    // whose highlight moved unless the pointer also crossed into another hitbox. Notifying the
+    // view asks for exactly one frame, and only when this flow's part changed.
+    let view = window.current_view();
+    let redraw = handle.subscribe(
+        move |event, cx| {
+            if matches!(event, TextSelectionEvent::SelectionChanged(_)) {
+                cx.notify(view);
+            }
+        },
+        cx,
+    );
     FlowState {
         handle,
         copy,
         press: Rc::new(LinkPress::default()),
+        _redraw: Rc::new(redraw),
     }
 }
 
@@ -515,6 +543,8 @@ mod tests {
         tokens: Tokens,
         focus: FocusHandle,
         opened: Rc<RefCell<Vec<String>>>,
+        /// How many times the window drew the harness.
+        renders: Rc<Cell<usize>>,
     }
 
     impl Focusable for Harness {
@@ -525,6 +555,7 @@ mod tests {
 
     impl Render for Harness {
         fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
             let scope = SelectionScope::for_row(0);
             let opened = self.opened.clone();
             let body = match self.body {
@@ -598,6 +629,7 @@ mod tests {
                         tokens,
                         focus: cx.focus_handle(),
                         opened: shared,
+                        renders: Rc::new(Cell::new(0)),
                     })
                 })
             else {
@@ -680,6 +712,73 @@ mod tests {
             "paragraphs, an inline-code chip (as its code, not its padding), a heading, a code \
              block and list items read as the message does"
         );
+    }
+
+    /// Moves the pointer with the left button held, as the platform does: the event alone, and
+    /// whatever frame it asks for. Returns how many times the window drew.
+    fn drag_to(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        harness: &Entity<Harness>,
+        x: f32,
+    ) -> usize {
+        let renders = cx.read(|cx| harness.read(cx).renders.clone());
+        let before = renders.get();
+        let _ = cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                gpui_kit::InputEvent::to_platform_input(gpui_kit::MouseMoveEvent {
+                    position: point(px(x), px(LINE_MID)),
+                    pressed_button: Some(gpui_kit::MouseButton::Left),
+                    modifiers: window.modifiers(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        renders.get() - before
+    }
+
+    #[gpui_kit::test]
+    fn each_drag_move_inside_a_paragraph_draws_one_frame(cx: &mut TestAppContext) {
+        // One paragraph, one hitbox: moving inside it changes nothing GPUI hit-tests, so only the
+        // selection can ask for the frame that shows the new highlight.
+        for (body, source) in [
+            (Body::Markdown, "Hello world and more words on one line"),
+            (Body::UserText, "Hello world and more words on one line"),
+        ] {
+            let (window, harness, _) = open(cx, source, body);
+            act(cx, window, |window, cx| {
+                window.pointer_down(
+                    point(px(1.0), px(LINE_MID)),
+                    gpui_kit::MouseButton::Left,
+                    cx,
+                );
+            });
+            let mut copied = Vec::new();
+            for x in [40.0, 80.0, 120.0, 160.0] {
+                assert_eq!(
+                    drag_to(cx, window, &harness, x),
+                    1,
+                    "a move to x={x} draws the new highlight in one frame, not when something \
+                     else redraws"
+                );
+                copied.push(
+                    cx.update_window(window, |_, window, cx| {
+                        gpui_kit::base::TextSelection::selected_text(window, cx)
+                    })
+                    .unwrap_or_default(),
+                );
+            }
+            assert!(
+                copied.windows(2).all(|pair| pair[0].len() < pair[1].len()),
+                "the selection grows with the drag: {copied:?}"
+            );
+            assert_eq!(
+                drag_to(cx, window, &harness, 160.0),
+                0,
+                "a move that changes nothing draws nothing"
+            );
+        }
     }
 
     #[gpui_kit::test]
@@ -879,7 +978,13 @@ mod tests {
 
     #[gpui_kit::test]
     fn the_highlight_uses_the_theme_selection_token_in_dark_and_light(cx: &mut TestAppContext) {
-        for id in ["dark-ocean", "t3-code-light"] {
+        for id in [
+            "dark-ocean",
+            "t3-code-light",
+            "dark-mono",
+            "ember",
+            "iris-dark",
+        ] {
             let tokens = tokens(id);
             let (selection, kit) = cx.update(|cx| {
                 gpui_kit::init(cx);
@@ -892,6 +997,11 @@ mod tests {
             assert_eq!(
                 selection, kit,
                 "{id}: the flow paints the kit's selection token"
+            );
+            assert_eq!(
+                selection,
+                crate::theme::selection_highlight(&tokens),
+                "{id}: the highlight is the theme's own focus colour"
             );
             assert!(selection.a > 0.0, "{id}: the highlight is visible");
         }

@@ -245,3 +245,76 @@ fn render_timeline_warning_screenshots() {
         chat.toggle_expanded("work-group-tool-1", cx);
     });
 }
+
+/// A live turn (a settled thought and tool, then a running tool) with two messages queued behind
+/// it.
+fn queued_thread() -> ThreadState {
+    let mut thread = ThreadState::new("thread-selected");
+    thread.synchronized = true;
+    thread.working = true;
+    let user = |id: &str, text: &str| TimelineEntry::User {
+        id: id.to_owned(),
+        text: text.to_owned(),
+        created_by_agent: false,
+        sender: None,
+        created_at: None,
+        attachments: Vec::new(),
+        is_steer: false,
+        review_comments: Vec::new(),
+        run_id: Some("run-1".to_owned()),
+    };
+    let tool = |id: &str, title: &str, status: ItemStatus| TimelineEntry::Tool {
+        id: id.to_owned(),
+        kind: "command".to_owned(),
+        title: title.to_owned(),
+        detail: None,
+        status,
+        output_omitted: false,
+    };
+    let queued = |n: u32, text: &str| TimelineEntry::QueuedUser {
+        id: format!("queued-{n}"),
+        run_id: format!("run-q-{n}"),
+        message_id: format!("msg-q-{n}"),
+        text: text.to_owned(),
+        attachments: Vec::new(),
+        created_at: "2026-11-26T08:08:00.000Z".to_owned(),
+        created_by_agent: false,
+    };
+    thread.entries = vec![
+        user("u-1", "Run the whole test suite and fix what breaks."),
+        TimelineEntry::Thinking {
+            id: "think-1".to_owned(),
+            text: "Starting with the crate that changed.".to_owned(),
+            streaming: false,
+        },
+        tool("tool-1", "cargo test -p conn-state", ItemStatus::Completed),
+        tool("tool-2", "cargo test -p conn-app", ItemStatus::Running),
+        queued(1, "After that, also run clippy with warnings denied."),
+        queued(2, "Then open a PR with screenshots."),
+    ];
+    for (id, start) in [("think-1", 0), ("tool-1", 3_000), ("tool-2", 9_000)] {
+        thread.entry_timings.insert(
+            id.to_owned(),
+            EntryTiming {
+                run_id: Some("run-1".to_owned()),
+                started_at_ms: Some(start),
+                completed_at_ms: (id != "tool-2").then_some(start + 3_000),
+            },
+        );
+    }
+    thread
+}
+
+/// Renders a live work group followed by two queued messages.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=queued cargo test -p conn-app
+/// render_queued_label_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_queued_label_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    let prefix = std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "queued".to_owned());
+    render_pngs(Path::new(&dir), &prefix, &queued_thread, &|_, _| {});
+}

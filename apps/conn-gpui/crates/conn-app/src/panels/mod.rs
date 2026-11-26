@@ -13,6 +13,7 @@ mod database;
 mod device;
 mod diff;
 use conn_state::diff_parser;
+pub(crate) mod empty_state;
 mod file_kind;
 pub(crate) mod file_path;
 mod files;

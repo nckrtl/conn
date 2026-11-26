@@ -14,6 +14,7 @@ use conn_desktop::orbit::tasks::{
     InsightsPeriod, PullRequestState, TaskInsights, TaskLane, TaskSummary,
 };
 use conn_theme::{Appearance, Tokens};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -32,6 +33,7 @@ use crate::panels::chrome::{
     XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use crate::panels::color::to_hsla;
+use crate::panels::empty_state::{self, EmptyAction, EmptyState, render_empty_state};
 use crate::panels::header::superhero_icon;
 use crate::sidebar::{project_icon_color, render_project_monogram_badge};
 
@@ -432,21 +434,26 @@ fn render_lane(
         .overflow_y_scroll();
 
     if lane.tasks.is_empty() {
+        // `.board-lane-empty`: 12px muted, centred, 10px above and below, 4px at the sides.
+        let (id, text) = if searching && lane.total > 0 {
+            ("tasks-lane-no-matches", "No matches")
+        } else {
+            ("tasks-lane-empty", "Nothing here")
+        };
         list = list.child(
             div()
+                .id(SharedString::from(format!("{id}-{:?}", lane.id)))
+                .test_support()
+                .a11y_group(format!("panel.tasks.lane-empty.{:?}", lane.id), text)
                 .w_full()
-                .px(px(12.0))
-                .py(px(16.0))
+                .px(px(4.0))
+                .py(px(10.0))
                 .flex()
                 .justify_center()
-                .text_size(px(UI_TEXT_PX))
-                .line_height(px(UI_LINE_HEIGHT_PX))
-                .text_color(muted.opacity(0.70))
-                .child(if searching && lane.total > 0 {
-                    "No matches"
-                } else {
-                    "Nothing here"
-                }),
+                .text_size(px(XS_TEXT_PX))
+                .line_height(px(XS_LINE_HEIGHT_PX))
+                .text_color(muted)
+                .child(text),
         );
     } else {
         for task in &lane.tasks {
@@ -660,84 +667,37 @@ pub(super) fn pull_request_presentation(
     }
 }
 
-/// Centered Conn `Empty` notice used for unavailable, access/error, and empty-list states.
+/// The board's empty and error states (`TaskNotice` in the desktop lab's `Panel.tsx`), in the
+/// shared empty-state design. A `retry` adds a "Try again" button.
 pub(super) fn render_notice(
+    window: &Window,
     tokens: &Tokens,
     icon_path: &'static str,
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
     retry: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 ) -> AnyElement {
-    let fg = to_hsla(tokens.foreground);
-    let muted = to_hsla(tokens.muted_foreground);
-    let tile_bg = to_hsla(tokens.shell_tile);
-    let tile_border = to_hsla(tokens.shell_tile_border);
-
-    let icon_tile = div()
-        .size(px(36.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(tile_border)
-        .bg(tile_bg)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(superhero_icon(icon_path, 18.0, fg));
-
-    v_flex()
-        .flex_1()
-        .min_h_0()
-        .w_full()
-        .items_center()
-        .justify_center()
-        .gap(px(16.0))
-        .p(px(24.0))
-        .child(icon_tile)
-        .child(
-            v_flex()
-                .max_w(px(384.0))
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .text_size(px(18.0))
-                        .line_height(px(24.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg)
-                        .child(title.into()),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
-                        .text_color(muted)
-                        .child(description.into()),
-                ),
-        )
-        .when_some(retry, |col, on_retry| {
-            let hover = to_hsla(tokens.shell_highlight);
-            col.child(
-                div()
-                    .id("tasks-notice-retry")
-                    .a11y_button("panel.tasks-notice-retry", "Retry")
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(to_hsla(tokens.shell_divider_header))
-                    .bg(to_hsla(tokens.shell_control))
-                    .cursor_pointer()
-                    .text_size(px(UI_TEXT_PX))
-                    .line_height(px(UI_LINE_HEIGHT_PX))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(fg)
-                    .hover(move |s| s.bg(hover))
-                    .on_click(move |_, window, cx| on_retry(window, cx))
-                    .child("Retry"),
-            )
+    let actions = retry
+        .map(|on_click| EmptyAction {
+            id: SharedString::from("tasks-notice-retry"),
+            ax_id: SharedString::from("panel.tasks.notice.retry"),
+            label: SharedString::from("Try again"),
+            icon: Some("superhero/refresh.svg"),
+            on_click,
         })
-        .into_any_element()
+        .into_iter()
+        .collect();
+    render_empty_state(
+        window,
+        tokens,
+        EmptyState {
+            id: "tasks-notice",
+            ax_id: "panel.tasks.notice",
+            label: "Tasks",
+            icon: icon_path,
+            title: title.into(),
+            description: empty_state::plain(&description.into()),
+            actions,
+        },
+    )
 }

@@ -1250,6 +1250,23 @@ pub(super) fn label_chip_colors(tokens: &Tokens, raw_color: Option<&str>) -> (Rg
     (bg, fg)
 }
 
+pub(super) const CLI_MISSING_MESSAGE: &str =
+    "The source-control CLI is not installed on this server.";
+pub(super) const SIGNED_OUT_MESSAGE: &str =
+    "Sign in to your source-control host to view pull requests.";
+
+/// The icon and title of an "unavailable" failure, from its message (`describe_rpc_error`): the
+/// lab's "Not signed in" (lock), "Source-control CLI missing" (terminal) and "Pull requests
+/// unavailable" (unplug).
+#[must_use]
+pub(super) fn unavailable_notice(message: &str) -> (&'static str, &'static str) {
+    match message {
+        CLI_MISSING_MESSAGE => ("superhero/terminal.svg", "Source-control CLI missing"),
+        SIGNED_OUT_MESSAGE => ("superhero/lock.svg", "Not signed in"),
+        _ => ("superhero/unplug.svg", "Pull requests unavailable"),
+    }
+}
+
 /// Extracts a concise human-readable error message from a `conn_client::ClientError`.
 #[must_use]
 pub(super) fn describe_rpc_error(err: &conn_client::ClientError) -> (Option<String>, String) {
@@ -1270,12 +1287,8 @@ pub(super) fn describe_rpc_error(err: &conn_client::ClientError) -> (Option<Stri
             }
             if tag == Some("PullRequestUnavailableError") {
                 let msg = match reason {
-                    Some("cli-missing") => {
-                        "The source-control CLI is not installed on this server."
-                    }
-                    Some("cli-unauthenticated") => {
-                        "Sign in to your source-control host to view pull requests."
-                    }
+                    Some("cli-missing") => CLI_MISSING_MESSAGE,
+                    Some("cli-unauthenticated") => SIGNED_OUT_MESSAGE,
                     Some("provider-unsupported") => {
                         "This repository's host does not support pull requests here yet."
                     }

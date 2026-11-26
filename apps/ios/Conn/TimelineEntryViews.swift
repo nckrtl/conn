@@ -18,8 +18,6 @@ enum ThreadFeed {
 struct WorkGroupCard: View {
     let group: FfiWorkGroupTiming
     let entries: [FfiTimelineEntry]
-    /// The following agent message's time, shown on the right of "Worked for".
-    var trailingTime: String? = nil
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
     @State private var expanded = false
@@ -59,11 +57,6 @@ struct WorkGroupCard: View {
                         ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
                             .foregroundStyle(theme.mutedForeground)
                         Spacer()
-                        if let date = threadDate(trailingTime) {
-                            Text(date, style: .time)
-                                .font(.system(size: size))
-                                .foregroundStyle(theme.mutedForeground)
-                        }
                     }
                     .contentShape(Rectangle())
                 }
@@ -322,8 +315,6 @@ struct TimelineEntryRow: View {
     @Environment(\.connTheme) private var theme
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
     @Environment(\.colorScheme) private var appearance
-    /// False when a "Worked for" row above shows this message's time on its right.
-    var timeAbove = true
 
     var body: some View {
         switch detail {
@@ -350,17 +341,15 @@ struct TimelineEntryRow: View {
             // The copy and time row sits a paragraph gap under the text, less its own 24 pt row's
             // inset above the time glyphs.
             VStack(alignment: .leading, spacing: 6) {
-                // The time sits top right: on the "Worked for" row when one precedes the message
-                // (WorkGroupCard `trailingTime`), else on its own line above the text.
-                if timeAbove, !streaming {
-                    MessageFooter(text: markdown, timestamp: timestamp)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
                 MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
                 if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
                 if !streaming, status == .failed {
                     Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption)
                         .foregroundStyle(theme.mutedForeground)
+                }
+                // The time under the text on the left, the size of a user message's time.
+                if !streaming {
+                    MessageFooter(text: markdown, timestamp: timestamp, trailingCopy: true)
                 }
             }
             .copyOnTap(streaming ? "" : markdown)

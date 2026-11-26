@@ -558,17 +558,11 @@ struct ThreadView: View {
                         let afterFold = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
                             if case .workGroup = pair.0 { return pair.1.id } else { return nil }
                         })
-                        // A "Worked for" row shows the next agent message's time on its right.
-                        let messageTimeAfter = Dictionary(zip(items, items.dropFirst()).compactMap { pair -> (String, String)? in
-                            guard case .workGroup = pair.0, case let .entry(.assistant(_, _, false, timestamp, _, _)) = pair.1,
-                                  let timestamp else { return nil }
-                            return (pair.0.id, timestamp)
-                        }, uniquingKeysWith: { first, _ in first })
                         ForEach(items) { item in
                             Group {
                                 switch item {
                                 case let .workGroup(group, entries):
-                                    WorkGroupCard(group: group, entries: entries, trailingTime: messageTimeAfter[item.id])
+                                    WorkGroupCard(group: group, entries: entries)
                                 case let .entry(entry):
                                     TimelineEntryRow(
                                         threadId: threadId,
@@ -577,8 +571,7 @@ struct ThreadView: View {
                                         detail: snapshot.feedDetails[entry.entryId],
                                         interactive: readingWindow == nil && store.status == .connected,
                                         onOpenThread: onOpenThread,
-                                        onTemplate: onTemplate,
-                                        timeAbove: !afterFold.contains(item.id)
+                                        onTemplate: onTemplate
                                     )
                                 }
                             }

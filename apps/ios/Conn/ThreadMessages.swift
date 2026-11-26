@@ -55,8 +55,8 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    // The time at the thread text size, like "Worked for" (15 pt on Polar); one point smaller
-    // under the user's own bubble (`trailingCopy`). Copying is a tap on the message (CopyOnTap).
+    // The time at the thread text size; one point smaller (`trailingCopy`, both message kinds
+    // use it now). Copying is a tap on the message (CopyOnTap).
     @ScaledMetric(relativeTo: .body) private var fullSize: CGFloat = ThreadText.size
     private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 1) / ThreadText.size : fullSize }
     @Environment(\.connTheme) private var theme

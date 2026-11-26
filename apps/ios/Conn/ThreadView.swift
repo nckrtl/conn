@@ -511,6 +511,7 @@ struct ThreadView: View {
         .defaultScrollAnchor(stickToBottom ? .bottom : .top, for: .sizeChanges)
         // Thread links in messages (`t3-thread://v2/…`, `conn://thread/…`) open in the app; other
         // links go to the system.
+        .environment(\.threadLinkProject) { [store] in store.linkProjectTitle(threadId: $0) }
         .environment(\.openURL, OpenURLAction { url in
             guard let link = ThreadLink(url: url) else { return .systemAction }
             onOpenThread(link.threadId, link.environmentId)

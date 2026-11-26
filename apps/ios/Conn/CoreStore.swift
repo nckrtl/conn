@@ -35,6 +35,12 @@ final class InboxPublications {
 final class CoreStore {
     private(set) var state: FfiSessionState?
     private(set) var shell: FfiShellSnapshot?
+
+    /// A thread's project title as the thread list shows it, or nil when this store doesn't list it.
+    func linkProjectTitle(threadId: String) -> String? {
+        guard let shell, let thread = shell.threads.first(where: { $0.id == threadId }) else { return nil }
+        return thread.orbitProjectSlug ?? shell.projects.first(where: { $0.id == thread.projectId })?.title
+    }
     private let publications: InboxPublications
     private var restoringLaunchInventory = false
     private(set) var openThread: FfiThreadSnapshot?

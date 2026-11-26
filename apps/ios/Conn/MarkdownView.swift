@@ -15,6 +15,8 @@ struct MarkdownView: View, Equatable {
     /// The feed entry this text belongs to: while it streams, its finished blocks are reused.
     var cacheID: String? = nil
     @Environment(\.connTheme) private var theme
+    /// A linked thread's project title, for the project tile in front of a thread link.
+    @Environment(\.threadLinkProject) private var threadLinkProject
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.source == rhs.source && lhs.fillsWidth == rhs.fillsWidth && lhs.muted == rhs.muted
@@ -250,9 +252,19 @@ struct MarkdownView: View, Equatable {
     private func inlineText(_ raw: String) -> InlineText {
         let key = InlineKey(
             raw: raw, size: bodySize, muted: muted, style: messageStyle.map { $0 == .assistant ? 1 : 2 } ?? 0,
-            code: muted ? theme.mutedForeground : theme.codeForeground, strong: theme.foreground
+            code: muted ? theme.mutedForeground : theme.codeForeground, strong: theme.foreground,
+            linkProjects: linkProjects(in: raw), dark: appearance == .dark
         )
         return MarkdownCache.inline(key) { buildInlineText(raw) }
+    }
+
+    /// The project title of each thread linked in `raw`, so the cache rebuilds once the thread list
+    /// knows them. Empty without thread links.
+    private func linkProjects(in raw: String) -> [String] {
+        guard raw.contains("thread"), let threadLinkProject else { return [] }
+        return raw.matches(of: /\]\(<?((?:t3-thread|conn):\/\/[^\s>)]+)>?\)/).compactMap { match in
+            URL(string: String(match.1)).flatMap(ThreadLink.init(url:)).map { threadLinkProject($0.threadId) ?? "" }
+        }
     }
 
     private func buildInlineText(_ raw: String) -> InlineText {
@@ -268,12 +280,22 @@ struct MarkdownView: View, Equatable {
             return (Text(raw), false, padX, padY)
         }
         let chips = messageStyle != nil
-        var segments: [(text: AttributedString, chip: Bool)] = []
+        var segments: [(text: AttributedString, chip: Bool, tile: UIImage?)] = []
         for run in parsed.runs {
             var piece = AttributedString(parsed[run.range])
             var chip = false
-            // Links are underlined so they read as tappable (desktop does the same).
-            if run.link != nil { piece.underlineStyle = .single }
+            var tile: UIImage?
+            if let url = run.link, let link = ThreadLink(url: url) {
+                // A thread link reads like Conn mobile's chip: the project tile, then the title in
+                // medium weight, no underline.
+                tile = ProjectTileImage.image(title: threadLinkProject?(link.threadId), size: bodySize * 0.95,
+                                              dark: appearance == .dark, theme: theme)
+                piece.font = .system(size: bodySize, weight: .medium)
+                if !muted { piece.foregroundColor = theme.foreground }
+            } else if run.link != nil {
+                // Links are underlined so they read as tappable (desktop does the same).
+                piece.underlineStyle = .single
+            }
             if let intent = run.inlinePresentationIntent {
                 if intent.contains(.code) {
                     piece.font = .system(size: codeSize, design: .monospaced)
@@ -287,7 +309,7 @@ struct MarkdownView: View, Equatable {
                     if !muted, messageStyle == .assistant { piece.foregroundColor = theme.foreground }
                 }
             }
-            segments.append((piece, chip))
+            segments.append((piece, chip, tile))
         }
         // The chip's room is kerning, not characters, so copied text stays plain. The previous
         // character carries the leading room and the chip's last character the trailing room.
@@ -306,6 +328,10 @@ struct MarkdownView: View, Equatable {
         // is deprecated in iOS 26, but it is the only way to carry per-run custom attributes.
         var out = Text("")
         for segment in segments {
+            if let tile = segment.tile {
+                // Centred on the text's x-height, with a thin space before the title.
+                out = out + Text(Image(uiImage: tile)).baselineOffset(-bodySize * 0.17) + Text("\u{2009}")
+            }
             let part = Text(segment.text)
             out = out + (segment.chip ? part.customAttribute(InlineCodeChip()) : part)
         }
@@ -383,6 +409,38 @@ struct InlineKey: Hashable {
     let style: Int
     let code: Color
     let strong: Color
+    var linkProjects: [String] = []
+    var dark = true
+}
+
+/// The project tile (`ProjectFaviconView`) as an image, to sit inline in text.
+@MainActor
+enum ProjectTileImage {
+    private static var cache: [String: UIImage] = [:]
+
+    static func image(title: String?, size: CGFloat, dark: Bool, theme: ConnTheme) -> UIImage? {
+        let key = "\(title ?? "")|\(size)|\(dark)"
+        if let cached = cache[key] { return cached }
+        let renderer = ImageRenderer(content: ProjectFaviconView(title: title, size: size)
+            .environment(\.colorScheme, dark ? .dark : .light)
+            .environment(\.connTheme, theme))
+        renderer.scale = UIScreen.main.scale
+        guard let image = renderer.uiImage else { return nil }
+        if cache.count > 200 { cache.removeAll() }
+        cache[key] = image
+        return image
+    }
+}
+
+private struct ThreadLinkProjectKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (String) -> String?)? = nil
+}
+
+extension EnvironmentValues {
+    var threadLinkProject: (@MainActor (String) -> String?)? {
+        get { self[ThreadLinkProjectKey.self] }
+        set { self[ThreadLinkProjectKey.self] = newValue }
+    }
 }
 
 /// Parsed Markdown kept between body evaluations: blocks by feed entry (or by source text) and

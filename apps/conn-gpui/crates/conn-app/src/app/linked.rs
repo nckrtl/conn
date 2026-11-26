@@ -24,6 +24,7 @@ use conn_state::environments::{LinkedShellSnapshot, LinkedShells, Origins};
 use gpui_kit::Context;
 
 use super::ConnApp;
+use crate::panels::terminal_target::{SessionKey, TerminalTarget, is_local_server_url};
 
 /// How long a changed shell waits before it is saved, so a burst of events writes once.
 const SHELL_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
@@ -533,6 +534,36 @@ impl ConnApp {
         match project_id {
             Some(project_id) => self.connection_for_project(project_id),
             None => self.connection.clone(),
+        }
+    }
+
+    /// Where the terminal of what is open runs. A thread on a linked environment (or on a primary
+    /// server that is not on this Mac) gets its shell on that server, in the thread's folder
+    /// there; any other thread keeps the local shell, still in the thread's folder.
+    pub(crate) fn terminal_target(
+        &self,
+        thread_id: Option<&str>,
+        cwd: Option<String>,
+    ) -> TerminalTarget {
+        let environment = self.context_environment();
+        let remote = environment.is_some() || !is_local_server_url(self.server_url.as_deref());
+        let label = match environment.as_deref() {
+            Some(id) => self
+                .linked
+                .origins()
+                .label(id)
+                .map_or_else(|| id.to_owned(), str::to_owned)
+                .into(),
+            None => self.server_label.clone(),
+        };
+        TerminalTarget {
+            key: SessionKey {
+                environment,
+                thread: thread_id.map(str::to_owned),
+            },
+            cwd,
+            label,
+            remote,
         }
     }
 

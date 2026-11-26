@@ -212,6 +212,8 @@ pub(crate) struct PanelHeaderProps<'a> {
     /// The thread has a project. Without one the add menu and launcher leave out the surfaces
     /// that need one (Files, MCP, API) instead of dimming them.
     pub(crate) has_project: bool,
+    /// The machine the shown thread's terminal runs on; the Terminal tab reads `Terminal · name`.
+    pub(crate) terminal_machine: Option<&'a str>,
     pub(crate) tokens: &'a Tokens,
 }
 
@@ -251,7 +253,7 @@ pub(crate) fn render_panel_header(
     for (idx, tab) in props.open_tabs.iter().enumerate() {
         let active = tab == props.active_tab;
         let text_color = if active { fg } else { muted };
-        let label = match tab {
+        let base_label = match tab {
             PanelSurface::Browser(id) => props
                 .browser_titles
                 .iter()
@@ -259,7 +261,14 @@ pub(crate) fn render_panel_header(
                 .map_or_else(|| surface_label(tab), |(_, title)| title.clone()),
             _ => surface_label(tab),
         };
-        let ax_slug = surface_ax_slug(tab, &label);
+        // The AX id stays `terminal`; only the title names the machine.
+        let ax_slug = surface_ax_slug(tab, &base_label);
+        let label = match tab {
+            PanelSurface::Kind(RightPanelTab::Terminal) => {
+                super::terminal_target::header_title(&base_label, props.terminal_machine)
+            }
+            _ => base_label,
+        };
         let icon_path = surface_icon_path(tab, props.tokens.appearance);
         let group = SharedString::from(format!("right-panel-tab-group-{idx}"));
         let on_select = callbacks.on_select_tab.clone();

@@ -82,12 +82,12 @@ fn browser_tabs_register_per_thread_and_follow_the_connection(cx: &mut TestAppCo
         server.registrations().len() == 2
     });
     assert_eq!(server.registrations()[1].0, "thread-other");
-    assert_eq!(
-        server.live_streams(),
-        2,
+    // The host registers a tab, then opens its request stream: the stream trails the registration.
+    wait_for("both tabs' request streams", || server.live_streams() == 2);
+    assert!(
+        server.closed().is_empty(),
         "a parked thread's tab stays registered"
     );
-    assert!(server.closed().is_empty());
 
     // Back on A, closing its tab releases the registration and the record; B's stays.
     cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
@@ -120,7 +120,9 @@ fn browser_tabs_register_per_thread_and_follow_the_connection(cx: &mut TestAppCo
         server.registrations().len() == 3
     });
     assert_eq!(server.registrations()[2], server.registrations()[1]);
-    assert_eq!(server.live_streams(), 1);
+    wait_for("the request stream after the reconnect", || {
+        server.live_streams() == 1
+    });
 
     // A thread deleted here takes its tabs, registrations and records with it.
     cx.update(|cx| {

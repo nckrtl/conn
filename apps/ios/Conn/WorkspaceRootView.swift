@@ -265,7 +265,7 @@ struct WorkspaceRootView: View {
         .toolbar(.hidden, for: .tabBar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 8) {
-                if store.showsOffline && !store.showsSavedConnectionAlert { OfflinePill() }
+                if store.showsOffline && !store.showsSavedConnectionAlert { OfflinePill(store: store) }
                 if query != nil {
                     HStack(spacing: 8) {
                         // Lab `.ios-search-field`: 44pt capsule, 12 inset, 18pt glyph 6 from the text.
@@ -320,17 +320,57 @@ struct WorkspaceRootView: View {
 }
 
 struct OfflinePill: View {
+    /// The store whose session the pill reports; tapping shows its last state changes.
+    var store: CoreStore?
+    @State private var showsDetails = false
+
     var body: some View {
-        // Lab `OfflinePill`: a 14pt bolt 6 from 13pt medium text.
-        HStack(spacing: 6) {
-            ThreadGlyph(name: "bolt", size: 14)
-            Text("Not connected")
+        Button { if store != nil { showsDetails = true } } label: {
+            // Lab `OfflinePill`: a 14pt bolt 6 from 13pt medium text.
+            HStack(spacing: 6) {
+                ThreadGlyph(name: "bolt", size: 14)
+                Text("Not connected")
+            }
+                .font(.system(size: 13, weight: .medium))
+                .frame(height: 16)
+                .foregroundStyle(Color(red: 0.16, green: 0.14, blue: 0.055))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color(red: 1, green: 0.83, blue: 0.30), in: Capsule())
         }
-            .font(.system(size: 13, weight: .medium))
-            .frame(height: 16)
-            .foregroundStyle(Color(red: 0.16, green: 0.14, blue: 0.055))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color(red: 1, green: 0.83, blue: 0.30), in: Capsule())
+        .buttonStyle(.plain)
+        .accessibilityHint(store == nil ? "" : "Shows the connection details")
+        .sheet(isPresented: $showsDetails) {
+            if let store { ConnectionDetailsSheet(store: store) }
+        }
+    }
+}
+
+/// Why the app shows "Not connected": the session's last state changes, to copy and send.
+struct ConnectionDetailsSheet: View {
+    let store: CoreStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var text: String { store.sessionHistory.reversed().joined(separator: "\n\n") }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(text.isEmpty ? "No state changes recorded yet." : text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .navigationTitle("Connection details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Copy") { UIPasteboard.general.string = text }
+                }
+                ToolbarItem(placement: .topBarTrailing) { Button(role: .close) { dismiss() } }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }

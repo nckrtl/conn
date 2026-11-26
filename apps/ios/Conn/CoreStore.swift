@@ -38,6 +38,8 @@ final class CoreStore {
     private let publications: InboxPublications
     private var restoringLaunchInventory = false
     private(set) var openThread: FfiThreadSnapshot?
+    /// The last session state lines (`logState`), newest last, for the offline pill's details.
+    private(set) var sessionHistory: [String] = []
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
     @ObservationIgnored let imageThumbnails = AttachmentThumbnails()
@@ -750,6 +752,9 @@ final class CoreStore {
         }
         let line = parts.joined(separator: " ")
         Self.sessionLog.info("\(line, privacy: .public)")
+        // The last state changes, shown when the "Not connected" pill is tapped.
+        sessionHistory.append(Date().formatted(date: .omitted, time: .standard) + "  " + line)
+        if sessionHistory.count > 15 { sessionHistory.removeFirst(sessionHistory.count - 15) }
     }
 
     func handleState(_ newState: FfiSessionState) {

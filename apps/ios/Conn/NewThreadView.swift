@@ -60,7 +60,7 @@ struct NewThreadDraftView: View {
         .background(theme.background.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                if store.showsOffline { OfflinePill().frame(maxWidth: .infinity) }
+                if store.showsOffline { OfflinePill(store: store).frame(maxWidth: .infinity) }
                 ConnComposerPill(
                     placeholder: "Ask anything",
                     draft: draft,

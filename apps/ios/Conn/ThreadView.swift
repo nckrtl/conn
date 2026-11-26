@@ -699,7 +699,7 @@ struct ThreadView: View {
                 Text(historyNotice).font(.kitDetail)
             }
             if store.showsOffline && !store.showsSavedConnectionAlert {
-                OfflinePill().frame(maxWidth: .infinity)
+                OfflinePill(store: store).frame(maxWidth: .infinity)
             }
             // Conn mobile pins the first pending approval above the composer.
             if let approval = pendingApprovals.first {

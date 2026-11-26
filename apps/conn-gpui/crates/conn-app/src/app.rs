@@ -57,7 +57,9 @@ actions!(
         ToggleRightPanel,
         NewThread,
         ToggleTerminal,
-        NewRightPanelSurface
+        NewRightPanelSurface,
+        PickerNextField,
+        PickerPreviousField
     ]
 );
 
@@ -66,6 +68,12 @@ pub(crate) fn register_keybindings(cx: &mut App) {
     crate::palette::register_keybindings(cx);
     crate::settings::register_keybindings(cx);
     cx.bind_keys([
+        KeyBinding::new("tab", PickerNextField, Some("ComposerModelPicker")),
+        KeyBinding::new(
+            "shift-tab",
+            PickerPreviousField,
+            Some("ComposerModelPicker"),
+        ),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, None),
         KeyBinding::new("cmd-n", NewThread, None),

@@ -17,6 +17,7 @@ mod drafts;
 mod footer;
 mod menus;
 mod model_picker;
+mod picker_settings;
 mod popovers;
 mod stash;
 
@@ -248,7 +249,7 @@ pub(crate) struct Composer {
     meter: context_meter::MeterHover,
     meter_timer: Option<gpui_kit::Task<()>>,
     footer_permissions_open: bool,
-    picker_permissions_open: bool,
+    strip_permissions_open: bool,
     permission_preview: Option<&'static str>,
     implement_menu_open: bool,
     /// Popovers open at the last render, to tell which opened since (`popovers.rs`).
@@ -270,8 +271,14 @@ pub(crate) struct Composer {
     selected_model: String,
     selected_options: Option<serde_json::Map<String, serde_json::Value>>,
     model_picker_open: bool,
+    /// Menu, cursor and focus of the picker's settings column.
+    picker_settings: picker_settings::SettingsState,
+    /// The pointer is on the trigger, so an outside press must not close the picker first.
+    model_trigger_hovered: bool,
     picker_provider_filter: Option<String>,
     picker_highlighted_index: usize,
+    /// Composer width and distance from the top of the window to its picker anchor.
+    picker_room_px: std::rc::Rc<std::cell::Cell<Option<(f32, f32)>>>,
     active_trigger: Option<ComposerTrigger>,
     dismissed_trigger_text: Option<String>,
     menu_highlighted_index: usize,
@@ -410,7 +417,7 @@ impl Composer {
             meter: context_meter::MeterHover::default(),
             meter_timer: None,
             footer_permissions_open: false,
-            picker_permissions_open: false,
+            strip_permissions_open: false,
             permission_preview: None,
             implement_menu_open: false,
             seen_popovers: Vec::new(),
@@ -427,8 +434,11 @@ impl Composer {
             selected_model: "Default model".to_owned(),
             selected_options: None,
             model_picker_open: false,
+            picker_settings: picker_settings::SettingsState::new(cx),
+            model_trigger_hovered: false,
             picker_provider_filter: None,
             picker_highlighted_index: 0,
+            picker_room_px: std::rc::Rc::default(),
             active_trigger: None,
             dismissed_trigger_text: None,
             menu_highlighted_index: 0,
@@ -1032,7 +1042,7 @@ impl Composer {
     /// Toggles the floating model picker popup.
     pub(crate) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.model_picker_open = !self.model_picker_open;
-        self.picker_permissions_open = false;
+        self.picker_settings.reset();
         self.permission_preview = None;
         if self.model_picker_open {
             self.active_trigger = None;
@@ -1060,7 +1070,7 @@ impl Composer {
         }
         for open in [
             &mut self.footer_permissions_open,
-            &mut self.picker_permissions_open,
+            &mut self.strip_permissions_open,
             &mut self.implement_menu_open,
             &mut self.context_meter_open,
             &mut self.stash.menu_open,
@@ -1073,6 +1083,7 @@ impl Composer {
             }
         }
         self.permission_preview = None;
+        self.picker_settings.reset();
         if self.active_trigger.take().is_some() {
             let text = self.textarea.read(cx).value().to_string();
             self.dismissed_trigger_text = Some(text);
@@ -1092,7 +1103,7 @@ impl Composer {
     fn any_overlay_open(&self) -> bool {
         self.model_picker_open
             || self.footer_permissions_open
-            || self.picker_permissions_open
+            || self.strip_permissions_open
             || self.implement_menu_open
             || self.context_meter_open
             || self.stash.menu_open
@@ -1785,9 +1796,13 @@ impl Composer {
         cx.notify();
     }
 
-    pub(super) fn toggle_picker_permissions_menu(&mut self, cx: &mut Context<'_, Self>) {
-        self.picker_permissions_open = !self.picker_permissions_open;
+    fn toggle_strip_permissions_menu(&mut self, cx: &mut Context<'_, Self>) {
+        self.strip_permissions_open = !self.strip_permissions_open;
         self.permission_preview = None;
+        if self.strip_permissions_open {
+            self.model_picker_open = false;
+            self.footer_permissions_open = false;
+        }
         cx.notify();
     }
 
@@ -1814,7 +1829,7 @@ impl Composer {
     /// Picks a permission mode; the radio item closes its menu (`closeOnClick`).
     pub(super) fn pick_runtime_mode(&mut self, mode: &'static str, cx: &mut Context<'_, Self>) {
         self.footer_permissions_open = false;
-        self.picker_permissions_open = false;
+        self.strip_permissions_open = false;
         self.permission_preview = None;
         if self.runtime_mode != mode {
             self.runtime_mode = mode.to_owned();
@@ -2504,6 +2519,9 @@ impl Render for Composer {
             })
             .when(picker_open, |s| s.bg(highlight_bg))
             .hover(move |s| s.bg(highlight_bg).text_color(fg))
+            .on_hover(cx.listener(|composer, hovered: &bool, _, _| {
+                composer.model_trigger_hovered = *hovered;
+            }))
             .on_click(cx.listener(|composer, _, window, cx| {
                 composer.toggle_model_picker(window, cx);
             }))
@@ -3046,6 +3064,12 @@ impl Render for Composer {
             ))
             .capture_key_down(cx.listener(
                 |composer, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    // The picker's settings column takes its keys first (`Tab` in, arrows, `Escape`).
+                    if composer.model_picker_open && composer.handle_settings_key(event, window, cx)
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     let keystroke = &event.keystroke;
                     let m = keystroke.modifiers;
                     // `⌘S` (`composer.stash`).
@@ -3132,6 +3156,35 @@ impl Render for Composer {
             );
         } else if self.model_picker_open {
             let query = self.model_search_input.read(cx).value().to_string();
+            let viewport = window.viewport_size();
+            let measured = std::rc::Rc::clone(&self.picker_room_px);
+            root = root.child(
+                gpui_kit::canvas(
+                    move |bounds, window, _| {
+                        let width = f32::from(bounds.size.width);
+                        let top = f32::from(bounds.origin.y);
+                        if measured.get() != Some((width, top)) {
+                            measured.set(Some((width, top)));
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+            let room = self.picker_room_px.get();
+            let mut geometry = model_picker::PickerGeometry::measure(
+                f32::from(viewport.width),
+                f32::from(viewport.height),
+                room.map_or(0.0, |(width, _)| width),
+            );
+            if let Some((_, top)) = room {
+                // The new-thread composer is centered. Reserve the popup gap and top margin.
+                geometry.shell_height = geometry.shell_height.min((top - 8.0).max(0.0));
+            }
+            self.picker_settings
+                .set_layout(f32::from(viewport.height), geometry.compact);
             let popup = render_model_picker(
                 &ModelPickerView {
                     catalog: &self.catalog,
@@ -3147,9 +3200,9 @@ impl Render for Composer {
                     selected_options: self.selected_options.as_ref(),
                     runtime_mode: &self.runtime_mode,
                     runtime_options: &runtime_options,
-                    permissions_open: self.picker_permissions_open,
-                    permission_preview: self.permission_preview,
                     follow_up: self.effective_follow_up(),
+                    settings: &self.picker_settings,
+                    geometry,
                 },
                 cx,
             );
@@ -3159,7 +3212,12 @@ impl Render for Composer {
                         .absolute()
                         .bottom_full()
                         .right_0()
-                        .mb(px(6.0))
+                        .mb(px(4.0))
+                        // A press outside the popup closes it; the settings menus hang below
+                        // their fields, so a press on an open menu counts as inside.
+                        .on_mouse_down_out(cx.listener(|composer, _, window, cx| {
+                            composer.dismiss_picker_outside(window, cx);
+                        }))
                         .child(popup),
                 )
                 .with_priority(2),

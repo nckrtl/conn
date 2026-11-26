@@ -52,7 +52,7 @@ impl Composer {
         match popover {
             Popover::ModelPicker => {
                 self.model_picker_open = false;
-                self.picker_permissions_open = false;
+                self.picker_settings.reset();
                 self.permission_preview = None;
             }
             Popover::FooterPermissions => self.footer_permissions_open = false,

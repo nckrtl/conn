@@ -27,8 +27,6 @@ struct ThreadView: View {
     private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
     @Namespace private var floatingGlass
-    /// The composer's top edge on screen, the bottom of the readable feed.
-    @State private var composerTop: CGFloat = .greatestFiniteMagnitude
     /// 0: at the end (within 24 pt); 1: within 100 pt; 2: further up.
     @State private var endBand = 0
     @State private var historyNotice: String?
@@ -393,7 +391,6 @@ struct ThreadView: View {
             timeline(proxy)
                 .safeAreaBar(edge: .bottom, spacing: 0) {
                     composerArea(proxy)
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { composerTop = $0 }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
                             if old != new && stickToBottom && !userScrolling && readingWindow == nil {
                                 proxy.scrollTo("timeline-bottom", anchor: .bottom)
@@ -627,15 +624,9 @@ struct ThreadView: View {
 
                 Color.clear
                     .frame(height: 1)
+                    // `.id` stays the outermost modifier on the lazy stack's child: with modifiers after it,
+                    // `scrollTo` could not find the marker once it scrolled off screen, and Jump did nothing.
                     .id("timeline-bottom")
-                    // How far the feed's end sits above the composer, measured on screen: 0 at the
-                    // end (within 24 pt), 1 within 100 pt, 2 further. The lazy stack drops the
-                    // marker when it scrolls far away, which counts as far.
-                    .onGeometryChange(for: Int.self) { proxy in
-                        let gap = proxy.frame(in: .global).minY - composerTop
-                        return gap <= 24 ? 0 : gap <= 100 ? 1 : 2
-                    } action: { endBand = $0 }
-                    .onDisappear { endBand = 2 }
             }
             .scrollTargetLayout()
             // A tap on the feed puts the keyboard away; simultaneous, so links, cards and buttons still
@@ -685,6 +676,14 @@ struct ThreadView: View {
                 }
             }
         }
+        // How far the readable feed sits above its end, banded so it updates only when a line is
+        // crossed: 0 at the end (within 24 pt), 1 within 100 pt, 2 further. SwiftUI's
+        // containerSize already excludes both insets and contentOffset starts under the top inset
+        // (measured on the simulator), so the readable bottom is offset + top inset + container.
+        .onScrollGeometryChange(for: Int.self, of: { g in
+            let toEnd = g.contentSize.height - (g.contentOffset.y + g.contentInsets.top + g.containerSize.height)
+            return toEnd <= 24 ? 0 : toEnd <= 100 ? 1 : 2
+        }) { _, band in endBand = band }
         .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
             if userScrolling {
                 if edges.top < previous.top && !paging { requestedByScroll = true }

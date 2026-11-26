@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use conn_state::{ItemStatus, ThreadState, TimelineEntry};
+use conn_state::{ItemStatus, SubagentModel, ThreadState, TimelineEntry, TurnItemStatus};
 use conn_theme::Tokens;
 use gpui_kit::test::{TestEventExt as _, TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{
@@ -66,6 +66,52 @@ pub(super) fn scene() -> ThreadState {
     thread
 }
 
+/// The id of the subagent card for `driver` in [`subagent_scene`].
+pub(super) fn subagent_card_id(driver: &str) -> String {
+    format!("sub-{driver}")
+}
+
+/// One delegated subagent card for each of `rows`: a driver, the instance and model it runs, and
+/// the machine it runs on, if not this one.
+pub(super) fn subagent_scene(rows: &[(&str, &str, &str, Option<&str>)]) -> ThreadState {
+    let mut thread = ThreadState::new("thread-selected");
+    thread.synchronized = true;
+    for (driver, instance, model, machine) in rows {
+        let id = subagent_card_id(driver);
+        thread.entries.push(TimelineEntry::Subagent {
+            id: id.clone(),
+            child_thread_id: machine.is_none().then(|| format!("child-{driver}")),
+            title: format!("Check the {driver} card header"),
+            role: (*driver).to_owned(),
+            status: TurnItemStatus::Running,
+            summary: Some("Looking at the header icon.".to_owned()),
+            remote_child: machine.map(|label| {
+                serde_json::from_value(serde_json::json!({
+                    "environmentId": "nick",
+                    "threadId": format!("remote-{driver}"),
+                    "label": label,
+                }))
+                .unwrap_or_else(|error| panic!("no remote child: {error}"))
+            }),
+            created_at: Some("2026-11-26T10:00:00.000Z".to_owned()),
+            started_at: Some("2026-11-26T10:00:00.000Z".to_owned()),
+            completed_at: None,
+        });
+        // The projection's subagent behind the card, and the model it runs.
+        let subagent = format!("subagent-{driver}");
+        thread.subagent_of_entry.insert(id, subagent.clone());
+        thread.subagent_models.insert(
+            subagent,
+            SubagentModel {
+                model: Some((*model).to_owned()),
+                instance_id: Some((*instance).to_owned()),
+                options: [("reasoningEffort".to_owned(), "medium".to_owned())].into(),
+            },
+        );
+    }
+    thread
+}
+
 /// A hidden offscreen window of `width` × `height` on `theme_id`, showing [`scene`]. It opens
 /// nothing on screen and takes no focus.
 pub(super) fn open_scene(
@@ -73,6 +119,17 @@ pub(super) fn open_scene(
     theme_id: &str,
     width: f32,
     height: f32,
+) -> (AnyWindowHandle, Tokens) {
+    open_thread_scene(ctx, theme_id, width, height, scene())
+}
+
+/// [`open_scene`] showing `thread`.
+pub(super) fn open_thread_scene(
+    ctx: &mut HeadlessAppContext,
+    theme_id: &str,
+    width: f32,
+    height: f32,
+    thread: ThreadState,
 ) -> (AnyWindowHandle, Tokens) {
     let theme = conn_theme::theme_by_id(theme_id)
         .unwrap_or_else(|| panic!("{theme_id} is not a built-in theme"));
@@ -103,7 +160,7 @@ pub(super) fn open_scene(
     ctx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_shell(crate::ui_tests::kitchen_sink_shell(), cx);
-            app.set_thread_for_test("thread-selected".to_owned(), scene(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), thread, cx);
         });
     });
     settle(ctx, window);
@@ -179,5 +236,38 @@ fn render_card_screenshots() {
                 .save(dir.join(format!("{prefix}-{label}-{state}.png")))
                 .expect("a saved PNG");
         }
+    }
+}
+
+/// Renders delegated subagent cards offscreen to PNG in dark and light: Claude, Codex, and a Claude
+/// task on another machine, whose driver is `remote`.
+///
+/// `CONN_CARD_SHOTS_DIR=<dir> cargo test -p conn-app render_subagent_icon_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_CARD_SHOTS_DIR"]
+fn render_subagent_icon_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_CARD_SHOTS_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = HeadlessAppContext::with_platform(
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+        std::sync::Arc::new(crate::superhero::AppAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    for (theme_id, label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        let thread = subagent_scene(&[
+            ("claudeAgent", "claudeAgent", "claude-opus-5-5", None),
+            ("codex", "codex", "gpt-5.5", None),
+            ("remote", "claudeAgent", "claude-opus-5-5", Some("nick")),
+            ("remote-codex", "codex", "gpt-5.5", Some("nick")),
+            ("mystery", "mystery", "mystery-1", None),
+        ]);
+        let (window, _) = open_thread_scene(&mut ctx, theme_id, 760.0, 900.0, thread);
+        let image = ctx.capture_screenshot(window).expect("a screenshot");
+        image
+            .save(dir.join(format!("agent-card-icon-{label}.png")))
+            .expect("a saved PNG");
     }
 }

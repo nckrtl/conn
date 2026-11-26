@@ -5,10 +5,14 @@
 mod empty;
 mod form;
 mod pending;
+mod picker;
 mod store;
 #[cfg(test)]
 mod tests;
 mod views;
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use conn_desktop::database::api::{
     CallOptions, ConnectionSource, DatabaseQueryResult, PanelConnection, browse_table_sql,
@@ -23,20 +27,23 @@ use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputSt
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, div, px, relative,
+    AnyElement, Bounds, Context, Entity, FontWeight, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement, Pixels, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
+    canvas, div, px, relative,
 };
 
 use self::form::ConnectionFormState;
 use self::pending::PendingQueries;
 #[cfg(test)]
 pub(crate) use self::pending::TOO_MANY_PENDING as TOO_MANY_PENDING_QUERIES;
+use self::picker::{PickerRows, menu_placement, step_row};
 use self::store::{
     DatabaseStore, active_connection, filter_tables, finalize_draft, format_result_summary,
     load_env_connection, load_store, project_connections, save_store,
 };
 use self::views::{
-    render_connection_alert, render_connection_menu, render_rows_grid, render_structure_list,
+    ConnectionMenuView, menu_wanted_height, render_connection_alert, render_connection_menu,
+    render_rows_grid, render_structure_list,
 };
 use super::chrome::{
     self, ConnTooltipExt as _, ICON_BUTTON_GLYPH_PX, ROW_PAD_START_PX, SectionTab,
@@ -106,6 +113,13 @@ pub(crate) struct DatabasePanel {
     allow_unlock_next: bool,
     pub(super) editing: Option<ConnectionFormState>,
     menu_open: bool,
+    /// The connection menu's search field, its text, the highlighted row and its list's scroll.
+    menu_input: Entity<InputState>,
+    menu_query: String,
+    menu_highlight: usize,
+    menu_scroll: ScrollHandle,
+    /// Where the menu's trigger was painted: the menu fits itself into the room around it.
+    trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     filter: String,
     clear_filter_pending: bool,
     filter_input: Entity<InputState>,
@@ -137,6 +151,8 @@ impl std::fmt::Debug for DatabasePanel {
 impl DatabasePanel {
     pub(crate) fn new(tokens: Tokens, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Tables"));
+        let menu_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search connections…"));
         let sql_input = cx.new(|cx| {
             EditorState::new(window, cx)
                 .placeholder(SQL_PLACEHOLDER)
@@ -152,6 +168,17 @@ impl DatabasePanel {
             if matches!(event, InputEvent::Change) {
                 this.filter = input.read(cx).value().to_string();
                 cx.notify();
+            }
+        });
+        let menu_sub = cx.subscribe(&menu_input, |this, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = input.read(cx).value().to_string();
+                if query != this.menu_query {
+                    this.menu_query = query;
+                    this.menu_highlight = 0;
+                    this.menu_scroll.scroll_to_item(0);
+                    cx.notify();
+                }
             }
         });
         let sql_sub = cx.subscribe(&sql_input, |this, input, event: &InputEvent, cx| {
@@ -188,6 +215,11 @@ impl DatabasePanel {
             allow_unlock_next: false,
             editing: None,
             menu_open: false,
+            menu_input,
+            menu_query: String::new(),
+            menu_highlight: 0,
+            menu_scroll: ScrollHandle::new(),
+            trigger_bounds: Rc::new(Cell::new(None)),
             filter: String::new(),
             clear_filter_pending: false,
             filter_input,
@@ -201,7 +233,7 @@ impl DatabasePanel {
             picked: None,
             query: None,
             run_id: 0,
-            _subscriptions: vec![filter_sub, sql_sub],
+            _subscriptions: vec![filter_sub, menu_sub, sql_sub],
         }
     }
 
@@ -838,6 +870,64 @@ impl DatabasePanel {
         self.run_sql(statement, cx);
     }
 
+    /// Opens the connection menu with an empty search that has the keyboard, or closes it.
+    fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.menu_open = !self.menu_open;
+        if self.menu_open {
+            self.reset_menu_search(window, cx);
+            self.menu_input
+                .update(cx, |input, cx| input.focus(window, cx));
+            if self.vault_connections.is_empty() || self.vault_status.is_some() {
+                self.load_vault_databases(false, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn reset_menu_search(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.menu_query.clear();
+        self.menu_highlight = 0;
+        self.menu_scroll.scroll_to_item(0);
+        self.menu_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// The connections the menu shows for the current search.
+    fn menu_rows(&self) -> PickerRows {
+        PickerRows::new(&self.connections(), &self.menu_query)
+    }
+
+    /// Moves the highlight over the rows the search keeps and scrolls it into view.
+    pub(super) fn move_menu_highlight(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
+        let rows = self.menu_rows();
+        if rows.is_empty() {
+            return;
+        }
+        self.menu_highlight = step_row(self.menu_highlight, delta, rows.len());
+        self.menu_scroll
+            .scroll_to_item(rows.child_index(self.menu_highlight));
+        cx.notify();
+    }
+
+    /// Enter in the search: picks the highlighted row.
+    pub(super) fn confirm_menu_highlight(&mut self, cx: &mut Context<'_, Self>) {
+        let rows = self.menu_rows();
+        let Some(id) = rows.get(self.menu_highlight).map(|c| c.id.clone()) else {
+            return;
+        };
+        self.select_connection(&id, cx);
+    }
+
+    /// Escape in the open menu: it clears the search first, then closes the menu.
+    fn escape_menu(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.menu_query.is_empty() {
+            self.menu_open = false;
+        } else {
+            self.reset_menu_search(window, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn select_connection(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         if let Some(project_key) = self.project_key.clone() {
             self.store.set_connection(&project_key, id);
@@ -982,9 +1072,9 @@ impl DatabasePanel {
 
     fn render_toolbar(
         &self,
-        connections: &[PanelConnection],
         selected: Option<&PanelConnection>,
         tables_loading: bool,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let tokens = &self.tokens;
@@ -995,6 +1085,7 @@ impl DatabasePanel {
 
         let mut trigger = chrome::toolbar_group(tokens)
             .id("db-connection-trigger")
+            .test_support()
             .a11y_button(
                 "database.connection.trigger",
                 selected.map_or_else(
@@ -1018,16 +1109,8 @@ impl DatabasePanel {
             .hover(move |s| s.bg(hover))
             .on_click({
                 let entity = entity.clone();
-                move |_, _, cx| {
-                    entity.update(cx, |panel, cx| {
-                        panel.menu_open = !panel.menu_open;
-                        if panel.menu_open
-                            && (panel.vault_connections.is_empty() || panel.vault_status.is_some())
-                        {
-                            panel.load_vault_databases(false, cx);
-                        }
-                        cx.notify();
-                    });
+                move |_, window, cx| {
+                    entity.update(cx, |panel, cx| panel.toggle_menu(window, cx));
                 }
             })
             .child(superhero_icon(
@@ -1054,18 +1137,43 @@ impl DatabasePanel {
             muted,
         ));
 
+        // Records where the trigger is, so the menu can fit the room above or below it.
+        let trigger_bounds = Rc::clone(&self.trigger_bounds);
         let mut connection_anchor = div()
             .relative()
             .min_w_0()
             .flex_shrink(1.0)
+            .child(
+                canvas(
+                    move |bounds, _, _| trigger_bounds.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(trigger.flex_shrink(1.0));
         if self.menu_open {
+            let total = self.connections().len();
+            let rows = self.menu_rows();
+            let wanted = menu_wanted_height(&rows, total, selected, self.vault_status);
+            let placement = menu_placement(
+                self.trigger_bounds.get(),
+                window.viewport_size().height.as_f32(),
+                wanted,
+            );
             connection_anchor = connection_anchor.child(render_connection_menu(
-                tokens,
-                connections,
-                selected,
-                self.vault_status,
-                self.vault_error.as_deref(),
+                &ConnectionMenuView {
+                    tokens,
+                    total,
+                    rows: &rows,
+                    highlight: self.menu_highlight,
+                    selected,
+                    vault_status: self.vault_status,
+                    vault_error: self.vault_error.as_deref(),
+                    input: &self.menu_input,
+                    scroll: &self.menu_scroll,
+                    placement,
+                },
                 cx,
             ));
         }
@@ -1498,7 +1606,6 @@ impl Render for DatabasePanel {
             .into_any_element();
         }
 
-        let connections = self.connections();
         let selected = self.selected_connection();
         let tables_loading = selected.as_ref().is_some_and(|conn| {
             let expected = format!("{}:{}", connection_key(conn), self.refresh_nonce);
@@ -1507,7 +1614,7 @@ impl Render for DatabasePanel {
                 .is_some_and(|load| load.key == expected && load.loading)
         });
 
-        let toolbar = self.render_toolbar(&connections, selected.as_ref(), tables_loading, cx);
+        let toolbar = self.render_toolbar(selected.as_ref(), tables_loading, window, cx);
         let body: AnyElement = if let Some(form) = &self.editing {
             form.render(&self.tokens, window, cx)
         } else if let Some(connection) = &selected {
@@ -1521,11 +1628,10 @@ impl Render for DatabasePanel {
             .a11y_group("panel.database", "Database")
             .size_full()
             // Capture phase intercepts Cmd+Enter / Ctrl+Enter before the SQL editor inserts a newline.
-            .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
                 let k = &event.keystroke;
                 if panel.menu_open && k.key == "escape" {
-                    panel.menu_open = false;
-                    cx.notify();
+                    panel.escape_menu(window, cx);
                     cx.stop_propagation();
                     return;
                 }

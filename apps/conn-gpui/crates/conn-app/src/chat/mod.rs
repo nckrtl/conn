@@ -35,6 +35,8 @@ mod inline_code;
 mod left_align_shots;
 mod link_menu;
 mod link_preview;
+#[cfg(test)]
+mod picker_settings_shots;
 pub(crate) use self::link_menu::LinkedPullRequest;
 pub(crate) mod markdown;
 mod provider_banner;

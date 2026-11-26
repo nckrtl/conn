@@ -35,6 +35,15 @@ fn attachment_name_and_size(attachment: &conn_contract::ChatAttachment) -> (Stri
     (name.clone(), usize::try_from(size).unwrap_or(0))
 }
 
+/// `returned` with the `draft` typed since after it, a blank line between.
+fn before_draft(returned: String, draft: &str) -> String {
+    if draft.trim().is_empty() {
+        returned
+    } else {
+        format!("{returned}\n\n{draft}")
+    }
+}
+
 impl Composer {
     /// Calls `visit(key, text, attachment count)` for every draft the composer holds: each
     /// parked one, then the live one under the active key.
@@ -94,9 +103,8 @@ impl Composer {
     }
 
     /// Puts a message whose send failed back under `key`: in the composer when `key` shows,
-    /// else parked for that thread. Its text replaces the shown draft's text, as before; its
-    /// attachments go before any the user added since. A parked draft keeps what was typed
-    /// since, after the message.
+    /// else parked for that thread. What the user typed or attached since stays, after the
+    /// message, so a send that comes back never overwrites a draft.
     pub(crate) fn return_unsent(
         &mut self,
         key: &str,
@@ -125,15 +133,12 @@ impl Composer {
             };
             returned.append(&mut self.attachments);
             self.attachments = returned;
-            self.set_draft_text(text, window, cx);
+            let typed = self.textarea.read(cx).value().to_string();
+            self.set_draft_text(before_draft(text, &typed), window, cx);
             return;
         }
         let parked = self.drafts.discard(key).unwrap_or_default();
-        let text = if parked.text.trim().is_empty() {
-            text
-        } else {
-            format!("{text}\n\n{}", parked.text)
-        };
+        let text = before_draft(text, &parked.text);
         returned.extend(parked.attachments);
         self.drafts.park(
             key,

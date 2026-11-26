@@ -619,3 +619,40 @@ fn a_slow_send_shows_sending_and_a_timed_out_one_resends_with_its_id(cx: &mut Te
     );
     assert_eq!(ledger.posted, vec!["the server is slow".to_owned()]);
 }
+
+#[gpui_kit::test]
+fn a_send_that_comes_back_keeps_what_the_user_typed_meanwhile(cx: &mut TestAppContext) {
+    let server = spawn_fake_server();
+    let (window, app) = open_app(cx, &server);
+
+    server.go_down();
+    pump_until(
+        cx,
+        &app,
+        "the app notices the server is gone",
+        |app, _, _| matches!(app.status, Some(ConnectionStatus::Reconnecting { .. })),
+        &server,
+    );
+    send(cx, window, &app, "first message", Vec::new());
+    send(cx, window, &app, "second message", Vec::new());
+    settle(cx);
+    // The user keeps typing while both wait.
+    cx.update_window(window, |_, window, cx| {
+        let chat = app.read(cx).chat.clone();
+        chat.update(cx, |chat, cx| {
+            chat.set_draft_text("typed while waiting".to_owned(), window, cx);
+        });
+    })
+    .expect("the window");
+
+    cx.executor().advance_clock(SEND_TIMEOUT);
+    settle(cx);
+    let draft = cx.read(|cx| draft_text(app.read(cx), cx));
+    for text in ["first message", "second message", "typed while waiting"] {
+        assert!(draft.contains(text), "{text:?} is kept: {draft:?}");
+    }
+    assert!(
+        draft.ends_with("typed while waiting"),
+        "the returned messages go before what was typed: {draft:?}"
+    );
+}

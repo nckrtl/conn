@@ -378,6 +378,25 @@ impl ConnApp {
         }
     }
 
+    /// Every linked environment's id and connection, and whether it is connected now, by id.
+    pub(super) fn linked_links(&self) -> Vec<(String, Connection, bool)> {
+        let Some(set) = self.linked.set.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids = set.environment_ids();
+        ids.sort();
+        ids.into_iter()
+            .filter_map(|id| {
+                let connection = set.connection(&id).cloned()?;
+                let connected = matches!(
+                    self.linked.statuses.get(&id),
+                    Some(ConnectionStatus::Connected)
+                );
+                Some((id, connection, connected))
+            })
+            .collect()
+    }
+
     /// The connections of every linked environment that is connected now.
     pub(super) fn linked_connections(&self) -> Vec<Connection> {
         let Some(set) = self.linked.set.as_ref() else {

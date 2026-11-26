@@ -7,6 +7,7 @@
 mod navigation;
 
 mod navigator;
+mod view_prefs;
 
 use crate::a11y::ConnA11yExt as _;
 use std::fmt;
@@ -31,7 +32,7 @@ use std::sync::Arc;
 
 use crate::chat::markdown::{MarkdownOptions, render_markdown};
 
-use super::chrome::ConnTooltipExt as _;
+use super::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _};
 use super::color::to_hsla;
 use super::file_kind::{self, PreviewKind};
 use super::file_path::{self, Crumb};
@@ -203,7 +204,9 @@ pub(crate) struct FilesPanel {
     recent_text: std::collections::VecDeque<PreviewState>,
     pending_path: Option<String>,
     loading_hint: bool,
-    word_wrap: bool,
+    /// Markdown preview and word wrap: global, saved to `prefs_path`.
+    prefs: view_prefs::ViewPrefs,
+    prefs_path: Option<std::path::PathBuf>,
     /// The Copy button shows a check for a moment after it copies (`useCopyToClipboard`).
     copied: bool,
     _copied_reset: Option<Task<()>>,
@@ -230,8 +233,6 @@ pub(crate) struct FilesPanel {
     menu_generation: u64,
     /// The thread whose workspace the files belong to: the server signs file addresses per thread.
     row_menu: Option<RowMenu>,
-    /// The editor the `Open in` button uses: the last one picked from its menu.
-    preferred_editor: Option<EditorTarget>,
     /// The breadcrumb trail's sideways scroll, and the path it was last scrolled to the end for.
     crumb_scroll: gpui_kit::ScrollHandle,
     crumbs_scrolled_for: std::cell::RefCell<Option<String>>,
@@ -281,8 +282,11 @@ impl FilesPanel {
                 cx.notify();
             }
         });
+        let prefs_path = view_prefs::ViewPrefs::path();
         Self {
             showing_preview: false,
+            prefs: view_prefs::ViewPrefs::load(prefs_path.as_deref()),
+            prefs_path,
             tokens,
             connection,
             workspace_root: None,
@@ -293,7 +297,6 @@ impl FilesPanel {
             recent_text: Default::default(),
             pending_path: None,
             loading_hint: false,
-            word_wrap: false,
             copied: false,
             _copied_reset: None,
             editor: None,
@@ -318,7 +321,6 @@ impl FilesPanel {
             crumb_menu: None,
             menu_generation: 0,
             row_menu: None,
-            preferred_editor: None,
             crumb_scroll: gpui_kit::ScrollHandle::new(),
             crumbs_scrolled_for: std::cell::RefCell::new(None),
             preview_scroll: gpui_kit::ScrollHandle::new(),
@@ -871,6 +873,13 @@ impl FilesPanel {
         }
     }
 
+    /// Re-reads the saved view choices; without a settings file the in-memory ones stay.
+    fn reload_prefs(&mut self) {
+        if let Some(path) = &self.prefs_path {
+            self.prefs = view_prefs::ViewPrefs::load(Some(path));
+        }
+    }
+
     fn present(&mut self, next: PreviewState, cx: &mut Context<'_, Self>) {
         let switched = self.preview.path() != next.path();
         let unchanged = matches!((&self.preview, &next),
@@ -893,9 +902,13 @@ impl FilesPanel {
         }
         if switched {
             self.recent_text.retain(|entry| entry.path() != next.path());
-            self.render_preview = next
-                .path()
-                .is_some_and(|path| file_kind::preview_kind(path).rendered_by_default());
+            // Another Files panel may have changed the saved choices since this one read them.
+            self.reload_prefs();
+            self.render_preview = next.path().is_some_and(|path| {
+                let kind = file_kind::preview_kind(path);
+                kind.rendered_by_default()
+                    || (kind == PreviewKind::Markdown && self.prefs.markdown_preview)
+            });
             self.crumb_menu = None;
         }
         let previous = std::mem::replace(&mut self.preview, next);
@@ -1368,7 +1381,6 @@ impl FilesPanel {
         let kind = file_kind::preview_kind(path);
         let loaded = matches!(self.preview, PreviewState::Loaded { .. });
         let document = matches!(self.preview, PreviewState::Document { .. });
-        let rendered = kind.has_rendered_view() && self.render_preview;
         let mut group = h_flex()
             .flex_shrink_0()
             .h(px(TOOLBAR_HEIGHT_PX))
@@ -1380,93 +1392,6 @@ impl FilesPanel {
             .border_1()
             .border_color(control_border);
         let mut buttons = 0;
-        if loaded && !rendered {
-            group = group.child(self.toolbar_button(
-                "files-preview-wrap-btn",
-                "panel.files.preview-wrap",
-                if self.word_wrap {
-                    "Disable word wrap"
-                } else {
-                    "Enable word wrap"
-                },
-                "superhero/wrap-lines.svg",
-                self.word_wrap,
-                cx.listener(|this, _, _, cx| {
-                    this.word_wrap = !this.word_wrap;
-                    #[cfg(feature = "zed-files")]
-                    if let Some(editor) = &this.zed {
-                        editor.update(cx, |e, cx| {
-                            super::zed_preview::set_wrap(e, this.word_wrap, cx)
-                        });
-                    }
-                    cx.notify();
-                }),
-            ));
-            buttons += 1;
-        }
-        if loaded {
-            group = group.child(self.toolbar_button(
-                "files-preview-copy-btn",
-                "panel.files.preview-copy",
-                if self.copied {
-                    "Copied"
-                } else {
-                    "Copy contents"
-                },
-                if self.copied {
-                    "superhero/check.svg"
-                } else {
-                    "superhero/copy.svg"
-                },
-                self.copied,
-                cx.listener(|this, _, _, cx| {
-                    if let PreviewState::Loaded { raw_contents, .. } = &this.preview {
-                        cx.write_to_clipboard(ClipboardItem::new_string(raw_contents.clone()));
-                        this.show_copied(cx);
-                    }
-                }),
-            ));
-            buttons += 1;
-        }
-        if loaded || document {
-            // `OpenInPicker`: a button that opens the file in the editor picked last
-            // (Cursor to begin with), and a chevron with every action.
-            let local = self.workspace_root.as_deref().is_some_and(|root| {
-                std::path::Path::new(&file_path::absolute_path(root, path)).exists()
-            });
-            if local {
-                let editor = self.preferred_editor.unwrap_or(EditorTarget::Cursor);
-                let open_path = path.to_owned();
-                group = group.child(self.toolbar_button(
-                    "files-preview-open-in-btn",
-                    "panel.files.preview-open-in",
-                    &format!("Open in {}", editor.label()),
-                    "superhero/external-link.svg",
-                    false,
-                    cx.listener(move |this, _, _, cx| {
-                        this.run_row_action(RowAction::OpenWith(editor), &open_path, cx);
-                    }),
-                ));
-                buttons += 1;
-            }
-            let menu_path = path.to_owned();
-            group = group.child(self.toolbar_button(
-                "files-preview-open-in-menu-btn",
-                "panel.files.preview-open-in-menu",
-                "More ways to open",
-                "superhero/chevron-down.svg",
-                self.row_menu.is_some(),
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.row_menu = Some(RowMenu {
-                        path: menu_path.clone(),
-                        position: event.position,
-                    });
-                    cx.notify();
-                }),
-            ));
-            buttons += 1;
-        }
         if kind.opens_in_browser() && (loaded || document) {
             group = group.child(self.toolbar_button(
                 "files-preview-browser-btn",
@@ -1660,44 +1585,144 @@ impl FilesPanel {
         col
     }
 
-    fn render_view_switch(&self, cx: &mut Context<'_, Self>) -> Option<impl IntoElement> {
-        let PreviewState::Loaded { path, .. } = &self.preview else {
-            return None;
-        };
-        let (icon, label) = match file_kind::preview_kind(path) {
-            PreviewKind::Markdown if !self.render_preview => {
-                ("superhero/show.svg", "Preview Markdown")
-            }
-            PreviewKind::Delimited { .. } if !self.render_preview => {
-                ("superhero/table.svg", "Show table")
-            }
-            kind if kind.has_rendered_view() => ("superhero/code.svg", "Show source"),
-            _ => return None,
-        };
-        Some(
-            h_flex()
-                .w_full()
-                .flex_shrink_0()
-                .justify_end()
-                .px(px(TOOLBAR_PAD_PX))
-                .pt(px(6.0))
-                .child(
-                    super::chrome::text_button(
+    /// The file's floating control group, over the editor's top-right corner like the
+    /// Terminal's action group (`absolute right-2 top-2`): it takes no row, so line 1 starts at
+    /// the same height as in any file. Round icon-only buttons: the rendered view (Markdown
+    /// preview, table), word wrap, copy, and an ellipsis with the other file actions.
+    fn render_file_controls(&self, cx: &mut Context<'_, Self>) -> Option<impl IntoElement> {
+        let loaded = matches!(self.preview, PreviewState::Loaded { .. });
+        let document = matches!(self.preview, PreviewState::Document { .. });
+        let path = self.preview.path().filter(|_| loaded || document)?;
+        let kind = file_kind::preview_kind(path);
+        let rendered = kind.has_rendered_view() && self.render_preview;
+        let mut group = h_flex()
+            .id("files-file-controls")
+            .test_support()
+            .absolute()
+            .top(px(8.0))
+            .right(px(8.0))
+            .h(px(TOOLBAR_HEIGHT_PX))
+            .px(px(TOOLBAR_INNER_PAD_PX))
+            .gap(px(2.0))
+            .items_center()
+            .rounded(px(9999.0))
+            .bg(to_hsla(self.tokens.shell_control))
+            .border_1()
+            .border_color(to_hsla(self.tokens.shell_divider_header));
+        if loaded {
+            let switch = match kind {
+                PreviewKind::Markdown if !self.render_preview => {
+                    Some(("superhero/show.svg", "Preview Markdown"))
+                }
+                PreviewKind::Delimited { .. } if !self.render_preview => {
+                    Some(("superhero/table.svg", "Show table"))
+                }
+                kind if kind.has_rendered_view() => Some(("superhero/code.svg", "Show source")),
+                _ => None,
+            };
+            if let Some((icon, label)) = switch {
+                group = group.child(
+                    self.toolbar_button(
                         "files.preview-render",
-                        Some(icon),
+                        "panel.files.preview-render",
                         label,
-                        &self.tokens,
+                        icon,
+                        self.render_preview,
                         cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.render_preview = !this.render_preview;
+                            if this.preview.path().map(file_kind::preview_kind)
+                                == Some(PreviewKind::Markdown)
+                            {
+                                this.prefs.markdown_preview = this.render_preview;
+                                this.prefs.save(this.prefs_path.as_deref());
+                            }
                             cx.notify();
                         }),
                     )
-                    .test_support()
-                    .bg(to_hsla(self.tokens.shell_control))
-                    .border_1()
-                    .border_color(to_hsla(self.tokens.shell_divider_header)),
-                ),
-        )
+                    .test_support(),
+                );
+            }
+            if !rendered {
+                group = group.child(
+                    self.toolbar_button(
+                        "files-preview-wrap-btn",
+                        "panel.files.preview-wrap",
+                        if self.prefs.word_wrap {
+                            "Disable word wrap"
+                        } else {
+                            "Enable word wrap"
+                        },
+                        "superhero/wrap-lines.svg",
+                        self.prefs.word_wrap,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.set_word_wrap(!this.prefs.word_wrap, window, cx);
+                        }),
+                    )
+                    .test_support(),
+                );
+            }
+            group = group.child(
+                self.toolbar_button(
+                    "files-preview-copy-btn",
+                    "panel.files.preview-copy",
+                    if self.copied {
+                        "Copied"
+                    } else {
+                        "Copy contents"
+                    },
+                    if self.copied {
+                        "superhero/check.svg"
+                    } else {
+                        "superhero/copy.svg"
+                    },
+                    self.copied,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        if let PreviewState::Loaded { raw_contents, .. } = &this.preview {
+                            cx.write_to_clipboard(ClipboardItem::new_string(raw_contents.clone()));
+                            this.show_copied(cx);
+                        }
+                    }),
+                )
+                .test_support(),
+            );
+        }
+        let menu_path = path.to_owned();
+        group = group.child(
+            self.toolbar_button(
+                "files-preview-more-btn",
+                "panel.files.preview-more",
+                "More actions",
+                "superhero/more-horizontal.svg",
+                self.row_menu.is_some(),
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.row_menu = Some(RowMenu {
+                        path: menu_path.clone(),
+                        position: event.position,
+                    });
+                    cx.notify();
+                }),
+            )
+            .test_support(),
+        );
+        Some(group)
+    }
+
+    /// Turns word wrap on or off for every file, now and after a restart.
+    fn set_word_wrap(&mut self, wrap: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.prefs.word_wrap = wrap;
+        self.prefs.save(self.prefs_path.as_deref());
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
+        }
+        #[cfg(feature = "zed-files")]
+        if let Some(editor) = &self.zed {
+            editor.update(cx, |e, cx| super::zed_preview::set_wrap(e, wrap, cx));
+        }
+        cx.notify();
     }
 
     fn render_preview_column(
@@ -1767,7 +1792,7 @@ impl FilesPanel {
                         &format!("file-preview-{path}"),
                         raw_contents,
                         &self.tokens,
-                        &MarkdownOptions::default(),
+                        &MarkdownOptions::files_preview(),
                     )),
                 }
             }
@@ -1783,7 +1808,7 @@ impl FilesPanel {
                 #[cfg(feature = "zed-files")]
                 if super::zed_preview::enabled() && path.ends_with(".php") && !*truncated {
                     let editor = self.zed.get_or_insert_with(|| {
-                        let editor = super::zed_preview::open(raw_contents, self.word_wrap, window, cx);
+                        let editor = super::zed_preview::open(raw_contents, self.prefs.word_wrap, window, cx);
                         self.editor_subscription = Some(cx.subscribe(
                             &editor,
                             |_, _, event: &zed_editor::EditorEvent, cx| {
@@ -1841,7 +1866,7 @@ impl FilesPanel {
                         let mut editor = EditorState::new(window, cx)
                             .language(language.to_owned())
                             .default_value(raw_contents.clone())
-                            .soft_wrap(self.word_wrap)
+                            .soft_wrap(self.prefs.word_wrap)
                             .line_number(true);
                         if path.ends_with(".php")
                             && !*truncated
@@ -1941,13 +1966,10 @@ impl FilesPanel {
         match action {
             RowAction::Open => spawn(&[&absolute]),
             RowAction::Reveal => spawn(&["-R", &absolute]),
-            RowAction::OpenWith(editor) => {
-                self.preferred_editor = Some(editor);
-                match editor.app_name() {
-                    Some(app) => spawn(&["-a", app, &absolute]),
-                    None => spawn(&[&absolute]),
-                }
-            }
+            RowAction::OpenWith(editor) => match editor.app_name() {
+                Some(app) => spawn(&["-a", app, &absolute]),
+                None => spawn(&[&absolute]),
+            },
             RowAction::CopyRelativePath => {
                 cx.write_to_clipboard(ClipboardItem::new_string(path.to_owned()));
             }
@@ -1984,6 +2006,7 @@ impl FilesPanel {
                 .id(group.clone())
                 .group(group.clone())
                 .a11y_button(format!("panel.files.row-menu.{id}"), label.clone())
+                .test_support()
                 .items_center()
                 .gap(px(8.0))
                 .min_h(px(28.0))
@@ -2023,7 +2046,8 @@ impl FilesPanel {
                     cx,
                 ));
             for editor in EditorTarget::ALL {
-                if editor.app_name().is_none() {
+                // Files no longer offers Cursor (Nick dropped "Open in Cursor").
+                if editor.app_name().is_none() || editor == EditorTarget::Cursor {
                     continue;
                 }
                 list = list.child(item(
@@ -2079,7 +2103,7 @@ impl FilesPanel {
             .border_1()
             .border_color(to_hsla(tokens.foreground.with_alpha(0.08)))
             .shadow(vec![super::header::dropdown_glass_shadow(tokens)])
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .floating_surface()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.row_menu = None;
                 cx.notify();
@@ -2183,7 +2207,6 @@ impl Render for FilesPanel {
                 .min_w_0()
                 .min_h_0()
                 .h_full()
-                .children(self.render_view_switch(cx))
                 .child(
                     v_flex()
                         .id("file-preview-viewport")
@@ -2193,7 +2216,8 @@ impl Render for FilesPanel {
                         .min_h_0()
                         .w_full()
                         .overflow_hidden()
-                        .child(self.render_preview_column(window, cx)),
+                        .child(self.render_preview_column(window, cx))
+                        .children(self.render_file_controls(cx)),
                 )
                 .into_any_element();
             return v_flex()
@@ -2497,7 +2521,7 @@ impl FilesPanel {
             .border_1()
             .border_color(to_hsla(tokens.foreground.with_alpha(0.08)))
             .shadow(vec![super::header::dropdown_glass_shadow(tokens)])
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .floating_surface()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.crumb_menu = None;
                 cx.notify();
@@ -2963,10 +2987,13 @@ mod tests {
         }
     }
 
-    #[gpui_kit::test]
-    fn markdown_view_switch_stays_available_while_scrolling(cx: &mut TestAppContext) {
-        use gpui_kit::test::TestQueryExt as _;
-        let (window, files) = cx.update(|cx| {
+    fn open_panel(
+        cx: &mut TestAppContext,
+        path: &str,
+        contents: &str,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<FilesPanel>) {
+        let (path, contents) = (path.to_owned(), contents.to_owned());
+        cx.update(|cx| {
             gpui_kit::init(cx);
             let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
             gpui_kit::open_window(Default::default(), cx, |window, cx| {
@@ -2974,37 +3001,225 @@ mod tests {
                     let mut files = FilesPanel::new(tokens, None, window, cx);
                     files.showing_preview = true;
                     files.preview = PreviewState::Loaded {
-                        path: "AGENTS.md".into(),
-                        raw_contents: "# Build instructions\n\nRun **tests** before shipping.\n\n"
-                            .repeat(80),
+                        path,
+                        raw_contents: contents,
                         truncated: false,
                     };
                     files
                 })
             })
             .unwrap()
-        });
+        })
+    }
+
+    /// Where the source editor, and so line 1, starts.
+    fn editor_top(files: &Entity<FilesPanel>, cx: &gpui_kit::App) -> gpui_kit::Pixels {
+        let editor = files.read(cx).editor.clone().expect("a source editor");
+        editor.read(cx).input_bounds().top()
+    }
+
+    fn loaded(path: &str, contents: &str) -> PreviewState {
+        PreviewState::Loaded {
+            path: path.into(),
+            raw_contents: contents.into(),
+            truncated: false,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn markdown_view_switch_stays_available_while_scrolling(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let (window, files) = open_panel(
+            cx,
+            "AGENTS.md",
+            &"# Build instructions\n\nRun **tests** before shipping.\n\n".repeat(80),
+        );
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find_by_label("Preview Markdown").is_some());
             window.click("files.preview-render", cx);
-            let button = window.find_by_label("Show source").bounds();
+            assert!(window.try_find_by_label("Show source").is_some());
+            let group = window.find("files-file-controls").bounds();
             let document = window.find("file-preview-viewport").bounds();
-            assert!(button.bottom() <= document.top());
-            assert_eq!(button.right(), document.right() - px(TOOLBAR_PAD_PX));
+            // Floats inside the editor's top-right corner (`right-2 top-2`), like the Terminal.
+            assert!(group.top() >= document.top());
+            assert_eq!(group.right(), document.right() - px(TOOLBAR_PAD_PX));
             window.scroll(
                 "file-preview-viewport",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-250.))),
                 cx,
             );
             assert!(files.read(cx).preview_scroll.offset().y < px(0.));
-            assert_eq!(window.find_by_label("Show source").bounds(), button);
+            assert_eq!(window.find("files-file-controls").bounds(), group);
             window.click("files.preview-render", cx);
             assert!(window.try_find_by_label("Preview Markdown").is_some());
             assert!(!files.read(cx).render_preview);
             assert!(files.read(cx).editor.is_some());
         })
         .unwrap();
+    }
+
+    /// The controls float over the editor's top-right corner as round icon-only buttons: they
+    /// take no row, so line 1 starts at the same height as in any other file.
+    #[gpui_kit::test]
+    fn file_controls_float_without_shifting_the_editor(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let (md_window, md_files) = open_panel(cx, "AGENTS.md", "@AGENTS.md\n\n");
+        let (md_editor, md_viewport, group) = cx
+            .update_window(md_window, |_, window, cx| {
+                window.render_frame(cx);
+                let group = window.find("files-file-controls").bounds();
+                let viewport = window.find("file-preview-viewport").bounds();
+                for label in [
+                    "Preview Markdown",
+                    "Enable word wrap",
+                    "Copy contents",
+                    "More actions",
+                ] {
+                    let button = window.find_by_label(label).bounds();
+                    assert_eq!(button.size.width, button.size.height, "{label} is round");
+                    // Inside the file, in the floating group: not in the panel's top toolbar.
+                    assert!(
+                        group.contains(&button.origin) && button.top() >= viewport.top(),
+                        "{label}"
+                    );
+                }
+                // The old text pill, the "Open in" button and its chevron are gone.
+                for label in ["Open in Cursor", "More ways to open"] {
+                    assert!(window.try_find_by_label(label).is_none(), "{label}");
+                }
+                (
+                    editor_top(&md_files, cx),
+                    window.find("file-preview-viewport").bounds(),
+                    window.find("files-file-controls").bounds(),
+                )
+            })
+            .unwrap();
+        // Floats 8px from the editor's top and right edges and takes no row.
+        assert_eq!(group.top(), md_viewport.top() + px(8.0));
+        assert_eq!(group.right(), md_viewport.right() - px(8.0));
+
+        let (rs_window, rs_files) = open_panel(cx, "main.rs", "fn main() {}\n");
+        let (rs_editor, rs_viewport) = cx
+            .update_window(rs_window, |_, window, cx| {
+                window.render_frame(cx);
+                // The eye shows on Markdown only; the rest of the group is on every file.
+                assert!(window.try_find_by_label("Preview Markdown").is_none());
+                for label in ["Enable word wrap", "Copy contents", "More actions"] {
+                    assert!(window.try_find_by_label(label).is_some(), "{label}");
+                }
+                (
+                    editor_top(&rs_files, cx),
+                    window.find("file-preview-viewport").bounds(),
+                )
+            })
+            .unwrap();
+        // Line 1 sits at the same offset from the editor's top in Markdown and Rust files.
+        assert_eq!(md_editor - md_viewport.top(), rs_editor - rs_viewport.top());
+
+        // Clicking still toggles the preview.
+        cx.update_window(md_window, |_, window, cx| {
+            assert!(!md_files.read(cx).render_preview);
+            window.click("files.preview-render", cx);
+            assert!(md_files.read(cx).render_preview);
+            assert!(window.try_find_by_label("Show source").is_some());
+            window.click("files.preview-render", cx);
+            assert!(!md_files.read(cx).render_preview);
+            assert!(window.try_find_by_label("Preview Markdown").is_some());
+        })
+        .unwrap();
+    }
+
+    /// Word wrap and Markdown preview belong to the user, not to a file: they carry over to
+    /// the next file and, saved to disk, to the next run.
+    #[gpui_kit::test]
+    fn markdown_preview_and_word_wrap_are_global_and_saved(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let saved =
+            std::env::temp_dir().join(format!("conn-files-view-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&saved);
+        let (window, files) = open_panel(cx, "a.md", "# A\n");
+        cx.update_window(window, |_, window, cx| {
+            files.update(cx, |files, _| files.prefs_path = Some(saved.clone()));
+            window.render_frame(cx);
+            assert!(!files.read(cx).render_preview);
+            window.click("files.preview-render", cx);
+            assert!(files.read(cx).render_preview);
+
+            // Another Markdown file opens in preview; a Rust file has no preview to carry.
+            files.update(cx, |files, cx| files.present(loaded("b.md", "# B\n"), cx));
+            assert!(files.read(cx).render_preview);
+            files.update(cx, |files, cx| {
+                files.present(loaded("main.rs", "fn main() {}\n"), cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find_by_label("Preview Markdown").is_none());
+            files.update(cx, |files, cx| files.present(loaded("c.md", "# C\n"), cx));
+            window.render_frame(cx);
+            assert!(files.read(cx).render_preview);
+            assert!(window.try_find_by_label("Show source").is_some());
+
+            // Word wrap applies to every file the same way.
+            files.update(cx, |files, cx| {
+                files.present(loaded("main.rs", "fn main() {}\n"), cx)
+            });
+            window.render_frame(cx);
+            assert!(!files.read(cx).prefs.word_wrap);
+            window.click("files-preview-wrap-btn", cx);
+            assert!(files.read(cx).prefs.word_wrap);
+            files.update(cx, |files, cx| {
+                files.present(loaded("lib.rs", "pub fn f() {}\n"), cx)
+            });
+            window.render_frame(cx);
+            assert!(files.read(cx).prefs.word_wrap);
+            assert!(window.try_find_by_label("Disable word wrap").is_some());
+        })
+        .unwrap();
+
+        // A fresh panel (the next run) reads both choices back.
+        let (window, restarted) = open_panel(cx, "d.md", "# D\n");
+        cx.update_window(window, |_, _, cx| {
+            restarted.update(cx, |files, cx| {
+                files.prefs_path = Some(saved.clone());
+                files.reload_prefs();
+                assert!(files.prefs.word_wrap && files.prefs.markdown_preview);
+                files.present(loaded("e.md", "# E\n"), cx);
+                assert!(files.render_preview);
+            });
+        })
+        .unwrap();
+        let _ = std::fs::remove_file(&saved);
+    }
+
+    /// "More actions" opens the file actions; Cursor is not among them.
+    #[gpui_kit::test]
+    fn more_actions_menu_has_no_cursor(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let root = std::env::temp_dir().join(format!("conn-files-menu-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.md"), "# Notes\n").unwrap();
+        let (window, files) = open_panel(cx, "notes.md", "# Notes\n");
+        cx.update_window(window, |_, window, cx| {
+            files.update(cx, |files, _| {
+                files.workspace_root = Some(root.to_string_lossy().into_owned());
+            });
+            window.render_frame(cx);
+            window.click("files-preview-more-btn", cx);
+            window.render_frame(cx);
+            for label in [
+                "Open",
+                "Reveal in Finder",
+                "Open with VS Code",
+                "Copy relative path",
+                "Add to chat",
+            ] {
+                assert!(window.try_find_by_label(label).is_some(), "{label}");
+            }
+            assert!(window.try_find_by_label("Open with Cursor").is_none());
+            assert!(window.try_find_by_label("Open in Cursor").is_none());
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui_kit::test]

@@ -135,6 +135,11 @@ pub struct DesktopPanelSubscription {
     pub files_thread: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub files_only: bool,
+    /// Conn extension to T3's subscription: the desktop hosts agent browser tabs and registers
+    /// them (`preview.desktopRegister`), so a Browser panel request leads to a tab. Only the
+    /// GPUI host sends it; the Electron desktop does not, and an absent flag means `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hosts_agent_tabs: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

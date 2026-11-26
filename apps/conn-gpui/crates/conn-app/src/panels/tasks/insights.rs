@@ -16,10 +16,11 @@ use conn_theme::Tokens;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Bounds, FontWeight, Pixels, ScrollHandle, SharedString, Window, div, px,
+    AnyElement, App, Bounds, FontWeight, Pixels, ScrollHandle, SharedString, TestSupportExt as _,
+    Window, div, px,
 };
 
-use super::charts::{render_sparkline, render_trend_chart};
+use super::charts::{AXIS_TOP_OVERHANG_PX, render_sparkline, render_trend_chart};
 use super::format::{insight_grid_layout, insight_hint};
 use crate::panels::chrome::{self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
@@ -35,6 +36,14 @@ const VALUE_LINE_HEIGHT_PX: f32 = 24.0;
 /// sparkline 32 (4 above, 28 tall) + padding 8. Cards are set to it, so the strip's height is
 /// known and the expanded chart can take exactly the same space.
 const CARD_HEIGHT_PX: f32 = 103.0;
+/// Top padding of an insight card and of the open chart's box.
+const CARD_PAD_TOP_PX: f32 = 10.0;
+/// Flex gap between the rows inside an insight card and the open chart's box.
+const CARD_GAP_PX: f32 = 4.0;
+/// Space above the chart's wrapper, on top of the box's flex gap. The visible gap from the number
+/// row to the first y label (whose text box starts `AXIS_TOP_OVERHANG_PX` above the chart) equals
+/// the card's top padding, i.e. the gap from the card's top edge to the title.
+const CHART_TOP_GAP_PX: f32 = CARD_PAD_TOP_PX - CARD_GAP_PX + AXIS_TOP_OVERHANG_PX;
 
 /// A single row stretches to 168px; two rows retain 103px each. Opening a
 /// metric keeps that exact height so the task lanes stay in place.
@@ -203,9 +212,9 @@ fn render_insight_card(
         .flex_grow(span as f32)
         .flex_shrink(1.0)
         .flex_basis(px(0.0))
-        .gap(px(4.0))
+        .gap(px(CARD_GAP_PX))
         .px(px(12.0))
-        .pt(px(10.0))
+        .pt(px(CARD_PAD_TOP_PX))
         .pb(px(8.0))
         .tab_index(0)
         .when(row_divider, |el| el.border_t_1())
@@ -348,11 +357,13 @@ fn render_insight_detail(
     };
 
     v_flex()
+        .id("tasks-insight-detail")
+        .test_support()
         .relative()
         .size_full()
-        .gap(px(4.0))
+        .gap(px(CARD_GAP_PX))
         .px(px(12.0))
-        .pt(px(10.0))
+        .pt(px(CARD_PAD_TOP_PX))
         .pb(px(8.0))
         .child(
             div().absolute().top(px(4.0)).right(px(4.0)).child(
@@ -368,6 +379,8 @@ fn render_insight_detail(
         )
         .child(
             div()
+                .id("tasks-insight-title")
+                .test_support()
                 .pr(px(32.0))
                 .truncate()
                 .h(px(UI_LINE_HEIGHT_PX))
@@ -379,6 +392,8 @@ fn render_insight_detail(
         )
         .child(
             h_flex()
+                .id("tasks-insight-summary")
+                .test_support()
                 .min_w_0()
                 .h(px(VALUE_LINE_HEIGHT_PX))
                 .flex_shrink_0()
@@ -408,13 +423,20 @@ fn render_insight_detail(
                         .child(legend),
                 ),
         )
-        .child(div().flex_1().min_h_0().child(chart_body))
+        .child(
+            div()
+                .mt(px(CHART_TOP_GAP_PX))
+                .flex_1()
+                .min_h_0()
+                .child(chart_body),
+        )
         .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{Context, Render};
 
     #[test]
     fn the_insight_strip_uses_the_same_height_when_expanded() {
@@ -422,5 +444,180 @@ mod tests {
         assert_eq!(strip_height(insight_grid_layout(2).rows), 168.0);
         assert_eq!(strip_height(insight_grid_layout(7).rows), 206.0);
         assert_eq!(strip_height(insight_grid_layout(8).rows), 206.0);
+    }
+
+    struct ChartHost {
+        tokens: Tokens,
+        scroll: ScrollHandle,
+        data: Option<TaskInsights>,
+        expanded: InsightId,
+        bounds: Rc<Cell<Bounds<Pixels>>>,
+    }
+
+    impl Render for ChartHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+            v_flex()
+                .size_full()
+                .bg(to_hsla(self.tokens.shell_card))
+                .children(render_insights_strip(
+                    &self.tokens,
+                    self.data.as_ref(),
+                    InsightsPeriod::Month,
+                    false,
+                    &[],
+                    Some(self.expanded),
+                    None,
+                    self.bounds.clone(),
+                    &self.scroll,
+                    InsightsCallbacks {
+                        on_expand: Rc::new(|_, _, _| {}),
+                        on_hover_chart: Rc::new(|_, _, _| {}),
+                    },
+                ))
+        }
+    }
+
+    fn chart_data() -> TaskInsights {
+        let daily: Vec<_> = [2, 48, 115, 140, 95]
+            .iter()
+            .enumerate()
+            .map(|(i, merged)| {
+                serde_json::json!({"date": format!("2026-11-{:02}", 20 + i), "merged": merged, "tokens": 1000})
+            })
+            .collect();
+        conn_desktop::orbit::tasks::decode_task_insights(&serde_json::json!({"data": {
+            "period": "30d",
+            "current": {"merged": 163, "tokens": 12_345_678},
+            "previous": {"merged": 180, "tokens": 11_111},
+            "daily": daily,
+            "breakdowns": {"model": [
+                {"key": "gpt-5", "label": "gpt-5", "merged": 13},
+                {"key": "claude-opus", "label": "claude-opus", "merged": 143},
+                {"key": "gemini", "label": "gemini", "merged": 5},
+            ]},
+        }}))
+        .expect("insights fixture decodes")
+    }
+
+    struct Measured {
+        chart: Bounds<Pixels>,
+        summary: Bounds<Pixels>,
+        labels: Vec<Bounds<Pixels>>,
+        title: Bounds<Pixels>,
+        card: Bounds<Pixels>,
+    }
+
+    /// Measures the open chart's card, title, number row, chart and axis labels.
+    fn measure(cx: &mut gpui_kit::TestAppContext, width: f32, expanded: InsightId) -> Measured {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, Point, WindowBounds, WindowOptions, size};
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let theme = conn_theme::theme_by_id("dark-ocean").expect("dark-ocean theme");
+            let tokens = Tokens::derive(&theme);
+            crate::theme::apply_kit_theme(&tokens, cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Point::default(),
+                    size(px(width), px(420.0)),
+                ))),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, move |_, cx| {
+                cx.new(|_| ChartHost {
+                    tokens,
+                    scroll: ScrollHandle::new(),
+                    data: Some(chart_data()),
+                    expanded,
+                    bounds: Rc::default(),
+                })
+            })
+            .expect("headless window opens")
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .expect("window renders");
+        let chart = cx.update(|cx| view.read(cx).bounds.get());
+        let (summary, labels, title, card) = cx
+            .update_window(window, |_, window, _| {
+                let summary = window.find("tasks-insight-summary").bounds();
+                let title = window.find("tasks-insight-title").bounds();
+                let card = window.find("tasks-insight-detail").bounds();
+                let labels = (0..)
+                    .map_while(|i| {
+                        window
+                            .try_find(SharedString::from(format!("tasks-insight-axis-{i}")))
+                            .map(|label| label.bounds())
+                    })
+                    .collect::<Vec<_>>();
+                (summary, labels, title, card)
+            })
+            .expect("window queried");
+        Measured {
+            chart,
+            summary,
+            labels,
+            title,
+            card,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_axis_labels_start_on_the_left_edge_and_the_chart_sits_below_the_numbers(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        for (width, expanded) in [
+            (340.0, InsightId::Completed),
+            (780.0, InsightId::Completed),
+            (780.0, InsightId::Spent),
+        ] {
+            let Measured {
+                chart,
+                summary,
+                labels,
+                title,
+                card,
+            } = measure(cx, width, expanded);
+            assert!(labels.len() >= 3, "a few ticks at {width}px ({expanded:?})");
+            let widths: Vec<f32> = labels.iter().map(|b| f32::from(b.size.width)).collect();
+            assert!(
+                widths.iter().any(|w| (w - widths[0]).abs() > 1.0),
+                "labels of different widths make the alignment check meaningful: {widths:?}"
+            );
+            for (i, label) in labels.iter().enumerate() {
+                assert_eq!(
+                    f32::from(label.origin.x),
+                    f32::from(chart.origin.x),
+                    "axis label {i} starts at the chart's left edge at {width}px ({expanded:?})"
+                );
+            }
+            // The gap above the title is the card's top padding; the gap from the number row to
+            // the top y label's text box must be the same, so the chart does not look detached.
+            let top_gap = f32::from(title.origin.y) - f32::from(card.origin.y);
+            let first_label_top = labels
+                .iter()
+                .map(|b| f32::from(b.origin.y))
+                .fold(f32::INFINITY, f32::min);
+            let chart_gap = first_label_top - f32::from(summary.bottom());
+            assert_eq!(top_gap, CARD_PAD_TOP_PX, "card top padding at {width}px");
+            assert!(
+                (chart_gap - top_gap).abs() <= 0.5,
+                "number row to top y label is {chart_gap}px, card top to title is {top_gap}px \
+                 at {width}px ({expanded:?})"
+            );
+            assert!(
+                f32::from(chart.origin.y) >= f32::from(summary.bottom()),
+                "the chart sits below the numbers at {width}px ({expanded:?})"
+            );
+            let plot_left = f32::from(chart.origin.x) + 44.0;
+            assert!(
+                labels
+                    .iter()
+                    .all(|b| f32::from(b.right()) <= plot_left - 4.0),
+                "labels stay left of the plot at {width}px ({expanded:?})"
+            );
+        }
     }
 }

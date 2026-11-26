@@ -54,7 +54,7 @@ use std::rc::Rc;
 
 use conn_contract::ChatAttachment;
 use conn_state::{
-    EntryTiming, ItemStatus, RunStatus, RunTiming, ThreadState, TimelineEntry,
+    EntryTiming, ItemStatus, NoticeLevel, RunStatus, RunTiming, ThreadState, TimelineEntry,
     TurnCheckpointSummary,
 };
 use conn_theme::Tokens;
@@ -1284,6 +1284,7 @@ impl ChatView {
         let entity_template = cx.entity().downgrade();
         let entity_thread = cx.entity().downgrade();
         markdown::MarkdownOptions {
+            surface: markdown::MarkdownSurface::Chat,
             heading_style: markdown::HeadingStyle::Scale,
             copied_code_blocks: Some(&self.copied_code_blocks),
             on_copy_code: Some(Rc::new(move |key, _window, cx| {
@@ -2124,8 +2125,8 @@ impl ChatView {
             // keeps its place between the work groups it splits.
             VirtualItem::Approval { .. } => div().into_any_element(),
             VirtualItem::Notice { row_idx } => {
-                if let TimelineEntry::Notice { id, text, is_error } = &rows[*row_idx].entry {
-                    self.render_notice_row(id, text, *is_error)
+                if let TimelineEntry::Notice { id, text, level } = &rows[*row_idx].entry {
+                    self.render_notice_row(id, text, *level, cx)
                 } else {
                     div().into_any_element()
                 }
@@ -3577,12 +3578,21 @@ impl ChatView {
         container.into_any_element()
     }
 
-    fn render_notice_row(&self, id: &str, text: &str, is_error: bool) -> AnyElement {
+    fn render_notice_row(
+        &self,
+        id: &str,
+        text: &str,
+        level: NoticeLevel,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let ax_id = format!("timeline.notice.{id}");
         let element_id = SharedString::from(format!("notice-{id}"));
-        if is_error {
+        if level == NoticeLevel::Warning {
+            return self.render_warning_row(id, text, cx);
+        }
+        if level.is_error() {
             // Conn `WorkEntryLogRow` error: `WorkLogRow` with `CircleAlertIcon` + destructive `text-sm font-medium`.
-            return div()
+            let row = div()
                 .id(element_id)
                 .a11y(
                     gpui_kit::Role::Alert,
@@ -3615,12 +3625,14 @@ impl ChatView {
                                 .text_color(hsla(self.tokens.destructive))
                                 .child(text.to_owned()),
                         ),
-                )
-                .into_any_element();
+                );
+            #[cfg(test)]
+            let row = gpui_kit::TestSupportExt::test_support(row);
+            return row.into_any_element();
         }
 
         // Conn `TimelineSystemDivider`: centered pill between 1px `--shell-divider` hairlines.
-        div()
+        let pill = div()
             .id(element_id)
             .a11y_group(ax_id, format!("Notice: {}", ax_snippet(text)))
             .w_full()
@@ -3668,8 +3680,102 @@ impl ChatView {
                             .h(px(1.0))
                             .bg(hsla(self.tokens.shell_divider)),
                     ),
-            )
-            .into_any_element()
+            );
+        #[cfg(test)]
+        let pill = gpui_kit::TestSupportExt::test_support(pill);
+        pill.into_any_element()
+    }
+
+    /// A runtime or provider warning, such as an MCP server that failed to start. Conn's
+    /// `runtime.warning` work-log row (`TimelineWorkEntryRow`): a warning-coloured `CircleAlert`, a
+    /// one-line `font-medium text-warning` label truncated with an ellipsis, and a chevron at the
+    /// right. A click expands the row to the whole message. Consecutive warnings stack as a compact
+    /// list: each row is a plain 24px work-log row.
+    fn render_warning_row(&self, id: &str, text: &str, cx: &mut Context<'_, Self>) -> AnyElement {
+        let expanded = self.expanded_ids.contains(id);
+        let toggle_id = id.to_owned();
+        let warning = hsla(self.tokens.warning);
+        let ax_id = format!("timeline.notice.{id}");
+        let one_line = command_label::collapse_whitespace(text).into_owned();
+        let label = div()
+            .id(SharedString::from(format!("notice-label-{id}")))
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .text_size(px(BODY_FONT_PX))
+            .line_height(px(BODY_LINE_HEIGHT_PX))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(warning)
+            .child(one_line);
+        #[cfg(test)]
+        let label = gpui_kit::TestSupportExt::test_support(label);
+        let row = div()
+            .id(SharedString::from(format!("notice-{id}")))
+            .a11y_button(ax_id.clone(), format!("Warning: {}", ax_snippet(text)))
+            .aria_expanded(expanded)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(WORK_ICON_GAP_PX))
+            .w_full()
+            .min_w_0()
+            .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+            .px(px(TIMELINE_INSET_PX))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.toggle_expanded(&toggle_id, cx);
+            }))
+            .child(work_icon_box(
+                SharedString::from(format!("notice-icon-{id}")),
+                icons::icon(icons::ERROR_CIRCLE, 16.0, warning),
+            ))
+            .child(label)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(16.0))
+                    .flex_none()
+                    .child(icons::icon(
+                        if expanded {
+                            icons::CARET_DOWN
+                        } else {
+                            icons::CARET_RIGHT
+                        },
+                        12.0,
+                        muted_icon(&self.tokens),
+                    )),
+            );
+        #[cfg(test)]
+        let row = gpui_kit::TestSupportExt::test_support(row);
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .pb(px(4.0))
+            .child(row);
+        if expanded {
+            // Conn `WorkLogDetails kind="text"`: under the label, the whole message, wrapped.
+            let detail = div()
+                .id(SharedString::from(format!("notice-detail-{id}")))
+                .a11y_group(format!("{ax_id}.detail"), "Warning details")
+                .ml(px(WORK_LABEL_INDENT_PX))
+                .px(px(TIMELINE_INSET_PX))
+                .py(px(4.0))
+                .text_size(px(BODY_FONT_PX))
+                .line_height(px(BODY_LINE_HEIGHT_PX))
+                .text_color(prose_foreground(&self.tokens))
+                .child(text.trim().to_owned());
+            #[cfg(test)]
+            let detail = gpui_kit::TestSupportExt::test_support(detail);
+            container = container.child(detail);
+        }
+        container.into_any_element()
     }
 
     /// Renders Conn's `WorkingTimelineRow`: `border-b border-(--shell-divider)! pb-2 pt-1`,
@@ -4464,6 +4570,217 @@ mod worked_label_tests {
             latest_actionable_plan_markdown(&thread, false),
             None,
             "subsequent user turn clears prior plan follow-up"
+        );
+    }
+}
+
+#[cfg(test)]
+mod warning_row_tests {
+    use conn_state::{ItemStatus, NoticeLevel, ThreadState, TimelineEntry};
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    use super::{WORK_LABEL_INDENT_PX, WORK_ROW_MIN_HEIGHT_PX};
+
+    const LONG: &str = "MCP client for `computer-use` failed to start: the server process exited before it answered the initialize request, so none of its tools are available in this thread";
+
+    fn notice(id: &str, text: &str, level: NoticeLevel) -> TimelineEntry {
+        TimelineEntry::Notice {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            level,
+        }
+    }
+
+    fn thread() -> ThreadState {
+        let mut thread = ThreadState::new("thread-selected");
+        thread.synchronized = true;
+        thread.entries = vec![
+            TimelineEntry::Assistant {
+                id: "answer-1".to_owned(),
+                markdown: "Paragraph that marks the timeline's left edge.".to_owned(),
+                streaming: false,
+                created_at: None,
+                run_id: Some("run-1".to_owned()),
+                status: ItemStatus::Completed,
+            },
+            notice("warn-1", LONG, NoticeLevel::Warning),
+            notice(
+                "warn-2",
+                "The linear MCP server requires OAuth reauthentication. Run `codex mcp login linear`.",
+                NoticeLevel::Warning,
+            ),
+            notice(
+                "warn-3",
+                "MCP client for `solo` failed to start",
+                NoticeLevel::Warning,
+            ),
+            notice("info-1", "Context compacted", NoticeLevel::Info),
+            notice(
+                "error-1",
+                "The provider closed the stream",
+                NoticeLevel::Error,
+            ),
+        ];
+        thread
+    }
+
+    fn mount(cx: &mut TestAppContext) -> gpui_kit::AnyWindowHandle {
+        let (window, app) = crate::ui_tests::mount_app(cx);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(crate::ui_tests::kitchen_sink_shell(), cx);
+                app.set_thread_for_test("thread-selected".to_owned(), thread(), cx);
+            });
+        });
+        cx.run_until_parked();
+        settle(cx, window);
+        window
+    }
+
+    fn settle(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle) {
+        // The first layout measures the lane, the next ones lay the rows out with it.
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, window, cx| window.render_frame(cx));
+            cx.run_until_parked();
+        }
+    }
+
+    fn has_label(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, label: &str) -> bool {
+        cx.update_window(window, |_, window, _| {
+            window.try_find_by_label(label).is_some()
+        })
+        .expect("a window")
+    }
+
+    #[gpui_kit::test]
+    fn collapsed_warnings_are_single_line_rows_on_the_left_edge(cx: &mut TestAppContext) {
+        let window = mount(cx);
+        cx.update_window(window, |_, window, _| {
+            let left = window.find("assistant-text-answer-1").bounds().left();
+            let right = window.find("assistant-text-answer-1").bounds().right();
+            let mut previous_bottom = None;
+            for id in ["warn-1", "warn-2", "warn-3"] {
+                let row = window.find(format!("notice-{id}")).bounds();
+                // One 24px line, however long the message: the label truncates.
+                assert_eq!(
+                    f32::from(row.size.height),
+                    WORK_ROW_MIN_HEIGHT_PX,
+                    "{id} is one line"
+                );
+                let icon = window.find(format!("notice-icon-{id}")).bounds();
+                assert!(
+                    f32::from((icon.left() - left).abs()) < 0.01,
+                    "{id} icon at {:?}, timeline edge at {left:?}",
+                    icon.left()
+                );
+                assert!(
+                    f32::from((row.right() - right).abs()) < 0.01,
+                    "{id} ends at {:?}, timeline right edge at {right:?}",
+                    row.right()
+                );
+                // The label is clipped, not wrapped: it never grows past the row.
+                let label = window.find(format!("notice-label-{id}")).bounds();
+                assert!(
+                    label.right() <= row.right(),
+                    "{id} label stays inside its row"
+                );
+                assert!(
+                    label.size.height <= row.size.height,
+                    "{id} label is one line"
+                );
+                // Consecutive warnings stack as a compact list.
+                if let Some(bottom) = previous_bottom {
+                    let gap = f32::from(row.top() - bottom);
+                    assert!(
+                        (0.0..=8.0).contains(&gap),
+                        "{id} sits {gap}px under the previous warning"
+                    );
+                }
+                previous_bottom = Some(row.bottom());
+            }
+        })
+        .expect("a window");
+        assert!(
+            !has_label(cx, window, "Warning details"),
+            "no message body while collapsed"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn clicking_a_warning_expands_the_whole_message_and_clicking_again_collapses_it(
+        cx: &mut TestAppContext,
+    ) {
+        let window = mount(cx);
+        let collapsed = cx
+            .update_window(window, |_, window, _| {
+                window.find("notice-warn-2").bounds().top()
+            })
+            .expect("a window");
+
+        cx.update_window(window, |_, window, cx| window.click("notice-warn-1", cx))
+            .expect("a window");
+        settle(cx, window);
+        assert!(
+            has_label(cx, window, "Warning details"),
+            "the message body shows after a click"
+        );
+        cx.update_window(window, |_, window, _| {
+            let row = window.find("notice-warn-1").bounds();
+            let detail = window.find("notice-detail-warn-1").bounds();
+            let icon = window.find("notice-icon-warn-1").bounds();
+            // The body sits under the label, indented to line up with it, and wraps.
+            assert!(
+                f32::from(
+                    (detail.left() - (icon.left() + gpui_kit::px(WORK_LABEL_INDENT_PX))).abs()
+                ) < 0.01,
+                "the body lines up under the label"
+            );
+            assert!(detail.top() >= row.bottom(), "the body is below the row");
+            assert!(
+                f32::from(detail.size.height) > WORK_ROW_MIN_HEIGHT_PX,
+                "the long message wraps onto several lines"
+            );
+            assert!(
+                window.find("notice-warn-2").bounds().top() > collapsed,
+                "the next warning moves down"
+            );
+        })
+        .expect("a window");
+
+        cx.update_window(window, |_, window, cx| window.click("notice-warn-1", cx))
+            .expect("a window");
+        settle(cx, window);
+        assert!(
+            !has_label(cx, window, "Warning details"),
+            "a second click collapses the row"
+        );
+        let again = cx
+            .update_window(window, |_, window, _| {
+                window.find("notice-warn-2").bounds().top()
+            })
+            .expect("a window");
+        assert_eq!(again, collapsed, "the list returns to its compact shape");
+    }
+
+    #[gpui_kit::test]
+    fn info_notices_stay_pills_and_errors_keep_their_row(cx: &mut TestAppContext) {
+        let window = mount(cx);
+        assert!(
+            has_label(cx, window, "Notice: Context compacted"),
+            "an info notice keeps the divider pill"
+        );
+        assert!(
+            has_label(cx, window, "Error: The provider closed the stream"),
+            "an error keeps its destructive row"
+        );
+        assert!(
+            !has_label(cx, window, "Notice: MCP client for `solo` failed to start"),
+            "a warning is not drawn as an info pill"
+        );
+        assert!(
+            has_label(cx, window, "Warning: MCP client for `solo` failed to start"),
+            "a warning is a warning row"
         );
     }
 }

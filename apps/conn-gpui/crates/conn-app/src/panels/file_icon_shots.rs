@@ -136,6 +136,7 @@ fn header(tokens: &Tokens) -> gpui_kit::AnyElement {
             panel_open: true,
             add_menu_open: false,
             available_tabs: &[],
+            has_project: true,
             tokens,
         },
         callbacks,

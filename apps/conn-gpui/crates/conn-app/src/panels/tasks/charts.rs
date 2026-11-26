@@ -14,7 +14,8 @@ use gpui_kit::component::h_flex;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Background, Bounds, BoxShadow, FontWeight, Hsla, MouseMoveEvent, PathBuilder,
-    Pixels, Point, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, px, size,
+    Pixels, Point, SharedString, TestSupportExt as _, Window, canvas, div, fill, linear_color_stop,
+    linear_gradient, point, px, size,
 };
 
 /// SVG `linearGradient x1=0 x2=0 y1=0 y2=1` from `color` at `opacity` to transparent, as a
@@ -38,6 +39,9 @@ const AXIS_LINE_HEIGHT_PX: f32 = 14.0;
 const CHART_MARGIN_LEFT_PX: f32 = 44.0;
 const AXIS_LABEL_WIDTH_PX: f32 = 40.0;
 const CHART_MARGIN_TOP_PX: f32 = 6.0;
+/// How far the first y label's text box starts above the chart's top edge: labels are centred on
+/// their gridline, which is `CHART_MARGIN_TOP_PX` below the top.
+pub(super) const AXIS_TOP_OVERHANG_PX: f32 = AXIS_LINE_HEIGHT_PX / 2.0 - CHART_MARGIN_TOP_PX;
 const CHART_MARGIN_RIGHT_PX: f32 = 4.0;
 const CHART_MARGIN_BOTTOM_PX: f32 = 24.0;
 
@@ -233,7 +237,7 @@ pub(super) fn render_trend_chart(
             .left_0()
             .w(px(AXIS_LABEL_WIDTH_PX));
         let span = (high - low).max(f64::EPSILON);
-        for (tick, text) in &tick_labels {
+        for (index, (tick, text)) in tick_labels.iter().enumerate() {
             let frac = 1.0 - ((*tick - low) / span) as f32;
             col = col.child(
                 div()
@@ -241,13 +245,21 @@ pub(super) fn render_trend_chart(
                     .left_0()
                     .right_0()
                     .top(gpui_kit::relative(frac))
-                    .mt(px(-7.0))
+                    .mt(px(-AXIS_LINE_HEIGHT_PX / 2.0))
                     .flex()
-                    .justify_end()
+                    // Left edge of the axis column, so every label starts on the same x.
+                    .justify_start()
+                    .whitespace_nowrap()
                     .text_size(px(AXIS_FONT_PX))
                     .line_height(px(AXIS_LINE_HEIGHT_PX))
                     .text_color(muted)
-                    .child(text.clone()),
+                    .child(
+                        // As wide as its text, so its bounds are where the text starts.
+                        div()
+                            .id(SharedString::from(format!("tasks-insight-axis-{index}")))
+                            .test_support()
+                            .child(text.clone()),
+                    ),
             );
         }
         col

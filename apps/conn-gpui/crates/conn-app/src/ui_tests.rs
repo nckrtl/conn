@@ -30,8 +30,11 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+mod annotations_popover;
 mod browser_inline_logins;
 pub(crate) mod details_tasks;
+mod floating_surfaces;
+mod preview_host;
 #[cfg(target_os = "macos")]
 mod selection_perf;
 
@@ -314,7 +317,7 @@ fn kitchen_sink_thread() -> ThreadState {
         TimelineEntry::Notice {
             id: "dup-id".to_owned(),
             text: "Secondary notice reusing an ID".to_owned(),
-            is_error: false,
+            level: conn_state::NoticeLevel::Info,
         },
         TimelineEntry::ProposedPlan {
             id: "plan-1".to_owned(),
@@ -4578,6 +4581,11 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
             db.finish_vault_load_for_test(second, vec![unreachable_database()], cx)
         })
     });
+    assert!(
+        waiting(cx).is_some(),
+        "the panel never opens a database nobody chose, so the query keeps waiting"
+    );
+    cx.update(|cx| database.update(cx, |db, cx| db.choose_first_connection_for_test(cx)));
     assert_eq!(waiting(cx), None);
     assert_eq!(
         cx.update(|cx| database.read(cx).sql_for_test()).as_deref(),
@@ -4654,6 +4662,76 @@ fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead
             Some(&PanelSurface::Kind(RightPanelTab::Database))
         );
     });
+}
+
+/// An agent's `files_reveal` and `files_selection` on a thread without a project get an error at
+/// once. Files is swapped for Tasks there, so no Files view would ever answer, and the agent
+/// would wait out the server's 15 s. A thread with a project is answered as before.
+#[gpui_kit::test]
+fn files_tools_on_a_thread_without_a_project_fail_at_once(cx: &mut TestAppContext) {
+    use conn_contract::source::{FilesAction, SourceLines};
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_scratch_project_for_test(Some("proj-other"));
+            app.learn_primary_environment_for_test("env-a", cx);
+        })
+    });
+    let reveal = || FilesAction::Reveal {
+        path: "src/lib.rs".to_owned(),
+        lines: SourceLines {
+            start_line: 1,
+            end_line: 2,
+        },
+        excerpt: "fn main() {}".to_owned(),
+    };
+    let ask = |cx: &mut TestAppContext, thread: &str, action: FilesAction| {
+        let request = panel_request(json!({
+            "requestId": "req-files",
+            "threadId": thread,
+            "panel": "files",
+            "focusWindow": false,
+        }));
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.dispatch_files_action_for_test(request, Some(action), None, cx)
+            })
+        })
+    };
+    // The no-project thread is on screen: the case that used to hang.
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    for action in [reveal(), FilesAction::Selection] {
+        let mut answer = ask(cx, "thread-other", action);
+        render_frames(cx, window);
+        cx.run_until_parked();
+        let response = answer
+            .try_recv()
+            .expect("answered without waiting on a Files view");
+        assert!(!response.panel.ok);
+        assert_eq!(
+            response.panel.error.as_deref(),
+            Some("Files isn't available on threads without a project.")
+        );
+        assert!(response.selection.is_none());
+    }
+    // Not on screen: the same error, not "the active thread changed".
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    let mut answer = ask(cx, "thread-other", reveal());
+    cx.run_until_parked();
+    let response = answer.try_recv().expect("answered at once");
+    assert_eq!(
+        response.panel.error.as_deref(),
+        Some("Files isn't available on threads without a project.")
+    );
+    // A thread with a project still reads its selection.
+    let mut answer = ask(cx, "thread-selected", FilesAction::Selection);
+    render_frames(cx, window);
+    cx.run_until_parked();
+    let response = answer.try_recv().expect("answered");
+    assert!(response.panel.ok, "{:?}", response.panel.error);
+    assert!(response.selection.is_none());
 }
 
 /// Tabs a thread's project made available stay open when the thread has none, hidden, and the

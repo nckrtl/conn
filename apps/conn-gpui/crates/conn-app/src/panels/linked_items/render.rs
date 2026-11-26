@@ -27,8 +27,8 @@ use super::logic::{
     thread_issue_key,
 };
 use crate::panels::chrome::{
-    self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
-    actor_tooltip_label,
+    self, ConnTooltipExt as _, FloatingSurfaceExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
+    XS_LINE_HEIGHT_PX, XS_TEXT_PX, actor_tooltip_label,
 };
 use crate::panels::color::to_hsla;
 use crate::panels::header::superhero_icon;
@@ -984,7 +984,7 @@ fn render_row_actions_menu(
         .border_1()
         .border_color(border)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .floating_surface()
         .child(menu_item(
             format!("linked-pr-menu-copy-{index}"),
             "superhero/link.svg",
@@ -1145,7 +1145,7 @@ pub(super) fn render_link_dialog(
         .shadow(vec![shadow])
         .p(px(16.0))
         .gap(px(12.0))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .floating_surface()
         .child(
             v_flex()
                 .gap(px(4.0))
@@ -1226,6 +1226,7 @@ pub(super) fn render_link_dialog(
     deferred(
         div()
             .id("linked-items-dialog-backdrop")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(backdrop)
@@ -1334,7 +1335,7 @@ fn render_change_breakdown_popover(
         .shadow_md()
         .p(px(10.0))
         .gap(px(6.0))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .floating_surface()
         .child(
             div()
                 .text_size(px(XS_TEXT_PX))

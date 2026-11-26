@@ -33,6 +33,29 @@ static ANTIGRAVITY_BRAND_IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::n
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
 });
 
+/// Pre-decoded Vault app icon (`assets/icons/brand/vault.png`), shown beside Vault databases.
+static VAULT_BRAND_IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| {
+    let bytes = include_bytes!("../assets/icons/brand/vault.png");
+    let mut rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+});
+
+/// The Vault app icon at `size_px`, or `None` if the bundled image cannot be decoded.
+#[must_use]
+pub(crate) fn vault_mark(size_px: f32) -> Option<AnyElement> {
+    let logo = VAULT_BRAND_IMAGE.as_ref()?;
+    Some(
+        img(ImageSource::Render(Arc::clone(logo)))
+            .size(px(size_px))
+            .object_fit(ObjectFit::Contain)
+            .flex_none()
+            .into_any_element(),
+    )
+}
+
 /// Standard chrome icon size (`size-4` = 16px).
 pub(crate) const CHROME_ICON_PX: f32 = 16.0;
 /// Disclosure chevron / tree caret size (`size-3` = 12px).

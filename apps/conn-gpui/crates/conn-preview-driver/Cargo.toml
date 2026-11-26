@@ -1,0 +1,26 @@
+[package]
+name = "conn-preview-driver"
+description = "Runs agent preview requests on a desktop browser tab over the Chrome DevTools Protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+conn-contract.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+url.workspace = true
+
+[dev-dependencies]
+conn-client.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+
+[lints]
+workspace = true

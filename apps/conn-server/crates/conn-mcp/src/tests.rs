@@ -6382,3 +6382,511 @@ async fn thread_send_refuses_an_archive_between_its_read_and_dispatch() {
         "archived before the read"
     );
 }
+
+/// What a desktop tab was asked: its name, the operation, the request's `tabId` and its input.
+type DesktopLog = Arc<std::sync::Mutex<Vec<(String, String, Option<String>, Value)>>>;
+
+/// Answers every request a desktop tab receives like a page at `http://desktop/<tab>`, and logs
+/// `(tab, operation, request tabId, input)`.
+fn serve_desktop_tab(
+    preview: conn_preview::tabs::Preview,
+    session: &'static str,
+    tab: &'static str,
+    mut feed: conn_preview::relay::DesktopFeed,
+    log: DesktopLog,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = feed.receiver.recv().await {
+            if event["type"] != "request" {
+                continue;
+            }
+            let request = &event["request"];
+            log.lock().unwrap().push((
+                tab.to_owned(),
+                request["operation"].as_str().unwrap().to_owned(),
+                request["tabId"].as_str().map(str::to_owned),
+                request["input"].clone(),
+            ));
+            let result = json!({
+                "available": true, "visible": true, "tabId": tab,
+                "url": format!("http://desktop/{tab}"), "title": "", "loading": false,
+                "control": {"owner": "unclaimed", "ownedByCaller": true, "generation": 0},
+            });
+            preview.desktop_respond(
+                session,
+                &json!({
+                    "clientId": "desktop", "connectionId": event["connectionId"],
+                    "requestId": request["requestId"], "ok": true, "result": result,
+                }),
+            );
+        }
+    });
+}
+
+fn desktop_binding(environment: &str, thread: &str, tab: &str) -> Value {
+    json!({
+        "environmentId": environment, "threadId": thread, "tabId": tab, "deviceName": "GPUI Mac",
+        "snapshot": {
+            "threadId": thread, "tabId": tab, "runtime": "desktop",
+            "navStatus": {"_tag": "Idle"}, "canGoBack": false, "canGoForward": false,
+            "viewport": {"_tag": "fill"}, "updatedAt": "2026-11-25T00:00:00Z",
+        },
+    })
+}
+
+/// Conn's deliberate divergence from T3: the desktop's browser is the agent's default. The
+/// server's own browser serves only a thread without a desktop, or an explicit server tab.
+#[tokio::test]
+async fn browser_calls_default_to_the_desktop_and_leave_it_only_for_a_named_server_tab() {
+    let f = fixture("desktop-default");
+    let mut client = Client::open(&f.service, client(true)).await;
+    let launched=client.ok("conn_thread_launch",json!({"projectId":project_id(),"message":"hang","title":"Desktop default","runtimeMode":"full-access"})).await;
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    let mut agent = Client::open(&f.service, agent_of(&f, &thread)).await;
+    let preview = f.service.config.preview.clone().unwrap();
+    let environment = f.service.config.environment_id.clone();
+    let broker = f.service.config.panels.as_ref().unwrap();
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tag = |reply: &Value| {
+        reply["result"]["structuredContent"]["error"]["_tag"]
+            .as_str()
+            .map(str::to_owned)
+    };
+
+    // No desktop for the thread: the server's own browser (no tab here), and no panel request.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{}}),
+        )
+        .await;
+    assert_eq!(
+        tag(&reply).as_deref(),
+        Some("PreviewAutomationTabNotFoundError")
+    );
+    let status = agent.ok("preview_status", json!({})).await;
+    assert_eq!(status["available"], false);
+
+    // A desktop is connected but the thread has no tab: the call asks it to open its Browser
+    // panel without taking the window's focus, and goes to the tab that registers.
+    // The Electron app is connected too. It never advertises tab hosting, so the request never
+    // reaches it.
+    let mut electron = broker.subscribe().unwrap();
+    let mut panels = broker.subscribe_tab_host().unwrap();
+    let navigate = agent.request(
+        "tools/call",
+        json!({"name":"preview_navigate","arguments":{"url":"http://localhost:3000"}}),
+    );
+    let desktop = async {
+        let request = panels.recv().await.unwrap();
+        assert_eq!(request.panel.panel, conn_contract::AgentPanelKind::Browser);
+        assert_eq!(request.thread_id, thread);
+        assert!(
+            !request.focus_window,
+            "the panel opens without stealing focus"
+        );
+        let registered = preview
+            .desktop_register(
+                "s1",
+                &environment,
+                &desktop_binding(&environment, &thread, "desk-1"),
+            )
+            .unwrap();
+        serve_desktop_tab(
+            preview.clone(),
+            "s1",
+            "desk-1",
+            preview.desktop_requests("s1", &registered).unwrap(),
+            log.clone(),
+        );
+        broker.respond(
+            from_json(json!({"requestId":request.request_id,"ok":true,"deviceName":"GPUI Mac"}))
+                .unwrap(),
+        );
+    };
+    let (reply, ()) = tokio::join!(navigate, desktop);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(reply["result"]["structuredContent"]["tabId"], "desk-1");
+    assert!(
+        electron.try_recv().is_err(),
+        "a desktop that does not host tabs got a panel request"
+    );
+    assert_eq!(
+        log.lock().unwrap()[0],
+        (
+            "desk-1".to_owned(),
+            "navigate".to_owned(),
+            Some("desk-1".to_owned()),
+            json!({"url":"http://localhost:3000"})
+        )
+    );
+
+    // `preview_open` shows the desktop tab, navigated if it has an address; it never opens a
+    // server tab beside it. Without an address it reads the tab.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_open","arguments":{"url":"http://localhost:4000"}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(reply["result"]["structuredContent"]["tabId"], "desk-1");
+    agent.ok("preview_open", json!({})).await;
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log[1].1, "navigate");
+        assert_eq!(
+            log[1].2.as_deref(),
+            Some("desk-1"),
+            "the agent's tab stays current"
+        );
+        assert_eq!(log[1].3, json!({"url":"http://localhost:4000"}));
+        assert_eq!(log[2].1, "status");
+    }
+
+    // A second desktop tab registers; the agent keeps its current tab, and `preview_status`
+    // lists desktop tabs first with the default target leading and as the top-level tab.
+    let second = preview
+        .desktop_register(
+            "s2",
+            &environment,
+            &desktop_binding(&environment, &thread, "desk-2"),
+        )
+        .unwrap();
+    serve_desktop_tab(
+        preview.clone(),
+        "s2",
+        "desk-2",
+        preview.desktop_requests("s2", &second).unwrap(),
+        log.clone(),
+    );
+    let status = agent.ok("preview_status", json!({})).await;
+    assert_eq!(status["tabId"], "desk-1", "the default target");
+    let tabs: Vec<_> = status["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["tabId"].as_str().unwrap(), t["runtime"].as_str().unwrap()))
+        .collect();
+    assert_eq!(tabs, [("desk-1", "desktop"), ("desk-2", "desktop")]);
+
+    // A tab no desktop hosts is a server tab: it stays on the server, with the desktop connected.
+    let before = log.lock().unwrap().len();
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{"tabId":"server-tab"}}),
+        )
+        .await;
+    assert_eq!(
+        tag(&reply).as_deref(),
+        Some("PreviewAutomationTabNotFoundError"),
+        "{reply}"
+    );
+    assert_eq!(
+        log.lock().unwrap().len(),
+        before,
+        "nothing reached a desktop"
+    );
+
+    // Naming the other desktop tab moves the agent there.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{"tabId":"desk-2"}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(log.lock().unwrap().last().unwrap().0, "desk-2");
+    // Recordings never default to a desktop tab: they need the server's browser.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_recording_start","arguments":{}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .all(|(_, op, _, _)| op != "recordingStart"),
+        "{reply}"
+    );
+}
+
+/// Boots a thread with an agent client and the desktop-routing pieces.
+struct DesktopRig {
+    fixture: Fixture,
+    preview: conn_preview::tabs::Preview,
+    environment: String,
+    thread: String,
+    broker: conn_features::panels::PanelBroker,
+    log: DesktopLog,
+}
+
+async fn desktop_rig(name: &str) -> DesktopRig {
+    let f = fixture(name);
+    let mut client = Client::open(&f.service, client(true)).await;
+    let launched=client.ok("conn_thread_launch",json!({"projectId":project_id(),"message":"hang","title":"Desktop rig","runtimeMode":"full-access"})).await;
+    let thread = launched["threadId"].as_str().unwrap().to_owned();
+    drop(client);
+    let preview = f.service.config.preview.clone().unwrap();
+    let environment = f.service.config.environment_id.clone();
+    let broker = f.service.config.panels.clone().unwrap();
+    DesktopRig {
+        preview,
+        environment,
+        thread,
+        broker,
+        log: Arc::new(std::sync::Mutex::new(Vec::new())),
+        fixture: f,
+    }
+}
+
+impl DesktopRig {
+    async fn agent(&self) -> Client<'_> {
+        Client::open(&self.fixture.service, agent_of(&self.fixture, &self.thread)).await
+    }
+
+    /// Registers a desktop tab and serves its requests into the log.
+    fn host(&self, session: &'static str, tab: &'static str) {
+        let registered = self
+            .preview
+            .desktop_register(
+                session,
+                &self.environment,
+                &desktop_binding(&self.environment, &self.thread, tab),
+            )
+            .unwrap();
+        serve_desktop_tab(
+            self.preview.clone(),
+            session,
+            tab,
+            self.preview.desktop_requests(session, &registered).unwrap(),
+            self.log.clone(),
+        );
+    }
+}
+
+fn error_text(reply: &Value) -> String {
+    reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The Electron desktop answers a Browser panel request `ok` and never registers a tab. A
+/// desktop that does not advertise tab hosting is never asked, and a call never waits for it.
+#[tokio::test]
+async fn a_desktop_that_acks_the_panel_but_never_registers_is_never_asked_or_waited_for() {
+    let rig = desktop_rig("desktop-electron").await;
+    let mut agent = rig.agent().await;
+    let mut electron = rig.broker.subscribe().unwrap();
+    assert!(rig.broker.has_desktop() && !rig.broker.has_tab_host());
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = asked.clone();
+    let broker = rig.broker.clone();
+    tokio::spawn(async move {
+        while let Some(request) = electron.recv().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            broker.respond(
+                from_json(
+                    json!({"requestId":request.request_id,"ok":true,"deviceName":"Electron"}),
+                )
+                .unwrap(),
+            );
+        }
+    });
+    let started = std::time::Instant::now();
+    for (name, args) in [
+        ("preview_snapshot", json!({})),
+        ("preview_navigate", json!({"url":"http://localhost:3000"})),
+        ("preview_act", json!({"action":"click","x":1,"y":1})),
+        ("preview_wait_for", json!({"text":"Ready"})),
+    ] {
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            agent.request("tools/call", json!({"name":name,"arguments":args})),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} waited for a desktop that never registers"));
+        // The server's own browser answered: it has no tab for this thread.
+        assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
+        assert!(
+            error_text(&reply).contains("was found")
+                || error_text(&reply).contains("server preview tab"),
+            "{name}: {reply}"
+        );
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "calls took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no panel_open request reached the desktop"
+    );
+    assert!(rig.log.lock().unwrap().is_empty());
+}
+
+/// A desktop that already hosts a tab for the thread serves the call, whether or not it
+/// advertises tab hosting, and nobody is asked to open a panel.
+#[tokio::test]
+async fn a_desktop_with_a_registered_tab_serves_the_call_without_a_panel_request() {
+    let rig = desktop_rig("desktop-registered").await;
+    let mut agent = rig.agent().await;
+    let mut electron = rig.broker.subscribe().unwrap();
+    rig.host("s1", "desk-1");
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(rig.log.lock().unwrap()[0].0, "desk-1");
+    assert!(electron.try_recv().is_err(), "no panel request was needed");
+}
+
+/// The Electron desktop (no tab hosting) runs T3's `open` for `preview_open`; only a desktop that
+/// hosts agent tabs (GPUI, whose runner has no `open`) gets it as a `navigate`.
+#[tokio::test]
+async fn preview_open_sends_t3s_open_to_a_desktop_that_does_not_host_tabs() {
+    let rig = desktop_rig("desktop-electron-open").await;
+    let mut agent = rig.agent().await;
+    let _electron = rig.broker.subscribe().unwrap();
+    assert!(!rig.broker.has_tab_host());
+    rig.host("s1", "desk-1");
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_open","arguments":{"tabId":"desk-1","url":"http://localhost:4000","open":false}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    {
+        let log = rig.log.lock().unwrap();
+        assert_eq!(log[0].0, "desk-1");
+        assert_eq!(log[0].1, "open", "{log:?}");
+        assert_eq!(log[0].3["url"], "http://localhost:4000");
+    }
+    let _gpui = rig.broker.subscribe_tab_host().unwrap();
+    let before = rig.log.lock().unwrap().len();
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_open","arguments":{"tabId":"desk-1","url":"http://localhost:4001"}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let log = rig.log.lock().unwrap();
+    assert_eq!(log[before].1, "navigate", "{log:?}");
+    assert_eq!(log[before].3, json!({"url":"http://localhost:4001"}));
+}
+
+/// A desktop that hosts tabs but has none for the thread yet is asked to open its Browser panel;
+/// the call goes to the tab it registers.
+#[tokio::test]
+async fn a_tab_hosting_desktop_without_a_tab_opens_its_panel_and_its_tab_serves_the_call() {
+    let rig = desktop_rig("desktop-gpui-opens").await;
+    let mut agent = rig.agent().await;
+    let mut gpui = rig.broker.subscribe_tab_host().unwrap();
+    assert!(rig.broker.has_tab_host());
+    let call = agent.request(
+        "tools/call",
+        json!({"name":"preview_snapshot","arguments":{}}),
+    );
+    let desktop = async {
+        let request = gpui.recv().await.unwrap();
+        assert_eq!(request.panel.panel, conn_contract::AgentPanelKind::Browser);
+        rig.host("s1", "desk-1");
+        rig.broker.respond(
+            from_json(json!({"requestId":request.request_id,"ok":true,"deviceName":"GPUI Mac"}))
+                .unwrap(),
+        );
+    };
+    let (reply, ()) = tokio::join!(call, desktop);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(rig.log.lock().unwrap()[0].0, "desk-1");
+}
+
+/// Recordings need the server's browser: with a desktop tab registered, a call that names no tab
+/// stays on the server and never reaches the desktop.
+#[tokio::test]
+async fn recordings_without_a_tab_go_to_the_server_browser_with_a_desktop_tab_registered() {
+    let rig = desktop_rig("desktop-recording").await;
+    let mut agent = rig.agent().await;
+    rig.host("s1", "desk-1");
+    // The agent's current tab is the desktop one.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let before = rig.log.lock().unwrap().len();
+    for (name, text) in [
+        ("preview_recording_start", "No active preview tab was found"),
+        ("preview_recording_stop", "No recording is active"),
+    ] {
+        let reply = agent
+            .request("tools/call", json!({"name":name,"arguments":{}}))
+            .await;
+        assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
+        let message = error_text(&reply);
+        assert!(
+            message.contains(text),
+            "{name}: the server answered: {message}"
+        );
+        assert!(!message.contains("desktop tabs"), "{name}: {message}");
+    }
+    assert_eq!(
+        rig.log.lock().unwrap().len(),
+        before,
+        "a recording call reached the desktop"
+    );
+}
+
+/// `preview_cdp_endpoint` never defaults to a desktop tab, whose endpoint the server-side agent
+/// cannot reach. A named desktop tab answers T3's "Not supported on desktop tabs" error.
+#[tokio::test]
+async fn cdp_endpoint_never_defaults_to_a_desktop_tab() {
+    let rig = desktop_rig("desktop-cdp").await;
+    let mut agent = rig.agent().await;
+    rig.host("s1", "desk-1");
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_cdp_endpoint","arguments":{}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(
+        error_text(&reply).contains("No active preview tab was found")
+            && !error_text(&reply).contains("desktop tabs"),
+        "{reply}"
+    );
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_cdp_endpoint","arguments":{"tabId":"desk-1"}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(
+        error_text(&reply).contains("Not supported on desktop tabs"),
+        "{reply}"
+    );
+    assert!(
+        rig.log
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, op, _, _)| op != "cdpEndpoint"),
+        "a CDP endpoint call reached the desktop"
+    );
+}

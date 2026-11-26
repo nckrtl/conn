@@ -2,9 +2,12 @@
 //! database from `.env` and saved manual connections, their tables, a table's columns, and
 //! read-only SQL executed natively via [`conn_desktop::database::DatabaseRunner`].
 
+mod empty;
 mod form;
 mod pending;
 mod store;
+#[cfg(test)]
+mod tests;
 mod views;
 
 use conn_desktop::database::api::{
@@ -15,6 +18,7 @@ use conn_desktop::database::api::{
 use conn_desktop::database::{DatabaseColumn, DatabaseRunner};
 use conn_desktop::vault::VaultErrorKind;
 use conn_theme::Tokens;
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -23,7 +27,7 @@ use gpui_kit::{
     Render, SharedString, Styled, Subscription, Window, div, px, relative,
 };
 
-use self::form::{ConnectionFormState, outline_sm_button};
+use self::form::ConnectionFormState;
 use self::pending::PendingQueries;
 #[cfg(test)]
 pub(crate) use self::pending::TOO_MANY_PENDING as TOO_MANY_PENDING_QUERIES;
@@ -52,6 +56,9 @@ const SQL_EDITOR_HEIGHT_PX: f32 = 96.0;
 /// Placeholder shown in the SQL editor (`DatabasePanel.tsx`).
 const SQL_PLACEHOLDER: &str = "select * from users limit 100";
 const PILL_RADIUS_PX: f32 = 9999.0;
+/// The remembered connection of a project the user disconnected. It is kept in `database.json`
+/// so the empty state also shows after a restart (`select("")` in the desktop lab).
+const DISCONNECTED: &str = "";
 /// An agent on a linked thread asked for SQL with no connection chosen for that environment.
 pub(crate) const NO_LINKED_CONNECTION: &str =
     "No database connection for this environment; pick one in the Database panel.";
@@ -282,6 +289,14 @@ impl DatabasePanel {
         self.pending.waiting(owner).map(str::to_owned)
     }
 
+    /// Picks the first listed connection, as the user does from the picker.
+    #[cfg(test)]
+    pub(crate) fn choose_first_connection_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(id) = self.connections().first().map(|c| c.id.clone()) {
+            self.select_connection(&id, cx);
+        }
+    }
+
     /// A Vault load that tests answer with [`Self::finish_vault_load_for_test`].
     #[cfg(test)]
     pub(crate) fn begin_vault_load_for_test(&mut self) -> u64 {
@@ -369,6 +384,10 @@ impl DatabasePanel {
             .project_key
             .as_deref()
             .and_then(|key| self.store.remembered_connection(key));
+        // An empty id is a disconnect: it never falls back to the `.env` or the first one.
+        if remembered == Some(DISCONNECTED) {
+            return None;
+        }
         if self.linked_environment.is_some() {
             // No default for a linked thread: only the connection picked for it.
             return remembered.and_then(|id| connections.iter().find(|c| c.id == id).cloned());
@@ -455,6 +474,11 @@ impl DatabasePanel {
             data: None,
             error: None,
         });
+        // A test never reaches a database: its runtime thread would finish the load while the
+        // test scheduler runs something else. The load stays pending, as the Vault load does.
+        if cfg!(test) {
+            return;
+        }
         let runner = self.runner.clone();
         let db_conn = connection.connection;
         let task = crate::live::RT
@@ -827,6 +851,39 @@ impl DatabasePanel {
         cx.notify();
     }
 
+    /// Closes the open connection and shows the empty state. The choice is saved, so neither a
+    /// reload nor a refresh brings the `.env` database back.
+    pub(super) fn disconnect(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(project_key) = self.project_key.clone() {
+            self.store.set_connection(&project_key, DISCONNECTED);
+            save_store(&self.store);
+        }
+        self.menu_open = false;
+        self.editing = None;
+        self.picked = None;
+        self.query = None;
+        self.tables_load = None;
+        self.columns_load = None;
+        self.synced_sql = None;
+        self.run_id = self.run_id.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// "Unlock Vault…": lists the Vault databases again and lets Vault ask for its unlock.
+    pub(super) fn unlock_vault(&mut self, cx: &mut Context<'_, Self>) {
+        self.menu_open = false;
+        self.allow_unlock_next = true;
+        self.load_vault_databases(true, cx);
+        cx.notify();
+    }
+
+    /// "Retry Vault" after a Vault error.
+    pub(super) fn retry_vault(&mut self, cx: &mut Context<'_, Self>) {
+        self.menu_open = false;
+        self.load_vault_databases(true, cx);
+        cx.notify();
+    }
+
     pub(super) fn begin_add_connection(
         &mut self,
         seed_from_env: bool,
@@ -1018,21 +1075,45 @@ impl DatabasePanel {
         } else {
             "superhero/refresh.svg"
         };
-        let refresh_group = chrome::icon_button("db-refresh-btn", refresh_icon, tokens, false, {
-            let entity = entity.clone();
-            move |_, _, cx| entity.update(cx, |panel, cx| panel.refresh(cx))
-        })
-        .ml_auto()
-        .size(px(chrome::CONTROL_HEIGHT_PX))
-        .bg(to_hsla(tokens.shell_control))
-        .border_1()
-        .border_color(to_hsla(tokens.shell_divider_header))
-        .conn_tooltip("Reload .env and tables", tokens);
+        // With nothing open there is nothing to reload: the same slot adds a connection.
+        let tool_group = if selected.is_some() {
+            chrome::icon_button("db-refresh-btn", refresh_icon, tokens, false, {
+                let entity = entity.clone();
+                move |_, _, cx| entity.update(cx, |panel, cx| panel.refresh(cx))
+            })
+            .test_support()
+            .ml_auto()
+            .size(px(chrome::CONTROL_HEIGHT_PX))
+            .bg(to_hsla(tokens.shell_control))
+            .border_1()
+            .border_color(to_hsla(tokens.shell_divider_header))
+            .conn_tooltip("Reload .env and tables", tokens)
+            .into_any_element()
+        } else {
+            toolbar_tool(
+                "db-add-btn",
+                "superhero/add.svg",
+                "Add connection",
+                tokens,
+                {
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |panel, cx| panel.begin_add_connection(true, window, cx));
+                    }
+                },
+            )
+            .ml_auto()
+            .into_any_element()
+        };
 
+        // `.lab-db-toolbar`: 8px padding and a 32px control make 49px with the border. The
+        // shared `toolbar_row` pads 7.5px and 11.5px; Tasks and the lab use 8px all round.
         let mut toolbar = chrome::toolbar_row(tokens)
+            .id("db-toolbar")
+            .test_support()
             .p(px(8.0))
             .child(connection_anchor)
-            .child(refresh_group);
+            .child(tool_group);
         if let Some(connection) = selected.filter(|_| self.editing.is_none()) {
             let running = self
                 .query
@@ -1044,8 +1125,10 @@ impl DatabasePanel {
             } else {
                 "superhero/play.svg"
             };
+            let run_entity = entity.clone();
             let button = chrome::toolbar_group(tokens)
                 .id("db-run-btn")
+                .test_support()
                 .a11y_button("panel.db-run-btn", "Run")
                 .px(px(8.0))
                 .gap(px(6.0))
@@ -1057,45 +1140,20 @@ impl DatabasePanel {
                     el.cursor_pointer()
                         .hover(move |s| s.bg(hover))
                         .on_click(move |_, _, cx| {
-                            entity.update(cx, |panel, cx| panel.run_current_sql(cx))
+                            run_entity.update(cx, |panel, cx| panel.run_current_sql(cx))
                         })
                 })
                 .child(superhero_icon(icon, ICON_BUTTON_GLYPH_PX, muted))
                 .child("Run");
-            toolbar = toolbar.child(button);
+            toolbar = toolbar.child(button).child(toolbar_tool(
+                "db-disconnect-btn",
+                "superhero/unplug.svg",
+                "Disconnect",
+                tokens,
+                move |_, _, cx| entity.update(cx, |panel, cx| panel.disconnect(cx)),
+            ));
         }
         toolbar.into_any_element()
-    }
-
-    fn render_empty_no_connection(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let tokens = &self.tokens;
-        let entity = cx.entity();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .items_start()
-            .gap(px(12.0))
-            .px(px(ROW_PAD_START_PX))
-            .py(px(12.0))
-            .child(
-                div()
-                    .text_size(px(UI_TEXT_PX))
-                    .line_height(px(UI_LINE_HEIGHT_PX))
-                    .text_color(to_hsla(tokens.muted_foreground))
-                    .child("No database in the project's .env (DB_CONNECTION). Add a connection to browse one."),
-            )
-            .child(outline_sm_button(
-                "db-empty-add",
-                Some("superhero/add.svg"),
-                "Add connection",
-                tokens,
-                false,
-                move |_, window, cx| {
-                    entity.update(cx, |panel, cx| panel.begin_add_connection(false, window, cx));
-                },
-            ))
-            .into_any_element()
     }
 
     fn render_workspace(
@@ -1396,6 +1454,39 @@ impl DatabasePanel {
     }
 }
 
+/// A round 32px toolbar tool (`.lab-db-toolbar .tool`): a raised pill with a 14px glyph.
+fn toolbar_tool(
+    id: &'static str,
+    icon_path: &'static str,
+    label: &'static str,
+    tokens: &Tokens,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+) -> impl IntoElement + Styled {
+    let hover = to_hsla(tokens.shell_highlight);
+    div()
+        .id(id)
+        .test_support()
+        .a11y_button(format!("panel.{id}"), label)
+        .flex()
+        .flex_shrink_0()
+        .size(px(chrome::CONTROL_HEIGHT_PX))
+        .items_center()
+        .justify_center()
+        .rounded(px(PILL_RADIUS_PX))
+        .bg(to_hsla(tokens.shell_control))
+        .border_1()
+        .border_color(to_hsla(tokens.shell_divider_header))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .on_click(on_click)
+        .child(superhero_icon(
+            icon_path,
+            ICON_BUTTON_GLYPH_PX,
+            to_hsla(tokens.muted_foreground),
+        ))
+        .conn_tooltip(label, tokens)
+}
+
 impl Render for DatabasePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.sync_inputs(window, cx);
@@ -1418,11 +1509,11 @@ impl Render for DatabasePanel {
 
         let toolbar = self.render_toolbar(&connections, selected.as_ref(), tables_loading, cx);
         let body: AnyElement = if let Some(form) = &self.editing {
-            form.render(&self.tokens, cx)
+            form.render(&self.tokens, window, cx)
         } else if let Some(connection) = &selected {
             self.render_workspace(connection, cx)
         } else {
-            self.render_empty_no_connection(cx)
+            self.render_empty_no_connection(window, cx)
         };
 
         v_flex()
@@ -1434,6 +1525,15 @@ impl Render for DatabasePanel {
                 let k = &event.keystroke;
                 if panel.menu_open && k.key == "escape" {
                     panel.menu_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if k.key == "escape"
+                    && let Some(form) = panel.editing.as_mut()
+                    && form.driver_menu_open
+                {
+                    form.driver_menu_open = false;
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -1451,6 +1551,12 @@ impl Render for DatabasePanel {
                 cx.listener(|panel, _, _, cx| {
                     if panel.menu_open {
                         panel.menu_open = false;
+                        cx.notify();
+                    }
+                    if let Some(form) = panel.editing.as_mut()
+                        && form.driver_menu_open
+                    {
+                        form.driver_menu_open = false;
                         cx.notify();
                     }
                 }),

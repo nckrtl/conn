@@ -28,6 +28,8 @@ const IDENTITY_FILE: &str = "identity";
 const LINK_TRIES: u32 = 12;
 const LINK_RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// The headline of a rejected sign-in: a definitive outcome, shown even while connecting.
+const AUTH_REJECTED: &str = "The server rejected this iPhone's sign-in.";
 const IDENTITY_CHANGED: &str =
     "This server's identity changed. Reconnect manually to replace its saved connection.";
 
@@ -283,25 +285,30 @@ impl<C: SessionCore> Machine<C> {
     /// The offline pill. Connecting never shows it; trouble that may pass waits for three failed
     /// tries and for the grace window to close.
     fn shows_offline(&self, phase: &FfiSessionPhase) -> bool {
-        let in_grace = self.grace.is_some();
+        // Connecting is never offline. While the launch or foreground grace window is open, the
+        // tunnel, discovery and the first tries may all still fail or find nothing; only a failure
+        // that outlasts the window is a connection error (Nick asked: no pill while connecting).
+        // A changed server identity or a rejected sign-in won't pass by waiting: those show at once.
+        if self.grace.is_some() {
+            return matches!(
+                phase,
+                FfiSessionPhase::Failed { message, .. }
+                    if message == IDENTITY_CHANGED || message == AUTH_REJECTED
+            );
+        }
         match phase {
             FfiSessionPhase::Suspended
             | FfiSessionPhase::Live {
                 status: FfiConnectionStatus::Failed { .. },
             } => true,
-            FfiSessionPhase::Failed { .. } | FfiSessionPhase::Idle { message: Some(_) } => {
-                !(in_grace && self.rest_transient)
-            }
+            FfiSessionPhase::Failed { .. } | FfiSessionPhase::Idle { message: Some(_) } => true,
             // A drop, or a reconnect still in its first tries, is connecting, not offline.
             FfiSessionPhase::Live {
                 status: FfiConnectionStatus::Reconnecting { .. },
-            } => {
-                !in_grace
-                    && self
-                        .attempt
-                        .as_ref()
-                        .is_some_and(|a| a.failed_tries >= OFFLINE_AFTER_FAILED_TRIES)
-            }
+            } => self
+                .attempt
+                .as_ref()
+                .is_some_and(|a| a.failed_tries >= OFFLINE_AFTER_FAILED_TRIES),
             _ => false,
         }
     }
@@ -854,7 +861,7 @@ impl<C: SessionCore> Machine<C> {
             return fx;
         }
         let headline = if rejected {
-            "The server rejected this iPhone's sign-in."
+            AUTH_REJECTED
         } else {
             "The connection to the server failed."
         };
@@ -2166,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn definitive_outcomes_show_at_once_inside_the_window() {
+    fn only_identity_and_sign_in_outcomes_show_inside_the_window() {
         // An identity change.
         let mut m = Machine::<FakeCore>::new();
         let fx = m.launch(None);
@@ -2205,7 +2212,10 @@ mod tests {
             "Orbit doesn't list the environment of that thread.".into(),
             None,
         );
-        assert!(m.state().shows_offline, "machine not listed");
+        assert!(
+            !m.state().shows_offline,
+            "not listed yet may be discovery catching up at launch: wait for the window"
+        );
 
         // A manual target's error, even one that would be transient for Orbit.
         let mut m = Machine::<FakeCore>::new();
@@ -2216,7 +2226,10 @@ mod tests {
             m.state().phase,
             FfiSessionPhase::Idle { message: Some(_) }
         ));
-        assert!(m.state().shows_offline, "manual target");
+        assert!(
+            !m.state().shows_offline,
+            "an unreachable target at launch may be the tunnel coming up: wait for the window"
+        );
     }
 
     #[test]
@@ -2245,13 +2258,21 @@ mod tests {
     }
 
     #[test]
-    fn suspending_a_linked_scope_is_offline_even_inside_a_window() {
+    fn suspending_inside_a_window_waits_for_the_window() {
         let mut m = Machine::<FakeCore>::new();
-        let (_, _) = grace_window(&m.launch(None)).expect("window");
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
         let fx = m.suspend();
         assert!(grace_window(&fx).is_none(), "suspend opens no window");
         assert!(matches!(m.state().phase, FfiSessionPhase::Suspended));
-        assert!(m.state().shows_offline);
+        assert!(
+            !m.state().shows_offline,
+            "discovery may find nothing while the app starts"
+        );
+        let _ = m.end_grace(window);
+        assert!(
+            m.state().shows_offline,
+            "still suspended once the window ends"
+        );
     }
 
     /// The `(id, delay)` of the start retry in `fx`, if it holds one.

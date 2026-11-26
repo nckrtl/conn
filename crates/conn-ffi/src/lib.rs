@@ -10,9 +10,9 @@ mod composer;
 mod core;
 mod feed;
 pub use feed::{
-    FfiChangedFileRow, FfiCodeSpan, FfiFeedDetail, FfiFilePatch, FfiPatchLine, FfiReviewExcerpt,
-    FfiSetupStage, FfiWorktreeSetup, WorktreeSetupFeed, changed_file_rows, highlight_code,
-    parse_file_patches,
+    FfiChangedFileRow, FfiCodeSpan, FfiConnToolIcon, FfiConnToolLabel, FfiFeedDetail, FfiFilePatch,
+    FfiPatchLine, FfiReviewExcerpt, FfiSetupStage, FfiWorktreeSetup, WorktreeSetupFeed,
+    changed_file_rows, conn_tool_label, highlight_code, parse_file_patches,
 };
 mod mcp_app;
 mod model_picker;

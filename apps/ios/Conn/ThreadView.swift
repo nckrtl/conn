@@ -26,6 +26,7 @@ struct ThreadView: View {
     @State private var retainedSnapshot: FfiThreadSnapshot?
     private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
+    @Namespace private var floatingGlass
     @State private var historyNotice: String?
     @State private var scrollTarget: String?
     @State private var historyRequest = UUID()
@@ -557,11 +558,17 @@ struct ThreadView: View {
                         let afterFold = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
                             if case .workGroup = pair.0 { return pair.1.id } else { return nil }
                         })
+                        // A "Worked for" row shows the next agent message's time on its right.
+                        let messageTimeAfter = Dictionary(zip(items, items.dropFirst()).compactMap { pair -> (String, String)? in
+                            guard case .workGroup = pair.0, case let .entry(.assistant(_, _, false, timestamp, _, _)) = pair.1,
+                                  let timestamp else { return nil }
+                            return (pair.0.id, timestamp)
+                        }, uniquingKeysWith: { first, _ in first })
                         ForEach(items) { item in
                             Group {
                                 switch item {
                                 case let .workGroup(group, entries):
-                                    WorkGroupCard(group: group, entries: entries)
+                                    WorkGroupCard(group: group, entries: entries, trailingTime: messageTimeAfter[item.id])
                                 case let .entry(entry):
                                     TimelineEntryRow(
                                         threadId: threadId,
@@ -570,7 +577,8 @@ struct ThreadView: View {
                                         detail: snapshot.feedDetails[entry.entryId],
                                         interactive: readingWindow == nil && store.status == .connected,
                                         onOpenThread: onOpenThread,
-                                        onTemplate: onTemplate
+                                        onTemplate: onTemplate,
+                                        timeAbove: !afterFold.contains(item.id)
                                     )
                                 }
                             }
@@ -894,6 +902,9 @@ struct ThreadView: View {
                             .foregroundStyle(theme.foreground)
                             .frame(width: 38.5, height: 38.5)
                             .glassEffect(.regular.interactive(), in: .circle)
+                            // Grows out of, and dissolves back into, the agents capsule beside it.
+                            .glassEffectID("jump", in: floatingGlass)
+                            .glassEffectTransition(.matchedGeometry)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -903,6 +914,8 @@ struct ThreadView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            // The capsule re-centres as the jump circle morphs in or out.
+            .animation(.smooth(duration: 0.35), value: showsJump)
         }
     }
 
@@ -943,6 +956,7 @@ struct ThreadView: View {
             // Mobile's 38.5pt control in a 44pt target, like the jump circle beside it.
             .frame(height: 38.5)
             .glassEffect(.regular.interactive(), in: .capsule)
+            .glassEffectID("agents", in: floatingGlass)
             .frame(height: 44)
             .contentShape(Capsule())
         }

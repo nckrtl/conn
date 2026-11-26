@@ -46,24 +46,10 @@ struct ThreadView: View {
     @State private var settled: Bool
     @State private var showingRename = false
     @State private var renameDraft = ""
-    /// The approval whose answer is on its way; its buttons stay off until the server answers.
-    @State private var respondingApprovalId: String?
-    /// Each open question's answers so far, by request id, then question id.
-    @State private var questionDrafts: [String: [String: FfiQuestionDraft]] = [:]
-    /// The step each open question shows, by request id.
-    @State private var questionSteps: [String: Int] = [:]
-    /// The question whose answers are on their way.
-    @State private var respondingUserInputId: String?
-    /// The step whose single-choice pick is about to move on (mobile's 200 ms).
-    @State private var advancingStep: Int?
-    @State private var advanceTask: Task<Void, Never>?
     @State private var viewSize: CGSize = .zero
 
+    /// The draft object only: its text is read by `ThreadComposerArea`, so typing leaves this body.
     private var composer: ComposerDraft { store.composerDraft(.thread(threadId)) }
-    private var draft: String {
-        get { composer.text }
-        nonmutating set { composer.text = newValue }
-    }
 
     /// The chip's provider and the sheet; `model_picker` in conn-ffi builds both.
     @State private var modelPicker: FfiModelPicker?
@@ -101,12 +87,6 @@ struct ThreadView: View {
         return retainedSnapshot?.threadId == threadId ? retainedSnapshot : nil
     }
 
-    /// An approval gives up height to the feed: at most 560pt, at least 160pt, and never more
-    /// than the screen leaves above the composer (`derivePendingUserInputMaxHeight`).
-    private var approvalMaxHeight: CGFloat {
-        min(560, max(160, viewSize.height - 140))
-    }
-
     private var pendingApprovals: [FfiPendingApproval] {
         readingWindow == nil && store.status == .connected ? snapshot?.pendingApprovals ?? [] : []
     }
@@ -114,113 +94,6 @@ struct ThreadView: View {
         readingWindow == nil && pendingApprovals.isEmpty && store.status == .connected ? snapshot?.pendingQuestion : nil
     }
 
-    /// The open question's panel for its current step; the composer's text shows as the answer.
-    private var questionPanelModel: FfiQuestionPanel? {
-        guard let question = pendingQuestion else { return nil }
-        return questionPanel(
-            pending: question,
-            step: UInt32(clamping: questionSteps[question.requestId] ?? 0),
-            drafts: questionDrafts[question.requestId] ?? [:],
-            typedAnswer: draft,
-            responding: respondingUserInputId == question.requestId
-        )
-    }
-
-    /// The panel leaves some of the feed in view above itself (`QUESTION_PANEL_FEED_PEEK`).
-    private var questionMaxHeight: CGFloat {
-        min(560, max(160, viewSize.height - 140 - 96))
-    }
-
-    private func setQuestionStep(_ step: Int, for question: FfiPendingQuestion) {
-        advanceTask?.cancel()
-        advanceTask = nil
-        advancingStep = nil
-        questionSteps[question.requestId] = max(0, step)
-    }
-
-    private func selectQuestionOption(_ value: String, question: FfiPendingQuestion, panel: FfiQuestionPanel) {
-        UISelectionFeedbackGenerator().selectionChanged()
-        questionDrafts[question.requestId] = questionToggleOption(
-            pending: question,
-            questionId: panel.questionId,
-            drafts: questionDrafts[question.requestId] ?? [:],
-            value: value
-        )
-        guard panel.advancesOnPick else { return }
-        advanceTask?.cancel()
-        let step = Int(panel.step)
-        advancingStep = step
-        advanceTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(200))
-            guard !Task.isCancelled else { return }
-            advanceTask = nil
-            advancingStep = nil
-            questionSteps[question.requestId] = step + 1
-        }
-    }
-
-    private func submitQuestion(_ question: FfiPendingQuestion) {
-        guard let answers = questionAnswers(
-            pending: question,
-            drafts: questionDrafts[question.requestId] ?? [:]
-        ) else { return }
-        respondingUserInputId = question.requestId
-        Task {
-            await store.respondUserInput(threadId: threadId, requestId: question.requestId, answers: answers)
-            if respondingUserInputId == question.requestId {
-                respondingUserInputId = nil
-            }
-        }
-    }
-
-    private func dismissQuestion(_ question: FfiPendingQuestion) {
-        respondingUserInputId = question.requestId
-        Task {
-            await store.dismissUserInput(threadId: threadId, requestId: question.requestId)
-            if respondingUserInputId == question.requestId {
-                respondingUserInputId = nil
-            }
-        }
-    }
-
-    /// Text sent while a question is open answers it: the prompt box is the free-text answer.
-    private func answerQuestion(with text: String, question: FfiPendingQuestion, panel: FfiQuestionPanel) {
-        questionDrafts[question.requestId] = questionSetCustomAnswer(
-            pending: question,
-            questionId: panel.questionId,
-            drafts: questionDrafts[question.requestId] ?? [:],
-            text: text
-        )
-        draft = ""
-        if panel.isLast {
-            submitQuestion(question)
-        } else {
-            setQuestionStep(Int(panel.step) + 1, for: question)
-        }
-    }
-
-    /// The composer's send button with no text: the next question, or the answers.
-    private func runAnswerAction(question: FfiPendingQuestion, panel: FfiQuestionPanel) {
-        if panel.isLast {
-            submitQuestion(question)
-        } else {
-            setQuestionStep(Int(panel.step) + 1, for: question)
-        }
-    }
-
-    private func respond(to approval: FfiPendingApproval, with decision: FfiApprovalDecision) {
-        respondingApprovalId = approval.requestId
-        Task {
-            await store.respondApproval(
-                threadId: threadId,
-                requestId: approval.requestId,
-                decision: decision
-            )
-            if respondingApprovalId == approval.requestId {
-                respondingApprovalId = nil
-            }
-        }
-    }
 
     private var displayTitle: String {
         if let title = snapshot?.title, !title.isEmpty { return title }
@@ -246,28 +119,6 @@ struct ThreadView: View {
 
     private var isWorking: Bool {
         snapshot?.working == true
-    }
-
-    private var hasDraft: Bool {
-        pendingQuestion == nil ? composer.hasContent : !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// With a question open, text answers it and an empty composer runs the answer action.
-    private var overlayHasCards: Bool {
-        !pendingApprovals.isEmpty || questionPanelModel != nil
-            || historyNotice != nil || (store.showsOffline && !store.showsSavedConnectionAlert)
-    }
-
-    private var composerCanSend: Bool {
-        guard store.status == .connected, readingWindow == nil else { return false }
-        guard let question = pendingQuestion, let panel = questionPanelModel else {
-            return hasDraft && !composer.locked
-        }
-        if hasDraft {
-            return panel.acceptsText && question.answerable
-                && respondingUserInputId != question.requestId
-        }
-        return panel.answerActionReady
     }
 
     private var scrollFingerprint: String {
@@ -385,6 +236,7 @@ struct ThreadView: View {
     }
 
     var body: some View {
+        let _ = BodyCount.tick("ThreadView")
         ScrollViewReader { proxy in
             // The feed runs under the header and composer, and iOS's soft scroll edge blurs it
             // there, as Conn mobile's EdgeBlur does.
@@ -450,11 +302,6 @@ struct ThreadView: View {
         .onGeometryChange(for: CGSize.self) { $0.size } action: { viewSize = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)
-        .onChange(of: pendingQuestion?.requestId) { _, current in
-            // Drafts of answered, skipped or expired questions go (`pruneResolvedRequestDrafts`).
-            questionDrafts = questionDrafts.filter { $0.key == current }
-            questionSteps = questionSteps.filter { $0.key == current }
-        }
         .sheet(isPresented: $showsAgents) {
             ThreadAgentsSheet(agents: turnSubagents) { agent in
                 guard let child = agent.child else { return }
@@ -540,6 +387,7 @@ struct ThreadView: View {
         ScrollView {
             // Lab `.m-feed-inner`: 36 between messages, so each message groups with its own parts.
             LazyVStack(alignment: .leading, spacing: ThreadFeed.spacing) {
+                let _ = BodyCount.tick("ThreadView.feed")
                 if let error = store.lastError, !error.isEmpty {
                     KitNotice(error, icon: .warning, tone: .error)
                 }
@@ -570,7 +418,10 @@ struct ThreadView: View {
                             Group {
                                 switch item {
                                 case let .workGroup(group, entries):
-                                    WorkGroupCard(group: group, entries: entries)
+                                    WorkGroupCard(group: group, entries: entries,
+                                                  workStartedAtMs: snapshot.activeWorkStartedAtMs,
+                                                  clockOffsetMs: snapshot.serverClockOffsetMs)
+                                        .equatable()
                                 case let .entry(entry):
                                     TimelineEntryRow(
                                         threadId: threadId,
@@ -581,6 +432,7 @@ struct ThreadView: View {
                                         onOpenThread: onOpenThread,
                                         onTemplate: onTemplate
                                     )
+                                    .equatable()
                                 }
                             }
                             .background {
@@ -603,7 +455,7 @@ struct ThreadView: View {
                         // already carries the "Working for" row; without one it stands alone.
                         VStack(alignment: .leading, spacing: 0) {
                             if !snapshot.workGroups.contains(where: \.hasActive) {
-                                WorkingFold(since: runStartedAt(in: snapshot))
+                                WorkingFold(startedAtMs: snapshot.activeWorkStartedAtMs, offsetMs: snapshot.serverClockOffsetMs)
                             }
                             LiveWorkRow(label: liveWork.label, glyph: liveWork.icon)
                         }
@@ -721,117 +573,21 @@ struct ThreadView: View {
     }
 
     private func composerArea(_ proxy: ScrollViewProxy) -> some View {
-        // Merge spacing 8: below the 12pt gap kept between the floating control and the composer, so
-        // the jump circle never blends into the prompt box's glass, also as the box grows.
-        GlassEffectContainer(spacing: 8) {
-          VStack(alignment: .leading, spacing: 0) {
-            floatingControl()
-          VStack(alignment: .leading, spacing: 10.5) {
-            if let historyNotice {
-                Text(historyNotice).font(.kitDetail)
-            }
-            if store.showsOffline && !store.showsSavedConnectionAlert {
-                OfflinePill(store: store).frame(maxWidth: .infinity)
-            }
-            // Conn mobile pins the first pending approval above the composer.
-            if let approval = pendingApprovals.first {
-                HeightCappedScroll(maxHeight: approvalMaxHeight) {
-                    PendingApprovalCard(
-                        approval: approval,
-                        remaining: pendingApprovals.count,
-                        responding: respondingApprovalId == approval.requestId
-                    ) { decision in
-                        respond(to: approval, with: decision)
-                    }
-                }
-                .modifier(ComposerDeck(remaining: pendingApprovals.count))
-                .id(approval.requestId)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-            if let question = pendingQuestion, let panel = questionPanelModel {
-                PendingUserInputCard(
-                    question: question,
-                    panel: panel,
-                    responding: respondingUserInputId == question.requestId,
-                    advancing: advancingStep == Int(panel.step),
-                    maxHeight: questionMaxHeight,
-                    onSelectOption: { value in
-                        selectQuestionOption(value, question: question, panel: panel)
-                    },
-                    onStepChange: { step in
-                        UISelectionFeedbackGenerator().selectionChanged()
-                        setQuestionStep(step, for: question)
-                    },
-                    onSubmit: { submitQuestion(question) },
-                    onDismiss: { dismissQuestion(question) }
-                )
-                .modifier(ComposerDeck(remaining: question.questions.count - Int(panel.step)))
-                .id(question.requestId)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-          }
-          // Cards: `px-[14px] pb-[7px] gap-2.5` (2pt more than the composer's 12).
-          .padding(.horizontal, 2)
-          .padding(.bottom, overlayHasCards ? 7 : 0)
-
-            ConnComposerPill(
-                placeholder: questionPanelModel?.composerPlaceholder
-                    ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
-                draft: composer,
-                limits: store.composerLimits,
-                allowsAttachments: questionPanelModel == nil,
-                isBusy: isWorking && !hasDraft && questionPanelModel == nil,
-                canSend: composerCanSend,
-                onSend: {
-                    if let question = pendingQuestion, let panel = questionPanelModel {
-                        if hasDraft {
-                            answerQuestion(with: draft, question: question, panel: panel)
-                        } else {
-                            runAnswerAction(question: question, panel: panel)
-                        }
-                    } else {
-                        sendDraft(scrollProxy: proxy)
-                    }
-                },
-                onStop: {
-                    Task {
-                        await store.stopThread(threadId: threadId)
-                    }
-                },
-                trailing: {
-                    HStack(spacing: 0) {
-                        if isWorking && hasDraft && questionPanelModel == nil {
-                            Button {
-                                Task {
-                                    await store.stopThread(threadId: threadId)
-                                }
-                            } label: {
-                                // Lab `.ios-stop`: a bare 13 pt `stop` in the text colour.
-                                ThreadGlyph(name: "stop", size: 13)
-                                    .foregroundStyle(theme.foreground)
-                                    .frame(minHeight: 44)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Stop")
-                        }
-                        ConnComposerModelChip(
-                            driver: modelPicker?.selectedDriver,
-                            modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel
-                        ) {
-                            showingModelPicker = true
-                        }
-                    }
-                }
-            )
-            .id(ObjectIdentifier(composer))
-            .disabled(store.status != .connected || readingWindow != nil)
-            .accessibilityIdentifier("thread.composer")
-          }
-        }
-        // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
-        .padding(.horizontal, ComposerSheet.screenInset)
-        .padding(.bottom, ComposerSheet.bottomGutter)
+        ThreadComposerArea(
+            store: store,
+            threadId: threadId,
+            pendingApprovals: pendingApprovals,
+            pendingQuestion: pendingQuestion,
+            isWorking: isWorking,
+            readingHistory: readingWindow != nil,
+            historyNotice: historyNotice,
+            viewHeight: viewSize.height,
+            modelDriver: modelPicker?.selectedDriver,
+            modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel,
+            onModelChip: { showingModelPicker = true },
+            onSendReply: { sendDraft(scrollProxy: proxy) },
+            floating: { floatingControl() }
+        )
     }
 
     /// What the running turn does now, for the live row: a running tool, the subagents it waits on,
@@ -847,13 +603,6 @@ struct ThreadView: View {
             return (waiting == 1 ? "Waiting on a subagent" : "Waiting on \(waiting) subagents", "thinking")
         }
         return ("Thinking", "thinking")
-    }
-
-    private func runStartedAt(in snapshot: FfiThreadSnapshot) -> Date {
-        for entry in snapshot.entries.reversed() {
-            if case let .user(_, _, createdAt, _, _, _, _) = entry, let date = threadDate(createdAt) { return date }
-        }
-        return Date()
     }
 
     struct TurnSubagent: Identifiable {
@@ -879,29 +628,15 @@ struct ThreadView: View {
         CoreStore.openLog.info("frame thread=\(threadId, privacy: .public) entries=\(snapshot.entries.count) capsule=\(turnSubagents.count) ms=\(ms)")
     }
 
-    /// The subagents of the latest turn (those after the last user message) plus any still running
-    /// from an earlier turn, so a reply never hides live agents (mobile's `deriveThreadTurnSubagents`).
+    /// The latest turn's agents, plus any still live from an earlier turn, from the projection's
+    /// subagents and runs (the core's `turn_agents`, mobile's `deriveThreadTurnSubagents`): there
+    /// with the first projection, and a delegated completion row never ends the turn.
     private var turnSubagents: [TurnSubagent] {
-        guard let snapshot else { return [] }
-        let start = snapshot.entries.lastIndex { if case .user = $0 { true } else { false } }
-            .map { $0 + 1 } ?? 0
-        return snapshot.entries.indices.compactMap { index in
-            let entry = snapshot.entries[index]
-            guard case let .subagent(id, child, title, _, state, label, settled, _, _, created, started, completed) = entry,
-                  index >= start || !settled else { return nil }
-            var thread = child
-            var environment: String?
-            var provider: String?
-            var model: String?
-            if case let .subagent(driver, slug, _, env, linked)? = snapshot.feedDetails[id] {
-                thread = linked ?? child
-                environment = env
-                provider = driver
-                model = slug
-            }
-            return TurnSubagent(id: id, title: title, child: thread, environment: environment,
-                                settled: settled, status: label, state: state, provider: provider,
-                                model: model, updatedAt: completed ?? started ?? created)
+        (snapshot?.turnAgents?.agents ?? []).map { agent in
+            TurnSubagent(id: agent.id, title: agent.title, child: agent.childThreadId,
+                         environment: agent.environmentId, settled: agent.settled,
+                         status: agent.statusLabel, state: agent.status, provider: agent.provider,
+                         model: agent.model, updatedAt: agent.completedAt ?? agent.startedAt ?? agent.updatedAt)
         }
     }
 
@@ -972,8 +707,9 @@ struct ThreadView: View {
     }
 
     private func agentsCapsule(_ agents: [TurnSubagent]) -> some View {
-        let live = agents.filter { !$0.settled }.count
-        let label = live > 0 ? "\(live)/\(agents.count)" : "\(agents.count) done"
+        let live = Int(snapshot?.turnAgents?.liveCount ?? 0)
+        let done = Int(snapshot?.turnAgents?.settledCount ?? 0)
+        let label = live > 0 ? "\(live)/\(agents.count)" : "\(done) done"
         return Button {
             UISelectionFeedbackGenerator().selectionChanged()
             showsAgents = true
@@ -995,7 +731,7 @@ struct ThreadView: View {
             .frame(height: 44)
             .contentShape(Capsule())
         }
-        .accessibilityLabel(live > 0 ? "Open agents, \(live) of \(agents.count) agents working" : "Open agents, \(agents.count) done")
+        .accessibilityLabel(live > 0 ? "Open agents, \(live) of \(agents.count) agents working" : "Open agents, \(done) done")
         .buttonStyle(.plain)
         .accessibilityIdentifier("thread.agents")
     }
@@ -1037,7 +773,7 @@ struct ThreadView: View {
             }
         }
 
-        let entriesById = Dictionary(uniqueKeysWithValues: snapshot.entries.map { ($0.entryId, $0) })
+        let entriesById = Dictionary(snapshot.entries.map { ($0.entryId, $0) }, uniquingKeysWith: { first, _ in first })
         var items: [RenderItem] = []
 
         let waiting = Set(pendingApprovals.map(\.entryId))

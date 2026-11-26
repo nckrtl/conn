@@ -25,6 +25,16 @@ final class ComposerDraft {
 
     private func renewKey() { key = UUID().uuidString }
 
+    /// A reply that failed comes back after anything typed since (`composer_restore_draft`), so
+    /// the caret stays in the newer text; its files follow any added since. With nothing new it
+    /// keeps its idempotency key, so sending again can't double it.
+    func restore(text sent: String, files sentFiles: [ComposerFile], key sentKey: String) {
+        let untouched = text.isEmpty && files.isEmpty
+        text = composerRestoreDraft(current: text, sent: sent)
+        files += sentFiles.filter { file in !files.contains { $0 === file } }
+        if untouched { key = sentKey }
+    }
+
     func discard() {
         discarded = true
         text = ""

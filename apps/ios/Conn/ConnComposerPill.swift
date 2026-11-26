@@ -33,6 +33,7 @@ struct ConnComposerPill<Trailing: View>: View {
     private var expanded: Bool { inputFocused || !draft.text.isEmpty || !draft.files.isEmpty }
 
     var body: some View {
+        let _ = BodyCount.tick("Composer")
         // Keyboard up: a sheet with 28 pt top corners and none below. Down: the floating pill.
         let corner: CGFloat = expanded ? 24 : 27
         let top = keyboardUp ? ComposerSheet.topRadius : corner
@@ -128,7 +129,6 @@ struct ConnComposerPill<Trailing: View>: View {
                         ))
                         .padding(.trailing, expanded ? 12 : 0)
                         .focused($inputFocused)
-                        .disabled(draft.sending)
                         .composerSlot(.field)
 
                     if dictation.isActive {

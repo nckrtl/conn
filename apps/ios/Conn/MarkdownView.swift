@@ -2,7 +2,7 @@ import CoreText
 import DesignKit
 import SwiftUI
 
-struct MarkdownView: View {
+struct MarkdownView: View, Equatable {
     let source: String
     /// An agent's earlier text beside a question: a size smaller, in the muted colour.
     var fillsWidth = true
@@ -12,7 +12,15 @@ struct MarkdownView: View {
     var messageStyle: MessageStyle?
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
     var onTemplate: ((String) -> Void)? = nil
+    /// The feed entry this text belongs to: while it streams, its finished blocks are reused.
+    var cacheID: String? = nil
     @Environment(\.connTheme) private var theme
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.source == rhs.source && lhs.fillsWidth == rhs.fillsWidth && lhs.muted == rhs.muted
+            && lhs.recordStyle == rhs.recordStyle && lhs.messageStyle == rhs.messageStyle
+            && lhs.cacheID == rhs.cacheID && (lhs.onTemplate == nil) == (rhs.onTemplate == nil)
+    }
 
     /// Lab `.m-md`: 16/23, `.m-md[data-muted]`: 15/21, and in the feed the thread text at 1.6.
     private var bodySize: CGFloat {
@@ -48,6 +56,7 @@ struct MarkdownView: View {
     }
 
     var body: some View {
+        let _ = BodyCount.tick("Markdown")
         if messageStyle == .user {
             Text(verbatim: source)
                 .font(bodyFont)
@@ -61,7 +70,7 @@ struct MarkdownView: View {
     }
 
     private var markdown: some View {
-        let blocks = parseBlocks(source)
+        let blocks = MarkdownCache.blocks(source, id: cacheID)
         return VStack(alignment: .leading, spacing: blockSpacing) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 blockView(block, first: index == 0)
@@ -238,7 +247,15 @@ struct MarkdownView: View {
         }
     }
 
-    private func inlineText(_ raw: String) -> (text: Text, hasChip: Bool, padX: CGFloat, padY: CGFloat) {
+    private func inlineText(_ raw: String) -> InlineText {
+        let key = InlineKey(
+            raw: raw, size: bodySize, muted: muted, style: messageStyle.map { $0 == .assistant ? 1 : 2 } ?? 0,
+            code: muted ? theme.mutedForeground : theme.codeForeground, strong: theme.foreground
+        )
+        return MarkdownCache.inline(key) { buildInlineText(raw) }
+    }
+
+    private func buildInlineText(_ raw: String) -> InlineText {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
@@ -246,6 +263,7 @@ struct MarkdownView: View {
         // `padding: 0.1em 0.35em` of the code size plus the 1 pt transparent border.
         let padX = 0.35 * codeSize + 1
         let padY = 0.1 * codeSize + 1
+        BodyCount.tick("md.inline")
         guard let parsed = try? AttributedString(markdown: raw, options: options) else {
             return (Text(raw), false, padX, padY)
         }
@@ -346,7 +364,7 @@ private struct InlineCodeChipRenderer: TextRenderer {
     }
 }
 
-private enum MarkdownBlock {
+enum MarkdownBlock {
     case heading(level: Int, text: String)
     case paragraph(String)
     case quote(String)
@@ -356,16 +374,93 @@ private enum MarkdownBlock {
     case list([(marker: String, text: String)])
 }
 
-private func parseBlocks(_ source: String) -> [MarkdownBlock] {
-    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-    var blocks: [MarkdownBlock] = []
+typealias InlineText = (text: Text, hasChip: Bool, padX: CGFloat, padY: CGFloat)
+
+struct InlineKey: Hashable {
+    let raw: String
+    let size: CGFloat
+    let muted: Bool
+    let style: Int
+    let code: Color
+    let strong: Color
+}
+
+/// Parsed Markdown kept between body evaluations: blocks by feed entry (or by source text) and
+/// inline text by its text and style. A streaming entry re-parses only its last block.
+@MainActor
+enum MarkdownCache {
+    struct Parsed {
+        let source: String
+        let blocks: [MarkdownBlock]
+        /// The UTF-8 offset of each block's first line.
+        let starts: [Int]
+    }
+
+    private static var byID: [String: Parsed] = [:]
+    private static var bySource: [String: Parsed] = [:]
+    private static var inlines: [InlineKey: InlineText] = [:]
+    private static let limit = 2000
+
+    static func blocks(_ source: String, id: String?) -> [MarkdownBlock] {
+        if let id {
+            let previous = byID[id]
+            if let previous, previous.source == source { return previous.blocks }
+            let parsed = reparse(source, after: previous)
+            if byID.count >= limit { byID.removeAll(keepingCapacity: true) }
+            byID[id] = parsed
+            return parsed.blocks
+        }
+        if let cached = bySource[source] { return cached.blocks }
+        let parsed = reparse(source, after: nil)
+        if bySource.count >= limit { bySource.removeAll(keepingCapacity: true) }
+        bySource[source] = parsed
+        return parsed.blocks
+    }
+
+    /// Appended text can change the last block, and the one before it when the old text ended in
+    /// a partial line (`-` becoming `- b` continues a list); the blocks before those are kept.
+    private static func reparse(_ source: String, after previous: Parsed?) -> Parsed {
+        let kept = max(0, (previous?.starts.count ?? 0) - 2)
+        guard let previous, kept > 0, source.hasPrefix(previous.source) else {
+            let parsed = parseBlocks(source)
+            return Parsed(source: source, blocks: parsed.map(\.block), starts: parsed.map(\.start))
+        }
+        let from = previous.starts[kept]
+        let utf8 = source.utf8
+        let tail = String(Substring(utf8[utf8.index(utf8.startIndex, offsetBy: from)...]))
+        let parsed = parseBlocks(tail)
+        return Parsed(
+            source: source,
+            blocks: previous.blocks.prefix(kept) + parsed.map(\.block),
+            starts: previous.starts.prefix(kept) + parsed.map { $0.start + from }
+        )
+    }
+
+    static func inline(_ key: InlineKey, build: () -> InlineText) -> InlineText {
+        if let cached = inlines[key] { return cached }
+        let built = build()
+        if inlines.count >= limit { inlines.removeAll(keepingCapacity: true) }
+        inlines[key] = built
+        return built
+    }
+}
+
+/// The blocks of `source`, each with the UTF-8 offset of its first line.
+func parseBlocks(_ source: String) -> [(block: MarkdownBlock, start: Int)] {
+    BodyCount.tick("md.parseBlocks")
+    let pieces = source.split(separator: "\n", omittingEmptySubsequences: false)
+    let lines = pieces.map(String.init)
+    let offsets = pieces.map { source.utf8.distance(from: source.startIndex, to: $0.startIndex) }
+    var blocks: [(block: MarkdownBlock, start: Int)] = []
+    var blockStart = 0
     var paragraphLines: [String] = []
     var index = 0
 
+    var paragraphStart = 0
     func flushParagraph() {
         let joined = paragraphLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         if !joined.isEmpty {
-            blocks.append(.paragraph(joined))
+            blocks.append((.paragraph(joined), offsets[paragraphStart]))
         }
         paragraphLines.removeAll()
     }
@@ -373,6 +468,7 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
     while index < lines.count {
         let line = lines[index]
         let trimmed = line.trimmingCharacters(in: .whitespaces)
+        blockStart = offsets[index]
 
         if let marker = trimmed.first, marker == "`" || marker == "~", trimmed.prefix(while: { $0 == marker }).count >= 3 {
             let fence = trimmed.prefix(while: { $0 == marker })
@@ -389,13 +485,13 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
                 codeLines.append(lines[index])
                 index += 1
             }
-            blocks.append(.codeBlock(language: lang.isEmpty ? nil : lang, code: codeLines.joined(separator: "\n")))
+            blocks.append((.codeBlock(language: lang.isEmpty ? nil : lang, code: codeLines.joined(separator: "\n")), blockStart))
             continue
         }
 
         if let template = ArtifactTemplate(directive: trimmed) {
             flushParagraph()
-            blocks.append(.template(template, line))
+            blocks.append((.template(template, line), blockStart))
             index += 1
             continue
         }
@@ -407,7 +503,7 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
                 quote.append(String(line).trimmingCharacters(in: .whitespaces))
                 index += 1
             }
-            blocks.append(.quote(quote.joined(separator: "\n")))
+            blocks.append((.quote(quote.joined(separator: "\n")), blockStart))
             continue
         }
         if trimmed.contains("|"), index + 1 < lines.count {
@@ -422,7 +518,7 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
                     rows.append(tableCells(lines[index]))
                     index += 1
                 }
-                blocks.append(.table(rows))
+                blocks.append((.table(rows), blockStart))
                 continue
             }
         }
@@ -435,7 +531,7 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
 
         if let (level, headingText) = parseHeading(trimmed) {
             flushParagraph()
-            blocks.append(.heading(level: level, text: headingText))
+            blocks.append((.heading(level: level, text: headingText), blockStart))
             index += 1
             continue
         }
@@ -449,10 +545,11 @@ private func parseBlocks(_ source: String) -> [MarkdownBlock] {
                 items.append((marker: nextMarker, text: nextText))
                 index += 1
             }
-            blocks.append(.list(items))
+            blocks.append((.list(items), blockStart))
             continue
         }
 
+        if paragraphLines.isEmpty { paragraphStart = index }
         paragraphLines.append(line)
         index += 1
     }
@@ -498,7 +595,7 @@ private func tableCells(_ line: String) -> [String] {
         .components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
 }
 
-private struct ArtifactTemplate {
+struct ArtifactTemplate {
     let name: String
     let prompt: String
     init?(directive: String) {
